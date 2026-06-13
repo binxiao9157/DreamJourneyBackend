@@ -13,7 +13,7 @@ services:
         condition: service_started
 
   postgres:
-    image: postgres:16-alpine
+    image: mirror.ccs.tencentyun.com/library/postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: dreamjourney
@@ -28,7 +28,7 @@ services:
       retries: 12
 
   redis:
-    image: redis:7-alpine
+    image: mirror.ccs.tencentyun.com/library/redis:7-alpine
     restart: unless-stopped
 
 volumes:

@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 import uuid
 
+from psycopg.types.json import Jsonb
+
 
 class PostgresStore:
     def __init__(self, dsn: str = None, connection_factory: Callable[[], Any] = None):
@@ -165,7 +167,7 @@ class PostgresStore:
     def _fetchone(self, sql: str, params: tuple = (), commit: bool = False) -> Optional[Dict[str, Any]]:
         connection = self._connect()
         with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
-            cursor.execute(sql, params)
+            cursor.execute(sql, self._adapt_params(params))
             row = cursor.fetchone()
         if commit:
             connection.commit()
@@ -174,9 +176,13 @@ class PostgresStore:
     def _fetchall(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
         connection = self._connect()
         with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
-            cursor.execute(sql, params)
+            cursor.execute(sql, self._adapt_params(params))
             rows = cursor.fetchall()
         return rows
+
+    @staticmethod
+    def _adapt_params(params: tuple) -> tuple:
+        return tuple(Jsonb(param) if isinstance(param, dict) else param for param in params)
 
     def _connect(self):
         if self._connection is not None:

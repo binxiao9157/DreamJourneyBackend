@@ -1,5 +1,7 @@
 import unittest
 
+from psycopg.types.json import Jsonb
+
 from app.services.postgres_store import PostgresStore
 
 
@@ -31,26 +33,35 @@ class FakeCursor:
             self.result = [{"payload": item} for item in self.connection.family_members.get(user_id, [])]
         elif normalized.startswith("INSERT INTO users"):
             user_id, phone, nickname, payload = params
+            payload = self._json_value(payload)
             self.connection.users[user_id] = dict(payload)
             self.result = {"payload": payload}
         elif normalized.startswith("INSERT INTO kb_snapshots"):
             user_id, graph = params
+            graph = self._json_value(graph)
             self.connection.kb_snapshots[user_id] = dict(graph)
             self.result = {"graph": graph}
         elif normalized.startswith("INSERT INTO memories"):
             user_id, item_id, payload = params
+            payload = self._json_value(payload)
             self.connection.memories.setdefault(user_id, []).insert(0, dict(payload))
             self.result = {"payload": payload}
         elif normalized.startswith("INSERT INTO archive_items"):
             user_id, item_id, payload = params
+            payload = self._json_value(payload)
             self.connection.archive_items.setdefault(user_id, []).insert(0, dict(payload))
             self.result = {"payload": payload}
         elif normalized.startswith("INSERT INTO family_members"):
             user_id, item_id, payload = params
+            payload = self._json_value(payload)
             self.connection.family_members.setdefault(user_id, []).append(dict(payload))
             self.result = {"payload": payload}
         else:
             self.result = None
+
+    @staticmethod
+    def _json_value(value):
+        return value.obj if isinstance(value, Jsonb) else value
 
     def fetchone(self):
         return self.result
@@ -100,6 +111,19 @@ class PostgresStoreTests(unittest.TestCase):
 
         self.assertEqual(store.get_kb_snapshot("u1")["people"][0]["id"], "p1")
         self.assertEqual(store.get_kb_snapshot("u2")["people"][0]["id"], "p2")
+
+    def test_store_wraps_jsonb_params_for_psycopg(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        store.save_kb_snapshot("u1", {"people": [{"id": "p1"}]})
+
+        insert_calls = [
+            params
+            for statement, params in connection.executed
+            if statement.startswith("INSERT INTO kb_snapshots")
+        ]
+        self.assertIsInstance(insert_calls[0][1], Jsonb)
 
     def test_store_persists_memories_and_family_members(self):
         connection = FakeConnection()
