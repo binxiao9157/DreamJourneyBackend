@@ -1,0 +1,71 @@
+# DreamJourneyBackend
+
+阶段1真实测试用最小后端，目标是把三方密钥、知识库同步、亲友协作和地图/TTS 代理从 iOS 包里拆出来。
+
+## 当前接口
+
+- `GET /health`
+- `POST /auth/login`
+- `GET /config/runtime`
+- `POST /voice/realtime-token`
+- `POST /tts`
+- `GET /maps/district`
+- `POST /kb/sync`
+- `GET /kb/snapshot/{user_id}`
+- `POST /memories`
+- `GET /memories/{user_id}`
+- `POST /archive/photos`
+- `POST /family/invite`
+- `GET /family/members/{user_id}`
+
+## 隐私规则
+
+- `localOnly`：后端同步时过滤，不上传。
+- `generationAllowed`：允许后端和 AI 处理。
+- `familyCircle`：允许授权亲友同步。
+
+`/kb/sync` 会过滤 KBLite 图谱里的 `localOnly` 实体，并清理事件、事实中的无效引用。
+
+## 本地启动
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --reload --port 8080
+```
+
+## 云服务器 Docker 启动
+
+```bash
+cp .env.example .env
+# 编辑 .env，填入 DeepSeek、VolcEngine、AMap 等服务端密钥
+docker compose up -d --build
+curl http://127.0.0.1:3100/health
+```
+
+生产建议通过现有 `Nginx` 反向代理到 `127.0.0.1:3100`，启用 HTTPS，再把 iOS 的后端地址配置为公网域名。
+
+## 真机配置建议
+
+- `DreamJourneyBackendBaseURL`：指向 `https://dreamjourney-api.liftora.cn`
+- `OpenAvatarChatBaseURL`：仅保留为旧 OpenAvatarChat 开源工程兼容配置，不作为本后端入口。
+- `SafetyGuardBaseURL`：后续如果把 safety guard 挂到本后端，也指向同域名
+- `AMapWebServiceKey`、`DeepSeekAPIKey`、`VolcEngineAPIKey`：逐步从 iOS LocalConfig 迁移到后端 `.env`
+
+当前默认使用 Postgres 持久化。API 容器启动时会自动创建以下 JSONB 表：
+
+- `users`
+- `kb_snapshots`
+- `memories`
+- `archive_items`
+- `family_members`
+
+如需本机临时无数据库调试，可设置：
+
+```bash
+STORE_BACKEND=memory uvicorn app.main:app --reload --port 8080
+```
+
+内存模式只用于开发调试，进程重启会丢数据；云服务器长期测试请保持 `STORE_BACKEND=postgres`。
