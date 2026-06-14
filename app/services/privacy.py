@@ -220,6 +220,25 @@ def sanitize_image_analysis_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return item
 
 
+def sanitize_knowledge_extraction_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return backend-safe knowledge extraction context and reject non-AI scopes."""
+    if _scope(payload) not in AI_PROCESSABLE_SCOPES:
+        raise ValueError("knowledge extraction requires generationAllowed privacy")
+
+    item = deepcopy(payload)
+    item.pop("transcript", None)
+    item.pop("rawTranscript", None)
+    item.pop("messages", None)
+    item.pop("sourceTexts", None)
+    item.pop("localPath", None)
+    item["metadataOnly"] = True
+
+    metadata = item.get("privacyMetadata")
+    if isinstance(metadata, dict):
+        item["privacyMetadata"] = _redact_source_ref_titles({"privacyMetadata": metadata})["privacyMetadata"]
+    return item
+
+
 def sanitize_mailbox_letter_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Return backend-safe mailbox metadata without full letter or echo text."""
     if not _is_syncable(payload):

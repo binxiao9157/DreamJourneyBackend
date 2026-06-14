@@ -172,6 +172,26 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(store.get_kb_snapshot("u1")["people"][0]["id"], "p1")
         self.assertEqual(store.get_kb_snapshot("u2")["people"][0]["id"], "p2")
 
+    def test_kb_snapshot_survives_store_recreation(self):
+        connection = FakeConnection()
+        writer = PostgresStore(connection_factory=lambda: connection)
+
+        writer.save_kb_snapshot(
+            "u1",
+            {
+                "people": [{"id": "p1", "name": "陈建国"}],
+                "places": [{"id": "place_shaoxing", "name": "绍兴"}],
+                "facts": [{"id": "fact_1", "statement": "1968 年住在绍兴越城区"}],
+            },
+        )
+
+        reader_after_restart = PostgresStore(connection_factory=lambda: connection)
+        snapshot = reader_after_restart.get_kb_snapshot("u1")
+
+        self.assertEqual(snapshot["people"][0]["name"], "陈建国")
+        self.assertEqual(snapshot["places"][0]["name"], "绍兴")
+        self.assertEqual(snapshot["facts"][0]["statement"], "1968 年住在绍兴越城区")
+
     def test_upsert_user_uses_stable_full_phone_hash(self):
         connection = FakeConnection()
         store = PostgresStore(connection_factory=lambda: connection)

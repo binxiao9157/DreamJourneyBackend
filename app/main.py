@@ -15,8 +15,10 @@ from app.services.privacy import (
     sanitize_archive_item_payload,
     sanitize_care_snapshot_payload,
     sanitize_image_analysis_payload,
+    sanitize_knowledge_extraction_payload,
     sanitize_mailbox_letter_payload,
 )
+from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.runtime_config import RuntimeConfigService
 from app.services.store_factory import init_store, make_store
 from app.services.tokens import TokenService
@@ -167,6 +169,55 @@ def kb_snapshot(user_id: str) -> Dict[str, Any]:
     if graph is None:
         raise HTTPException(status_code=404, detail="snapshot not found")
     return {"userId": user_id, "graph": graph}
+
+
+@app.post("/kb/extract")
+def extract_kb(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
+    user_id = str(payload.get("userId") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+    transcript = str(payload.get("transcript") or "").strip()
+    if not transcript:
+        raise HTTPException(status_code=400, detail="transcript is required")
+    existing_summary = str(payload.get("existingSummary") or "").strip()
+
+    try:
+        safe_context = sanitize_knowledge_extraction_payload(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    proxy = DeepSeekKnowledgeExtractionProxy(settings)
+    try:
+        if not dryRun:
+            extraction = proxy.request_extraction(
+                transcript=transcript,
+                existing_summary=existing_summary,
+            )
+            return {
+                "provider": "deepseek",
+                "capability": "kbExtract",
+                "userId": user_id,
+                "extraction": extraction,
+                "context": safe_context,
+            }
+        request = proxy.redacted_request(
+            transcript=transcript,
+            existing_summary=existing_summary,
+        )
+    except ValueError as exc:
+        status_code = 503 if "DEEPSEEK_API_KEY" in str(exc) else 502
+        raise HTTPException(status_code=status_code, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return {
+        "provider": "deepseek",
+        "capability": "kbExtract",
+        "userId": user_id,
+        "request": request,
+        "context": safe_context,
+        "note": "dryRun=true returns the redacted upstream request without calling DeepSeek.",
+    }
 
 
 @app.post("/memories")
@@ -330,13 +381,30 @@ def _normalize_viewer_family_member_id(value: Any) -> Optional[str]:
     return normalized or None
 
 
-def _ensure_active_family_viewer(user_id: str, viewer_family_member_id: Optional[str]) -> None:
+def _normalized_phone(value: Any) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _ensure_active_family_viewer(
+    user_id: str,
+    viewer_family_member_id: Optional[str],
+    requester_phone: Optional[str] = None,
+    require_requester_identity: bool = False,
+) -> None:
     if viewer_family_member_id is None:
         return
     for member in store.list_family_members(user_id):
         if str(member.get("id") or "") != viewer_family_member_id:
             continue
         if member.get("accessStatus") == "active" and member.get("invitationStatus") == "accepted":
+            if require_requester_identity:
+                normalized_requester_phone = _normalized_phone(requester_phone)
+                if not normalized_requester_phone:
+                    raise HTTPException(status_code=403, detail="requester identity is required")
+                normalized_member_phone = _normalized_phone(member.get("phone"))
+                if normalized_member_phone and normalized_requester_phone == normalized_member_phone:
+                    return
+                raise HTTPException(status_code=403, detail="requester is not authorized for this care snapshot")
             return
         raise HTTPException(status_code=403, detail="family member access is not active")
     raise HTTPException(status_code=403, detail="family member is not authorized")
@@ -365,9 +433,18 @@ def save_care_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/care/snapshots/latest/{user_id}")
-def latest_care_snapshot(user_id: str, viewerFamilyMemberID: str = None) -> Dict[str, Any]:
+def latest_care_snapshot(
+    user_id: str,
+    viewerFamilyMemberID: str = None,
+    requesterPhone: str = None,
+) -> Dict[str, Any]:
     viewer_family_member_id = _normalize_viewer_family_member_id(viewerFamilyMemberID)
-    _ensure_active_family_viewer(user_id, viewer_family_member_id)
+    _ensure_active_family_viewer(
+        user_id,
+        viewer_family_member_id,
+        requester_phone=requesterPhone,
+        require_requester_identity=True,
+    )
     item = store.get_latest_care_snapshot(
         user_id,
         viewer_family_member_id=viewer_family_member_id,
@@ -381,10 +458,16 @@ def latest_care_snapshot(user_id: str, viewerFamilyMemberID: str = None) -> Dict
 def care_snapshot_history(
     user_id: str,
     viewerFamilyMemberID: str = None,
+    requesterPhone: str = None,
     limit: int = 7,
 ) -> Dict[str, Any]:
     viewer_family_member_id = _normalize_viewer_family_member_id(viewerFamilyMemberID)
-    _ensure_active_family_viewer(user_id, viewer_family_member_id)
+    _ensure_active_family_viewer(
+        user_id,
+        viewer_family_member_id,
+        requester_phone=requesterPhone,
+        require_requester_identity=True,
+    )
     items = store.list_care_snapshots(
         user_id,
         viewer_family_member_id=viewer_family_member_id,

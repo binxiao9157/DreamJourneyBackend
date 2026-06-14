@@ -14,7 +14,7 @@ from app.services.store_factory import make_store
 from app.services.tokens import TokenService
 from app.services.tts import VolcTTSProxy
 from app.services.amap import AMapDistrictProxy
-from app.services.deepseek import DeepSeekImageAnalysisProxy
+from app.services.deepseek import DeepSeekImageAnalysisProxy, DeepSeekKnowledgeExtractionProxy
 
 
 class PrivacyFilteringTests(unittest.TestCase):
@@ -223,6 +223,70 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertIn("key=amap-secret", url)
         self.assertIn("keywords=", url)
         self.assertIn("%E7%BB%8D%E5%85%B4%E5%B8%82", url)
+
+    def test_knowledge_extraction_proxy_builds_redacted_deepseek_request(self):
+        settings = Settings(deepseek_api_key="deepseek-secret")
+        proxy = DeepSeekKnowledgeExtractionProxy(settings)
+
+        request = proxy.redacted_request(
+            transcript="[长辈]: 我叫陈建国，1968年住在绍兴越城区仓桥直街。",
+            existing_summary="（暂无已有知识）",
+        )
+
+        serialized = str(request)
+        self.assertEqual(request["headers"]["Authorization"], "Bearer <server-side>")
+        self.assertNotIn("deepseek-secret", serialized)
+        self.assertIn("陈建国", serialized)
+        self.assertIn("严格的 JSON", serialized)
+
+    def test_kb_extract_endpoint_rejects_non_ai_privacy_scope(self):
+        client = TestClient(app)
+
+        response = client.post(
+            "/kb/extract?dryRun=true",
+            json={
+                "userId": "u1",
+                "transcript": "[长辈]: 本机私密内容",
+                "existingSummary": "（暂无已有知识）",
+                "privacyMetadata": {"scope": "localOnly"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_kb_extract_endpoint_dry_run_returns_redacted_request(self):
+        client = TestClient(app)
+
+        response = client.post(
+            "/kb/extract?dryRun=true",
+            json={
+                "userId": "u1",
+                "transcript": "[长辈]: 我叫陈建国，1968年住在绍兴越城区仓桥直街。",
+                "existingSummary": "（暂无已有知识）",
+                "privacyMetadata": {
+                    "scope": "generationAllowed",
+                    "sourceRefs": [
+                        {
+                            "kind": "conversationTurn",
+                            "id": "turn-1",
+                            "title": "用户对话原文不应出现在服务端上下文",
+                        }
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        serialized = str(payload)
+        self.assertEqual(payload["provider"], "deepseek")
+        self.assertIn("kbExtract", payload["capability"])
+        self.assertNotIn("deepseek-secret", serialized)
+        self.assertNotIn("用户对话原文不应出现在服务端上下文", serialized)
+        self.assertEqual(
+            payload["context"]["privacyMetadata"]["sourceRefs"][0]["title"],
+            "对话来源",
+        )
 
 
 class StoreTests(unittest.TestCase):
@@ -444,7 +508,7 @@ class CareSnapshotAPITests(unittest.TestCase):
         latest_all = client.get("/care/snapshots/latest/care_user_1")
         latest_daughter = client.get(
             "/care/snapshots/latest/care_user_1",
-            params={"viewerFamilyMemberID": member_id},
+            params={"viewerFamilyMemberID": member_id, "requesterPhone": "13900001111"},
         )
 
         self.assertEqual(latest_all.status_code, 200)
@@ -483,7 +547,7 @@ class CareSnapshotAPITests(unittest.TestCase):
 
         history = client.get(
             "/care/snapshots/care_history_user",
-            params={"viewerFamilyMemberID": member_id, "limit": 2},
+            params={"viewerFamilyMemberID": member_id, "requesterPhone": "13900001111", "limit": 2},
         )
         all_family_history = client.get("/care/snapshots/care_history_user", params={"limit": 10})
 
@@ -543,7 +607,7 @@ class CareSnapshotAPITests(unittest.TestCase):
         )
         active_read = client.get(
             f"/care/snapshots/latest/{user_id}",
-            params={"viewerFamilyMemberID": member_id},
+            params={"viewerFamilyMemberID": member_id, "requesterPhone": "13900001111"},
         )
 
         self.assertEqual(accepted.status_code, 200)
@@ -561,17 +625,54 @@ class CareSnapshotAPITests(unittest.TestCase):
         )
         revoked_latest = client.get(
             f"/care/snapshots/latest/{user_id}",
-            params={"viewerFamilyMemberID": member_id},
+            params={"viewerFamilyMemberID": member_id, "requesterPhone": "13900001111"},
         )
         revoked_history = client.get(
             f"/care/snapshots/{user_id}",
-            params={"viewerFamilyMemberID": member_id},
+            params={"viewerFamilyMemberID": member_id, "requesterPhone": "13900001111"},
         )
 
         self.assertEqual(revoked.status_code, 200)
         self.assertEqual(revoked_write.status_code, 403)
         self.assertEqual(revoked_latest.status_code, 403)
         self.assertEqual(revoked_history.status_code, 403)
+
+    def test_care_snapshot_member_reads_require_requester_phone(self):
+        client = TestClient(app)
+        user_id = "care_requester_user"
+        member_id = self._accept_family_member(client, user_id, phone="13900001111")
+        saved = client.post(
+            "/care/snapshots",
+            json={
+                "userId": user_id,
+                "viewerFamilyMemberID": member_id,
+                "snapshot": self._care_snapshot(summary="女儿视角"),
+            },
+        )
+        self.assertEqual(saved.status_code, 200)
+
+        missing_requester = client.get(
+            f"/care/snapshots/latest/{user_id}",
+            params={"viewerFamilyMemberID": member_id},
+        )
+        wrong_requester = client.get(
+            f"/care/snapshots/latest/{user_id}",
+            params={"viewerFamilyMemberID": member_id, "requesterPhone": "13999999999"},
+        )
+        matching_requester = client.get(
+            f"/care/snapshots/latest/{user_id}",
+            params={"viewerFamilyMemberID": member_id, "requesterPhone": "13900001111"},
+        )
+        history = client.get(
+            f"/care/snapshots/{user_id}",
+            params={"viewerFamilyMemberID": member_id, "requesterPhone": "13900001111"},
+        )
+
+        self.assertEqual(missing_requester.status_code, 403)
+        self.assertEqual(wrong_requester.status_code, 403)
+        self.assertEqual(matching_requester.status_code, 200)
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(matching_requester.json()["item"]["snapshot"]["summary"], "女儿视角")
 
     def test_care_snapshot_api_never_persists_raw_conversation_payload(self):
         client = TestClient(app)
@@ -970,6 +1071,28 @@ class FamilyAPITests(unittest.TestCase):
         revoked = client.post(f"/family/members/u_revoked_inviter/{member['id']}/revoke")
         accepted = client.post(
             f"/family/invitations/{member['invitationCode']}/accept",
+            json={"phone": "13900001111"},
+        )
+
+        self.assertEqual(revoked.status_code, 200)
+        self.assertEqual(accepted.status_code, 404)
+
+    def test_family_member_direct_accept_rejects_revoked_member(self):
+        client = TestClient(app)
+
+        created = client.post(
+            "/family/invite",
+            json={
+                "userId": "u_revoked_direct_accept",
+                "name": "陈岚",
+                "relation": "女儿",
+                "phone": "13900001111",
+            },
+        )
+        member = created.json()["member"]
+        revoked = client.post(f"/family/members/u_revoked_direct_accept/{member['id']}/revoke")
+        accepted = client.post(
+            f"/family/members/u_revoked_direct_accept/{member['id']}/accept",
             json={"phone": "13900001111"},
         )
 

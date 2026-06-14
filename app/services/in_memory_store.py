@@ -101,12 +101,19 @@ class InMemoryStore:
             expected_phone = self._normalized_phone(str(item.get("phone") or ""))
             if expected_phone and normalized_phone != expected_phone:
                 return None
+            if item.get("accessStatus") == "revoked" or item.get("invitationStatus") == "revoked":
+                return None
+            if item.get("accessStatus") == "active" and item.get("invitationStatus") == "accepted":
+                accepted = deepcopy(item)
+                accepted["ownerUserId"] = user_id
+                return accepted
             accepted = deepcopy(item)
             accepted["accessStatus"] = "active"
             accepted["invitationStatus"] = "accepted"
             accepted["isOnline"] = True
             accepted["acceptedAt"] = self._now()
             accepted["lastUpdated"] = "刚刚接受邀请"
+            accepted["ownerUserId"] = user_id
             members[index] = accepted
             return deepcopy(accepted)
         return None
