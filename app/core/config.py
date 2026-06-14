@@ -19,6 +19,7 @@ class Settings:
     store_backend: str = "postgres"
     database_url: str = "postgresql://dreamjourney:dreamjourney@postgres:5432/dreamjourney"
     redis_url: str = "redis://redis:6379/0"
+    backend_api_token: Optional[str] = None
 
     deepseek_api_key: Optional[str] = None
     deepseek_base_url: str = "https://api.deepseek.com/v1/chat/completions"
@@ -43,6 +44,7 @@ class Settings:
             store_backend=_env("STORE_BACKEND", cls.store_backend) or cls.store_backend,
             database_url=_env("DATABASE_URL", cls.database_url) or cls.database_url,
             redis_url=_env("REDIS_URL", cls.redis_url) or cls.redis_url,
+            backend_api_token=_env("BACKEND_API_TOKEN"),
             deepseek_api_key=_env("DEEPSEEK_API_KEY"),
             deepseek_base_url=_env("DEEPSEEK_BASE_URL", cls.deepseek_base_url) or cls.deepseek_base_url,
             volcengine_api_key=_env("VOLCENGINE_API_KEY"),

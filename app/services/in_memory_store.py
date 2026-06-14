@@ -2,6 +2,8 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from app.services.user_identity import stable_user_id
+
 
 class InMemoryStore:
     def __init__(self):
@@ -9,10 +11,12 @@ class InMemoryStore:
         self._kb_snapshots: Dict[str, Dict[str, Any]] = {}
         self._memories: Dict[str, List[Dict[str, Any]]] = {}
         self._archive_items: Dict[str, List[Dict[str, Any]]] = {}
+        self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
         self._family_members: Dict[str, List[Dict[str, Any]]] = {}
+        self._care_snapshots: Dict[str, List[Dict[str, Any]]] = {}
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
-        user_id = f"user_{phone[-4:]}" if phone else f"user_{len(self._users) + 1}"
+        user_id = stable_user_id(phone)
         user = {
             "id": user_id,
             "phone": phone,
@@ -56,10 +60,31 @@ class InMemoryStore:
         self._archive_items.setdefault(user_id, []).insert(0, item)
         return deepcopy(item)
 
+    def list_archive_items(self, user_id: str) -> List[Dict[str, Any]]:
+        return deepcopy(self._archive_items.get(user_id, []))
+
+    def add_mailbox_letter(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(payload)
+        item.setdefault("id", f"mailbox_{len(self._mailbox_letters.get(user_id, [])) + 1}")
+        item["userId"] = user_id
+        item["updatedAt"] = self._now()
+        item.setdefault("createdAt", item["updatedAt"])
+
+        letters = self._mailbox_letters.setdefault(user_id, [])
+        letters[:] = [letter for letter in letters if letter.get("id") != item["id"]]
+        letters.insert(0, item)
+        return deepcopy(item)
+
+    def list_mailbox_letters(self, user_id: str) -> List[Dict[str, Any]]:
+        return deepcopy(self._mailbox_letters.get(user_id, []))
+
     def add_family_member(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
         item.setdefault("id", f"family_{len(self._family_members.get(user_id, [])) + 1}")
+        item.setdefault("invitationCode", "")
+        item.setdefault("invitationURL", "")
         item["userId"] = user_id
+        item["ownerUserId"] = user_id
         item["createdAt"] = self._now()
         self._family_members.setdefault(user_id, []).append(item)
         return deepcopy(item)
@@ -67,6 +92,113 @@ class InMemoryStore:
     def list_family_members(self, user_id: str) -> List[Dict[str, Any]]:
         return deepcopy(self._family_members.get(user_id, []))
 
+    def accept_family_member(self, user_id: str, member_id: str, phone: str) -> Optional[Dict[str, Any]]:
+        members = self._family_members.get(user_id, [])
+        normalized_phone = self._normalized_phone(phone)
+        for index, item in enumerate(members):
+            if item.get("id") != member_id:
+                continue
+            expected_phone = self._normalized_phone(str(item.get("phone") or ""))
+            if expected_phone and normalized_phone != expected_phone:
+                return None
+            accepted = deepcopy(item)
+            accepted["accessStatus"] = "active"
+            accepted["invitationStatus"] = "accepted"
+            accepted["isOnline"] = True
+            accepted["acceptedAt"] = self._now()
+            accepted["lastUpdated"] = "刚刚接受邀请"
+            members[index] = accepted
+            return deepcopy(accepted)
+        return None
+
+    def accept_family_invitation_code(self, invitation_code: str, phone: str) -> Optional[Dict[str, Any]]:
+        normalized_code = invitation_code.strip()
+        if not normalized_code:
+            return None
+        normalized_phone = self._normalized_phone(phone)
+        for user_id, members in self._family_members.items():
+            for index, item in enumerate(members):
+                if str(item.get("invitationCode") or "").strip() != normalized_code:
+                    continue
+                expected_phone = self._normalized_phone(str(item.get("phone") or ""))
+                if expected_phone and normalized_phone != expected_phone:
+                    return None
+                if item.get("accessStatus") == "revoked" or item.get("invitationStatus") == "revoked":
+                    return None
+                if item.get("accessStatus") == "active" and item.get("invitationStatus") == "accepted":
+                    accepted = deepcopy(item)
+                    accepted["ownerUserId"] = user_id
+                    return accepted
+                accepted = deepcopy(item)
+                accepted["accessStatus"] = "active"
+                accepted["invitationStatus"] = "accepted"
+                accepted["isOnline"] = True
+                accepted["acceptedAt"] = self._now()
+                accepted["lastUpdated"] = "刚刚接受邀请"
+                accepted["ownerUserId"] = user_id
+                members[index] = accepted
+                return deepcopy(accepted)
+        return None
+
+    def revoke_family_member(self, user_id: str, member_id: str) -> Optional[Dict[str, Any]]:
+        members = self._family_members.get(user_id, [])
+        for index, item in enumerate(members):
+            if item.get("id") != member_id:
+                continue
+            revoked = deepcopy(item)
+            revoked["accessStatus"] = "revoked"
+            revoked["invitationStatus"] = "revoked"
+            revoked["isOnline"] = False
+            revoked["revokedAt"] = self._now()
+            revoked["lastUpdated"] = "访问已撤回"
+            members[index] = revoked
+            return deepcopy(revoked)
+        return None
+
+    def save_care_snapshot(
+        self,
+        user_id: str,
+        snapshot: Dict[str, Any],
+        viewer_family_member_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        item = {
+            "id": f"care_{len(self._care_snapshots.get(user_id, [])) + 1}",
+            "userId": user_id,
+            "viewerFamilyMemberID": viewer_family_member_id,
+            "snapshot": deepcopy(snapshot),
+            "createdAt": self._now(),
+        }
+        self._care_snapshots.setdefault(user_id, []).insert(0, item)
+        return deepcopy(item)
+
+    def get_latest_care_snapshot(
+        self,
+        user_id: str,
+        viewer_family_member_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        snapshots = self._care_snapshots.get(user_id, [])
+        for item in snapshots:
+            if item.get("viewerFamilyMemberID") == viewer_family_member_id:
+                return deepcopy(item)
+        return None
+
+    def list_care_snapshots(
+        self,
+        user_id: str,
+        viewer_family_member_id: Optional[str] = None,
+        limit: int = 7,
+    ) -> List[Dict[str, Any]]:
+        snapshots = self._care_snapshots.get(user_id, [])
+        filtered = [
+            item for item in snapshots
+            if item.get("viewerFamilyMemberID") == viewer_family_member_id
+        ]
+        return deepcopy(filtered[:max(1, min(limit, 30))])
+
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _normalized_phone(phone: str) -> str:
+        return "".join(ch for ch in phone if ch.isdigit())
