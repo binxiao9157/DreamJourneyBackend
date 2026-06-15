@@ -50,9 +50,10 @@ curl http://127.0.0.1:3100/health
 ## 真机配置建议
 
 - `DreamJourneyBackendBaseURL`：指向 `https://dreamjourney-api.liftora.cn`
+- `DreamJourneyBackendAPIToken`：如果服务器启用了 `BACKEND_API_TOKEN`，iOS 必须配置同值 token，才能拉取实时语音运行配置。
 - `OpenAvatarChatBaseURL`：仅保留为旧 OpenAvatarChat 开源工程兼容配置，不作为本后端入口。
 - `SafetyGuardBaseURL`：后续如果把 safety guard 挂到本后端，也指向同域名
-- `AMapWebServiceKey`、`DeepSeekAPIKey`、`VolcEngineAPIKey`：逐步从 iOS LocalConfig 迁移到后端 `.env`
+- `AMapWebServiceKey`、`DeepSeekAPIKey`、`VolcEngineAPIKey`、`VolcEngineAppID`、`VolcEngineAppToken`：逐步从 iOS LocalConfig 迁移到后端 `.env`；实时语音会通过 `POST /voice/realtime-token` 下发运行配置。
 
 当前默认使用 Postgres 持久化。API 容器启动时会自动创建以下 JSONB 表：
 

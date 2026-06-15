@@ -195,10 +195,13 @@ class TokenAndProxyTests(unittest.TestCase):
         payload = TokenService(settings).realtime_config(user_id="u1")
 
         self.assertEqual(payload["authMode"], "legacy")
-        self.assertEqual(payload["headers"]["X-Api-App-ID"], "test-app-id")
-        self.assertEqual(payload["headers"]["X-Api-App-Key"], "PlgvMymc7f3tQnJ6")
-        self.assertNotIn("access-token-secret", str(payload))
-        self.assertIn("tokenRef", payload)
+        self.assertEqual(payload["appID"], "test-app-id")
+        self.assertEqual(payload["appKey"], "PlgvMymc7f3tQnJ6")
+        self.assertEqual(payload["appToken"], "access-token-secret")
+        self.assertEqual(payload["resourceID"], "volc.speech.dialog")
+        self.assertEqual(payload["address"], "wss://openspeech.bytedance.com")
+        self.assertEqual(payload["uri"], "/api/v3/realtime/dialogue")
+        self.assertNotIn("tokenRef", payload)
 
     def test_tts_proxy_builds_volcengine_request(self):
         settings = Settings(

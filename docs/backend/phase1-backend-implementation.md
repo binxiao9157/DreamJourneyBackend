@@ -5,7 +5,7 @@
 ## 已覆盖能力
 
 - 服务端运行配置：`GET /config/runtime` 只暴露能力状态，不泄露密钥。
-- 火山实时对话配置：`POST /voice/realtime-token` 返回可下发给客户端的实时连接配置，敏感 token 只返回引用。
+- 火山实时对话配置：`POST /voice/realtime-token` 返回 iOS `SpeechEngineToB` 可直接启动的实时连接配置；该接口必须通过 `BACKEND_API_TOKEN` / `DreamJourneyBackendAPIToken` 保护，避免把火山运行凭证作为公开接口暴露。
 - 火山 TTS 代理：`POST /tts` 默认转发到火山 TTS，`dryRun=true` 可查看脱敏请求。
 - 高德行政区代理：`GET /maps/district` 默认转发高德 WebService，`dryRun=true` 可查看脱敏 URL。
 - KBLite 同步：`POST /kb/sync` 过滤 `localOnly`，保留可同步图谱。

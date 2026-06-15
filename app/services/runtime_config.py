@@ -15,7 +15,7 @@ class RuntimeConfigService:
                 "deepseekProxy": bool(self.settings.deepseek_api_key),
                 "ttsProxy": bool(self.settings.volcengine_api_key and self.settings.volcengine_voice_type),
                 "realtimeToken": bool(
-                    (self.settings.volcengine_app_id and self.settings.volcengine_app_key and self.settings.volcengine_app_token)
+                    (self.settings.volcengine_app_id and self.settings.volcengine_app_token)
                     or self.settings.volcengine_api_key
                 ),
                 "amapDistrictProxy": bool(self.settings.amap_web_service_key),
