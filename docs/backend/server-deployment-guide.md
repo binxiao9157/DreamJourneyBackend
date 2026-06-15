@@ -8,6 +8,10 @@
 - `DreamJourneyBackend/docker-compose.yml`
 - `DreamJourneyBackend/.env.example`
 
+服务器已经完成初次部署后的日常更新，优先参考：
+
+- `docs/backend/server-update-operations.md`
+
 ## 1. 当前服务器现状
 
 服务器：
