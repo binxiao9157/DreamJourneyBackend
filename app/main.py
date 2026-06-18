@@ -1,3 +1,5 @@
+import hashlib
+import re
 import secrets
 from typing import Any, Dict, Optional
 
@@ -429,6 +431,45 @@ def list_mailbox_letters(user_id: str) -> Dict[str, Any]:
 
 
 _ALLOWED_ECHO_DELAYED_REPLY_TRIGGERS = {"tenRoundBaseline", "contentSignal"}
+_ALLOWED_PUSH_PLATFORMS = {"ios"}
+_ALLOWED_PUSH_ENVIRONMENTS = {"sandbox", "production"}
+_DEVICE_TOKEN_PATTERN = re.compile(r"^[0-9a-fA-F]{16,256}$")
+
+
+def _sanitize_push_device_token_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = str(payload.get("userId") or "").strip()
+    device_token = str(payload.get("deviceToken") or "").strip().replace(" ", "")
+    platform = str(payload.get("platform") or "").strip().lower()
+    environment = str(payload.get("environment") or "").strip().lower()
+    device_id = str(payload.get("deviceId") or "").strip()
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+    if not device_token:
+        raise HTTPException(status_code=400, detail="deviceToken is required")
+    if _DEVICE_TOKEN_PATTERN.match(device_token) is None:
+        raise HTTPException(status_code=400, detail="deviceToken is invalid")
+    if platform not in _ALLOWED_PUSH_PLATFORMS:
+        raise HTTPException(status_code=400, detail="unsupported push platform")
+    if environment not in _ALLOWED_PUSH_ENVIRONMENTS:
+        raise HTTPException(status_code=400, detail="unsupported push environment")
+    if len(device_id) > 64:
+        raise HTTPException(status_code=400, detail="deviceId is too long")
+
+    token_hash = hashlib.sha256(device_token.lower().encode("utf-8")).hexdigest()
+    device_token_id = f"push_{user_id}_{token_hash[:16]}"
+    return {
+        "id": device_token_id,
+        "deviceTokenId": device_token_id,
+        "userId": user_id,
+        "platform": platform,
+        "environment": environment,
+        "deviceId": device_id or f"ios_{token_hash[:12]}",
+        "deviceTokenHash": token_hash,
+        "deviceTokenPreview": f"{device_token[:6].lower()}...{device_token[-4:].lower()}",
+        "deliveryProviderState": "pending",
+        "containsRawToken": False,
+    }
 
 
 def _sanitize_echo_delayed_reply_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -464,7 +505,15 @@ def _sanitize_echo_delayed_reply_payload(payload: Dict[str, Any]) -> Dict[str, A
         "deliveryState": "scheduled",
         "pushProviderState": "pending",
         "containsRawTranscript": False,
+        **({"deviceTokenId": str(payload.get("deviceTokenId")).strip()} if str(payload.get("deviceTokenId") or "").strip() else {}),
     }
+
+
+@app.post("/devices/push-token")
+def register_push_device_token(payload: Dict[str, Any]) -> Dict[str, Any]:
+    item = _sanitize_push_device_token_payload(payload)
+    saved = store.save_push_device_token(item["userId"], item)
+    return {"status": "registered", "item": saved}
 
 
 @app.post("/echo/delayed-replies")

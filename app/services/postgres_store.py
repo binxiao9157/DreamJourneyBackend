@@ -81,6 +81,18 @@ class PostgresStore:
                 ON echo_delayed_replies(user_id, created_at DESC)
             """,
             """
+            CREATE TABLE IF NOT EXISTS push_device_tokens (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                payload JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_push_device_tokens_user_updated
+                ON push_device_tokens(user_id, updated_at DESC)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS profiles (
                 user_id TEXT PRIMARY KEY,
                 payload JSONB NOT NULL,
@@ -284,6 +296,38 @@ class PostgresStore:
 
     def list_echo_delayed_replies(self, user_id: str) -> List[Dict[str, Any]]:
         return self._list_payloads("echo_delayed_replies", user_id)
+
+    def save_push_device_token(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(payload)
+        item["userId"] = user_id
+        item.setdefault("id", item.get("deviceTokenId") or f"push_token_{uuid.uuid4().hex}")
+        item.setdefault("deviceTokenId", item["id"])
+        item["updatedAt"] = self._now()
+        row = self._fetchone(
+            """
+            INSERT INTO push_device_tokens (user_id, id, payload, updated_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (id) DO UPDATE SET
+                user_id = EXCLUDED.user_id,
+                payload = EXCLUDED.payload,
+                updated_at = NOW()
+            RETURNING payload
+            """,
+            (user_id, item["id"], item),
+            commit=True,
+        )
+        return deepcopy(row["payload"])
+
+    def list_push_device_tokens(self, user_id: str) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT payload FROM push_device_tokens
+            WHERE user_id = %s
+            ORDER BY updated_at DESC
+            """,
+            (user_id,),
+        )
+        return [deepcopy(row["payload"]) for row in rows]
 
     def add_family_member(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = self._with_identity(payload, "family", user_id)

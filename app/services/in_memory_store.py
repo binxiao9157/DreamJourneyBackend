@@ -17,6 +17,7 @@ class InMemoryStore:
         self._family_members: Dict[str, List[Dict[str, Any]]] = {}
         self._care_snapshots: Dict[str, List[Dict[str, Any]]] = {}
         self._echo_delayed_replies: Dict[str, List[Dict[str, Any]]] = {}
+        self._push_device_tokens: Dict[str, List[Dict[str, Any]]] = {}
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
@@ -116,6 +117,21 @@ class InMemoryStore:
 
     def list_echo_delayed_replies(self, user_id: str) -> List[Dict[str, Any]]:
         return deepcopy(self._echo_delayed_replies.get(user_id, []))
+
+    def save_push_device_token(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(payload)
+        item.setdefault("id", item.get("deviceTokenId") or f"push_token_{len(self._push_device_tokens.get(user_id, [])) + 1}")
+        item.setdefault("deviceTokenId", item["id"])
+        item["userId"] = user_id
+        item["updatedAt"] = self._now()
+
+        tokens = self._push_device_tokens.setdefault(user_id, [])
+        tokens[:] = [token for token in tokens if token.get("id") != item["id"]]
+        tokens.insert(0, item)
+        return deepcopy(item)
+
+    def list_push_device_tokens(self, user_id: str) -> List[Dict[str, Any]]:
+        return deepcopy(self._push_device_tokens.get(user_id, []))
 
     def add_family_member(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)

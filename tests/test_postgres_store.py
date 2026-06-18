@@ -41,6 +41,9 @@ class FakeCursor:
         elif normalized.startswith("SELECT payload FROM echo_delayed_replies"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.echo_delayed_replies.get(user_id, [])]
+        elif normalized.startswith("SELECT payload FROM push_device_tokens"):
+            user_id = params[0]
+            self.result = [{"payload": item} for item in self.connection.push_device_tokens.get(user_id, [])]
         elif normalized.startswith("SELECT payload FROM profiles"):
             user_id = params[0]
             profile = self.connection.profiles.get(user_id)
@@ -115,6 +118,13 @@ class FakeCursor:
             replies[:] = [item for item in replies if item.get("id") != item_id]
             replies.insert(0, dict(payload))
             self.result = {"payload": payload}
+        elif normalized.startswith("INSERT INTO push_device_tokens"):
+            user_id, item_id, payload = params
+            payload = unwrap_jsonb(payload)
+            tokens = self.connection.push_device_tokens.setdefault(user_id, [])
+            tokens[:] = [item for item in tokens if item.get("id") != item_id]
+            tokens.insert(0, dict(payload))
+            self.result = {"payload": payload}
         elif normalized.startswith("INSERT INTO profiles"):
             user_id, payload = params
             payload = unwrap_jsonb(payload)
@@ -166,6 +176,7 @@ class FakeConnection:
         self.archive_items = {}
         self.mailbox_letters = {}
         self.echo_delayed_replies = {}
+        self.push_device_tokens = {}
         self.profiles = {}
         self.password_credentials = {}
         self.family_members = {}
@@ -224,6 +235,7 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS archive_items", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS mailbox_letters", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS echo_delayed_replies", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS push_device_tokens", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS profiles", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS password_credentials", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS family_members", sql)
@@ -370,6 +382,36 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(first["userId"], "u1")
         self.assertEqual(store.list_echo_delayed_replies("u1")[0]["delayedReplyId"], "reply_1")
         self.assertEqual(store.list_echo_delayed_replies("u2")[0]["trigger"], "contentSignal")
+
+    def test_store_persists_push_device_tokens_by_user(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        store.save_push_device_token(
+            "u1",
+            {
+                "id": "push_1",
+                "deviceTokenId": "push_1",
+                "userId": "u1",
+                "deviceTokenHash": "hash_1",
+                "platform": "ios",
+                "environment": "sandbox",
+            },
+        )
+        store.save_push_device_token(
+            "u2",
+            {
+                "id": "push_2",
+                "deviceTokenId": "push_2",
+                "userId": "u2",
+                "deviceTokenHash": "hash_2",
+                "platform": "ios",
+                "environment": "production",
+            },
+        )
+
+        self.assertEqual(store.list_push_device_tokens("u1")[0]["deviceTokenId"], "push_1")
+        self.assertEqual(store.list_push_device_tokens("u2")[0]["environment"], "production")
 
     def test_store_persists_profile_metadata_by_user(self):
         connection = FakeConnection()

@@ -940,6 +940,69 @@ class BackendUserIdentityTests(unittest.TestCase):
 
 
 class EchoDelayedReplyAPITests(unittest.TestCase):
+    def test_push_device_token_api_registers_without_returning_raw_token(self):
+        previous_store = main_module.store
+        main_module.store = InMemoryStore()
+        client = TestClient(app)
+        raw_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        try:
+            registered = client.post(
+                "/devices/push-token",
+                json={
+                    "userId": "echo_user_1",
+                    "deviceToken": raw_token,
+                    "platform": "ios",
+                    "environment": "sandbox",
+                    "deviceId": "iphone-qa-1",
+                },
+            )
+            created = client.post(
+                "/echo/delayed-replies",
+                json={
+                    "userId": "echo_user_1",
+                    "delayedReplyId": "reply_with_device_token",
+                    "deliverAt": "2026-06-18T12:05:00Z",
+                    "minutes": 7,
+                    "trigger": "tenRoundBaseline",
+                    "deviceTokenId": registered.json()["item"]["deviceTokenId"],
+                },
+            )
+            listed = client.get("/echo/delayed-replies/echo_user_1")
+        finally:
+            main_module.store = previous_store
+
+        self.assertEqual(registered.status_code, 200)
+        self.assertEqual(registered.json()["status"], "registered")
+        token_item = registered.json()["item"]
+        self.assertEqual(token_item["userId"], "echo_user_1")
+        self.assertEqual(token_item["platform"], "ios")
+        self.assertEqual(token_item["environment"], "sandbox")
+        self.assertEqual(token_item["deviceId"], "iphone-qa-1")
+        self.assertEqual(token_item["deliveryProviderState"], "pending")
+        self.assertIn("deviceTokenId", token_item)
+        self.assertIn("deviceTokenHash", token_item)
+        self.assertNotIn("deviceToken", token_item)
+        self.assertNotIn(raw_token, str(registered.json()))
+
+        self.assertEqual(created.status_code, 200)
+        delayed_item = created.json()["item"]
+        self.assertEqual(delayed_item["deviceTokenId"], token_item["deviceTokenId"])
+        self.assertNotIn(raw_token, str(delayed_item))
+        self.assertNotIn(raw_token, str(listed.json()))
+
+    def test_push_device_token_api_rejects_invalid_payloads(self):
+        client = TestClient(app)
+
+        for payload in [
+            {"deviceToken": "0123456789abcdef", "platform": "ios", "environment": "sandbox"},
+            {"userId": "echo_user_1", "platform": "ios", "environment": "sandbox"},
+            {"userId": "echo_user_1", "deviceToken": "not hex", "platform": "ios", "environment": "sandbox"},
+            {"userId": "echo_user_1", "deviceToken": "0123456789abcdef", "platform": "android", "environment": "sandbox"},
+            {"userId": "echo_user_1", "deviceToken": "0123456789abcdef", "platform": "ios", "environment": "qa"},
+        ]:
+            response = client.post("/devices/push-token", json=payload)
+            self.assertEqual(response.status_code, 400, payload)
+
     def test_echo_delayed_reply_api_schedules_and_lists_contract(self):
         previous_store = main_module.store
         main_module.store = InMemoryStore()
