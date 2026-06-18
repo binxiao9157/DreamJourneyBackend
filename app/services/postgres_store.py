@@ -297,6 +297,45 @@ class PostgresStore:
     def list_echo_delayed_replies(self, user_id: str) -> List[Dict[str, Any]]:
         return self._list_payloads("echo_delayed_replies", user_id)
 
+    def mark_due_echo_delayed_replies_for_dispatch(
+        self,
+        cutoff_iso: str,
+        dispatched_at_iso: str,
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+        bounded_limit = max(1, min(limit, 100))
+        rows = self._fetchall(
+            """
+            SELECT user_id, id, payload FROM echo_delayed_replies
+            WHERE payload->>'deliveryState' = 'scheduled'
+                AND payload->>'deliverAt' <= %s
+            ORDER BY payload->>'deliverAt' ASC
+            LIMIT %s
+            """,
+            (cutoff_iso, bounded_limit),
+        )
+
+        dispatched: List[Dict[str, Any]] = []
+        for row in rows:
+            item = deepcopy(row["payload"])
+            item["deliveryState"] = "readyForProvider"
+            item["pushProviderState"] = "queued"
+            item["dispatchAttemptedAt"] = dispatched_at_iso
+            item["providerDeliveryAttempted"] = False
+            updated = self._fetchone(
+                """
+                UPDATE echo_delayed_replies
+                SET payload = %s
+                WHERE user_id = %s AND id = %s
+                RETURNING payload
+                """,
+                (item, row["user_id"], row["id"]),
+                commit=True,
+            )
+            if updated is not None:
+                dispatched.append(deepcopy(updated["payload"]))
+        return dispatched
+
     def save_push_device_token(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
         item["userId"] = user_id

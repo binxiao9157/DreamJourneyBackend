@@ -1039,6 +1039,59 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
         self.assertEqual(listed.json()["items"][0]["id"], "reply_1")
         self.assertNotIn("ECHO_RAW_SENTINEL", str(listed.json()))
 
+    def test_echo_delayed_reply_dispatch_due_marks_only_due_items(self):
+        previous_store = main_module.store
+        main_module.store = InMemoryStore()
+        client = TestClient(app)
+        try:
+            due = client.post(
+                "/echo/delayed-replies",
+                json={
+                    "userId": "echo_user_due",
+                    "delayedReplyId": "reply_due",
+                    "deliverAt": "2026-06-18T12:05:00Z",
+                    "minutes": 7,
+                    "trigger": "tenRoundBaseline",
+                    "rawTranscript": "ECHO_DISPATCH_RAW_SENTINEL should not persist",
+                },
+            )
+            future = client.post(
+                "/echo/delayed-replies",
+                json={
+                    "userId": "echo_user_due",
+                    "delayedReplyId": "reply_future",
+                    "deliverAt": "2026-06-18T12:20:00Z",
+                    "minutes": 7,
+                    "trigger": "contentSignal",
+                },
+            )
+            dispatched = client.post(
+                "/echo/delayed-replies/dispatch-due",
+                json={"now": "2026-06-18T12:06:00Z", "limit": 10},
+            )
+            listed = client.get("/echo/delayed-replies/echo_user_due")
+        finally:
+            main_module.store = previous_store
+
+        self.assertEqual(due.status_code, 200)
+        self.assertEqual(future.status_code, 200)
+        self.assertEqual(dispatched.status_code, 200)
+        dispatch_body = dispatched.json()
+        self.assertEqual(dispatch_body["status"], "queued")
+        self.assertEqual(dispatch_body["itemCount"], 1)
+        self.assertFalse(dispatch_body["providerDeliveryAttempted"])
+        item = dispatch_body["items"][0]
+        self.assertEqual(item["id"], "reply_due")
+        self.assertEqual(item["deliveryState"], "readyForProvider")
+        self.assertEqual(item["pushProviderState"], "queued")
+        self.assertEqual(item["dispatchAttemptedAt"], "2026-06-18T12:06:00Z")
+        self.assertNotIn("rawTranscript", item)
+        self.assertNotIn("ECHO_DISPATCH_RAW_SENTINEL", str(dispatch_body))
+
+        listed_items = {item["id"]: item for item in listed.json()["items"]}
+        self.assertEqual(listed_items["reply_due"]["deliveryState"], "readyForProvider")
+        self.assertEqual(listed_items["reply_future"]["deliveryState"], "scheduled")
+
     def test_echo_delayed_reply_api_rejects_missing_required_fields(self):
         client = TestClient(app)
 

@@ -118,6 +118,35 @@ class InMemoryStore:
     def list_echo_delayed_replies(self, user_id: str) -> List[Dict[str, Any]]:
         return deepcopy(self._echo_delayed_replies.get(user_id, []))
 
+    def mark_due_echo_delayed_replies_for_dispatch(
+        self,
+        cutoff_iso: str,
+        dispatched_at_iso: str,
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+        due: List[Dict[str, Any]] = []
+        bounded_limit = max(1, min(limit, 100))
+        for user_id, replies in self._echo_delayed_replies.items():
+            for index, reply in enumerate(replies):
+                if len(due) >= bounded_limit:
+                    break
+                if reply.get("deliveryState") != "scheduled":
+                    continue
+                deliver_at = str(reply.get("deliverAt") or "")
+                if not deliver_at or deliver_at > cutoff_iso:
+                    continue
+                updated = deepcopy(reply)
+                updated["userId"] = user_id
+                updated["deliveryState"] = "readyForProvider"
+                updated["pushProviderState"] = "queued"
+                updated["dispatchAttemptedAt"] = dispatched_at_iso
+                updated["providerDeliveryAttempted"] = False
+                replies[index] = updated
+                due.append(deepcopy(updated))
+            if len(due) >= bounded_limit:
+                break
+        return sorted(due, key=lambda item: str(item.get("deliverAt") or ""))
+
     def save_push_device_token(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
         item.setdefault("id", item.get("deviceTokenId") or f"push_token_{len(self._push_device_tokens.get(user_id, [])) + 1}")

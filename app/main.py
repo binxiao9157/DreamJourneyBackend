@@ -1,6 +1,7 @@
 import hashlib
 import re
 import secrets
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 try:
@@ -509,6 +510,28 @@ def _sanitize_echo_delayed_reply_payload(payload: Dict[str, Any]) -> Dict[str, A
     }
 
 
+def _parse_iso_datetime(value: str, field_name: str) -> None:
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be ISO-8601") from exc
+
+
+def _sanitize_echo_dispatch_due_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    now = str(payload.get("now") or "").strip()
+    if not now:
+        raise HTTPException(status_code=400, detail="now is required")
+    _parse_iso_datetime(now, "now")
+
+    try:
+        limit = int(payload.get("limit", 25))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="limit must be an integer") from exc
+    if limit < 1:
+        raise HTTPException(status_code=400, detail="limit must be positive")
+    return {"now": now, "limit": min(limit, 100)}
+
+
 @app.post("/devices/push-token")
 def register_push_device_token(payload: Dict[str, Any]) -> Dict[str, Any]:
     item = _sanitize_push_device_token_payload(payload)
@@ -521,6 +544,23 @@ def schedule_echo_delayed_reply(payload: Dict[str, Any]) -> Dict[str, Any]:
     item = _sanitize_echo_delayed_reply_payload(payload)
     saved = store.add_echo_delayed_reply(item["userId"], item)
     return {"status": "scheduled", "item": saved}
+
+
+@app.post("/echo/delayed-replies/dispatch-due")
+def dispatch_due_echo_delayed_replies(payload: Dict[str, Any]) -> Dict[str, Any]:
+    contract = _sanitize_echo_dispatch_due_payload(payload)
+    items = store.mark_due_echo_delayed_replies_for_dispatch(
+        cutoff_iso=contract["now"],
+        dispatched_at_iso=contract["now"],
+        limit=contract["limit"],
+    )
+    return {
+        "status": "queued",
+        "cutoff": contract["now"],
+        "itemCount": len(items),
+        "items": items,
+        "providerDeliveryAttempted": False,
+    }
 
 
 @app.get("/echo/delayed-replies/{user_id}")

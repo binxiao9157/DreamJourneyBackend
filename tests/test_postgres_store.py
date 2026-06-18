@@ -38,6 +38,19 @@ class FakeCursor:
         elif normalized.startswith("SELECT payload FROM mailbox_letters"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.mailbox_letters.get(user_id, [])]
+        elif normalized.startswith("SELECT user_id, id, payload FROM echo_delayed_replies"):
+            cutoff_iso, limit = params
+            matches = [
+                item for replies in self.connection.echo_delayed_replies.values()
+                for item in replies
+                if item.get("deliveryState") == "scheduled"
+                and str(item.get("deliverAt") or "") <= cutoff_iso
+            ]
+            matches = sorted(matches, key=lambda item: str(item.get("deliverAt") or ""))[:limit]
+            self.result = [
+                {"user_id": item.get("userId"), "id": item.get("id"), "payload": item}
+                for item in matches
+            ]
         elif normalized.startswith("SELECT payload FROM echo_delayed_replies"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.echo_delayed_replies.get(user_id, [])]
@@ -118,6 +131,17 @@ class FakeCursor:
             replies[:] = [item for item in replies if item.get("id") != item_id]
             replies.insert(0, dict(payload))
             self.result = {"payload": payload}
+        elif normalized.startswith("UPDATE echo_delayed_replies"):
+            payload, user_id, item_id = params
+            payload = unwrap_jsonb(payload)
+            replies = self.connection.echo_delayed_replies.get(user_id, [])
+            for index, item in enumerate(replies):
+                if item.get("id") == item_id:
+                    replies[index] = dict(payload)
+                    self.result = {"payload": payload}
+                    break
+            else:
+                self.result = None
         elif normalized.startswith("INSERT INTO push_device_tokens"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
@@ -382,6 +406,50 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(first["userId"], "u1")
         self.assertEqual(store.list_echo_delayed_replies("u1")[0]["delayedReplyId"], "reply_1")
         self.assertEqual(store.list_echo_delayed_replies("u2")[0]["trigger"], "contentSignal")
+
+    def test_store_marks_due_echo_delayed_replies_for_dispatch(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        store.add_echo_delayed_reply(
+            "u1",
+            {
+                "id": "reply_due",
+                "delayedReplyId": "reply_due",
+                "deliverAt": "2026-06-18T12:05:00Z",
+                "minutes": 7,
+                "trigger": "tenRoundBaseline",
+                "deliveryState": "scheduled",
+                "pushProviderState": "pending",
+            },
+        )
+        store.add_echo_delayed_reply(
+            "u1",
+            {
+                "id": "reply_future",
+                "delayedReplyId": "reply_future",
+                "deliverAt": "2026-06-18T12:20:00Z",
+                "minutes": 7,
+                "trigger": "contentSignal",
+                "deliveryState": "scheduled",
+                "pushProviderState": "pending",
+            },
+        )
+
+        dispatched = store.mark_due_echo_delayed_replies_for_dispatch(
+            cutoff_iso="2026-06-18T12:06:00Z",
+            dispatched_at_iso="2026-06-18T12:06:00Z",
+            limit=10,
+        )
+
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(dispatched[0]["id"], "reply_due")
+        self.assertEqual(dispatched[0]["deliveryState"], "readyForProvider")
+        self.assertEqual(dispatched[0]["pushProviderState"], "queued")
+        self.assertEqual(dispatched[0]["dispatchAttemptedAt"], "2026-06-18T12:06:00Z")
+        listed = {item["id"]: item for item in store.list_echo_delayed_replies("u1")}
+        self.assertEqual(listed["reply_due"]["deliveryState"], "readyForProvider")
+        self.assertEqual(listed["reply_future"]["deliveryState"], "scheduled")
 
     def test_store_persists_push_device_tokens_by_user(self):
         connection = FakeConnection()
