@@ -4,11 +4,20 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [[ -z "$PYTHON_BIN" ]]; then
+  if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
+    PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+  else
+    PYTHON_BIN="python3"
+  fi
+fi
+
 echo "== Backend unittest =="
-PYTHONPATH=. python3 -m unittest discover tests
+STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" -m unittest discover tests
 
 echo "== Backend py_compile =="
-python3 -m compileall -q app tests
+"$PYTHON_BIN" -m compileall -q app tests
 
 echo "== Backend deployment files =="
 test -f Dockerfile
@@ -18,12 +27,12 @@ test -f requirements.txt
 grep -q "psycopg" requirements.txt
 
 echo "== Backend FastAPI smoke =="
-if python3 - <<'PY' >/dev/null 2>&1
+if "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
 import fastapi
 import httpx
 PY
 then
-  STORE_BACKEND=memory PYTHONPATH=. python3 - <<'PY'
+  STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" - <<'PY'
 from fastapi.testclient import TestClient
 from app.main import app
 

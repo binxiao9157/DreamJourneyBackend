@@ -12,11 +12,23 @@
 - `GET /maps/district`
 - `POST /kb/sync`
 - `GET /kb/snapshot/{user_id}`
+- `POST /kb/extract`
 - `POST /memories`
 - `GET /memories/{user_id}`
 - `POST /archive/photos`
+- `POST /archive/items`
+- `GET /archive/items/{user_id}`
+- `POST /archive/image-analysis`
+- `POST /mailbox/letters`
+- `GET /mailbox/letters/{user_id}`
 - `POST /family/invite`
 - `GET /family/members/{user_id}`
+- `POST /family/members/{user_id}/{member_id}/accept`
+- `POST /family/invitations/{invitation_code}/accept`
+- `POST /family/members/{user_id}/{member_id}/revoke`
+- `POST /care/snapshots`
+- `GET /care/snapshots/latest/{user_id}`
+- `GET /care/snapshots/{user_id}`
 
 ## 隐私规则
 
