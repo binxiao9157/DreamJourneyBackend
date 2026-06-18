@@ -45,6 +45,10 @@ class FakeCursor:
             user_id = params[0]
             profile = self.connection.profiles.get(user_id)
             self.result = None if profile is None else {"payload": profile}
+        elif normalized.startswith("SELECT payload FROM password_credentials"):
+            user_id = params[0]
+            credential = self.connection.password_credentials.get(user_id)
+            self.result = None if credential is None else {"payload": credential}
         elif normalized.startswith("SELECT payload FROM family_members WHERE user_id = %s AND id = %s"):
             user_id, item_id = params
             members = [
@@ -116,6 +120,11 @@ class FakeCursor:
             payload = unwrap_jsonb(payload)
             self.connection.profiles[user_id] = dict(payload)
             self.result = {"payload": payload}
+        elif normalized.startswith("INSERT INTO password_credentials"):
+            user_id, payload = params
+            payload = unwrap_jsonb(payload)
+            self.connection.password_credentials[user_id] = dict(payload)
+            self.result = {"payload": payload}
         elif normalized.startswith("INSERT INTO family_members"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
@@ -158,6 +167,7 @@ class FakeConnection:
         self.mailbox_letters = {}
         self.echo_delayed_replies = {}
         self.profiles = {}
+        self.password_credentials = {}
         self.family_members = {}
         self.care_snapshots = {}
 
@@ -215,6 +225,7 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS mailbox_letters", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS echo_delayed_replies", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS profiles", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS password_credentials", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS family_members", sql)
         self.assertIn("idx_family_members_invitation_code", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS care_snapshots", sql)
@@ -261,6 +272,25 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertNotEqual(first["id"], "user_9157")
         self.assertNotEqual(first["id"], second["id"])
         self.assertIn("user_aef88d2439c15d38", connection.users)
+
+    def test_store_persists_password_credentials_by_user(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        saved = store.save_password_credential(
+            "u1",
+            {"algorithm": "pbkdf2_sha256", "salt": "salt", "hash": "hash", "iterations": 210000},
+        )
+        store.save_password_credential(
+            "u2",
+            {"algorithm": "pbkdf2_sha256", "salt": "other", "hash": "other-hash", "iterations": 210000},
+        )
+        loaded = store.get_password_credential("u1")
+
+        self.assertEqual(saved["userId"], "u1")
+        self.assertEqual(loaded["hash"], "hash")
+        self.assertEqual(store.get_password_credential("u2")["hash"], "other-hash")
+        self.assertIsNone(store.get_password_credential("missing"))
 
     def test_store_rolls_back_failed_payload_insert(self):
         connection = FailingConnection(RuntimeError("duplicate key"))

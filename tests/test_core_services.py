@@ -500,6 +500,67 @@ class ProfileAPITests(unittest.TestCase):
         self.assertEqual(missing_profile.status_code, 404)
 
 
+class PasswordAPITests(unittest.TestCase):
+    def test_password_login_sets_credential_and_change_requires_old_password(self):
+        client = TestClient(app)
+        phone = "13900007777"
+
+        first_login = client.post(
+            "/auth/login",
+            json={"phone": phone, "nickname": "密码用户", "password": "old-password-1"},
+        )
+        self.assertEqual(first_login.status_code, 200)
+        user = first_login.json()["user"]
+        user_id = user["id"]
+        self.assertTrue(user["passwordConfigured"])
+        encoded_user = str(first_login.json())
+        self.assertNotIn("passwordHash", encoded_user)
+        self.assertNotIn("passwordSalt", encoded_user)
+
+        wrong_login = client.post("/auth/login", json={"phone": phone, "password": "wrong-password"})
+        self.assertEqual(wrong_login.status_code, 401)
+
+        wrong_change = client.post(
+            "/auth/password",
+            json={"userId": user_id, "oldPassword": "wrong-password", "newPassword": "new-password-1"},
+        )
+        self.assertEqual(wrong_change.status_code, 401)
+
+        changed = client.post(
+            "/auth/password",
+            json={"userId": user_id, "oldPassword": "old-password-1", "newPassword": "new-password-1"},
+        )
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(changed.json()["status"], "changed")
+        self.assertEqual(changed.json()["userId"], user_id)
+
+        old_password_login = client.post("/auth/login", json={"phone": phone, "password": "old-password-1"})
+        new_password_login = client.post("/auth/login", json={"phone": phone, "password": "new-password-1"})
+        self.assertEqual(old_password_login.status_code, 401)
+        self.assertEqual(new_password_login.status_code, 200)
+        self.assertTrue(new_password_login.json()["user"]["passwordConfigured"])
+
+    def test_password_change_rejects_invalid_and_unconfigured_credentials(self):
+        client = TestClient(app)
+
+        missing_user = client.post(
+            "/auth/password",
+            json={"oldPassword": "old-password-1", "newPassword": "new-password-1"},
+        )
+        short_password = client.post(
+            "/auth/password",
+            json={"userId": "password_unconfigured_user", "oldPassword": "old-password-1", "newPassword": "short"},
+        )
+        unconfigured = client.post(
+            "/auth/password",
+            json={"userId": "password_unconfigured_user", "oldPassword": "old-password-1", "newPassword": "new-password-1"},
+        )
+
+        self.assertEqual(missing_user.status_code, 400)
+        self.assertEqual(short_password.status_code, 400)
+        self.assertEqual(unconfigured.status_code, 409)
+
+
 class CareSnapshotAPITests(unittest.TestCase):
     def _care_snapshot(
         self,

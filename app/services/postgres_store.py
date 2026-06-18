@@ -88,6 +88,13 @@ class PostgresStore:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS password_credentials (
+                user_id TEXT PRIMARY KEY,
+                payload JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS family_members (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
@@ -168,6 +175,31 @@ class PostgresStore:
     def get_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
         row = self._fetchone(
             "SELECT payload FROM profiles WHERE user_id = %s",
+            (user_id,),
+        )
+        return None if row is None else deepcopy(row["payload"])
+
+    def save_password_credential(self, user_id: str, credential: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(credential)
+        item["userId"] = user_id
+        item["updatedAt"] = self._now()
+        row = self._fetchone(
+            """
+            INSERT INTO password_credentials (user_id, payload, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                payload = EXCLUDED.payload,
+                updated_at = NOW()
+            RETURNING payload
+            """,
+            (user_id, item),
+            commit=True,
+        )
+        return deepcopy(row["payload"])
+
+    def get_password_credential(self, user_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            "SELECT payload FROM password_credentials WHERE user_id = %s",
             (user_id,),
         )
         return None if row is None else deepcopy(row["payload"])

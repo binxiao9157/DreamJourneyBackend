@@ -19,10 +19,12 @@ from app.services.privacy import (
     sanitize_mailbox_letter_payload,
 )
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
+from app.services.passwords import make_password_credential, verify_password
 from app.services.runtime_config import RuntimeConfigService
 from app.services.store_factory import init_store, make_store
 from app.services.tokens import TokenService
 from app.services.tts import VolcTTSProxy
+from app.services.user_identity import stable_user_id
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
@@ -65,9 +67,55 @@ def health() -> Dict[str, Any]:
 def login(payload: Dict[str, Any]) -> Dict[str, Any]:
     phone = str(payload.get("phone") or "").strip()
     nickname = str(payload.get("nickname") or "").strip()
+    password = _optional_password(payload, "password")
     if not phone:
         raise HTTPException(status_code=400, detail="phone is required")
-    return {"user": store.upsert_user(phone=phone, nickname=nickname)}
+    user_id = stable_user_id(phone)
+    credential = store.get_password_credential(user_id)
+    if credential is not None and not password:
+        raise HTTPException(status_code=401, detail="password is required")
+    if credential is not None and password and not verify_password(password, credential):
+        raise HTTPException(status_code=401, detail="invalid password")
+
+    user = store.upsert_user(phone=phone, nickname=nickname)
+    if password and credential is None:
+        credential = store.save_password_credential(user_id, make_password_credential(password))
+    user["passwordConfigured"] = credential is not None
+    return {"user": user}
+
+
+def _optional_password(payload: Dict[str, Any], key: str) -> Optional[str]:
+    if key not in payload or payload.get(key) is None:
+        return None
+    value = str(payload.get(key) or "")
+    return value if value else None
+
+
+def _required_password(payload: Dict[str, Any], key: str, *, min_length: int = 1) -> str:
+    value = str(payload.get(key) or "")
+    if not value:
+        raise HTTPException(status_code=400, detail=f"{key} is required")
+    if len(value) < min_length:
+        raise HTTPException(status_code=400, detail=f"{key} is too short")
+    return value
+
+
+@app.post("/auth/password")
+def change_password(payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = str(payload.get("userId") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+    old_password = _required_password(payload, "oldPassword")
+    new_password = _required_password(payload, "newPassword", min_length=8)
+
+    credential = store.get_password_credential(user_id)
+    if credential is None:
+        raise HTTPException(status_code=409, detail="password credential not configured")
+    if not verify_password(old_password, credential):
+        raise HTTPException(status_code=401, detail="invalid password")
+
+    store.save_password_credential(user_id, make_password_credential(new_password))
+    return {"status": "changed", "userId": user_id}
 
 
 _ALLOWED_PROFILE_GENDERS = {"男", "女", "不便透露"}
