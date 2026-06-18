@@ -14,6 +14,7 @@ class InMemoryStore:
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
         self._family_members: Dict[str, List[Dict[str, Any]]] = {}
         self._care_snapshots: Dict[str, List[Dict[str, Any]]] = {}
+        self._echo_delayed_replies: Dict[str, List[Dict[str, Any]]] = {}
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
@@ -77,6 +78,20 @@ class InMemoryStore:
 
     def list_mailbox_letters(self, user_id: str) -> List[Dict[str, Any]]:
         return deepcopy(self._mailbox_letters.get(user_id, []))
+
+    def add_echo_delayed_reply(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(payload)
+        item.setdefault("id", item.get("delayedReplyId") or f"echo_delayed_{len(self._echo_delayed_replies.get(user_id, [])) + 1}")
+        item["userId"] = user_id
+        item["createdAt"] = self._now()
+
+        replies = self._echo_delayed_replies.setdefault(user_id, [])
+        replies[:] = [reply for reply in replies if reply.get("id") != item["id"]]
+        replies.insert(0, item)
+        return deepcopy(item)
+
+    def list_echo_delayed_replies(self, user_id: str) -> List[Dict[str, Any]]:
+        return deepcopy(self._echo_delayed_replies.get(user_id, []))
 
     def add_family_member(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)

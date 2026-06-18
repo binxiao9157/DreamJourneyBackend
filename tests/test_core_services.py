@@ -793,6 +793,84 @@ class BackendUserIdentityTests(unittest.TestCase):
         self.assertNotEqual(first_user_id, second_user_id)
 
 
+class EchoDelayedReplyAPITests(unittest.TestCase):
+    def test_echo_delayed_reply_api_schedules_and_lists_contract(self):
+        previous_store = main_module.store
+        main_module.store = InMemoryStore()
+        client = TestClient(app)
+        try:
+            created = client.post(
+                "/echo/delayed-replies",
+                json={
+                    "userId": "echo_user_1",
+                    "delayedReplyId": "reply_1",
+                    "deliverAt": "2026-06-18T12:05:00Z",
+                    "minutes": 7,
+                    "trigger": "tenRoundBaseline",
+                    "rawTranscript": "ECHO_RAW_SENTINEL should not persist",
+                },
+            )
+            listed = client.get("/echo/delayed-replies/echo_user_1")
+        finally:
+            main_module.store = previous_store
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.json()["status"], "scheduled")
+        item = created.json()["item"]
+        self.assertEqual(item["id"], "reply_1")
+        self.assertEqual(item["delayedReplyId"], "reply_1")
+        self.assertEqual(item["userId"], "echo_user_1")
+        self.assertEqual(item["deliveryState"], "scheduled")
+        self.assertEqual(item["deliverAt"], "2026-06-18T12:05:00Z")
+        self.assertEqual(item["minutes"], 7)
+        self.assertEqual(item["trigger"], "tenRoundBaseline")
+        self.assertNotIn("rawTranscript", item)
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["items"][0]["id"], "reply_1")
+        self.assertNotIn("ECHO_RAW_SENTINEL", str(listed.json()))
+
+    def test_echo_delayed_reply_api_rejects_missing_required_fields(self):
+        client = TestClient(app)
+
+        for payload in [
+            {"delayedReplyId": "reply_missing_user", "deliverAt": "2026-06-18T12:05:00Z", "minutes": 7, "trigger": "tenRoundBaseline"},
+            {"userId": "echo_user_2", "deliverAt": "2026-06-18T12:05:00Z", "minutes": 7, "trigger": "tenRoundBaseline"},
+            {"userId": "echo_user_2", "delayedReplyId": "reply_missing_deliver", "minutes": 7, "trigger": "tenRoundBaseline"},
+            {"userId": "echo_user_2", "delayedReplyId": "reply_missing_minutes", "deliverAt": "2026-06-18T12:05:00Z", "trigger": "tenRoundBaseline"},
+            {"userId": "echo_user_2", "delayedReplyId": "reply_missing_trigger", "deliverAt": "2026-06-18T12:05:00Z", "minutes": 7},
+        ]:
+            response = client.post("/echo/delayed-replies", json=payload)
+            self.assertEqual(response.status_code, 400, payload)
+
+    def test_echo_delayed_reply_api_rejects_invalid_minutes_and_trigger(self):
+        client = TestClient(app)
+
+        invalid_minutes = client.post(
+            "/echo/delayed-replies",
+            json={
+                "userId": "echo_user_3",
+                "delayedReplyId": "reply_invalid_minutes",
+                "deliverAt": "2026-06-18T12:05:00Z",
+                "minutes": 0,
+                "trigger": "tenRoundBaseline",
+            },
+        )
+        invalid_trigger = client.post(
+            "/echo/delayed-replies",
+            json={
+                "userId": "echo_user_3",
+                "delayedReplyId": "reply_invalid_trigger",
+                "deliverAt": "2026-06-18T12:05:00Z",
+                "minutes": 7,
+                "trigger": "manual",
+            },
+        )
+
+        self.assertEqual(invalid_minutes.status_code, 400)
+        self.assertEqual(invalid_trigger.status_code, 400)
+
+
 class ArchiveAPITests(unittest.TestCase):
     def test_archive_items_api_saves_sanitized_metadata_and_lists_by_user(self):
         client = TestClient(app)

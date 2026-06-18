@@ -322,6 +322,57 @@ def list_mailbox_letters(user_id: str) -> Dict[str, Any]:
     return {"userId": user_id, "items": store.list_mailbox_letters(user_id)}
 
 
+_ALLOWED_ECHO_DELAYED_REPLY_TRIGGERS = {"tenRoundBaseline", "contentSignal"}
+
+
+def _sanitize_echo_delayed_reply_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = str(payload.get("userId") or "").strip()
+    delayed_reply_id = str(payload.get("delayedReplyId") or "").strip()
+    deliver_at = str(payload.get("deliverAt") or "").strip()
+    trigger = str(payload.get("trigger") or "").strip()
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+    if not delayed_reply_id:
+        raise HTTPException(status_code=400, detail="delayedReplyId is required")
+    if not deliver_at:
+        raise HTTPException(status_code=400, detail="deliverAt is required")
+
+    try:
+        minutes = int(payload.get("minutes"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="minutes is required") from exc
+    if minutes < 1:
+        raise HTTPException(status_code=400, detail="minutes must be positive")
+
+    if trigger not in _ALLOWED_ECHO_DELAYED_REPLY_TRIGGERS:
+        raise HTTPException(status_code=400, detail="unsupported delayed reply trigger")
+
+    return {
+        "id": delayed_reply_id,
+        "delayedReplyId": delayed_reply_id,
+        "userId": user_id,
+        "deliverAt": deliver_at,
+        "minutes": minutes,
+        "trigger": trigger,
+        "deliveryState": "scheduled",
+        "pushProviderState": "pending",
+        "containsRawTranscript": False,
+    }
+
+
+@app.post("/echo/delayed-replies")
+def schedule_echo_delayed_reply(payload: Dict[str, Any]) -> Dict[str, Any]:
+    item = _sanitize_echo_delayed_reply_payload(payload)
+    saved = store.add_echo_delayed_reply(item["userId"], item)
+    return {"status": "scheduled", "item": saved}
+
+
+@app.get("/echo/delayed-replies/{user_id}")
+def list_echo_delayed_replies(user_id: str) -> Dict[str, Any]:
+    return {"userId": user_id, "items": store.list_echo_delayed_replies(user_id)}
+
+
 @app.post("/family/invite")
 def invite_family(payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id = str(payload.get("userId") or "").strip()

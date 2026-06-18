@@ -38,6 +38,9 @@ class FakeCursor:
         elif normalized.startswith("SELECT payload FROM mailbox_letters"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.mailbox_letters.get(user_id, [])]
+        elif normalized.startswith("SELECT payload FROM echo_delayed_replies"):
+            user_id = params[0]
+            self.result = [{"payload": item} for item in self.connection.echo_delayed_replies.get(user_id, [])]
         elif normalized.startswith("SELECT payload FROM family_members WHERE user_id = %s AND id = %s"):
             user_id, item_id = params
             members = [
@@ -97,6 +100,13 @@ class FakeCursor:
             letters[:] = [item for item in letters if item.get("id") != item_id]
             letters.insert(0, dict(payload))
             self.result = {"payload": payload}
+        elif normalized.startswith("INSERT INTO echo_delayed_replies"):
+            user_id, item_id, payload = params
+            payload = unwrap_jsonb(payload)
+            replies = self.connection.echo_delayed_replies.setdefault(user_id, [])
+            replies[:] = [item for item in replies if item.get("id") != item_id]
+            replies.insert(0, dict(payload))
+            self.result = {"payload": payload}
         elif normalized.startswith("INSERT INTO family_members"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
@@ -137,6 +147,7 @@ class FakeConnection:
         self.memories = {}
         self.archive_items = {}
         self.mailbox_letters = {}
+        self.echo_delayed_replies = {}
         self.family_members = {}
         self.care_snapshots = {}
 
@@ -192,6 +203,7 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS memories", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS archive_items", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS mailbox_letters", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS echo_delayed_replies", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS family_members", sql)
         self.assertIn("idx_family_members_invitation_code", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS care_snapshots", sql)
@@ -287,6 +299,36 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(revoked["invitationStatus"], "revoked")
         self.assertFalse(revoked["isOnline"])
         self.assertEqual(store.list_family_members("u1")[0]["accessStatus"], "revoked")
+
+    def test_store_persists_echo_delayed_replies_by_user(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        first = store.add_echo_delayed_reply(
+            "u1",
+            {
+                "id": "reply_1",
+                "delayedReplyId": "reply_1",
+                "deliverAt": "2026-06-18T12:05:00Z",
+                "minutes": 7,
+                "trigger": "tenRoundBaseline",
+            },
+        )
+        store.add_echo_delayed_reply(
+            "u2",
+            {
+                "id": "reply_2",
+                "delayedReplyId": "reply_2",
+                "deliverAt": "2026-06-18T12:06:00Z",
+                "minutes": 8,
+                "trigger": "contentSignal",
+            },
+        )
+
+        self.assertEqual(first["id"], "reply_1")
+        self.assertEqual(first["userId"], "u1")
+        self.assertEqual(store.list_echo_delayed_replies("u1")[0]["delayedReplyId"], "reply_1")
+        self.assertEqual(store.list_echo_delayed_replies("u2")[0]["trigger"], "contentSignal")
 
     def test_store_persists_family_member_acceptance(self):
         connection = FakeConnection()
