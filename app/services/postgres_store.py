@@ -81,6 +81,13 @@ class PostgresStore:
                 ON echo_delayed_replies(user_id, created_at DESC)
             """,
             """
+            CREATE TABLE IF NOT EXISTS profiles (
+                user_id TEXT PRIMARY KEY,
+                payload JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS family_members (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
@@ -139,6 +146,31 @@ class PostgresStore:
             commit=True,
         )
         return deepcopy(row["payload"])
+
+    def save_profile(self, user_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(profile)
+        item["userId"] = user_id
+        item["updatedAt"] = self._now()
+        row = self._fetchone(
+            """
+            INSERT INTO profiles (user_id, payload, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                payload = EXCLUDED.payload,
+                updated_at = NOW()
+            RETURNING payload
+            """,
+            (user_id, item),
+            commit=True,
+        )
+        return deepcopy(row["payload"])
+
+    def get_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            "SELECT payload FROM profiles WHERE user_id = %s",
+            (user_id,),
+        )
+        return None if row is None else deepcopy(row["payload"])
 
     def save_kb_snapshot(self, user_id: str, graph: Dict[str, Any]) -> Dict[str, Any]:
         row = self._fetchone(

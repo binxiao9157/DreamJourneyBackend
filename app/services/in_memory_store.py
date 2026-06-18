@@ -12,6 +12,7 @@ class InMemoryStore:
         self._memories: Dict[str, List[Dict[str, Any]]] = {}
         self._archive_items: Dict[str, List[Dict[str, Any]]] = {}
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
+        self._profiles: Dict[str, Dict[str, Any]] = {}
         self._family_members: Dict[str, List[Dict[str, Any]]] = {}
         self._care_snapshots: Dict[str, List[Dict[str, Any]]] = {}
         self._echo_delayed_replies: Dict[str, List[Dict[str, Any]]] = {}
@@ -26,6 +27,17 @@ class InMemoryStore:
         }
         self._users[user_id] = user
         return deepcopy(user)
+
+    def save_profile(self, user_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(profile)
+        item["userId"] = user_id
+        item["updatedAt"] = self._now()
+        self._profiles[user_id] = item
+        return deepcopy(item)
+
+    def get_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
+        profile = self._profiles.get(user_id)
+        return None if profile is None else deepcopy(profile)
 
     def save_kb_snapshot(self, user_id: str, graph: Dict[str, Any]) -> Dict[str, Any]:
         snapshot = {

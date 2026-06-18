@@ -70,6 +70,64 @@ def login(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"user": store.upsert_user(phone=phone, nickname=nickname)}
 
 
+_ALLOWED_PROFILE_GENDERS = {"男", "女", "不便透露"}
+
+
+def _optional_profile_text(payload: Dict[str, Any], key: str, max_length: int) -> Optional[str]:
+    if key not in payload or payload.get(key) is None:
+        return None
+    value = str(payload.get(key) or "").strip()
+    if not value:
+        return None
+    if len(value) > max_length:
+        raise HTTPException(status_code=400, detail=f"{key} is too long")
+    return value
+
+
+def _sanitize_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = str(payload.get("userId") or "").strip()
+    nickname = str(payload.get("nickname") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+    if not nickname:
+        raise HTTPException(status_code=400, detail="nickname is required")
+    if len(nickname) > 24:
+        raise HTTPException(status_code=400, detail="nickname is too long")
+
+    gender = _optional_profile_text(payload, "gender", 8)
+    if gender is not None and gender not in _ALLOWED_PROFILE_GENDERS:
+        raise HTTPException(status_code=400, detail="unsupported gender")
+
+    profile = {
+        "userId": user_id,
+        "nickname": nickname,
+    }
+    region = _optional_profile_text(payload, "region", 32)
+    avatar_name = _optional_profile_text(payload, "avatarName", 64)
+    if gender is not None:
+        profile["gender"] = gender
+    if region is not None:
+        profile["region"] = region
+    if avatar_name is not None:
+        profile["avatarName"] = avatar_name
+    return profile
+
+
+@app.post("/profile")
+def save_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
+    profile = _sanitize_profile_payload(payload)
+    saved = store.save_profile(profile["userId"], profile)
+    return {"status": "saved", "profile": saved}
+
+
+@app.get("/profile/{user_id}")
+def get_profile(user_id: str) -> Dict[str, Any]:
+    profile = store.get_profile(user_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="profile not found")
+    return {"userId": user_id, "profile": profile}
+
+
 @app.get("/config/runtime")
 def runtime_config() -> Dict[str, Any]:
     return RuntimeConfigService(settings).public_config()

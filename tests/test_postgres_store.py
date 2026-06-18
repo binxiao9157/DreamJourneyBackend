@@ -41,6 +41,10 @@ class FakeCursor:
         elif normalized.startswith("SELECT payload FROM echo_delayed_replies"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.echo_delayed_replies.get(user_id, [])]
+        elif normalized.startswith("SELECT payload FROM profiles"):
+            user_id = params[0]
+            profile = self.connection.profiles.get(user_id)
+            self.result = None if profile is None else {"payload": profile}
         elif normalized.startswith("SELECT payload FROM family_members WHERE user_id = %s AND id = %s"):
             user_id, item_id = params
             members = [
@@ -107,6 +111,11 @@ class FakeCursor:
             replies[:] = [item for item in replies if item.get("id") != item_id]
             replies.insert(0, dict(payload))
             self.result = {"payload": payload}
+        elif normalized.startswith("INSERT INTO profiles"):
+            user_id, payload = params
+            payload = unwrap_jsonb(payload)
+            self.connection.profiles[user_id] = dict(payload)
+            self.result = {"payload": payload}
         elif normalized.startswith("INSERT INTO family_members"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
@@ -148,6 +157,7 @@ class FakeConnection:
         self.archive_items = {}
         self.mailbox_letters = {}
         self.echo_delayed_replies = {}
+        self.profiles = {}
         self.family_members = {}
         self.care_snapshots = {}
 
@@ -204,6 +214,7 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS archive_items", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS mailbox_letters", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS echo_delayed_replies", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS profiles", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS family_members", sql)
         self.assertIn("idx_family_members_invitation_code", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS care_snapshots", sql)
@@ -329,6 +340,47 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(first["userId"], "u1")
         self.assertEqual(store.list_echo_delayed_replies("u1")[0]["delayedReplyId"], "reply_1")
         self.assertEqual(store.list_echo_delayed_replies("u2")[0]["trigger"], "contentSignal")
+
+    def test_store_persists_profile_metadata_by_user(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        store.save_profile(
+            "profile_user_1",
+            {
+                "nickname": "陈建国",
+                "gender": "男",
+                "region": "绍兴",
+                "avatarName": "person.crop.circle.fill",
+            },
+        )
+        store.save_profile(
+            "profile_user_2",
+            {
+                "nickname": "林桂芳",
+                "gender": "女",
+                "region": "上海",
+                "avatarName": "person.circle.fill",
+            },
+        )
+        updated = store.save_profile(
+            "profile_user_1",
+            {
+                "nickname": "陈伯伯",
+                "gender": "不便透露",
+                "region": "杭州",
+                "avatarName": "person.crop.circle",
+            },
+        )
+
+        self.assertEqual(updated["userId"], "profile_user_1")
+        self.assertEqual(updated["nickname"], "陈伯伯")
+        self.assertEqual(updated["gender"], "不便透露")
+        self.assertEqual(updated["region"], "杭州")
+        self.assertEqual(updated["avatarName"], "person.crop.circle")
+        self.assertEqual(store.get_profile("profile_user_1")["nickname"], "陈伯伯")
+        self.assertEqual(store.get_profile("profile_user_2")["nickname"], "林桂芳")
+        self.assertIsNone(store.get_profile("missing_user"))
 
     def test_store_persists_family_member_acceptance(self):
         connection = FakeConnection()

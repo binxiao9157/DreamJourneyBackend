@@ -367,6 +367,46 @@ class StoreTests(unittest.TestCase):
         self.assertIn("acceptedAt", accepted)
         self.assertEqual(store.list_family_members("u1")[0]["invitationStatus"], "accepted")
 
+    def test_store_persists_profile_metadata_by_user(self):
+        store = InMemoryStore()
+
+        first = store.save_profile(
+            "profile_user_1",
+            {
+                "nickname": "陈建国",
+                "gender": "男",
+                "region": "绍兴",
+                "avatarName": "person.crop.circle.fill",
+            },
+        )
+        store.save_profile(
+            "profile_user_2",
+            {
+                "nickname": "林桂芳",
+                "gender": "女",
+                "region": "上海",
+                "avatarName": "person.circle.fill",
+            },
+        )
+        updated = store.save_profile(
+            "profile_user_1",
+            {
+                "nickname": "陈伯伯",
+                "gender": "不便透露",
+                "region": "杭州",
+                "avatarName": "person.crop.circle",
+            },
+        )
+
+        self.assertEqual(first["userId"], "profile_user_1")
+        self.assertEqual(updated["nickname"], "陈伯伯")
+        self.assertEqual(updated["gender"], "不便透露")
+        self.assertEqual(updated["region"], "杭州")
+        self.assertEqual(updated["avatarName"], "person.crop.circle")
+        self.assertEqual(store.get_profile("profile_user_1")["nickname"], "陈伯伯")
+        self.assertEqual(store.get_profile("profile_user_2")["nickname"], "林桂芳")
+        self.assertIsNone(store.get_profile("missing_user"))
+
     def test_store_lists_archive_items_by_user(self):
         store = InMemoryStore()
 
@@ -413,6 +453,51 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([item["title"] for item in store.list_mailbox_letters("u1")], ["第一封已读", "第二封"])
         self.assertEqual(store.list_mailbox_letters("u1")[0]["status"], "read")
         self.assertEqual([item["title"] for item in store.list_mailbox_letters("u2")], ["其他用户"])
+
+
+class ProfileAPITests(unittest.TestCase):
+    def test_profile_api_saves_and_returns_account_metadata(self):
+        client = TestClient(app)
+
+        response = client.post(
+            "/profile",
+            json={
+                "userId": "profile_api_user",
+                "nickname": "陈建国",
+                "gender": "男",
+                "region": "绍兴",
+                "avatarName": "person.crop.circle.fill",
+            },
+        )
+        loaded = client.get("/profile/profile_api_user")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "saved")
+        profile = response.json()["profile"]
+        self.assertEqual(profile["userId"], "profile_api_user")
+        self.assertEqual(profile["nickname"], "陈建国")
+        self.assertEqual(profile["gender"], "男")
+        self.assertEqual(profile["region"], "绍兴")
+        self.assertEqual(profile["avatarName"], "person.crop.circle.fill")
+        self.assertIn("updatedAt", profile)
+        self.assertEqual(loaded.status_code, 200)
+        self.assertEqual(loaded.json()["profile"]["nickname"], "陈建国")
+
+    def test_profile_api_rejects_missing_user_empty_nickname_and_invalid_gender(self):
+        client = TestClient(app)
+
+        missing_user = client.post("/profile", json={"nickname": "陈建国"})
+        empty_nickname = client.post("/profile", json={"userId": "u1", "nickname": "  "})
+        invalid_gender = client.post(
+            "/profile",
+            json={"userId": "u1", "nickname": "陈建国", "gender": "未知"},
+        )
+        missing_profile = client.get("/profile/missing_user")
+
+        self.assertEqual(missing_user.status_code, 400)
+        self.assertEqual(empty_nickname.status_code, 400)
+        self.assertEqual(invalid_gender.status_code, 400)
+        self.assertEqual(missing_profile.status_code, 404)
 
 
 class CareSnapshotAPITests(unittest.TestCase):
