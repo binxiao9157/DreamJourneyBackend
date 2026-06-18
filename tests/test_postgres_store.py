@@ -32,6 +32,9 @@ class FakeCursor:
         elif normalized.startswith("SELECT payload FROM memories"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.memories.get(user_id, [])]
+        elif normalized.startswith("SELECT payload FROM archive_items"):
+            user_id = params[0]
+            self.result = [{"payload": item} for item in self.connection.archive_items.get(user_id, [])]
         elif normalized.startswith("SELECT payload FROM mailbox_letters"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.mailbox_letters.get(user_id, [])]
@@ -250,15 +253,26 @@ class PostgresStoreTests(unittest.TestCase):
         store = PostgresStore(connection_factory=lambda: connection)
 
         memory = store.add_memory("u1", {"title": "绍兴记忆"})
-        archive = store.add_archive_item("u1", {"title": "老照片"})
+        archive = store.add_archive_item(
+            "u1",
+            {
+                "title": "老照片",
+                "personaScope": "family",
+                "digitalHumanId": "family_default",
+            },
+        )
         mailbox = store.add_mailbox_letter("u1", {"id": "letter_1", "title": "想说的话"})
         member = store.add_family_member("u1", {"name": "林桂芳"})
 
         self.assertTrue(memory["id"].startswith("memory_"))
         self.assertTrue(archive["id"].startswith("archive_"))
+        self.assertEqual(archive["personaScope"], "family")
+        self.assertEqual(archive["digitalHumanId"], "family_default")
         self.assertEqual(mailbox["id"], "letter_1")
         self.assertTrue(member["id"].startswith("family_"))
         self.assertEqual(store.list_memories("u1")[0]["title"], "绍兴记忆")
+        self.assertEqual(store.list_archive_items("u1")[0]["personaScope"], "family")
+        self.assertEqual(store.list_archive_items("u1")[0]["digitalHumanId"], "family_default")
         self.assertEqual(store.list_mailbox_letters("u1")[0]["title"], "想说的话")
         self.assertEqual(store.list_family_members("u1")[0]["name"], "林桂芳")
 

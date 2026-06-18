@@ -815,10 +815,59 @@ class ArchiveAPITests(unittest.TestCase):
         item = created.json()["item"]
         self.assertEqual(item["id"], "archive-text-1")
         self.assertEqual(item["title"], "仓桥直街")
+        self.assertEqual(item["personaScope"], "personal")
+        self.assertEqual(item["digitalHumanId"], "archive_user_1")
         self.assertNotIn("localPath", item)
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.json()["items"][0]["id"], "archive-text-1")
+        self.assertEqual(listed.json()["items"][0]["personaScope"], "personal")
+        self.assertEqual(listed.json()["items"][0]["digitalHumanId"], "archive_user_1")
         self.assertNotIn("localPath", listed.json()["items"][0])
+
+    def test_archive_items_api_persists_family_persona_visibility_contract(self):
+        client = TestClient(app)
+
+        created = client.post(
+            "/archive/items",
+            json={
+                "userId": "archive_family_user",
+                "viewerUserId": "viewer_1",
+                "ownerId": "elder_1",
+                "ownerUserId": "viewer_1",
+                "id": "archive-family-1",
+                "kind": "photo",
+                "title": "外婆的老照片",
+                "personaScope": "family",
+                "digitalHumanId": "family_default",
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        listed = client.get("/archive/items/archive_family_user")
+
+        self.assertEqual(created.status_code, 200)
+        item = created.json()["item"]
+        self.assertEqual(item["personaScope"], "family")
+        self.assertEqual(item["digitalHumanId"], "family_default")
+        self.assertEqual(listed.json()["items"][0]["personaScope"], "family")
+        self.assertEqual(listed.json()["items"][0]["digitalHumanId"], "family_default")
+
+    def test_archive_items_api_rejects_unknown_persona_scope(self):
+        client = TestClient(app)
+
+        response = client.post(
+            "/archive/items",
+            json={
+                "userId": "archive_family_user",
+                "id": "archive-invalid-scope",
+                "kind": "photo",
+                "title": "错误可见性",
+                "personaScope": "public",
+                "digitalHumanId": "family_default",
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
 
     def test_archive_items_api_rejects_private_or_local_items(self):
         client = TestClient(app)

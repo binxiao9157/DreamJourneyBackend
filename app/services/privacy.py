@@ -4,6 +4,8 @@ from typing import Any, Dict, Iterable, List
 
 SYNCABLE_SCOPES = {"generationAllowed", "familyCircle"}
 AI_PROCESSABLE_SCOPES = {"generationAllowed"}
+ARCHIVE_PERSONA_SCOPES = {"personal", "family"}
+ARCHIVE_DEFAULT_FAMILY_DIGITAL_HUMAN_ID = "family_default"
 
 CARE_SNAPSHOT_SCALAR_KEYS = {
     "generatedAt",
@@ -199,9 +201,24 @@ def sanitize_archive_item_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("archive item is not syncable")
 
     item = deepcopy(payload)
+    persona_scope = str(item.get("personaScope") or "personal").strip()
+    if persona_scope not in ARCHIVE_PERSONA_SCOPES:
+        raise ValueError("archive item personaScope is invalid")
+
+    digital_human_id = str(item.get("digitalHumanId") or "").strip()
+    if not digital_human_id:
+        if persona_scope == "family":
+            digital_human_id = ARCHIVE_DEFAULT_FAMILY_DIGITAL_HUMAN_ID
+        else:
+            digital_human_id = str(item.get("ownerId") or item.get("userId") or "").strip()
+    if not digital_human_id:
+        raise ValueError("archive item digitalHumanId is required")
+
     item.pop("localPath", None)
     item.pop("fileURL", None)
     item.pop("absolutePath", None)
+    item["personaScope"] = persona_scope
+    item["digitalHumanId"] = digital_human_id
     item["metadataOnly"] = True
     return item
 
