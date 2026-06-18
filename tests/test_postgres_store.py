@@ -144,6 +144,38 @@ class FakeConnection:
         self.commits += 1
 
 
+class FailingCursor:
+    def __init__(self, error):
+        self.error = error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, sql, params=None):
+        raise self.error
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+
+class FailingConnection:
+    def __init__(self, error):
+        self.error = error
+        self.rollbacks = 0
+
+    def cursor(self, row_factory=None):
+        return FailingCursor(self.error)
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
 class PostgresStoreTests(unittest.TestCase):
     def test_init_schema_creates_required_tables(self):
         connection = FakeConnection()
@@ -203,6 +235,15 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertNotEqual(first["id"], "user_9157")
         self.assertNotEqual(first["id"], second["id"])
         self.assertIn("user_aef88d2439c15d38", connection.users)
+
+    def test_store_rolls_back_failed_payload_insert(self):
+        connection = FailingConnection(RuntimeError("duplicate key"))
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        with self.assertRaises(RuntimeError):
+            store.add_archive_item("u1", {"id": "archive_1", "title": "老照片"})
+
+        self.assertEqual(connection.rollbacks, 1)
 
     def test_store_persists_memories_and_family_members(self):
         connection = FakeConnection()

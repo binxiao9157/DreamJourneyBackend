@@ -413,19 +413,27 @@ class PostgresStore:
 
     def _fetchone(self, sql: str, params: tuple = (), commit: bool = False) -> Optional[Dict[str, Any]]:
         connection = self._connect()
-        with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
-            cursor.execute(sql, self._adapt_params(params))
-            row = cursor.fetchone()
-        if commit:
-            connection.commit()
-        return row
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(sql, self._adapt_params(params))
+                row = cursor.fetchone()
+            if commit:
+                connection.commit()
+            return row
+        except Exception:
+            self._rollback(connection)
+            raise
 
     def _fetchall(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
         connection = self._connect()
-        with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
-            cursor.execute(sql, self._adapt_params(params))
-            rows = cursor.fetchall()
-        return rows
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(sql, self._adapt_params(params))
+                rows = cursor.fetchall()
+            return rows
+        except Exception:
+            self._rollback(connection)
+            raise
 
     @staticmethod
     def _adapt_params(params: tuple) -> tuple:
@@ -451,6 +459,12 @@ class PostgresStore:
             return dict_row
         except ImportError:
             return None
+
+    @staticmethod
+    def _rollback(connection: Any) -> None:
+        rollback = getattr(connection, "rollback", None)
+        if callable(rollback):
+            rollback()
 
     @staticmethod
     def _with_identity(payload: Dict[str, Any], prefix: str, user_id: str) -> Dict[str, Any]:
