@@ -1,7 +1,8 @@
 import hashlib
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from pathlib import PurePosixPath
 from typing import Any, Dict, Optional
 
 try:
@@ -32,6 +33,15 @@ from app.services.user_identity import stable_user_id
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 store = make_store(settings)
+
+ARCHIVE_MEDIA_UPLOAD_PROVIDER = "mockObjectStorage"
+ARCHIVE_MEDIA_UPLOAD_TTL_SECONDS = 900
+ARCHIVE_AUDIO_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
+ARCHIVE_VIDEO_UPLOAD_LIMIT_BYTES = 200 * 1024 * 1024
+ARCHIVE_MEDIA_UPLOAD_LIMITS = {
+    "audio": ARCHIVE_AUDIO_UPLOAD_LIMIT_BYTES,
+    "video": ARCHIVE_VIDEO_UPLOAD_LIMIT_BYTES,
+}
 
 
 def _request_backend_api_token(request: Request) -> str:
@@ -162,6 +172,90 @@ def _sanitize_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if avatar_name is not None:
         profile["avatarName"] = avatar_name
     return profile
+
+
+def _required_text(payload: Dict[str, Any], key: str, max_length: int = 160) -> str:
+    value = str(payload.get(key) or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail=f"{key} is required")
+    return value[:max_length]
+
+
+def _safe_file_name(value: str) -> str:
+    candidate = PurePosixPath(value).name.strip()
+    if not candidate or candidate in {".", ".."}:
+        return "media.bin"
+    return "".join(ch for ch in candidate if ch.isalnum() or ch in {".", "-", "_"}) or "media.bin"
+
+
+def _safe_object_segment(value: str, fallback: str) -> str:
+    segment = "".join(ch for ch in value.strip() if ch.isalnum() or ch in {"-", "_"})
+    return segment or fallback
+
+
+def _archive_media_upload_intent_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        safe_scope = sanitize_archive_item_payload(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    user_id = _required_text(payload, "userId", 96)
+    archive_item_id = _required_text(payload, "archiveItemId", 128)
+    kind = _required_text(payload, "kind", 32).lower()
+    if kind not in ARCHIVE_MEDIA_UPLOAD_LIMITS:
+        raise HTTPException(status_code=400, detail=f"unsupported media kind: {kind}")
+
+    file_size_bytes = int(payload.get("fileSizeBytes") or 0)
+    if file_size_bytes <= 0:
+        raise HTTPException(status_code=400, detail="fileSizeBytes is required")
+    max_file_size_bytes = ARCHIVE_MEDIA_UPLOAD_LIMITS[kind]
+    if file_size_bytes > max_file_size_bytes:
+        raise HTTPException(status_code=413, detail="file too large")
+
+    content_type = _required_text(payload, "contentType", 128)
+    if not content_type.startswith(f"{kind}/"):
+        raise HTTPException(status_code=400, detail="contentType does not match media kind")
+
+    file_name = _safe_file_name(_required_text(payload, "fileName", 180))
+    user_id_segment = _safe_object_segment(user_id, "user")
+    archive_item_id_segment = _safe_object_segment(archive_item_id, "archive_item")
+    persona_scope = str(safe_scope["personaScope"])
+    digital_human_id = str(safe_scope["digitalHumanId"])
+    digital_human_id_segment = _safe_object_segment(digital_human_id, "digital_human")
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ARCHIVE_MEDIA_UPLOAD_TTL_SECONDS)
+    upload_intent_id = f"upload_intent_{archive_item_id}"
+    object_key = "/".join(
+        [
+            user_id_segment,
+            persona_scope,
+            digital_human_id_segment,
+            kind,
+            archive_item_id_segment,
+            file_name,
+        ]
+    )
+
+    return {
+        "uploadIntentId": upload_intent_id,
+        "archiveItemId": archive_item_id,
+        "kind": kind,
+        "storageProvider": ARCHIVE_MEDIA_UPLOAD_PROVIDER,
+        "objectKey": object_key,
+        "uploadURL": f"mock://archive-media/{object_key}",
+        "expiresAt": expires_at.isoformat(),
+        "expiresInSeconds": ARCHIVE_MEDIA_UPLOAD_TTL_SECONDS,
+        "maxFileSizeBytes": max_file_size_bytes,
+        "requiredHeaders": {
+            "Content-Type": content_type,
+            "x-dreamjourney-upload-intent": upload_intent_id,
+        },
+        "fileSizeBytes": file_size_bytes,
+        "fileName": file_name,
+        "contentType": content_type,
+        "personaScope": persona_scope,
+        "digitalHumanId": digital_human_id,
+        "metadataOnly": True,
+    }
 
 
 @app.post("/profile")
@@ -366,6 +460,14 @@ def create_archive_item(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail=str(exc))
     item = store.add_archive_item(user_id, safe_payload)
     return {"status": "saved", "item": item}
+
+
+@app.post("/archive/media/upload-intent")
+def archive_media_upload_intent(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "status": "mock_ready",
+        "uploadIntent": _archive_media_upload_intent_payload(payload),
+    }
 
 
 @app.get("/archive/items/{user_id}")

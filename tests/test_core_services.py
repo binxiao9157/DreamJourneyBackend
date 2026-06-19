@@ -1317,6 +1317,102 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(listed.json()["items"][0]["id"], "archive-video-1")
         self.assertNotIn("rawVideoURL", listed.json()["items"][0])
 
+    def test_archive_media_upload_intent_returns_mock_contract(self):
+        client = TestClient(app)
+
+        response = client.post(
+            "/archive/media/upload-intent",
+            json={
+                "userId": "archive_upload_user",
+                "archiveItemId": "archive-audio-upload-1",
+                "kind": "audio",
+                "fileName": "voice.m4a",
+                "contentType": "audio/mp4",
+                "fileSizeBytes": 1048576,
+                "personaScope": "family",
+                "digitalHumanId": "family_default",
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        intent = response.json()["uploadIntent"]
+        self.assertEqual(response.json()["status"], "mock_ready")
+        self.assertEqual(intent["archiveItemId"], "archive-audio-upload-1")
+        self.assertEqual(intent["kind"], "audio")
+        self.assertEqual(intent["storageProvider"], "mockObjectStorage")
+        self.assertEqual(intent["personaScope"], "family")
+        self.assertEqual(intent["digitalHumanId"], "family_default")
+        self.assertTrue(intent["uploadIntentId"].startswith("upload_intent_"))
+        self.assertIn("archive_upload_user/family/family_default/audio/archive-audio-upload-1", intent["objectKey"])
+        self.assertTrue(intent["uploadURL"].startswith("mock://archive-media/"))
+        self.assertEqual(intent["requiredHeaders"]["Content-Type"], "audio/mp4")
+        self.assertEqual(intent["maxFileSizeBytes"], 50 * 1024 * 1024)
+        self.assertEqual(intent["expiresInSeconds"], 900)
+        self.assertIn("expiresAt", intent)
+        self.assertNotIn("localPath", intent)
+        self.assertNotIn("file://", str(intent))
+
+    def test_archive_media_upload_intent_rejects_unsupported_kind_or_size(self):
+        client = TestClient(app)
+
+        unsupported = client.post(
+            "/archive/media/upload-intent",
+            json={
+                "userId": "archive_upload_user",
+                "archiveItemId": "archive-text-upload-1",
+                "kind": "text",
+                "fileName": "note.txt",
+                "contentType": "text/plain",
+                "fileSizeBytes": 10,
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        oversized = client.post(
+            "/archive/media/upload-intent",
+            json={
+                "userId": "archive_upload_user",
+                "archiveItemId": "archive-video-upload-1",
+                "kind": "video",
+                "fileName": "too-large.mov",
+                "contentType": "video/quicktime",
+                "fileSizeBytes": 201 * 1024 * 1024,
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        mismatched_content_type = client.post(
+            "/archive/media/upload-intent",
+            json={
+                "userId": "archive_upload_user",
+                "archiveItemId": "archive-audio-mismatch-1",
+                "kind": "audio",
+                "fileName": "../voice.m4a",
+                "contentType": "text/plain",
+                "fileSizeBytes": 1024,
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        local_only = client.post(
+            "/archive/media/upload-intent",
+            json={
+                "userId": "archive_upload_user",
+                "archiveItemId": "archive-audio-local-1",
+                "kind": "audio",
+                "fileName": "private.m4a",
+                "contentType": "audio/mp4",
+                "fileSizeBytes": 1024,
+                "privacyMetadata": {"scope": "localOnly"},
+            },
+        )
+
+        self.assertEqual(unsupported.status_code, 400)
+        self.assertEqual(oversized.status_code, 413)
+        self.assertEqual(mismatched_content_type.status_code, 400)
+        self.assertEqual(local_only.status_code, 403)
+        self.assertIn("unsupported", unsupported.text)
+        self.assertIn("file too large", oversized.text)
+        self.assertIn("contentType does not match media kind", mismatched_content_type.text)
+
     def test_archive_items_api_rejects_unknown_persona_scope(self):
         client = TestClient(app)
 

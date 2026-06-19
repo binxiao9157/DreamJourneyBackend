@@ -21,6 +21,15 @@ class RuntimeConfigService:
                 "amapDistrictProxy": bool(self.settings.amap_web_service_key),
                 "kbSync": True,
                 "familyCircle": True,
+                "archiveMediaUploadIntent": True,
+            },
+            "archive": {
+                "uploadIntentEndpoint": "/archive/media/upload-intent",
+                "storageProvider": "mockObjectStorage",
+                "supportedMediaKinds": ["audio", "video"],
+                "audioFileSizeLimitMB": 50,
+                "videoFileSizeLimitMB": 200,
+                "uploadIntentTTLSeconds": 900,
             },
             "voice": {
                 "voiceType": self.settings.volcengine_voice_type,

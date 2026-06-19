@@ -17,6 +17,7 @@
 - `GET /memories/{user_id}`
 - `POST /archive/photos`
 - `POST /archive/items`
+- `POST /archive/media/upload-intent`
 - `GET /archive/items/{user_id}`
 - `POST /archive/image-analysis`
 - `POST /mailbox/letters`
