@@ -184,6 +184,34 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertTrue(config["capabilities"]["ttsProxy"])
         self.assertEqual(config["voice"]["voiceType"], "zh_female_cancan_mars_bigtts")
 
+    def test_runtime_config_exposes_archive_image_analysis_capability(self):
+        settings = Settings(deepseek_api_key="deepseek-secret")
+
+        config = RuntimeConfigService(settings).public_config()
+
+        capability = config["archiveImageAnalysis"]
+        self.assertTrue(config["capabilities"]["archiveImageAnalysis"])
+        self.assertTrue(capability["enabled"])
+        self.assertEqual(capability["endpoint"], "/archive/image-analysis")
+        self.assertEqual(capability["provider"], "deepseek/text-only")
+        self.assertFalse(capability["supportsVision"])
+        self.assertEqual(capability["fallbackMode"], "retryableFailure")
+        self.assertEqual(
+            capability["statuses"],
+            ["pending", "analyzing", "analyzed", "failed", "retryable"],
+        )
+        self.assertNotIn("deepseek-secret", str(config))
+
+    def test_runtime_config_marks_archive_image_analysis_unavailable_without_key(self):
+        config = RuntimeConfigService(Settings(deepseek_api_key=None)).public_config()
+
+        capability = config["archiveImageAnalysis"]
+        self.assertFalse(config["capabilities"]["archiveImageAnalysis"])
+        self.assertFalse(capability["enabled"])
+        self.assertEqual(capability["provider"], "deepseek/text-only")
+        self.assertFalse(capability["supportsVision"])
+        self.assertEqual(capability["fallbackMode"], "retryableFailure")
+
 
 class TokenAndProxyTests(unittest.TestCase):
     def test_realtime_token_uses_legacy_credentials_without_exposing_app_token(self):
@@ -1522,6 +1550,30 @@ class ArchiveAPITests(unittest.TestCase):
 
 
 class ArchiveImageAnalysisAPITests(unittest.TestCase):
+    def test_archive_analysis_status_enum_contract(self):
+        from app.services.deepseek import ArchiveAnalysisStatus
+
+        self.assertEqual(
+            ArchiveAnalysisStatus.values(),
+            ["pending", "analyzing", "analyzed", "failed", "retryable"],
+        )
+
+    def test_image_analysis_provider_adapter_exposes_text_only_capabilities(self):
+        from app.services.deepseek import ArchiveImageAnalysisProviderFactory
+
+        adapter = ArchiveImageAnalysisProviderFactory(Settings(deepseek_api_key="deepseek-secret")).make()
+
+        self.assertTrue(adapter.enabled)
+        self.assertEqual(adapter.provider_id, "deepseek/text-only")
+        self.assertFalse(adapter.supports_vision)
+        self.assertEqual(adapter.fallback_mode, "retryableFailure")
+        failure = adapter.failure_contract(provider_message="vision provider unavailable")
+        self.assertEqual(failure["analysisStatus"], "failed")
+        self.assertEqual(failure["analysisFailureReason"], "provider_unavailable")
+        self.assertTrue(failure["analysisRetryable"])
+        self.assertEqual(failure["provider"], "deepseek/text-only")
+        self.assertIn("vision provider unavailable", failure["providerMessage"])
+
     def test_image_analysis_parse_requires_structured_json(self):
         proxy = DeepSeekImageAnalysisProxy(Settings(deepseek_api_key="deepseek-secret"))
 
@@ -1583,6 +1635,10 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
         self.assertEqual(response.json()["responseContract"]["detectedScenes"], [])
         self.assertEqual(response.json()["responseContract"]["analysisFailureReason"], "")
         self.assertTrue(response.json()["responseContract"]["analysisRetryable"])
+        self.assertEqual(response.json()["provider"], "deepseek/text-only")
+        self.assertEqual(response.json()["capability"]["provider"], "deepseek/text-only")
+        self.assertFalse(response.json()["capability"]["supportsVision"])
+        self.assertEqual(response.json()["capability"]["fallbackMode"], "retryableFailure")
 
     def test_archive_image_analysis_requires_image_base64(self):
         client = TestClient(app)
@@ -1654,7 +1710,7 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
         self.assertEqual(payload["tags"], [])
         self.assertEqual(payload["analysisFailureReason"], "provider_unavailable")
         self.assertTrue(payload["analysisRetryable"])
-        self.assertEqual(payload["provider"], "deepseek")
+        self.assertEqual(payload["provider"], "deepseek/text-only")
         self.assertIn("providerMessage", payload)
         self.assertIn("DEEPSEEK_API_KEY is not configured", payload["providerMessage"])
 

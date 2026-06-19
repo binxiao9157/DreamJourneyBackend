@@ -13,7 +13,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without runtime 
 
 from app.core.config import settings
 from app.services.amap import AMapDistrictProxy
-from app.services.deepseek import DeepSeekImageAnalysisProxy
+from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.privacy import (
     filter_syncable_graph,
     sanitize_archive_item_payload,
@@ -492,24 +492,25 @@ def archive_image_analysis(payload: Dict[str, Any], dryRun: bool = False) -> Dic
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
-    proxy = DeepSeekImageAnalysisProxy(settings)
+    provider = ArchiveImageAnalysisProviderFactory(settings).make()
     try:
         if not dryRun:
-            return proxy.request_analysis(image_base64=image_base64)
-        request = proxy.redacted_request(image_base64=image_base64)
+            return provider.request_analysis(image_base64=image_base64)
+        request = provider.redacted_request(image_base64=image_base64)
     except ValueError as exc:
         if not dryRun:
-            return proxy.failure_contract(provider_message=str(exc))
+            return provider.failure_contract(provider_message=str(exc))
         raise HTTPException(status_code=502, detail=str(exc))
     except Exception as exc:
         if not dryRun:
-            return proxy.failure_contract(provider_message=str(exc))
+            return provider.failure_contract(provider_message=str(exc))
         raise HTTPException(status_code=502, detail=str(exc))
 
     return {
-        "provider": "deepseek",
+        "provider": provider.provider_id,
+        "capability": provider.public_capability(),
         "request": request,
-        "responseContract": proxy.response_contract(),
+        "responseContract": provider.response_contract(),
         "context": {
             "userId": user_id,
             "archiveItemId": archive_item_id,

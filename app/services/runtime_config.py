@@ -1,6 +1,7 @@
 from typing import Any, Dict
 
 from app.core.config import Settings
+from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 
 
 class RuntimeConfigService:
@@ -8,11 +9,13 @@ class RuntimeConfigService:
         self.settings = settings
 
     def public_config(self) -> Dict[str, Any]:
+        archive_image_analysis = ArchiveImageAnalysisProviderFactory(self.settings).make()
         return {
             "environment": self.settings.environment,
             "baseURL": self.settings.public_base_url,
             "capabilities": {
                 "deepseekProxy": bool(self.settings.deepseek_api_key),
+                "archiveImageAnalysis": archive_image_analysis.enabled,
                 "ttsProxy": bool(self.settings.volcengine_api_key and self.settings.volcengine_voice_type),
                 "realtimeToken": bool(
                     (self.settings.volcengine_app_id and self.settings.volcengine_app_token)
@@ -31,6 +34,7 @@ class RuntimeConfigService:
                 "videoFileSizeLimitMB": 200,
                 "uploadIntentTTLSeconds": 900,
             },
+            "archiveImageAnalysis": archive_image_analysis.public_capability(),
             "voice": {
                 "voiceType": self.settings.volcengine_voice_type,
                 "realtimeResourceID": self.settings.volcengine_realtime_resource_id,

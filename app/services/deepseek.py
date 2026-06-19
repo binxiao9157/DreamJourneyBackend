@@ -1,9 +1,100 @@
 import json
+from enum import Enum
 from typing import Any, Dict, Optional
 
 import httpx
 
 from app.core.config import Settings
+
+
+class ArchiveAnalysisStatus(str, Enum):
+    pending = "pending"
+    analyzing = "analyzing"
+    analyzed = "analyzed"
+    failed = "failed"
+    retryable = "retryable"
+
+    @classmethod
+    def values(cls) -> list:
+        return [status.value for status in cls]
+
+
+class ArchiveImageAnalysisProviderAdapter:
+    provider_id = "unknown"
+    supports_vision = False
+    fallback_mode = "retryableFailure"
+    endpoint = "/archive/image-analysis"
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    @property
+    def enabled(self) -> bool:
+        return False
+
+    def public_capability(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "endpoint": self.endpoint,
+            "provider": self.provider_id,
+            "supportsVision": self.supports_vision,
+            "fallbackMode": self.fallback_mode,
+            "statuses": ArchiveAnalysisStatus.values(),
+        }
+
+    def request_analysis(self, image_base64: str) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def redacted_request(self, image_base64: str) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def response_contract(self) -> Dict[str, Any]:
+        return DeepSeekImageAnalysisProxy.response_contract()
+
+    def failure_contract(
+        self,
+        reason: str = "provider_unavailable",
+        provider_message: str = "",
+    ) -> Dict[str, Any]:
+        return DeepSeekImageAnalysisProxy.failure_contract(
+            reason=reason,
+            provider_message=provider_message,
+            provider=self.provider_id,
+        )
+
+
+class DeepSeekTextOnlyImageAnalysisAdapter(ArchiveImageAnalysisProviderAdapter):
+    provider_id = "deepseek/text-only"
+    supports_vision = False
+    fallback_mode = "retryableFailure"
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.settings.deepseek_api_key)
+
+    def request_analysis(self, image_base64: str) -> Dict[str, Any]:
+        if not self.settings.deepseek_api_key:
+            raise ValueError("DEEPSEEK_API_KEY is not configured")
+        image_base64 = image_base64.strip()
+        if not image_base64:
+            raise ValueError("imageBase64 is required")
+        return self.failure_contract(
+            provider_message=(
+                "provider deepseek/text-only does not support vision input; "
+                "retry after archive image analysis provider is upgraded"
+            )
+        )
+
+    def redacted_request(self, image_base64: str) -> Dict[str, Any]:
+        return DeepSeekImageAnalysisProxy(self.settings).redacted_request(image_base64)
+
+
+class ArchiveImageAnalysisProviderFactory:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def make(self) -> ArchiveImageAnalysisProviderAdapter:
+        return DeepSeekTextOnlyImageAnalysisAdapter(self.settings)
 
 
 class DeepSeekImageAnalysisProxy:
@@ -132,9 +223,13 @@ class DeepSeekImageAnalysisProxy:
         }
 
     @staticmethod
-    def failure_contract(reason: str = "provider_unavailable", provider_message: str = "") -> Dict[str, Any]:
+    def failure_contract(
+        reason: str = "provider_unavailable",
+        provider_message: str = "",
+        provider: str = "deepseek",
+    ) -> Dict[str, Any]:
         payload = {
-            "analysisStatus": "failed",
+            "analysisStatus": ArchiveAnalysisStatus.failed.value,
             "analysisSummary": "",
             "description": "",
             "detectedPeople": [],
@@ -147,7 +242,7 @@ class DeepSeekImageAnalysisProxy:
             "estimatedDecade": None,
             "analysisFailureReason": reason,
             "analysisRetryable": True,
-            "provider": "deepseek",
+            "provider": provider,
         }
         if provider_message:
             payload["providerMessage"] = provider_message
