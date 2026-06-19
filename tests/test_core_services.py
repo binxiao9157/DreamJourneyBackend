@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
@@ -201,7 +202,22 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(payload["resourceID"], "volc.speech.dialog")
         self.assertEqual(payload["address"], "wss://openspeech.bytedance.com")
         self.assertEqual(payload["uri"], "/api/v3/realtime/dialogue")
+        self.assertEqual(payload["expiresInSeconds"], 3600)
+        expires_at = datetime.fromisoformat(payload["expiresAt"].replace("Z", "+00:00"))
+        self.assertGreater(expires_at, datetime.now(timezone.utc))
+        self.assertEqual(payload["fallback"]["mode"], "localBuildSettings")
+        self.assertTrue(payload["fallback"]["enabled"])
         self.assertNotIn("tokenRef", payload)
+
+    def test_runtime_config_documents_realtime_token_endpoint_and_fallback(self):
+        settings = Settings(volcengine_app_id="test-app-id", volcengine_app_token="access-token-secret")
+
+        config = RuntimeConfigService(settings).public_config()
+
+        self.assertTrue(config["capabilities"]["realtimeToken"])
+        self.assertEqual(config["voice"]["runtimeConfigEndpoint"], "/voice/realtime-token")
+        self.assertEqual(config["voice"]["fallback"]["mode"], "localBuildSettings")
+        self.assertTrue(config["voice"]["fallback"]["enabled"])
 
     def test_tts_proxy_builds_volcengine_request(self):
         settings = Settings(

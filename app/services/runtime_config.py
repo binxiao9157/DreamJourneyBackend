@@ -25,6 +25,11 @@ class RuntimeConfigService:
             "voice": {
                 "voiceType": self.settings.volcengine_voice_type,
                 "realtimeResourceID": self.settings.volcengine_realtime_resource_id,
+                "runtimeConfigEndpoint": "/voice/realtime-token",
+                "fallback": {
+                    "enabled": True,
+                    "mode": "localBuildSettings",
+                },
             },
             "privacy": {
                 "localOnly": "never_upload",
