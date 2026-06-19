@@ -1643,8 +1643,20 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
         finally:
             main_module.settings = original_settings
 
-        self.assertEqual(response.status_code, 503)
-        self.assertIn("DEEPSEEK_API_KEY is not configured", response.text)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["analysisStatus"], "failed")
+        self.assertEqual(payload["analysisSummary"], "")
+        self.assertEqual(payload["description"], "")
+        self.assertEqual(payload["detectedPeople"], [])
+        self.assertEqual(payload["detectedLocations"], [])
+        self.assertEqual(payload["detectedScenes"], [])
+        self.assertEqual(payload["tags"], [])
+        self.assertEqual(payload["analysisFailureReason"], "provider_unavailable")
+        self.assertTrue(payload["analysisRetryable"])
+        self.assertEqual(payload["provider"], "deepseek")
+        self.assertIn("providerMessage", payload)
+        self.assertIn("DEEPSEEK_API_KEY is not configured", payload["providerMessage"])
 
 
 class MailboxAPITests(unittest.TestCase):

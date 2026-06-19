@@ -132,6 +132,28 @@ class DeepSeekImageAnalysisProxy:
         }
 
     @staticmethod
+    def failure_contract(reason: str = "provider_unavailable", provider_message: str = "") -> Dict[str, Any]:
+        payload = {
+            "analysisStatus": "failed",
+            "analysisSummary": "",
+            "description": "",
+            "detectedPeople": [],
+            "detectedLocations": [],
+            "detectedScenes": [],
+            "tags": [],
+            "scene": "",
+            "occasion": "",
+            "mood": "",
+            "estimatedDecade": None,
+            "analysisFailureReason": reason,
+            "analysisRetryable": True,
+            "provider": "deepseek",
+        }
+        if provider_message:
+            payload["providerMessage"] = provider_message
+        return payload
+
+    @staticmethod
     def extract_json_substring(text: str) -> Optional[str]:
         start = text.find("{")
         end = text.rfind("}")

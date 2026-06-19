@@ -498,9 +498,12 @@ def archive_image_analysis(payload: Dict[str, Any], dryRun: bool = False) -> Dic
             return proxy.request_analysis(image_base64=image_base64)
         request = proxy.redacted_request(image_base64=image_base64)
     except ValueError as exc:
-        status_code = 503 if "DEEPSEEK_API_KEY" in str(exc) else 502
-        raise HTTPException(status_code=status_code, detail=str(exc))
+        if not dryRun:
+            return proxy.failure_contract(provider_message=str(exc))
+        raise HTTPException(status_code=502, detail=str(exc))
     except Exception as exc:
+        if not dryRun:
+            return proxy.failure_contract(provider_message=str(exc))
         raise HTTPException(status_code=502, detail=str(exc))
 
     return {
