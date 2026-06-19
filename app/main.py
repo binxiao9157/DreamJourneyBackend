@@ -35,6 +35,13 @@ app = FastAPI(title=settings.app_name, version="0.1.0")
 store = make_store(settings)
 
 ARCHIVE_MEDIA_UPLOAD_PROVIDER = "mockObjectStorage"
+ARCHIVE_MEDIA_UPLOAD_PROVIDER_DISPLAY_NAME = "Mock Object Storage"
+ARCHIVE_MEDIA_UPLOAD_PROVIDER_MODE = "mock"
+ARCHIVE_MEDIA_REQUIRES_CLIENT_UPLOAD = False
+ARCHIVE_MEDIA_UPLOAD_URL_SCHEME = "mock"
+ARCHIVE_MEDIA_REAL_PROVIDER_READY = False
+ARCHIVE_MEDIA_PROVIDER_SWITCH_CONTRACT_VERSION = 1
+ARCHIVE_MEDIA_CLIENT_UPLOAD_ACTION = "metadataOnly"
 ARCHIVE_MEDIA_UPLOAD_TTL_SECONDS = 900
 ARCHIVE_AUDIO_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 ARCHIVE_VIDEO_UPLOAD_LIMIT_BYTES = 200 * 1024 * 1024
@@ -240,6 +247,13 @@ def _archive_media_upload_intent_payload(payload: Dict[str, Any]) -> Dict[str, A
         "archiveItemId": archive_item_id,
         "kind": kind,
         "storageProvider": ARCHIVE_MEDIA_UPLOAD_PROVIDER,
+        "providerDisplayName": ARCHIVE_MEDIA_UPLOAD_PROVIDER_DISPLAY_NAME,
+        "providerMode": ARCHIVE_MEDIA_UPLOAD_PROVIDER_MODE,
+        "requiresClientUpload": ARCHIVE_MEDIA_REQUIRES_CLIENT_UPLOAD,
+        "uploadURLScheme": ARCHIVE_MEDIA_UPLOAD_URL_SCHEME,
+        "realProviderReady": ARCHIVE_MEDIA_REAL_PROVIDER_READY,
+        "providerSwitchContractVersion": ARCHIVE_MEDIA_PROVIDER_SWITCH_CONTRACT_VERSION,
+        "clientUploadAction": ARCHIVE_MEDIA_CLIENT_UPLOAD_ACTION,
         "objectKey": object_key,
         "uploadURL": f"mock://archive-media/{object_key}",
         "expiresAt": expires_at.isoformat(),

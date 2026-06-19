@@ -29,6 +29,13 @@ class RuntimeConfigService:
             "archive": {
                 "uploadIntentEndpoint": "/archive/media/upload-intent",
                 "storageProvider": "mockObjectStorage",
+                "providerDisplayName": "Mock Object Storage",
+                "providerMode": "mock",
+                "requiresClientUpload": False,
+                "uploadURLScheme": "mock",
+                "realProviderReady": False,
+                "providerSwitchContractVersion": 1,
+                "clientUploadAction": "metadataOnly",
                 "supportedMediaKinds": ["audio", "video"],
                 "audioFileSizeLimitMB": 50,
                 "videoFileSizeLimitMB": 200,
