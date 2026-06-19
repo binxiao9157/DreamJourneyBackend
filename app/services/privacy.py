@@ -6,6 +6,29 @@ SYNCABLE_SCOPES = {"generationAllowed", "familyCircle"}
 AI_PROCESSABLE_SCOPES = {"generationAllowed"}
 ARCHIVE_PERSONA_SCOPES = {"personal", "family"}
 ARCHIVE_DEFAULT_FAMILY_DIGITAL_HUMAN_ID = "family_default"
+ARCHIVE_LOCAL_MEDIA_KEYS = {
+    "localPath",
+    "fileURL",
+    "absolutePath",
+    "rawAudioURL",
+    "rawVideoURL",
+    "rawTranscript",
+    "transcript",
+    "thumbnailPath",
+    "localThumbnailPath",
+}
+ARCHIVE_METADATA_LOCAL_MEDIA_KEYS = {
+    "localPath",
+    "fileURL",
+    "absolutePath",
+    "rawAudioURL",
+    "rawVideoURL",
+    "thumbnailPath",
+    "localThumbnailPath",
+}
+# Reviewed media contract fields such as transcriptText and thumbnailObjectKey
+# are allowed to pass through; rawTranscript/raw media URLs are removed above.
+ARCHIVE_REVIEWED_MEDIA_KEYS = {"transcriptText", "thumbnailObjectKey"}
 
 CARE_SNAPSHOT_SCALAR_KEYS = {
     "generatedAt",
@@ -214,9 +237,14 @@ def sanitize_archive_item_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not digital_human_id:
         raise ValueError("archive item digitalHumanId is required")
 
-    item.pop("localPath", None)
-    item.pop("fileURL", None)
-    item.pop("absolutePath", None)
+    for key in ARCHIVE_LOCAL_MEDIA_KEYS:
+        item.pop(key, None)
+    metadata = item.get("metadata")
+    if isinstance(metadata, dict):
+        safe_metadata = deepcopy(metadata)
+        for key in ARCHIVE_METADATA_LOCAL_MEDIA_KEYS:
+            safe_metadata.pop(key, None)
+        item["metadata"] = safe_metadata
     item["personaScope"] = persona_scope
     item["digitalHumanId"] = digital_human_id
     item["metadataOnly"] = True

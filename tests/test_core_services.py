@@ -1207,6 +1207,116 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(listed.json()["items"][0]["personaScope"], "family")
         self.assertEqual(listed.json()["items"][0]["digitalHumanId"], "family_default")
 
+    def test_archive_items_api_persists_audio_contract_fields(self):
+        client = TestClient(app)
+
+        created = client.post(
+            "/archive/items",
+            json={
+                "userId": "archive_audio_user",
+                "viewerUserId": "viewer_audio_1",
+                "ownerId": "elder_audio_1",
+                "ownerUserId": "viewer_audio_1",
+                "uploadedByUserId": "viewer_audio_1",
+                "uploaderUserId": "viewer_audio_1",
+                "id": "archive-audio-1",
+                "kind": "audio",
+                "title": "外婆讲绍兴",
+                "note": "讲到仓桥直街。",
+                "localPath": "/private/var/mobile/archive-audio/raw.m4a",
+                "rawAudioURL": "file:///private/var/mobile/archive-audio/raw.m4a",
+                "rawTranscript": "这是一段不应作为原文暴露的未审转写",
+                "transcriptText": "外婆讲到仓桥直街。",
+                "analysisStatus": "pending",
+                "personaScope": "family",
+                "digitalHumanId": "family_default",
+                "metadata": {
+                    "contentKind": "audio",
+                    "uploadStatus": "pending",
+                    "transcriptionStatus": "completed",
+                    "transcriptText": "外婆讲到仓桥直街。",
+                    "durationSeconds": "18",
+                    "localPath": "/private/var/mobile/archive-audio/raw.m4a",
+                },
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        listed = client.get("/archive/items/archive_audio_user")
+
+        self.assertEqual(created.status_code, 200)
+        item = created.json()["item"]
+        self.assertEqual(item["kind"], "audio")
+        self.assertEqual(item["ownerUserId"], "viewer_audio_1")
+        self.assertEqual(item["uploadedByUserId"], "viewer_audio_1")
+        self.assertEqual(item["uploaderUserId"], "viewer_audio_1")
+        self.assertEqual(item["personaScope"], "family")
+        self.assertEqual(item["digitalHumanId"], "family_default")
+        self.assertEqual(item["analysisStatus"], "pending")
+        self.assertEqual(item["transcriptText"], "外婆讲到仓桥直街。")
+        self.assertEqual(item["metadata"]["uploadStatus"], "pending")
+        self.assertEqual(item["metadata"]["transcriptionStatus"], "completed")
+        self.assertEqual(item["metadata"]["transcriptText"], "外婆讲到仓桥直街。")
+        self.assertNotIn("localPath", item)
+        self.assertNotIn("rawAudioURL", item)
+        self.assertNotIn("rawTranscript", item)
+        self.assertNotIn("localPath", item["metadata"])
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["items"][0]["id"], "archive-audio-1")
+        self.assertNotIn("rawAudioURL", listed.json()["items"][0])
+
+    def test_archive_items_api_persists_video_contract_fields(self):
+        client = TestClient(app)
+
+        created = client.post(
+            "/archive/items",
+            json={
+                "userId": "archive_video_user",
+                "ownerUserId": "archive_video_user",
+                "uploadedByUserId": "archive_video_user",
+                "uploaderUserId": "archive_video_user",
+                "id": "archive-video-1",
+                "kind": "video",
+                "title": "生日视频片段",
+                "note": "一段待分析的视频。",
+                "localPath": "/private/var/mobile/archive-video/raw.mov",
+                "rawVideoURL": "file:///private/var/mobile/archive-video/raw.mov",
+                "thumbnailPath": "/private/var/mobile/archive-video/thumb.jpg",
+                "localThumbnailPath": "/private/var/mobile/archive-video/thumb.jpg",
+                "thumbnailObjectKey": "archive/video/archive-video-1/thumb.jpg",
+                "fileSizeBytes": 7340032,
+                "fileSizeLimitMB": 200,
+                "analysisStatus": "pending",
+                "metadata": {
+                    "contentKind": "video",
+                    "uploadStatus": "pending",
+                    "thumbnailStatus": "generated",
+                    "thumbnailObjectKey": "archive/video/archive-video-1/thumb.jpg",
+                    "fileSizeBytes": "7340032",
+                    "fileSizeLimitMB": "200",
+                    "thumbnailPath": "/private/var/mobile/archive-video/thumb.jpg",
+                },
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        listed = client.get("/archive/items/archive_video_user")
+
+        self.assertEqual(created.status_code, 200)
+        item = created.json()["item"]
+        self.assertEqual(item["kind"], "video")
+        self.assertEqual(item["thumbnailObjectKey"], "archive/video/archive-video-1/thumb.jpg")
+        self.assertEqual(item["fileSizeLimitMB"], 200)
+        self.assertEqual(item["metadata"]["thumbnailStatus"], "generated")
+        self.assertEqual(item["metadata"]["thumbnailObjectKey"], "archive/video/archive-video-1/thumb.jpg")
+        self.assertEqual(item["metadata"]["fileSizeLimitMB"], "200")
+        self.assertNotIn("localPath", item)
+        self.assertNotIn("rawVideoURL", item)
+        self.assertNotIn("thumbnailPath", item)
+        self.assertNotIn("localThumbnailPath", item)
+        self.assertNotIn("thumbnailPath", item["metadata"])
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["items"][0]["id"], "archive-video-1")
+        self.assertNotIn("rawVideoURL", listed.json()["items"][0])
+
     def test_archive_items_api_rejects_unknown_persona_scope(self):
         client = TestClient(app)
 
