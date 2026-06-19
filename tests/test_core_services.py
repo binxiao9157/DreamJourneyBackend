@@ -1317,6 +1317,68 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(listed.json()["items"][0]["id"], "archive-video-1")
         self.assertNotIn("rawVideoURL", listed.json()["items"][0])
 
+    def test_archive_items_api_persists_structured_analysis_contract(self):
+        client = TestClient(app)
+
+        created = client.post(
+            "/archive/items",
+            json={
+                "userId": "archive_analysis_user",
+                "id": "archive-analysis-1",
+                "kind": "photo",
+                "title": "老家院子合影",
+                "note": "外婆和家人在杭州老家院子里合影。",
+                "analysisStatus": "analyzed",
+                "analysisSummary": "识别到家人、杭州老家和院子合影场景。",
+                "detectedPeople": ["外婆", "家人", ""],
+                "detectedLocations": ["杭州", "老家", "院子"],
+                "detectedScenes": ["合影", "家庭聚会"],
+                "tags": ["相册影像", "场景线索", ""],
+                "analysisFailureReason": "",
+                "analysisRetryable": False,
+                "metadata": {
+                    "analysisLocationClues": "杭州、老家、院子",
+                    "analysisSceneClues": "合影、家庭聚会",
+                },
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        failed = client.post(
+            "/archive/items",
+            json={
+                "userId": "archive_analysis_user",
+                "id": "archive-analysis-failed",
+                "kind": "photo",
+                "title": "待重试照片",
+                "note": "模型暂时不可用。",
+                "analysisStatus": "failed",
+                "analysisFailureReason": "provider_timeout",
+                "analysisRetryable": True,
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        listed = client.get("/archive/items/archive_analysis_user")
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(failed.status_code, 200)
+        item = created.json()["item"]
+        self.assertEqual(item["analysisStatus"], "analyzed")
+        self.assertEqual(item["analysisSummary"], "识别到家人、杭州老家和院子合影场景。")
+        self.assertEqual(item["detectedPeople"], ["外婆", "家人"])
+        self.assertEqual(item["detectedLocations"], ["杭州", "老家", "院子"])
+        self.assertEqual(item["detectedScenes"], ["合影", "家庭聚会"])
+        self.assertEqual(item["tags"], ["相册影像", "场景线索"])
+        self.assertFalse(item["analysisRetryable"])
+        failed_item = failed.json()["item"]
+        self.assertEqual(failed_item["analysisStatus"], "failed")
+        self.assertEqual(failed_item["analysisFailureReason"], "provider_timeout")
+        self.assertTrue(failed_item["analysisRetryable"])
+        listed_items = {item["id"]: item for item in listed.json()["items"]}
+        self.assertEqual(listed_items["archive-analysis-1"]["detectedLocations"], ["杭州", "老家", "院子"])
+        self.assertEqual(listed_items["archive-analysis-1"]["detectedScenes"], ["合影", "家庭聚会"])
+        self.assertEqual(listed_items["archive-analysis-failed"]["analysisFailureReason"], "provider_timeout")
+        self.assertTrue(listed_items["archive-analysis-failed"]["analysisRetryable"])
+
     def test_archive_media_upload_intent_returns_mock_contract(self):
         client = TestClient(app)
 
@@ -1466,6 +1528,36 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-JSON"):
             proxy.parse_analysis("这是一张照片，有三个人，像是在老家门口。")
 
+    def test_image_analysis_parse_returns_archive_insight_contract(self):
+        proxy = DeepSeekImageAnalysisProxy(Settings(deepseek_api_key="deepseek-secret"))
+
+        parsed = proxy.parse_analysis(
+            """
+            ```json
+            {
+              "description": "外婆和家人在杭州老家院子里合影。",
+              "detectedPeople": ["外婆", "家人"],
+              "detectedLocations": ["杭州", "老家", "院子"],
+              "detectedScenes": ["合影", "家庭聚会"],
+              "tags": ["相册影像", "场景线索"],
+              "scene": "院子",
+              "occasion": "家庭聚会",
+              "mood": "温暖",
+              "estimatedDecade": 1990
+            }
+            ```
+            """
+        )
+
+        self.assertEqual(parsed["analysisStatus"], "analyzed")
+        self.assertEqual(parsed["analysisSummary"], "外婆和家人在杭州老家院子里合影。")
+        self.assertEqual(parsed["detectedPeople"], ["外婆", "家人"])
+        self.assertEqual(parsed["detectedLocations"], ["杭州", "老家", "院子"])
+        self.assertEqual(parsed["detectedScenes"], ["合影", "家庭聚会"])
+        self.assertEqual(parsed["tags"], ["相册影像", "场景线索"])
+        self.assertEqual(parsed["analysisFailureReason"], "")
+        self.assertFalse(parsed["analysisRetryable"])
+
     def test_archive_image_analysis_dry_run_redacts_secret(self):
         client = TestClient(app)
 
@@ -1486,6 +1578,11 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
         self.assertIn("Authorization", serialized)
         self.assertIn("Bearer <server-side>", serialized)
         self.assertNotIn("DEEPSEEK_API_KEY", serialized)
+        self.assertIn("responseContract", response.json())
+        self.assertEqual(response.json()["responseContract"]["detectedLocations"], [])
+        self.assertEqual(response.json()["responseContract"]["detectedScenes"], [])
+        self.assertEqual(response.json()["responseContract"]["analysisFailureReason"], "")
+        self.assertTrue(response.json()["responseContract"]["analysisRetryable"])
 
     def test_archive_image_analysis_requires_image_base64(self):
         client = TestClient(app)

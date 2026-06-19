@@ -506,6 +506,7 @@ def archive_image_analysis(payload: Dict[str, Any], dryRun: bool = False) -> Dic
     return {
         "provider": "deepseek",
         "request": request,
+        "responseContract": proxy.response_contract(),
         "context": {
             "userId": user_id,
             "archiveItemId": archive_item_id,

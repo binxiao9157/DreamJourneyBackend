@@ -21,7 +21,8 @@ class DeepSeekImageAnalysisProxy:
             "描述这张照片的内容。关注：1. 场景（在哪里、什么场合）2. 人物（数量、年龄、推测关系）"
             "3. 活动（在做什么）4. 情绪氛围 5. 年代特征。"
             "请输出严格JSON："
-            '{"description":"...","detectedPeople":["..."],"scene":"...","occasion":"...",'
+            '{"description":"...","detectedPeople":["..."],"detectedLocations":["..."],'
+            '"detectedScenes":["..."],"tags":["..."],"scene":"...","occasion":"...",'
             '"mood":"...","estimatedDecade":1970}'
         )
         messages = [
@@ -86,13 +87,48 @@ class DeepSeekImageAnalysisProxy:
         if parsed is None:
             raise ValueError("DeepSeek image analysis returned non-JSON content")
 
+        description = str(parsed.get("description") or "")
+        detected_locations = cls._string_list(parsed.get("detectedLocations"))
+        detected_scenes = cls._string_list(parsed.get("detectedScenes"))
+        scene = str(parsed.get("scene") or "")
+        occasion = str(parsed.get("occasion") or "")
+        if scene and scene not in detected_locations:
+            detected_locations.append(scene)
+        if occasion and occasion not in detected_scenes:
+            detected_scenes.append(occasion)
+
         return {
-            "description": str(parsed.get("description") or ""),
+            "analysisStatus": "analyzed",
+            "analysisSummary": description,
+            "description": description,
             "detectedPeople": cls._string_list(parsed.get("detectedPeople")),
+            "detectedLocations": detected_locations,
+            "detectedScenes": detected_scenes,
+            "tags": cls._string_list(parsed.get("tags")),
             "scene": str(parsed.get("scene") or ""),
             "occasion": str(parsed.get("occasion") or ""),
             "mood": str(parsed.get("mood") or ""),
             "estimatedDecade": cls._int_or_none(parsed.get("estimatedDecade")),
+            "analysisFailureReason": "",
+            "analysisRetryable": False,
+        }
+
+    @staticmethod
+    def response_contract() -> Dict[str, Any]:
+        return {
+            "analysisStatus": "analyzed",
+            "analysisSummary": "",
+            "description": "",
+            "detectedPeople": [],
+            "detectedLocations": [],
+            "detectedScenes": [],
+            "tags": [],
+            "scene": "",
+            "occasion": "",
+            "mood": "",
+            "estimatedDecade": None,
+            "analysisFailureReason": "",
+            "analysisRetryable": True,
         }
 
     @staticmethod

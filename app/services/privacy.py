@@ -29,6 +29,12 @@ ARCHIVE_METADATA_LOCAL_MEDIA_KEYS = {
 # Reviewed media contract fields such as transcriptText and thumbnailObjectKey
 # are allowed to pass through; rawTranscript/raw media URLs are removed above.
 ARCHIVE_REVIEWED_MEDIA_KEYS = {"transcriptText", "thumbnailObjectKey"}
+ARCHIVE_ANALYSIS_LIST_KEYS = {
+    "detectedPeople",
+    "detectedLocations",
+    "detectedScenes",
+    "tags",
+}
 
 CARE_SNAPSHOT_SCALAR_KEYS = {
     "generatedAt",
@@ -245,6 +251,17 @@ def sanitize_archive_item_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         for key in ARCHIVE_METADATA_LOCAL_MEDIA_KEYS:
             safe_metadata.pop(key, None)
         item["metadata"] = safe_metadata
+    for key in ARCHIVE_ANALYSIS_LIST_KEYS:
+        item[key] = _trimmed_string_list(item.get(key))
+    analysis_status = str(item.get("analysisStatus") or "").strip()
+    if analysis_status:
+        item["analysisStatus"] = analysis_status
+    analysis_failure_reason = str(item.get("analysisFailureReason") or "").strip()
+    if analysis_failure_reason:
+        item["analysisFailureReason"] = analysis_failure_reason
+    elif "analysisFailureReason" in item or analysis_status == "failed":
+        item["analysisFailureReason"] = analysis_failure_reason
+    item["analysisRetryable"] = _bool_value(item.get("analysisRetryable"), default=analysis_status == "failed")
     item["personaScope"] = persona_scope
     item["digitalHumanId"] = digital_human_id
     item["metadataOnly"] = True
@@ -315,6 +332,30 @@ def _string_list(value: Any) -> List[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str)]
+
+
+def _trimmed_string_list(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        item.strip()
+        for item in value
+        if isinstance(item, str) and item.strip()
+    ]
+
+
+def _bool_value(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
 
 
 def _ensure_no_raw_text(value: str, field_name: str, max_length: int = 260) -> None:
