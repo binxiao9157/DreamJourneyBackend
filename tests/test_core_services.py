@@ -1388,6 +1388,102 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.json()["items"][0]["id"], "archive-time-letter-1")
 
+    def test_archive_items_api_upserts_time_letter_draft_and_sealed_contract(self):
+        client = TestClient(app)
+        user_id = "archive_time_letter_lifecycle_user"
+        item_id = "archive-time-letter-lifecycle-1"
+
+        draft = {
+            "userId": user_id,
+            "ownerUserId": user_id,
+            "id": item_id,
+            "kind": "timeLetter",
+            "title": "时间信件草稿",
+            "note": "第一版草稿",
+            "analysisStatus": "manual",
+            "deliveryState": "draft",
+            "deliveryPolicy": "pending_product_decision",
+            "metadata": {
+                "contentKind": "time_letter",
+                "deliveryState": "draft",
+                "timeLetterStatus": "draft",
+                "deliveryPolicy": "pending_product_decision",
+                "deliveryDecisionRequired": "true",
+                "localPath": "/private/var/mobile/time-letter-draft.txt",
+            },
+            "privacyMetadata": {"scope": "generationAllowed"},
+        }
+        sealed = {
+            **draft,
+            "title": "时间信件",
+            "note": "已经封存的正文",
+            "deliveryState": "sealed",
+            "metadata": {
+                **draft["metadata"],
+                "deliveryState": "sealed",
+                "timeLetterStatus": "sealed",
+            },
+        }
+
+        draft_response = client.post("/archive/items", json=draft)
+        sealed_response = client.post("/archive/items", json=sealed)
+        listed = client.get(f"/archive/items/{user_id}")
+
+        self.assertEqual(draft_response.status_code, 200)
+        self.assertEqual(sealed_response.status_code, 200)
+        self.assertEqual(listed.status_code, 200)
+        matching = [item for item in listed.json()["items"] if item.get("id") == item_id]
+        self.assertEqual(len(matching), 1)
+        item = matching[0]
+        self.assertEqual(item["kind"], "timeLetter")
+        self.assertEqual(item["note"], "已经封存的正文")
+        self.assertEqual(item["deliveryState"], "sealed")
+        self.assertEqual(item["deliveryPolicy"], "pending_product_decision")
+        self.assertEqual(item["metadata"]["deliveryState"], "sealed")
+        self.assertEqual(item["metadata"]["timeLetterStatus"], "sealed")
+        self.assertEqual(item["metadata"]["deliveryDecisionRequired"], "true")
+        self.assertEqual(item["metadataOnly"], True)
+        self.assertNotIn("localPath", item["metadata"])
+
+    def test_archive_items_api_deletes_time_letter_by_user_and_id(self):
+        client = TestClient(app)
+        user_id = "archive_time_letter_delete_user"
+        item_id = "archive-time-letter-delete-1"
+
+        created = client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "ownerUserId": user_id,
+                "id": item_id,
+                "kind": "timeLetter",
+                "title": "待删除的时间信件",
+                "note": "草稿删除后不应再被拉取。",
+                "analysisStatus": "manual",
+                "deliveryState": "draft",
+                "deliveryPolicy": "pending_product_decision",
+                "metadata": {
+                    "contentKind": "time_letter",
+                    "deliveryState": "draft",
+                    "timeLetterStatus": "draft",
+                    "deliveryPolicy": "pending_product_decision",
+                    "deliveryDecisionRequired": "true",
+                },
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        deleted = client.delete(f"/archive/items/{user_id}/{item_id}")
+        listed = client.get(f"/archive/items/{user_id}")
+        missing = client.delete(f"/archive/items/{user_id}/{item_id}")
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["status"], "deleted")
+        self.assertEqual(deleted.json()["id"], item_id)
+        self.assertEqual(listed.status_code, 200)
+        self.assertFalse(any(item.get("id") == item_id for item in listed.json()["items"]))
+        self.assertEqual(missing.status_code, 404)
+
     def test_archive_items_api_persists_structured_analysis_contract(self):
         client = TestClient(app)
 

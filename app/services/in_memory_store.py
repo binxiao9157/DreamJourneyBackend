@@ -82,12 +82,26 @@ class InMemoryStore:
         item = deepcopy(payload)
         item.setdefault("id", f"archive_{len(self._archive_items.get(user_id, [])) + 1}")
         item["userId"] = user_id
-        item["createdAt"] = self._now()
-        self._archive_items.setdefault(user_id, []).insert(0, item)
+        items = self._archive_items.setdefault(user_id, [])
+        existing = next((entry for entry in items if entry.get("id") == item["id"]), None)
+        if existing is not None:
+            item.setdefault("createdAt", existing.get("createdAt") or self._now())
+        else:
+            item.setdefault("createdAt", self._now())
+        item.setdefault("updatedAt", self._now())
+        items[:] = [entry for entry in items if entry.get("id") != item["id"]]
+        items.insert(0, item)
         return deepcopy(item)
 
     def list_archive_items(self, user_id: str) -> List[Dict[str, Any]]:
         return deepcopy(self._archive_items.get(user_id, []))
+
+    def delete_archive_item(self, user_id: str, item_id: str) -> Optional[Dict[str, Any]]:
+        items = self._archive_items.get(user_id, [])
+        for index, item in enumerate(items):
+            if item.get("id") == item_id:
+                return deepcopy(items.pop(index))
+        return None
 
     def add_mailbox_letter(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)

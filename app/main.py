@@ -475,6 +475,14 @@ def list_archive_items(user_id: str) -> Dict[str, Any]:
     return {"userId": user_id, "items": store.list_archive_items(user_id)}
 
 
+@app.delete("/archive/items/{user_id}/{item_id}")
+def delete_archive_item(user_id: str, item_id: str) -> Dict[str, Any]:
+    deleted = store.delete_archive_item(user_id, item_id)
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="archive item not found")
+    return {"status": "deleted", "id": item_id, "item": deleted}
+
+
 @app.post("/archive/image-analysis")
 def archive_image_analysis(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
     image_base64 = str(payload.get("imageBase64") or "").strip()

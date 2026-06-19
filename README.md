@@ -19,6 +19,7 @@
 - `POST /archive/items`
 - `POST /archive/media/upload-intent`
 - `GET /archive/items/{user_id}`
+- `DELETE /archive/items/{user_id}/{item_id}`
 - `POST /archive/image-analysis`
 - `POST /mailbox/letters`
 - `GET /mailbox/letters/{user_id}`

@@ -115,8 +115,19 @@ class FakeCursor:
         elif normalized.startswith("INSERT INTO archive_items"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
-            self.connection.archive_items.setdefault(user_id, []).insert(0, dict(payload))
+            items = self.connection.archive_items.setdefault(user_id, [])
+            items[:] = [item for item in items if item.get("id") != item_id]
+            items.insert(0, dict(payload))
             self.result = {"payload": payload}
+        elif normalized.startswith("DELETE FROM archive_items"):
+            user_id, item_id = params
+            items = self.connection.archive_items.get(user_id, [])
+            for index, item in enumerate(items):
+                if item.get("id") == item_id:
+                    self.result = {"payload": items.pop(index)}
+                    break
+            else:
+                self.result = None
         elif normalized.startswith("INSERT INTO mailbox_letters"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
@@ -364,6 +375,23 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(store.list_archive_items("u1")[0]["digitalHumanId"], "family_default")
         self.assertEqual(store.list_mailbox_letters("u1")[0]["title"], "想说的话")
         self.assertEqual(store.list_family_members("u1")[0]["name"], "林桂芳")
+
+    def test_store_upserts_and_deletes_archive_items_by_user_and_id(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        store.add_archive_item("u1", {"id": "time-letter-1", "kind": "timeLetter", "note": "草稿"})
+        updated = store.add_archive_item("u1", {"id": "time-letter-1", "kind": "timeLetter", "note": "封存"})
+        listed = store.list_archive_items("u1")
+        deleted = store.delete_archive_item("u1", "time-letter-1")
+        missing = store.delete_archive_item("u1", "time-letter-1")
+
+        self.assertEqual(updated["note"], "封存")
+        self.assertEqual(len([item for item in listed if item.get("id") == "time-letter-1"]), 1)
+        self.assertEqual(listed[0]["note"], "封存")
+        self.assertEqual(deleted["id"], "time-letter-1")
+        self.assertIsNone(missing)
+        self.assertEqual(store.list_archive_items("u1"), [])
 
     def test_store_persists_family_member_revocation(self):
         connection = FakeConnection()

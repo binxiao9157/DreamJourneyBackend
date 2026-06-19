@@ -256,6 +256,18 @@ class PostgresStore:
     def list_archive_items(self, user_id: str) -> List[Dict[str, Any]]:
         return self._list_payloads("archive_items", user_id)
 
+    def delete_archive_item(self, user_id: str, item_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            DELETE FROM archive_items
+            WHERE user_id = %s AND id = %s
+            RETURNING payload
+            """,
+            (user_id, item_id),
+            commit=True,
+        )
+        return None if row is None else deepcopy(row["payload"])
+
     def add_mailbox_letter(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = self._with_identity(payload, "mailbox", user_id)
         item["updatedAt"] = self._now()
@@ -572,6 +584,10 @@ class PostgresStore:
             f"""
             INSERT INTO {table} (user_id, id, payload, created_at)
             VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (id) DO UPDATE SET
+                user_id = EXCLUDED.user_id,
+                payload = EXCLUDED.payload,
+                created_at = NOW()
             RETURNING payload
             """,
             (user_id, item["id"], item),
