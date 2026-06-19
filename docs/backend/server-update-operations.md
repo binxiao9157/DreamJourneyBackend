@@ -117,6 +117,9 @@ VOLCENGINE_APP_TOKEN=<火山实时对话 Access Token>
 VOLCENGINE_REALTIME_RESOURCE_ID=volc.speech.dialog
 VOLCENGINE_REALTIME_ADDRESS=wss://openspeech.bytedance.com
 VOLCENGINE_REALTIME_URI=/api/v3/realtime/dialogue
+VOLCENGINE_VOICE_CLONE_API_KEY=<火山声音复刻 V3 API Key>
+VOLCENGINE_VOICE_CLONE_TRAIN_URL=https://openspeech.bytedance.com/api/v3/tts/voice_clone
+VOLCENGINE_VOICE_CLONE_QUERY_URL=https://openspeech.bytedance.com/api/v3/tts/get_voice
 
 AMAP_WEB_SERVICE_KEY=<高德 WebService Key>
 ```
@@ -519,5 +522,7 @@ sudo docker compose up -d --build
 - `sudo docker compose ps` 中 `api`、`postgres`、`redis` 正常运行。
 - `/health` 返回 `status=ok`、`store=postgres`。
 - `/config/runtime` 带 token 后返回能力开关，`realtimeToken=true`。
+- `/config/runtime` 带 token 后返回 `voiceClone.provider=volcengineVoiceCloneV3` 且 `voiceClone.realProviderReady=true`。
 - `/voice/realtime-token` 带 token 后返回 `authMode=legacy`，且 `hasAppToken=True`。
+- `/voice/profiles` 在带授权与声音样本时由后端代理火山声音复刻 V3；返回结果不应包含 `audioBase64`、`rawSampleURL` 或本地样本路径。
 - iOS 真机配置 `DreamJourneyBackendBaseURL` 和 `DreamJourneyBackendAPIToken` 后，不再因新电脑缺本地火山实时语音三件套而提示“语音服务暂不可用”。

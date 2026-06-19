@@ -1,6 +1,7 @@
 import os
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -14,6 +15,7 @@ from app.services.runtime_config import RuntimeConfigService
 from app.services.store_factory import make_store
 from app.services.tokens import TokenService
 from app.services.tts import VolcTTSProxy
+from app.services.voice_clone import VolcEngineVoiceCloneV3Provider
 from app.services.amap import AMapDistrictProxy
 from app.services.deepseek import DeepSeekImageAnalysisProxy, DeepSeekKnowledgeExtractionProxy
 
@@ -1187,6 +1189,94 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
 
 
 class VoiceCloneProfileAPITests(unittest.TestCase):
+    def test_runtime_config_exposes_volcengine_voice_clone_v3_capability(self):
+        configured = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            volcengine_voice_clone_train_url="https://example.com/voice_clone",
+            volcengine_voice_clone_query_url="https://example.com/get_voice",
+        )
+
+        config = RuntimeConfigService(configured).public_config()
+        voice_clone = config["voiceClone"]
+
+        self.assertTrue(voice_clone["enabled"])
+        self.assertEqual(voice_clone["provider"], "volcengineVoiceCloneV3")
+        self.assertTrue(voice_clone["realProviderReady"])
+        self.assertEqual(voice_clone["trainEndpoint"], "/voice/profiles")
+        self.assertEqual(voice_clone["queryEndpoint"], "/voice/profiles/{user_id}/{voice_profile_id}/refresh")
+        self.assertFalse(voice_clone["defaultReleaseVisible"])
+
+    def test_volcengine_voice_clone_v3_provider_builds_training_request(self):
+        configured = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            volcengine_voice_clone_train_url="https://example.com/voice_clone",
+            volcengine_voice_clone_query_url="https://example.com/get_voice",
+        )
+        provider = VolcEngineVoiceCloneV3Provider(configured)
+
+        request = provider.build_training_request(
+            voice_profile_id="voice_profile_contract_1",
+            audio_base64="BASE64_AUDIO_SAMPLE",
+            audio_format="wav",
+            language=0,
+        )
+
+        self.assertEqual(request["url"], "https://example.com/voice_clone")
+        self.assertEqual(request["headers"]["X-Api-Key"], "test-voice-clone-key")
+        self.assertEqual(request["headers"]["Content-Type"], "application/json")
+        self.assertIn("X-Api-Request-Id", request["headers"])
+        self.assertEqual(request["json"]["speaker_id"], "voice_profile_contract_1")
+        self.assertEqual(request["json"]["audio"]["data"], "BASE64_AUDIO_SAMPLE")
+        self.assertEqual(request["json"]["audio"]["format"], "wav")
+        self.assertEqual(request["json"]["language"], 0)
+        self.assertTrue(request["json"]["extra_params"]["enable_audio_denoise"])
+
+    def test_voice_clone_profile_uses_configured_provider_without_persisting_raw_audio(self):
+        class FakeProvider:
+            is_configured = True
+            provider_mode = "volcengineVoiceCloneV3"
+
+            def submit_training(self, *, voice_profile_id, audio_base64, audio_format, language):
+                return {
+                    "voiceProfileId": voice_profile_id,
+                    "providerRequestId": "provider-request-1",
+                    "providerStatus": "pending",
+                    "sampleStatus": "pending",
+                }
+
+        configured = Settings(volcengine_voice_clone_api_key="test-voice-clone-key")
+        user_id = "voice_clone_provider_user"
+        voice_profile_id = "voice_profile_provider_1"
+
+        with patch("app.main.settings", configured), patch("app.main.VoiceCloneProviderFactory") as factory:
+            factory.return_value.make.return_value = FakeProvider()
+            created = TestClient(app).post(
+                "/voice/profiles",
+                json={
+                    "userId": user_id,
+                    "voiceProfileId": voice_profile_id,
+                    "sampleStatus": "pending",
+                    "sampleCount": 1,
+                    "authorizationConfirmed": True,
+                    "personaScope": "family",
+                    "digitalHumanId": "family_default",
+                    "audioBase64": "RAW_SAMPLE_BASE64",
+                    "audioFormat": "wav",
+                    "privacyMetadata": {"scope": "generationAllowed"},
+                },
+            )
+
+        self.assertEqual(created.status_code, 200)
+        profile = created.json()["profile"]
+        self.assertEqual(profile["voiceProfileId"], voice_profile_id)
+        self.assertEqual(profile["providerMode"], "volcengineVoiceCloneV3")
+        self.assertTrue(profile["realCloneProviderReady"])
+        self.assertEqual(profile["providerRequestId"], "provider-request-1")
+        self.assertEqual(profile["providerStatus"], "pending")
+        self.assertNotIn("audioBase64", profile)
+        self.assertNotIn("rawSampleURL", profile)
+        self.assertNotIn("sampleLocalPath", profile)
+
     def test_voice_clone_profile_contract_requires_authorization_and_persists_lifecycle(self):
         client = TestClient(app)
         user_id = "voice_clone_contract_user"

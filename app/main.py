@@ -28,6 +28,7 @@ from app.services.runtime_config import RuntimeConfigService
 from app.services.store_factory import init_store, make_store
 from app.services.tokens import TokenService
 from app.services.tts import VolcTTSProxy
+from app.services.voice_clone import VoiceCloneProviderFactory, VoiceCloneProviderUnavailable
 from app.services.user_identity import stable_user_id
 
 
@@ -56,6 +57,7 @@ VOICE_CLONE_AUTHORIZATION_COPY = (
     "声音克隆必须由用户主动授权，仅使用用户确认提交的声音样本；"
     "未完成授权、样本质量和合规验收前不会公开训练或合成功能。"
 )
+VOICE_CLONE_PROVIDER_ERROR_PREFIX = "voice clone provider error"
 VOICE_CLONE_DISABLE_CONTRACT = (
     "disableVoiceProfile(profileId:) 应撤销该 voiceProfileId 的合成权限，"
     "当前后端仅保存 mock 禁用状态。"
@@ -328,6 +330,30 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     sample_count = max(0, min(sample_count, 20))
 
     now = datetime.now(timezone.utc).isoformat()
+    provider = VoiceCloneProviderFactory(settings).make()
+    provider_mode = provider.provider_mode
+    provider_result: Dict[str, Any] = {}
+    audio_base64 = str(payload.get("audioBase64") or "").strip()
+    if provider.is_configured and audio_base64:
+        try:
+            provider_result = provider.submit_training(
+                voice_profile_id=voice_profile_id,
+                audio_base64=audio_base64,
+                audio_format=str(payload.get("audioFormat") or "wav").strip() or "wav",
+                language=int(payload.get("language") or 0),
+            )
+            voice_profile_id = str(provider_result.get("voiceProfileId") or voice_profile_id)
+            sample_status = str(provider_result.get("sampleStatus") or sample_status)
+            if sample_status not in VOICE_CLONE_SAMPLE_STATUSES:
+                sample_status = "pending"
+        except (ValueError, VoiceCloneProviderUnavailable) as exc:
+            provider_result = {
+                "providerStatus": "failed",
+                "providerMessage": f"{VOICE_CLONE_PROVIDER_ERROR_PREFIX}: {exc}",
+                "sampleStatus": "failed",
+            }
+            sample_status = "failed"
+
     profile = {
         "id": voice_profile_id,
         "voiceProfileId": voice_profile_id,
@@ -341,8 +367,9 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "authorizationText": str(payload.get("authorizationText") or VOICE_CLONE_AUTHORIZATION_COPY)[:300],
         "authorizationConfirmedAt": str(payload.get("authorizationConfirmedAt") or now),
         "authorizationCopy": VOICE_CLONE_AUTHORIZATION_COPY,
-        "providerMode": VOICE_CLONE_PROVIDER_MODE,
-        "realCloneProviderReady": False,
+        "providerMode": provider_mode,
+        "realCloneProviderReady": provider.is_configured,
+        "providerStatus": str(provider_result.get("providerStatus") or ("notSubmitted" if provider.is_configured else "mockOnly")),
         "qualityAcceptanceRequired": True,
         "isEnabled": sample_status == "ready",
         "defaultReleaseVisible": False,
@@ -354,6 +381,12 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             "scope": privacy_metadata.get("scope"),
         },
     }
+    provider_request_id = str(provider_result.get("providerRequestId") or "").strip()
+    provider_message = str(provider_result.get("providerMessage") or "").strip()
+    if provider_request_id:
+        profile["providerRequestId"] = provider_request_id
+    if provider_message:
+        profile["providerMessage"] = provider_message[:300]
     if "createdAt" in payload:
         profile["createdAt"] = str(payload.get("createdAt") or now)
     else:
@@ -398,6 +431,38 @@ def _voice_profile_lifecycle_update(profile: Dict[str, Any], sample_status: str)
         updated["deletedAt"] = now
         updated["deletionState"] = "deleted"
         updated["sampleCount"] = 0
+    return updated
+
+
+def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
+    provider = VoiceCloneProviderFactory(settings).make()
+    if not provider.is_configured:
+        raise HTTPException(status_code=503, detail="voice clone provider is not configured")
+    voice_profile_id = str(profile.get("voiceProfileId") or "").strip()
+    try:
+        provider_result = provider.query_status(voice_profile_id=voice_profile_id)
+    except (ValueError, VoiceCloneProviderUnavailable) as exc:
+        provider_result = {
+            "providerStatus": "failed",
+            "providerMessage": f"{VOICE_CLONE_PROVIDER_ERROR_PREFIX}: {exc}",
+            "sampleStatus": "failed",
+        }
+    sample_status = str(provider_result.get("sampleStatus") or profile.get("sampleStatus") or "pending")
+    if sample_status not in VOICE_CLONE_SAMPLE_STATUSES:
+        sample_status = "pending"
+    updated = dict(profile)
+    updated["sampleStatus"] = sample_status
+    updated["isEnabled"] = sample_status == "ready"
+    updated["providerMode"] = provider.provider_mode
+    updated["realCloneProviderReady"] = provider.is_configured
+    updated["providerStatus"] = str(provider_result.get("providerStatus") or updated.get("providerStatus") or "unknown")
+    provider_request_id = str(provider_result.get("providerRequestId") or "").strip()
+    provider_message = str(provider_result.get("providerMessage") or "").strip()
+    if provider_request_id:
+        updated["providerRequestId"] = provider_request_id
+    if provider_message:
+        updated["providerMessage"] = provider_message[:300]
+    updated["updatedAt"] = datetime.now(timezone.utc).isoformat()
     return updated
 
 
@@ -452,6 +517,16 @@ def disable_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]
     disabled = _voice_profile_lifecycle_update(profile, "disabled")
     saved = store.save_voice_profile(user_id, disabled)
     return {"status": "disabled", "profile": saved}
+
+
+@app.post("/voice/profiles/{user_id}/{voice_profile_id}/refresh")
+def refresh_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+    profile = store.get_voice_profile(user_id, voice_profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="voice profile not found")
+    refreshed = _voice_profile_refresh_update(profile)
+    saved = store.save_voice_profile(user_id, refreshed)
+    return {"status": "refreshed", "profile": saved}
 
 
 @app.delete("/voice/profiles/{user_id}/{voice_profile_id}")

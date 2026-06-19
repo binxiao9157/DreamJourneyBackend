@@ -32,6 +32,9 @@ class Settings:
     volcengine_realtime_resource_id: str = "volc.speech.dialog"
     volcengine_realtime_address: str = "wss://openspeech.bytedance.com"
     volcengine_realtime_uri: str = "/api/v3/realtime/dialogue"
+    volcengine_voice_clone_api_key: Optional[str] = None
+    volcengine_voice_clone_train_url: str = "https://openspeech.bytedance.com/api/v3/tts/voice_clone"
+    volcengine_voice_clone_query_url: str = "https://openspeech.bytedance.com/api/v3/tts/get_voice"
 
     amap_web_service_key: Optional[str] = None
 
@@ -55,6 +58,9 @@ class Settings:
             volcengine_realtime_resource_id=_env("VOLCENGINE_REALTIME_RESOURCE_ID", cls.volcengine_realtime_resource_id) or cls.volcengine_realtime_resource_id,
             volcengine_realtime_address=_env("VOLCENGINE_REALTIME_ADDRESS", cls.volcengine_realtime_address) or cls.volcengine_realtime_address,
             volcengine_realtime_uri=_env("VOLCENGINE_REALTIME_URI", cls.volcengine_realtime_uri) or cls.volcengine_realtime_uri,
+            volcengine_voice_clone_api_key=_env("VOLCENGINE_VOICE_CLONE_API_KEY"),
+            volcengine_voice_clone_train_url=_env("VOLCENGINE_VOICE_CLONE_TRAIN_URL", cls.volcengine_voice_clone_train_url) or cls.volcengine_voice_clone_train_url,
+            volcengine_voice_clone_query_url=_env("VOLCENGINE_VOICE_CLONE_QUERY_URL", cls.volcengine_voice_clone_query_url) or cls.volcengine_voice_clone_query_url,
             amap_web_service_key=_env("AMAP_WEB_SERVICE_KEY"),
         )
 

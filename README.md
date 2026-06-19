@@ -11,6 +11,7 @@
 - `POST /voice/profiles`
 - `GET /voice/profiles/{user_id}`
 - `POST /voice/profiles/{user_id}/{voice_profile_id}/disable`
+- `POST /voice/profiles/{user_id}/{voice_profile_id}/refresh`
 - `DELETE /voice/profiles/{user_id}/{voice_profile_id}`
 - `POST /tts`
 - `GET /maps/district`
