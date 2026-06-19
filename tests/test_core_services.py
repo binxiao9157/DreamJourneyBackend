@@ -2046,6 +2046,78 @@ class MailboxAPITests(unittest.TestCase):
 
 
 class FamilyAPITests(unittest.TestCase):
+    def test_family_member_api_defaults_hidden_digital_human_contract(self):
+        client = TestClient(app)
+
+        created = client.post(
+            "/family/invite",
+            json={
+                "userId": "u_family_contract_default",
+                "name": "林桂芳",
+                "relation": "祖母",
+                "phone": "13900001111",
+            },
+        )
+
+        self.assertEqual(created.status_code, 200)
+        member = created.json()["member"]
+        self.assertEqual(member["personaScope"], "family")
+        self.assertEqual(member["digitalHumanId"], "family_default")
+        self.assertEqual(member["digitalHumanMode"], "sunlight")
+        self.assertEqual(member["digitalHumanModeLabel"], "阳光")
+        self.assertEqual(member["backendContractMode"], "mockFamilyPersona")
+        self.assertEqual(member["familyPersonaContractVersion"], 1)
+        self.assertFalse(member["defaultReleaseVisible"])
+
+    def test_family_member_api_persists_digital_human_mode_contract(self):
+        client = TestClient(app)
+
+        created = client.post(
+            "/family/invite",
+            json={
+                "userId": "u_family_contract_star",
+                "name": "陈岚",
+                "relation": "女儿",
+                "phone": "13900001111",
+                "personaScope": "family",
+                "digitalHumanId": "family_chenlan",
+                "digitalHumanMode": "star",
+            },
+        )
+        member = created.json()["member"]
+        accepted = client.post(
+            f"/family/members/u_family_contract_star/{member['id']}/accept",
+            json={"phone": "13900001111"},
+        )
+        listed = client.get("/family/members/u_family_contract_star")
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(member["digitalHumanMode"], "star")
+        self.assertEqual(member["digitalHumanModeLabel"], "星辰")
+        self.assertEqual(member["digitalHumanId"], "family_chenlan")
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.json()["member"]["digitalHumanMode"], "star")
+        listed_member = next(item for item in listed.json()["members"] if item["id"] == member["id"])
+        self.assertEqual(listed_member["digitalHumanMode"], "star")
+        self.assertEqual(listed_member["digitalHumanModeLabel"], "星辰")
+        self.assertFalse(listed_member["defaultReleaseVisible"])
+
+    def test_family_member_api_rejects_invalid_digital_human_mode_contract(self):
+        client = TestClient(app)
+
+        created = client.post(
+            "/family/invite",
+            json={
+                "userId": "u_family_contract_invalid",
+                "name": "陈岚",
+                "relation": "女儿",
+                "phone": "13900001111",
+                "digitalHumanMode": "storm",
+            },
+        )
+
+        self.assertEqual(created.status_code, 400)
+
     def test_family_member_accept_api_marks_member_active(self):
         client = TestClient(app)
 

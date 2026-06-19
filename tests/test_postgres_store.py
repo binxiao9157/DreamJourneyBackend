@@ -423,6 +423,32 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertFalse(revoked["isOnline"])
         self.assertEqual(store.list_family_members("u1")[0]["accessStatus"], "revoked")
 
+    def test_store_persists_family_member_digital_human_contract(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        member = store.add_family_member(
+            "u1",
+            {
+                "name": "林桂芳",
+                "personaScope": "family",
+                "digitalHumanId": "family_linguifang",
+                "digitalHumanMode": "silent",
+                "digitalHumanModeLabel": "静默",
+                "backendContractMode": "mockFamilyPersona",
+                "familyPersonaContractVersion": 1,
+                "defaultReleaseVisible": False,
+            },
+        )
+        listed = store.list_family_members("u1")
+
+        self.assertEqual(member["digitalHumanMode"], "silent")
+        self.assertEqual(member["digitalHumanModeLabel"], "静默")
+        self.assertEqual(member["backendContractMode"], "mockFamilyPersona")
+        self.assertEqual(member["familyPersonaContractVersion"], 1)
+        self.assertFalse(member["defaultReleaseVisible"])
+        self.assertEqual(listed[0]["digitalHumanId"], "family_linguifang")
+
     def test_store_persists_voice_profiles_disable_and_delete_states(self):
         connection = FakeConnection()
         store = PostgresStore(connection_factory=lambda: connection)

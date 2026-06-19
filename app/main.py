@@ -64,6 +64,13 @@ VOICE_CLONE_DELETE_CONTRACT = (
     "deleteVoiceProfile(profileId:) 应删除样本、训练产物和关联授权记录，"
     "当前后端保存 deleted tombstone 以便验收生命周期。"
 )
+FAMILY_PERSONA_CONTRACT_VERSION = 1
+FAMILY_PERSONA_CONTRACT_MODE = "mockFamilyPersona"
+DIGITAL_HUMAN_MODE_LABELS = {
+    "sunlight": "阳光",
+    "star": "星辰",
+    "silent": "静默",
+}
 
 
 def _request_backend_api_token(request: Request) -> str:
@@ -352,6 +359,31 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         profile["createdAt"] = now
     return profile
+
+
+def _sanitize_family_member_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = _required_text(payload, "userId", 96)
+    safe_payload = dict(payload)
+    persona_scope = str(safe_payload.get("personaScope") or "family").strip()
+    if persona_scope != "family":
+        raise HTTPException(status_code=400, detail="family member personaScope must be family")
+
+    digital_human_id = str(safe_payload.get("digitalHumanId") or "family_default").strip()
+    if not digital_human_id:
+        digital_human_id = "family_default"
+    digital_human_mode = str(safe_payload.get("digitalHumanMode") or "sunlight").strip()
+    if digital_human_mode not in DIGITAL_HUMAN_MODE_LABELS:
+        raise HTTPException(status_code=400, detail=f"unsupported digitalHumanMode: {digital_human_mode}")
+
+    safe_payload["userId"] = user_id
+    safe_payload["personaScope"] = "family"
+    safe_payload["digitalHumanId"] = digital_human_id
+    safe_payload["digitalHumanMode"] = digital_human_mode
+    safe_payload["digitalHumanModeLabel"] = DIGITAL_HUMAN_MODE_LABELS[digital_human_mode]
+    safe_payload["backendContractMode"] = FAMILY_PERSONA_CONTRACT_MODE
+    safe_payload["familyPersonaContractVersion"] = FAMILY_PERSONA_CONTRACT_VERSION
+    safe_payload["defaultReleaseVisible"] = False
+    return safe_payload
 
 
 def _voice_profile_lifecycle_update(profile: Dict[str, Any], sample_status: str) -> Dict[str, Any]:
@@ -828,10 +860,8 @@ def list_echo_delayed_replies(user_id: str) -> Dict[str, Any]:
 
 @app.post("/family/invite")
 def invite_family(payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
-    invite_payload = dict(payload)
+    invite_payload = _sanitize_family_member_payload(payload)
+    user_id = str(invite_payload["userId"])
     invite_payload.setdefault("accessStatus", "pending")
     invite_payload.setdefault("invitationStatus", "pending")
     invitation_code = str(invite_payload.get("invitationCode") or "").strip()
