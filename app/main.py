@@ -49,6 +49,21 @@ ARCHIVE_MEDIA_UPLOAD_LIMITS = {
     "audio": ARCHIVE_AUDIO_UPLOAD_LIMIT_BYTES,
     "video": ARCHIVE_VIDEO_UPLOAD_LIMIT_BYTES,
 }
+VOICE_CLONE_SAMPLE_STATUSES = {"notProvided", "pending", "ready", "disabled", "deleted", "failed"}
+VOICE_CLONE_CONTRACT_VERSION = 1
+VOICE_CLONE_PROVIDER_MODE = "mockContract"
+VOICE_CLONE_AUTHORIZATION_COPY = (
+    "声音克隆必须由用户主动授权，仅使用用户确认提交的声音样本；"
+    "未完成授权、样本质量和合规验收前不会公开训练或合成功能。"
+)
+VOICE_CLONE_DISABLE_CONTRACT = (
+    "disableVoiceProfile(profileId:) 应撤销该 voiceProfileId 的合成权限，"
+    "当前后端仅保存 mock 禁用状态。"
+)
+VOICE_CLONE_DELETE_CONTRACT = (
+    "deleteVoiceProfile(profileId:) 应删除样本、训练产物和关联授权记录，"
+    "当前后端保存 deleted tombstone 以便验收生命周期。"
+)
 
 
 def _request_backend_api_token(request: Request) -> str:
@@ -272,6 +287,88 @@ def _archive_media_upload_intent_payload(payload: Dict[str, Any]) -> Dict[str, A
     }
 
 
+def _safe_voice_profile_id(value: str, user_id: str) -> str:
+    candidate = _safe_object_segment(value, "")
+    if candidate:
+        return candidate[:96]
+    return f"voice_profile_{_safe_object_segment(user_id, 'user')}"
+
+
+def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = _required_text(payload, "userId", 96)
+    privacy_metadata = payload.get("privacyMetadata") or {}
+    if not isinstance(privacy_metadata, dict) or privacy_metadata.get("scope") not in {"generationAllowed", "familyCircle"}:
+        raise HTTPException(status_code=403, detail="voice clone profile requires syncable authorization scope")
+
+    authorization_confirmed = bool(payload.get("authorizationConfirmed"))
+    if not authorization_confirmed:
+        raise HTTPException(status_code=403, detail="authorizationConfirmed is required")
+
+    sample_status = str(payload.get("sampleStatus") or "notProvided").strip()
+    if sample_status not in VOICE_CLONE_SAMPLE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"unsupported sampleStatus: {sample_status}")
+
+    voice_profile_id = _safe_voice_profile_id(str(payload.get("voiceProfileId") or ""), user_id)
+    persona_scope = str(payload.get("personaScope") or "personal").strip()
+    if persona_scope not in {"personal", "family"}:
+        raise HTTPException(status_code=400, detail="unsupported personaScope")
+    digital_human_id = str(payload.get("digitalHumanId") or user_id).strip() or user_id
+
+    try:
+        sample_count = int(payload.get("sampleCount") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="sampleCount must be an integer")
+    sample_count = max(0, min(sample_count, 20))
+
+    now = datetime.now(timezone.utc).isoformat()
+    profile = {
+        "id": voice_profile_id,
+        "voiceProfileId": voice_profile_id,
+        "userId": user_id,
+        "personaScope": persona_scope,
+        "digitalHumanId": digital_human_id,
+        "sampleStatus": sample_status,
+        "sampleCount": sample_count,
+        "authorizationConfirmed": True,
+        "authorizationVersion": str(payload.get("authorizationVersion") or "voice-clone-consent-v1"),
+        "authorizationText": str(payload.get("authorizationText") or VOICE_CLONE_AUTHORIZATION_COPY)[:300],
+        "authorizationConfirmedAt": str(payload.get("authorizationConfirmedAt") or now),
+        "authorizationCopy": VOICE_CLONE_AUTHORIZATION_COPY,
+        "providerMode": VOICE_CLONE_PROVIDER_MODE,
+        "realCloneProviderReady": False,
+        "qualityAcceptanceRequired": True,
+        "isEnabled": sample_status == "ready",
+        "defaultReleaseVisible": False,
+        "contractVersion": VOICE_CLONE_CONTRACT_VERSION,
+        "disableContract": VOICE_CLONE_DISABLE_CONTRACT,
+        "deleteContract": VOICE_CLONE_DELETE_CONTRACT,
+        "updatedAt": now,
+        "privacyMetadata": {
+            "scope": privacy_metadata.get("scope"),
+        },
+    }
+    if "createdAt" in payload:
+        profile["createdAt"] = str(payload.get("createdAt") or now)
+    else:
+        profile["createdAt"] = now
+    return profile
+
+
+def _voice_profile_lifecycle_update(profile: Dict[str, Any], sample_status: str) -> Dict[str, Any]:
+    updated = dict(profile)
+    now = datetime.now(timezone.utc).isoformat()
+    updated["sampleStatus"] = sample_status
+    updated["isEnabled"] = False
+    updated["updatedAt"] = now
+    if sample_status == "disabled":
+        updated["disabledAt"] = now
+    if sample_status == "deleted":
+        updated["deletedAt"] = now
+        updated["deletionState"] = "deleted"
+        updated["sampleCount"] = 0
+    return updated
+
+
 @app.post("/profile")
 def save_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     profile = _sanitize_profile_payload(payload)
@@ -301,6 +398,38 @@ def realtime_token(payload: Dict[str, Any]) -> Dict[str, Any]:
         return TokenService(settings).realtime_config(user_id=user_id)
     except ValueError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/voice/profiles")
+def save_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
+    profile = _sanitize_voice_profile_payload(payload)
+    saved = store.save_voice_profile(profile["userId"], profile)
+    return {"status": "saved", "profile": saved}
+
+
+@app.get("/voice/profiles/{user_id}")
+def list_voice_profiles(user_id: str) -> Dict[str, Any]:
+    return {"userId": user_id, "profiles": store.list_voice_profiles(user_id)}
+
+
+@app.post("/voice/profiles/{user_id}/{voice_profile_id}/disable")
+def disable_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+    profile = store.get_voice_profile(user_id, voice_profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="voice profile not found")
+    disabled = _voice_profile_lifecycle_update(profile, "disabled")
+    saved = store.save_voice_profile(user_id, disabled)
+    return {"status": "disabled", "profile": saved}
+
+
+@app.delete("/voice/profiles/{user_id}/{voice_profile_id}")
+def delete_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+    profile = store.get_voice_profile(user_id, voice_profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="voice profile not found")
+    deleted = _voice_profile_lifecycle_update(profile, "deleted")
+    saved = store.save_voice_profile(user_id, deleted)
+    return {"status": "deleted", "profile": saved}
 
 
 @app.post("/tts")

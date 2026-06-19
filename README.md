@@ -8,6 +8,10 @@
 - `POST /auth/login`
 - `GET /config/runtime`
 - `POST /voice/realtime-token`
+- `POST /voice/profiles`
+- `GET /voice/profiles/{user_id}`
+- `POST /voice/profiles/{user_id}/{voice_profile_id}/disable`
+- `DELETE /voice/profiles/{user_id}/{voice_profile_id}`
 - `POST /tts`
 - `GET /maps/district`
 - `POST /kb/sync`
@@ -75,6 +79,7 @@ curl http://127.0.0.1:3100/health
 - `kb_snapshots`
 - `memories`
 - `archive_items`
+- `voice_profiles`
 - `family_members`
 
 如需本机临时无数据库调试，可设置：

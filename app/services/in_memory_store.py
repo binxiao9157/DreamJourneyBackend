@@ -18,6 +18,7 @@ class InMemoryStore:
         self._care_snapshots: Dict[str, List[Dict[str, Any]]] = {}
         self._echo_delayed_replies: Dict[str, List[Dict[str, Any]]] = {}
         self._push_device_tokens: Dict[str, List[Dict[str, Any]]] = {}
+        self._voice_profiles: Dict[str, List[Dict[str, Any]]] = {}
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
@@ -175,6 +176,28 @@ class InMemoryStore:
 
     def list_push_device_tokens(self, user_id: str) -> List[Dict[str, Any]]:
         return deepcopy(self._push_device_tokens.get(user_id, []))
+
+    def save_voice_profile(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(payload)
+        item["userId"] = user_id
+        item.setdefault("id", item.get("voiceProfileId") or f"voice_profile_{len(self._voice_profiles.get(user_id, [])) + 1}")
+        item.setdefault("voiceProfileId", item["id"])
+        item["updatedAt"] = self._now()
+
+        profiles = self._voice_profiles.setdefault(user_id, [])
+        profiles[:] = [profile for profile in profiles if profile.get("voiceProfileId") != item["voiceProfileId"]]
+        profiles.insert(0, item)
+        return deepcopy(item)
+
+    def list_voice_profiles(self, user_id: str) -> List[Dict[str, Any]]:
+        return deepcopy(self._voice_profiles.get(user_id, []))
+
+    def get_voice_profile(self, user_id: str, voice_profile_id: str) -> Optional[Dict[str, Any]]:
+        profiles = self._voice_profiles.get(user_id, [])
+        for profile in profiles:
+            if profile.get("voiceProfileId") == voice_profile_id:
+                return deepcopy(profile)
+        return None
 
     def add_family_member(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)

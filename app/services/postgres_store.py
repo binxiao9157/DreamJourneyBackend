@@ -93,6 +93,18 @@ class PostgresStore:
                 ON push_device_tokens(user_id, updated_at DESC)
             """,
             """
+            CREATE TABLE IF NOT EXISTS voice_profiles (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                payload JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_voice_profiles_user_updated
+                ON voice_profiles(user_id, updated_at DESC)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS profiles (
                 user_id TEXT PRIMARY KEY,
                 payload JSONB NOT NULL,
@@ -379,6 +391,48 @@ class PostgresStore:
             (user_id,),
         )
         return [deepcopy(row["payload"]) for row in rows]
+
+    def save_voice_profile(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(payload)
+        item["userId"] = user_id
+        item.setdefault("id", item.get("voiceProfileId") or f"voice_profile_{uuid.uuid4().hex}")
+        item.setdefault("voiceProfileId", item["id"])
+        item["updatedAt"] = self._now()
+        row = self._fetchone(
+            """
+            INSERT INTO voice_profiles (user_id, id, payload, updated_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (id) DO UPDATE SET
+                user_id = EXCLUDED.user_id,
+                payload = EXCLUDED.payload,
+                updated_at = NOW()
+            RETURNING payload
+            """,
+            (user_id, item["voiceProfileId"], item),
+            commit=True,
+        )
+        return deepcopy(row["payload"])
+
+    def list_voice_profiles(self, user_id: str) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT payload FROM voice_profiles
+            WHERE user_id = %s
+            ORDER BY updated_at DESC
+            """,
+            (user_id,),
+        )
+        return [deepcopy(row["payload"]) for row in rows]
+
+    def get_voice_profile(self, user_id: str, voice_profile_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT payload FROM voice_profiles
+            WHERE user_id = %s AND id = %s
+            """,
+            (user_id, voice_profile_id),
+        )
+        return None if row is None else deepcopy(row["payload"])
 
     def add_family_member(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = self._with_identity(payload, "family", user_id)

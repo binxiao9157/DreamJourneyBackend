@@ -1186,6 +1186,119 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
         self.assertEqual(invalid_trigger.status_code, 400)
 
 
+class VoiceCloneProfileAPITests(unittest.TestCase):
+    def test_voice_clone_profile_contract_requires_authorization_and_persists_lifecycle(self):
+        client = TestClient(app)
+        user_id = "voice_clone_contract_user"
+        voice_profile_id = "voice_profile_contract_1"
+
+        unauthorized = client.post(
+            "/voice/profiles",
+            json={
+                "userId": user_id,
+                "voiceProfileId": voice_profile_id,
+                "sampleStatus": "pending",
+                "authorizationConfirmed": False,
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        created = client.post(
+            "/voice/profiles",
+            json={
+                "userId": user_id,
+                "voiceProfileId": voice_profile_id,
+                "sampleStatus": "pending",
+                "sampleCount": 2,
+                "authorizationConfirmed": True,
+                "authorizationVersion": "voice-clone-consent-v1",
+                "authorizationText": "用户确认提交声音样本，仅用于家庭数字人声音壳层合同。",
+                "personaScope": "family",
+                "digitalHumanId": "family_default",
+                "rawSampleURL": "file:///private/var/mobile/voice/raw.m4a",
+                "sampleLocalPath": "/private/var/mobile/voice/raw.m4a",
+                "audioBase64": "RAW_SAMPLE_BASE64",
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        listed = client.get(f"/voice/profiles/{user_id}")
+        disabled = client.post(f"/voice/profiles/{user_id}/{voice_profile_id}/disable")
+        deleted = client.delete(f"/voice/profiles/{user_id}/{voice_profile_id}")
+        listed_after_delete = client.get(f"/voice/profiles/{user_id}")
+
+        self.assertEqual(unauthorized.status_code, 403)
+        self.assertEqual(created.status_code, 200)
+        profile = created.json()["profile"]
+        self.assertEqual(created.json()["status"], "saved")
+        self.assertEqual(profile["userId"], user_id)
+        self.assertEqual(profile["voiceProfileId"], voice_profile_id)
+        self.assertEqual(profile["sampleStatus"], "pending")
+        self.assertEqual(profile["sampleCount"], 2)
+        self.assertTrue(profile["authorizationConfirmed"])
+        self.assertEqual(profile["authorizationVersion"], "voice-clone-consent-v1")
+        self.assertEqual(profile["personaScope"], "family")
+        self.assertEqual(profile["digitalHumanId"], "family_default")
+        self.assertFalse(profile["isEnabled"])
+        self.assertFalse(profile["realCloneProviderReady"])
+        self.assertEqual(profile["providerMode"], "mockContract")
+        self.assertEqual(profile["contractVersion"], 1)
+        self.assertIn("disableVoiceProfile", profile["disableContract"])
+        self.assertIn("deleteVoiceProfile", profile["deleteContract"])
+        self.assertNotIn("rawSampleURL", profile)
+        self.assertNotIn("sampleLocalPath", profile)
+        self.assertNotIn("audioBase64", profile)
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["profiles"][0]["voiceProfileId"], voice_profile_id)
+        self.assertEqual(disabled.status_code, 200)
+        disabled_profile = disabled.json()["profile"]
+        self.assertEqual(disabled.json()["status"], "disabled")
+        self.assertEqual(disabled_profile["sampleStatus"], "disabled")
+        self.assertFalse(disabled_profile["isEnabled"])
+        self.assertIn("disabledAt", disabled_profile)
+
+        self.assertEqual(deleted.status_code, 200)
+        deleted_profile = deleted.json()["profile"]
+        self.assertEqual(deleted.json()["status"], "deleted")
+        self.assertEqual(deleted_profile["sampleStatus"], "deleted")
+        self.assertEqual(deleted_profile["deletionState"], "deleted")
+        self.assertFalse(deleted_profile["isEnabled"])
+        self.assertIn("deletedAt", deleted_profile)
+        matching = [
+            item for item in listed_after_delete.json()["profiles"]
+            if item.get("voiceProfileId") == voice_profile_id
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["sampleStatus"], "deleted")
+
+    def test_voice_clone_profile_contract_rejects_unsupported_status_and_local_only(self):
+        client = TestClient(app)
+
+        unsupported = client.post(
+            "/voice/profiles",
+            json={
+                "userId": "voice_clone_invalid_user",
+                "voiceProfileId": "voice_profile_invalid_status",
+                "sampleStatus": "training",
+                "authorizationConfirmed": True,
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        local_only = client.post(
+            "/voice/profiles",
+            json={
+                "userId": "voice_clone_local_only_user",
+                "voiceProfileId": "voice_profile_local_only",
+                "sampleStatus": "pending",
+                "authorizationConfirmed": True,
+                "privacyMetadata": {"scope": "localOnly"},
+            },
+        )
+
+        self.assertEqual(unsupported.status_code, 400)
+        self.assertIn("unsupported sampleStatus", unsupported.text)
+        self.assertEqual(local_only.status_code, 403)
+
+
 class ArchiveAPITests(unittest.TestCase):
     def test_archive_items_api_saves_sanitized_metadata_and_lists_by_user(self):
         client = TestClient(app)

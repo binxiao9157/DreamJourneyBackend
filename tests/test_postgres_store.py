@@ -57,6 +57,16 @@ class FakeCursor:
         elif normalized.startswith("SELECT payload FROM push_device_tokens"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.push_device_tokens.get(user_id, [])]
+        elif normalized.startswith("SELECT payload FROM voice_profiles WHERE user_id = %s AND id = %s"):
+            user_id, voice_profile_id = params
+            profiles = [
+                item for item in self.connection.voice_profiles.get(user_id, [])
+                if item.get("voiceProfileId") == voice_profile_id
+            ]
+            self.result = None if not profiles else {"payload": profiles[0]}
+        elif normalized.startswith("SELECT payload FROM voice_profiles"):
+            user_id = params[0]
+            self.result = [{"payload": item} for item in self.connection.voice_profiles.get(user_id, [])]
         elif normalized.startswith("SELECT payload FROM profiles"):
             user_id = params[0]
             profile = self.connection.profiles.get(user_id)
@@ -160,6 +170,13 @@ class FakeCursor:
             tokens[:] = [item for item in tokens if item.get("id") != item_id]
             tokens.insert(0, dict(payload))
             self.result = {"payload": payload}
+        elif normalized.startswith("INSERT INTO voice_profiles"):
+            user_id, item_id, payload = params
+            payload = unwrap_jsonb(payload)
+            profiles = self.connection.voice_profiles.setdefault(user_id, [])
+            profiles[:] = [item for item in profiles if item.get("voiceProfileId") != item_id]
+            profiles.insert(0, dict(payload))
+            self.result = {"payload": payload}
         elif normalized.startswith("INSERT INTO profiles"):
             user_id, payload = params
             payload = unwrap_jsonb(payload)
@@ -212,6 +229,7 @@ class FakeConnection:
         self.mailbox_letters = {}
         self.echo_delayed_replies = {}
         self.push_device_tokens = {}
+        self.voice_profiles = {}
         self.profiles = {}
         self.password_credentials = {}
         self.family_members = {}
@@ -404,6 +422,47 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(revoked["invitationStatus"], "revoked")
         self.assertFalse(revoked["isOnline"])
         self.assertEqual(store.list_family_members("u1")[0]["accessStatus"], "revoked")
+
+    def test_store_persists_voice_profiles_disable_and_delete_states(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        profile = store.save_voice_profile(
+            "u1",
+            {
+                "voiceProfileId": "voice_profile_1",
+                "sampleStatus": "pending",
+                "authorizationConfirmed": True,
+            },
+        )
+        disabled = store.save_voice_profile(
+            "u1",
+            {
+                **profile,
+                "sampleStatus": "disabled",
+                "isEnabled": False,
+                "disabledAt": "2026-06-19T00:00:00+00:00",
+            },
+        )
+        deleted = store.save_voice_profile(
+            "u1",
+            {
+                **disabled,
+                "sampleStatus": "deleted",
+                "deletionState": "deleted",
+                "deletedAt": "2026-06-19T00:01:00+00:00",
+            },
+        )
+        listed = store.list_voice_profiles("u1")
+        fetched = store.get_voice_profile("u1", "voice_profile_1")
+
+        self.assertEqual(profile["voiceProfileId"], "voice_profile_1")
+        self.assertEqual(disabled["sampleStatus"], "disabled")
+        self.assertEqual(deleted["sampleStatus"], "deleted")
+        self.assertEqual(deleted["deletionState"], "deleted")
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["sampleStatus"], "deleted")
+        self.assertEqual(fetched["voiceProfileId"], "voice_profile_1")
 
     def test_store_persists_echo_delayed_replies_by_user(self):
         connection = FakeConnection()
