@@ -1345,6 +1345,49 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(listed.json()["items"][0]["id"], "archive-video-1")
         self.assertNotIn("rawVideoURL", listed.json()["items"][0])
 
+    def test_archive_items_api_persists_time_letter_shell_contract(self):
+        client = TestClient(app)
+
+        created = client.post(
+            "/archive/items",
+            json={
+                "userId": "archive_time_letter_user",
+                "ownerUserId": "archive_time_letter_user",
+                "id": "archive-time-letter-1",
+                "kind": "timeLetter",
+                "title": "写给未来的一封信",
+                "note": "这段正文只在客户端壳层使用。",
+                "analysisStatus": "manual",
+                "deliveryState": "sealed",
+                "deliveryPolicy": "pending_product_decision",
+                "metadata": {
+                    "contentKind": "time_letter",
+                    "deliveryState": "sealed",
+                    "timeLetterStatus": "sealed",
+                    "deliveryPolicy": "pending_product_decision",
+                    "deliveryDecisionRequired": "true",
+                    "localPath": "/private/var/mobile/time-letter.txt",
+                },
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        listed = client.get("/archive/items/archive_time_letter_user")
+
+        self.assertEqual(created.status_code, 200)
+        item = created.json()["item"]
+        self.assertEqual(item["kind"], "timeLetter")
+        self.assertEqual(item["analysisStatus"], "manual")
+        self.assertEqual(item["deliveryState"], "sealed")
+        self.assertEqual(item["deliveryPolicy"], "pending_product_decision")
+        self.assertEqual(item["metadata"]["deliveryState"], "sealed")
+        self.assertEqual(item["metadata"]["timeLetterStatus"], "sealed")
+        self.assertEqual(item["metadata"]["deliveryPolicy"], "pending_product_decision")
+        self.assertEqual(item["metadata"]["deliveryDecisionRequired"], "true")
+        self.assertEqual(item["metadataOnly"], True)
+        self.assertNotIn("localPath", item["metadata"])
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["items"][0]["id"], "archive-time-letter-1")
+
     def test_archive_items_api_persists_structured_analysis_contract(self):
         client = TestClient(app)
 
