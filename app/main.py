@@ -27,7 +27,7 @@ from app.services.passwords import make_password_credential, verify_password
 from app.services.runtime_config import RuntimeConfigService
 from app.services.store_factory import init_store, make_store
 from app.services.tokens import TokenService
-from app.services.tts import VolcTTSProxy
+from app.services.tts import VolcTTSProxy, VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, VoiceCloneProviderUnavailable
 from app.services.user_identity import stable_user_id
 
@@ -527,6 +527,45 @@ def refresh_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]
     refreshed = _voice_profile_refresh_update(profile)
     saved = store.save_voice_profile(user_id, refreshed)
     return {"status": "refreshed", "profile": saved}
+
+
+@app.post("/voice/synthesis")
+def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = _required_text(payload, "userId", 96)
+    voice_profile_id = _required_text(payload, "voiceProfileId", 96)
+    text = _required_text(payload, "text", 4000)
+    audio_format = str(payload.get("format") or "mp3").strip() or "mp3"
+    sample_rate = int(payload.get("sampleRate") or 24000)
+    speech_rate = int(payload.get("speechRate") or -10)
+    loudness_rate = int(payload.get("loudnessRate") or 10)
+
+    provider = VoiceCloneTTSProviderFactory(settings).make()
+    if not provider.is_configured:
+        raise HTTPException(status_code=503, detail="voice clone TTS provider is not configured")
+    try:
+        result = provider.synthesize(
+            text=text,
+            user_id=user_id,
+            voice_profile_id=voice_profile_id,
+            audio_format=audio_format,
+            sample_rate=sample_rate,
+            speech_rate=speech_rate,
+            loudness_rate=loudness_rate,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return {
+        "status": "synthesized",
+        "voiceProfileId": result["voiceProfileId"],
+        "providerMode": result["providerMode"],
+        "audio": {
+            "encoding": "base64",
+            "format": result["audioFormat"],
+            "data": result["audioBase64"],
+            "byteCount": result["byteCount"],
+        },
+    }
 
 
 @app.delete("/voice/profiles/{user_id}/{voice_profile_id}")

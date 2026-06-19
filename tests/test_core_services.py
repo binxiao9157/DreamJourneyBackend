@@ -14,7 +14,7 @@ from app.services.privacy import filter_syncable_graph, sanitize_care_snapshot_p
 from app.services.runtime_config import RuntimeConfigService
 from app.services.store_factory import make_store
 from app.services.tokens import TokenService
-from app.services.tts import VolcTTSProxy
+from app.services.tts import VolcTTSProxy, VolcVoiceCloneTTSProxy
 from app.services.voice_clone import VolcEngineVoiceCloneV3Provider
 from app.services.amap import AMapDistrictProxy
 from app.services.deepseek import DeepSeekImageAnalysisProxy, DeepSeekKnowledgeExtractionProxy
@@ -185,6 +185,9 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertTrue(config["capabilities"]["deepseekProxy"])
         self.assertTrue(config["capabilities"]["ttsProxy"])
         self.assertEqual(config["voice"]["voiceType"], "zh_female_cancan_mars_bigtts")
+        voice_clone = config["voiceClone"]
+        self.assertEqual(voice_clone["synthesisEndpoint"], "/voice/synthesis")
+        self.assertFalse(voice_clone["synthesisProviderReady"])
         archive = config["archive"]
         self.assertEqual(archive["storageProvider"], "mockObjectStorage")
         self.assertEqual(archive["providerDisplayName"], "Mock Object Storage")
@@ -271,6 +274,82 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(request["headers"]["x-api-key"], "volc-secret")
         self.assertEqual(request["json"]["audio"]["voice_type"], "speaker-id")
         self.assertEqual(request["json"]["request"]["text"], "你好")
+
+    def test_voice_clone_tts_proxy_builds_v3_request_and_parses_audio_chunks(self):
+        settings = Settings(
+            volcengine_voice_clone_api_key="voice-clone-secret",
+            volcengine_voice_clone_tts_url="https://example.com/tts/unidirectional",
+            volcengine_voice_clone_tts_resource_id="seed-icl-1.0",
+        )
+        proxy = VolcVoiceCloneTTSProxy(settings)
+
+        request = proxy.build_synthesis_request(
+            text="你好，欢迎回家。",
+            user_id="u1",
+            voice_profile_id="S_voice_001",
+            audio_format="mp3",
+            sample_rate=24000,
+            speech_rate=-10,
+            loudness_rate=10,
+        )
+        chunked_payload = "\n".join([
+            '{"code":0,"message":"","data":"5L2g"}',
+            '{"code":0,"message":"","data":"5aW9"}',
+            '{"code":20000000,"message":"ok","data":null}',
+        ])
+
+        audio = proxy.parse_chunked_audio_response(chunked_payload)
+
+        self.assertEqual(request["url"], "https://example.com/tts/unidirectional")
+        self.assertEqual(request["headers"]["X-Api-Key"], "voice-clone-secret")
+        self.assertEqual(request["headers"]["X-Api-Resource-Id"], "seed-icl-1.0")
+        self.assertEqual(request["json"]["user"]["uid"], "u1")
+        self.assertEqual(request["json"]["req_params"]["text"], "你好，欢迎回家。")
+        self.assertEqual(request["json"]["req_params"]["speaker"], "S_voice_001")
+        self.assertEqual(request["json"]["req_params"]["audio_params"]["format"], "mp3")
+        self.assertEqual(request["json"]["req_params"]["audio_params"]["sample_rate"], 24000)
+        self.assertEqual(request["json"]["req_params"]["audio_params"]["speech_rate"], -10)
+        self.assertEqual(request["json"]["req_params"]["audio_params"]["loudness_rate"], 10)
+        self.assertEqual(audio, "你好".encode("utf-8"))
+
+    def test_voice_clone_synthesis_endpoint_returns_base64_audio_without_exposing_provider_key(self):
+        class FakeVoiceCloneTTSProvider:
+            provider_mode = "volcengineVoiceCloneV3TTS"
+            is_configured = True
+
+            def synthesize(self, *, text, user_id, voice_profile_id, audio_format, sample_rate, speech_rate, loudness_rate):
+                return {
+                    "audioBase64": "U09VTkQ=",
+                    "audioFormat": audio_format,
+                    "byteCount": 5,
+                    "providerMode": self.provider_mode,
+                    "voiceProfileId": voice_profile_id,
+                }
+
+        with patch("app.main.VoiceCloneTTSProviderFactory") as factory:
+            factory.return_value.make.return_value = FakeVoiceCloneTTSProvider()
+            response = TestClient(app).post(
+                "/voice/synthesis",
+                json={
+                    "userId": "u1",
+                    "voiceProfileId": "S_voice_001",
+                    "text": "你好，欢迎回家。",
+                    "format": "mp3",
+                    "sampleRate": 24000,
+                    "speechRate": -10,
+                    "loudnessRate": 10,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "synthesized")
+        self.assertEqual(payload["voiceProfileId"], "S_voice_001")
+        self.assertEqual(payload["audio"]["data"], "U09VTkQ=")
+        self.assertEqual(payload["audio"]["format"], "mp3")
+        self.assertEqual(payload["providerMode"], "volcengineVoiceCloneV3TTS")
+        self.assertNotIn("X-Api-Key", response.text)
+        self.assertNotIn("voice-clone-secret", response.text)
 
     def test_amap_proxy_adds_server_side_key(self):
         settings = Settings(amap_web_service_key="amap-secret")

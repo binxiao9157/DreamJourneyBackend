@@ -13,6 +13,7 @@
 - `POST /voice/profiles/{user_id}/{voice_profile_id}/disable`
 - `POST /voice/profiles/{user_id}/{voice_profile_id}/refresh`
 - `DELETE /voice/profiles/{user_id}/{voice_profile_id}`
+- `POST /voice/synthesis`
 - `POST /tts`
 - `GET /maps/district`
 - `POST /kb/sync`

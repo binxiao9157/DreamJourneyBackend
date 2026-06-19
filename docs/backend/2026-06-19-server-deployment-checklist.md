@@ -8,10 +8,11 @@
 
 本次服务器部署目标是让线上后端包含以下能力：
 
-- 后端 `main` 至少包含提交 `0752b07 feat: proxy voice clone provider through backend`
+- 后端 `main` 至少包含提交 `0752b07 feat: proxy voice clone provider through backend`，并包含后续 `/voice/synthesis` 复刻音色 TTS 代理提交
 - `/config/runtime` 暴露 `voiceClone` 能力公告
 - `/voice/profiles` 由后端代理火山声音复刻 V3 训练，不让 iOS 直连火山复刻 API
 - `/voice/profiles/{user_id}/{voice_profile_id}/refresh` 查询声音复刻训练状态
+- `/voice/synthesis` 由后端代理复刻音色 TTS 合成，不让 iOS 直连火山合成 API 或持有合成密钥
 - `.env` 中配置火山实时语音、火山声音复刻、DeepSeek、高德、后端访问 token
 
 ## 2. 部署前确认
@@ -119,6 +120,8 @@ VOLCENGINE_REALTIME_URI=/api/v3/realtime/dialogue
 VOLCENGINE_VOICE_CLONE_API_KEY=<volcengine voice clone v3 api key>
 VOLCENGINE_VOICE_CLONE_TRAIN_URL=https://openspeech.bytedance.com/api/v3/tts/voice_clone
 VOLCENGINE_VOICE_CLONE_QUERY_URL=https://openspeech.bytedance.com/api/v3/tts/get_voice
+VOLCENGINE_VOICE_CLONE_TTS_URL=https://openspeech.bytedance.com/api/v3/tts/unidirectional
+VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID=seed-icl-1.0
 
 AMAP_WEB_SERVICE_KEY=<amap web service key>
 ```
@@ -220,6 +223,8 @@ curl -s "$DJ_API/config/runtime" \
     "realProviderReady": true,
     "trainEndpoint": "/voice/profiles",
     "queryEndpoint": "/voice/profiles/{user_id}/{voice_profile_id}/refresh",
+    "synthesisEndpoint": "/voice/synthesis",
+    "synthesisProviderReady": true,
     "defaultReleaseVisible": false
   }
 }
@@ -297,6 +302,38 @@ curl -s "$DJ_API/voice/profiles/voice_clone_acceptance_user/voice_profile_accept
   | python3 -m json.tool
 ```
 
+复刻音色 TTS 合成验证需要使用已训练成功的 `voiceProfileId`。该请求会真实调用火山合成接口并可能消耗额度，因此不要使用假 `voiceProfileId` 做线上验收。
+
+```bash
+tmp_voice_synthesis_response="$(mktemp)"
+curl -s "$DJ_API/voice/synthesis" \
+  -H "Authorization: Bearer $DJ_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "userId": "voice_clone_acceptance_user",
+    "voiceProfileId": "<ready voiceProfileId>",
+    "text": "你好，欢迎回家。",
+    "format": "mp3",
+    "sampleRate": 24000,
+    "speechRate": -10,
+    "loudnessRate": 10
+  }' > "$tmp_voice_synthesis_response"
+python3 - "$tmp_voice_synthesis_response" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+print({
+    "status": payload.get("status"),
+    "voiceProfileId": payload.get("voiceProfileId"),
+    "providerMode": payload.get("providerMode"),
+    "audioFormat": payload.get("audio", {}).get("format"),
+    "byteCount": payload.get("audio", {}).get("byteCount"),
+    "hasAudioData": bool(payload.get("audio", {}).get("data")),
+})
+PY
+rm -f "$tmp_voice_synthesis_response"
+```
+
 ## 10. 后端本地测试命令
 
 服务器容器内可跑：
@@ -322,7 +359,7 @@ DreamJourneyBackendBaseURL=https://dreamjourney-api.liftora.cn
 DreamJourneyBackendAPIToken=<BACKEND_API_TOKEN>
 ```
 
-iOS 不再需要配置火山声音复刻训练/查询 API Key。声音复刻训练和查询统一走后端。
+iOS 不再需要配置火山声音复刻训练/查询/合成 API Key。声音复刻训练、查询和复刻音色 TTS 合成统一走后端。
 
 ## 12. 回滚方案
 
@@ -357,10 +394,11 @@ sudo docker compose up -d --build
 
 满足以下条件才算部署完成：
 
-- 服务器 `git log -1 --oneline` 显示 `0752b07` 或更新提交
+- 服务器 `git log -1 --oneline` 显示包含 `/voice/synthesis` 的更新提交
 - `docker compose ps` 中 `api`、`postgres`、`redis` 正常运行
 - `/health` 返回 `200`，且 `store=postgres`
 - `/config/runtime` 返回 `voiceClone.provider=volcengineVoiceCloneV3`
 - `/config/runtime` 返回 `voiceClone.realProviderReady=true`
+- `/config/runtime` 返回 `voiceClone.synthesisEndpoint=/voice/synthesis` 和 `voiceClone.synthesisProviderReady=true`
 - `/voice/realtime-token` 返回可用实时语音配置
-- iOS 端声音复刻训练/查询不再直连火山 API
+- iOS 端声音复刻训练/查询/合成不再直连火山 API

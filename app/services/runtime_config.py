@@ -60,6 +60,8 @@ class RuntimeConfigService:
                 "realProviderReady": voice_clone_provider.is_configured,
                 "trainEndpoint": "/voice/profiles",
                 "queryEndpoint": "/voice/profiles/{user_id}/{voice_profile_id}/refresh",
+                "synthesisEndpoint": "/voice/synthesis",
+                "synthesisProviderReady": voice_clone_provider.is_configured,
                 "requiresAuthorization": True,
                 "qualityAcceptanceRequired": True,
                 "defaultReleaseVisible": False,
