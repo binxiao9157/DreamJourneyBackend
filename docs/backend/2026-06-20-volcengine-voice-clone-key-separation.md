@@ -183,6 +183,7 @@ curl -sS "$BACKEND_BASE_URL/config/runtime" \
 
 - `realProviderReady`：声音复刻训练/查询 provider 是否可用。
 - `synthesisProviderReady`：复刻音色 TTS 合成 provider 是否可用。
+- `lipSyncTimeline`：复刻音色 TTS 可选口型时间轴合同。当前 `supported=false`，表示现有火山 HTTP TTS 链路不保证返回真实 phoneme/viseme 时间戳；iOS 应继续用播放器音量 metering 作为数字人口型降级。未来 provider 如果返回 `visemeTimeline`，后端会清洗并随 `/voice/synthesis` 原样回传给 iOS。
 
 再验证无音频合同链路：
 
@@ -192,6 +193,21 @@ python3 scripts/backend-family-voice-contract-smoke.py
 ```
 
 最后用真实授权音频样本验证训练，用已训练成功的 `voiceProfileId` 验证 `/voice/synthesis`。如果只是用随机 `voiceProfileId`，上游返回“speaker/resource 不匹配”是合理失败，不代表真实训练链路失败。
+
+`/voice/synthesis` 响应中的 `visemeTimeline` 是可选字段，格式如下。当前 provider 不返回时该字段为 `null`。
+
+```json
+{
+  "visemeTimeline": {
+    "source": "providerVisemeTimeline",
+    "duration": 1.2,
+    "frames": [
+      {"timeOffset": 0.0, "mouthShape": "neutral", "intensity": 0.1},
+      {"timeOffset": 0.12, "mouthShape": "aa", "intensity": 0.85}
+    ]
+  }
+}
+```
 
 如果训练或查询失败，后端会在 voice profile 合同中返回并持久化：
 

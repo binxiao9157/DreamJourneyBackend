@@ -577,6 +577,7 @@ def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         "status": "synthesized",
         "voiceProfileId": result["voiceProfileId"],
         "providerMode": result["providerMode"],
+        "visemeTimeline": result.get("visemeTimeline"),
         "audio": {
             "encoding": "base64",
             "format": result["audioFormat"],

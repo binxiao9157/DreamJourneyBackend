@@ -70,6 +70,13 @@ class RuntimeConfigService:
                 "speakerIdMode": self.settings.volcengine_voice_clone_speaker_id_mode,
                 "consoleSpeakerIdConfigured": bool(self.settings.volcengine_voice_clone_speaker_id),
                 "fallbackMode": "hiddenContract" if not voice_clone_provider.is_configured else "providerV3",
+                "lipSyncTimeline": {
+                    "field": "visemeTimeline",
+                    "source": "providerOptional",
+                    "supported": False,
+                    "fallbackMode": "avAudioPlayerMetering",
+                    "contractVersion": 1,
+                },
                 "contractVersion": 1,
             },
             "privacy": {

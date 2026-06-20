@@ -536,7 +536,8 @@ sudo docker compose up -d --build
 - `/config/runtime` 带 token 后返回能力开关，`realtimeToken=true`。
 - `/config/runtime` 带 token 后返回 `voiceClone.provider=volcengineVoiceCloneV3` 且 `voiceClone.realProviderReady=true`。
 - `/config/runtime` 带 token 后返回 `voiceClone.synthesisEndpoint=/voice/synthesis` 且 `voiceClone.synthesisProviderReady=true`。
+- `/config/runtime` 带 token 后返回 `voiceClone.lipSyncTimeline.field=visemeTimeline`；当前 `supported=false` 代表 TTS provider 尚未承诺真实 phoneme/viseme 时间戳，iOS 应使用播放器音量 metering 降级。
 - `/voice/realtime-token` 带 token 后返回 `authMode=legacy`，且 `hasAppToken=True`。
 - `/voice/profiles` 在带授权与声音样本时由后端代理火山声音复刻 V3；返回结果不应包含 `audioBase64`、`rawSampleURL` 或本地样本路径。
-- `/voice/synthesis` 使用已训练成功的 `voiceProfileId` 由后端代理 `/api/v1/tts` 复刻音色 TTS；响应不得包含火山 `X-Api-Key`、`x-api-key` 或上游请求头。
+- `/voice/synthesis` 使用已训练成功的 `voiceProfileId` 由后端代理 `/api/v1/tts` 复刻音色 TTS；响应可包含可选 `visemeTimeline`，不得包含火山 `X-Api-Key`、`x-api-key` 或上游请求头。
 - iOS 真机配置 `DreamJourneyBackendBaseURL` 和 `DreamJourneyBackendAPIToken` 后，不再因新电脑缺本地火山实时语音三件套而提示“语音服务暂不可用”。

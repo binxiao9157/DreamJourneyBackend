@@ -190,6 +190,16 @@ class RuntimeConfigTests(unittest.TestCase):
         voice_clone = config["voiceClone"]
         self.assertEqual(voice_clone["synthesisEndpoint"], "/voice/synthesis")
         self.assertFalse(voice_clone["synthesisProviderReady"])
+        self.assertEqual(
+            voice_clone["lipSyncTimeline"],
+            {
+                "field": "visemeTimeline",
+                "source": "providerOptional",
+                "supported": False,
+                "fallbackMode": "avAudioPlayerMetering",
+                "contractVersion": 1,
+            },
+        )
         archive = config["archive"]
         self.assertEqual(archive["storageProvider"], "mockObjectStorage")
         self.assertEqual(archive["providerDisplayName"], "Mock Object Storage")
@@ -313,6 +323,16 @@ class TokenAndProxyTests(unittest.TestCase):
             loudness_rate=10,
         )
         audio = proxy.parse_tts_response({"code": 3000, "message": "Success", "data": "U09VTkQ="})
+        timeline = proxy.parse_viseme_timeline(
+            {
+                "duration": 0.48,
+                "frames": [
+                    {"timeOffset": 0.24, "mouthShape": "oo", "intensity": 1.4},
+                    {"timeOffset": 0.0, "mouthShape": "neutral", "intensity": 0.1},
+                    {"timeOffset": 0.12, "mouthShape": "aa", "intensity": -0.2},
+                ],
+            }
+        )
 
         self.assertEqual(request["url"], "https://example.com/api/v1/tts")
         self.assertEqual(request["headers"]["x-api-key"], "voice-clone-tts-secret")
@@ -326,6 +346,16 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(request["json"]["request"]["text"], "你好，欢迎回家。")
         self.assertEqual(request["json"]["request"]["operation"], "query")
         self.assertEqual(audio, b"SOUND")
+        self.assertEqual(timeline["source"], "providerVisemeTimeline")
+        self.assertEqual(timeline["duration"], 0.48)
+        self.assertEqual(
+            timeline["frames"],
+            [
+                {"timeOffset": 0.0, "mouthShape": "neutral", "intensity": 0.1},
+                {"timeOffset": 0.12, "mouthShape": "aa", "intensity": 0.0},
+                {"timeOffset": 0.24, "mouthShape": "oo", "intensity": 1.0},
+            ],
+        )
 
     def test_voice_clone_synthesis_endpoint_returns_base64_audio_without_exposing_provider_key(self):
         class FakeVoiceCloneTTSProvider:
@@ -339,6 +369,14 @@ class TokenAndProxyTests(unittest.TestCase):
                     "byteCount": 5,
                     "providerMode": self.provider_mode,
                     "voiceProfileId": voice_profile_id,
+                    "visemeTimeline": {
+                        "source": "providerVisemeTimeline",
+                        "duration": 0.36,
+                        "frames": [
+                            {"timeOffset": 0.0, "mouthShape": "neutral", "intensity": 0.1},
+                            {"timeOffset": 0.18, "mouthShape": "aa", "intensity": 0.85},
+                        ],
+                    },
                 }
 
         with patch("app.main.VoiceCloneTTSProviderFactory") as factory:
@@ -363,6 +401,8 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(payload["audio"]["data"], "U09VTkQ=")
         self.assertEqual(payload["audio"]["format"], "mp3")
         self.assertEqual(payload["providerMode"], "volcengineVoiceCloneV1TTS")
+        self.assertEqual(payload["visemeTimeline"]["source"], "providerVisemeTimeline")
+        self.assertEqual(payload["visemeTimeline"]["frames"][1]["mouthShape"], "aa")
         self.assertNotIn("X-Api-Key", response.text)
         self.assertNotIn("voice-clone-secret", response.text)
 

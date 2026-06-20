@@ -3,7 +3,7 @@ import uuid
 import json
 import urllib.error
 import urllib.request
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.core.config import Settings
 
@@ -194,12 +194,16 @@ class VolcVoiceCloneTTSProxy:
             raise ValueError("voice clone TTS provider returned invalid JSON") from exc
 
         audio = self.parse_tts_response(response_json)
+        viseme_timeline = self.parse_viseme_timeline(
+            response_json.get("visemeTimeline") or response_json.get("lipSyncTimeline")
+        )
         return {
             "audioBase64": base64.b64encode(audio).decode("ascii"),
             "audioFormat": audio_format,
             "byteCount": len(audio),
             "providerMode": self.provider_mode,
             "voiceProfileId": voice_profile_id,
+            "visemeTimeline": viseme_timeline,
         }
 
     def parse_tts_response(self, payload: Dict[str, Any]) -> bytes:
@@ -215,6 +219,57 @@ class VolcVoiceCloneTTSProxy:
             return base64.b64decode(str(data))
         except ValueError as exc:
             raise ValueError("voice clone TTS provider returned invalid base64 audio") from exc
+
+    def parse_viseme_timeline(self, payload: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return None
+
+        raw_frames = payload.get("frames")
+        if not isinstance(raw_frames, list):
+            return None
+
+        frames = []
+        for item in raw_frames:
+            if not isinstance(item, dict):
+                continue
+            try:
+                time_offset = float(item.get("timeOffset"))
+            except (TypeError, ValueError):
+                continue
+            if time_offset < 0:
+                continue
+
+            mouth_shape = str(item.get("mouthShape") or item.get("viseme") or "neutral").strip()[:32]
+            if not mouth_shape:
+                mouth_shape = "neutral"
+            try:
+                intensity = float(item.get("intensity") if item.get("intensity") is not None else 0)
+            except (TypeError, ValueError):
+                intensity = 0
+            intensity = max(0.0, min(1.0, intensity))
+            frames.append(
+                {
+                    "timeOffset": round(time_offset, 3),
+                    "mouthShape": mouth_shape,
+                    "intensity": round(intensity, 3),
+                }
+            )
+
+        if not frames:
+            return None
+
+        frames.sort(key=lambda frame: frame["timeOffset"])
+        try:
+            duration = float(payload.get("duration") or payload.get("durationSeconds"))
+        except (TypeError, ValueError):
+            duration = frames[-1]["timeOffset"] + 0.12
+        duration = max(0.0, duration, frames[-1]["timeOffset"])
+
+        return {
+            "source": str(payload.get("source") or "providerVisemeTimeline"),
+            "duration": round(duration, 3),
+            "frames": frames,
+        }
 
     def parse_chunked_audio_response(self, payload: str) -> bytes:
         audio = bytearray()
