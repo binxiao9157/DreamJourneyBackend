@@ -2,6 +2,7 @@ from typing import Any, Dict
 
 from app.core.config import Settings
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
+from app.services.tts import VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory
 
 
@@ -12,6 +13,7 @@ class RuntimeConfigService:
     def public_config(self) -> Dict[str, Any]:
         archive_image_analysis = ArchiveImageAnalysisProviderFactory(self.settings).make()
         voice_clone_provider = VoiceCloneProviderFactory(self.settings).make()
+        voice_clone_tts_provider = VoiceCloneTTSProviderFactory(self.settings).make()
         return {
             "environment": self.settings.environment,
             "baseURL": self.settings.public_base_url,
@@ -61,7 +63,7 @@ class RuntimeConfigService:
                 "trainEndpoint": "/voice/profiles",
                 "queryEndpoint": "/voice/profiles/{user_id}/{voice_profile_id}/refresh",
                 "synthesisEndpoint": "/voice/synthesis",
-                "synthesisProviderReady": voice_clone_provider.is_configured,
+                "synthesisProviderReady": voice_clone_tts_provider.is_configured,
                 "requiresAuthorization": True,
                 "qualityAcceptanceRequired": True,
                 "defaultReleaseVisible": False,

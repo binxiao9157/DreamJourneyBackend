@@ -37,7 +37,10 @@ class VolcEngineVoiceCloneV3Provider:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.settings.volcengine_voice_clone_api_key)
+        return bool(
+            self.settings.volcengine_voice_clone_api_key
+            or (self.settings.volcengine_app_id and self.settings.volcengine_app_token)
+        )
 
     def build_training_request(
         self,
@@ -56,15 +59,14 @@ class VolcEngineVoiceCloneV3Provider:
             "url": self.settings.volcengine_voice_clone_train_url,
             "headers": self._headers(api_key),
             "json": {
-                "speaker_id": "custom_speaker_id",
-                "custom_speaker_id": voice_profile_id,
+                "speaker_id": "",
                 "audio": {
                     "data": audio_base64,
                     "format": audio_format or "wav",
                 },
                 "language": language,
                 "extra_params": {
-                    "enable_audio_denoise": True,
+                    "voice_clone_denoise_model_id": "",
                 },
             },
         }
@@ -104,17 +106,23 @@ class VolcEngineVoiceCloneV3Provider:
 
     def _required_api_key(self) -> str:
         api_key = self.settings.volcengine_voice_clone_api_key
-        if not api_key:
-            raise VoiceCloneProviderUnavailable("VolcEngine voice clone API key is not configured")
-        return api_key
+        if api_key:
+            return api_key
+        if self.settings.volcengine_app_id and self.settings.volcengine_app_token:
+            return ""
+        raise VoiceCloneProviderUnavailable("VolcEngine voice clone API key is not configured")
 
     def _headers(self, api_key: str) -> Dict[str, str]:
-        return {
+        headers = {
             "Content-Type": "application/json",
-            "X-Api-Key": api_key,
             "X-Api-Request-Id": str(uuid.uuid4()),
-            "X-Api-Resource-Id": self.settings.volcengine_voice_clone_resource_id,
         }
+        if self.settings.volcengine_app_id and self.settings.volcengine_app_token:
+            headers["X-Api-App-Key"] = self.settings.volcengine_app_id
+            headers["X-Api-Access-Key"] = self.settings.volcengine_app_token
+        else:
+            headers["X-Api-Key"] = api_key
+        return headers
 
     def _post_json(self, request: Dict[str, Any]) -> Dict[str, Any]:
         body = json.dumps(request["json"], ensure_ascii=False).encode("utf-8")
@@ -177,6 +185,8 @@ class VoiceCloneProviderFactory:
         self.settings = settings
 
     def make(self):
-        if self.settings.volcengine_voice_clone_api_key:
+        if self.settings.volcengine_voice_clone_api_key or (
+            self.settings.volcengine_app_id and self.settings.volcengine_app_token
+        ):
             return VolcEngineVoiceCloneV3Provider(self.settings)
         return MockVoiceCloneProvider()

@@ -99,7 +99,7 @@ class MockVoiceCloneTTSProvider:
 
 
 class VolcVoiceCloneTTSProxy:
-    provider_mode = "volcengineVoiceCloneV3TTS"
+    provider_mode = "volcengineVoiceCloneV1TTS"
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -125,29 +125,29 @@ class VolcVoiceCloneTTSProxy:
         if not voice_profile_id.strip():
             raise ValueError("voiceProfileId is required")
 
-        additions = json.dumps({"explicit_language": "zh-cn"}, ensure_ascii=False)
+        speed_ratio = max(0.5, min(2.0, 1.0 + (speech_rate / 100.0)))
         return {
             "url": self.settings.volcengine_voice_clone_tts_url,
             "headers": {
+                "x-api-key": api_key,
                 "Content-Type": "application/json",
-                "X-Api-Key": api_key,
-                "X-Api-Request-Id": str(uuid.uuid4()),
-                "X-Api-Resource-Id": self.settings.volcengine_voice_clone_tts_resource_id,
             },
             "json": {
+                "app": {
+                    "cluster": "volcano_icl",
+                },
                 "user": {
                     "uid": user_id,
                 },
-                "req_params": {
+                "audio": {
+                    "voice_type": voice_profile_id,
+                    "encoding": audio_format,
+                    "speed_ratio": speed_ratio,
+                },
+                "request": {
+                    "reqid": uuid.uuid4().hex,
                     "text": text,
-                    "speaker": voice_profile_id,
-                    "audio_params": {
-                        "format": audio_format,
-                        "sample_rate": sample_rate,
-                        "speech_rate": speech_rate,
-                        "loudness_rate": loudness_rate,
-                    },
-                    "additions": additions,
+                    "operation": "query",
                 },
             },
         }
@@ -188,7 +188,12 @@ class VolcVoiceCloneTTSProxy:
         except urllib.error.URLError as exc:
             raise ValueError(f"voice clone TTS provider network error: {exc.reason}") from exc
 
-        audio = self.parse_chunked_audio_response(payload)
+        try:
+            response_json = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ValueError("voice clone TTS provider returned invalid JSON") from exc
+
+        audio = self.parse_tts_response(response_json)
         return {
             "audioBase64": base64.b64encode(audio).decode("ascii"),
             "audioFormat": audio_format,
@@ -196,6 +201,20 @@ class VolcVoiceCloneTTSProxy:
             "providerMode": self.provider_mode,
             "voiceProfileId": voice_profile_id,
         }
+
+    def parse_tts_response(self, payload: Dict[str, Any]) -> bytes:
+        code = payload.get("code")
+        if code is not None and int(code) not in {0, 3000, 20000000}:
+            message = str(payload.get("message") or payload.get("msg") or "unknown error")
+            raise ValueError(f"voice clone TTS provider error {code}: {message}")
+
+        data = payload.get("data")
+        if not data:
+            raise ValueError("voice clone TTS provider returned empty audio")
+        try:
+            return base64.b64decode(str(data))
+        except ValueError as exc:
+            raise ValueError("voice clone TTS provider returned invalid base64 audio") from exc
 
     def parse_chunked_audio_response(self, payload: str) -> bytes:
         audio = bytearray()

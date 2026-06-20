@@ -117,17 +117,15 @@ VOLCENGINE_REALTIME_RESOURCE_ID=volc.speech.dialog
 VOLCENGINE_REALTIME_ADDRESS=wss://openspeech.bytedance.com
 VOLCENGINE_REALTIME_URI=/api/v3/realtime/dialogue
 
-VOLCENGINE_VOICE_CLONE_API_KEY=<volcengine voice clone v3 api key>
+VOLCENGINE_VOICE_CLONE_API_KEY=<volcengine voice clone x-api-key>
 VOLCENGINE_VOICE_CLONE_TRAIN_URL=https://openspeech.bytedance.com/api/v3/tts/voice_clone
 VOLCENGINE_VOICE_CLONE_QUERY_URL=https://openspeech.bytedance.com/api/v3/tts/get_voice
-VOLCENGINE_VOICE_CLONE_RESOURCE_ID=seed-icl-2.0
-VOLCENGINE_VOICE_CLONE_TTS_URL=https://openspeech.bytedance.com/api/v3/tts/unidirectional
-VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID=seed-icl-2.0
+VOLCENGINE_VOICE_CLONE_TTS_URL=https://openspeech.bytedance.com/api/v1/tts
 
 AMAP_WEB_SERVICE_KEY=<amap web service key>
 ```
 
-注意：`VOLCENGINE_VOICE_CLONE_API_KEY` 必须是火山声音复刻 V3 HTTP 接口用于 `X-Api-Key` 的 API Key。不要填普通 Secret Key、实时语音 App Token、SDK App Key 或 Access Token；填错时线上 `/voice/profiles` 会返回并持久化 `sampleStatus=failed`，`providerMessage` 类似 `Invalid X-Api-Key`。`VOLCENGINE_VOICE_CLONE_RESOURCE_ID` 用于训练/查询接口的 `X-Api-Resource-Id`，必须和该音色所属资源一致；填错或缺失时 provider 可能返回 `resource ID is mismatched with speaker related resource`。
+注意：声音复刻训练/查询接口按火山官方指南走 `https://openspeech.bytedance.com/api/v3/tts/voice_clone` 与 `https://openspeech.bytedance.com/api/v3/tts/get_voice`。后端优先使用 `VOLCENGINE_APP_ID` + `VOLCENGINE_APP_TOKEN` 生成 `X-Api-App-Key` / `X-Api-Access-Key` 请求头；未配置这两个值时才使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key` 请求头。当前链路不要配置或传递 `VOLCENGINE_VOICE_CLONE_RESOURCE_ID` / `VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID`，也不要向声音复刻训练或 TTS 合成请求追加 `X-Api-Resource-Id`，否则可能出现资源未授权或资源不匹配错误。复刻音色 TTS 合成按官方 HTTP TTS 示例走 `/api/v1/tts`，将训练得到的 `voiceProfileId` 作为 `audio.voice_type`。
 
 权限要求：
 
@@ -265,7 +263,8 @@ curl -s "$DJ_API/voice/realtime-token" \
 - 样本来源合规
 - 样本质量可用于验收
 - 本次训练可消耗火山额度
-- 如果返回 `providerMessage=Invalid X-Api-Key`，优先检查服务器 `.env` 中 `VOLCENGINE_VOICE_CLONE_API_KEY` 是否为声音复刻 V3 HTTP API Key。
+- 如果返回 `providerMessage=Invalid X-Api-Key`，优先检查服务器 `.env` 中 `VOLCENGINE_APP_ID` / `VOLCENGINE_APP_TOKEN` 或 `VOLCENGINE_VOICE_CLONE_API_KEY` 是否对应同一套声音复刻服务。
+- 如果返回 `requested resource not granted`、`resource ID is mismatched` 等资源错误，优先确认后端已更新到不再发送 `X-Api-Resource-Id` 的版本，并重建容器使新代码生效。
 
 验证请求模板：
 

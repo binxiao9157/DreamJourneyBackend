@@ -35,9 +35,7 @@ class Settings:
     volcengine_voice_clone_api_key: Optional[str] = None
     volcengine_voice_clone_train_url: str = "https://openspeech.bytedance.com/api/v3/tts/voice_clone"
     volcengine_voice_clone_query_url: str = "https://openspeech.bytedance.com/api/v3/tts/get_voice"
-    volcengine_voice_clone_resource_id: str = "seed-icl-2.0"
-    volcengine_voice_clone_tts_url: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
-    volcengine_voice_clone_tts_resource_id: str = "seed-icl-2.0"
+    volcengine_voice_clone_tts_url: str = "https://openspeech.bytedance.com/api/v1/tts"
 
     amap_web_service_key: Optional[str] = None
 
@@ -64,9 +62,7 @@ class Settings:
             volcengine_voice_clone_api_key=_env("VOLCENGINE_VOICE_CLONE_API_KEY"),
             volcengine_voice_clone_train_url=_env("VOLCENGINE_VOICE_CLONE_TRAIN_URL", cls.volcengine_voice_clone_train_url) or cls.volcengine_voice_clone_train_url,
             volcengine_voice_clone_query_url=_env("VOLCENGINE_VOICE_CLONE_QUERY_URL", cls.volcengine_voice_clone_query_url) or cls.volcengine_voice_clone_query_url,
-            volcengine_voice_clone_resource_id=_env("VOLCENGINE_VOICE_CLONE_RESOURCE_ID", cls.volcengine_voice_clone_resource_id) or cls.volcengine_voice_clone_resource_id,
             volcengine_voice_clone_tts_url=_env("VOLCENGINE_VOICE_CLONE_TTS_URL", cls.volcengine_voice_clone_tts_url) or cls.volcengine_voice_clone_tts_url,
-            volcengine_voice_clone_tts_resource_id=_env("VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID", cls.volcengine_voice_clone_tts_resource_id) or cls.volcengine_voice_clone_tts_resource_id,
             amap_web_service_key=_env("AMAP_WEB_SERVICE_KEY"),
         )
 
