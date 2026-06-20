@@ -37,10 +37,7 @@ class VolcEngineVoiceCloneV3Provider:
 
     @property
     def is_configured(self) -> bool:
-        return bool(
-            self.settings.volcengine_voice_clone_api_key
-            or (self.settings.volcengine_app_id and self.settings.volcengine_app_token)
-        )
+        return bool(self.settings.volcengine_voice_clone_api_key)
 
     def build_training_request(
         self,
@@ -108,21 +105,14 @@ class VolcEngineVoiceCloneV3Provider:
         api_key = self.settings.volcengine_voice_clone_api_key
         if api_key:
             return api_key
-        if self.settings.volcengine_app_id and self.settings.volcengine_app_token:
-            return ""
         raise VoiceCloneProviderUnavailable("VolcEngine voice clone API key is not configured")
 
     def _headers(self, api_key: str) -> Dict[str, str]:
-        headers = {
+        return {
             "Content-Type": "application/json",
+            "X-Api-Key": api_key,
             "X-Api-Request-Id": str(uuid.uuid4()),
         }
-        if self.settings.volcengine_app_id and self.settings.volcengine_app_token:
-            headers["X-Api-App-Key"] = self.settings.volcengine_app_id
-            headers["X-Api-Access-Key"] = self.settings.volcengine_app_token
-        else:
-            headers["X-Api-Key"] = api_key
-        return headers
 
     def _post_json(self, request: Dict[str, Any]) -> Dict[str, Any]:
         body = json.dumps(request["json"], ensure_ascii=False).encode("utf-8")
@@ -185,8 +175,6 @@ class VoiceCloneProviderFactory:
         self.settings = settings
 
     def make(self):
-        if self.settings.volcengine_voice_clone_api_key or (
-            self.settings.volcengine_app_id and self.settings.volcengine_app_token
-        ):
+        if self.settings.volcengine_voice_clone_api_key:
             return VolcEngineVoiceCloneV3Provider(self.settings)
         return MockVoiceCloneProvider()

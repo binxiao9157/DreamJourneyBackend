@@ -106,7 +106,7 @@ class VolcVoiceCloneTTSProxy:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.settings.volcengine_voice_clone_api_key)
+        return bool(self.settings.volcengine_voice_clone_tts_api_key)
 
     def build_synthesis_request(
         self,
@@ -134,7 +134,7 @@ class VolcVoiceCloneTTSProxy:
             },
             "json": {
                 "app": {
-                    "cluster": "volcano_icl",
+                    "cluster": self.settings.volcengine_voice_clone_tts_cluster,
                 },
                 "user": {
                     "uid": user_id,
@@ -242,9 +242,9 @@ class VolcVoiceCloneTTSProxy:
         return bytes(audio)
 
     def _required_api_key(self) -> str:
-        api_key = self.settings.volcengine_voice_clone_api_key
+        api_key = self.settings.volcengine_voice_clone_tts_api_key
         if not api_key:
-            raise ValueError("VolcEngine voice clone API key is not configured")
+            raise ValueError("VolcEngine voice clone TTS API key is not configured")
         return api_key
 
 
@@ -253,6 +253,6 @@ class VoiceCloneTTSProviderFactory:
         self.settings = settings
 
     def make(self):
-        if self.settings.volcengine_voice_clone_api_key:
+        if self.settings.volcengine_voice_clone_tts_api_key:
             return VolcVoiceCloneTTSProxy(self.settings)
         return MockVoiceCloneTTSProvider()

@@ -6,6 +6,9 @@
 
 > 不要把真实 `.env`、`BACKEND_API_TOKEN`、火山/DeepSeek/高德 key 粘贴到群聊、工单或仓库文档里。本文所有命令只展示 key 名，不展示真实值。
 
+声音复刻训练/查询/升级与复刻音色 TTS 合成的 key 建议拆开配置，详见：
+`docs/backend/2026-06-20-volcengine-voice-clone-key-separation.md`。
+
 ## 1. 本次更新目标
 
 | 项 | 目标 |
@@ -120,12 +123,15 @@ VOLCENGINE_REALTIME_URI=/api/v3/realtime/dialogue
 VOLCENGINE_VOICE_CLONE_API_KEY=<火山声音复刻 x-api-key>
 VOLCENGINE_VOICE_CLONE_TRAIN_URL=https://openspeech.bytedance.com/api/v3/tts/voice_clone
 VOLCENGINE_VOICE_CLONE_QUERY_URL=https://openspeech.bytedance.com/api/v3/tts/get_voice
+VOLCENGINE_VOICE_CLONE_UPGRADE_URL=https://openspeech.bytedance.com/api/v3/tts/upgrade_voice
+VOLCENGINE_VOICE_CLONE_TTS_API_KEY=<火山声音复刻 TTS x-api-key>
 VOLCENGINE_VOICE_CLONE_TTS_URL=https://openspeech.bytedance.com/api/v1/tts
+VOLCENGINE_VOICE_CLONE_TTS_CLUSTER=volcano_icl
 
 AMAP_WEB_SERVICE_KEY=<高德 WebService Key>
 ```
 
-声音复刻训练/查询优先使用 `VOLCENGINE_APP_ID` + `VOLCENGINE_APP_TOKEN` 生成 `X-Api-App-Key` / `X-Api-Access-Key`；没有这两个值时才使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key`。复刻音色 TTS 使用官方 HTTP TTS `/api/v1/tts`，将训练得到的 `voiceProfileId` 作为 `audio.voice_type`。当前版本不要配置或依赖 `VOLCENGINE_VOICE_CLONE_RESOURCE_ID`、`VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID`，后端不会向声音复刻训练/查询/TTS 请求发送 `X-Api-Resource-Id`。
+声音复刻训练/查询只使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key`。复刻音色 TTS 使用独立的 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY` 调官方 HTTP TTS `/api/v1/tts`，将训练得到的 `voiceProfileId` 作为 `audio.voice_type`。当前版本不要配置或依赖 `VOLCENGINE_VOICE_CLONE_RESOURCE_ID`、`VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID`，后端不会向声音复刻训练/查询/TTS 请求发送 `X-Api-Resource-Id`。
 
 如果还没有 `BACKEND_API_TOKEN`，可在服务器生成一个：
 
