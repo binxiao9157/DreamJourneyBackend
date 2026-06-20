@@ -67,6 +67,8 @@ class RuntimeConfigService:
                 "requiresAuthorization": True,
                 "qualityAcceptanceRequired": True,
                 "defaultReleaseVisible": False,
+                "speakerIdMode": self.settings.volcengine_voice_clone_speaker_id_mode,
+                "consoleSpeakerIdConfigured": bool(self.settings.volcengine_voice_clone_speaker_id),
                 "fallbackMode": "hiddenContract" if not voice_clone_provider.is_configured else "providerV3",
                 "contractVersion": 1,
             },

@@ -58,6 +58,9 @@ VOLCENGINE_VOICE_CLONE_API_KEY=<volcengine voice clone x-api-key>
 VOLCENGINE_VOICE_CLONE_TRAIN_URL=https://openspeech.bytedance.com/api/v3/tts/voice_clone
 VOLCENGINE_VOICE_CLONE_QUERY_URL=https://openspeech.bytedance.com/api/v3/tts/get_voice
 VOLCENGINE_VOICE_CLONE_UPGRADE_URL=https://openspeech.bytedance.com/api/v3/tts/upgrade_voice
+VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=customSpeakerId
+# 预付费/免费音色模式才需要填写控制台生成的真实 S_ 音色 ID。
+# VOLCENGINE_VOICE_CLONE_SPEAKER_ID=S_xxxxxxxx
 
 # 复刻音色 TTS 合成，建议独立配置，不与训练 key 混用
 VOLCENGINE_VOICE_CLONE_TTS_API_KEY=<volcengine voice clone tts x-api-key>
@@ -83,7 +86,7 @@ X-Api-Key: <VOLCENGINE_VOICE_CLONE_API_KEY>
 X-Api-Request-Id: <uuid>
 ```
 
-训练请求核心字段：
+后付费自定义音色模式，即 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=customSpeakerId`，训练请求核心字段：
 
 ```json
 {
@@ -101,6 +104,24 @@ X-Api-Request-Id: <uuid>
 ```
 
 注意：按火山声音复刻 V3 文档，使用自定义音色时 `speaker_id` 必须传固定值 `custom_speaker_id`，真实自定义音色 ID 写在 `custom_speaker_id` 字段中；不要留空。
+
+预付费/免费音色模式，即 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=consoleSpeakerId`，训练请求核心字段：
+
+```json
+{
+  "speaker_id": "<控制台生成的 S_ 音色 ID>",
+  "audio": {
+    "data": "<base64 audio>",
+    "format": "wav"
+  },
+  "language": 0,
+  "extra_params": {
+    "voice_clone_denoise_model_id": "..."
+  }
+}
+```
+
+此模式必须在服务器 `.env` 配置 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID`，不要使用 iOS 本地随机生成的 `S_` ID。
 
 查询请求核心字段：
 
@@ -184,6 +205,7 @@ python3 scripts/backend-family-voice-contract-smoke.py
 | --- | --- |
 | `/voice/profiles` 返回 provider 未配置 | 检查 `VOLCENGINE_VOICE_CLONE_API_KEY` 是否配置 |
 | 训练返回 `Invalid X-Api-Key` | 检查训练 key 是否来自声音复刻服务，而不是普通 TTS 或实时对话 |
+| 训练返回 `[resource_id=volc.megatts.timbre] requested resource not granted` | 如果账号使用预付费/免费音色模式，配置 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=consoleSpeakerId` 和控制台生成的 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID`；如果使用后付费自定义模式，检查 `volc.megatts.timbre` 资源权限 |
 | 查询返回 speaker/resource mismatch | 检查 `voiceProfileId` 是否由同一账号、同一声音复刻资源训练得到 |
 | `/voice/synthesis` 返回 resource not granted | 检查 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY`、HTTP TTS 权限、`volcano_icl` cluster 权限 |
 | iOS 提示生产语音服务未完成配置 | 检查 `/config/runtime` 中 synthesis readiness，不要只看训练 readiness |

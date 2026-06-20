@@ -36,6 +36,8 @@ class Settings:
     volcengine_voice_clone_train_url: str = "https://openspeech.bytedance.com/api/v3/tts/voice_clone"
     volcengine_voice_clone_query_url: str = "https://openspeech.bytedance.com/api/v3/tts/get_voice"
     volcengine_voice_clone_upgrade_url: str = "https://openspeech.bytedance.com/api/v3/tts/upgrade_voice"
+    volcengine_voice_clone_speaker_id_mode: str = "customSpeakerId"
+    volcengine_voice_clone_speaker_id: Optional[str] = None
     volcengine_voice_clone_tts_api_key: Optional[str] = None
     volcengine_voice_clone_tts_url: str = "https://openspeech.bytedance.com/api/v1/tts"
     volcengine_voice_clone_tts_cluster: str = "volcano_icl"
@@ -66,6 +68,8 @@ class Settings:
             volcengine_voice_clone_train_url=_env("VOLCENGINE_VOICE_CLONE_TRAIN_URL", cls.volcengine_voice_clone_train_url) or cls.volcengine_voice_clone_train_url,
             volcengine_voice_clone_query_url=_env("VOLCENGINE_VOICE_CLONE_QUERY_URL", cls.volcengine_voice_clone_query_url) or cls.volcengine_voice_clone_query_url,
             volcengine_voice_clone_upgrade_url=_env("VOLCENGINE_VOICE_CLONE_UPGRADE_URL", cls.volcengine_voice_clone_upgrade_url) or cls.volcengine_voice_clone_upgrade_url,
+            volcengine_voice_clone_speaker_id_mode=_env("VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE", cls.volcengine_voice_clone_speaker_id_mode) or cls.volcengine_voice_clone_speaker_id_mode,
+            volcengine_voice_clone_speaker_id=_env("VOLCENGINE_VOICE_CLONE_SPEAKER_ID"),
             volcengine_voice_clone_tts_api_key=_env("VOLCENGINE_VOICE_CLONE_TTS_API_KEY"),
             volcengine_voice_clone_tts_url=_env("VOLCENGINE_VOICE_CLONE_TTS_URL", cls.volcengine_voice_clone_tts_url) or cls.volcengine_voice_clone_tts_url,
             volcengine_voice_clone_tts_cluster=_env("VOLCENGINE_VOICE_CLONE_TTS_CLUSTER", cls.volcengine_voice_clone_tts_cluster) or cls.volcengine_voice_clone_tts_cluster,

@@ -59,12 +59,12 @@ class VolcEngineVoiceCloneV3Provider:
             raise ValueError("voiceProfileId is required")
         if not audio_base64.strip():
             raise ValueError("audioBase64 is required")
+        speaker_payload = self._training_speaker_payload(voice_profile_id)
         return {
             "url": self.settings.volcengine_voice_clone_train_url,
             "headers": self._headers(api_key),
             "json": {
-                "speaker_id": "custom_speaker_id",
-                "custom_speaker_id": voice_profile_id,
+                **speaker_payload,
                 "audio": {
                     "data": audio_base64,
                     "format": audio_format or "wav",
@@ -103,7 +103,12 @@ class VolcEngineVoiceCloneV3Provider:
             language=language,
         )
         response = self._post_json(request)
-        return self._normalize_response(response, fallback_voice_profile_id=voice_profile_id)
+        fallback_voice_profile_id = str(
+            request["json"].get("custom_speaker_id")
+            or request["json"].get("speaker_id")
+            or voice_profile_id
+        )
+        return self._normalize_response(response, fallback_voice_profile_id=fallback_voice_profile_id)
 
     def query_status(self, *, voice_profile_id: str) -> Dict[str, Any]:
         response = self._post_json(self.build_query_request(voice_profile_id=voice_profile_id))
@@ -120,6 +125,21 @@ class VolcEngineVoiceCloneV3Provider:
             "Content-Type": "application/json",
             "X-Api-Key": api_key,
             "X-Api-Request-Id": str(uuid.uuid4()),
+        }
+
+    def _training_speaker_payload(self, voice_profile_id: str) -> Dict[str, str]:
+        mode = str(self.settings.volcengine_voice_clone_speaker_id_mode or "customSpeakerId").strip().lower()
+        if mode in {"consolespeakerid", "console_speaker_id", "prepaid", "free"}:
+            speaker_id = str(self.settings.volcengine_voice_clone_speaker_id or "").strip()
+            if not speaker_id:
+                raise ValueError(
+                    "VOLCENGINE_VOICE_CLONE_SPEAKER_ID is required when "
+                    "VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=consoleSpeakerId"
+                )
+            return {"speaker_id": speaker_id}
+        return {
+            "speaker_id": "custom_speaker_id",
+            "custom_speaker_id": voice_profile_id,
         }
 
     def _post_json(self, request: Dict[str, Any]) -> Dict[str, Any]:
