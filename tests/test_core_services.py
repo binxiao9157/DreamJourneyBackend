@@ -1304,7 +1304,8 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertEqual(request["headers"]["X-Api-Key"], "test-voice-clone-key")
         self.assertEqual(request["headers"]["Content-Type"], "application/json")
         self.assertIn("X-Api-Request-Id", request["headers"])
-        self.assertEqual(request["json"]["speaker_id"], "voice_profile_contract_1")
+        self.assertEqual(request["json"]["speaker_id"], "custom_speaker_id")
+        self.assertEqual(request["json"]["custom_speaker_id"], "voice_profile_contract_1")
         self.assertEqual(request["json"]["audio"]["data"], "BASE64_AUDIO_SAMPLE")
         self.assertEqual(request["json"]["audio"]["format"], "wav")
         self.assertEqual(request["json"]["language"], 0)
@@ -1355,6 +1356,44 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertNotIn("audioBase64", profile)
         self.assertNotIn("rawSampleURL", profile)
         self.assertNotIn("sampleLocalPath", profile)
+
+    def test_voice_clone_profile_persists_provider_failure_message(self):
+        class FailingProvider:
+            is_configured = True
+            provider_mode = "volcengineVoiceCloneV3"
+
+            def submit_training(self, *, voice_profile_id, audio_base64, audio_format, language):
+                raise ValueError("voice clone provider HTTP 401: Invalid X-Api-Key")
+
+        configured = Settings(volcengine_voice_clone_api_key="test-voice-clone-key")
+        user_id = "voice_clone_failure_user"
+        voice_profile_id = "voice_profile_failure_1"
+
+        with patch("app.main.settings", configured), patch("app.main.VoiceCloneProviderFactory") as factory:
+            factory.return_value.make.return_value = FailingProvider()
+            created = TestClient(app).post(
+                "/voice/profiles",
+                json={
+                    "userId": user_id,
+                    "voiceProfileId": voice_profile_id,
+                    "sampleStatus": "pending",
+                    "sampleCount": 1,
+                    "authorizationConfirmed": True,
+                    "personaScope": "personal",
+                    "digitalHumanId": user_id,
+                    "audioBase64": "RAW_SAMPLE_BASE64",
+                    "audioFormat": "wav",
+                    "privacyMetadata": {"scope": "generationAllowed"},
+                },
+            )
+
+        self.assertEqual(created.status_code, 200)
+        profile = created.json()["profile"]
+        self.assertEqual(profile["voiceProfileId"], voice_profile_id)
+        self.assertEqual(profile["sampleStatus"], "failed")
+        self.assertEqual(profile["providerStatus"], "failed")
+        self.assertIn("Invalid X-Api-Key", profile["providerMessage"])
+        self.assertNotIn("audioBase64", profile)
 
     def test_voice_clone_profile_contract_requires_authorization_and_persists_lifecycle(self):
         client = TestClient(app)

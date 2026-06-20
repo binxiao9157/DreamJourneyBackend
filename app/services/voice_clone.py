@@ -56,7 +56,8 @@ class VolcEngineVoiceCloneV3Provider:
             "url": self.settings.volcengine_voice_clone_train_url,
             "headers": self._headers(api_key),
             "json": {
-                "speaker_id": voice_profile_id,
+                "speaker_id": "custom_speaker_id",
+                "custom_speaker_id": voice_profile_id,
                 "audio": {
                     "data": audio_base64,
                     "format": audio_format or "wav",

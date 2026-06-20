@@ -126,6 +126,8 @@ VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID=seed-icl-1.0
 AMAP_WEB_SERVICE_KEY=<amap web service key>
 ```
 
+注意：`VOLCENGINE_VOICE_CLONE_API_KEY` 必须是火山声音复刻 V3 HTTP 接口用于 `X-Api-Key` 的 API Key。不要填普通 Secret Key、实时语音 App Token、SDK App Key 或 Access Token；填错时线上 `/voice/profiles` 会返回并持久化 `sampleStatus=failed`，`providerMessage` 类似 `Invalid X-Api-Key`。
+
 权限要求：
 
 ```bash
@@ -262,6 +264,7 @@ curl -s "$DJ_API/voice/realtime-token" \
 - 样本来源合规
 - 样本质量可用于验收
 - 本次训练可消耗火山额度
+- 如果返回 `providerMessage=Invalid X-Api-Key`，优先检查服务器 `.env` 中 `VOLCENGINE_VOICE_CLONE_API_KEY` 是否为声音复刻 V3 HTTP API Key。
 
 验证请求模板：
 
