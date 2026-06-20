@@ -279,7 +279,7 @@ class TokenAndProxyTests(unittest.TestCase):
         settings = Settings(
             volcengine_voice_clone_api_key="voice-clone-secret",
             volcengine_voice_clone_tts_url="https://example.com/tts/unidirectional",
-            volcengine_voice_clone_tts_resource_id="seed-icl-1.0",
+            volcengine_voice_clone_tts_resource_id="seed-icl-2.0",
         )
         proxy = VolcVoiceCloneTTSProxy(settings)
 
@@ -302,7 +302,7 @@ class TokenAndProxyTests(unittest.TestCase):
 
         self.assertEqual(request["url"], "https://example.com/tts/unidirectional")
         self.assertEqual(request["headers"]["X-Api-Key"], "voice-clone-secret")
-        self.assertEqual(request["headers"]["X-Api-Resource-Id"], "seed-icl-1.0")
+        self.assertEqual(request["headers"]["X-Api-Resource-Id"], "seed-icl-2.0")
         self.assertEqual(request["json"]["user"]["uid"], "u1")
         self.assertEqual(request["json"]["req_params"]["text"], "你好，欢迎回家。")
         self.assertEqual(request["json"]["req_params"]["speaker"], "S_voice_001")
@@ -1304,7 +1304,7 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertEqual(request["headers"]["X-Api-Key"], "test-voice-clone-key")
         self.assertEqual(request["headers"]["Content-Type"], "application/json")
         self.assertIn("X-Api-Request-Id", request["headers"])
-        self.assertEqual(request["headers"]["X-Api-Resource-Id"], "seed-icl-1.0")
+        self.assertEqual(request["headers"]["X-Api-Resource-Id"], "seed-icl-2.0")
         self.assertEqual(request["json"]["speaker_id"], "custom_speaker_id")
         self.assertEqual(request["json"]["custom_speaker_id"], "voice_profile_contract_1")
         self.assertEqual(request["json"]["audio"]["data"], "BASE64_AUDIO_SAMPLE")

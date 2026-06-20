@@ -120,9 +120,9 @@ VOLCENGINE_REALTIME_URI=/api/v3/realtime/dialogue
 VOLCENGINE_VOICE_CLONE_API_KEY=<volcengine voice clone v3 api key>
 VOLCENGINE_VOICE_CLONE_TRAIN_URL=https://openspeech.bytedance.com/api/v3/tts/voice_clone
 VOLCENGINE_VOICE_CLONE_QUERY_URL=https://openspeech.bytedance.com/api/v3/tts/get_voice
-VOLCENGINE_VOICE_CLONE_RESOURCE_ID=seed-icl-1.0
+VOLCENGINE_VOICE_CLONE_RESOURCE_ID=seed-icl-2.0
 VOLCENGINE_VOICE_CLONE_TTS_URL=https://openspeech.bytedance.com/api/v3/tts/unidirectional
-VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID=seed-icl-1.0
+VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID=seed-icl-2.0
 
 AMAP_WEB_SERVICE_KEY=<amap web service key>
 ```

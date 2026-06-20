@@ -35,9 +35,9 @@ class Settings:
     volcengine_voice_clone_api_key: Optional[str] = None
     volcengine_voice_clone_train_url: str = "https://openspeech.bytedance.com/api/v3/tts/voice_clone"
     volcengine_voice_clone_query_url: str = "https://openspeech.bytedance.com/api/v3/tts/get_voice"
-    volcengine_voice_clone_resource_id: str = "seed-icl-1.0"
+    volcengine_voice_clone_resource_id: str = "seed-icl-2.0"
     volcengine_voice_clone_tts_url: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
-    volcengine_voice_clone_tts_resource_id: str = "seed-icl-1.0"
+    volcengine_voice_clone_tts_resource_id: str = "seed-icl-2.0"
 
     amap_web_service_key: Optional[str] = None
 
