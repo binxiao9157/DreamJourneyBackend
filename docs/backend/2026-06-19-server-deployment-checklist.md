@@ -120,13 +120,14 @@ VOLCENGINE_REALTIME_URI=/api/v3/realtime/dialogue
 VOLCENGINE_VOICE_CLONE_API_KEY=<volcengine voice clone v3 api key>
 VOLCENGINE_VOICE_CLONE_TRAIN_URL=https://openspeech.bytedance.com/api/v3/tts/voice_clone
 VOLCENGINE_VOICE_CLONE_QUERY_URL=https://openspeech.bytedance.com/api/v3/tts/get_voice
+VOLCENGINE_VOICE_CLONE_RESOURCE_ID=seed-icl-1.0
 VOLCENGINE_VOICE_CLONE_TTS_URL=https://openspeech.bytedance.com/api/v3/tts/unidirectional
 VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID=seed-icl-1.0
 
 AMAP_WEB_SERVICE_KEY=<amap web service key>
 ```
 
-注意：`VOLCENGINE_VOICE_CLONE_API_KEY` 必须是火山声音复刻 V3 HTTP 接口用于 `X-Api-Key` 的 API Key。不要填普通 Secret Key、实时语音 App Token、SDK App Key 或 Access Token；填错时线上 `/voice/profiles` 会返回并持久化 `sampleStatus=failed`，`providerMessage` 类似 `Invalid X-Api-Key`。
+注意：`VOLCENGINE_VOICE_CLONE_API_KEY` 必须是火山声音复刻 V3 HTTP 接口用于 `X-Api-Key` 的 API Key。不要填普通 Secret Key、实时语音 App Token、SDK App Key 或 Access Token；填错时线上 `/voice/profiles` 会返回并持久化 `sampleStatus=failed`，`providerMessage` 类似 `Invalid X-Api-Key`。`VOLCENGINE_VOICE_CLONE_RESOURCE_ID` 用于训练/查询接口的 `X-Api-Resource-Id`，必须和该音色所属资源一致；填错或缺失时 provider 可能返回 `resource ID is mismatched with speaker related resource`。
 
 权限要求：
 

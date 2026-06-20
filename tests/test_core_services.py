@@ -1304,6 +1304,7 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertEqual(request["headers"]["X-Api-Key"], "test-voice-clone-key")
         self.assertEqual(request["headers"]["Content-Type"], "application/json")
         self.assertIn("X-Api-Request-Id", request["headers"])
+        self.assertEqual(request["headers"]["X-Api-Resource-Id"], "seed-icl-1.0")
         self.assertEqual(request["json"]["speaker_id"], "custom_speaker_id")
         self.assertEqual(request["json"]["custom_speaker_id"], "voice_profile_contract_1")
         self.assertEqual(request["json"]["audio"]["data"], "BASE64_AUDIO_SAMPLE")

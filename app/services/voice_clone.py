@@ -113,6 +113,7 @@ class VolcEngineVoiceCloneV3Provider:
             "Content-Type": "application/json",
             "X-Api-Key": api_key,
             "X-Api-Request-Id": str(uuid.uuid4()),
+            "X-Api-Resource-Id": self.settings.volcengine_voice_clone_resource_id,
         }
 
     def _post_json(self, request: Dict[str, Any]) -> Dict[str, Any]:
