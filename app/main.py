@@ -352,6 +352,12 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "providerMessage": f"{VOICE_CLONE_PROVIDER_ERROR_PREFIX}: {exc}",
                 "sampleStatus": "failed",
             }
+            provider_request_id = str(getattr(exc, "provider_request_id", "") or "").strip()
+            provider_log_id = str(getattr(exc, "provider_log_id", "") or "").strip()
+            if provider_request_id:
+                provider_result["providerRequestId"] = provider_request_id
+            if provider_log_id:
+                provider_result["providerLogId"] = provider_log_id
             sample_status = "failed"
 
     profile = {
@@ -382,9 +388,12 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         },
     }
     provider_request_id = str(provider_result.get("providerRequestId") or "").strip()
+    provider_log_id = str(provider_result.get("providerLogId") or "").strip()
     provider_message = str(provider_result.get("providerMessage") or "").strip()
     if provider_request_id:
         profile["providerRequestId"] = provider_request_id
+    if provider_log_id:
+        profile["providerLogId"] = provider_log_id[:160]
     if provider_message:
         profile["providerMessage"] = provider_message[:300]
     if "createdAt" in payload:
@@ -447,6 +456,12 @@ def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
             "providerMessage": f"{VOICE_CLONE_PROVIDER_ERROR_PREFIX}: {exc}",
             "sampleStatus": "failed",
         }
+        provider_request_id = str(getattr(exc, "provider_request_id", "") or "").strip()
+        provider_log_id = str(getattr(exc, "provider_log_id", "") or "").strip()
+        if provider_request_id:
+            provider_result["providerRequestId"] = provider_request_id
+        if provider_log_id:
+            provider_result["providerLogId"] = provider_log_id
     sample_status = str(provider_result.get("sampleStatus") or profile.get("sampleStatus") or "pending")
     if sample_status not in VOICE_CLONE_SAMPLE_STATUSES:
         sample_status = "pending"
@@ -457,9 +472,12 @@ def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
     updated["realCloneProviderReady"] = provider.is_configured
     updated["providerStatus"] = str(provider_result.get("providerStatus") or updated.get("providerStatus") or "unknown")
     provider_request_id = str(provider_result.get("providerRequestId") or "").strip()
+    provider_log_id = str(provider_result.get("providerLogId") or "").strip()
     provider_message = str(provider_result.get("providerMessage") or "").strip()
     if provider_request_id:
         updated["providerRequestId"] = provider_request_id
+    if provider_log_id:
+        updated["providerLogId"] = provider_log_id[:160]
     if provider_message:
         updated["providerMessage"] = provider_message[:300]
     updated["updatedAt"] = datetime.now(timezone.utc).isoformat()

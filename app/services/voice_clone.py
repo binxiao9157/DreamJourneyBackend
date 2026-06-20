@@ -11,6 +11,13 @@ class VoiceCloneProviderUnavailable(ValueError):
     pass
 
 
+class VoiceCloneProviderError(ValueError):
+    def __init__(self, message: str, *, provider_request_id: str = "", provider_log_id: str = ""):
+        super().__init__(message)
+        self.provider_request_id = provider_request_id
+        self.provider_log_id = provider_log_id
+
+
 class MockVoiceCloneProvider:
     provider_mode = "mockContract"
     is_configured = False
@@ -116,6 +123,7 @@ class VolcEngineVoiceCloneV3Provider:
 
     def _post_json(self, request: Dict[str, Any]) -> Dict[str, Any]:
         body = json.dumps(request["json"], ensure_ascii=False).encode("utf-8")
+        provider_request_id = str(request["headers"].get("X-Api-Request-Id") or "")
         upstream = urllib.request.Request(
             request["url"],
             data=body,
@@ -125,14 +133,30 @@ class VolcEngineVoiceCloneV3Provider:
         try:
             with urllib.request.urlopen(upstream, timeout=45) as response:
                 payload = response.read().decode("utf-8")
-            return json.loads(payload) if payload else {}
+                provider_log_id = self._header_value(response.headers, "X-Tt-Logid")
+            result = json.loads(payload) if payload else {}
+            if isinstance(result, dict):
+                result["_providerRequestId"] = provider_request_id
+                if provider_log_id:
+                    result["_providerLogId"] = provider_log_id
+            return result
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise ValueError(f"voice clone provider HTTP {exc.code}: {detail[:200]}") from exc
+            raise VoiceCloneProviderError(
+                f"voice clone provider HTTP {exc.code}: {detail[:200]}",
+                provider_request_id=provider_request_id,
+                provider_log_id=self._header_value(exc.headers, "X-Tt-Logid"),
+            ) from exc
         except urllib.error.URLError as exc:
-            raise ValueError(f"voice clone provider network error: {exc.reason}") from exc
+            raise VoiceCloneProviderError(
+                f"voice clone provider network error: {exc.reason}",
+                provider_request_id=provider_request_id,
+            ) from exc
         except json.JSONDecodeError as exc:
-            raise ValueError("voice clone provider returned invalid JSON") from exc
+            raise VoiceCloneProviderError(
+                "voice clone provider returned invalid JSON",
+                provider_request_id=provider_request_id,
+            ) from exc
 
     def _normalize_response(
         self,
@@ -142,23 +166,43 @@ class VolcEngineVoiceCloneV3Provider:
     ) -> Dict[str, Any]:
         code = response.get("code")
         message = str(response.get("message") or response.get("msg") or "")
+        provider_request_id = str(response.get("request_id") or response.get("reqid") or response.get("task_id") or response.get("_providerRequestId") or "")
+        provider_log_id = str(response.get("log_id") or response.get("logid") or response.get("_providerLogId") or "")
         if isinstance(code, int) and code not in {0, 20000000}:
-            return {
+            result = {
                 "voiceProfileId": fallback_voice_profile_id,
                 "providerStatus": "failed",
                 "sampleStatus": "failed",
                 "providerMessage": message or f"provider code {code}",
             }
+            if provider_request_id:
+                result["providerRequestId"] = provider_request_id
+            if provider_log_id:
+                result["providerLogId"] = provider_log_id
+            return result
 
         provider_status = str(response.get("status") or response.get("state") or "pending")
         sample_status = self._sample_status(provider_status)
-        return {
+        result = {
             "voiceProfileId": str(response.get("speaker_id") or response.get("voiceProfileId") or fallback_voice_profile_id),
-            "providerRequestId": str(response.get("request_id") or response.get("reqid") or response.get("task_id") or ""),
+            "providerRequestId": provider_request_id,
             "providerStatus": provider_status,
             "sampleStatus": sample_status,
             "providerMessage": message,
         }
+        if provider_log_id:
+            result["providerLogId"] = provider_log_id
+        return result
+
+    @staticmethod
+    def _header_value(headers: Any, name: str) -> str:
+        if not headers:
+            return ""
+        value = ""
+        get = getattr(headers, "get", None)
+        if callable(get):
+            value = get(name) or get(name.lower()) or get(name.upper()) or ""
+        return str(value or "").strip()
 
     @staticmethod
     def _sample_status(provider_status: str) -> str:

@@ -1,5 +1,7 @@
 import os
+import urllib.error
 import unittest
+from io import BytesIO
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -1342,6 +1344,34 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertNotIn("X-Api-App-Key", request["headers"])
         self.assertNotIn("X-Api-Access-Key", request["headers"])
 
+    def test_volcengine_voice_clone_v3_provider_attaches_request_and_log_ids_to_http_error(self):
+        configured = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            volcengine_voice_clone_train_url="https://example.com/voice_clone",
+        )
+        provider = VolcEngineVoiceCloneV3Provider(configured)
+        headers = {"X-Tt-Logid": "upstream-logid-123"}
+        http_error = urllib.error.HTTPError(
+            url="https://example.com/voice_clone",
+            code=500,
+            msg="Internal Server Error",
+            hdrs=headers,
+            fp=BytesIO(b'{"code":55000000,"message":"resource mismatch"}'),
+        )
+
+        with patch("urllib.request.urlopen", side_effect=http_error):
+            with self.assertRaises(ValueError) as context:
+                provider.submit_training(
+                    voice_profile_id="voice_profile_contract_1",
+                    audio_base64="BASE64_AUDIO_SAMPLE",
+                    audio_format="wav",
+                    language=0,
+                )
+
+        self.assertEqual(getattr(context.exception, "provider_log_id", None), "upstream-logid-123")
+        self.assertTrue(getattr(context.exception, "provider_request_id", ""))
+        self.assertIn("resource mismatch", str(context.exception))
+
     def test_voice_clone_provider_factory_rejects_realtime_app_auth_without_clone_key(self):
         configured = Settings(
             volcengine_app_id="test-app-id",
@@ -1436,6 +1466,47 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertEqual(profile["sampleStatus"], "failed")
         self.assertEqual(profile["providerStatus"], "failed")
         self.assertIn("Invalid X-Api-Key", profile["providerMessage"])
+        self.assertNotIn("audioBase64", profile)
+
+    def test_voice_clone_profile_persists_provider_request_and_log_ids_on_failure(self):
+        class ProviderFailure(ValueError):
+            provider_request_id = "req-train-123"
+            provider_log_id = "logid-train-456"
+
+        class FailingProvider:
+            is_configured = True
+            provider_mode = "volcengineVoiceCloneV3"
+
+            def submit_training(self, *, voice_profile_id, audio_base64, audio_format, language):
+                raise ProviderFailure("voice clone provider HTTP 500: resource mismatch")
+
+        configured = Settings(volcengine_voice_clone_api_key="test-voice-clone-key")
+        user_id = "voice_clone_failure_log_user"
+        voice_profile_id = "voice_profile_failure_log_1"
+
+        with patch("app.main.settings", configured), patch("app.main.VoiceCloneProviderFactory") as factory:
+            factory.return_value.make.return_value = FailingProvider()
+            created = TestClient(app).post(
+                "/voice/profiles",
+                json={
+                    "userId": user_id,
+                    "voiceProfileId": voice_profile_id,
+                    "sampleStatus": "pending",
+                    "sampleCount": 1,
+                    "authorizationConfirmed": True,
+                    "personaScope": "personal",
+                    "digitalHumanId": user_id,
+                    "audioBase64": "RAW_SAMPLE_BASE64",
+                    "audioFormat": "wav",
+                    "privacyMetadata": {"scope": "generationAllowed"},
+                },
+            )
+
+        self.assertEqual(created.status_code, 200)
+        profile = created.json()["profile"]
+        self.assertEqual(profile["sampleStatus"], "failed")
+        self.assertEqual(profile.get("providerRequestId"), "req-train-123")
+        self.assertEqual(profile.get("providerLogId"), "logid-train-456")
         self.assertNotIn("audioBase64", profile)
 
     def test_voice_clone_profile_contract_requires_authorization_and_persists_lifecycle(self):

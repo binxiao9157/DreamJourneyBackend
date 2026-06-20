@@ -169,6 +169,12 @@ python3 scripts/backend-family-voice-contract-smoke.py
 
 最后用真实授权音频样本验证训练，用已训练成功的 `voiceProfileId` 验证 `/voice/synthesis`。如果只是用随机 `voiceProfileId`，上游返回“speaker/resource 不匹配”是合理失败，不代表真实训练链路失败。
 
+如果训练或查询失败，后端会在 voice profile 合同中返回并持久化：
+
+- `providerRequestId`：本次请求发给火山的 `X-Api-Request-Id`。
+- `providerLogId`：火山响应头中的 `X-Tt-Logid`，可直接提供给火山支持排查上游日志。
+- `providerMessage`：裁剪后的上游错误信息，不包含密钥或原始音频。
+
 ## 7. 常见错误判断
 
 | 现象 | 优先判断 |
