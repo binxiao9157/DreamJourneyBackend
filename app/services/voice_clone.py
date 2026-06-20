@@ -63,7 +63,8 @@ class VolcEngineVoiceCloneV3Provider:
             "url": self.settings.volcengine_voice_clone_train_url,
             "headers": self._headers(api_key),
             "json": {
-                "speaker_id": "",
+                "speaker_id": "custom_speaker_id",
+                "custom_speaker_id": voice_profile_id,
                 "audio": {
                     "data": audio_base64,
                     "format": audio_format or "wav",
@@ -183,8 +184,12 @@ class VolcEngineVoiceCloneV3Provider:
 
         provider_status = str(response.get("status") or response.get("state") or "pending")
         sample_status = self._sample_status(provider_status)
+        provider_voice_profile_id = str(response.get("custom_speaker_id") or response.get("voiceProfileId") or fallback_voice_profile_id)
+        response_speaker_id = str(response.get("speaker_id") or "").strip()
+        if response_speaker_id and response_speaker_id != "custom_speaker_id":
+            provider_voice_profile_id = response_speaker_id
         result = {
-            "voiceProfileId": str(response.get("speaker_id") or response.get("voiceProfileId") or fallback_voice_profile_id),
+            "voiceProfileId": provider_voice_profile_id,
             "providerRequestId": provider_request_id,
             "providerStatus": provider_status,
             "sampleStatus": sample_status,

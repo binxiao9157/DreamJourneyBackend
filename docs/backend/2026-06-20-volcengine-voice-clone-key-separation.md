@@ -87,7 +87,8 @@ X-Api-Request-Id: <uuid>
 
 ```json
 {
-  "speaker_id": "",
+  "speaker_id": "custom_speaker_id",
+  "custom_speaker_id": "<voiceProfileId>",
   "audio": {
     "data": "<base64 audio>",
     "format": "wav"
@@ -98,6 +99,8 @@ X-Api-Request-Id: <uuid>
   }
 }
 ```
+
+注意：按火山声音复刻 V3 文档，使用自定义音色时 `speaker_id` 必须传固定值 `custom_speaker_id`，真实自定义音色 ID 写在 `custom_speaker_id` 字段中；不要留空。
 
 查询请求核心字段：
 

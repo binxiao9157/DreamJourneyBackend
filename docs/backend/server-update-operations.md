@@ -131,7 +131,7 @@ VOLCENGINE_VOICE_CLONE_TTS_CLUSTER=volcano_icl
 AMAP_WEB_SERVICE_KEY=<高德 WebService Key>
 ```
 
-声音复刻训练/查询只使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key`。复刻音色 TTS 使用独立的 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY` 调官方 HTTP TTS `/api/v1/tts`，将训练得到的 `voiceProfileId` 作为 `audio.voice_type`。当前版本不要配置或依赖 `VOLCENGINE_VOICE_CLONE_RESOURCE_ID`、`VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID`，后端不会向声音复刻训练/查询/TTS 请求发送 `X-Api-Resource-Id`。
+声音复刻训练/查询只使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key`。训练自定义音色时，请求体会传 `speaker_id=custom_speaker_id`，并把本地 `voiceProfileId` 写入 `custom_speaker_id`。复刻音色 TTS 使用独立的 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY` 调官方 HTTP TTS `/api/v1/tts`，将训练得到的 `voiceProfileId` 作为 `audio.voice_type`。当前版本不要配置或依赖 `VOLCENGINE_VOICE_CLONE_RESOURCE_ID`、`VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID`，后端不会向声音复刻训练/查询/TTS 请求发送 `X-Api-Resource-Id`。
 
 如果还没有 `BACKEND_API_TOKEN`，可在服务器生成一个：
 
