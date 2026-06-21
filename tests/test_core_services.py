@@ -532,7 +532,7 @@ class StoreTests(unittest.TestCase):
         )
         self.assertIsNone(store.get_latest_care_snapshot("u2"))
 
-    def test_store_marks_family_member_revoked(self):
+    def test_store_keeps_family_member_revoke_internal_only(self):
         store = InMemoryStore()
 
         member = store.add_family_member("u1", {"name": "陈岚", "phone": "13900001111"})
@@ -750,6 +750,76 @@ class PasswordAPITests(unittest.TestCase):
         self.assertEqual(unconfigured.status_code, 409)
 
 
+class AccountDeletionAPITests(unittest.TestCase):
+    def test_account_delete_soft_deletes_and_login_restores_once_by_phone(self):
+        client = TestClient(app)
+        phone = "13900008881"
+
+        created = client.post("/auth/login", json={"phone": phone, "nickname": "注销用户"})
+        user_id = created.json()["user"]["id"]
+        deleted = client.post(
+            "/auth/delete",
+            json={
+                "userId": user_id,
+                "phone": phone,
+                "firstConfirmation": True,
+                "secondConfirmation": True,
+            },
+        )
+        restored = client.post("/auth/login", json={"phone": phone, "nickname": "恢复用户"})
+        deleted_again = client.post(
+            "/auth/delete",
+            json={
+                "userId": user_id,
+                "phone": phone,
+                "firstConfirmation": True,
+                "secondConfirmation": True,
+            },
+        )
+        second_restore = client.post("/auth/login", json={"phone": phone, "nickname": "第二次恢复"})
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(deleted.status_code, 200)
+        deletion = deleted.json()["deletion"]
+        self.assertEqual(deleted.json()["status"], "softDeleted")
+        self.assertEqual(deletion["deletionState"], "softDeleted")
+        self.assertEqual(deletion["retentionDays"], 30)
+        self.assertFalse(deletion["dataExportSupported"])
+        self.assertIn("deletedAt", deletion)
+        self.assertIn("purgeAfter", deletion)
+        self.assertIn("restoreDeadline", deletion)
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual(restored.json()["status"], "restored")
+        self.assertEqual(restored.json()["user"]["restoreCount"], 1)
+        self.assertEqual(restored.json()["user"]["deletionState"], "active")
+        self.assertEqual(deleted_again.status_code, 200)
+        self.assertEqual(second_restore.status_code, 410)
+        self.assertEqual(second_restore.json()["detail"], "account restore chance already used")
+
+    def test_account_delete_requires_two_confirmations_and_restore_rejects_expired_window(self):
+        client = TestClient(app)
+        phone = "13900008882"
+
+        created = client.post("/auth/login", json={"phone": phone, "nickname": "超期用户"})
+        user_id = created.json()["user"]["id"]
+        missing_second_confirm = client.post(
+            "/auth/delete",
+            json={"userId": user_id, "phone": phone, "firstConfirmation": True},
+        )
+        expired_deleted = main_module.store.soft_delete_user(
+            user_id,
+            phone=phone,
+            requested_at_iso="2026-01-01T00:00:00+00:00",
+        )
+        restore = client.post("/auth/restore", json={"phone": phone})
+
+        self.assertEqual(missing_second_confirm.status_code, 400)
+        self.assertEqual(missing_second_confirm.json()["detail"], "two deletion confirmations are required")
+        self.assertEqual(expired_deleted["deletionState"], "softDeleted")
+        self.assertEqual(restore.status_code, 410)
+        self.assertEqual(restore.json()["detail"], "account restore deadline expired")
+
+
 class CareSnapshotAPITests(unittest.TestCase):
     def _care_snapshot(
         self,
@@ -952,28 +1022,15 @@ class CareSnapshotAPITests(unittest.TestCase):
         self.assertEqual(active_write.status_code, 200)
         self.assertEqual(active_read.status_code, 200)
 
-        revoked = client.post(f"/family/members/{user_id}/{member_id}/revoke")
-        revoked_write = client.post(
-            "/care/snapshots",
-            json={
-                "userId": user_id,
-                "viewerFamilyMemberID": member_id,
-                "snapshot": {"summary": "撤销后不可写入"},
-            },
-        )
-        revoked_latest = client.get(
+        revoke = client.post(f"/family/members/{user_id}/{member_id}/revoke")
+        still_active_read = client.get(
             f"/care/snapshots/latest/{user_id}",
             params={"viewerFamilyMemberID": member_id, "requesterPhone": "13900001111"},
         )
-        revoked_history = client.get(
-            f"/care/snapshots/{user_id}",
-            params={"viewerFamilyMemberID": member_id, "requesterPhone": "13900001111"},
-        )
 
-        self.assertEqual(revoked.status_code, 200)
-        self.assertEqual(revoked_write.status_code, 403)
-        self.assertEqual(revoked_latest.status_code, 403)
-        self.assertEqual(revoked_history.status_code, 403)
+        self.assertEqual(revoke.status_code, 409)
+        self.assertEqual(revoke.json()["detail"], "family member removal is not supported")
+        self.assertEqual(still_active_read.status_code, 200)
 
     def test_care_snapshot_member_reads_require_requester_phone(self):
         client = TestClient(app)
@@ -1704,6 +1761,13 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
 
 
 class ArchiveAPITests(unittest.TestCase):
+    def setUp(self):
+        self.previous_store = main_module.store
+        main_module.store = InMemoryStore()
+
+    def tearDown(self):
+        main_module.store = self.previous_store
+
     def test_archive_items_api_saves_sanitized_metadata_and_lists_by_user(self):
         client = TestClient(app)
 
@@ -1873,6 +1937,12 @@ class ArchiveAPITests(unittest.TestCase):
 
     def test_archive_items_api_persists_time_letter_shell_contract(self):
         client = TestClient(app)
+        open_at = "2026-07-01T09:30:00Z"
+        sealed_at = "2026-06-21T10:00:00Z"
+        recipients = [
+            {"id": "self", "name": "我", "type": "self"},
+            {"id": "family-001", "name": "林静文", "type": "family"},
+        ]
 
         created = client.post(
             "/archive/items",
@@ -1885,13 +1955,27 @@ class ArchiveAPITests(unittest.TestCase):
                 "note": "这段正文只在客户端壳层使用。",
                 "analysisStatus": "manual",
                 "deliveryState": "sealed",
-                "deliveryPolicy": "pending_product_decision",
+                "deliveryPolicy": "scheduled_local_and_in_app",
+                "openAt": open_at,
+                "recipients": recipients,
+                "sealedAt": sealed_at,
+                "deliveryStatus": "scheduled",
+                "deliveryNotificationScheduled": True,
                 "metadata": {
                     "contentKind": "time_letter",
                     "deliveryState": "sealed",
                     "timeLetterStatus": "sealed",
-                    "deliveryPolicy": "pending_product_decision",
-                    "deliveryDecisionRequired": "true",
+                    "deliveryPolicy": "scheduled_local_and_in_app",
+                    "openAt": open_at,
+                    "recipientIds": "self|family-001",
+                    "recipientNames": "我、林静文",
+                    "sealedAt": sealed_at,
+                    "deliveryStatus": "scheduled",
+                    "deliveryExecutionState": "scheduled",
+                    "deliveryDecisionState": "confirmed",
+                    "deliveryScheduleState": "scheduled",
+                    "deliveryProviderState": "local_notification_and_in_app",
+                    "deliveryNotificationScheduled": "true",
                     "localPath": "/private/var/mobile/time-letter.txt",
                 },
                 "privacyMetadata": {"scope": "generationAllowed"},
@@ -1904,11 +1988,25 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(item["kind"], "timeLetter")
         self.assertEqual(item["analysisStatus"], "manual")
         self.assertEqual(item["deliveryState"], "sealed")
-        self.assertEqual(item["deliveryPolicy"], "pending_product_decision")
+        self.assertEqual(item["deliveryPolicy"], "scheduled_local_and_in_app")
+        self.assertEqual(item["openAt"], open_at)
+        self.assertEqual(item["recipients"], recipients)
+        self.assertEqual(item["sealedAt"], sealed_at)
+        self.assertEqual(item["deliveryStatus"], "scheduled")
+        self.assertEqual(item["deliveryNotificationScheduled"], True)
         self.assertEqual(item["metadata"]["deliveryState"], "sealed")
         self.assertEqual(item["metadata"]["timeLetterStatus"], "sealed")
-        self.assertEqual(item["metadata"]["deliveryPolicy"], "pending_product_decision")
-        self.assertEqual(item["metadata"]["deliveryDecisionRequired"], "true")
+        self.assertEqual(item["metadata"]["deliveryPolicy"], "scheduled_local_and_in_app")
+        self.assertEqual(item["metadata"]["openAt"], open_at)
+        self.assertEqual(item["metadata"]["recipientIds"], "self|family-001")
+        self.assertEqual(item["metadata"]["recipientNames"], "我、林静文")
+        self.assertEqual(item["metadata"]["sealedAt"], sealed_at)
+        self.assertEqual(item["metadata"]["deliveryStatus"], "scheduled")
+        self.assertEqual(item["metadata"]["deliveryExecutionState"], "scheduled")
+        self.assertEqual(item["metadata"]["deliveryDecisionState"], "confirmed")
+        self.assertEqual(item["metadata"]["deliveryScheduleState"], "scheduled")
+        self.assertEqual(item["metadata"]["deliveryProviderState"], "local_notification_and_in_app")
+        self.assertEqual(item["metadata"]["deliveryNotificationScheduled"], "true")
         self.assertEqual(item["metadataOnly"], True)
         self.assertNotIn("localPath", item["metadata"])
         self.assertEqual(listed.status_code, 200)
@@ -1928,13 +2026,21 @@ class ArchiveAPITests(unittest.TestCase):
             "note": "第一版草稿",
             "analysisStatus": "manual",
             "deliveryState": "draft",
-            "deliveryPolicy": "pending_product_decision",
+            "deliveryPolicy": "draft",
+            "openAt": "2026-07-02T09:00:00Z",
+            "recipients": [{"id": "self", "name": "我", "type": "self"}],
+            "deliveryStatus": "draft",
             "metadata": {
                 "contentKind": "time_letter",
                 "deliveryState": "draft",
                 "timeLetterStatus": "draft",
-                "deliveryPolicy": "pending_product_decision",
-                "deliveryDecisionRequired": "true",
+                "deliveryPolicy": "draft",
+                "openAt": "2026-07-02T09:00:00Z",
+                "recipientIds": "self",
+                "recipientNames": "我",
+                "deliveryStatus": "draft",
+                "deliveryExecutionState": "draft",
+                "deliveryScheduleState": "not_scheduled",
                 "localPath": "/private/var/mobile/time-letter-draft.txt",
             },
             "privacyMetadata": {"scope": "generationAllowed"},
@@ -1944,10 +2050,22 @@ class ArchiveAPITests(unittest.TestCase):
             "title": "时间信件",
             "note": "已经封存的正文",
             "deliveryState": "sealed",
+            "deliveryPolicy": "scheduled_local_and_in_app",
+            "sealedAt": "2026-06-21T10:10:00Z",
+            "deliveryStatus": "scheduled",
+            "deliveryNotificationScheduled": True,
             "metadata": {
                 **draft["metadata"],
                 "deliveryState": "sealed",
                 "timeLetterStatus": "sealed",
+                "deliveryPolicy": "scheduled_local_and_in_app",
+                "sealedAt": "2026-06-21T10:10:00Z",
+                "deliveryStatus": "scheduled",
+                "deliveryExecutionState": "scheduled",
+                "deliveryDecisionState": "confirmed",
+                "deliveryScheduleState": "scheduled",
+                "deliveryProviderState": "local_notification_and_in_app",
+                "deliveryNotificationScheduled": "true",
             },
         }
 
@@ -1964,10 +2082,14 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(item["kind"], "timeLetter")
         self.assertEqual(item["note"], "已经封存的正文")
         self.assertEqual(item["deliveryState"], "sealed")
-        self.assertEqual(item["deliveryPolicy"], "pending_product_decision")
+        self.assertEqual(item["deliveryPolicy"], "scheduled_local_and_in_app")
+        self.assertEqual(item["sealedAt"], "2026-06-21T10:10:00Z")
+        self.assertEqual(item["deliveryStatus"], "scheduled")
+        self.assertEqual(item["deliveryNotificationScheduled"], True)
         self.assertEqual(item["metadata"]["deliveryState"], "sealed")
         self.assertEqual(item["metadata"]["timeLetterStatus"], "sealed")
-        self.assertEqual(item["metadata"]["deliveryDecisionRequired"], "true")
+        self.assertEqual(item["metadata"]["deliveryPolicy"], "scheduled_local_and_in_app")
+        self.assertEqual(item["metadata"]["deliveryStatus"], "scheduled")
         self.assertEqual(item["metadataOnly"], True)
         self.assertNotIn("localPath", item["metadata"])
 
@@ -2009,6 +2131,51 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(listed.status_code, 200)
         self.assertFalse(any(item.get("id") == item_id for item in listed.json()["items"]))
         self.assertEqual(missing.status_code, 404)
+
+    def test_archive_items_api_rejects_sealed_time_letter_delete(self):
+        client = TestClient(app)
+        user_id = "archive_time_letter_sealed_delete_user"
+        item_id = "archive-time-letter-sealed-delete-1"
+
+        created = client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "ownerUserId": user_id,
+                "id": item_id,
+                "kind": "timeLetter",
+                "title": "不可删除的时间信件",
+                "note": "封存后需要保留。",
+                "analysisStatus": "manual",
+                "deliveryState": "sealed",
+                "deliveryPolicy": "scheduled_local_and_in_app",
+                "openAt": "2026-07-03T08:00:00Z",
+                "recipients": [{"id": "self", "name": "我", "type": "self"}],
+                "sealedAt": "2026-06-21T11:00:00Z",
+                "deliveryStatus": "scheduled",
+                "deliveryNotificationScheduled": True,
+                "metadata": {
+                    "contentKind": "time_letter",
+                    "deliveryState": "sealed",
+                    "timeLetterStatus": "sealed",
+                    "deliveryPolicy": "scheduled_local_and_in_app",
+                    "openAt": "2026-07-03T08:00:00Z",
+                    "recipientIds": "self",
+                    "recipientNames": "我",
+                    "sealedAt": "2026-06-21T11:00:00Z",
+                    "deliveryStatus": "scheduled",
+                    "deliveryNotificationScheduled": "true",
+                },
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        deleted = client.delete(f"/archive/items/{user_id}/{item_id}")
+        listed = client.get(f"/archive/items/{user_id}")
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(deleted.status_code, 409)
+        self.assertEqual(deleted.json()["detail"], "sealed timeLetter cannot be deleted")
+        self.assertTrue(any(item.get("id") == item_id for item in listed.json()["items"]))
 
     def test_archive_items_api_persists_structured_analysis_contract(self):
         client = TestClient(app)
@@ -2578,29 +2745,30 @@ class FamilyAPITests(unittest.TestCase):
         listed_member = next(item for item in listed.json()["members"] if item["id"] == member["id"])
         self.assertEqual(listed_member["invitationStatus"], "accepted")
 
-    def test_family_invitation_code_rejects_revoked_member(self):
+    def test_family_member_revoke_api_is_blocked_by_product_rule(self):
         client = TestClient(app)
 
         created = client.post(
             "/family/invite",
             json={
-                "userId": "u_revoked_inviter",
+                "userId": "u_revoke_blocked",
                 "name": "陈岚",
                 "relation": "女儿",
                 "phone": "13900001111",
             },
         )
         member = created.json()["member"]
-        revoked = client.post(f"/family/members/u_revoked_inviter/{member['id']}/revoke")
+        revoked = client.post(f"/family/members/u_revoke_blocked/{member['id']}/revoke")
         accepted = client.post(
             f"/family/invitations/{member['invitationCode']}/accept",
             json={"phone": "13900001111"},
         )
 
-        self.assertEqual(revoked.status_code, 200)
-        self.assertEqual(accepted.status_code, 404)
+        self.assertEqual(revoked.status_code, 409)
+        self.assertEqual(revoked.json()["detail"], "family member removal is not supported")
+        self.assertEqual(accepted.status_code, 200)
 
-    def test_family_member_direct_accept_rejects_revoked_member(self):
+    def test_family_member_direct_accept_still_works_after_blocked_revoke_attempt(self):
         client = TestClient(app)
 
         created = client.post(
@@ -2619,32 +2787,8 @@ class FamilyAPITests(unittest.TestCase):
             json={"phone": "13900001111"},
         )
 
-        self.assertEqual(revoked.status_code, 200)
-        self.assertEqual(accepted.status_code, 404)
-
-    def test_family_member_revoke_api_marks_member_revoked(self):
-        client = TestClient(app)
-
-        created = client.post(
-            "/family/invite",
-            json={
-                "userId": "u1",
-                "name": "陈岚",
-                "relation": "女儿",
-                "phone": "13900001111",
-            },
-        )
-        member_id = created.json()["member"]["id"]
-        revoked = client.post(f"/family/members/u1/{member_id}/revoke")
-        listed = client.get("/family/members/u1")
-
-        self.assertEqual(created.status_code, 200)
-        self.assertEqual(revoked.status_code, 200)
-        self.assertEqual(revoked.json()["member"]["accessStatus"], "revoked")
-        self.assertEqual(revoked.json()["member"]["invitationStatus"], "revoked")
-        self.assertIn("revokedAt", revoked.json()["member"])
-        listed_member = next(item for item in listed.json()["members"] if item["id"] == member_id)
-        self.assertEqual(listed_member["accessStatus"], "revoked")
+        self.assertEqual(revoked.status_code, 409)
+        self.assertEqual(accepted.status_code, 200)
 
 
 if __name__ == "__main__":

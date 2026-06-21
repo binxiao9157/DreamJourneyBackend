@@ -73,6 +73,9 @@ DIGITAL_HUMAN_MODE_LABELS = {
     "star": "星辰",
     "silent": "静默",
 }
+ACCOUNT_DELETION_RETENTION_DAYS = 30
+ACCOUNT_RESTORE_LIMIT = 1
+ACCOUNT_DELETION_CONTRACT_VERSION = 1
 
 
 def _request_backend_api_token(request: Request) -> str:
@@ -121,11 +124,119 @@ def login(payload: Dict[str, Any]) -> Dict[str, Any]:
     if credential is not None and password and not verify_password(password, credential):
         raise HTTPException(status_code=401, detail="invalid password")
 
+    existing_user = _store_get_user(user_id)
+    if existing_user is not None and existing_user.get("deletionState") == "softDeleted":
+        user = _restore_soft_deleted_account_or_raise(
+            user_id=user_id,
+            phone=phone,
+            nickname=nickname,
+        )
+        user["passwordConfigured"] = credential is not None
+        return {"status": "restored", "user": user}
+
     user = store.upsert_user(phone=phone, nickname=nickname)
     if password and credential is None:
         credential = store.save_password_credential(user_id, make_password_credential(password))
     user["passwordConfigured"] = credential is not None
     return {"user": user}
+
+
+def _store_get_user(user_id: str) -> Optional[Dict[str, Any]]:
+    get_user = getattr(store, "get_user", None)
+    if not callable(get_user):
+        return None
+    return get_user(user_id)
+
+
+def _parse_account_datetime(value: Any) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+def _account_restore_deadline_expired(user: Dict[str, Any]) -> bool:
+    deadline = _parse_account_datetime(user.get("restoreDeadline") or user.get("purgeAfter"))
+    return deadline < datetime.now(timezone.utc)
+
+
+def _restore_soft_deleted_account_or_raise(
+    *,
+    user_id: str,
+    phone: str,
+    nickname: str = "",
+) -> Dict[str, Any]:
+    user = _store_get_user(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="account not found")
+    if user.get("deletionState") != "softDeleted":
+        return user
+    if int(user.get("restoreCount") or 0) >= ACCOUNT_RESTORE_LIMIT:
+        raise HTTPException(status_code=410, detail="account restore chance already used")
+    if _account_restore_deadline_expired(user):
+        raise HTTPException(status_code=410, detail="account restore deadline expired")
+    restored = store.restore_user(user_id, phone=phone, nickname=nickname)
+    if restored is None:
+        raise HTTPException(status_code=404, detail="account not found")
+    return restored
+
+
+def _require_account_deletion_confirmations(payload: Dict[str, Any]) -> None:
+    if not bool(payload.get("firstConfirmation")) or not bool(payload.get("secondConfirmation")):
+        raise HTTPException(status_code=400, detail="two deletion confirmations are required")
+
+
+@app.post("/auth/delete")
+def soft_delete_account(payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = str(payload.get("userId") or "").strip()
+    phone = str(payload.get("phone") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+    if not phone:
+        raise HTTPException(status_code=400, detail="phone is required")
+    _require_account_deletion_confirmations(payload)
+    deletion = store.soft_delete_user(user_id, phone=phone)
+    if deletion is None:
+        raise HTTPException(status_code=404, detail="account not found")
+    return {
+        "status": "softDeleted",
+        "contractVersion": ACCOUNT_DELETION_CONTRACT_VERSION,
+        "deletion": deletion,
+        "policy": {
+            "dataExportSupported": False,
+            "retentionDays": ACCOUNT_DELETION_RETENTION_DAYS,
+            "restoreLimit": ACCOUNT_RESTORE_LIMIT,
+            "restoreBySamePhone": True,
+        },
+    }
+
+
+@app.post("/auth/restore")
+def restore_account(payload: Dict[str, Any]) -> Dict[str, Any]:
+    phone = str(payload.get("phone") or "").strip()
+    nickname = str(payload.get("nickname") or "").strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="phone is required")
+    user_id = stable_user_id(phone)
+    user = _restore_soft_deleted_account_or_raise(
+        user_id=user_id,
+        phone=phone,
+        nickname=nickname,
+    )
+    return {"status": "restored", "user": user}
+
+
+@app.post("/auth/purge-expired-deletions")
+def purge_expired_account_deletions(payload: Dict[str, Any]) -> Dict[str, Any]:
+    cutoff = str(payload.get("cutoff") or datetime.now(timezone.utc).isoformat())
+    purged = store.purge_expired_deleted_users(cutoff)
+    return {
+        "status": "purged",
+        "cutoff": cutoff,
+        "purgedCount": len(purged),
+        "items": purged,
+        "contractVersion": ACCOUNT_DELETION_CONTRACT_VERSION,
+    }
 
 
 def _optional_password(payload: Dict[str, Any], key: str) -> Optional[str]:
@@ -783,8 +894,28 @@ def list_archive_items(user_id: str) -> Dict[str, Any]:
     return {"userId": user_id, "items": store.list_archive_items(user_id)}
 
 
+def _is_sealed_time_letter(item: Dict[str, Any]) -> bool:
+    if str(item.get("kind") or "").strip() != "timeLetter":
+        return False
+    metadata = item.get("metadata")
+    metadata_delivery_state = ""
+    if isinstance(metadata, dict):
+        metadata_delivery_state = str(metadata.get("deliveryState") or "").strip()
+    delivery_state = str(item.get("deliveryState") or metadata_delivery_state).strip()
+    return delivery_state == "sealed"
+
+
 @app.delete("/archive/items/{user_id}/{item_id}")
 def delete_archive_item(user_id: str, item_id: str) -> Dict[str, Any]:
+    existing = next(
+        (item for item in store.list_archive_items(user_id) if str(item.get("id") or "") == item_id),
+        None,
+    )
+    if existing is None:
+        raise HTTPException(status_code=404, detail="archive item not found")
+    if _is_sealed_time_letter(existing):
+        raise HTTPException(status_code=409, detail="sealed timeLetter cannot be deleted")
+
     deleted = store.delete_archive_item(user_id, item_id)
     if deleted is None:
         raise HTTPException(status_code=404, detail="archive item not found")
@@ -1035,10 +1166,7 @@ def accept_family_invitation_code(invitation_code: str, payload: Dict[str, Any])
 
 @app.post("/family/members/{user_id}/{member_id}/revoke")
 def revoke_family_member(user_id: str, member_id: str) -> Dict[str, Any]:
-    member = store.revoke_family_member(user_id, member_id)
-    if member is None:
-        raise HTTPException(status_code=404, detail="family member not found")
-    return {"status": "revoked", "member": member}
+    raise HTTPException(status_code=409, detail="family member removal is not supported")
 
 
 def _normalize_viewer_family_member_id(value: Any) -> Optional[str]:

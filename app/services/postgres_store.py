@@ -1,5 +1,5 @@
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 import uuid
 
@@ -156,11 +156,14 @@ class PostgresStore:
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
+        existing = self.get_user(user_id) or {}
         user = {
             "id": user_id,
             "phone": phone,
             "nickname": nickname or "寻梦环游用户",
             "updatedAt": self._now(),
+            "restoreCount": int(existing.get("restoreCount") or 0),
+            "deletionState": "active",
         }
         row = self._fetchone(
             """
@@ -177,6 +180,138 @@ class PostgresStore:
             commit=True,
         )
         return deepcopy(row["payload"])
+
+    def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            "SELECT payload FROM users WHERE id = %s",
+            (user_id,),
+        )
+        return None if row is None else deepcopy(row["payload"])
+
+    def soft_delete_user(
+        self,
+        user_id: str,
+        *,
+        phone: str,
+        requested_at_iso: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        user = self.get_user(user_id)
+        if user is None:
+            return None
+        if self._normalized_phone(str(user.get("phone") or "")) != self._normalized_phone(phone):
+            return None
+
+        requested_at = self._parse_iso_datetime(requested_at_iso) if requested_at_iso else datetime.now(timezone.utc)
+        purge_after = requested_at + timedelta(days=30)
+        item = deepcopy(user)
+        item["deletionState"] = "softDeleted"
+        item["deletedAt"] = requested_at.isoformat()
+        item["purgeAfter"] = purge_after.isoformat()
+        item["restoreDeadline"] = purge_after.isoformat()
+        item["retentionDays"] = 30
+        item["dataExportSupported"] = False
+        item["restoreLimit"] = 1
+        item["restoreCount"] = int(item.get("restoreCount") or 0)
+        item["updatedAt"] = self._now()
+
+        row = self._fetchone(
+            """
+            UPDATE users
+            SET payload = %s, updated_at = NOW()
+            WHERE id = %s
+            RETURNING payload
+            """,
+            (item, user_id),
+            commit=True,
+        )
+        return None if row is None else deepcopy(row["payload"])
+
+    def restore_user(
+        self,
+        user_id: str,
+        *,
+        phone: str,
+        nickname: str = "",
+        restored_at_iso: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        user = self.get_user(user_id)
+        if user is None:
+            return None
+        if self._normalized_phone(str(user.get("phone") or "")) != self._normalized_phone(phone):
+            return None
+
+        restored_at = restored_at_iso or self._now()
+        item = deepcopy(user)
+        item["nickname"] = nickname or item.get("nickname") or "寻梦环游用户"
+        item["deletionState"] = "active"
+        item["restoreCount"] = int(item.get("restoreCount") or 0) + 1
+        item["restoredAt"] = restored_at
+        item["updatedAt"] = restored_at
+        for key in ("deletedAt", "purgeAfter", "restoreDeadline", "retentionDays", "dataExportSupported", "restoreLimit"):
+            item.pop(key, None)
+
+        row = self._fetchone(
+            """
+            UPDATE users
+            SET phone = %s, nickname = %s, payload = %s, updated_at = NOW()
+            WHERE id = %s
+            RETURNING payload
+            """,
+            (phone, item["nickname"], item, user_id),
+            commit=True,
+        )
+        return None if row is None else deepcopy(row["payload"])
+
+    def purge_expired_deleted_users(self, cutoff_iso: str) -> List[Dict[str, Any]]:
+        cutoff = self._parse_iso_datetime(cutoff_iso)
+        rows = self._fetchall(
+            """
+            SELECT id, payload FROM users
+            WHERE payload->>'deletionState' = 'softDeleted'
+            """,
+        )
+        purged: List[Dict[str, Any]] = []
+        for row in rows:
+            user_id = str(row.get("id") or row["payload"].get("id") or "")
+            user = deepcopy(row["payload"])
+            deadline = self._parse_iso_datetime(str(user.get("restoreDeadline") or user.get("purgeAfter") or ""))
+            if not user_id or deadline > cutoff:
+                continue
+            for table in (
+                "profiles",
+                "password_credentials",
+                "kb_snapshots",
+                "memories",
+                "archive_items",
+                "mailbox_letters",
+                "family_members",
+                "care_snapshots",
+                "echo_delayed_replies",
+                "push_device_tokens",
+                "voice_profiles",
+            ):
+                self._fetchall(f"DELETE FROM {table} WHERE user_id = %s RETURNING payload", (user_id,))
+            tombstone = {
+                "id": user_id,
+                "phone": user.get("phone", ""),
+                "nickname": "",
+                "deletionState": "purged",
+                "purgedAt": cutoff.isoformat(),
+                "restoreCount": int(user.get("restoreCount") or 0),
+            }
+            updated = self._fetchone(
+                """
+                UPDATE users
+                SET nickname = %s, payload = %s, updated_at = NOW()
+                WHERE id = %s
+                RETURNING payload
+                """,
+                ("", tombstone, user_id),
+                commit=True,
+            )
+            if updated is not None:
+                purged.append(deepcopy(updated["payload"]))
+        return purged
 
     def save_profile(self, user_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(profile)
@@ -730,3 +865,9 @@ class PostgresStore:
     @staticmethod
     def _normalized_phone(phone: str) -> str:
         return "".join(ch for ch in phone if ch.isdigit())
+
+    @staticmethod
+    def _parse_iso_datetime(value: str) -> datetime:
+        if not value:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))

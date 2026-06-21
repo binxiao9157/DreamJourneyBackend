@@ -22,14 +22,110 @@ class InMemoryStore:
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
+        existing = self._users.get(user_id, {})
         user = {
             "id": user_id,
             "phone": phone,
             "nickname": nickname or "寻梦环游用户",
             "updatedAt": self._now(),
         }
+        if existing.get("restoreCount") is not None:
+            user["restoreCount"] = int(existing.get("restoreCount") or 0)
+        user.setdefault("restoreCount", 0)
+        user["deletionState"] = "active"
         self._users[user_id] = user
         return deepcopy(user)
+
+    def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
+        user = self._users.get(user_id)
+        return None if user is None else deepcopy(user)
+
+    def soft_delete_user(
+        self,
+        user_id: str,
+        *,
+        phone: str,
+        requested_at_iso: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        user = self._users.get(user_id)
+        if user is None:
+            return None
+        if self._normalized_phone(user.get("phone", "")) != self._normalized_phone(phone):
+            return None
+
+        requested_at = self._parse_iso_datetime(requested_at_iso) if requested_at_iso else datetime.now(timezone.utc)
+        deleted_at = requested_at.isoformat()
+        purge_after = (requested_at + self._account_delete_retention_delta()).isoformat()
+        item = deepcopy(user)
+        item["deletionState"] = "softDeleted"
+        item["deletedAt"] = deleted_at
+        item["purgeAfter"] = purge_after
+        item["restoreDeadline"] = purge_after
+        item["retentionDays"] = 30
+        item["dataExportSupported"] = False
+        item["restoreLimit"] = 1
+        item["restoreCount"] = int(item.get("restoreCount") or 0)
+        item["updatedAt"] = self._now()
+        self._users[user_id] = item
+        return deepcopy(item)
+
+    def restore_user(
+        self,
+        user_id: str,
+        *,
+        phone: str,
+        nickname: str = "",
+        restored_at_iso: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        user = self._users.get(user_id)
+        if user is None:
+            return None
+        if self._normalized_phone(user.get("phone", "")) != self._normalized_phone(phone):
+            return None
+
+        restored_at = restored_at_iso or self._now()
+        item = deepcopy(user)
+        item["nickname"] = nickname or item.get("nickname") or "寻梦环游用户"
+        item["deletionState"] = "active"
+        item["restoreCount"] = int(item.get("restoreCount") or 0) + 1
+        item["restoredAt"] = restored_at
+        item["updatedAt"] = restored_at
+        for key in ("deletedAt", "purgeAfter", "restoreDeadline", "retentionDays", "dataExportSupported", "restoreLimit"):
+            item.pop(key, None)
+        self._users[user_id] = item
+        return deepcopy(item)
+
+    def purge_expired_deleted_users(self, cutoff_iso: str) -> List[Dict[str, Any]]:
+        cutoff = self._parse_iso_datetime(cutoff_iso)
+        purged: List[Dict[str, Any]] = []
+        for user_id, user in list(self._users.items()):
+            if user.get("deletionState") != "softDeleted":
+                continue
+            deadline = self._parse_iso_datetime(str(user.get("restoreDeadline") or user.get("purgeAfter") or ""))
+            if deadline > cutoff:
+                continue
+            tombstone = {
+                "id": user_id,
+                "phone": user.get("phone", ""),
+                "nickname": "",
+                "deletionState": "purged",
+                "purgedAt": cutoff.isoformat(),
+                "restoreCount": int(user.get("restoreCount") or 0),
+            }
+            self._users[user_id] = tombstone
+            self._profiles.pop(user_id, None)
+            self._password_credentials.pop(user_id, None)
+            self._kb_snapshots.pop(user_id, None)
+            self._memories.pop(user_id, None)
+            self._archive_items.pop(user_id, None)
+            self._mailbox_letters.pop(user_id, None)
+            self._family_members.pop(user_id, None)
+            self._care_snapshots.pop(user_id, None)
+            self._echo_delayed_replies.pop(user_id, None)
+            self._push_device_tokens.pop(user_id, None)
+            self._voice_profiles.pop(user_id, None)
+            purged.append(deepcopy(tombstone))
+        return purged
 
     def save_profile(self, user_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(profile)
@@ -330,3 +426,14 @@ class InMemoryStore:
     @staticmethod
     def _normalized_phone(phone: str) -> str:
         return "".join(ch for ch in phone if ch.isdigit())
+
+    @staticmethod
+    def _account_delete_retention_delta():
+        from datetime import timedelta
+        return timedelta(days=30)
+
+    @staticmethod
+    def _parse_iso_datetime(value: str) -> datetime:
+        if not value:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))

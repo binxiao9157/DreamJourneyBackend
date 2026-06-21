@@ -75,6 +75,16 @@ class FakeCursor:
             user_id = params[0]
             credential = self.connection.password_credentials.get(user_id)
             self.result = None if credential is None else {"payload": credential}
+        elif normalized.startswith("SELECT payload FROM users WHERE id = %s"):
+            user_id = params[0]
+            user = self.connection.users.get(user_id)
+            self.result = None if user is None else {"payload": user}
+        elif normalized.startswith("SELECT id, payload FROM users"):
+            self.result = [
+                {"id": user_id, "payload": user}
+                for user_id, user in self.connection.users.items()
+                if user.get("deletionState") == "softDeleted"
+            ]
         elif normalized.startswith("SELECT payload FROM family_members WHERE user_id = %s AND id = %s"):
             user_id, item_id = params
             members = [
@@ -109,6 +119,18 @@ class FakeCursor:
             self.result = {"payload": snapshots[0]} if snapshots else None
         elif normalized.startswith("INSERT INTO users"):
             user_id, phone, nickname, payload = params
+            payload = unwrap_jsonb(payload)
+            self.connection.users[user_id] = dict(payload)
+            self.result = {"payload": payload}
+        elif normalized.startswith("UPDATE users"):
+            if len(params) == 2:
+                payload, user_id = params
+            elif len(params) == 4:
+                _, _, payload, user_id = params
+            elif len(params) == 3:
+                _, payload, user_id = params
+            else:
+                payload, user_id = params[-2], params[-1]
             payload = unwrap_jsonb(payload)
             self.connection.users[user_id] = dict(payload)
             self.result = {"payload": payload}
