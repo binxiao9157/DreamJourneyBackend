@@ -338,6 +338,7 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(request["headers"]["x-api-key"], "voice-clone-tts-secret")
         self.assertNotEqual(request["headers"]["x-api-key"], "voice-clone-train-secret")
         self.assertNotIn("X-Api-Resource-Id", request["headers"])
+        self.assertEqual(request["headers"]["Resource-Id"], "seed-icl-2.0")
         self.assertEqual(request["json"]["app"]["cluster"], "volcano_icl_custom")
         self.assertEqual(request["json"]["user"]["uid"], "u1")
         self.assertEqual(request["json"]["audio"]["voice_type"], "S_voice_001")
@@ -1398,6 +1399,30 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertFalse(voice_clone["defaultReleaseVisible"])
         self.assertEqual(voice_clone["speakerIdMode"], "customSpeakerId")
         self.assertFalse(voice_clone["consoleSpeakerIdConfigured"])
+        self.assertFalse(voice_clone["speakerIdPoolConfigured"])
+        self.assertEqual(voice_clone["modelType"], 5)
+        self.assertEqual(voice_clone["ttsResourceId"], "seed-icl-2.0")
+        self.assertFalse(voice_clone["voiceClone2TrialReady"])
+
+    def test_runtime_config_exposes_voice_clone_2_trial_readiness(self):
+        configured = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            volcengine_voice_clone_speaker_id_mode="trialSpeakerIdPool",
+            volcengine_voice_clone_speaker_ids="S_trial_001,S_trial_002",
+            volcengine_voice_clone_model_type=5,
+            volcengine_voice_clone_tts_api_key="voice-clone-tts-secret",
+            volcengine_voice_clone_tts_resource_id="seed-icl-2.0",
+        )
+
+        config = RuntimeConfigService(configured).public_config()
+        voice_clone = config["voiceClone"]
+
+        self.assertTrue(voice_clone["voiceClone2TrialReady"])
+        self.assertTrue(voice_clone["speakerIdPoolConfigured"])
+        self.assertEqual(voice_clone["speakerIdPoolCount"], 2)
+        self.assertEqual(voice_clone["speakerIdMode"], "trialSpeakerIdPool")
+        self.assertEqual(voice_clone["modelType"], 5)
+        self.assertEqual(voice_clone["ttsResourceId"], "seed-icl-2.0")
 
     def test_volcengine_voice_clone_v3_provider_builds_training_request(self):
         configured = Settings(
@@ -1424,6 +1449,7 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertEqual(request["json"]["audio"]["data"], "BASE64_AUDIO_SAMPLE")
         self.assertEqual(request["json"]["audio"]["format"], "wav")
         self.assertEqual(request["json"]["language"], 0)
+        self.assertEqual(request["json"]["model_type"], 5)
         self.assertEqual(request["json"]["extra_params"]["voice_clone_denoise_model_id"], "")
 
     def test_volcengine_voice_clone_v3_provider_builds_console_speaker_training_request(self):
@@ -1445,6 +1471,28 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
 
         self.assertEqual(request["json"]["speaker_id"], "S_console_001")
         self.assertNotIn("custom_speaker_id", request["json"])
+        self.assertEqual(request["json"]["model_type"], 5)
+
+    def test_volcengine_voice_clone_v3_provider_builds_trial_speaker_pool_training_request(self):
+        configured = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            volcengine_voice_clone_train_url="https://example.com/voice_clone",
+            volcengine_voice_clone_query_url="https://example.com/get_voice",
+            volcengine_voice_clone_speaker_id_mode="trialSpeakerIdPool",
+            volcengine_voice_clone_speaker_ids="S_trial_001,S_trial_002,S_trial_003",
+        )
+        provider = VolcEngineVoiceCloneV3Provider(configured)
+
+        request = provider.build_training_request(
+            voice_profile_id="voice_profile_contract_1",
+            audio_base64="BASE64_AUDIO_SAMPLE",
+            audio_format="wav",
+            language=0,
+        )
+
+        self.assertIn(request["json"]["speaker_id"], {"S_trial_001", "S_trial_002", "S_trial_003"})
+        self.assertNotIn("custom_speaker_id", request["json"])
+        self.assertEqual(request["json"]["model_type"], 5)
 
     def test_volcengine_voice_clone_v3_provider_requires_console_speaker_id_for_console_mode(self):
         configured = Settings(
@@ -1463,6 +1511,30 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
             )
 
         self.assertIn("VOLCENGINE_VOICE_CLONE_SPEAKER_ID", str(context.exception))
+
+    def test_volcengine_voice_clone_v3_provider_normalizes_nested_speaker_status(self):
+        configured = Settings(volcengine_voice_clone_api_key="test-voice-clone-key")
+        provider = VolcEngineVoiceCloneV3Provider(configured)
+
+        result = provider._normalize_response(
+            {
+                "code": 0,
+                "message": "success",
+                "speaker_status": {
+                    "speaker_id": "S_trial_001",
+                    "status": 4,
+                    "model_type": 5,
+                },
+                "_providerRequestId": "request-1",
+                "_providerLogId": "log-1",
+            },
+            fallback_voice_profile_id="voice_profile_contract_1",
+        )
+
+        self.assertEqual(result["voiceProfileId"], "S_trial_001")
+        self.assertEqual(result["providerStatus"], "4")
+        self.assertEqual(result["sampleStatus"], "ready")
+        self.assertEqual(result["providerLogId"], "log-1")
 
     def test_volcengine_voice_clone_v3_provider_uses_dedicated_clone_api_key(self):
         configured = Settings(

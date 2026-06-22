@@ -126,12 +126,16 @@ class VolcVoiceCloneTTSProxy:
             raise ValueError("voiceProfileId is required")
 
         speed_ratio = max(0.5, min(2.0, 1.0 + (speech_rate / 100.0)))
+        headers = {
+            "x-api-key": api_key,
+            "Content-Type": "application/json",
+        }
+        resource_id = str(self.settings.volcengine_voice_clone_tts_resource_id or "").strip()
+        if resource_id:
+            headers["Resource-Id"] = resource_id
         return {
             "url": self.settings.volcengine_voice_clone_tts_url,
-            "headers": {
-                "x-api-key": api_key,
-                "Content-Type": "application/json",
-            },
+            "headers": headers,
             "json": {
                 "app": {
                     "cluster": self.settings.volcengine_voice_clone_tts_cluster,

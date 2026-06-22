@@ -19,6 +19,9 @@ STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" -m unittest discover tests
 echo "== Backend py_compile =="
 "$PYTHON_BIN" -m compileall -q app tests
 
+echo "== Voice clone 2.0 contract smoke =="
+PYTHONPATH=. "$PYTHON_BIN" scripts/voice_clone_2_contract_smoke.py >/dev/null
+
 echo "== Backend deployment files =="
 test -f Dockerfile
 test -f docker-compose.yml

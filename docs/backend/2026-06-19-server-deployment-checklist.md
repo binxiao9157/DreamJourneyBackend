@@ -124,14 +124,19 @@ VOLCENGINE_VOICE_CLONE_UPGRADE_URL=https://openspeech.bytedance.com/api/v3/tts/u
 VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=customSpeakerId
 # 如果火山账号使用预付费/免费音色模式，改成 consoleSpeakerId，并填写控制台生成的真实 S_ 音色 ID。
 # VOLCENGINE_VOICE_CLONE_SPEAKER_ID=S_xxxxxxxx
+# 如果使用声音复刻 2.0 赠送试用槽位，建议改为 trialSpeakerIdPool，并填写控制台赠送的 S_ 音色 ID 列表。
+# VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=trialSpeakerIdPool
+# VOLCENGINE_VOICE_CLONE_SPEAKER_IDS=S_xxxxxxxx,S_yyyyyyyy
+VOLCENGINE_VOICE_CLONE_MODEL_TYPE=5
 VOLCENGINE_VOICE_CLONE_TTS_API_KEY=<volcengine voice clone tts x-api-key>
 VOLCENGINE_VOICE_CLONE_TTS_URL=https://openspeech.bytedance.com/api/v1/tts
 VOLCENGINE_VOICE_CLONE_TTS_CLUSTER=volcano_icl
+VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID=seed-icl-2.0
 
 AMAP_WEB_SERVICE_KEY=<amap web service key>
 ```
 
-注意：声音复刻训练/查询接口按火山官方指南走 `https://openspeech.bytedance.com/api/v3/tts/voice_clone` 与 `https://openspeech.bytedance.com/api/v3/tts/get_voice`，只使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key` 请求头。火山支持两种音色 ID 模式：后付费自定义音色模式传 `speaker_id=custom_speaker_id`，并把本地 `voiceProfileId` 写入 `custom_speaker_id`；预付费/免费音色模式传控制台生成的真实 `S_` ID 到 `speaker_id`，不要传 iOS 随机生成的 `S_`。复刻音色 TTS 合成按官方 HTTP TTS 示例走 `/api/v1/tts`，只使用 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY` 生成 `x-api-key` 请求头，并将训练得到的 `voiceProfileId` 作为 `audio.voice_type`。当前链路不要配置或传递 `VOLCENGINE_VOICE_CLONE_RESOURCE_ID` / `VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID`，也不要向声音复刻训练或 TTS 合成请求追加 `X-Api-Resource-Id`，否则可能出现资源未授权或资源不匹配错误。
+注意：声音复刻训练/查询接口按火山官方指南走 `https://openspeech.bytedance.com/api/v3/tts/voice_clone` 与 `https://openspeech.bytedance.com/api/v3/tts/get_voice`，只使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key` 请求头。火山支持两种音色 ID 模式：后付费自定义音色模式传 `speaker_id=custom_speaker_id`，并把本地 `voiceProfileId` 写入 `custom_speaker_id`；预付费/免费音色模式传控制台生成的真实 `S_` ID 到 `speaker_id`。声音复刻 2.0 赠送试用槽位建议使用 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=trialSpeakerIdPool` 和 `VOLCENGINE_VOICE_CLONE_SPEAKER_IDS`，后端会按本地 `voiceProfileId` 稳定选择一个 `S_` 槽位，并在训练请求中带 `model_type=5`。复刻音色 TTS 合成按官方 HTTP TTS 示例走 `/api/v1/tts`，只使用 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY` 生成 `x-api-key` 请求头，将训练得到的真实 `S_` 音色 ID 作为 `audio.voice_type`，并按 2.0 合同发送 `Resource-Id=seed-icl-2.0`。不要向声音复刻训练或查询请求追加 `X-Api-Resource-Id`，也不要把合成 `Resource-Id` 写成 `X-Api-Resource-Id`。
 
 权限要求：
 

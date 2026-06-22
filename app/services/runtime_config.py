@@ -14,6 +14,7 @@ class RuntimeConfigService:
         archive_image_analysis = ArchiveImageAnalysisProviderFactory(self.settings).make()
         voice_clone_provider = VoiceCloneProviderFactory(self.settings).make()
         voice_clone_tts_provider = VoiceCloneTTSProviderFactory(self.settings).make()
+        voice_clone_speaker_ids = self._voice_clone_speaker_ids()
         return {
             "environment": self.settings.environment,
             "baseURL": self.settings.public_base_url,
@@ -69,6 +70,16 @@ class RuntimeConfigService:
                 "defaultReleaseVisible": False,
                 "speakerIdMode": self.settings.volcengine_voice_clone_speaker_id_mode,
                 "consoleSpeakerIdConfigured": bool(self.settings.volcengine_voice_clone_speaker_id),
+                "speakerIdPoolConfigured": bool(voice_clone_speaker_ids),
+                "speakerIdPoolCount": len(voice_clone_speaker_ids),
+                "modelType": self.settings.volcengine_voice_clone_model_type,
+                "ttsResourceId": self.settings.volcengine_voice_clone_tts_resource_id,
+                "voiceClone2TrialReady": (
+                    voice_clone_provider.is_configured
+                    and self.settings.volcengine_voice_clone_model_type == 5
+                    and bool(voice_clone_speaker_ids)
+                    and bool(self.settings.volcengine_voice_clone_tts_resource_id)
+                ),
                 "fallbackMode": "hiddenContract" if not voice_clone_provider.is_configured else "providerV3",
                 "lipSyncTimeline": {
                     "field": "visemeTimeline",
@@ -85,3 +96,18 @@ class RuntimeConfigService:
                 "familyCircle": "authorized_family_sync",
             },
         }
+
+    def _voice_clone_speaker_ids(self) -> list[str]:
+        values = []
+        if self.settings.volcengine_voice_clone_speaker_ids:
+            values.extend(str(self.settings.volcengine_voice_clone_speaker_ids).split(","))
+        if self.settings.volcengine_voice_clone_speaker_id:
+            values.append(str(self.settings.volcengine_voice_clone_speaker_id))
+        seen = set()
+        speaker_ids = []
+        for value in values:
+            speaker_id = value.strip()
+            if speaker_id and speaker_id not in seen:
+                seen.add(speaker_id)
+                speaker_ids.append(speaker_id)
+        return speaker_ids

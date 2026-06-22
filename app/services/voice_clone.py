@@ -1,3 +1,4 @@
+import hashlib
 import json
 import uuid
 import urllib.error
@@ -70,6 +71,7 @@ class VolcEngineVoiceCloneV3Provider:
                     "format": audio_format or "wav",
                 },
                 "language": language,
+                "model_type": self.settings.volcengine_voice_clone_model_type,
                 "extra_params": {
                     "voice_clone_denoise_model_id": "",
                 },
@@ -129,18 +131,55 @@ class VolcEngineVoiceCloneV3Provider:
 
     def _training_speaker_payload(self, voice_profile_id: str) -> Dict[str, str]:
         mode = str(self.settings.volcengine_voice_clone_speaker_id_mode or "customSpeakerId").strip().lower()
-        if mode in {"consolespeakerid", "console_speaker_id", "prepaid", "free"}:
-            speaker_id = str(self.settings.volcengine_voice_clone_speaker_id or "").strip()
-            if not speaker_id:
+        if mode in {
+            "consolespeakerid",
+            "console_speaker_id",
+            "prepaid",
+            "free",
+            "trialspeakeridpool",
+            "trial_speaker_id_pool",
+            "console_speaker_id_pool",
+            "consolespeakeridpool",
+            "prepaidpool",
+            "freepool",
+            "trial",
+            "pool",
+        }:
+            speaker_ids = self._configured_speaker_ids()
+            if not speaker_ids:
                 raise ValueError(
-                    "VOLCENGINE_VOICE_CLONE_SPEAKER_ID is required when "
-                    "VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=consoleSpeakerId"
+                    "VOLCENGINE_VOICE_CLONE_SPEAKER_ID or VOLCENGINE_VOICE_CLONE_SPEAKER_IDS "
+                    "is required when VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE uses console/trial speaker IDs"
                 )
+            speaker_id = self._speaker_id_for_profile(voice_profile_id, speaker_ids)
             return {"speaker_id": speaker_id}
         return {
             "speaker_id": "custom_speaker_id",
             "custom_speaker_id": voice_profile_id,
         }
+
+    def _configured_speaker_ids(self) -> list[str]:
+        values = []
+        if self.settings.volcengine_voice_clone_speaker_ids:
+            values.extend(str(self.settings.volcengine_voice_clone_speaker_ids).split(","))
+        if self.settings.volcengine_voice_clone_speaker_id:
+            values.append(str(self.settings.volcengine_voice_clone_speaker_id))
+        seen = set()
+        speaker_ids = []
+        for value in values:
+            speaker_id = value.strip()
+            if speaker_id and speaker_id not in seen:
+                seen.add(speaker_id)
+                speaker_ids.append(speaker_id)
+        return speaker_ids
+
+    @staticmethod
+    def _speaker_id_for_profile(voice_profile_id: str, speaker_ids: list[str]) -> str:
+        if len(speaker_ids) == 1:
+            return speaker_ids[0]
+        digest = hashlib.sha256(voice_profile_id.encode("utf-8")).hexdigest()
+        index = int(digest[:8], 16) % len(speaker_ids)
+        return speaker_ids[index]
 
     def _post_json(self, request: Dict[str, Any]) -> Dict[str, Any]:
         body = json.dumps(request["json"], ensure_ascii=False).encode("utf-8")
@@ -202,10 +241,17 @@ class VolcEngineVoiceCloneV3Provider:
                 result["providerLogId"] = provider_log_id
             return result
 
-        provider_status = str(response.get("status") or response.get("state") or "pending")
+        speaker_status = self._speaker_status_payload(response)
+        provider_status = str(
+            response.get("status")
+            or response.get("state")
+            or speaker_status.get("status")
+            or speaker_status.get("state")
+            or "pending"
+        )
         sample_status = self._sample_status(provider_status)
         provider_voice_profile_id = str(response.get("custom_speaker_id") or response.get("voiceProfileId") or fallback_voice_profile_id)
-        response_speaker_id = str(response.get("speaker_id") or "").strip()
+        response_speaker_id = str(response.get("speaker_id") or speaker_status.get("speaker_id") or "").strip()
         if response_speaker_id and response_speaker_id != "custom_speaker_id":
             provider_voice_profile_id = response_speaker_id
         result = {
@@ -220,6 +266,17 @@ class VolcEngineVoiceCloneV3Provider:
         return result
 
     @staticmethod
+    def _speaker_status_payload(response: Dict[str, Any]) -> Dict[str, Any]:
+        speaker_status = response.get("speaker_status")
+        if isinstance(speaker_status, dict):
+            return speaker_status
+        if isinstance(speaker_status, list) and speaker_status:
+            first = speaker_status[0]
+            if isinstance(first, dict):
+                return first
+        return {}
+
+    @staticmethod
     def _header_value(headers: Any, name: str) -> str:
         if not headers:
             return ""
@@ -232,9 +289,9 @@ class VolcEngineVoiceCloneV3Provider:
     @staticmethod
     def _sample_status(provider_status: str) -> str:
         normalized = provider_status.strip().lower()
-        if normalized in {"ready", "success", "succeeded", "done", "finished", "complete", "completed"}:
+        if normalized in {"2", "4", "ready", "success", "succeeded", "done", "finished", "complete", "completed", "active"}:
             return "ready"
-        if normalized in {"failed", "fail", "error", "rejected"}:
+        if normalized in {"3", "failed", "fail", "error", "rejected"}:
             return "failed"
         return "pending"
 

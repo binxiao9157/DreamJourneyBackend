@@ -127,14 +127,19 @@ VOLCENGINE_VOICE_CLONE_UPGRADE_URL=https://openspeech.bytedance.com/api/v3/tts/u
 VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=customSpeakerId
 # 如果使用火山预付费/免费音色模式，改为 consoleSpeakerId，并填写控制台生成的真实 S_ 音色 ID。
 # VOLCENGINE_VOICE_CLONE_SPEAKER_ID=S_xxxxxxxx
+# 如果使用声音复刻 2.0 赠送试用槽位，建议改为 trialSpeakerIdPool，并填写控制台赠送的 S_ 音色 ID 列表。
+# VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=trialSpeakerIdPool
+# VOLCENGINE_VOICE_CLONE_SPEAKER_IDS=S_xxxxxxxx,S_yyyyyyyy
+VOLCENGINE_VOICE_CLONE_MODEL_TYPE=5
 VOLCENGINE_VOICE_CLONE_TTS_API_KEY=<火山声音复刻 TTS x-api-key>
 VOLCENGINE_VOICE_CLONE_TTS_URL=https://openspeech.bytedance.com/api/v1/tts
 VOLCENGINE_VOICE_CLONE_TTS_CLUSTER=volcano_icl
+VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID=seed-icl-2.0
 
 AMAP_WEB_SERVICE_KEY=<高德 WebService Key>
 ```
 
-声音复刻训练/查询只使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key`。`VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=customSpeakerId` 时，请求体会传 `speaker_id=custom_speaker_id`，并把本地 `voiceProfileId` 写入 `custom_speaker_id`。`VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=consoleSpeakerId` 时，请求体会把服务器配置的 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID` 作为 `speaker_id`，用于火山预付费/免费音色模式。复刻音色 TTS 使用独立的 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY` 调官方 HTTP TTS `/api/v1/tts`，将训练得到的 `voiceProfileId` 作为 `audio.voice_type`。当前版本不要配置或依赖 `VOLCENGINE_VOICE_CLONE_RESOURCE_ID`、`VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID`，后端不会向声音复刻训练/查询/TTS 请求发送 `X-Api-Resource-Id`。
+声音复刻训练/查询只使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key`。`VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=customSpeakerId` 时，请求体会传 `speaker_id=custom_speaker_id`，并把本地 `voiceProfileId` 写入 `custom_speaker_id`。`VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=consoleSpeakerId` 时，请求体会把服务器配置的 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID` 作为 `speaker_id`，用于火山预付费/免费音色模式。`VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=trialSpeakerIdPool` 时，后端会从 `VOLCENGINE_VOICE_CLONE_SPEAKER_IDS` 里按本地 `voiceProfileId` 稳定选择一个控制台赠送的 `S_` 试用槽位，并在训练请求中带 `model_type=5`。复刻音色 TTS 使用独立的 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY` 调官方 HTTP TTS `/api/v1/tts`，将训练得到的真实 `S_` 音色 ID 作为 `audio.voice_type`，并按声音复刻 2.0 合同发送 `Resource-Id=seed-icl-2.0`。不要向训练或查询请求发送 `X-Api-Resource-Id`，也不要把 `Resource-Id` 写成 `X-Api-Resource-Id`。
 
 如果还没有 `BACKEND_API_TOKEN`，可在服务器生成一个：
 
@@ -150,6 +155,21 @@ openssl rand -hex 32
 sudo chown miao:miao /opt/services/dreamjourney/DreamJourneyBackend/.env
 sudo chmod 600 /opt/services/dreamjourney/DreamJourneyBackend/.env
 ```
+
+部署前可先跑本地声音复刻 2.0 合同 dry-run，不会调用火山接口，也不会打印 key：
+
+```bash
+PYTHONPATH=. scripts/run-voice-clone-2-contract-smoke.sh
+```
+
+输出应满足：
+
+- `voiceClone2TrialReady=true`
+- `trainingSpeakerId` 以 `S_` 开头
+- `trainingModelType=5`
+- `trainingHasCustomSpeakerId=false`
+- `ttsResourceId=seed-icl-2.0`
+- `ttsHasXApiResourceId=false`
 
 ## 6. 重建并启动容器
 

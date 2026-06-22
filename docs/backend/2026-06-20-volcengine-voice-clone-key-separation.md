@@ -61,11 +61,16 @@ VOLCENGINE_VOICE_CLONE_UPGRADE_URL=https://openspeech.bytedance.com/api/v3/tts/u
 VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=customSpeakerId
 # 预付费/免费音色模式才需要填写控制台生成的真实 S_ 音色 ID。
 # VOLCENGINE_VOICE_CLONE_SPEAKER_ID=S_xxxxxxxx
+# 声音复刻 2.0 赠送试用槽位建议使用槽位池模式。
+# VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=trialSpeakerIdPool
+# VOLCENGINE_VOICE_CLONE_SPEAKER_IDS=S_xxxxxxxx,S_yyyyyyyy
+VOLCENGINE_VOICE_CLONE_MODEL_TYPE=5
 
 # 复刻音色 TTS 合成，建议独立配置，不与训练 key 混用
 VOLCENGINE_VOICE_CLONE_TTS_API_KEY=<volcengine voice clone tts x-api-key>
 VOLCENGINE_VOICE_CLONE_TTS_URL=https://openspeech.bytedance.com/api/v1/tts
 VOLCENGINE_VOICE_CLONE_TTS_CLUSTER=volcano_icl
+VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID=seed-icl-2.0
 ```
 
 后端代码需要支持 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY`。补完后：
@@ -115,6 +120,7 @@ X-Api-Request-Id: <uuid>
     "format": "wav"
   },
   "language": 0,
+  "model_type": 5,
   "extra_params": {
     "voice_clone_denoise_model_id": "..."
   }
@@ -122,6 +128,8 @@ X-Api-Request-Id: <uuid>
 ```
 
 此模式必须在服务器 `.env` 配置 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID`，不要使用 iOS 本地随机生成的 `S_` ID。
+
+声音复刻 2.0 赠送的 10 个试用音色建议使用 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=trialSpeakerIdPool`，并把控制台赠送的多个 `S_` ID 写入 `VOLCENGINE_VOICE_CLONE_SPEAKER_IDS`。后端会按本地 `voiceProfileId` 稳定选择一个槽位，训练成功后把真实 `S_` ID 返回给 iOS 保存。此调试模式不在 iOS 保存火山密钥。
 
 查询请求核心字段：
 
@@ -138,6 +146,7 @@ X-Api-Request-Id: <uuid>
 ```text
 Content-Type: application/json
 x-api-key: <VOLCENGINE_VOICE_CLONE_TTS_API_KEY>
+Resource-Id: seed-icl-2.0
 ```
 
 请求体核心字段：
@@ -167,7 +176,8 @@ x-api-key: <VOLCENGINE_VOICE_CLONE_TTS_API_KEY>
 
 - 不要把 `VOLCENGINE_APP_TOKEN` 当成声音复刻 TTS 的 `x-api-key`。
 - 不要把实时对话的 `VOLCENGINE_REALTIME_RESOURCE_ID` 用到声音复刻训练或合成。
-- 不要在当前链路里给声音复刻训练、查询或 `/api/v1/tts` 合成请求强行追加 `X-Api-Resource-Id`。当前对照的官方声音复刻文档和 TTS 示例里没有要求这个头。
+- 不要给声音复刻训练、查询接口追加 `X-Api-Resource-Id`。
+- 声音复刻 2.0 合成要按当前接入合同给 `/api/v1/tts` 追加 `Resource-Id=seed-icl-2.0`；不要写成 `X-Api-Resource-Id`。
 - 不要把 key 写进 iOS 工程、Git 仓库、聊天记录或 issue。
 
 ## 6. 部署后验证
@@ -178,6 +188,14 @@ x-api-key: <VOLCENGINE_VOICE_CLONE_TTS_API_KEY>
 curl -sS "$BACKEND_BASE_URL/config/runtime" \
   -H "Authorization: Bearer $BACKEND_API_TOKEN" | jq '.voiceClone'
 ```
+
+部署前可先跑本地声音复刻 2.0 合同 dry-run，不会调用火山接口，也不会打印 key：
+
+```bash
+PYTHONPATH=. scripts/run-voice-clone-2-contract-smoke.sh
+```
+
+输出应看到 `trainingSpeakerId` 为 `S_` 音色 ID、`trainingModelType=5`、`ttsResourceId=seed-icl-2.0`，且 `trainingHasCustomSpeakerId=false`、`ttsHasXApiResourceId=false`。
 
 预期能区分：
 
