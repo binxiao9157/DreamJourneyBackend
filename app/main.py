@@ -76,6 +76,23 @@ DIGITAL_HUMAN_MODE_LABELS = {
 ACCOUNT_DELETION_RETENTION_DAYS = 30
 ACCOUNT_RESTORE_LIMIT = 1
 ACCOUNT_DELETION_CONTRACT_VERSION = 1
+DIGITAL_HUMAN_SESSION_CONTRACT_VERSION = 1
+DIGITAL_HUMAN_SESSION_PROVIDER = "tencent"
+DIGITAL_HUMAN_SESSION_MOCK_PROVIDER_MODE = "mockContract"
+DIGITAL_HUMAN_SESSION_CLOUD_PROVIDER_MODE = "cloudRender"
+DIGITAL_HUMAN_SESSION_DRIVE_MODE = "streamText"
+DIGITAL_HUMAN_SESSION_TTL_SECONDS = 180
+
+
+def _digital_human_provider_ready() -> bool:
+    return bool(
+        settings.tencent_digital_human_app_key
+        and settings.tencent_digital_human_access_token
+        and (
+            settings.tencent_digital_human_asset_virtualman_key
+            or settings.tencent_digital_human_virtualman_project_id
+        )
+    )
 
 
 def _request_backend_api_token(request: Request) -> str:
@@ -108,6 +125,83 @@ def health() -> Dict[str, Any]:
         "environment": settings.environment,
         "store": settings.store_backend,
     }
+
+
+@app.post("/digital-human/sessions")
+def create_digital_human_session(payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = str(payload.get("userId") or "").strip()
+    persona_id = str(payload.get("personaId") or "").strip()
+    scene = str(payload.get("scene") or "echo").strip() or "echo"
+    device_id = str(payload.get("deviceId") or "").strip()
+    lifecycle_mode = str(payload.get("lifecycleMode") or "sunlight").strip() or "sunlight"
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+    if not persona_id:
+        raise HTTPException(status_code=400, detail="personaId is required")
+    if lifecycle_mode not in DIGITAL_HUMAN_MODE_LABELS:
+        raise HTTPException(status_code=400, detail=f"unsupported lifecycleMode: {lifecycle_mode}")
+    if lifecycle_mode == "silent":
+        raise HTTPException(status_code=409, detail="silent mode must not create a digital human render session")
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=DIGITAL_HUMAN_SESSION_TTL_SECONDS)
+    session_seed = f"{user_id}:{persona_id}:{scene}:{device_id}:{now.isoformat()}"
+    session_id = "dh_session_" + hashlib.sha256(session_seed.encode("utf-8")).hexdigest()[:24]
+    cloud_render_ready = _digital_human_provider_ready()
+    provider_mode = (
+        DIGITAL_HUMAN_SESSION_CLOUD_PROVIDER_MODE
+        if cloud_render_ready
+        else DIGITAL_HUMAN_SESSION_MOCK_PROVIDER_MODE
+    )
+    provider_asset_id = settings.tencent_digital_human_asset_virtualman_key
+    provider_project_id = settings.tencent_digital_human_virtualman_project_id
+    if not cloud_render_ready:
+        provider_asset_id = "mock_asset_" + hashlib.sha256(persona_id.encode("utf-8")).hexdigest()[:12]
+        provider_project_id = None
+
+    credential: Dict[str, Any] = {
+        "mode": "backend-issued-tencent-cloud" if cloud_render_ready else "backend-issued-mock",
+        "expiresAt": expires_at.isoformat().replace("+00:00", "Z"),
+    }
+    if cloud_render_ready:
+        credential["appkey"] = settings.tencent_digital_human_app_key
+        credential["accesstoken"] = settings.tencent_digital_human_access_token
+
+    response: Dict[str, Any] = {
+        "sessionId": session_id,
+        "provider": DIGITAL_HUMAN_SESSION_PROVIDER,
+        "providerMode": provider_mode,
+        "personaId": persona_id,
+        "scene": scene,
+        "deviceId": device_id,
+        "lifecycleMode": lifecycle_mode,
+        "lifecycleModeLabel": DIGITAL_HUMAN_MODE_LABELS[lifecycle_mode],
+        "assetKey": provider_asset_id,
+        "driveMode": DIGITAL_HUMAN_SESSION_DRIVE_MODE,
+        "alphaEnabled": True,
+        "smartActionEnabled": False,
+        "sessionPolicy": {
+            "allowInterrupt": True,
+            "maxDurationSeconds": DIGITAL_HUMAN_SESSION_TTL_SECONDS,
+            "proactiveSpeechAllowed": False,
+        },
+        "credential": credential,
+        "fallback": {
+            "mode": "none" if cloud_render_ready else "audioOnly",
+            "reason": (
+                "tencent cloud-render session credential issued"
+                if cloud_render_ready
+                else "tencent runtime is not connected in this mock contract"
+            ),
+        },
+        "contractVersion": DIGITAL_HUMAN_SESSION_CONTRACT_VERSION,
+    }
+    if provider_asset_id:
+        response["providerAssetId"] = provider_asset_id
+    if provider_project_id:
+        response["providerProjectId"] = provider_project_id
+
+    return response
 
 
 @app.post("/auth/login")

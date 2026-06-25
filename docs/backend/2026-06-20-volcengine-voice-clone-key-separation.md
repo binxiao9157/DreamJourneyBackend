@@ -177,6 +177,7 @@ Resource-Id: seed-icl-2.0
 - 不要把 `VOLCENGINE_APP_TOKEN` 当成声音复刻 TTS 的 `x-api-key`。
 - 不要把实时对话的 `VOLCENGINE_REALTIME_RESOURCE_ID` 用到声音复刻训练或合成。
 - 不要给声音复刻训练、查询接口追加 `X-Api-Resource-Id`。
+- 不要在当前链路里给声音复刻训练、查询或 `/api/v1/tts` 合成请求强行追加 `X-Api-Resource-Id`。
 - 声音复刻 2.0 合成要按当前接入合同给 `/api/v1/tts` 追加 `Resource-Id=seed-icl-2.0`；不要写成 `X-Api-Resource-Id`。
 - 不要把 key 写进 iOS 工程、Git 仓库、聊天记录或 issue。
 

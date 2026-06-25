@@ -223,6 +223,17 @@ VOLCENGINE_REALTIME_ADDRESS=wss://openspeech.bytedance.com
 VOLCENGINE_REALTIME_URI=/api/v3/realtime/dialogue
 
 AMAP_WEB_SERVICE_KEY=你的高德WebServiceKey
+
+TENCENT_DIGITAL_HUMAN_APP_KEY=你的腾讯数智人appkey
+TENCENT_DIGITAL_HUMAN_ACCESS_TOKEN=你的腾讯数智人accesstoken
+TENCENT_DIGITAL_HUMAN_ASSET_VIRTUALMAN_KEY=你的asset_virtualman_key
+# 或者使用项目建流，二选一即可：
+# TENCENT_DIGITAL_HUMAN_VIRTUALMAN_PROJECT_ID=你的virtualman_project_id
+
+# 只有启用腾讯 ASR 时才需要：
+# TENCENT_DIGITAL_HUMAN_APP_ID=你的腾讯账号AppId
+# TENCENT_DIGITAL_HUMAN_SECRET_ID=你的腾讯云SecretId
+# TENCENT_DIGITAL_HUMAN_SECRET_KEY=你的腾讯云SecretKey
 ```
 
 注意：
@@ -231,6 +242,8 @@ AMAP_WEB_SERVICE_KEY=你的高德WebServiceKey
 - `AMAP_WEB_SERVICE_KEY` 是高德 Web 服务 Key，不是 iOS SDK Key。
 - `VOLCENGINE_APP_KEY` 对端到端实时对话 WebSocket 是固定值时，填 `PlgvMymc7f3tQnJ6`。
 - `PUBLIC_BASE_URL` 在域名确认前可以先填 `http://127.0.0.1:3100`，但真机联调应改为 HTTPS 域名。
+- 腾讯数智人云渲染只有在 `TENCENT_DIGITAL_HUMAN_APP_KEY`、`TENCENT_DIGITAL_HUMAN_ACCESS_TOKEN`，以及 `TENCENT_DIGITAL_HUMAN_ASSET_VIRTUALMAN_KEY` 或 `TENCENT_DIGITAL_HUMAN_VIRTUALMAN_PROJECT_ID` 齐全时，`/config/runtime` 才会返回 `digitalHuman.providerMode=cloudRender`。
+- `TENCENT_DIGITAL_HUMAN_APP_ID`、`TENCENT_DIGITAL_HUMAN_SECRET_ID`、`TENCENT_DIGITAL_HUMAN_SECRET_KEY` 不是云渲染建流必填项，只在后续接腾讯 ASR 时启用。
 
 ## 7. 启动 DreamJourney 后端
 
@@ -299,6 +312,40 @@ curl -X POST http://127.0.0.1:3100/auth/login \
 ```bash
 curl http://127.0.0.1:3100/config/runtime
 ```
+
+数智人云渲染配置检查：
+
+```bash
+curl http://127.0.0.1:3100/config/runtime | python3 -m json.tool
+```
+
+配置齐全时，`digitalHuman` 应包含：
+
+```json
+{
+  "provider": "tencent",
+  "providerMode": "cloudRender",
+  "realProviderReady": true,
+  "sdkAuthMode": "appkeyAccessToken",
+  "assetMode": "asset"
+}
+```
+
+创建数智人 session：
+
+```bash
+curl -X POST http://127.0.0.1:3100/digital-human/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "userId": "user_9157",
+    "personaId": "persona_mother_001",
+    "scene": "echo",
+    "deviceId": "ios-qa",
+    "lifecycleMode": "sunlight"
+  }'
+```
+
+配置齐全时，响应应包含 `providerMode=cloudRender`、`credential.appkey`、`credential.accesstoken`，以及 `providerAssetId` 或 `providerProjectId`。不要把该响应里的凭证写入日志或提交到仓库。
 
 KBLite 同步：
 

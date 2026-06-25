@@ -56,6 +56,13 @@ class Settings:
     volcengine_voice_clone_tts_resource_id: str = "seed-icl-2.0"
 
     amap_web_service_key: Optional[str] = None
+    tencent_digital_human_app_key: Optional[str] = None
+    tencent_digital_human_access_token: Optional[str] = None
+    tencent_digital_human_asset_virtualman_key: Optional[str] = None
+    tencent_digital_human_virtualman_project_id: Optional[str] = None
+    tencent_digital_human_app_id: Optional[str] = None
+    tencent_digital_human_secret_id: Optional[str] = None
+    tencent_digital_human_secret_key: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -90,6 +97,13 @@ class Settings:
             volcengine_voice_clone_tts_cluster=_env("VOLCENGINE_VOICE_CLONE_TTS_CLUSTER", cls.volcengine_voice_clone_tts_cluster) or cls.volcengine_voice_clone_tts_cluster,
             volcengine_voice_clone_tts_resource_id=_env("VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID", cls.volcengine_voice_clone_tts_resource_id) or cls.volcengine_voice_clone_tts_resource_id,
             amap_web_service_key=_env("AMAP_WEB_SERVICE_KEY"),
+            tencent_digital_human_app_key=_env("TENCENT_DIGITAL_HUMAN_APP_KEY"),
+            tencent_digital_human_access_token=_env("TENCENT_DIGITAL_HUMAN_ACCESS_TOKEN"),
+            tencent_digital_human_asset_virtualman_key=_env("TENCENT_DIGITAL_HUMAN_ASSET_VIRTUALMAN_KEY"),
+            tencent_digital_human_virtualman_project_id=_env("TENCENT_DIGITAL_HUMAN_VIRTUALMAN_PROJECT_ID"),
+            tencent_digital_human_app_id=_env("TENCENT_DIGITAL_HUMAN_APP_ID"),
+            tencent_digital_human_secret_id=_env("TENCENT_DIGITAL_HUMAN_SECRET_ID"),
+            tencent_digital_human_secret_key=_env("TENCENT_DIGITAL_HUMAN_SECRET_KEY"),
         )
 
 
