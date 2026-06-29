@@ -253,6 +253,7 @@ class VolcVoiceCloneTTSProxy:
             speech_rate=speech_rate,
             loudness_rate=loudness_rate,
         )
+        provider_request_id = str(request["json"].get("request", {}).get("reqid") or "")
         body = json.dumps(request["json"], ensure_ascii=False).encode("utf-8")
         upstream = urllib.request.Request(
             request["url"],
@@ -260,25 +261,41 @@ class VolcVoiceCloneTTSProxy:
             headers=request["headers"],
             method="POST",
         )
+        provider_log_id = ""
         try:
             with urllib.request.urlopen(upstream, timeout=60) as response:
                 payload = response.read().decode("utf-8")
+                provider_log_id = self._header_value(response.headers, "X-Tt-Logid")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise ValueError(f"voice clone TTS provider HTTP {exc.code}: {detail[:200]}") from exc
+            error = ValueError(f"voice clone TTS provider HTTP {exc.code}: {detail[:200]}")
+            setattr(error, "provider_request_id", provider_request_id)
+            setattr(error, "provider_log_id", self._header_value(exc.headers, "X-Tt-Logid"))
+            raise error from exc
         except urllib.error.URLError as exc:
-            raise ValueError(f"voice clone TTS provider network error: {exc.reason}") from exc
+            error = ValueError(f"voice clone TTS provider network error: {exc.reason}")
+            setattr(error, "provider_request_id", provider_request_id)
+            raise error from exc
 
         try:
             response_json = json.loads(payload)
         except json.JSONDecodeError as exc:
-            raise ValueError("voice clone TTS provider returned invalid JSON") from exc
+            error = ValueError("voice clone TTS provider returned invalid JSON")
+            setattr(error, "provider_request_id", provider_request_id)
+            setattr(error, "provider_log_id", provider_log_id)
+            raise error from exc
 
         audio = self.parse_tts_response(response_json)
         viseme_timeline = self.parse_viseme_timeline(
             response_json.get("visemeTimeline") or response_json.get("lipSyncTimeline")
         )
-        return {
+        provider_request_id = str(
+            response_json.get("request_id")
+            or response_json.get("reqid")
+            or provider_request_id
+        )
+        provider_log_id = str(response_json.get("log_id") or response_json.get("logid") or provider_log_id)
+        result = {
             "audioBase64": base64.b64encode(audio).decode("ascii"),
             "audioFormat": audio_format,
             "byteCount": len(audio),
@@ -286,6 +303,23 @@ class VolcVoiceCloneTTSProxy:
             "voiceProfileId": voice_profile_id,
             "visemeTimeline": viseme_timeline,
         }
+        if provider_request_id:
+            result["providerRequestId"] = provider_request_id
+        if provider_log_id:
+            result["providerLogId"] = provider_log_id
+        return result
+
+    @staticmethod
+    def _header_value(headers: Any, name: str) -> str:
+        if not headers:
+            return ""
+        get = getattr(headers, "get", None)
+        if callable(get):
+            return str(get(name) or get(name.lower()) or get(name.upper()) or "").strip()
+        try:
+            return str(headers[name] or "").strip()
+        except (KeyError, TypeError):
+            return ""
 
     def parse_tts_response(self, payload: Dict[str, Any]) -> bytes:
         code = payload.get("code")

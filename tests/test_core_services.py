@@ -360,6 +360,40 @@ class TokenAndProxyTests(unittest.TestCase):
             ],
         )
 
+    def test_voice_clone_tts_proxy_attaches_provider_request_and_log_ids(self):
+        settings = Settings(
+            volcengine_voice_clone_tts_api_key="voice-clone-tts-secret",
+            volcengine_voice_clone_tts_url="https://example.com/api/v1/tts",
+        )
+        proxy = VolcVoiceCloneTTSProxy(settings)
+
+        class FakeResponse:
+            headers = {"X-Tt-Logid": "tts-logid-123"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"code":3000,"message":"Success","data":"U09VTkQ="}'
+
+        with patch("urllib.request.urlopen", return_value=FakeResponse()):
+            result = proxy.synthesize(
+                text="你好，欢迎回家。",
+                user_id="u1",
+                voice_profile_id="S_voice_001",
+                audio_format="mp3",
+                sample_rate=24000,
+                speech_rate=-10,
+                loudness_rate=10,
+            )
+
+        self.assertEqual(result["providerLogId"], "tts-logid-123")
+        self.assertTrue(result["providerRequestId"])
+        self.assertEqual(result["voiceProfileId"], "S_voice_001")
+
     def test_voice_clone_synthesis_endpoint_returns_base64_audio_without_exposing_provider_key(self):
         class FakeVoiceCloneTTSProvider:
             provider_mode = "volcengineVoiceCloneV1TTS"
@@ -372,6 +406,8 @@ class TokenAndProxyTests(unittest.TestCase):
                     "byteCount": 5,
                     "providerMode": self.provider_mode,
                     "voiceProfileId": voice_profile_id,
+                    "providerRequestId": "req-synthesis-001",
+                    "providerLogId": "log-synthesis-001",
                     "visemeTimeline": {
                         "source": "providerVisemeTimeline",
                         "duration": 0.36,
@@ -404,6 +440,8 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(payload["audio"]["data"], "U09VTkQ=")
         self.assertEqual(payload["audio"]["format"], "mp3")
         self.assertEqual(payload["providerMode"], "volcengineVoiceCloneV1TTS")
+        self.assertEqual(payload["providerRequestId"], "req-synthesis-001")
+        self.assertEqual(payload["providerLogId"], "log-synthesis-001")
         self.assertEqual(payload["visemeTimeline"]["source"], "providerVisemeTimeline")
         self.assertEqual(payload["visemeTimeline"]["frames"][1]["mouthShape"], "aa")
         self.assertNotIn("X-Api-Key", response.text)

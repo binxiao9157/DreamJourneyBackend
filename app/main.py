@@ -802,6 +802,12 @@ def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         "visemeTimeline": result.get("visemeTimeline"),
         "audio": audio_payload,
     }
+    provider_request_id = str(result.get("providerRequestId") or "").strip()
+    provider_log_id = str(result.get("providerLogId") or "").strip()
+    if provider_request_id:
+        response["providerRequestId"] = provider_request_id
+    if provider_log_id:
+        response["providerLogId"] = provider_log_id[:160]
     if output_mode != "default":
         response["outputMode"] = output_mode
     return response
