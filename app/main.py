@@ -689,6 +689,20 @@ def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
     return updated
 
 
+def _voice_profile_quality_acceptance_update(profile: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    if profile.get("sampleStatus") != "ready" or not bool(profile.get("isEnabled")) or not bool(profile.get("realCloneProviderReady")):
+        raise HTTPException(status_code=409, detail="voice profile is not ready for quality acceptance")
+
+    now = datetime.now(timezone.utc).isoformat()
+    updated = dict(profile)
+    updated["qualityAcceptanceRequired"] = False
+    updated["qualityAcceptanceState"] = "accepted"
+    updated["qualityAcceptedAt"] = now
+    updated["qualityAcceptedBy"] = user_id
+    updated["updatedAt"] = now
+    return updated
+
+
 @app.post("/profile")
 def save_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     profile = _sanitize_profile_payload(payload)
@@ -750,6 +764,16 @@ def refresh_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]
     refreshed = _voice_profile_refresh_update(profile)
     saved = store.save_voice_profile(user_id, refreshed)
     return {"status": "refreshed", "profile": saved}
+
+
+@app.post("/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance")
+def accept_voice_profile_quality(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+    profile = store.get_voice_profile(user_id, voice_profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="voice profile not found")
+    accepted = _voice_profile_quality_acceptance_update(profile, user_id)
+    saved = store.save_voice_profile(user_id, accepted)
+    return {"status": "accepted", "profile": saved}
 
 
 @app.post("/voice/synthesis")

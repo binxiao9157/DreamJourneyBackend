@@ -1927,6 +1927,82 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertIn("unsupported sampleStatus", unsupported.text)
         self.assertEqual(local_only.status_code, 403)
 
+    def test_voice_clone_profile_quality_acceptance_marks_ready_profile_as_usable(self):
+        previous_store = main_module.store
+        main_module.store = InMemoryStore()
+        try:
+            client = TestClient(app)
+            user_id = "voice_clone_quality_user"
+            voice_profile_id = "S_quality_acceptance_1"
+            main_module.store.save_voice_profile(
+                user_id,
+                {
+                    "id": voice_profile_id,
+                    "voiceProfileId": voice_profile_id,
+                    "userId": user_id,
+                    "sampleStatus": "ready",
+                    "isEnabled": True,
+                    "realCloneProviderReady": True,
+                    "qualityAcceptanceRequired": True,
+                    "providerMode": "volcengineVoiceCloneV3",
+                    "providerStatus": "2",
+                    "authorizationConfirmed": True,
+                    "authorizationCopy": "用户已授权本人声音样本。",
+                    "disableContract": main_module.VOICE_CLONE_DISABLE_CONTRACT,
+                    "deleteContract": main_module.VOICE_CLONE_DELETE_CONTRACT,
+                    "contractVersion": main_module.VOICE_CLONE_CONTRACT_VERSION,
+                },
+            )
+
+            accepted = client.post(f"/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance")
+            listed = client.get(f"/voice/profiles/{user_id}")
+
+            self.assertEqual(accepted.status_code, 200)
+            self.assertEqual(accepted.json()["status"], "accepted")
+            profile = accepted.json()["profile"]
+            self.assertFalse(profile["qualityAcceptanceRequired"])
+            self.assertEqual(profile["qualityAcceptanceState"], "accepted")
+            self.assertEqual(profile["qualityAcceptedBy"], user_id)
+            self.assertIn("qualityAcceptedAt", profile)
+            self.assertEqual(listed.json()["profiles"][0]["qualityAcceptanceRequired"], False)
+        finally:
+            main_module.store = previous_store
+
+    def test_voice_clone_profile_quality_acceptance_rejects_not_ready_profile(self):
+        previous_store = main_module.store
+        main_module.store = InMemoryStore()
+        try:
+            client = TestClient(app)
+            user_id = "voice_clone_quality_pending_user"
+            voice_profile_id = "S_quality_pending_1"
+            main_module.store.save_voice_profile(
+                user_id,
+                {
+                    "id": voice_profile_id,
+                    "voiceProfileId": voice_profile_id,
+                    "userId": user_id,
+                    "sampleStatus": "pending",
+                    "isEnabled": False,
+                    "realCloneProviderReady": True,
+                    "qualityAcceptanceRequired": True,
+                    "providerMode": "volcengineVoiceCloneV3",
+                    "providerStatus": "1",
+                    "authorizationConfirmed": True,
+                    "authorizationCopy": "用户已授权本人声音样本。",
+                    "disableContract": main_module.VOICE_CLONE_DISABLE_CONTRACT,
+                    "deleteContract": main_module.VOICE_CLONE_DELETE_CONTRACT,
+                    "contractVersion": main_module.VOICE_CLONE_CONTRACT_VERSION,
+                },
+            )
+
+            accepted = client.post(f"/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance")
+            persisted = main_module.store.get_voice_profile(user_id, voice_profile_id)
+
+            self.assertEqual(accepted.status_code, 409)
+            self.assertTrue(persisted["qualityAcceptanceRequired"])
+        finally:
+            main_module.store = previous_store
+
 
 class ArchiveAPITests(unittest.TestCase):
     def setUp(self):
