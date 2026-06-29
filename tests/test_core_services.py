@@ -1,6 +1,8 @@
+import base64
 import os
 import urllib.error
 import unittest
+import wave
 from io import BytesIO
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -404,6 +406,62 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(payload["providerMode"], "volcengineVoiceCloneV1TTS")
         self.assertEqual(payload["visemeTimeline"]["source"], "providerVisemeTimeline")
         self.assertEqual(payload["visemeTimeline"]["frames"][1]["mouthShape"], "aa")
+        self.assertNotIn("X-Api-Key", response.text)
+        self.assertNotIn("voice-clone-secret", response.text)
+
+    def test_voice_clone_synthesis_can_return_tencent_audio_drive_pcm_contract(self):
+        source_wav = BytesIO()
+        with wave.open(source_wav, "wb") as wav:
+            wav.setnchannels(2)
+            wav.setsampwidth(2)
+            wav.setframerate(24000)
+            wav.writeframes((b"\x00\x10\x00\x10" * 2400))
+
+        class FakeVoiceCloneTTSProvider:
+            provider_mode = "volcengineVoiceCloneV1TTS"
+            is_configured = True
+
+            def synthesize(self, *, text, user_id, voice_profile_id, audio_format, sample_rate, speech_rate, loudness_rate):
+                self.requested_audio_format = audio_format
+                self.requested_sample_rate = sample_rate
+                return {
+                    "audioBase64": base64.b64encode(source_wav.getvalue()).decode("ascii"),
+                    "audioFormat": audio_format,
+                    "byteCount": len(source_wav.getvalue()),
+                    "providerMode": self.provider_mode,
+                    "voiceProfileId": voice_profile_id,
+                    "visemeTimeline": None,
+                }
+
+        fake_provider = FakeVoiceCloneTTSProvider()
+        with patch("app.main.VoiceCloneTTSProviderFactory") as factory:
+            factory.return_value.make.return_value = fake_provider
+            response = TestClient(app).post(
+                "/voice/synthesis",
+                json={
+                    "userId": "u1",
+                    "voiceProfileId": "S_voice_001",
+                    "text": "你好，欢迎回家。",
+                    "format": "mp3",
+                    "sampleRate": 24000,
+                    "outputMode": "tencentAudioDrive",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        audio = payload["audio"]
+        pcm = base64.b64decode(audio["data"])
+        self.assertEqual(fake_provider.requested_audio_format, "wav")
+        self.assertEqual(fake_provider.requested_sample_rate, 16000)
+        self.assertEqual(payload["outputMode"], "tencentAudioDrive")
+        self.assertEqual(audio["format"], "pcm16kMono")
+        self.assertEqual(audio["sampleRate"], 16000)
+        self.assertEqual(audio["bitsPerSample"], 16)
+        self.assertEqual(audio["channelCount"], 1)
+        self.assertEqual(audio["byteCount"], len(pcm))
+        self.assertNotEqual(pcm[:4], b"RIFF")
+        self.assertEqual(len(pcm) % 2, 0)
         self.assertNotIn("X-Api-Key", response.text)
         self.assertNotIn("voice-clone-secret", response.text)
 

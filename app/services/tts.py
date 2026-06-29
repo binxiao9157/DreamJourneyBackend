@@ -1,9 +1,16 @@
 import base64
+from io import BytesIO
 import uuid
 import json
 import urllib.error
 import urllib.request
+import wave
 from typing import Any, Dict, Optional
+
+try:
+    import audioop
+except ImportError:  # pragma: no cover - Python runtimes without audioop can still pass through exact PCM.
+    audioop = None
 
 from app.core.config import Settings
 
@@ -96,6 +103,76 @@ class MockVoiceCloneTTSProvider:
         loudness_rate: int,
     ) -> Dict[str, Any]:
         raise ValueError("VolcEngine voice clone TTS provider is not configured")
+
+
+class TencentAudioDrivePCMAdapter:
+    audio_format = "pcm16kMono"
+    sample_rate = 16000
+    bits_per_sample = 16
+    channel_count = 1
+
+    def adapt(self, *, audio_base64: str, audio_format: str) -> Dict[str, Any]:
+        try:
+            audio = base64.b64decode(str(audio_base64))
+        except ValueError as exc:
+            raise ValueError("voice clone TTS provider returned invalid base64 audio") from exc
+
+        normalized_format = str(audio_format or "").strip().lower()
+        if normalized_format in {"pcm16kmono", "pcm_16k_mono", "pcm16", "pcm"}:
+            pcm = audio
+        elif normalized_format == "wav":
+            pcm = self._wav_to_pcm16k_mono(audio)
+        else:
+            raise ValueError(
+                "voice clone TTS audio format "
+                f"{audio_format!r} cannot be converted to Tencent audio-drive PCM"
+            )
+
+        return {
+            "encoding": "base64",
+            "format": self.audio_format,
+            "sampleRate": self.sample_rate,
+            "bitsPerSample": self.bits_per_sample,
+            "channelCount": self.channel_count,
+            "data": base64.b64encode(pcm).decode("ascii"),
+            "byteCount": len(pcm),
+        }
+
+    def _wav_to_pcm16k_mono(self, audio: bytes) -> bytes:
+        try:
+            with wave.open(BytesIO(audio), "rb") as wav:
+                channels = wav.getnchannels()
+                sample_width = wav.getsampwidth()
+                frame_rate = wav.getframerate()
+                frames = wav.readframes(wav.getnframes())
+        except wave.Error as exc:
+            raise ValueError("voice clone TTS provider returned invalid WAV audio") from exc
+
+        if channels <= 0 or sample_width <= 0 or frame_rate <= 0:
+            raise ValueError("voice clone TTS provider returned invalid WAV metadata")
+
+        if sample_width != 2:
+            self._require_audioop("sample width conversion")
+            frames = audioop.lin2lin(frames, sample_width, 2)
+            sample_width = 2
+
+        if channels == 2:
+            self._require_audioop("stereo downmix")
+            frames = audioop.tomono(frames, sample_width, 0.5, 0.5)
+            channels = 1
+        elif channels != 1:
+            raise ValueError("voice clone TTS WAV must be mono or stereo for Tencent audio-drive conversion")
+
+        if frame_rate != self.sample_rate:
+            self._require_audioop("sample-rate conversion")
+            frames, _ = audioop.ratecv(frames, sample_width, channels, frame_rate, self.sample_rate, None)
+
+        return frames
+
+    @staticmethod
+    def _require_audioop(operation: str) -> None:
+        if audioop is None:
+            raise ValueError(f"Python audioop is required for {operation}")
 
 
 class VolcVoiceCloneTTSProxy:

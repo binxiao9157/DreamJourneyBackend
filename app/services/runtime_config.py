@@ -91,6 +91,18 @@ class RuntimeConfigService:
                     "fallbackMode": "avAudioPlayerMetering",
                     "contractVersion": 1,
                 },
+                "tencentAudioDrive": {
+                    "supported": voice_clone_tts_provider.is_configured,
+                    "synthesisEndpoint": "/voice/synthesis",
+                    "requestOutputMode": "tencentAudioDrive",
+                    "providerRequestFormat": "wav",
+                    "audioFormat": "pcm16kMono",
+                    "sampleRate": 16000,
+                    "bitsPerSample": 16,
+                    "channelCount": 1,
+                    "fallbackMode": "providerTextDrive",
+                    "contractVersion": 1,
+                },
                 "contractVersion": 1,
             },
             "digitalHuman": {

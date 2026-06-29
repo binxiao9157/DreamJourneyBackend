@@ -27,7 +27,7 @@ from app.services.passwords import make_password_credential, verify_password
 from app.services.runtime_config import RuntimeConfigService
 from app.services.store_factory import init_store, make_store
 from app.services.tokens import TokenService
-from app.services.tts import VolcTTSProxy, VoiceCloneTTSProviderFactory
+from app.services.tts import TencentAudioDrivePCMAdapter, VolcTTSProxy, VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, VoiceCloneProviderUnavailable
 from app.services.user_identity import stable_user_id
 
@@ -761,6 +761,12 @@ def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     sample_rate = int(payload.get("sampleRate") or 24000)
     speech_rate = int(payload.get("speechRate") or -10)
     loudness_rate = int(payload.get("loudnessRate") or 10)
+    output_mode = str(payload.get("outputMode") or "default").strip() or "default"
+    provider_audio_format = audio_format
+    provider_sample_rate = sample_rate
+    if output_mode == "tencentAudioDrive":
+        provider_audio_format = "wav"
+        provider_sample_rate = TencentAudioDrivePCMAdapter.sample_rate
 
     provider = VoiceCloneTTSProviderFactory(settings).make()
     if not provider.is_configured:
@@ -770,26 +776,35 @@ def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
             text=text,
             user_id=user_id,
             voice_profile_id=voice_profile_id,
-            audio_format=audio_format,
-            sample_rate=sample_rate,
+            audio_format=provider_audio_format,
+            sample_rate=provider_sample_rate,
             speech_rate=speech_rate,
             loudness_rate=loudness_rate,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-
-    return {
-        "status": "synthesized",
-        "voiceProfileId": result["voiceProfileId"],
-        "providerMode": result["providerMode"],
-        "visemeTimeline": result.get("visemeTimeline"),
-        "audio": {
+        audio_payload = {
             "encoding": "base64",
             "format": result["audioFormat"],
             "data": result["audioBase64"],
             "byteCount": result["byteCount"],
-        },
+        }
+        if output_mode == "tencentAudioDrive":
+            audio_payload = TencentAudioDrivePCMAdapter().adapt(
+                audio_base64=result["audioBase64"],
+                audio_format=result["audioFormat"],
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    response = {
+        "status": "synthesized",
+        "voiceProfileId": result["voiceProfileId"],
+        "providerMode": result["providerMode"],
+        "visemeTimeline": result.get("visemeTimeline"),
+        "audio": audio_payload,
     }
+    if output_mode != "default":
+        response["outputMode"] = output_mode
+    return response
 
 
 @app.delete("/voice/profiles/{user_id}/{voice_profile_id}")
