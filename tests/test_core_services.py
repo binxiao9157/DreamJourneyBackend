@@ -2008,10 +2008,19 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
 class ArchiveAPITests(unittest.TestCase):
     def setUp(self):
         self.previous_store = main_module.store
+        self.previous_settings = main_module.settings
         main_module.store = InMemoryStore()
+        main_module.settings = Settings(
+            store_backend="memory",
+            volcengine_voice_clone_tts_api_key="voice-clone-tts-secret",
+            tencent_digital_human_app_key="dh-appkey",
+            tencent_digital_human_access_token="dh-token",
+            tencent_digital_human_virtualman_project_id="dh-project",
+        )
 
     def tearDown(self):
         main_module.store = self.previous_store
+        main_module.settings = self.previous_settings
 
     def test_archive_items_api_saves_sanitized_metadata_and_lists_by_user(self):
         client = TestClient(app)
@@ -2042,6 +2051,141 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(listed.json()["items"][0]["personaScope"], "personal")
         self.assertEqual(listed.json()["items"][0]["digitalHumanId"], "archive_user_1")
         self.assertNotIn("localPath", listed.json()["items"][0])
+
+    def test_context_build_returns_cfl_lite_packet_without_cross_scope_archive_leak(self):
+        client = TestClient(app)
+        user_id = "context_user_1"
+
+        client.post(
+            "/kb/sync",
+            json={
+                "userId": user_id,
+                "graph": {
+                    "people": [
+                        {
+                            "id": "person_1",
+                            "name": "陈建国",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ],
+                    "places": [
+                        {
+                            "id": "place_1",
+                            "name": "绍兴",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ],
+                    "events": [],
+                    "facts": [
+                        {
+                            "id": "fact_1",
+                            "statement": "小时候常去仓桥直街。",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ],
+                },
+            },
+        )
+        client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "archive_personal_1",
+                "kind": "photo",
+                "title": "仓桥直街旧照",
+                "note": "相册导入的一张照片",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "detectedPeople": ["陈建国"],
+                "detectedLocations": ["绍兴"],
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "archive_family_1",
+                "kind": "photo",
+                "title": "外婆家的照片",
+                "personaScope": "family",
+                "digitalHumanId": "family_elder_1",
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        main_module.store.save_voice_profile(
+            user_id,
+            {
+                "userId": user_id,
+                "voiceProfileId": "S_context_ready",
+                "sampleStatus": "ready",
+                "isEnabled": True,
+                "realCloneProviderReady": True,
+                "qualityAcceptanceRequired": False,
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+            },
+        )
+        main_module.store.save_care_snapshot(
+            user_id,
+            {
+                "riskLevel": "watch",
+                "summary": "最近睡眠线索较多。",
+                "suggestions": ["晚间轻声询问。"],
+            },
+        )
+
+        response = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "query": "还记得仓桥直街吗？",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "lifecycleMode": "sunlight",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        packet = response.json()["contextPacket"]
+        self.assertEqual(packet["intent"], "echo_chat")
+        self.assertEqual(packet["userId"], user_id)
+        self.assertTrue(packet["traceId"].startswith("ctx_"))
+        self.assertEqual(packet["schemaVersion"], 0)
+        self.assertEqual(packet["persona"]["personaScope"], "personal")
+        self.assertEqual(packet["memory"]["archiveItems"][0]["id"], "archive_personal_1")
+        self.assertNotIn("archive_family_1", str(packet["memory"]["archiveItems"]))
+        self.assertEqual(packet["memory"]["kbFacts"][0]["statement"], "小时候常去仓桥直街。")
+        self.assertEqual(packet["care"]["latest"]["snapshot"]["riskLevel"], "watch")
+        self.assertTrue(packet["voice"]["cloneReady"])
+        self.assertEqual(packet["voice"]["voiceProfileId"], "S_context_ready")
+        self.assertEqual(packet["voice"]["outputMode"], "tencentAudioDrive")
+        self.assertIn("sessionReady", packet["digitalHuman"])
+        self.assertFalse(packet["policy"]["crossScopeArchiveIncluded"])
+        self.assertGreaterEqual(packet["debug"]["sourceCounts"]["archiveItemsAvailable"], 2)
+        self.assertEqual(packet["debug"]["sourceCounts"]["archiveItemsIncluded"], 1)
+        self.assertGreaterEqual(packet["debug"]["latencyMs"], 0)
+
+    def test_context_build_reports_fallbacks_when_voice_and_digital_human_are_unavailable(self):
+        client = TestClient(app)
+        user_id = "context_user_no_voice"
+        response = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        packet = response.json()["contextPacket"]
+        self.assertFalse(packet["voice"]["cloneReady"])
+        self.assertIn("voice_clone_not_ready", packet["fallbacks"])
+        self.assertIn("no_archive_context", packet["fallbacks"])
+        self.assertFalse(packet["policy"]["crossScopeArchiveIncluded"])
 
     def test_archive_items_api_persists_family_persona_visibility_contract(self):
         client = TestClient(app)

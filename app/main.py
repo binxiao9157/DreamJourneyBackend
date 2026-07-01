@@ -25,6 +25,7 @@ from app.services.privacy import (
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.passwords import make_password_credential, verify_password
 from app.services.runtime_config import RuntimeConfigService
+from app.services.context_packet import ContextPacketBuilder
 from app.services.store_factory import init_store, make_store
 from app.services.tokens import TokenService
 from app.services.tts import TencentAudioDrivePCMAdapter, VolcTTSProxy, VoiceCloneTTSProviderFactory
@@ -721,6 +722,15 @@ def get_profile(user_id: str) -> Dict[str, Any]:
 @app.get("/config/runtime")
 def runtime_config() -> Dict[str, Any]:
     return RuntimeConfigService(settings).public_config()
+
+
+@app.post("/context/build")
+def build_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        packet = ContextPacketBuilder(store, settings).build(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "built", "contextPacket": packet}
 
 
 @app.post("/voice/realtime-token")
