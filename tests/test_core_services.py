@@ -498,6 +498,7 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(audio["bitsPerSample"], 16)
         self.assertEqual(audio["channelCount"], 1)
         self.assertEqual(audio["byteCount"], len(pcm))
+        self.assertGreater(audio["durationSeconds"], 0)
         self.assertNotEqual(pcm[:4], b"RIFF")
         self.assertEqual(len(pcm) % 2, 0)
         self.assertNotIn("X-Api-Key", response.text)

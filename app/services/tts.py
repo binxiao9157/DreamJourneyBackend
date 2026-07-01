@@ -128,6 +128,9 @@ class TencentAudioDrivePCMAdapter:
                 f"{audio_format!r} cannot be converted to Tencent audio-drive PCM"
             )
 
+        bytes_per_second = self.sample_rate * self.channel_count * (self.bits_per_sample // 8)
+        duration_seconds = round(len(pcm) / bytes_per_second, 3) if bytes_per_second > 0 else 0
+
         return {
             "encoding": "base64",
             "format": self.audio_format,
@@ -136,6 +139,7 @@ class TencentAudioDrivePCMAdapter:
             "channelCount": self.channel_count,
             "data": base64.b64encode(pcm).decode("ascii"),
             "byteCount": len(pcm),
+            "durationSeconds": duration_seconds,
         }
 
     def _wav_to_pcm16k_mono(self, audio: bytes) -> bytes:

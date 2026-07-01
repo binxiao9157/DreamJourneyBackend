@@ -213,6 +213,31 @@ python3 scripts/backend-family-voice-contract-smoke.py
 
 最后用真实授权音频样本验证训练，用已训练成功的 `voiceProfileId` 验证 `/voice/synthesis`。如果只是用随机 `voiceProfileId`，上游返回“speaker/resource 不匹配”是合理失败，不代表真实训练链路失败。
 
+`/voice/synthesis` 使用 `outputMode=tencentAudioDrive` 时，后端会把 provider 音频转换成腾讯数智人 audio-drive 可消费的 PCM，并返回可观测字段：
+
+```json
+{
+  "status": "synthesized",
+  "voiceProfileId": "S_example",
+  "providerMode": "volcengineVoiceCloneV1TTS",
+  "outputMode": "tencentAudioDrive",
+  "providerRequestId": "req-...",
+  "providerLogId": "log-...",
+  "audio": {
+    "encoding": "base64",
+    "format": "pcm16kMono",
+    "sampleRate": 16000,
+    "bitsPerSample": 16,
+    "channelCount": 1,
+    "byteCount": 32000,
+    "durationSeconds": 1.0,
+    "data": "<base64 pcm>"
+  }
+}
+```
+
+如果 provider 不可用、音色资源不匹配或音频无法转换为腾讯 audio-drive PCM，接口返回明确错误，不会静默降级成默认音色。
+
 `/voice/synthesis` 响应中的 `visemeTimeline` 是可选字段，格式如下。当前 provider 不返回时该字段为 `null`。
 
 ```json
