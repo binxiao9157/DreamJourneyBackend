@@ -8,7 +8,7 @@ from app.services.runtime_config import RuntimeConfigService
 
 
 class ContextPacketBuilder:
-    schema_version = 0
+    schema_version = 1
 
     def __init__(self, store: Any, settings: Settings):
         self.store = store
@@ -56,6 +56,29 @@ class ContextPacketBuilder:
             fallbacks.append("digital_human_not_ready")
 
         latency_ms = int((time.perf_counter() - started) * 1000)
+        privacy_scope = self._privacy_scope(
+            user_id=user_id,
+            persona_scope=persona_scope,
+            digital_human_id=digital_human_id,
+            viewer_family_member_id=viewer_family_member_id,
+            cross_scope_archive_included=self._has_cross_scope_archive(
+                included_archive_items,
+                persona_scope=persona_scope,
+                digital_human_id=digital_human_id,
+                user_id=user_id,
+            ),
+        )
+        trace = self._trace_summary(
+            archive_items=included_archive_items,
+            kb_graph=kb_graph,
+            usable_voice_profile=usable_voice_profile,
+            clone_ready=clone_ready,
+            digital_human_ready=digital_human_ready,
+            digital_human_provider_mode=digital_human_runtime.get("providerMode") or "mockContract",
+            privacy_scope=privacy_scope,
+            fallbacks=fallbacks,
+            latency_ms=latency_ms,
+        )
         return {
             "schemaVersion": self.schema_version,
             "traceId": "ctx_" + uuid.uuid4().hex[:24],
@@ -100,13 +123,10 @@ class ContextPacketBuilder:
                 "privacyMode": "standard",
                 "canUseFamilyData": persona_scope == "family",
                 "canUseVoiceClone": clone_ready,
-                "crossScopeArchiveIncluded": self._has_cross_scope_archive(
-                    included_archive_items,
-                    persona_scope=persona_scope,
-                    digital_human_id=digital_human_id,
-                    user_id=user_id,
-                ),
+                "crossScopeArchiveIncluded": privacy_scope["crossScopeArchiveIncluded"],
+                "privacyScope": privacy_scope,
             },
+            "trace": trace,
             "fallbacks": fallbacks,
             "debug": {
                 "sourceCounts": {
@@ -186,6 +206,66 @@ class ContextPacketBuilder:
             )
             for item in items
         )
+
+    def _privacy_scope(
+        self,
+        *,
+        user_id: str,
+        persona_scope: str,
+        digital_human_id: str,
+        viewer_family_member_id: Optional[str],
+        cross_scope_archive_included: bool,
+    ) -> Dict[str, Any]:
+        if persona_scope == "family":
+            allowed_archive_scopes = ["family"]
+            allowed_digital_human_ids = [digital_human_id]
+            scope_label = f"family:{digital_human_id}"
+        else:
+            allowed_archive_scopes = ["personal"]
+            allowed_digital_human_ids = sorted({user_id, digital_human_id})
+            scope_label = f"personal:{digital_human_id}"
+
+        return {
+            "scope": persona_scope,
+            "scopeLabel": scope_label,
+            "viewerUserId": user_id,
+            "ownerUserId": user_id,
+            "digitalHumanId": digital_human_id,
+            "viewerFamilyMemberID": viewer_family_member_id,
+            "allowedArchiveScopes": allowed_archive_scopes,
+            "allowedDigitalHumanIds": allowed_digital_human_ids,
+            "canUseFamilyData": persona_scope == "family",
+            "crossScopeArchiveIncluded": cross_scope_archive_included,
+        }
+
+    @staticmethod
+    def _trace_summary(
+        *,
+        archive_items: List[Dict[str, Any]],
+        kb_graph: Dict[str, Any],
+        usable_voice_profile: Optional[Dict[str, Any]],
+        clone_ready: bool,
+        digital_human_ready: bool,
+        digital_human_provider_mode: str,
+        privacy_scope: Dict[str, Any],
+        fallbacks: List[str],
+        latency_ms: int,
+    ) -> Dict[str, Any]:
+        return {
+            "archiveItemIds": [str(item.get("id")) for item in archive_items if item.get("id")],
+            "archiveItemKinds": [str(item.get("kind") or "unknown") for item in archive_items],
+            "archiveItemsIncluded": len(archive_items),
+            "kbFactCount": len(kb_graph.get("facts") or []),
+            "voiceProfileId": usable_voice_profile.get("voiceProfileId") if usable_voice_profile else None,
+            "voiceCloneReady": clone_ready,
+            "voiceOutputMode": "tencentAudioDrive",
+            "digitalHumanSessionReady": digital_human_ready,
+            "digitalHumanProviderMode": digital_human_provider_mode,
+            "fallbacks": list(fallbacks),
+            "privacyScope": privacy_scope["scopeLabel"],
+            "crossScopeArchiveIncluded": privacy_scope["crossScopeArchiveIncluded"],
+            "latencyMs": latency_ms,
+        }
 
     @staticmethod
     def _archive_summary(item: Dict[str, Any]) -> Dict[str, Any]:
