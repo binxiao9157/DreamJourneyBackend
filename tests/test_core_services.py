@@ -2181,6 +2181,363 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(packet["debug"]["sourceCounts"]["archiveItemsIncluded"], 1)
         self.assertGreaterEqual(packet["debug"]["latencyMs"], 0)
 
+    def test_context_build_emits_v2_selected_filtered_and_ranking_trace(self):
+        client = TestClient(app)
+        user_id = "context_user_v2_trace"
+
+        client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "archive_trace_ready_1",
+                "kind": "photo",
+                "title": "西湖旧照",
+                "note": "这张照片记录了和妈妈在西湖边散步。",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "analysisStatus": "analyzed",
+                "detectedPeople": ["妈妈"],
+                "detectedLocations": ["西湖"],
+                "detectedScenes": ["散步"],
+                "tags": ["相册影像", "亲情"],
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "archive_trace_failed_empty",
+                "kind": "photo",
+                "title": "",
+                "note": "",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "analysisStatus": "failed",
+                "analysisRetryable": True,
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "archive_trace_family_blocked",
+                "kind": "photo",
+                "title": "外婆家的照片",
+                "personaScope": "family",
+                "digitalHumanId": "family_elder_trace",
+                "analysisStatus": "analyzed",
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "archive_trace_time_draft",
+                "kind": "timeLetter",
+                "title": "写给未来的自己",
+                "note": "草稿不应该进入回响。",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "deliveryStatus": "draft",
+                "metadata": {
+                    "contentKind": "time_letter",
+                    "timeLetterStatus": "draft",
+                    "deliveryStatus": "draft",
+                },
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+
+        response = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "query": "妈妈和西湖的照片有什么线索？",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        packet = response.json()["contextPacket"]
+        self.assertEqual(packet["schemaVersion"], 1)
+        self.assertEqual(packet["contextVersion"], "echo-context-v2")
+
+        selected_refs = [item["refId"] for item in packet["selectedContext"]]
+        self.assertIn("archive_trace_ready_1", selected_refs)
+        self.assertEqual(packet["memory"]["archiveItems"][0]["id"], "archive_trace_ready_1")
+
+        filtered_by_ref = {item["refId"]: item["reason"] for item in packet["filteredContext"]}
+        self.assertEqual(filtered_by_ref["archive_trace_family_blocked"], "scope_mismatch")
+        self.assertEqual(filtered_by_ref["archive_trace_failed_empty"], "analysis_failed_empty_context")
+        self.assertEqual(filtered_by_ref["archive_trace_time_draft"], "time_letter_draft")
+
+        ranking_by_ref = {item["refId"]: item for item in packet["rankingTrace"]}
+        self.assertIn("archive_trace_ready_1", ranking_by_ref)
+        self.assertGreater(ranking_by_ref["archive_trace_ready_1"]["score"], 0)
+        self.assertIn("scoreBreakdown", ranking_by_ref["archive_trace_ready_1"])
+
+        self.assertEqual(packet["trace"]["selectedContextCount"], len(packet["selectedContext"]))
+        self.assertEqual(packet["trace"]["filteredContextCount"], len(packet["filteredContext"]))
+        self.assertEqual(packet["trace"]["rankingTraceCount"], len(packet["rankingTrace"]))
+        self.assertEqual(
+            packet["debug"]["sourceCounts"]["archiveItemsIncluded"],
+            len([item for item in packet["selectedContext"] if item["source"] == "archive"]),
+        )
+
+    def test_context_build_includes_kblite_persona_and_care_signals_in_v2_trace(self):
+        client = TestClient(app)
+        user_id = "context_user_v2_sources"
+
+        client.post(
+            "/kb/sync",
+            json={
+                "userId": user_id,
+                "graph": {
+                    "people": [],
+                    "places": [],
+                    "events": [],
+                    "facts": [
+                        {
+                            "id": "fact_context_1",
+                            "statement": "妈妈喜欢在西湖边散步。",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        },
+                        {
+                            "id": "fact_context_2",
+                            "statement": "用户小时候常听越剧。",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        },
+                    ],
+                },
+            },
+        )
+        client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "archive_context_sources_1",
+                "kind": "photo",
+                "title": "西湖照片",
+                "note": "和妈妈在西湖边散步。",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "analysisStatus": "analyzed",
+                "detectedPeople": ["妈妈"],
+                "detectedLocations": ["西湖"],
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        main_module.store.save_care_snapshot(
+            user_id,
+            {
+                "riskLevel": "watch",
+                "summary": "近期对母亲相关回忆更敏感。",
+                "suggestions": ["用温和语气回应。"],
+                "trendSummary": "最近 7 天有轻微信号。",
+                "dailyTrend": [{"date": "2026-07-01", "signalScore": 1}],
+                "internalDebug": "不应进入 trace",
+            },
+        )
+
+        response = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "query": "妈妈和西湖的记忆有哪些？",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "lifecycleMode": "sunlight",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        packet = response.json()["contextPacket"]
+        selected_by_ref = {item["refId"]: item for item in packet["selectedContext"]}
+        selected_sources = {item["source"] for item in packet["selectedContext"]}
+        ranking_by_ref = {item["refId"]: item for item in packet["rankingTrace"]}
+
+        self.assertIn("archive", selected_sources)
+        self.assertIn("kbFact", selected_sources)
+        self.assertIn("persona", selected_sources)
+        self.assertIn("care", selected_sources)
+        self.assertIn("fact_context_1", selected_by_ref)
+        self.assertIn(f"persona:personal:{user_id}", selected_by_ref)
+        self.assertIn("care:latest", selected_by_ref)
+
+        self.assertEqual(selected_by_ref["fact_context_1"]["kind"], "fact")
+        self.assertEqual(selected_by_ref[f"persona:personal:{user_id}"]["kind"], "sunlight")
+        self.assertEqual(selected_by_ref["care:latest"]["kind"], "snapshot")
+        self.assertEqual(selected_by_ref["care:latest"]["signals"]["riskLevel"], "watch")
+
+        self.assertIn("scoreBreakdown", ranking_by_ref["fact_context_1"])
+        self.assertIn("scoreBreakdown", ranking_by_ref[f"persona:personal:{user_id}"])
+        self.assertIn("scoreBreakdown", ranking_by_ref["care:latest"])
+        self.assertEqual(packet["trace"]["selectedContextRefs"], [item["refId"] for item in packet["selectedContext"]])
+        self.assertEqual(packet["trace"]["selectedContextSourceCounts"]["kbFact"], 2)
+        self.assertEqual(packet["trace"]["selectedContextSourceCounts"]["persona"], 1)
+        self.assertEqual(packet["trace"]["selectedContextSourceCounts"]["care"], 1)
+        self.assertEqual(packet["debug"]["sourceCounts"]["selectedContextKbFacts"], 2)
+        self.assertEqual(packet["debug"]["sourceCounts"]["selectedContextPersona"], 1)
+        self.assertEqual(packet["debug"]["sourceCounts"]["selectedContextCare"], 1)
+        self.assertNotIn("internalDebug", str(packet["selectedContext"]))
+        self.assertNotIn("dailyTrend", str(packet["selectedContext"]))
+
+    def test_context_build_filters_unopened_time_letter_for_family_recipient(self):
+        client = TestClient(app)
+        user_id = "context_user_time_letter_policy"
+        member = client.post(
+            "/family/invite",
+            json={
+                "userId": user_id,
+                "id": "family_time_recipient",
+                "name": "林静文",
+                "relation": "女儿",
+                "phone": "13900001111",
+            },
+        )
+        self.assertEqual(member.status_code, 200)
+        accepted = client.post(
+            f"/family/members/{user_id}/family_time_recipient/accept",
+            json={"phone": "13900001111"},
+        )
+        self.assertEqual(accepted.status_code, 200)
+        client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "archive_time_letter_future",
+                "kind": "timeLetter",
+                "title": "写给未来的一封信",
+                "note": "还没到打开时间。",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "deliveryState": "sealed",
+                "deliveryStatus": "scheduled",
+                "openAt": "2999-01-01T00:00:00Z",
+                "recipients": [{"id": "family_time_recipient", "name": "林静文", "type": "family"}],
+                "metadata": {
+                    "timeLetterStatus": "sealed",
+                    "deliveryStatus": "scheduled",
+                    "openAt": "2999-01-01T00:00:00Z",
+                    "recipientIds": "family_time_recipient",
+                },
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+
+        response = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "query": "这封信写了什么？",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "viewerFamilyMemberID": "family_time_recipient",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        packet = response.json()["contextPacket"]
+        self.assertEqual(packet["memory"]["archiveItems"], [])
+        filtered_by_ref = {item["refId"]: item["reason"] for item in packet["filteredContext"]}
+        self.assertEqual(filtered_by_ref["archive_time_letter_future"], "time_letter_not_open_for_recipient")
+
+    def test_context_build_blocks_pending_family_viewer_and_summarizes_care_snapshot(self):
+        client = TestClient(app)
+        user_id = "context_user_family_policy"
+        member = client.post(
+            "/family/invite",
+            json={
+                "userId": user_id,
+                "id": "family_pending_context",
+                "name": "陈岚",
+                "relation": "女儿",
+                "phone": "13900001111",
+                "personaScope": "family",
+                "digitalHumanId": "family_context_elder",
+            },
+        )
+        self.assertEqual(member.status_code, 200)
+        client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "archive_family_pending_blocked",
+                "kind": "photo",
+                "title": "外婆家的照片",
+                "note": "家庭成员未接受前不应可用。",
+                "personaScope": "family",
+                "digitalHumanId": "family_context_elder",
+                "analysisStatus": "analyzed",
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        main_module.store.save_care_snapshot(
+            user_id,
+            {
+                "riskLevel": "watch",
+                "summary": "家庭关怀摘要",
+                "suggestions": ["轻声询问近况"],
+                "dailyTrend": [{"date": "2026-07-01", "signalScore": 1}],
+                "internalDebug": "不应进入 context packet",
+            },
+            viewer_family_member_id="family_pending_context",
+        )
+
+        pending_response = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "personaScope": "family",
+                "digitalHumanId": "family_context_elder",
+                "viewerFamilyMemberID": "family_pending_context",
+            },
+        )
+
+        self.assertEqual(pending_response.status_code, 200)
+        pending_packet = pending_response.json()["contextPacket"]
+        self.assertEqual(pending_packet["memory"]["archiveItems"], [])
+        self.assertIsNone(pending_packet["care"]["latest"])
+        self.assertFalse(pending_packet["policy"]["canUseFamilyData"])
+        self.assertFalse(pending_packet["policy"]["familyViewerActive"])
+        self.assertIn("family_viewer_not_active", pending_packet["fallbacks"])
+        filtered_by_ref = {item["refId"]: item["reason"] for item in pending_packet["filteredContext"]}
+        self.assertEqual(filtered_by_ref["archive_family_pending_blocked"], "family_viewer_not_active")
+
+        accepted = client.post(
+            f"/family/members/{user_id}/family_pending_context/accept",
+            json={"phone": "13900001111"},
+        )
+        self.assertEqual(accepted.status_code, 200)
+        active_response = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "personaScope": "family",
+                "digitalHumanId": "family_context_elder",
+                "viewerFamilyMemberID": "family_pending_context",
+            },
+        )
+
+        self.assertEqual(active_response.status_code, 200)
+        active_packet = active_response.json()["contextPacket"]
+        self.assertEqual(active_packet["memory"]["archiveItems"][0]["id"], "archive_family_pending_blocked")
+        self.assertTrue(active_packet["policy"]["canUseFamilyData"])
+        self.assertTrue(active_packet["policy"]["familyViewerActive"])
+        self.assertEqual(active_packet["care"]["latest"]["snapshot"]["summary"], "家庭关怀摘要")
+        self.assertEqual(active_packet["care"]["latest"]["snapshot"]["suggestions"], ["轻声询问近况"])
+        self.assertNotIn("dailyTrend", active_packet["care"]["latest"]["snapshot"])
+        self.assertNotIn("internalDebug", str(active_packet["care"]["latest"]))
+
     def test_context_build_reports_fallbacks_when_voice_and_digital_human_are_unavailable(self):
         client = TestClient(app)
         user_id = "context_user_no_voice"
