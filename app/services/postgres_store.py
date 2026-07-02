@@ -415,6 +415,64 @@ class PostgresStore:
         )
         return None if row is None else deepcopy(row["payload"])
 
+    def mark_due_time_letters_delivered(
+        self,
+        cutoff_iso: str,
+        delivered_at_iso: str,
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+        bounded_limit = max(1, min(limit, 100))
+        rows = self._fetchall(
+            """
+            SELECT user_id, id, payload FROM archive_items
+            WHERE payload->>'kind' = 'timeLetter'
+                AND COALESCE(payload->>'deliveryState', payload->'metadata'->>'deliveryState') = 'sealed'
+                AND COALESCE(
+                    payload->>'deliveryStatus',
+                    payload->'metadata'->>'deliveryStatus',
+                    payload->'metadata'->>'deliveryExecutionState'
+                ) = 'scheduled'
+                AND COALESCE(payload->>'openAt', payload->'metadata'->>'openAt') <= %s
+            ORDER BY COALESCE(payload->>'openAt', payload->'metadata'->>'openAt') ASC
+            LIMIT %s
+            """,
+            (cutoff_iso, bounded_limit),
+        )
+
+        dispatched: List[Dict[str, Any]] = []
+        for row in rows:
+            item = deepcopy(row["payload"])
+            metadata = deepcopy(item.get("metadata") if isinstance(item.get("metadata"), dict) else {})
+            item["userId"] = row["user_id"]
+            item["deliveryStatus"] = "delivered"
+            item["deliveryExecutionState"] = "delivered"
+            item["deliveryScheduleState"] = "dispatched"
+            item["deliveryProviderState"] = "local_notification_and_in_app"
+            item["deliveredAt"] = delivered_at_iso
+            item["dispatchAttemptedAt"] = delivered_at_iso
+            item["providerDeliveryAttempted"] = False
+            metadata["deliveryStatus"] = "delivered"
+            metadata["deliveryExecutionState"] = "delivered"
+            metadata["deliveryScheduleState"] = "dispatched"
+            metadata["deliveryProviderState"] = "local_notification_and_in_app"
+            metadata["deliveredAt"] = delivered_at_iso
+            metadata["dispatchAttemptedAt"] = delivered_at_iso
+            item["metadata"] = metadata
+            item["updatedAt"] = delivered_at_iso
+            updated = self._fetchone(
+                """
+                UPDATE archive_items
+                SET payload = %s
+                WHERE user_id = %s AND id = %s
+                RETURNING payload
+                """,
+                (item, row["user_id"], row["id"]),
+                commit=True,
+            )
+            if updated is not None:
+                dispatched.append(deepcopy(updated["payload"]))
+        return dispatched
+
     def add_mailbox_letter(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = self._with_identity(payload, "mailbox", user_id)
         item["updatedAt"] = self._now()

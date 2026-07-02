@@ -200,6 +200,27 @@ class InMemoryStore:
                 return deepcopy(items.pop(index))
         return None
 
+    def mark_due_time_letters_delivered(
+        self,
+        cutoff_iso: str,
+        delivered_at_iso: str,
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+        due: List[Dict[str, Any]] = []
+        bounded_limit = max(1, min(limit, 100))
+        for user_id, items in self._archive_items.items():
+            for index, item in enumerate(items):
+                if len(due) >= bounded_limit:
+                    break
+                if not self._is_due_scheduled_time_letter(item, cutoff_iso):
+                    continue
+                updated = self._mark_time_letter_delivered(item, user_id, delivered_at_iso)
+                items[index] = updated
+                due.append(deepcopy(updated))
+            if len(due) >= bounded_limit:
+                break
+        return sorted(due, key=lambda item: str(item.get("openAt") or item.get("metadata", {}).get("openAt") or ""))
+
     def add_mailbox_letter(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
         item.setdefault("id", f"mailbox_{len(self._mailbox_letters.get(user_id, [])) + 1}")
@@ -257,6 +278,51 @@ class InMemoryStore:
             if len(due) >= bounded_limit:
                 break
         return sorted(due, key=lambda item: str(item.get("deliverAt") or ""))
+
+    @staticmethod
+    def _is_due_scheduled_time_letter(item: Dict[str, Any], cutoff_iso: str) -> bool:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        if str(item.get("kind") or "").strip() != "timeLetter":
+            return False
+        delivery_state = str(item.get("deliveryState") or metadata.get("deliveryState") or "").strip()
+        if delivery_state != "sealed":
+            return False
+        delivery_status = str(
+            item.get("deliveryStatus")
+            or metadata.get("deliveryStatus")
+            or metadata.get("deliveryExecutionState")
+            or ""
+        ).strip()
+        if delivery_status != "scheduled":
+            return False
+        open_at = str(item.get("openAt") or metadata.get("openAt") or "").strip()
+        return bool(open_at) and open_at <= cutoff_iso
+
+    @staticmethod
+    def _mark_time_letter_delivered(
+        item: Dict[str, Any],
+        user_id: str,
+        delivered_at_iso: str,
+    ) -> Dict[str, Any]:
+        updated = deepcopy(item)
+        metadata = deepcopy(updated.get("metadata") if isinstance(updated.get("metadata"), dict) else {})
+        updated["userId"] = user_id
+        updated["deliveryStatus"] = "delivered"
+        updated["deliveryExecutionState"] = "delivered"
+        updated["deliveryScheduleState"] = "dispatched"
+        updated["deliveryProviderState"] = "local_notification_and_in_app"
+        updated["deliveredAt"] = delivered_at_iso
+        updated["dispatchAttemptedAt"] = delivered_at_iso
+        updated["providerDeliveryAttempted"] = False
+        metadata["deliveryStatus"] = "delivered"
+        metadata["deliveryExecutionState"] = "delivered"
+        metadata["deliveryScheduleState"] = "dispatched"
+        metadata["deliveryProviderState"] = "local_notification_and_in_app"
+        metadata["deliveredAt"] = delivered_at_iso
+        metadata["dispatchAttemptedAt"] = delivered_at_iso
+        updated["metadata"] = metadata
+        updated["updatedAt"] = delivered_at_iso
+        return updated
 
     def save_push_device_token(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)

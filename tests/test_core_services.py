@@ -19,6 +19,7 @@ from app.services.runtime_config import RuntimeConfigService
 from app.services.store_factory import make_store
 from app.services.tokens import TokenService
 from app.services.tts import VolcTTSProxy, VolcVoiceCloneTTSProxy
+from app.services.user_identity import stable_user_id
 from app.services.voice_clone import VolcEngineVoiceCloneV3Provider, VoiceCloneProviderFactory
 from app.services.amap import AMapDistrictProxy
 from app.services.deepseek import DeepSeekImageAnalysisProxy, DeepSeekKnowledgeExtractionProxy
@@ -2936,6 +2937,145 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(deleted.status_code, 409)
         self.assertEqual(deleted.json()["detail"], "sealed timeLetter cannot be deleted")
         self.assertTrue(any(item.get("id") == item_id for item in listed.json()["items"]))
+
+    def test_time_letter_dispatch_due_delivers_once_and_creates_in_app_reminders(self):
+        client = TestClient(app)
+        user_id = "archive_time_letter_dispatch_user"
+        recipient_phone = "+86 138 1000 9001"
+        recipient_user_id = stable_user_id(recipient_phone)
+
+        invited = client.post(
+            "/family/invite",
+            json={
+                "userId": user_id,
+                "id": "family-recipient-1",
+                "name": "林静文",
+                "relation": "女儿",
+                "phone": recipient_phone,
+            },
+        )
+        accepted = client.post(
+            f"/family/members/{user_id}/family-recipient-1/accept",
+            json={"phone": recipient_phone},
+        )
+        due_created = client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "ownerUserId": user_id,
+                "id": "archive-time-letter-due",
+                "kind": "timeLetter",
+                "title": "十八岁生日信",
+                "note": "这段正文不应该进入提醒列表。",
+                "analysisStatus": "manual",
+                "deliveryState": "sealed",
+                "deliveryPolicy": "scheduled_local_and_in_app",
+                "openAt": "2026-07-02T08:00:00Z",
+                "recipients": [
+                    {"id": "self", "name": "我", "type": "self"},
+                    {"id": "family-recipient-1", "name": "林静文", "type": "family"},
+                ],
+                "sealedAt": "2026-06-21T11:00:00Z",
+                "deliveryStatus": "scheduled",
+                "deliveryNotificationScheduled": True,
+                "metadata": {
+                    "contentKind": "time_letter",
+                    "deliveryState": "sealed",
+                    "timeLetterStatus": "sealed",
+                    "deliveryPolicy": "scheduled_local_and_in_app",
+                    "openAt": "2026-07-02T08:00:00Z",
+                    "recipientIds": "self|family-recipient-1",
+                    "recipientNames": "我、林静文",
+                    "sealedAt": "2026-06-21T11:00:00Z",
+                    "deliveryStatus": "scheduled",
+                    "deliveryExecutionState": "scheduled",
+                    "deliveryProviderState": "local_notification_and_in_app",
+                    "deliveryNotificationScheduled": "true",
+                },
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        future_created = client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "ownerUserId": user_id,
+                "id": "archive-time-letter-future",
+                "kind": "timeLetter",
+                "title": "未来信",
+                "note": "未到时间不应对收件人可见。",
+                "analysisStatus": "manual",
+                "deliveryState": "sealed",
+                "deliveryPolicy": "scheduled_local_and_in_app",
+                "openAt": "2999-01-01T00:00:00Z",
+                "recipients": [{"id": "family-recipient-1", "name": "林静文", "type": "family"}],
+                "sealedAt": "2026-06-21T11:00:00Z",
+                "deliveryStatus": "scheduled",
+                "deliveryNotificationScheduled": True,
+                "metadata": {
+                    "contentKind": "time_letter",
+                    "deliveryState": "sealed",
+                    "timeLetterStatus": "sealed",
+                    "deliveryPolicy": "scheduled_local_and_in_app",
+                    "openAt": "2999-01-01T00:00:00Z",
+                    "recipientIds": "family-recipient-1",
+                    "recipientNames": "林静文",
+                    "sealedAt": "2026-06-21T11:00:00Z",
+                    "deliveryStatus": "scheduled",
+                    "deliveryExecutionState": "scheduled",
+                    "deliveryProviderState": "local_notification_and_in_app",
+                    "deliveryNotificationScheduled": "true",
+                },
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+
+        dispatched = client.post(
+            "/archive/time-letters/dispatch-due",
+            json={"now": "2026-07-02T09:00:00Z", "limit": 10},
+        )
+        repeated = client.post(
+            "/archive/time-letters/dispatch-due",
+            json={"now": "2026-07-02T09:00:00Z", "limit": 10},
+        )
+        owner_mailbox = client.get(f"/mailbox/letters/{user_id}")
+        recipient_mailbox = client.get(f"/mailbox/letters/{recipient_user_id}")
+        listed = client.get(f"/archive/items/{user_id}")
+
+        self.assertEqual(invited.status_code, 200)
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(due_created.status_code, 200)
+        self.assertEqual(future_created.status_code, 200)
+        self.assertEqual(dispatched.status_code, 200)
+        self.assertEqual(dispatched.json()["status"], "dispatched")
+        self.assertEqual(dispatched.json()["itemCount"], 1)
+        self.assertEqual(dispatched.json()["reminderCount"], 2)
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.json()["itemCount"], 0)
+        self.assertEqual(repeated.json()["reminderCount"], 0)
+
+        updated_due = next(item for item in listed.json()["items"] if item["id"] == "archive-time-letter-due")
+        updated_future = next(item for item in listed.json()["items"] if item["id"] == "archive-time-letter-future")
+        self.assertEqual(updated_due["deliveryStatus"], "delivered")
+        self.assertEqual(updated_due["metadata"]["deliveryStatus"], "delivered")
+        self.assertEqual(updated_due["metadata"]["deliveryExecutionState"], "delivered")
+        self.assertEqual(updated_due["metadata"]["deliveryProviderState"], "local_notification_and_in_app")
+        self.assertEqual(updated_due["metadata"]["deliveredAt"], "2026-07-02T09:00:00Z")
+        self.assertEqual(updated_future["deliveryStatus"], "scheduled")
+
+        owner_items = owner_mailbox.json()["items"]
+        recipient_items = recipient_mailbox.json()["items"]
+        self.assertEqual(len(owner_items), 1)
+        self.assertEqual(len(recipient_items), 1)
+        self.assertEqual(owner_items[0]["id"], "time-letter-archive-time-letter-due-self")
+        self.assertEqual(recipient_items[0]["id"], "time-letter-archive-time-letter-due-family-recipient-1")
+        self.assertEqual(owner_items[0]["status"], "unread")
+        self.assertEqual(recipient_items[0]["sourceArchiveItemId"], "archive-time-letter-due")
+        self.assertEqual(recipient_items[0]["recipientRole"], "recipient")
+        self.assertTrue(recipient_items[0]["metadataOnly"])
+        self.assertTrue(recipient_items[0]["contentRedacted"])
+        self.assertNotIn("这段正文", recipient_mailbox.text)
+        self.assertNotIn("archive-time-letter-future", recipient_mailbox.text)
 
     def test_archive_items_api_persists_structured_analysis_contract(self):
         client = TestClient(app)

@@ -32,6 +32,29 @@ class FakeCursor:
         elif normalized.startswith("SELECT payload FROM memories"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.memories.get(user_id, [])]
+        elif normalized.startswith("SELECT user_id, id, payload FROM archive_items"):
+            cutoff_iso, limit = params
+            matches = [
+                (user_id, item)
+                for user_id, items in self.connection.archive_items.items()
+                for item in items
+                if item.get("kind") == "timeLetter"
+                and (item.get("deliveryState") or (item.get("metadata") or {}).get("deliveryState")) == "sealed"
+                and (
+                    item.get("deliveryStatus")
+                    or (item.get("metadata") or {}).get("deliveryStatus")
+                    or (item.get("metadata") or {}).get("deliveryExecutionState")
+                ) == "scheduled"
+                and str(item.get("openAt") or (item.get("metadata") or {}).get("openAt") or "") <= cutoff_iso
+            ]
+            matches = sorted(
+                matches,
+                key=lambda match: str(match[1].get("openAt") or (match[1].get("metadata") or {}).get("openAt") or ""),
+            )[:limit]
+            self.result = [
+                {"user_id": user_id, "id": item.get("id"), "payload": item}
+                for user_id, item in matches
+            ]
         elif normalized.startswith("SELECT payload FROM archive_items"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.archive_items.get(user_id, [])]
@@ -157,6 +180,17 @@ class FakeCursor:
             for index, item in enumerate(items):
                 if item.get("id") == item_id:
                     self.result = {"payload": items.pop(index)}
+                    break
+            else:
+                self.result = None
+        elif normalized.startswith("UPDATE archive_items"):
+            payload, user_id, item_id = params
+            payload = unwrap_jsonb(payload)
+            items = self.connection.archive_items.get(user_id, [])
+            for index, item in enumerate(items):
+                if item.get("id") == item_id:
+                    items[index] = dict(payload)
+                    self.result = {"payload": payload}
                     break
             else:
                 self.result = None
@@ -432,6 +466,61 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(deleted["id"], "time-letter-1")
         self.assertIsNone(missing)
         self.assertEqual(store.list_archive_items("u1"), [])
+
+    def test_store_marks_due_time_letters_delivered_once(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        store.add_archive_item(
+            "u1",
+            {
+                "id": "time-letter-due",
+                "kind": "timeLetter",
+                "deliveryState": "sealed",
+                "deliveryStatus": "scheduled",
+                "openAt": "2026-07-02T08:00:00Z",
+                "metadata": {
+                    "deliveryState": "sealed",
+                    "deliveryStatus": "scheduled",
+                    "openAt": "2026-07-02T08:00:00Z",
+                },
+            },
+        )
+        store.add_archive_item(
+            "u1",
+            {
+                "id": "time-letter-future",
+                "kind": "timeLetter",
+                "deliveryState": "sealed",
+                "deliveryStatus": "scheduled",
+                "openAt": "2999-01-01T00:00:00Z",
+                "metadata": {
+                    "deliveryState": "sealed",
+                    "deliveryStatus": "scheduled",
+                    "openAt": "2999-01-01T00:00:00Z",
+                },
+            },
+        )
+
+        dispatched = store.mark_due_time_letters_delivered(
+            cutoff_iso="2026-07-02T09:00:00Z",
+            delivered_at_iso="2026-07-02T09:00:00Z",
+            limit=10,
+        )
+        repeated = store.mark_due_time_letters_delivered(
+            cutoff_iso="2026-07-02T09:00:00Z",
+            delivered_at_iso="2026-07-02T09:01:00Z",
+            limit=10,
+        )
+
+        self.assertEqual([item["id"] for item in dispatched], ["time-letter-due"])
+        self.assertEqual(repeated, [])
+        listed = {item["id"]: item for item in store.list_archive_items("u1")}
+        self.assertEqual(listed["time-letter-due"]["deliveryStatus"], "delivered")
+        self.assertEqual(listed["time-letter-due"]["metadata"]["deliveryStatus"], "delivered")
+        self.assertEqual(listed["time-letter-due"]["metadata"]["deliveryExecutionState"], "delivered")
+        self.assertEqual(listed["time-letter-due"]["metadata"]["deliveredAt"], "2026-07-02T09:00:00Z")
+        self.assertEqual(listed["time-letter-future"]["deliveryStatus"], "scheduled")
 
     def test_store_persists_family_member_revocation(self):
         connection = FakeConnection()
