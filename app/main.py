@@ -1169,6 +1169,16 @@ def mark_mailbox_letter_read(user_id: str, letter_id: str, payload: Dict[str, An
     return {"status": "read", "item": item}
 
 
+@app.post("/mailbox/letters/{user_id}/{letter_id}/archive")
+def archive_mailbox_letter(user_id: str, letter_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    archived_at = str(payload.get("archivedAt") or datetime.now(timezone.utc).isoformat()).strip()
+    _parse_iso_datetime(archived_at, "archivedAt")
+    item = store.archive_mailbox_letter(user_id, letter_id, archived_at)
+    if item is None:
+        raise HTTPException(status_code=404, detail="mailbox letter not found")
+    return {"status": "archived", "item": item}
+
+
 _ALLOWED_ECHO_DELAYED_REPLY_TRIGGERS = {"tenRoundBaseline", "contentSignal"}
 _ALLOWED_PUSH_PLATFORMS = {"ios"}
 _ALLOWED_PUSH_ENVIRONMENTS = {"sandbox", "production"}

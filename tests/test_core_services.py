@@ -3589,6 +3589,47 @@ class MailboxAPITests(unittest.TestCase):
         self.assertEqual(items_by_id["letter_read_1"]["status"], "read")
         self.assertEqual(items_by_id["letter_read_2"]["status"], "unread")
 
+    def test_mailbox_letters_api_archives_letter_for_owner_only(self):
+        client = TestClient(app)
+
+        for letter_id, title in [("letter_archive_1", "第一封"), ("letter_archive_2", "第二封")]:
+            response = client.post(
+                "/mailbox/letters",
+                json={
+                    "userId": "mailbox_archive_user",
+                    "id": letter_id,
+                    "title": title,
+                    "status": "read",
+                    "privacyMetadata": {"scope": "generationAllowed"},
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+
+        archived = client.post(
+            "/mailbox/letters/mailbox_archive_user/letter_archive_1/archive",
+            json={"archivedAt": "2026-07-02T12:05:00Z"},
+        )
+        archived_again = client.post(
+            "/mailbox/letters/mailbox_archive_user/letter_archive_1/archive",
+            json={"archivedAt": "2026-07-02T12:06:00Z"},
+        )
+        other_user = client.post(
+            "/mailbox/letters/mailbox_other_user/letter_archive_1/archive",
+            json={"archivedAt": "2026-07-02T12:05:00Z"},
+        )
+        listed = client.get("/mailbox/letters/mailbox_archive_user")
+
+        self.assertEqual(archived.status_code, 200)
+        self.assertEqual(archived.json()["item"]["status"], "archived")
+        self.assertEqual(archived.json()["item"]["archivedAt"], "2026-07-02T12:05:00Z")
+        self.assertEqual(archived_again.status_code, 200)
+        self.assertEqual(archived_again.json()["item"]["status"], "archived")
+        self.assertEqual(archived_again.json()["item"]["archivedAt"], "2026-07-02T12:06:00Z")
+        self.assertEqual(other_user.status_code, 404)
+        items_by_id = {item["id"]: item for item in listed.json()["items"]}
+        self.assertEqual(items_by_id["letter_archive_1"]["status"], "archived")
+        self.assertEqual(items_by_id["letter_archive_2"]["status"], "read")
+
     def test_mailbox_letters_api_rejects_private_or_local_letters(self):
         client = TestClient(app)
 

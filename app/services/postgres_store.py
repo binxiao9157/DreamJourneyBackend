@@ -525,6 +525,37 @@ class PostgresStore:
         )
         return None if updated is None else deepcopy(updated["payload"])
 
+    def archive_mailbox_letter(
+        self,
+        user_id: str,
+        letter_id: str,
+        archived_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT payload FROM mailbox_letters
+            WHERE user_id = %s AND id = %s
+            """,
+            (user_id, letter_id),
+        )
+        if row is None:
+            return None
+        item = deepcopy(row["payload"])
+        item["status"] = "archived"
+        item["archivedAt"] = archived_at_iso
+        item["updatedAt"] = archived_at_iso
+        updated = self._fetchone(
+            """
+            UPDATE mailbox_letters
+            SET payload = %s
+            WHERE user_id = %s AND id = %s
+            RETURNING payload
+            """,
+            (item, user_id, letter_id),
+            commit=True,
+        )
+        return None if updated is None else deepcopy(updated["payload"])
+
     def add_echo_delayed_reply(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = self._with_identity(payload, "echo_delayed", user_id)
         row = self._fetchone(

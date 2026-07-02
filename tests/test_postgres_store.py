@@ -472,6 +472,23 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(store.list_mailbox_letters("u1")[0]["title"], "想说的话")
         self.assertEqual(store.list_family_members("u1")[0]["name"], "林桂芳")
 
+    def test_store_marks_mailbox_letters_read_and_archived(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        store.add_mailbox_letter("u1", {"id": "letter_1", "title": "想说的话", "status": "unread"})
+        read = store.mark_mailbox_letter_read("u1", "letter_1", "2026-07-02T12:00:00Z")
+        archived = store.archive_mailbox_letter("u1", "letter_1", "2026-07-02T12:05:00Z")
+        missing = store.archive_mailbox_letter("u2", "letter_1", "2026-07-02T12:05:00Z")
+        listed = store.list_mailbox_letters("u1")
+
+        self.assertEqual(read["status"], "read")
+        self.assertEqual(read["readAt"], "2026-07-02T12:00:00Z")
+        self.assertEqual(archived["status"], "archived")
+        self.assertEqual(archived["archivedAt"], "2026-07-02T12:05:00Z")
+        self.assertIsNone(missing)
+        self.assertEqual(listed[0]["status"], "archived")
+
     def test_store_upserts_and_deletes_archive_items_by_user_and_id(self):
         connection = FakeConnection()
         store = PostgresStore(connection_factory=lambda: connection)

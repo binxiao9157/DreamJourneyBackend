@@ -254,6 +254,24 @@ class InMemoryStore:
             return deepcopy(updated)
         return None
 
+    def archive_mailbox_letter(
+        self,
+        user_id: str,
+        letter_id: str,
+        archived_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        letters = self._mailbox_letters.get(user_id, [])
+        for index, letter in enumerate(letters):
+            if str(letter.get("id") or "") != letter_id:
+                continue
+            updated = deepcopy(letter)
+            updated["status"] = "archived"
+            updated["archivedAt"] = archived_at_iso
+            updated["updatedAt"] = archived_at_iso
+            letters[index] = updated
+            return deepcopy(updated)
+        return None
+
     def add_echo_delayed_reply(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
         item.setdefault("id", item.get("delayedReplyId") or f"echo_delayed_{len(self._echo_delayed_replies.get(user_id, [])) + 1}")
