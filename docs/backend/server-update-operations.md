@@ -394,13 +394,11 @@ RUN_BACKEND_TIME_LETTER_LIFECYCLE_SMOKE=1 \
 Scripts/QA/prd-stitch-ui/run-backend-time-letter-lifecycle-smoke.sh
 ```
 
-服务器上可先手动执行一次调度脚本，确认 `.env`、Postgres 和代码路径正确：
+服务器上可先手动执行一次调度脚本，确认 `.env`、Postgres 和代码路径正确。生产环境推荐在 `api` 容器内执行，复用容器依赖和环境变量：
 
 ```bash
-sudo -iu miao bash -lc '
-  cd /opt/services/dreamjourney/DreamJourneyBackend &&
-  PYTHONPATH=. scripts/run-dispatch-due-time-letters.sh --limit 50
-'
+cd /opt/services/dreamjourney/DreamJourneyBackend
+sudo docker compose exec -T api python scripts/dispatch_due_time_letters.py --limit 50
 ```
 
 推荐使用 systemd timer 定时扫描。示例 unit：
@@ -412,9 +410,8 @@ Description=DreamJourney due time letter dispatch
 
 [Service]
 Type=oneshot
-User=miao
 WorkingDirectory=/opt/services/dreamjourney/DreamJourneyBackend
-ExecStart=/opt/services/dreamjourney/DreamJourneyBackend/scripts/run-dispatch-due-time-letters.sh --limit 50
+ExecStart=/usr/bin/docker compose exec -T api python scripts/dispatch_due_time_letters.py --limit 50
 ```
 
 示例 timer：
