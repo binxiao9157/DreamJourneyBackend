@@ -1159,6 +1159,16 @@ def list_mailbox_letters(user_id: str) -> Dict[str, Any]:
     return {"userId": user_id, "items": store.list_mailbox_letters(user_id)}
 
 
+@app.post("/mailbox/letters/{user_id}/{letter_id}/read")
+def mark_mailbox_letter_read(user_id: str, letter_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    read_at = str(payload.get("readAt") or datetime.now(timezone.utc).isoformat()).strip()
+    _parse_iso_datetime(read_at, "readAt")
+    item = store.mark_mailbox_letter_read(user_id, letter_id, read_at)
+    if item is None:
+        raise HTTPException(status_code=404, detail="mailbox letter not found")
+    return {"status": "read", "item": item}
+
+
 _ALLOWED_ECHO_DELAYED_REPLY_TRIGGERS = {"tenRoundBaseline", "contentSignal"}
 _ALLOWED_PUSH_PLATFORMS = {"ios"}
 _ALLOWED_PUSH_ENVIRONMENTS = {"sandbox", "production"}

@@ -236,6 +236,24 @@ class InMemoryStore:
     def list_mailbox_letters(self, user_id: str) -> List[Dict[str, Any]]:
         return deepcopy(self._mailbox_letters.get(user_id, []))
 
+    def mark_mailbox_letter_read(
+        self,
+        user_id: str,
+        letter_id: str,
+        read_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        letters = self._mailbox_letters.get(user_id, [])
+        for index, letter in enumerate(letters):
+            if str(letter.get("id") or "") != letter_id:
+                continue
+            updated = deepcopy(letter)
+            updated["status"] = "read"
+            updated["readAt"] = read_at_iso
+            updated["updatedAt"] = read_at_iso
+            letters[index] = updated
+            return deepcopy(updated)
+        return None
+
     def add_echo_delayed_reply(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
         item.setdefault("id", item.get("delayedReplyId") or f"echo_delayed_{len(self._echo_delayed_replies.get(user_id, [])) + 1}")

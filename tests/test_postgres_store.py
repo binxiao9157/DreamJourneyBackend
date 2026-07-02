@@ -60,7 +60,18 @@ class FakeCursor:
             self.result = [{"payload": item} for item in self.connection.archive_items.get(user_id, [])]
         elif normalized.startswith("SELECT payload FROM mailbox_letters"):
             user_id = params[0]
-            self.result = [{"payload": item} for item in self.connection.mailbox_letters.get(user_id, [])]
+            if len(params) > 1:
+                item_id = params[1]
+                self.result = next(
+                    (
+                        {"payload": item}
+                        for item in self.connection.mailbox_letters.get(user_id, [])
+                        if item.get("id") == item_id
+                    ),
+                    None,
+                )
+            else:
+                self.result = [{"payload": item} for item in self.connection.mailbox_letters.get(user_id, [])]
         elif normalized.startswith("SELECT user_id, id, payload FROM echo_delayed_replies"):
             cutoff_iso, limit = params
             matches = [
@@ -215,6 +226,17 @@ class FakeCursor:
             for index, item in enumerate(replies):
                 if item.get("id") == item_id:
                     replies[index] = dict(payload)
+                    self.result = {"payload": payload}
+                    break
+            else:
+                self.result = None
+        elif normalized.startswith("UPDATE mailbox_letters"):
+            payload, user_id, item_id = params
+            payload = unwrap_jsonb(payload)
+            letters = self.connection.mailbox_letters.get(user_id, [])
+            for index, item in enumerate(letters):
+                if item.get("id") == item_id:
+                    letters[index] = dict(payload)
                     self.result = {"payload": payload}
                     break
             else:

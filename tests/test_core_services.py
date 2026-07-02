@@ -3548,6 +3548,47 @@ class MailboxAPITests(unittest.TestCase):
         self.assertNotIn("MAILBOX_PRIVATE_BODY_SENTINEL", listed_text)
         self.assertNotIn("ECHO_SENTINEL", listed_text)
 
+    def test_mailbox_letters_api_marks_letter_read_for_owner_only(self):
+        client = TestClient(app)
+
+        for letter_id, title in [("letter_read_1", "第一封"), ("letter_read_2", "第二封")]:
+            response = client.post(
+                "/mailbox/letters",
+                json={
+                    "userId": "mailbox_read_user",
+                    "id": letter_id,
+                    "title": title,
+                    "status": "unread",
+                    "privacyMetadata": {"scope": "generationAllowed"},
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+
+        marked = client.post(
+            "/mailbox/letters/mailbox_read_user/letter_read_1/read",
+            json={"readAt": "2026-07-02T12:00:00Z"},
+        )
+        marked_again = client.post(
+            "/mailbox/letters/mailbox_read_user/letter_read_1/read",
+            json={"readAt": "2026-07-02T12:01:00Z"},
+        )
+        other_user = client.post(
+            "/mailbox/letters/mailbox_other_user/letter_read_1/read",
+            json={"readAt": "2026-07-02T12:00:00Z"},
+        )
+        listed = client.get("/mailbox/letters/mailbox_read_user")
+
+        self.assertEqual(marked.status_code, 200)
+        self.assertEqual(marked.json()["item"]["status"], "read")
+        self.assertEqual(marked.json()["item"]["readAt"], "2026-07-02T12:00:00Z")
+        self.assertEqual(marked_again.status_code, 200)
+        self.assertEqual(marked_again.json()["item"]["status"], "read")
+        self.assertEqual(marked_again.json()["item"]["readAt"], "2026-07-02T12:01:00Z")
+        self.assertEqual(other_user.status_code, 404)
+        items_by_id = {item["id"]: item for item in listed.json()["items"]}
+        self.assertEqual(items_by_id["letter_read_1"]["status"], "read")
+        self.assertEqual(items_by_id["letter_read_2"]["status"], "unread")
+
     def test_mailbox_letters_api_rejects_private_or_local_letters(self):
         client = TestClient(app)
 

@@ -494,6 +494,37 @@ class PostgresStore:
     def list_mailbox_letters(self, user_id: str) -> List[Dict[str, Any]]:
         return self._list_payloads("mailbox_letters", user_id)
 
+    def mark_mailbox_letter_read(
+        self,
+        user_id: str,
+        letter_id: str,
+        read_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT payload FROM mailbox_letters
+            WHERE user_id = %s AND id = %s
+            """,
+            (user_id, letter_id),
+        )
+        if row is None:
+            return None
+        item = deepcopy(row["payload"])
+        item["status"] = "read"
+        item["readAt"] = read_at_iso
+        item["updatedAt"] = read_at_iso
+        updated = self._fetchone(
+            """
+            UPDATE mailbox_letters
+            SET payload = %s
+            WHERE user_id = %s AND id = %s
+            RETURNING payload
+            """,
+            (item, user_id, letter_id),
+            commit=True,
+        )
+        return None if updated is None else deepcopy(updated["payload"])
+
     def add_echo_delayed_reply(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = self._with_identity(payload, "echo_delayed", user_id)
         row = self._fetchone(
