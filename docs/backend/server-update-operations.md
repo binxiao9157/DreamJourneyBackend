@@ -377,6 +377,13 @@ curl -s -G "$DJ_API/maps/district" \
 
 二者共用 `app.services.time_letters.dispatch_due_time_letters_for_store`，因此幂等、收件人过滤、提醒 payload 和详情访问权限是一套逻辑。
 
+并发调度策略：
+
+- `archive_items` 的 due 查询只负责挑选候选信件。
+- 真正派发前会通过带条件的 `UPDATE ... RETURNING` 抢占 `scheduled -> delivered` 状态转换。
+- 如果两个调度任务同时扫到同一封信，只有第一个仍匹配 `deliveryStatus=scheduled` 且 `openAt<=now` 的更新会返回 item；后一个会得到空返回，因此不会创建重复 mailbox reminder。
+- mailbox reminder 使用稳定 ID 写入，重复调用仍会保持同一提醒记录。
+
 部署后先跑线上 smoke。该 smoke 会验证：
 
 - 到期信件更新为 `deliveryStatus=delivered`

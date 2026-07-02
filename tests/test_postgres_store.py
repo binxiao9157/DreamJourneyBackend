@@ -195,11 +195,43 @@ class FakeCursor:
             else:
                 self.result = None
         elif normalized.startswith("UPDATE archive_items"):
-            payload, user_id, item_id = params
+            payload, user_id, item_id = params[:3]
+            cutoff_iso = params[3] if len(params) > 3 else None
             payload = unwrap_jsonb(payload)
             items = self.connection.archive_items.get(user_id, [])
+            if self.connection.deliver_archive_item_before_next_update:
+                self.connection.deliver_archive_item_before_next_update = False
+                for existing in items:
+                    if existing.get("id") != item_id:
+                        continue
+                    metadata = dict(existing.get("metadata") or {})
+                    existing["deliveryStatus"] = "delivered"
+                    existing["deliveryExecutionState"] = "delivered"
+                    metadata["deliveryStatus"] = "delivered"
+                    metadata["deliveryExecutionState"] = "delivered"
+                    existing["metadata"] = metadata
+                    break
             for index, item in enumerate(items):
                 if item.get("id") == item_id:
+                    if (
+                        "payload->>'deliveryStatus'" in normalized
+                        and "= 'scheduled'" in normalized
+                        and (
+                            item.get("deliveryStatus")
+                            or (item.get("metadata") or {}).get("deliveryStatus")
+                            or (item.get("metadata") or {}).get("deliveryExecutionState")
+                        )
+                        != "scheduled"
+                    ):
+                        self.result = None
+                        break
+                    if (
+                        cutoff_iso is not None
+                        and "payload->>'openAt'" in normalized
+                        and str(item.get("openAt") or (item.get("metadata") or {}).get("openAt") or "") > cutoff_iso
+                    ):
+                        self.result = None
+                        break
                     items[index] = dict(payload)
                     self.result = {"payload": payload}
                     break
@@ -312,6 +344,7 @@ class FakeConnection:
         self.password_credentials = {}
         self.family_members = {}
         self.care_snapshots = {}
+        self.deliver_archive_item_before_next_update = False
 
     def cursor(self, row_factory=None):
         return FakeCursor(self)
@@ -560,6 +593,38 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(listed["time-letter-due"]["metadata"]["deliveryExecutionState"], "delivered")
         self.assertEqual(listed["time-letter-due"]["metadata"]["deliveredAt"], "2026-07-02T09:00:00Z")
         self.assertEqual(listed["time-letter-future"]["deliveryStatus"], "scheduled")
+
+    def test_store_does_not_dispatch_time_letter_when_concurrent_worker_already_delivered_it(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        store.add_archive_item(
+            "u1",
+            {
+                "id": "time-letter-race",
+                "kind": "timeLetter",
+                "deliveryState": "sealed",
+                "deliveryStatus": "scheduled",
+                "openAt": "2026-07-02T08:00:00Z",
+                "metadata": {
+                    "deliveryState": "sealed",
+                    "deliveryStatus": "scheduled",
+                    "deliveryExecutionState": "scheduled",
+                    "openAt": "2026-07-02T08:00:00Z",
+                },
+            },
+        )
+        connection.deliver_archive_item_before_next_update = True
+
+        dispatched = store.mark_due_time_letters_delivered(
+            cutoff_iso="2026-07-02T09:00:00Z",
+            delivered_at_iso="2026-07-02T09:00:00Z",
+            limit=10,
+        )
+
+        self.assertEqual(dispatched, [])
+        listed = {item["id"]: item for item in store.list_archive_items("u1")}
+        self.assertEqual(listed["time-letter-race"]["deliveryStatus"], "delivered")
 
     def test_store_persists_family_member_revocation(self):
         connection = FakeConnection()

@@ -464,9 +464,16 @@ class PostgresStore:
                 UPDATE archive_items
                 SET payload = %s
                 WHERE user_id = %s AND id = %s
+                    AND payload->>'kind' = 'timeLetter'
+                    AND COALESCE(
+                        payload->>'deliveryStatus',
+                        payload->'metadata'->>'deliveryStatus',
+                        payload->'metadata'->>'deliveryExecutionState'
+                    ) = 'scheduled'
+                    AND COALESCE(payload->>'openAt', payload->'metadata'->>'openAt') <= %s
                 RETURNING payload
                 """,
-                (item, row["user_id"], row["id"]),
+                (item, row["user_id"], row["id"], cutoff_iso),
                 commit=True,
             )
             if updated is not None:
