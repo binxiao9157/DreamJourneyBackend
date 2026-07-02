@@ -2943,6 +2943,8 @@ class ArchiveAPITests(unittest.TestCase):
         user_id = "archive_time_letter_dispatch_user"
         recipient_phone = "+86 138 1000 9001"
         recipient_user_id = stable_user_id(recipient_phone)
+        pending_recipient_phone = "+86 138 1000 9002"
+        pending_recipient_user_id = stable_user_id(pending_recipient_phone)
 
         invited = client.post(
             "/family/invite",
@@ -2957,6 +2959,16 @@ class ArchiveAPITests(unittest.TestCase):
         accepted = client.post(
             f"/family/members/{user_id}/family-recipient-1/accept",
             json={"phone": recipient_phone},
+        )
+        pending_invited = client.post(
+            "/family/invite",
+            json={
+                "userId": user_id,
+                "id": "family-pending-recipient-1",
+                "name": "林明",
+                "relation": "儿子",
+                "phone": pending_recipient_phone,
+            },
         )
         due_created = client.post(
             "/archive/items",
@@ -2974,6 +2986,7 @@ class ArchiveAPITests(unittest.TestCase):
                 "recipients": [
                     {"id": "self", "name": "我", "type": "self"},
                     {"id": "family-recipient-1", "name": "林静文", "type": "family"},
+                    {"id": "family-pending-recipient-1", "name": "林明", "type": "family"},
                 ],
                 "sealedAt": "2026-06-21T11:00:00Z",
                 "deliveryStatus": "scheduled",
@@ -2984,8 +2997,8 @@ class ArchiveAPITests(unittest.TestCase):
                     "timeLetterStatus": "sealed",
                     "deliveryPolicy": "scheduled_local_and_in_app",
                     "openAt": "2026-07-02T08:00:00Z",
-                    "recipientIds": "self|family-recipient-1",
-                    "recipientNames": "我、林静文",
+                    "recipientIds": "self|family-recipient-1|family-pending-recipient-1",
+                    "recipientNames": "我、林静文、林明",
                     "sealedAt": "2026-06-21T11:00:00Z",
                     "deliveryStatus": "scheduled",
                     "deliveryExecutionState": "scheduled",
@@ -3040,10 +3053,32 @@ class ArchiveAPITests(unittest.TestCase):
         )
         owner_mailbox = client.get(f"/mailbox/letters/{user_id}")
         recipient_mailbox = client.get(f"/mailbox/letters/{recipient_user_id}")
+        pending_recipient_mailbox = client.get(f"/mailbox/letters/{pending_recipient_user_id}")
         listed = client.get(f"/archive/items/{user_id}")
+        recipient_detail = client.get(
+            f"/archive/time-letters/{user_id}/archive-time-letter-due/detail",
+            params={"viewerUserId": recipient_user_id, "now": "2026-07-02T09:00:00Z"},
+        )
+        owner_detail = client.get(
+            f"/archive/time-letters/{user_id}/archive-time-letter-due/detail",
+            params={"viewerUserId": user_id, "now": "2026-07-02T09:00:00Z"},
+        )
+        future_detail = client.get(
+            f"/archive/time-letters/{user_id}/archive-time-letter-future/detail",
+            params={"viewerUserId": recipient_user_id, "now": "2026-07-02T09:00:00Z"},
+        )
+        pending_recipient_detail = client.get(
+            f"/archive/time-letters/{user_id}/archive-time-letter-due/detail",
+            params={"viewerUserId": pending_recipient_user_id, "now": "2026-07-02T09:00:00Z"},
+        )
+        non_recipient_detail = client.get(
+            f"/archive/time-letters/{user_id}/archive-time-letter-due/detail",
+            params={"viewerUserId": "not_a_recipient", "now": "2026-07-02T09:00:00Z"},
+        )
 
         self.assertEqual(invited.status_code, 200)
         self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(pending_invited.status_code, 200)
         self.assertEqual(due_created.status_code, 200)
         self.assertEqual(future_created.status_code, 200)
         self.assertEqual(dispatched.status_code, 200)
@@ -3067,6 +3102,7 @@ class ArchiveAPITests(unittest.TestCase):
         recipient_items = recipient_mailbox.json()["items"]
         self.assertEqual(len(owner_items), 1)
         self.assertEqual(len(recipient_items), 1)
+        self.assertEqual(pending_recipient_mailbox.json()["items"], [])
         self.assertEqual(owner_items[0]["id"], "time-letter-archive-time-letter-due-self")
         self.assertEqual(recipient_items[0]["id"], "time-letter-archive-time-letter-due-family-recipient-1")
         self.assertEqual(owner_items[0]["status"], "unread")
@@ -3076,6 +3112,18 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertTrue(recipient_items[0]["contentRedacted"])
         self.assertNotIn("这段正文", recipient_mailbox.text)
         self.assertNotIn("archive-time-letter-future", recipient_mailbox.text)
+        self.assertEqual(recipient_detail.status_code, 200)
+        self.assertEqual(recipient_detail.json()["item"]["note"], "这段正文不应该进入提醒列表。")
+        self.assertEqual(recipient_detail.json()["access"]["role"], "recipient")
+        self.assertFalse(recipient_detail.json()["item"]["contentRedacted"])
+        self.assertEqual(owner_detail.status_code, 200)
+        self.assertEqual(owner_detail.json()["access"]["role"], "owner")
+        self.assertEqual(future_detail.status_code, 403)
+        self.assertEqual(future_detail.json()["detail"], "timeLetter is not open yet")
+        self.assertEqual(pending_recipient_detail.status_code, 403)
+        self.assertEqual(pending_recipient_detail.json()["detail"], "family recipient is not active")
+        self.assertEqual(non_recipient_detail.status_code, 403)
+        self.assertEqual(non_recipient_detail.json()["detail"], "viewer is not a recipient")
 
     def test_archive_items_api_persists_structured_analysis_contract(self):
         client = TestClient(app)

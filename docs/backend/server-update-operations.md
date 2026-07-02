@@ -368,6 +368,88 @@ curl -s -G "$DJ_API/maps/district" \
   | python3 -m json.tool
 ```
 
+## 10. 时间信件到期投递生产化
+
+本版本起，时间信件的“到达 openAt 后本人和收件人收到应用内提醒”有两条执行入口：
+
+- 手动/API：`POST /archive/time-letters/dispatch-due`
+- 服务器脚本：`scripts/run-dispatch-due-time-letters.sh`
+
+二者共用 `app.services.time_letters.dispatch_due_time_letters_for_store`，因此幂等、收件人过滤、提醒 payload 和详情访问权限是一套逻辑。
+
+部署后先跑线上 smoke。该 smoke 会验证：
+
+- 到期信件更新为 `deliveryStatus=delivered`
+- 本人和已接受家庭收件人各收到一条 mailbox reminder
+- 重复 dispatch 不重复投递
+- 未到期信件不进入收件人 mailbox
+- mailbox 只暴露元数据，不暴露正文
+- 到期后收件人可通过详情接口读取正文
+- 未到期、非收件人、未接受家人关系无法读取正文
+
+在 iOS 工程目录运行：
+
+```bash
+RUN_BACKEND_TIME_LETTER_LIFECYCLE_SMOKE=1 \
+Scripts/QA/prd-stitch-ui/run-backend-time-letter-lifecycle-smoke.sh
+```
+
+服务器上可先手动执行一次调度脚本，确认 `.env`、Postgres 和代码路径正确：
+
+```bash
+sudo -iu miao bash -lc '
+  cd /opt/services/dreamjourney/DreamJourneyBackend &&
+  PYTHONPATH=. scripts/run-dispatch-due-time-letters.sh --limit 50
+'
+```
+
+推荐使用 systemd timer 定时扫描。示例 unit：
+
+```ini
+# /etc/systemd/system/dreamjourney-time-letter-dispatch.service
+[Unit]
+Description=DreamJourney due time letter dispatch
+
+[Service]
+Type=oneshot
+User=miao
+WorkingDirectory=/opt/services/dreamjourney/DreamJourneyBackend
+ExecStart=/opt/services/dreamjourney/DreamJourneyBackend/scripts/run-dispatch-due-time-letters.sh --limit 50
+```
+
+示例 timer：
+
+```ini
+# /etc/systemd/system/dreamjourney-time-letter-dispatch.timer
+[Unit]
+Description=Run DreamJourney due time letter dispatch every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=dreamjourney-time-letter-dispatch.service
+
+[Install]
+WantedBy=timers.target
+```
+
+启用：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now dreamjourney-time-letter-dispatch.timer
+sudo systemctl list-timers 'dreamjourney-time-letter-dispatch*'
+```
+
+查看最近执行日志：
+
+```bash
+sudo journalctl -u dreamjourney-time-letter-dispatch.service -n 100 --no-pager
+```
+
+不要把 `BACKEND_API_TOKEN` 或数据库连接串写进 unit 文件。脚本在后端目录内运行，配置从服务器 `.env` / 容器环境读取。
+
 TTS dry run：
 
 ```bash

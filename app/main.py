@@ -29,6 +29,11 @@ from app.services.context_packet import ContextPacketBuilder
 from app.services.store_factory import init_store, make_store
 from app.services.tokens import TokenService
 from app.services.tts import TencentAudioDrivePCMAdapter, VolcTTSProxy, VoiceCloneTTSProviderFactory
+from app.services.time_letters import (
+    TimeLetterAccessError,
+    dispatch_due_time_letters_for_store,
+    time_letter_detail_for_viewer,
+)
 from app.services.voice_clone import VoiceCloneProviderFactory, VoiceCloneProviderUnavailable
 from app.services.user_identity import stable_user_id
 
@@ -1043,6 +1048,26 @@ def list_archive_items(user_id: str) -> Dict[str, Any]:
     return {"userId": user_id, "items": store.list_archive_items(user_id)}
 
 
+@app.get("/archive/time-letters/{owner_user_id}/{item_id}/detail")
+def get_time_letter_detail(
+    owner_user_id: str,
+    item_id: str,
+    viewerUserId: str,
+    now: Optional[str] = None,
+) -> Dict[str, Any]:
+    now_iso = str(now or datetime.now(timezone.utc).isoformat()).strip()
+    try:
+        return time_letter_detail_for_viewer(
+            store=store,
+            owner_user_id=owner_user_id,
+            item_id=item_id,
+            viewer_user_id=viewerUserId,
+            now_iso=now_iso,
+        )
+    except TimeLetterAccessError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
 def _is_sealed_time_letter(item: Dict[str, Any]) -> bool:
     if str(item.get("kind") or "").strip() != "timeLetter":
         return False
@@ -1235,119 +1260,6 @@ def _sanitize_echo_dispatch_due_payload(payload: Dict[str, Any]) -> Dict[str, An
     return {"now": now, "limit": min(limit, 100)}
 
 
-def _time_letter_recipient_records(item: Dict[str, Any]) -> list[Dict[str, str]]:
-    recipients = item.get("recipients")
-    if isinstance(recipients, list):
-        records = []
-        for recipient in recipients:
-            if not isinstance(recipient, dict):
-                continue
-            recipient_id = str(recipient.get("id") or "").strip()
-            if not recipient_id:
-                continue
-            records.append(
-                {
-                    "id": recipient_id,
-                    "name": str(recipient.get("name") or recipient_id).strip() or recipient_id,
-                    "type": str(recipient.get("type") or ("self" if recipient_id == "self" else "family")).strip(),
-                }
-            )
-        if records:
-            return records
-
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    recipient_ids = [
-        token.strip()
-        for token in str(metadata.get("recipientIds") or "").replace(",", "|").split("|")
-        if token.strip()
-    ]
-    recipient_names = [
-        token.strip()
-        for token in str(metadata.get("recipientNames") or "").replace("、", "|").replace(",", "|").split("|")
-        if token.strip()
-    ]
-    return [
-        {
-            "id": recipient_id,
-            "name": recipient_names[index] if index < len(recipient_names) else recipient_id,
-            "type": "self" if recipient_id == "self" else "family",
-        }
-        for index, recipient_id in enumerate(recipient_ids)
-    ]
-
-
-def _active_family_member_for_recipient(owner_user_id: str, recipient_id: str) -> Optional[Dict[str, Any]]:
-    for member in store.list_family_members(owner_user_id):
-        if str(member.get("id") or "") != recipient_id:
-            continue
-        if member.get("accessStatus") == "active" and member.get("invitationStatus") == "accepted":
-            return member
-        return None
-    return None
-
-
-def _time_letter_in_app_reminder_payloads(
-    item: Dict[str, Any],
-    delivered_at_iso: str,
-) -> list[tuple[str, Dict[str, Any]]]:
-    owner_user_id = str(item.get("ownerUserId") or item.get("userId") or "").strip()
-    item_id = str(item.get("id") or "").strip()
-    title = str(item.get("title") or "时间信件").strip() or "时间信件"
-    open_at = str(item.get("openAt") or (item.get("metadata") or {}).get("openAt") or "").strip()
-    if not owner_user_id or not item_id:
-        return []
-
-    reminders: list[tuple[str, Dict[str, Any]]] = []
-    seen_reminder_ids: set[str] = set()
-
-    def append_reminder(target_user_id: str, recipient_id: str, recipient_name: str, role: str) -> None:
-        reminder_id = f"time-letter-{item_id}-{recipient_id}"
-        if reminder_id in seen_reminder_ids:
-            return
-        seen_reminder_ids.add(reminder_id)
-        reminders.append(
-            (
-                target_user_id,
-                {
-                    "id": reminder_id,
-                    "kind": "timeLetterReminder",
-                    "sourceArchiveItemId": item_id,
-                    "recipientId": recipient_id,
-                    "recipientName": recipient_name,
-                    "recipientRole": role,
-                    "title": f"{title}已到打开时间",
-                    "deliverAt": open_at,
-                    "deliveredAt": delivered_at_iso,
-                    "status": "unread",
-                    "boundaryAcknowledged": True,
-                    "metadataOnly": True,
-                    "contentRedacted": True,
-                    "privacyMetadata": {"scope": "generationAllowed"},
-                },
-            )
-        )
-
-    append_reminder(owner_user_id, "self", "我", "owner")
-
-    for recipient in _time_letter_recipient_records(item):
-        recipient_id = recipient["id"]
-        if recipient_id == "self":
-            continue
-        member = _active_family_member_for_recipient(owner_user_id, recipient_id)
-        if member is None:
-            continue
-        phone = str(member.get("phone") or "").strip()
-        target_user_id = stable_user_id(phone) if phone else recipient_id
-        append_reminder(
-            target_user_id,
-            recipient_id,
-            str(member.get("name") or recipient.get("name") or recipient_id).strip() or recipient_id,
-            "recipient",
-        )
-
-    return reminders
-
-
 @app.post("/devices/push-token")
 def register_push_device_token(payload: Dict[str, Any]) -> Dict[str, Any]:
     item = _sanitize_push_device_token_payload(payload)
@@ -1382,25 +1294,7 @@ def dispatch_due_echo_delayed_replies(payload: Dict[str, Any]) -> Dict[str, Any]
 @app.post("/archive/time-letters/dispatch-due")
 def dispatch_due_time_letters(payload: Dict[str, Any]) -> Dict[str, Any]:
     contract = _sanitize_echo_dispatch_due_payload(payload)
-    items = store.mark_due_time_letters_delivered(
-        cutoff_iso=contract["now"],
-        delivered_at_iso=contract["now"],
-        limit=contract["limit"],
-    )
-    reminders = []
-    for item in items:
-        for target_user_id, reminder_payload in _time_letter_in_app_reminder_payloads(item, contract["now"]):
-            reminders.append(store.add_mailbox_letter(target_user_id, reminder_payload))
-
-    return {
-        "status": "dispatched",
-        "cutoff": contract["now"],
-        "itemCount": len(items),
-        "reminderCount": len(reminders),
-        "items": items,
-        "reminders": reminders,
-        "providerDeliveryAttempted": False,
-    }
+    return dispatch_due_time_letters_for_store(store, now_iso=contract["now"], limit=contract["limit"])
 
 
 @app.get("/echo/delayed-replies/{user_id}")
