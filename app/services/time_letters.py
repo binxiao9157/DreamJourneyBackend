@@ -140,6 +140,7 @@ def time_letter_in_app_reminder_payloads(
                 {
                     "id": reminder_id,
                     "kind": "timeLetterReminder",
+                    "ownerUserId": owner_user_id,
                     "sourceArchiveItemId": item_id,
                     "recipientId": recipient_id,
                     "recipientName": recipient_name,

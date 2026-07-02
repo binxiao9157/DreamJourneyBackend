@@ -3105,6 +3105,8 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(pending_recipient_mailbox.json()["items"], [])
         self.assertEqual(owner_items[0]["id"], "time-letter-archive-time-letter-due-self")
         self.assertEqual(recipient_items[0]["id"], "time-letter-archive-time-letter-due-family-recipient-1")
+        self.assertEqual(owner_items[0]["ownerUserId"], user_id)
+        self.assertEqual(recipient_items[0]["ownerUserId"], user_id)
         self.assertEqual(owner_items[0]["status"], "unread")
         self.assertEqual(recipient_items[0]["sourceArchiveItemId"], "archive-time-letter-due")
         self.assertEqual(recipient_items[0]["recipientRole"], "recipient")
