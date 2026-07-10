@@ -139,7 +139,7 @@ VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID=seed-icl-2.0
 AMAP_WEB_SERVICE_KEY=<高德 WebService Key>
 ```
 
-声音复刻训练/查询只使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key`。`VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=customSpeakerId` 时，请求体会传 `speaker_id=custom_speaker_id`，并把本地 `voiceProfileId` 写入 `custom_speaker_id`。`VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=consoleSpeakerId` 时，请求体会把服务器配置的 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID` 作为 `speaker_id`，用于火山预付费/免费音色模式。`VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=trialSpeakerIdPool` 时，后端会从 `VOLCENGINE_VOICE_CLONE_SPEAKER_IDS` 里按本地 `voiceProfileId` 稳定选择一个控制台赠送的 `S_` 试用槽位，并在训练请求中带 `model_type=5`。复刻音色 TTS 使用独立的 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY` 调官方 HTTP TTS `/api/v1/tts`，将训练得到的真实 `S_` 音色 ID 作为 `audio.voice_type`，并按声音复刻 2.0 合同发送 `Resource-Id=seed-icl-2.0`。不要向训练或查询请求发送 `X-Api-Resource-Id`，也不要把 `Resource-Id` 写成 `X-Api-Resource-Id`。
+声音复刻训练/查询只使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key`。`VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=customSpeakerId` 时，请求体会传 `speaker_id=custom_speaker_id`，并把产品逻辑 `voiceProfileId` 写入 `custom_speaker_id`。`VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=consoleSpeakerId` 时，请求体会把服务器配置的 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID` 作为 `speaker_id`，用于单个火山预付费/免费音色。`VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=trialSpeakerIdPool` 时，后端会通过 `voice_clone_slots` 为逻辑 `voiceProfileId` 原子分配一个独占 `S_` 试用槽位；容量耗尽返回 409，删除或账号最终清理后槽位永久退休，不会自动分配给其他用户。真实 `providerSpeakerId` 只保存在后端，不返回 iOS。复刻音色 TTS 使用独立的 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY` 调官方 HTTP TTS `/api/v1/tts`，将后端解析出的真实 `S_` 音色 ID 作为 `audio.voice_type`，并按声音复刻 2.0 合同发送 `Resource-Id=seed-icl-2.0`。不要向训练或查询请求发送 `X-Api-Resource-Id`，也不要把 `Resource-Id` 写成 `X-Api-Resource-Id`。
 
 如果还没有 `BACKEND_API_TOKEN`，可在服务器生成一个：
 
@@ -464,7 +464,44 @@ curl -s -X POST "$DJ_API/tts?dryRun=true" \
   | python3 -m json.tool
 ```
 
-## 10. 数据库确认
+## 11. 声音复刻独占槽升级
+
+本版本新增 `voice_clone_slots` 表，并把声音复刻合同升级为 v2：
+
+- App 使用逻辑 `voiceProfileId`，新建格式为 `vp_...`。
+- 火山 `providerSpeakerId=S_...` 仅保存在服务端。
+- 试用/控制台槽通过 Postgres 原子独占分配。
+- 删除 profile 会将槽标记为 `retired`，不会自动给下一位用户。
+- `/voice/synthesis` 会验证 owner、ready、enabled 和质量验收状态。
+
+更新代码和 `.env` 后必须重建 API 容器，让 schema 初始化和新环境变量同时生效：
+
+```bash
+cd /opt/services/dreamjourney/DreamJourneyBackend
+git pull --ff-only origin main
+sudo docker compose up -d --build --force-recreate api
+```
+
+确认 runtime：
+
+```bash
+curl -s "$DJ_API/config/runtime" \
+  -H "Authorization: Bearer ${BACKEND_API_TOKEN}" \
+  | python3 -m json.tool
+```
+
+预期 `voiceClone` 包含：
+
+```text
+contractVersion=2
+speakerSlotAllocationMode=exclusivePersistentSlot
+speakerSlotReusePolicy=retireOnDelete
+logicalProfileIdSeparated=true
+```
+
+已有 legacy `S_` profile 可以继续使用，但必须已保存到对应 owner。不能再使用随机用户直接拿 `S_` ID 调 `/voice/synthesis`。
+
+## 12. 数据库确认
 
 查看 Postgres 表：
 

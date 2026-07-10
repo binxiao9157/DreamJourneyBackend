@@ -34,7 +34,12 @@ from app.services.time_letters import (
     dispatch_due_time_letters_for_store,
     time_letter_detail_for_viewer,
 )
-from app.services.voice_clone import VoiceCloneProviderFactory, VoiceCloneProviderUnavailable
+from app.services.voice_clone import (
+    VoiceCloneProviderFactory,
+    VoiceCloneProviderUnavailable,
+    configured_voice_clone_speaker_ids,
+    uses_voice_clone_speaker_pool,
+)
 from app.services.user_identity import stable_user_id
 
 
@@ -57,7 +62,7 @@ ARCHIVE_MEDIA_UPLOAD_LIMITS = {
     "video": ARCHIVE_VIDEO_UPLOAD_LIMIT_BYTES,
 }
 VOICE_CLONE_SAMPLE_STATUSES = {"notProvided", "pending", "ready", "disabled", "deleted", "failed"}
-VOICE_CLONE_CONTRACT_VERSION = 1
+VOICE_CLONE_CONTRACT_VERSION = 2
 VOICE_CLONE_PROVIDER_MODE = "mockContract"
 VOICE_CLONE_AUTHORIZATION_COPY = (
     "声音克隆必须由用户主动授权，仅使用用户确认提交的声音样本；"
@@ -514,6 +519,75 @@ def _safe_voice_profile_id(value: str, user_id: str) -> str:
     return f"voice_profile_{_safe_object_segment(user_id, 'user')}"
 
 
+def _voice_clone_provider_speaker_id(profile: Dict[str, Any]) -> str:
+    provider_speaker_id = str(profile.get("providerSpeakerId") or "").strip()
+    if provider_speaker_id:
+        return provider_speaker_id
+    voice_profile_id = str(profile.get("voiceProfileId") or "").strip()
+    if voice_profile_id.startswith("S_"):
+        return voice_profile_id
+    return ""
+
+
+def _voice_clone_public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+    public_profile = dict(profile)
+    public_profile.pop("providerSpeakerId", None)
+    public_profile.setdefault(
+        "providerBindingMode",
+        "legacyDirectProviderId"
+        if str(public_profile.get("voiceProfileId") or "").startswith("S_")
+        else "unassigned",
+    )
+    public_profile.setdefault("providerSlotManaged", public_profile.get("providerBindingMode") == "exclusiveSlot")
+    return public_profile
+
+
+def _voice_clone_slot_status(sample_status: str) -> str:
+    return {
+        "pending": "training",
+        "ready": "ready",
+        "failed": "failed",
+        "disabled": "disabled",
+        "deleted": "retired",
+    }.get(sample_status, "assigned")
+
+
+def _update_voice_clone_slot(
+    voice_profile_id: str,
+    sample_status: str,
+    *,
+    increment_training_attempts: bool = False,
+) -> Optional[Dict[str, Any]]:
+    update = getattr(store, "update_voice_clone_slot", None)
+    if not callable(update):
+        return None
+    return update(
+        voice_profile_id,
+        status=_voice_clone_slot_status(sample_status),
+        increment_training_attempts=increment_training_attempts,
+    )
+
+
+def _validate_voice_profile_for_synthesis(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+    profile = store.get_voice_profile(user_id, voice_profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="voice profile not found for user")
+    if str(profile.get("deletionState") or "") == "deleted" or str(profile.get("sampleStatus") or "") == "deleted":
+        raise HTTPException(status_code=409, detail="voice profile is deleted")
+    if str(profile.get("sampleStatus") or "") != "ready":
+        raise HTTPException(status_code=409, detail="voice profile is not ready")
+    if not bool(profile.get("isEnabled")):
+        raise HTTPException(status_code=409, detail="voice profile is disabled")
+    if not bool(profile.get("realCloneProviderReady")):
+        raise HTTPException(status_code=409, detail="voice profile provider is not ready")
+    if bool(profile.get("qualityAcceptanceRequired", True)):
+        raise HTTPException(status_code=409, detail="voice profile quality acceptance is required")
+    provider_speaker_id = _voice_clone_provider_speaker_id(profile)
+    if not provider_speaker_id:
+        raise HTTPException(status_code=409, detail="voice profile provider binding is missing")
+    return profile
+
+
 def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id = _required_text(payload, "userId", 96)
     privacy_metadata = payload.get("privacyMetadata") or {}
@@ -545,15 +619,42 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     provider_mode = provider.provider_mode
     provider_result: Dict[str, Any] = {}
     audio_base64 = str(payload.get("audioBase64") or "").strip()
+    existing_profile = store.get_voice_profile(user_id, voice_profile_id) or {}
+    provider_speaker_id = _voice_clone_provider_speaker_id(existing_profile)
+    provider_binding_mode = str(existing_profile.get("providerBindingMode") or "unassigned")
+    provider_slot_state = str(existing_profile.get("providerSlotState") or "")
+    if not existing_profile and voice_profile_id.startswith("S_"):
+        provider_speaker_id = voice_profile_id
+        provider_binding_mode = "legacyDirectProviderId"
     if provider.is_configured and audio_base64:
+        if uses_voice_clone_speaker_pool(settings):
+            provider_speaker_ids = configured_voice_clone_speaker_ids(settings)
+            slot = store.allocate_voice_clone_slot(
+                provider_speaker_ids,
+                user_id=user_id,
+                voice_profile_id=voice_profile_id,
+                persona_scope=persona_scope,
+                digital_human_id=digital_human_id,
+            )
+            if slot is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="voice clone speaker slot capacity exhausted; provision or release a provider slot",
+                )
+            provider_speaker_id = str(slot.get("providerSpeakerId") or "").strip()
+            provider_binding_mode = "exclusiveSlot"
+            provider_slot_state = "training"
+            _update_voice_clone_slot(voice_profile_id, "pending", increment_training_attempts=True)
+        else:
+            provider_speaker_id = voice_profile_id
+            provider_binding_mode = "customSpeakerId"
         try:
             provider_result = provider.submit_training(
-                voice_profile_id=voice_profile_id,
+                voice_profile_id=provider_speaker_id,
                 audio_base64=audio_base64,
                 audio_format=str(payload.get("audioFormat") or "wav").strip() or "wav",
                 language=int(payload.get("language") or 0),
             )
-            voice_profile_id = str(provider_result.get("voiceProfileId") or voice_profile_id)
             sample_status = str(provider_result.get("sampleStatus") or sample_status)
             if sample_status not in VOICE_CLONE_SAMPLE_STATUSES:
                 sample_status = "pending"
@@ -570,6 +671,9 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             if provider_log_id:
                 provider_result["providerLogId"] = provider_log_id
             sample_status = "failed"
+        slot_update = _update_voice_clone_slot(voice_profile_id, sample_status)
+        if slot_update is not None:
+            provider_slot_state = str(slot_update.get("status") or provider_slot_state)
 
     profile = {
         "id": voice_profile_id,
@@ -587,6 +691,9 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "providerMode": provider_mode,
         "realCloneProviderReady": provider.is_configured,
         "providerStatus": str(provider_result.get("providerStatus") or ("notSubmitted" if provider.is_configured else "mockOnly")),
+        "providerBindingMode": provider_binding_mode,
+        "providerSlotManaged": provider_binding_mode == "exclusiveSlot",
+        "providerSlotState": provider_slot_state,
         "qualityAcceptanceRequired": True,
         "isEnabled": sample_status == "ready",
         "defaultReleaseVisible": False,
@@ -598,6 +705,8 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             "scope": privacy_metadata.get("scope"),
         },
     }
+    if provider_speaker_id:
+        profile["providerSpeakerId"] = provider_speaker_id
     provider_request_id = str(provider_result.get("providerRequestId") or "").strip()
     provider_log_id = str(provider_result.get("providerLogId") or "").strip()
     provider_message = str(provider_result.get("providerMessage") or "").strip()
@@ -659,8 +768,11 @@ def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
     if not provider.is_configured:
         raise HTTPException(status_code=503, detail="voice clone provider is not configured")
     voice_profile_id = str(profile.get("voiceProfileId") or "").strip()
+    provider_speaker_id = _voice_clone_provider_speaker_id(profile)
+    if not provider_speaker_id:
+        raise HTTPException(status_code=409, detail="voice profile provider binding is missing")
     try:
-        provider_result = provider.query_status(voice_profile_id=voice_profile_id)
+        provider_result = provider.query_status(voice_profile_id=provider_speaker_id)
     except (ValueError, VoiceCloneProviderUnavailable) as exc:
         provider_result = {
             "providerStatus": "failed",
@@ -692,6 +804,9 @@ def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
     if provider_message:
         updated["providerMessage"] = provider_message[:300]
     updated["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    slot_update = _update_voice_clone_slot(voice_profile_id, sample_status)
+    if slot_update is not None:
+        updated["providerSlotState"] = str(slot_update.get("status") or "")
     return updated
 
 
@@ -752,13 +867,19 @@ def realtime_token(payload: Dict[str, Any]) -> Dict[str, Any]:
 @app.post("/voice/profiles")
 def save_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     profile = _sanitize_voice_profile_payload(payload)
-    saved = store.save_voice_profile(profile["userId"], profile)
-    return {"status": "saved", "profile": saved}
+    try:
+        saved = store.save_voice_profile(profile["userId"], profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "saved", "profile": _voice_clone_public_profile(saved)}
 
 
 @app.get("/voice/profiles/{user_id}")
 def list_voice_profiles(user_id: str) -> Dict[str, Any]:
-    return {"userId": user_id, "profiles": store.list_voice_profiles(user_id)}
+    return {
+        "userId": user_id,
+        "profiles": [_voice_clone_public_profile(profile) for profile in store.list_voice_profiles(user_id)],
+    }
 
 
 @app.post("/voice/profiles/{user_id}/{voice_profile_id}/disable")
@@ -767,8 +888,11 @@ def disable_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]
     if profile is None:
         raise HTTPException(status_code=404, detail="voice profile not found")
     disabled = _voice_profile_lifecycle_update(profile, "disabled")
+    slot_update = _update_voice_clone_slot(voice_profile_id, "disabled")
+    if slot_update is not None:
+        disabled["providerSlotState"] = str(slot_update.get("status") or "disabled")
     saved = store.save_voice_profile(user_id, disabled)
-    return {"status": "disabled", "profile": saved}
+    return {"status": "disabled", "profile": _voice_clone_public_profile(saved)}
 
 
 @app.post("/voice/profiles/{user_id}/{voice_profile_id}/refresh")
@@ -778,7 +902,7 @@ def refresh_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]
         raise HTTPException(status_code=404, detail="voice profile not found")
     refreshed = _voice_profile_refresh_update(profile)
     saved = store.save_voice_profile(user_id, refreshed)
-    return {"status": "refreshed", "profile": saved}
+    return {"status": "refreshed", "profile": _voice_clone_public_profile(saved)}
 
 
 @app.post("/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance")
@@ -788,13 +912,16 @@ def accept_voice_profile_quality(user_id: str, voice_profile_id: str) -> Dict[st
         raise HTTPException(status_code=404, detail="voice profile not found")
     accepted = _voice_profile_quality_acceptance_update(profile, user_id)
     saved = store.save_voice_profile(user_id, accepted)
-    return {"status": "accepted", "profile": saved}
+    _update_voice_clone_slot(voice_profile_id, "ready")
+    return {"status": "accepted", "profile": _voice_clone_public_profile(saved)}
 
 
 @app.post("/voice/synthesis")
 def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id = _required_text(payload, "userId", 96)
     voice_profile_id = _required_text(payload, "voiceProfileId", 96)
+    profile = _validate_voice_profile_for_synthesis(user_id, voice_profile_id)
+    provider_speaker_id = _voice_clone_provider_speaker_id(profile)
     text = _required_text(payload, "text", 4000)
     audio_format = str(payload.get("format") or "mp3").strip() or "mp3"
     sample_rate = int(payload.get("sampleRate") or 24000)
@@ -814,7 +941,7 @@ def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         result = provider.synthesize(
             text=text,
             user_id=user_id,
-            voice_profile_id=voice_profile_id,
+            voice_profile_id=provider_speaker_id,
             audio_format=provider_audio_format,
             sample_rate=provider_sample_rate,
             speech_rate=speech_rate,
@@ -836,8 +963,11 @@ def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     response = {
         "status": "synthesized",
-        "voiceProfileId": result["voiceProfileId"],
+        "voiceProfileId": voice_profile_id,
         "providerMode": result["providerMode"],
+        "providerBindingMode": str(profile.get("providerBindingMode") or (
+            "legacyDirectProviderId" if voice_profile_id.startswith("S_") else "customSpeakerId"
+        )),
         "visemeTimeline": result.get("visemeTimeline"),
         "audio": audio_payload,
     }
@@ -858,8 +988,11 @@ def delete_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
     if profile is None:
         raise HTTPException(status_code=404, detail="voice profile not found")
     deleted = _voice_profile_lifecycle_update(profile, "deleted")
+    slot_update = _update_voice_clone_slot(voice_profile_id, "deleted")
+    if slot_update is not None:
+        deleted["providerSlotState"] = str(slot_update.get("status") or "retired")
     saved = store.save_voice_profile(user_id, deleted)
-    return {"status": "deleted", "profile": saved}
+    return {"status": "deleted", "profile": _voice_clone_public_profile(saved)}
 
 
 @app.post("/tts")

@@ -136,7 +136,7 @@ VOLCENGINE_VOICE_CLONE_TTS_RESOURCE_ID=seed-icl-2.0
 AMAP_WEB_SERVICE_KEY=<amap web service key>
 ```
 
-注意：声音复刻训练/查询接口按火山官方指南走 `https://openspeech.bytedance.com/api/v3/tts/voice_clone` 与 `https://openspeech.bytedance.com/api/v3/tts/get_voice`，只使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key` 请求头。火山支持两种音色 ID 模式：后付费自定义音色模式传 `speaker_id=custom_speaker_id`，并把本地 `voiceProfileId` 写入 `custom_speaker_id`；预付费/免费音色模式传控制台生成的真实 `S_` ID 到 `speaker_id`。声音复刻 2.0 赠送试用槽位建议使用 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=trialSpeakerIdPool` 和 `VOLCENGINE_VOICE_CLONE_SPEAKER_IDS`，后端会按本地 `voiceProfileId` 稳定选择一个 `S_` 槽位，并在训练请求中带 `model_type=5`。复刻音色 TTS 合成按官方 HTTP TTS 示例走 `/api/v1/tts`，只使用 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY` 生成 `x-api-key` 请求头，将训练得到的真实 `S_` 音色 ID 作为 `audio.voice_type`，并按 2.0 合同发送 `Resource-Id=seed-icl-2.0`。不要向声音复刻训练或查询请求追加 `X-Api-Resource-Id`，也不要把合成 `Resource-Id` 写成 `X-Api-Resource-Id`。
+注意：声音复刻训练/查询接口按火山官方指南走 `https://openspeech.bytedance.com/api/v3/tts/voice_clone` 与 `https://openspeech.bytedance.com/api/v3/tts/get_voice`，只使用 `VOLCENGINE_VOICE_CLONE_API_KEY` 生成 `X-Api-Key` 请求头。火山支持两种音色 ID 模式：后付费自定义音色模式传 `speaker_id=custom_speaker_id`，并把产品逻辑 `voiceProfileId` 写入 `custom_speaker_id`；预付费/免费音色模式传控制台生成的真实 `S_` ID 到 `speaker_id`。声音复刻 2.0 赠送试用槽位建议使用 `VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE=trialSpeakerIdPool` 和 `VOLCENGINE_VOICE_CLONE_SPEAKER_IDS`，后端通过 `voice_clone_slots` 独占分配真实 `S_` 槽位，绝不再按哈希共享槽位，且不会把 `providerSpeakerId` 返回 iOS。复刻音色 TTS 合成按官方 HTTP TTS 示例走 `/api/v1/tts`，只使用 `VOLCENGINE_VOICE_CLONE_TTS_API_KEY` 生成 `x-api-key` 请求头，将后端解析出的真实 `S_` 音色 ID 作为 `audio.voice_type`，并按 2.0 合同发送 `Resource-Id=seed-icl-2.0`。不要向声音复刻训练或查询请求追加 `X-Api-Resource-Id`，也不要把合成 `Resource-Id` 写成 `X-Api-Resource-Id`。
 
 权限要求：
 

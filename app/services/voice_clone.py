@@ -1,4 +1,3 @@
-import hashlib
 import json
 import uuid
 import urllib.error
@@ -6,6 +5,43 @@ import urllib.request
 from typing import Any, Dict, Optional
 
 from app.core.config import Settings
+
+
+VOICE_CLONE_SPEAKER_POOL_MODES = {
+    "consolespeakerid",
+    "console_speaker_id",
+    "prepaid",
+    "free",
+    "trialspeakeridpool",
+    "trial_speaker_id_pool",
+    "console_speaker_id_pool",
+    "consolespeakeridpool",
+    "prepaidpool",
+    "freepool",
+    "trial",
+    "pool",
+}
+
+
+def configured_voice_clone_speaker_ids(settings: Settings) -> list[str]:
+    values = []
+    if settings.volcengine_voice_clone_speaker_ids:
+        values.extend(str(settings.volcengine_voice_clone_speaker_ids).split(","))
+    if settings.volcengine_voice_clone_speaker_id:
+        values.append(str(settings.volcengine_voice_clone_speaker_id))
+    seen = set()
+    speaker_ids = []
+    for value in values:
+        speaker_id = value.strip()
+        if speaker_id and speaker_id not in seen:
+            seen.add(speaker_id)
+            speaker_ids.append(speaker_id)
+    return speaker_ids
+
+
+def uses_voice_clone_speaker_pool(settings: Settings) -> bool:
+    mode = str(settings.volcengine_voice_clone_speaker_id_mode or "customSpeakerId").strip().lower()
+    return mode in VOICE_CLONE_SPEAKER_POOL_MODES
 
 
 class VoiceCloneProviderUnavailable(ValueError):
@@ -130,56 +166,25 @@ class VolcEngineVoiceCloneV3Provider:
         }
 
     def _training_speaker_payload(self, voice_profile_id: str) -> Dict[str, str]:
-        mode = str(self.settings.volcengine_voice_clone_speaker_id_mode or "customSpeakerId").strip().lower()
-        if mode in {
-            "consolespeakerid",
-            "console_speaker_id",
-            "prepaid",
-            "free",
-            "trialspeakeridpool",
-            "trial_speaker_id_pool",
-            "console_speaker_id_pool",
-            "consolespeakeridpool",
-            "prepaidpool",
-            "freepool",
-            "trial",
-            "pool",
-        }:
+        if uses_voice_clone_speaker_pool(self.settings):
             speaker_ids = self._configured_speaker_ids()
             if not speaker_ids:
                 raise ValueError(
                     "VOLCENGINE_VOICE_CLONE_SPEAKER_ID or VOLCENGINE_VOICE_CLONE_SPEAKER_IDS "
                     "is required when VOLCENGINE_VOICE_CLONE_SPEAKER_ID_MODE uses console/trial speaker IDs"
                 )
-            speaker_id = self._speaker_id_for_profile(voice_profile_id, speaker_ids)
-            return {"speaker_id": speaker_id}
+            if voice_profile_id not in speaker_ids:
+                raise ValueError(
+                    "provider speaker ID must be allocated from the configured voice clone slot pool before training"
+                )
+            return {"speaker_id": voice_profile_id}
         return {
             "speaker_id": "custom_speaker_id",
             "custom_speaker_id": voice_profile_id,
         }
 
     def _configured_speaker_ids(self) -> list[str]:
-        values = []
-        if self.settings.volcengine_voice_clone_speaker_ids:
-            values.extend(str(self.settings.volcengine_voice_clone_speaker_ids).split(","))
-        if self.settings.volcengine_voice_clone_speaker_id:
-            values.append(str(self.settings.volcengine_voice_clone_speaker_id))
-        seen = set()
-        speaker_ids = []
-        for value in values:
-            speaker_id = value.strip()
-            if speaker_id and speaker_id not in seen:
-                seen.add(speaker_id)
-                speaker_ids.append(speaker_id)
-        return speaker_ids
-
-    @staticmethod
-    def _speaker_id_for_profile(voice_profile_id: str, speaker_ids: list[str]) -> str:
-        if len(speaker_ids) == 1:
-            return speaker_ids[0]
-        digest = hashlib.sha256(voice_profile_id.encode("utf-8")).hexdigest()
-        index = int(digest[:8], 16) % len(speaker_ids)
-        return speaker_ids[index]
+        return configured_voice_clone_speaker_ids(self.settings)
 
     def _post_json(self, request: Dict[str, Any]) -> Dict[str, Any]:
         body = json.dumps(request["json"], ensure_ascii=False).encode("utf-8")

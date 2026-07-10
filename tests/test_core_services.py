@@ -401,6 +401,7 @@ class TokenAndProxyTests(unittest.TestCase):
             is_configured = True
 
             def synthesize(self, *, text, user_id, voice_profile_id, audio_format, sample_rate, speech_rate, loudness_rate):
+                self.requested_voice_profile_id = voice_profile_id
                 return {
                     "audioBase64": "U09VTkQ=",
                     "audioFormat": audio_format,
@@ -419,13 +420,27 @@ class TokenAndProxyTests(unittest.TestCase):
                     },
                 }
 
-        with patch("app.main.VoiceCloneTTSProviderFactory") as factory:
-            factory.return_value.make.return_value = FakeVoiceCloneTTSProvider()
+        profile_store = InMemoryStore()
+        profile_store.save_voice_profile(
+            "u1",
+            {
+                "voiceProfileId": "vp_voice_001",
+                "providerSpeakerId": "S_voice_001",
+                "sampleStatus": "ready",
+                "isEnabled": True,
+                "realCloneProviderReady": True,
+                "qualityAcceptanceRequired": False,
+                "qualityAcceptanceState": "accepted",
+            },
+        )
+        fake_provider = FakeVoiceCloneTTSProvider()
+        with patch("app.main.store", profile_store), patch("app.main.VoiceCloneTTSProviderFactory") as factory:
+            factory.return_value.make.return_value = fake_provider
             response = TestClient(app).post(
                 "/voice/synthesis",
                 json={
                     "userId": "u1",
-                    "voiceProfileId": "S_voice_001",
+                    "voiceProfileId": "vp_voice_001",
                     "text": "你好，欢迎回家。",
                     "format": "mp3",
                     "sampleRate": 24000,
@@ -437,7 +452,8 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["status"], "synthesized")
-        self.assertEqual(payload["voiceProfileId"], "S_voice_001")
+        self.assertEqual(payload["voiceProfileId"], "vp_voice_001")
+        self.assertEqual(fake_provider.requested_voice_profile_id, "S_voice_001")
         self.assertEqual(payload["audio"]["data"], "U09VTkQ=")
         self.assertEqual(payload["audio"]["format"], "mp3")
         self.assertEqual(payload["providerMode"], "volcengineVoiceCloneV1TTS")
@@ -472,8 +488,20 @@ class TokenAndProxyTests(unittest.TestCase):
                     "visemeTimeline": None,
                 }
 
+        profile_store = InMemoryStore()
+        profile_store.save_voice_profile(
+            "u1",
+            {
+                "voiceProfileId": "S_voice_001",
+                "sampleStatus": "ready",
+                "isEnabled": True,
+                "realCloneProviderReady": True,
+                "qualityAcceptanceRequired": False,
+                "qualityAcceptanceState": "accepted",
+            },
+        )
         fake_provider = FakeVoiceCloneTTSProvider()
-        with patch("app.main.VoiceCloneTTSProviderFactory") as factory:
+        with patch("app.main.store", profile_store), patch("app.main.VoiceCloneTTSProviderFactory") as factory:
             factory.return_value.make.return_value = fake_provider
             response = TestClient(app).post(
                 "/voice/synthesis",
@@ -1521,6 +1549,8 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertEqual(voice_clone["speakerIdMode"], "trialSpeakerIdPool")
         self.assertEqual(voice_clone["modelType"], 5)
         self.assertEqual(voice_clone["ttsResourceId"], "seed-icl-2.0")
+        self.assertEqual(voice_clone["speakerSlotAllocationMode"], "exclusivePersistentSlot")
+        self.assertEqual(voice_clone["speakerSlotReusePolicy"], "retireOnDelete")
 
     def test_volcengine_voice_clone_v3_provider_builds_training_request(self):
         configured = Settings(
@@ -1561,7 +1591,7 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         provider = VolcEngineVoiceCloneV3Provider(configured)
 
         request = provider.build_training_request(
-            voice_profile_id="S_client_generated",
+            voice_profile_id="S_console_001",
             audio_base64="BASE64_AUDIO_SAMPLE",
             audio_format="wav",
             language=0,
@@ -1582,15 +1612,219 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         provider = VolcEngineVoiceCloneV3Provider(configured)
 
         request = provider.build_training_request(
-            voice_profile_id="voice_profile_contract_1",
+            voice_profile_id="S_trial_002",
             audio_base64="BASE64_AUDIO_SAMPLE",
             audio_format="wav",
             language=0,
         )
 
-        self.assertIn(request["json"]["speaker_id"], {"S_trial_001", "S_trial_002", "S_trial_003"})
+        self.assertEqual(request["json"]["speaker_id"], "S_trial_002")
         self.assertNotIn("custom_speaker_id", request["json"])
         self.assertEqual(request["json"]["model_type"], 5)
+
+    def test_volcengine_voice_clone_v3_provider_rejects_unallocated_logical_id_in_pool_mode(self):
+        configured = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            volcengine_voice_clone_speaker_id_mode="trialSpeakerIdPool",
+            volcengine_voice_clone_speaker_ids="S_trial_001,S_trial_002",
+        )
+        provider = VolcEngineVoiceCloneV3Provider(configured)
+
+        with self.assertRaises(ValueError) as context:
+            provider.build_training_request(
+                voice_profile_id="vp_unallocated",
+                audio_base64="BASE64_AUDIO_SAMPLE",
+                audio_format="wav",
+                language=0,
+            )
+
+        self.assertIn("must be allocated", str(context.exception))
+
+    def test_voice_clone_pool_assigns_exclusive_provider_speaker_without_exposing_it(self):
+        class FakeProvider:
+            is_configured = True
+            provider_mode = "volcengineVoiceCloneV3"
+
+            def __init__(self):
+                self.requested_ids = []
+
+            def submit_training(self, *, voice_profile_id, audio_base64, audio_format, language):
+                self.requested_ids.append(voice_profile_id)
+                return {
+                    "voiceProfileId": voice_profile_id,
+                    "providerStatus": "pending",
+                    "sampleStatus": "pending",
+                }
+
+        profile_store = InMemoryStore()
+        provider = FakeProvider()
+        configured = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            volcengine_voice_clone_speaker_id_mode="trialSpeakerIdPool",
+            volcengine_voice_clone_speaker_ids="S_slot_001,S_slot_002,S_slot_003",
+        )
+        client = TestClient(app)
+
+        with patch("app.main.store", profile_store), patch("app.main.settings", configured), patch("app.main.VoiceCloneProviderFactory") as factory:
+            factory.return_value.make.return_value = provider
+            responses = [
+                client.post(
+                    "/voice/profiles",
+                    json={
+                        "userId": f"u{index}",
+                        "voiceProfileId": f"vp_{index}",
+                        "sampleStatus": "pending",
+                        "sampleCount": 1,
+                        "authorizationConfirmed": True,
+                        "personaScope": "personal",
+                        "digitalHumanId": f"u{index}",
+                        "audioBase64": "RAW_SAMPLE_BASE64",
+                        "audioFormat": "wav",
+                        "privacyMetadata": {"scope": "generationAllowed"},
+                    },
+                )
+                for index in range(1, 5)
+            ]
+
+        self.assertEqual([response.status_code for response in responses], [200, 200, 200, 409])
+        self.assertEqual(len(set(provider.requested_ids)), 3)
+        first_profile = responses[0].json()["profile"]
+        self.assertEqual(first_profile["voiceProfileId"], "vp_1")
+        self.assertEqual(first_profile["providerBindingMode"], "exclusiveSlot")
+        self.assertNotIn("providerSpeakerId", first_profile)
+        stored = profile_store.get_voice_profile("u1", "vp_1")
+        self.assertIn(stored["providerSpeakerId"], {"S_slot_001", "S_slot_002", "S_slot_003"})
+
+    def test_voice_clone_synthesis_requires_owned_accepted_profile(self):
+        class FakeVoiceCloneTTSProvider:
+            provider_mode = "volcengineVoiceCloneV1TTS"
+            is_configured = True
+
+            def synthesize(self, *, text, user_id, voice_profile_id, audio_format, sample_rate, speech_rate, loudness_rate):
+                return {
+                    "audioBase64": "U09VTkQ=",
+                    "audioFormat": audio_format,
+                    "byteCount": 5,
+                    "providerMode": self.provider_mode,
+                    "voiceProfileId": voice_profile_id,
+                    "visemeTimeline": None,
+                }
+
+        profile_store = InMemoryStore()
+        profile_store.save_voice_profile(
+            "owner",
+            {
+                "voiceProfileId": "vp_ready",
+                "providerSpeakerId": "S_slot_001",
+                "sampleStatus": "ready",
+                "isEnabled": True,
+                "realCloneProviderReady": True,
+                "qualityAcceptanceRequired": False,
+                "qualityAcceptanceState": "accepted",
+            },
+        )
+        profile_store.save_voice_profile(
+            "owner",
+            {
+                "voiceProfileId": "vp_pending",
+                "providerSpeakerId": "S_slot_002",
+                "sampleStatus": "pending",
+                "isEnabled": False,
+                "realCloneProviderReady": True,
+                "qualityAcceptanceRequired": True,
+            },
+        )
+        client = TestClient(app)
+
+        with patch("app.main.store", profile_store), patch("app.main.VoiceCloneTTSProviderFactory") as factory:
+            factory.return_value.make.return_value = FakeVoiceCloneTTSProvider()
+            ready = client.post("/voice/synthesis", json={"userId": "owner", "voiceProfileId": "vp_ready", "text": "你好"})
+            cross_user = client.post("/voice/synthesis", json={"userId": "other", "voiceProfileId": "vp_ready", "text": "你好"})
+            pending = client.post("/voice/synthesis", json={"userId": "owner", "voiceProfileId": "vp_pending", "text": "你好"})
+
+        self.assertEqual(ready.status_code, 200)
+        self.assertEqual(ready.json()["voiceProfileId"], "vp_ready")
+        self.assertEqual(cross_user.status_code, 404)
+        self.assertEqual(pending.status_code, 409)
+
+    def test_voice_clone_refresh_uses_provider_binding_and_delete_retires_slot(self):
+        class FakeProvider:
+            is_configured = True
+            provider_mode = "volcengineVoiceCloneV3"
+
+            def __init__(self):
+                self.queried_id = None
+
+            def query_status(self, *, voice_profile_id):
+                self.queried_id = voice_profile_id
+                return {
+                    "voiceProfileId": voice_profile_id,
+                    "providerStatus": "4",
+                    "sampleStatus": "ready",
+                }
+
+        profile_store = InMemoryStore()
+        slot = profile_store.allocate_voice_clone_slot(
+            ["S_slot_001"],
+            user_id="owner",
+            voice_profile_id="vp_bound",
+            persona_scope="personal",
+            digital_human_id="owner",
+        )
+        profile_store.save_voice_profile(
+            "owner",
+            {
+                "voiceProfileId": "vp_bound",
+                "providerSpeakerId": slot["providerSpeakerId"],
+                "providerBindingMode": "exclusiveSlot",
+                "providerSlotManaged": True,
+                "providerSlotState": "training",
+                "sampleStatus": "pending",
+                "isEnabled": False,
+                "realCloneProviderReady": True,
+                "qualityAcceptanceRequired": True,
+            },
+        )
+        provider = FakeProvider()
+        client = TestClient(app)
+
+        with patch("app.main.store", profile_store), patch("app.main.VoiceCloneProviderFactory") as factory:
+            factory.return_value.make.return_value = provider
+            refreshed = client.post("/voice/profiles/owner/vp_bound/refresh")
+            accepted = client.post("/voice/profiles/owner/vp_bound/quality-acceptance")
+            deleted = client.delete("/voice/profiles/owner/vp_bound")
+
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertEqual(provider.queried_id, "S_slot_001")
+        self.assertEqual(refreshed.json()["profile"]["voiceProfileId"], "vp_bound")
+        self.assertNotIn("providerSpeakerId", refreshed.json()["profile"])
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["profile"]["providerSlotState"], "retired")
+        self.assertEqual(profile_store.get_voice_clone_slot("vp_bound")["status"], "retired")
+
+    def test_voice_profile_id_cannot_be_claimed_by_another_user(self):
+        profile_store = InMemoryStore()
+        client = TestClient(app)
+        payload = {
+            "voiceProfileId": "vp_owned",
+            "sampleStatus": "pending",
+            "sampleCount": 0,
+            "authorizationConfirmed": True,
+            "personaScope": "personal",
+            "digitalHumanId": "owner",
+            "privacyMetadata": {"scope": "generationAllowed"},
+        }
+
+        with patch("app.main.store", profile_store):
+            first = client.post("/voice/profiles", json={**payload, "userId": "owner"})
+            second = client.post(
+                "/voice/profiles",
+                json={**payload, "userId": "other", "digitalHumanId": "other"},
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 409)
 
     def test_volcengine_voice_clone_v3_provider_requires_console_speaker_id_for_console_mode(self):
         configured = Settings(
@@ -1871,7 +2105,7 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertFalse(profile["isEnabled"])
         self.assertFalse(profile["realCloneProviderReady"])
         self.assertEqual(profile["providerMode"], "mockContract")
-        self.assertEqual(profile["contractVersion"], 1)
+        self.assertEqual(profile["contractVersion"], 2)
         self.assertIn("disableVoiceProfile", profile["disableContract"])
         self.assertIn("deleteVoiceProfile", profile["deleteContract"])
         self.assertNotIn("rawSampleURL", profile)

@@ -2,6 +2,7 @@ import unittest
 
 from psycopg.types.json import Jsonb
 
+from app.services.in_memory_store import InMemoryStore
 from app.services.postgres_store import PostgresStore
 
 
@@ -101,6 +102,18 @@ class FakeCursor:
         elif normalized.startswith("SELECT payload FROM voice_profiles"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.voice_profiles.get(user_id, [])]
+        elif normalized.startswith("SELECT provider_speaker_id, voice_profile_id, user_id, persona_scope, digital_human_id, status, training_attempts, configured, assigned_at, updated_at FROM voice_clone_slots WHERE voice_profile_id = %s"):
+            voice_profile_id = params[0]
+            self.result = next(
+                (
+                    dict(slot)
+                    for slot in self.connection.voice_clone_slots.values()
+                    if slot.get("voice_profile_id") == voice_profile_id
+                ),
+                None,
+            )
+        elif normalized.startswith("SELECT provider_speaker_id, voice_profile_id, user_id, persona_scope, digital_human_id, status, training_attempts, configured, assigned_at, updated_at FROM voice_clone_slots"):
+            self.result = [dict(slot) for slot in self.connection.voice_clone_slots.values()]
         elif normalized.startswith("SELECT payload FROM profiles"):
             user_id = params[0]
             profile = self.connection.profiles.get(user_id)
@@ -186,6 +199,13 @@ class FakeCursor:
             items.insert(0, dict(payload))
             self.result = {"payload": payload}
         elif normalized.startswith("DELETE FROM archive_items"):
+            if len(params) == 1:
+                user_id = params[0]
+                self.result = [
+                    {"payload": item}
+                    for item in self.connection.archive_items.pop(user_id, [])
+                ]
+                return
             user_id, item_id = params
             items = self.connection.archive_items.get(user_id, [])
             for index, item in enumerate(items):
@@ -283,10 +303,107 @@ class FakeCursor:
         elif normalized.startswith("INSERT INTO voice_profiles"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
+            conflicting_owner = next(
+                (
+                    existing_user_id
+                    for existing_user_id, items in self.connection.voice_profiles.items()
+                    if existing_user_id != user_id
+                    and any(item.get("voiceProfileId") == item_id for item in items)
+                ),
+                None,
+            )
+            if conflicting_owner is not None:
+                self.result = None
+                return
             profiles = self.connection.voice_profiles.setdefault(user_id, [])
             profiles[:] = [item for item in profiles if item.get("voiceProfileId") != item_id]
             profiles.insert(0, dict(payload))
             self.result = {"payload": payload}
+        elif normalized.startswith("INSERT INTO voice_clone_slots"):
+            provider_speaker_id = params[0]
+            slot = self.connection.voice_clone_slots.setdefault(
+                provider_speaker_id,
+                {
+                    "provider_speaker_id": provider_speaker_id,
+                    "voice_profile_id": None,
+                    "user_id": None,
+                    "persona_scope": None,
+                    "digital_human_id": None,
+                    "status": "available",
+                    "training_attempts": 0,
+                    "configured": True,
+                    "assigned_at": None,
+                    "updated_at": "2026-07-10T00:00:00+00:00",
+                },
+            )
+            slot["configured"] = True
+            self.result = dict(slot)
+        elif normalized.startswith("WITH candidate AS") and "UPDATE voice_clone_slots" in normalized:
+            provider_speaker_ids, voice_profile_id, candidate_user_id, _, assigned_voice_profile_id, user_id, persona_scope, digital_human_id, _ = params
+            candidates = [
+                slot
+                for provider_speaker_id, slot in self.connection.voice_clone_slots.items()
+                if provider_speaker_id in provider_speaker_ids
+                and slot.get("configured") is True
+                and (
+                    (
+                        slot.get("voice_profile_id") == voice_profile_id
+                        and slot.get("user_id") == candidate_user_id
+                        and slot.get("status") not in {"retired", "deleted"}
+                    )
+                    or (
+                        slot.get("voice_profile_id") is None
+                        and slot.get("status") == "available"
+                    )
+                )
+            ]
+            candidates.sort(
+                key=lambda slot: (
+                    0 if slot.get("voice_profile_id") == voice_profile_id else 1,
+                    slot.get("provider_speaker_id") or "",
+                )
+            )
+            if not candidates:
+                self.result = None
+            else:
+                slot = candidates[0]
+                existing_assignment = slot.get("voice_profile_id") == voice_profile_id
+                slot["voice_profile_id"] = assigned_voice_profile_id
+                slot["user_id"] = user_id
+                slot["persona_scope"] = persona_scope
+                slot["digital_human_id"] = digital_human_id
+                if not existing_assignment:
+                    slot["status"] = "assigned"
+                    slot["assigned_at"] = "2026-07-10T00:00:00+00:00"
+                slot["updated_at"] = "2026-07-10T00:00:00+00:00"
+                self.result = dict(slot)
+        elif normalized.startswith("UPDATE voice_clone_slots") and "WHERE user_id = %s" in normalized:
+            user_id = params[0]
+            retired = []
+            for slot in self.connection.voice_clone_slots.values():
+                if slot.get("user_id") != user_id or slot.get("status") in {"retired", "deleted"}:
+                    continue
+                slot["status"] = "retired"
+                slot["updated_at"] = "2026-07-10T00:00:00+00:00"
+                retired.append({"provider_speaker_id": slot.get("provider_speaker_id")})
+            self.result = retired
+        elif normalized.startswith("UPDATE voice_clone_slots"):
+            status, increment_attempts, voice_profile_id = params
+            slot = next(
+                (
+                    item
+                    for item in self.connection.voice_clone_slots.values()
+                    if item.get("voice_profile_id") == voice_profile_id
+                ),
+                None,
+            )
+            if slot is None:
+                self.result = None
+            else:
+                slot["status"] = status
+                slot["training_attempts"] = int(slot.get("training_attempts") or 0) + int(increment_attempts)
+                slot["updated_at"] = "2026-07-10T00:00:00+00:00"
+                self.result = dict(slot)
         elif normalized.startswith("INSERT INTO profiles"):
             user_id, payload = params
             payload = unwrap_jsonb(payload)
@@ -340,6 +457,7 @@ class FakeConnection:
         self.echo_delayed_replies = {}
         self.push_device_tokens = {}
         self.voice_profiles = {}
+        self.voice_clone_slots = {}
         self.profiles = {}
         self.password_credentials = {}
         self.family_members = {}
@@ -405,6 +523,8 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS family_members", sql)
         self.assertIn("idx_family_members_invitation_code", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS care_snapshots", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS voice_clone_slots", sql)
+        self.assertIn("voice_profile_id TEXT UNIQUE", sql)
         self.assertGreaterEqual(connection.commits, 1)
 
     def test_store_persists_kb_snapshot_by_user(self):
@@ -697,6 +817,16 @@ class PostgresStoreTests(unittest.TestCase):
         listed = store.list_voice_profiles("u1")
         fetched = store.get_voice_profile("u1", "voice_profile_1")
 
+        with self.assertRaises(ValueError):
+            store.save_voice_profile(
+                "u2",
+                {
+                    "voiceProfileId": "voice_profile_1",
+                    "sampleStatus": "pending",
+                    "authorizationConfirmed": True,
+                },
+            )
+
         self.assertEqual(profile["voiceProfileId"], "voice_profile_1")
         self.assertEqual(disabled["sampleStatus"], "disabled")
         self.assertEqual(deleted["sampleStatus"], "deleted")
@@ -704,6 +834,136 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0]["sampleStatus"], "deleted")
         self.assertEqual(fetched["voiceProfileId"], "voice_profile_1")
+
+    def test_in_memory_store_allocates_voice_clone_slots_exclusively(self):
+        store = InMemoryStore()
+        provider_ids = ["S_slot_001", "S_slot_002"]
+
+        first = store.allocate_voice_clone_slot(
+            provider_ids,
+            user_id="u1",
+            voice_profile_id="vp_1",
+            persona_scope="personal",
+            digital_human_id="u1",
+        )
+        repeated = store.allocate_voice_clone_slot(
+            provider_ids,
+            user_id="u1",
+            voice_profile_id="vp_1",
+            persona_scope="personal",
+            digital_human_id="u1",
+        )
+        second = store.allocate_voice_clone_slot(
+            provider_ids,
+            user_id="u2",
+            voice_profile_id="vp_2",
+            persona_scope="family",
+            digital_human_id="family_2",
+        )
+        exhausted = store.allocate_voice_clone_slot(
+            provider_ids,
+            user_id="u3",
+            voice_profile_id="vp_3",
+            persona_scope="personal",
+            digital_human_id="u3",
+        )
+
+        self.assertEqual(first["providerSpeakerId"], repeated["providerSpeakerId"])
+        self.assertNotEqual(first["providerSpeakerId"], second["providerSpeakerId"])
+        self.assertIsNone(exhausted)
+
+        retired = store.update_voice_clone_slot("vp_1", status="retired")
+        still_exhausted = store.allocate_voice_clone_slot(
+            provider_ids,
+            user_id="u3",
+            voice_profile_id="vp_3",
+            persona_scope="personal",
+            digital_human_id="u3",
+        )
+        self.assertEqual(retired["status"], "retired")
+        self.assertIsNone(still_exhausted)
+
+    def test_postgres_store_allocates_voice_clone_slots_with_locking_contract(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        provider_ids = ["S_slot_001", "S_slot_002"]
+
+        first = store.allocate_voice_clone_slot(
+            provider_ids,
+            user_id="u1",
+            voice_profile_id="vp_1",
+            persona_scope="personal",
+            digital_human_id="u1",
+        )
+        repeated = store.allocate_voice_clone_slot(
+            provider_ids,
+            user_id="u1",
+            voice_profile_id="vp_1",
+            persona_scope="personal",
+            digital_human_id="u1",
+        )
+        second = store.allocate_voice_clone_slot(
+            provider_ids,
+            user_id="u2",
+            voice_profile_id="vp_2",
+            persona_scope="family",
+            digital_human_id="family_2",
+        )
+        exhausted = store.allocate_voice_clone_slot(
+            provider_ids,
+            user_id="u3",
+            voice_profile_id="vp_3",
+            persona_scope="personal",
+            digital_human_id="u3",
+        )
+
+        self.assertEqual(first["providerSpeakerId"], repeated["providerSpeakerId"])
+        self.assertNotEqual(first["providerSpeakerId"], second["providerSpeakerId"])
+        self.assertIsNone(exhausted)
+        allocation_sql = "\n".join(sql for sql, _ in connection.executed if sql.startswith("WITH candidate AS"))
+        self.assertIn("FOR UPDATE SKIP LOCKED", allocation_sql)
+        self.assertIn("voice_profile_id = %s AND user_id = %s", allocation_sql)
+
+        training = store.update_voice_clone_slot("vp_1", status="training", increment_training_attempts=True)
+        retired = store.update_voice_clone_slot("vp_1", status="retired")
+        self.assertEqual(training["trainingAttempts"], 1)
+        self.assertEqual(retired["status"], "retired")
+
+    def test_account_purge_retires_voice_clone_slots_without_recycling_them(self):
+        stores = [
+            InMemoryStore(),
+            PostgresStore(connection_factory=lambda: FakeConnection()),
+        ]
+
+        for store in stores:
+            with self.subTest(store=type(store).__name__):
+                user = store.upsert_user("13800138000", "测试用户")
+                store.allocate_voice_clone_slot(
+                    ["S_slot_001"],
+                    user_id=user["id"],
+                    voice_profile_id="vp_purged",
+                    persona_scope="personal",
+                    digital_human_id=user["id"],
+                )
+                store.soft_delete_user(
+                    user["id"],
+                    phone="13800138000",
+                    requested_at_iso="2026-01-01T00:00:00+00:00",
+                )
+
+                purged = store.purge_expired_deleted_users("2026-02-01T00:00:01+00:00")
+                slot = store.get_voice_clone_slot("vp_purged")
+                replacement = store.allocate_voice_clone_slot(
+                    ["S_slot_001"],
+                    user_id="replacement",
+                    voice_profile_id="vp_replacement",
+                    persona_scope="personal",
+                    digital_human_id="replacement",
+                )
+
+                self.assertEqual(len(purged), 1)
+                self.assertEqual(slot["status"], "retired")
+                self.assertIsNone(replacement)
 
     def test_store_persists_echo_delayed_replies_by_user(self):
         connection = FakeConnection()

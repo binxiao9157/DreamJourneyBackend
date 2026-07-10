@@ -105,6 +105,24 @@ class PostgresStore:
                 ON voice_profiles(user_id, updated_at DESC)
             """,
             """
+            CREATE TABLE IF NOT EXISTS voice_clone_slots (
+                provider_speaker_id TEXT PRIMARY KEY,
+                voice_profile_id TEXT UNIQUE,
+                user_id TEXT,
+                persona_scope TEXT,
+                digital_human_id TEXT,
+                status TEXT NOT NULL DEFAULT 'available',
+                training_attempts INTEGER NOT NULL DEFAULT 0,
+                configured BOOLEAN NOT NULL DEFAULT TRUE,
+                assigned_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_voice_clone_slots_user_updated
+                ON voice_clone_slots(user_id, updated_at DESC)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS profiles (
                 user_id TEXT PRIMARY KEY,
                 payload JSONB NOT NULL,
@@ -277,6 +295,15 @@ class PostgresStore:
             deadline = self._parse_iso_datetime(str(user.get("restoreDeadline") or user.get("purgeAfter") or ""))
             if not user_id or deadline > cutoff:
                 continue
+            self._fetchall(
+                """
+                UPDATE voice_clone_slots
+                SET status = 'retired', updated_at = NOW()
+                WHERE user_id = %s AND status NOT IN ('retired', 'deleted')
+                RETURNING provider_speaker_id
+                """,
+                (user_id,),
+            )
             for table in (
                 "profiles",
                 "password_credentials",
@@ -665,14 +692,16 @@ class PostgresStore:
             INSERT INTO voice_profiles (user_id, id, payload, updated_at)
             VALUES (%s, %s, %s, NOW())
             ON CONFLICT (id) DO UPDATE SET
-                user_id = EXCLUDED.user_id,
                 payload = EXCLUDED.payload,
                 updated_at = NOW()
+            WHERE voice_profiles.user_id = EXCLUDED.user_id
             RETURNING payload
             """,
             (user_id, item["voiceProfileId"], item),
             commit=True,
         )
+        if row is None:
+            raise ValueError("voiceProfileId is already owned by another user")
         return deepcopy(row["payload"])
 
     def list_voice_profiles(self, user_id: str) -> List[Dict[str, Any]]:
@@ -695,6 +724,139 @@ class PostgresStore:
             (user_id, voice_profile_id),
         )
         return None if row is None else deepcopy(row["payload"])
+
+    def allocate_voice_clone_slot(
+        self,
+        provider_speaker_ids: List[str],
+        *,
+        user_id: str,
+        voice_profile_id: str,
+        persona_scope: str,
+        digital_human_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        configured_ids = [speaker_id.strip() for speaker_id in provider_speaker_ids if speaker_id.strip()]
+        if not configured_ids:
+            return None
+
+        existing = self.get_voice_clone_slot(voice_profile_id)
+        if existing is not None and existing.get("userId") != user_id:
+            return None
+
+        for provider_speaker_id in configured_ids:
+            self._fetchone(
+                """
+                INSERT INTO voice_clone_slots (provider_speaker_id, status, configured, updated_at)
+                VALUES (%s, 'available', TRUE, NOW())
+                ON CONFLICT (provider_speaker_id) DO UPDATE SET
+                    configured = TRUE,
+                    updated_at = NOW()
+                RETURNING provider_speaker_id, voice_profile_id, user_id, persona_scope,
+                    digital_human_id, status, training_attempts, configured, assigned_at, updated_at
+                """,
+                (provider_speaker_id,),
+                commit=True,
+            )
+
+        try:
+            row = self._fetchone(
+                """
+            WITH candidate AS (
+                SELECT provider_speaker_id
+                FROM voice_clone_slots
+                WHERE provider_speaker_id = ANY(%s)
+                    AND configured = TRUE
+                    AND (
+                        (voice_profile_id = %s AND user_id = %s AND status NOT IN ('retired', 'deleted'))
+                        OR (voice_profile_id IS NULL AND status = 'available')
+                    )
+                ORDER BY CASE WHEN voice_profile_id = %s THEN 0 ELSE 1 END,
+                    provider_speaker_id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE voice_clone_slots AS slots
+            SET voice_profile_id = %s,
+                user_id = %s,
+                persona_scope = %s,
+                digital_human_id = %s,
+                status = CASE
+                    WHEN slots.voice_profile_id = %s THEN slots.status
+                    ELSE 'assigned'
+                END,
+                assigned_at = COALESCE(slots.assigned_at, NOW()),
+                updated_at = NOW()
+            FROM candidate
+            WHERE slots.provider_speaker_id = candidate.provider_speaker_id
+            RETURNING slots.provider_speaker_id, slots.voice_profile_id, slots.user_id,
+                slots.persona_scope, slots.digital_human_id, slots.status,
+                slots.training_attempts, slots.configured, slots.assigned_at, slots.updated_at
+            """,
+                (
+                    configured_ids,
+                    voice_profile_id,
+                    user_id,
+                    voice_profile_id,
+                    voice_profile_id,
+                    user_id,
+                    persona_scope,
+                    digital_human_id,
+                    voice_profile_id,
+                ),
+                commit=True,
+            )
+        except Exception:
+            existing = self.get_voice_clone_slot(voice_profile_id)
+            if existing is not None and existing.get("userId") == user_id:
+                return existing
+            if existing is not None:
+                return None
+            raise
+        return None if row is None else self._voice_clone_slot_payload(row)
+
+    def get_voice_clone_slot(self, voice_profile_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT provider_speaker_id, voice_profile_id, user_id, persona_scope,
+                digital_human_id, status, training_attempts, configured, assigned_at, updated_at
+            FROM voice_clone_slots
+            WHERE voice_profile_id = %s
+            """,
+            (voice_profile_id,),
+        )
+        return None if row is None else self._voice_clone_slot_payload(row)
+
+    def list_voice_clone_slots(self) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT provider_speaker_id, voice_profile_id, user_id, persona_scope,
+                digital_human_id, status, training_attempts, configured, assigned_at, updated_at
+            FROM voice_clone_slots
+            ORDER BY provider_speaker_id ASC
+            """
+        )
+        return [self._voice_clone_slot_payload(row) for row in rows]
+
+    def update_voice_clone_slot(
+        self,
+        voice_profile_id: str,
+        *,
+        status: str,
+        increment_training_attempts: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            UPDATE voice_clone_slots
+            SET status = %s,
+                training_attempts = training_attempts + %s,
+                updated_at = NOW()
+            WHERE voice_profile_id = %s
+            RETURNING provider_speaker_id, voice_profile_id, user_id, persona_scope,
+                digital_human_id, status, training_attempts, configured, assigned_at, updated_at
+            """,
+            (status, 1 if increment_training_attempts else 0, voice_profile_id),
+            commit=True,
+        )
+        return None if row is None else self._voice_clone_slot_payload(row)
 
     def add_family_member(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = self._with_identity(payload, "family", user_id)
@@ -998,3 +1160,20 @@ class PostgresStore:
         if not value:
             return datetime.min.replace(tzinfo=timezone.utc)
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    @staticmethod
+    def _voice_clone_slot_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+        assigned_at = row.get("assigned_at")
+        updated_at = row.get("updated_at")
+        return {
+            "providerSpeakerId": str(row.get("provider_speaker_id") or ""),
+            "voiceProfileId": row.get("voice_profile_id"),
+            "userId": row.get("user_id"),
+            "personaScope": row.get("persona_scope"),
+            "digitalHumanId": row.get("digital_human_id"),
+            "status": str(row.get("status") or "available"),
+            "trainingAttempts": int(row.get("training_attempts") or 0),
+            "configured": bool(row.get("configured")),
+            "assignedAt": assigned_at.isoformat() if hasattr(assigned_at, "isoformat") else assigned_at,
+            "updatedAt": updated_at.isoformat() if hasattr(updated_at, "isoformat") else updated_at,
+        }

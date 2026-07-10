@@ -3,7 +3,7 @@ from typing import Any, Dict
 from app.core.config import Settings
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.tts import VoiceCloneTTSProviderFactory
-from app.services.voice_clone import VoiceCloneProviderFactory
+from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice_clone_speaker_ids
 
 
 class RuntimeConfigService:
@@ -75,6 +75,9 @@ class RuntimeConfigService:
                 "consoleSpeakerIdConfigured": bool(self.settings.volcengine_voice_clone_speaker_id),
                 "speakerIdPoolConfigured": bool(voice_clone_speaker_ids),
                 "speakerIdPoolCount": len(voice_clone_speaker_ids),
+                "speakerSlotAllocationMode": "exclusivePersistentSlot",
+                "speakerSlotReusePolicy": "retireOnDelete",
+                "logicalProfileIdSeparated": True,
                 "modelType": self.settings.volcengine_voice_clone_model_type,
                 "ttsResourceId": self.settings.volcengine_voice_clone_tts_resource_id,
                 "voiceClone2TrialReady": (
@@ -103,7 +106,7 @@ class RuntimeConfigService:
                     "fallbackMode": "providerTextDrive",
                     "contractVersion": 1,
                 },
-                "contractVersion": 1,
+                "contractVersion": 2,
             },
             "digitalHuman": {
                 "enabled": True,
@@ -153,19 +156,7 @@ class RuntimeConfigService:
         }
 
     def _voice_clone_speaker_ids(self) -> list[str]:
-        values = []
-        if self.settings.volcengine_voice_clone_speaker_ids:
-            values.extend(str(self.settings.volcengine_voice_clone_speaker_ids).split(","))
-        if self.settings.volcengine_voice_clone_speaker_id:
-            values.append(str(self.settings.volcengine_voice_clone_speaker_id))
-        seen = set()
-        speaker_ids = []
-        for value in values:
-            speaker_id = value.strip()
-            if speaker_id and speaker_id not in seen:
-                seen.add(speaker_id)
-                speaker_ids.append(speaker_id)
-        return speaker_ids
+        return configured_voice_clone_speaker_ids(self.settings)
 
     def _digital_human_ready(self) -> bool:
         return bool(

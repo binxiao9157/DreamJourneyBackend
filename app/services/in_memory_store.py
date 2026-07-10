@@ -19,6 +19,7 @@ class InMemoryStore:
         self._echo_delayed_replies: Dict[str, List[Dict[str, Any]]] = {}
         self._push_device_tokens: Dict[str, List[Dict[str, Any]]] = {}
         self._voice_profiles: Dict[str, List[Dict[str, Any]]] = {}
+        self._voice_clone_slots: Dict[str, Dict[str, Any]] = {}
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
@@ -123,6 +124,11 @@ class InMemoryStore:
             self._care_snapshots.pop(user_id, None)
             self._echo_delayed_replies.pop(user_id, None)
             self._push_device_tokens.pop(user_id, None)
+            for slot in self._voice_clone_slots.values():
+                if slot.get("userId") != user_id:
+                    continue
+                slot["status"] = "retired"
+                slot["updatedAt"] = cutoff.isoformat()
             self._voice_profiles.pop(user_id, None)
             purged.append(deepcopy(tombstone))
         return purged
@@ -382,6 +388,12 @@ class InMemoryStore:
         item.setdefault("voiceProfileId", item["id"])
         item["updatedAt"] = self._now()
 
+        for existing_user_id, existing_profiles in self._voice_profiles.items():
+            if existing_user_id == user_id:
+                continue
+            if any(profile.get("voiceProfileId") == item["voiceProfileId"] for profile in existing_profiles):
+                raise ValueError("voiceProfileId is already owned by another user")
+
         profiles = self._voice_profiles.setdefault(user_id, [])
         profiles[:] = [profile for profile in profiles if profile.get("voiceProfileId") != item["voiceProfileId"]]
         profiles.insert(0, item)
@@ -395,6 +407,102 @@ class InMemoryStore:
         for profile in profiles:
             if profile.get("voiceProfileId") == voice_profile_id:
                 return deepcopy(profile)
+        return None
+
+    def allocate_voice_clone_slot(
+        self,
+        provider_speaker_ids: List[str],
+        *,
+        user_id: str,
+        voice_profile_id: str,
+        persona_scope: str,
+        digital_human_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        now = self._now()
+        configured_ids = [speaker_id.strip() for speaker_id in provider_speaker_ids if speaker_id.strip()]
+        for provider_speaker_id in configured_ids:
+            slot = self._voice_clone_slots.setdefault(
+                provider_speaker_id,
+                {
+                    "providerSpeakerId": provider_speaker_id,
+                    "voiceProfileId": None,
+                    "userId": None,
+                    "personaScope": None,
+                    "digitalHumanId": None,
+                    "status": "available",
+                    "trainingAttempts": 0,
+                    "configured": True,
+                    "assignedAt": None,
+                    "updatedAt": now,
+                },
+            )
+            slot["configured"] = True
+
+        existing = next(
+            (
+                slot
+                for slot in self._voice_clone_slots.values()
+                if slot.get("voiceProfileId") == voice_profile_id
+                and slot.get("providerSpeakerId") in configured_ids
+                and slot.get("status") not in {"retired", "deleted"}
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing.get("userId") != user_id:
+                return None
+            return deepcopy(existing)
+
+        available = next(
+            (
+                self._voice_clone_slots[provider_speaker_id]
+                for provider_speaker_id in configured_ids
+                if self._voice_clone_slots[provider_speaker_id].get("configured") is True
+                and self._voice_clone_slots[provider_speaker_id].get("voiceProfileId") is None
+                and self._voice_clone_slots[provider_speaker_id].get("status") == "available"
+            ),
+            None,
+        )
+        if available is None:
+            return None
+
+        available.update(
+            {
+                "voiceProfileId": voice_profile_id,
+                "userId": user_id,
+                "personaScope": persona_scope,
+                "digitalHumanId": digital_human_id,
+                "status": "assigned",
+                "assignedAt": now,
+                "updatedAt": now,
+            }
+        )
+        return deepcopy(available)
+
+    def get_voice_clone_slot(self, voice_profile_id: str) -> Optional[Dict[str, Any]]:
+        for slot in self._voice_clone_slots.values():
+            if slot.get("voiceProfileId") == voice_profile_id:
+                return deepcopy(slot)
+        return None
+
+    def list_voice_clone_slots(self) -> List[Dict[str, Any]]:
+        return deepcopy(list(self._voice_clone_slots.values()))
+
+    def update_voice_clone_slot(
+        self,
+        voice_profile_id: str,
+        *,
+        status: str,
+        increment_training_attempts: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        for slot in self._voice_clone_slots.values():
+            if slot.get("voiceProfileId") != voice_profile_id:
+                continue
+            slot["status"] = status
+            if increment_training_attempts:
+                slot["trainingAttempts"] = int(slot.get("trainingAttempts") or 0) + 1
+            slot["updatedAt"] = self._now()
+            return deepcopy(slot)
         return None
 
     def add_family_member(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:

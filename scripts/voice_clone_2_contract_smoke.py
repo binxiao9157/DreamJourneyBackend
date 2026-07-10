@@ -5,7 +5,7 @@ import os
 from app.core.config import Settings
 from app.services.runtime_config import RuntimeConfigService
 from app.services.tts import VolcVoiceCloneTTSProxy
-from app.services.voice_clone import VolcEngineVoiceCloneV3Provider
+from app.services.voice_clone import VolcEngineVoiceCloneV3Provider, configured_voice_clone_speaker_ids
 
 
 def _settings() -> Settings:
@@ -37,8 +37,9 @@ def main() -> None:
     profile_id = os.getenv("VOICE_CLONE_2_SMOKE_PROFILE_ID", "voice_profile_contract_smoke")
     settings = _settings()
     runtime = RuntimeConfigService(settings).public_config()["voiceClone"]
+    provider_speaker_id = configured_voice_clone_speaker_ids(settings)[0]
     train_request = VolcEngineVoiceCloneV3Provider(settings).build_training_request(
-        voice_profile_id=profile_id,
+        voice_profile_id=provider_speaker_id,
         audio_base64="BASE64_AUDIO_SAMPLE",
         audio_format="wav",
         language=0,
@@ -50,6 +51,7 @@ def main() -> None:
     )
 
     payload = {
+        "logicalVoiceProfileId": profile_id,
         "voiceClone2TrialReady": runtime["voiceClone2TrialReady"],
         "speakerIdMode": runtime["speakerIdMode"],
         "speakerIdPoolCount": runtime["speakerIdPoolCount"],

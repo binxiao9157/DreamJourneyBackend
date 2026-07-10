@@ -1,5 +1,7 @@
 # 声音复刻 2.0 试用音色槽位切换与调试说明
 
+> 已废弃的调试分配方式：本文记录的“按 `voiceProfileId` 稳定选择槽位”仅用于历史排障。2026-07-10 起，生产合同使用 Postgres `voice_clone_slots` 独占分配；容量耗尽必须失败，槽位删除后退休，真实 `S_` ID 不再返回 iOS。
+
 日期：2026-06-22
 后端分支：`main`
 当前提交：`805689e fix: support voice clone 2 trial slots`
