@@ -2,6 +2,7 @@ from typing import Any, Dict
 
 from app.core.config import Settings
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
+from app.services.route_ownership import RouteOwnershipRegistry
 from app.services.tts import VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice_clone_speaker_ids
 
@@ -17,6 +18,7 @@ class RuntimeConfigService:
         voice_clone_speaker_ids = self._voice_clone_speaker_ids()
         digital_human_ready = self._digital_human_ready()
         digital_human_asset_mode = self._digital_human_asset_mode()
+        route_ownership_audit = RouteOwnershipRegistry().audit_summary()
         return {
             "environment": self.settings.environment,
             "baseURL": self.settings.public_base_url,
@@ -74,6 +76,12 @@ class RuntimeConfigService:
                         "X-DreamJourney-Authorization-Reason",
                     ],
                     "productionEnforceReady": False,
+                    "principalBoundRouteEnforcement": True,
+                    "routeOwnershipAudit": {
+                        "routeCount": route_ownership_audit["routeCount"],
+                        "categoryCounts": route_ownership_audit["categoryCounts"],
+                        "unclassifiedCount": route_ownership_audit["unclassifiedCount"],
+                    },
                     "enforceBlockers": [
                         "smsIdentityProof",
                         "deployedShadowEvidence",

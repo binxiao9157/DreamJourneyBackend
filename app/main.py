@@ -59,8 +59,6 @@ AUTH_OWNERSHIP_MODE = (
     if settings.auth_ownership_mode in {"shadow", "enforce"}
     else "shadow"
 )
-AUTH_OWNERSHIP_MAX_JSON_INSPECTION_BYTES = 256 * 1024
-
 ARCHIVE_MEDIA_UPLOAD_PROVIDER = "mockObjectStorage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_DISPLAY_NAME = "Mock Object Storage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_MODE = "mock"
@@ -266,12 +264,6 @@ async def _ownership_claim_user_ids(request: Request) -> Tuple[set[str], str, Di
     payload_context: Dict[str, Any] = {}
     if "application/json" in content_type:
         try:
-            content_length = int(request.headers.get("content-length") or "0")
-        except ValueError:
-            content_length = 0
-        if content_length > AUTH_OWNERSHIP_MAX_JSON_INSPECTION_BYTES:
-            return {claim for claim in claims if claim}, "uninspectedLargeBody", payload_context
-        try:
             payload = json.loads((await request.body()).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             payload = None
@@ -412,7 +404,8 @@ async def require_backend_api_token(request: Request, call_next):
                 sorted(_ownership_log_hash(claim) for claim in claims),
                 request.method,
             )
-        if should_block and AUTH_OWNERSHIP_MODE == "enforce":
+        principal_bound = bool(policy_decision is not None and policy_decision.principal_bound)
+        if should_block and (principal_bound or AUTH_OWNERSHIP_MODE == "enforce"):
             return _set_auth_diagnostic_headers(
                 JSONResponse(status_code=403, content={"detail": "authorization denied"}),
                 principal_kind="user",

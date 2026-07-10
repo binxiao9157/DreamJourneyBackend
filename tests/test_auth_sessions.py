@@ -91,6 +91,9 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertFalse(policy["productionEnforceReady"])
         self.assertIn("careSnapshotRead", policy["coveredPolicies"])
         self.assertIn("timeLetterDetail", policy["coveredPolicies"])
+        self.assertTrue(policy["principalBoundRouteEnforcement"])
+        self.assertEqual(policy["routeOwnershipAudit"]["routeCount"], 54)
+        self.assertEqual(policy["routeOwnershipAudit"]["unclassifiedCount"], 0)
         self.assertEqual(
             policy["diagnosticHeaders"],
             [
@@ -143,7 +146,7 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertEqual(logout.json()["status"], "revoked")
         self.assertEqual(after_logout.status_code, 401)
 
-    def test_shadow_mismatch_is_observable_but_not_blocked(self):
+    def test_principal_bound_owner_mismatch_is_blocked_while_global_mode_stays_shadow(self):
         login = self.login()
         auth = login["auth"]
         response = client.post(
@@ -152,9 +155,71 @@ class AuthSessionAPITests(unittest.TestCase):
             json={"userId": "user_other", "nickname": "shadow allowed"},
         )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 403)
         self.assertEqual(response.headers["x-dreamjourney-ownership-mode"], "shadow")
         self.assertEqual(response.headers["x-dreamjourney-ownership-decision"], "mismatch")
+        self.assertEqual(response.headers["x-dreamjourney-authorization-policy"], "profileOwner")
+        self.assertEqual(response.headers["x-dreamjourney-authorization-reason"], "ownerPrincipalMismatch")
+
+    def test_owner_path_routes_reject_cross_user_access_in_shadow_mode(self):
+        attacker = self.login("13800138110")
+        routes = [
+            ("GET", "/profile/user_other"),
+            ("GET", "/voice/profiles/user_other"),
+            ("GET", "/kb/snapshot/user_other"),
+            ("GET", "/memories/user_other"),
+            ("GET", "/archive/items/user_other"),
+            ("GET", "/mailbox/letters/user_other"),
+            ("GET", "/echo/delayed-replies/user_other"),
+            ("GET", "/family/members/user_other"),
+        ]
+
+        for method, path in routes:
+            with self.subTest(method=method, path=path):
+                response = client.request(method, path, headers=self.access_headers(attacker))
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.headers["x-dreamjourney-ownership-mode"], "shadow")
+                self.assertEqual(response.headers["x-dreamjourney-authorization-decision"], "deny")
+                self.assertEqual(response.headers["x-dreamjourney-authorization-reason"], "ownerPrincipalMismatch")
+
+    def test_owner_body_routes_reject_cross_user_access_before_endpoint_validation(self):
+        attacker = self.login("13800138111")
+        routes = [
+            ("POST", "/digital-human/sessions"),
+            ("POST", "/voice/realtime-token"),
+            ("POST", "/archive/items"),
+            ("POST", "/kb/sync"),
+            ("POST", "/devices/push-token"),
+            ("POST", "/echo/delayed-replies"),
+            ("POST", "/family/invite"),
+        ]
+
+        for method, path in routes:
+            with self.subTest(method=method, path=path):
+                response = client.request(
+                    method,
+                    path,
+                    headers=self.access_headers(attacker),
+                    json={"userId": "user_other"},
+                )
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.headers["x-dreamjourney-authorization-decision"], "deny")
+                self.assertEqual(response.headers["x-dreamjourney-authorization-reason"], "ownerPrincipalMismatch")
+
+    def test_owner_can_save_and_read_own_profile_in_shadow_mode(self):
+        owner = self.login("13800138112")
+        user_id = owner["user"]["id"]
+        saved = client.post(
+            "/profile",
+            headers=self.access_headers(owner),
+            json={"userId": user_id, "nickname": "本人资料"},
+        )
+        fetched = client.get(f"/profile/{user_id}", headers=self.access_headers(owner))
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.json()["profile"]["nickname"], "本人资料")
+        self.assertEqual(saved.headers["x-dreamjourney-authorization-decision"], "allowOwner")
 
     def test_family_care_read_is_classified_as_delegated_and_enforce_safe(self):
         owner, family, member = self.accepted_family_fixture(
@@ -269,7 +334,7 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertEqual(forged.headers["x-dreamjourney-authorization-decision"], "deny")
         self.assertEqual(forged.headers["x-dreamjourney-authorization-reason"], "viewerPrincipalMismatch")
 
-    def test_system_only_route_is_shadowed_then_blocked_for_user_principal(self):
+    def test_system_only_route_is_blocked_for_user_principal_even_in_shadow(self):
         login = self.login("13800138104")
         payload = {"now": "2026-07-10T00:00:00Z", "limit": 1}
 
@@ -285,8 +350,8 @@ class AuthSessionAPITests(unittest.TestCase):
             json=payload,
         )
 
-        self.assertEqual(shadow.status_code, 200)
-        self.assertEqual(shadow.headers["x-dreamjourney-authorization-policy"], "systemOnly")
+        self.assertEqual(shadow.status_code, 403)
+        self.assertEqual(shadow.headers["x-dreamjourney-authorization-policy"], "systemTimeLetterDispatch")
         self.assertEqual(shadow.headers["x-dreamjourney-authorization-decision"], "deny")
         self.assertEqual(enforced.status_code, 403)
         self.assertEqual(enforced.headers["x-dreamjourney-authorization-reason"], "systemPrincipalRequired")
@@ -304,21 +369,21 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(main_module.AUTH_OWNERSHIP_MODE, "enforce")
 
-    def test_large_json_body_is_left_for_endpoint_and_marked_uninspected(self):
+    def test_large_json_body_is_still_bound_to_authenticated_owner(self):
         login = self.login()
         auth = login["auth"]
         response = client.post(
             "/kb/sync",
             headers={"Authorization": f"Bearer {auth['accessToken']}"},
-            json={"userId": "large-body-owner", "graph": {"blob": "x" * 300_000}},
+            json={"userId": login["user"]["id"], "graph": {"blob": "x" * 300_000}},
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.headers["x-dreamjourney-ownership-decision"],
-            "uninspectedLargeBody",
+            "match",
         )
-        self.assertEqual(response.json()["userId"], "large-body-owner")
+        self.assertEqual(response.json()["userId"], login["user"]["id"])
 
     def test_legacy_backend_token_remains_compatible(self):
         main_module.BACKEND_API_TOKEN = "legacy-test-token"
@@ -329,6 +394,14 @@ class AuthSessionAPITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["x-dreamjourney-auth-principal"], "system")
+
+        dispatch = client.post(
+            "/archive/time-letters/dispatch-due",
+            headers={"Authorization": "Bearer legacy-test-token"},
+            json={"now": "2026-07-10T00:00:00Z", "limit": 1},
+        )
+        self.assertEqual(dispatch.status_code, 200)
+        self.assertEqual(dispatch.headers["x-dreamjourney-auth-principal"], "system")
 
 
 class AuthSessionServiceTests(unittest.TestCase):

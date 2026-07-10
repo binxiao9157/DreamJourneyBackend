@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Set
 
+from app.services.route_ownership import RouteOwnershipCategory, RouteOwnershipRegistry
 from app.services.time_letters import time_letter_recipient_records
 from app.services.user_identity import stable_user_id
 
@@ -16,6 +16,7 @@ class AuthorizationPolicyDecision:
     allowed: Optional[bool]
     delegated: bool = False
     terminal: bool = True
+    principal_bound: bool = False
 
     def header_values(self) -> Dict[str, str]:
         return {
@@ -26,26 +27,13 @@ class AuthorizationPolicyDecision:
 
 
 class CrossAccountAuthorizationPolicy:
-    """Classify known cross-account requests without changing route behavior."""
+    """Bind user principals to route owners while preserving delegated policies."""
 
-    _SYSTEM_ONLY_ROUTES = {
-        ("POST", "/archive/time-letters/dispatch-due"),
-        ("POST", "/echo/delayed-replies/dispatch-due"),
-        ("POST", "/auth/purge-expired-deletions"),
-    }
-    _CARE_READ_PATTERN = re.compile(r"^/care/snapshots/(?:latest/)?([^/]+)$")
-    _TIME_LETTER_DETAIL_PATTERN = re.compile(
-        r"^/archive/time-letters/([^/]+)/([^/]+)/detail$"
-    )
-    _FAMILY_MEMBER_ACCEPT_PATTERN = re.compile(
-        r"^/family/members/([^/]+)/([^/]+)/accept$"
-    )
-    _FAMILY_INVITATION_ACCEPT_PATTERN = re.compile(
-        r"^/family/invitations/[^/]+/accept$"
-    )
+    _registry = RouteOwnershipRegistry()
 
     def __init__(self, store: Any):
         self.store = store
+        self.registry = self._registry
 
     def evaluate(
         self,
@@ -60,60 +48,90 @@ class CrossAccountAuthorizationPolicy:
         normalized_path = str(path or "")
         principal_user_id = str(principal_user_id or "").strip()
 
-        if (normalized_method, normalized_path) in self._SYSTEM_ONLY_ROUTES:
-            return self._deny("systemOnly", "systemPrincipalRequired")
+        route_match = self.registry.match(normalized_method, normalized_path)
+        if route_match is None:
+            return AuthorizationPolicyDecision(
+                policy_id="ownershipFallback",
+                decision="fallback",
+                reason="routeNotClassified",
+                allowed=None,
+                terminal=False,
+            )
 
-        care_match = self._CARE_READ_PATTERN.match(normalized_path)
-        if normalized_method == "GET" and care_match:
+        rule = route_match.rule
+        if rule.policy_id == "careViewer" and normalized_method == "GET":
+            owner_user_id = str(route_match.path_parameters.get("user_id") or "").strip()
             return self._evaluate_care_read(
-                owner_user_id=care_match.group(1),
+                owner_user_id=owner_user_id,
                 principal_user_id=principal_user_id,
                 query=query,
             )
 
-        if normalized_method == "POST" and normalized_path == "/care/snapshots":
+        if rule.policy_id == "careViewer" and normalized_method == "POST":
             return self._evaluate_owner_write(
                 policy_id="careSnapshotWrite",
                 owner_user_id=str(payload.get("userId") or "").strip(),
                 principal_user_id=principal_user_id,
             )
 
-        time_letter_match = self._TIME_LETTER_DETAIL_PATTERN.match(normalized_path)
-        if normalized_method == "GET" and time_letter_match:
+        if rule.policy_id == "timeLetterViewer":
             return self._evaluate_time_letter_detail(
-                owner_user_id=time_letter_match.group(1),
-                item_id=time_letter_match.group(2),
+                owner_user_id=str(route_match.path_parameters.get("owner_user_id") or "").strip(),
+                item_id=str(route_match.path_parameters.get("item_id") or "").strip(),
                 principal_user_id=principal_user_id,
                 query=query,
             )
 
-        if normalized_method == "POST" and self._FAMILY_INVITATION_ACCEPT_PATTERN.match(normalized_path):
+        if normalized_path.startswith("/family/invitations/"):
             return self._evaluate_invitation_accept(
                 principal_user_id=principal_user_id,
                 payload=payload,
             )
 
-        family_accept_match = self._FAMILY_MEMBER_ACCEPT_PATTERN.match(normalized_path)
-        if normalized_method == "POST" and family_accept_match:
+        if rule.policy_id == "familyInvitationAcceptance":
             return self._evaluate_family_member_accept(
-                owner_user_id=family_accept_match.group(1),
-                member_id=family_accept_match.group(2),
+                owner_user_id=str(route_match.path_parameters.get("user_id") or "").strip(),
+                member_id=str(route_match.path_parameters.get("member_id") or "").strip(),
                 principal_user_id=principal_user_id,
             )
 
+        if rule.category in {RouteOwnershipCategory.OWNER_BODY, RouteOwnershipCategory.OWNER_PATH}:
+            return self._evaluate_owner_write(
+                policy_id=rule.policy_id,
+                owner_user_id=route_match.owner_user_id(dict(payload)),
+                principal_user_id=principal_user_id,
+            )
+        if rule.category == RouteOwnershipCategory.SYSTEM_ONLY:
+            return self._deny(rule.policy_id, "systemPrincipalRequired")
+        if rule.category == RouteOwnershipCategory.DELEGATED:
+            return self._deny(rule.policy_id, "delegatedPolicyUnavailable")
+        if rule.category == RouteOwnershipCategory.USER_SESSION:
+            return AuthorizationPolicyDecision(
+                policy_id=rule.policy_id,
+                decision="allowSession",
+                reason="authenticatedSession",
+                allowed=True,
+                principal_bound=True,
+            )
+        if rule.category == RouteOwnershipCategory.AUTHENTICATED_SERVICE:
+            return AuthorizationPolicyDecision(
+                policy_id=rule.policy_id,
+                decision="allowAuthenticated",
+                reason="authenticatedPrincipal",
+                allowed=True,
+            )
         return AuthorizationPolicyDecision(
-            policy_id="ownershipFallback",
-            decision="fallback",
-            reason="routeNotClassified",
-            allowed=None,
-            terminal=False,
+            policy_id=rule.policy_id,
+            decision="allowPublic",
+            reason="publicRoute",
+            allowed=True,
         )
 
     def _evaluate_owner_write(
         self,
         *,
         policy_id: str,
-        owner_user_id: str,
+        owner_user_id: Optional[str],
         principal_user_id: str,
     ) -> AuthorizationPolicyDecision:
         if not owner_user_id:
@@ -148,6 +166,7 @@ class CrossAccountAuthorizationPolicy:
             reason="activeFamilyPrincipal",
             allowed=True,
             delegated=True,
+            principal_bound=True,
         )
 
     def _evaluate_time_letter_detail(
@@ -185,6 +204,7 @@ class CrossAccountAuthorizationPolicy:
                     reason="activeTimeLetterRecipient",
                     allowed=True,
                     delegated=True,
+                    principal_bound=True,
                 )
         return self._deny("timeLetterDetail", "viewerNotRecipient")
 
@@ -205,6 +225,7 @@ class CrossAccountAuthorizationPolicy:
             reason="invitationPhonePrincipal",
             allowed=True,
             delegated=True,
+            principal_bound=True,
         )
 
     def _evaluate_family_member_accept(
@@ -226,6 +247,7 @@ class CrossAccountAuthorizationPolicy:
                 reason="invitationPhonePrincipal",
                 allowed=True,
                 delegated=True,
+                principal_bound=True,
             )
         return self._deny("familyMemberAccept", "invitationPrincipalMismatch")
 
@@ -269,6 +291,7 @@ class CrossAccountAuthorizationPolicy:
             decision="allowOwner",
             reason="ownerPrincipal",
             allowed=True,
+            principal_bound=True,
         )
 
     @staticmethod
@@ -278,6 +301,7 @@ class CrossAccountAuthorizationPolicy:
             decision="deny",
             reason=reason,
             allowed=False,
+            principal_bound=True,
         )
 
     @staticmethod

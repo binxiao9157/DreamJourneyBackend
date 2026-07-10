@@ -52,6 +52,7 @@ class CrossAccountAuthorizationPolicyTests(unittest.TestCase):
         self.assertEqual(decision.decision, "allowOwner")
         self.assertTrue(decision.allowed)
         self.assertFalse(decision.delegated)
+        self.assertTrue(decision.principal_bound)
 
     def test_only_active_family_principal_can_read_member_care_snapshot(self):
         member = self.add_family_member(accepted=True)
@@ -149,21 +150,43 @@ class CrossAccountAuthorizationPolicyTests(unittest.TestCase):
             payload={"now": "2026-06-20T00:00:00Z"},
         )
 
-        self.assertEqual(decision.policy_id, "systemOnly")
+        self.assertEqual(decision.policy_id, "systemTimeLetterDispatch")
         self.assertEqual(decision.decision, "deny")
         self.assertEqual(decision.reason, "systemPrincipalRequired")
+        self.assertTrue(decision.principal_bound)
 
-    def test_unknown_route_defers_to_ownership_fallback(self):
-        decision = self.evaluate(
+    def test_registry_owner_route_binds_principal(self):
+        allowed = self.evaluate(
             method="POST",
             path="/profile",
             principal=self.owner_user_id,
             payload={"userId": self.owner_user_id},
         )
+        denied = self.evaluate(
+            method="POST",
+            path="/profile",
+            principal=self.owner_user_id,
+            payload={"userId": "user_other"},
+        )
+
+        self.assertEqual(allowed.policy_id, "profileOwner")
+        self.assertEqual(allowed.decision, "allowOwner")
+        self.assertTrue(allowed.principal_bound)
+        self.assertEqual(denied.decision, "deny")
+        self.assertEqual(denied.reason, "ownerPrincipalMismatch")
+        self.assertTrue(denied.principal_bound)
+
+    def test_unknown_route_defers_to_ownership_fallback(self):
+        decision = self.evaluate(
+            method="POST",
+            path="/future/unclassified",
+            principal=self.owner_user_id,
+        )
 
         self.assertEqual(decision.decision, "fallback")
         self.assertIsNone(decision.allowed)
         self.assertFalse(decision.terminal)
+        self.assertFalse(decision.principal_bound)
 
     def test_header_values_only_contain_fixed_safe_enums(self):
         decision = self.evaluate(
