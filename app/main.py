@@ -38,6 +38,10 @@ from app.services.knowledge_extraction import (
     normalize_knowledge_extraction_input,
     sanitize_knowledge_extraction_context,
 )
+from app.services.knowledge_proposal import (
+    KnowledgeProposalValidationError,
+    build_knowledge_mutation_proposal,
+)
 from app.services.passwords import make_password_credential, verify_password
 from app.services.runtime_config import RuntimeConfigService
 from app.services.context_packet import ContextPacketBuilder
@@ -1666,6 +1670,17 @@ def extract_kb(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
             }
             if extraction_input.schema_version == 2:
                 response["extractionSchemaVersion"] = 2
+                try:
+                    response["mutationProposal"] = build_knowledge_mutation_proposal(
+                        user_id=user_id,
+                        persona_scope=payload.get("personaScope", "personal"),
+                        digital_human_id=payload.get("digitalHumanId"),
+                        extraction=extraction,
+                        safe_context=safe_context,
+                        snapshot=store.get_kb_snapshot_record(user_id),
+                    )
+                except KnowledgeProposalValidationError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
             return response
         request = proxy.redacted_request(
             transcript=extraction_input.transcript,

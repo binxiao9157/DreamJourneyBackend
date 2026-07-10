@@ -789,7 +789,11 @@ class TokenAndProxyTests(unittest.TestCase):
         with patch(
             "app.main.DeepSeekKnowledgeExtractionProxy.request_extraction",
             return_value=provider_extraction,
-        ) as request_extraction:
+        ) as request_extraction, patch.object(
+            main_module.store,
+            "get_kb_snapshot_record",
+            return_value=None,
+        ):
             response = TestClient(app).post(
                 "/kb/extract",
                 json={
@@ -3764,7 +3768,7 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(filtered_by_ref["archive_family_pending_blocked"], "family_viewer_not_active")
         self.assertEqual(
             filtered_by_ref["fact_family_viewer_private"],
-            "kb_fact_persona_scope_unavailable",
+            "kb_fact_family_metadata_missing",
         )
         pending_generation_refs = {
             item["refId"] for item in pending_packet["generationContext"]["sourceRefs"]

@@ -68,6 +68,7 @@ class ContextPacketBuilder:
             care_snapshot=care_snapshot,
             query=query,
         )
+        eligible_kb_graph = {"facts": supplemental_context["kbFacts"]}
         filtered_context.extend(supplemental_context["filteredContext"])
         selected_context, ranking_trace = self._rank_context_candidates(
             archive_trace_candidates + supplemental_context["candidates"]
@@ -75,7 +76,7 @@ class ContextPacketBuilder:
         generation_context = self._build_generation_context(
             selected_context=selected_context,
             archive_candidates=archive_trace_candidates,
-            kb_graph=kb_graph,
+            kb_graph=eligible_kb_graph,
             care_snapshot=care_snapshot,
         )
         voice_profiles = self.store.list_voice_profiles(user_id)
@@ -144,9 +145,7 @@ class ContextPacketBuilder:
                 "kbPeople": self._kb_people(kb_graph),
                 "kbPlaces": self._kb_places(kb_graph),
                 "kbEvents": self._kb_events(kb_graph),
-                "kbFacts": self._kb_facts(kb_graph)
-                if persona_scope == "personal" and digital_human_id == user_id
-                else [],
+                "kbFacts": self._kb_facts(eligible_kb_graph),
             },
             "selectedContext": selected_context,
             "filteredContext": filtered_context,
@@ -432,13 +431,15 @@ class ContextPacketBuilder:
         family_viewer_active: bool,
         care_snapshot: Optional[Dict[str, Any]],
         query: str,
-    ) -> Dict[str, List[Dict[str, Any]]]:
+    ) -> Dict[str, Any]:
         candidates: List[Dict[str, Any]] = []
         filtered_context: List[Dict[str, Any]] = []
         kb_fact_context = self._kb_fact_candidates(
             kb_graph,
             query=query,
-            allow_personal_facts=persona_scope == "personal" and digital_human_id == user_id,
+            user_id=user_id,
+            persona_scope=persona_scope,
+            digital_human_id=digital_human_id,
         )
         candidates.extend(kb_fact_context["candidates"])
         filtered_context.extend(kb_fact_context["filteredContext"])
@@ -454,17 +455,24 @@ class ContextPacketBuilder:
         care_candidate = self._care_candidate(care_snapshot, query=query)
         if care_candidate is not None:
             candidates.append(care_candidate)
-        return {"candidates": candidates, "filteredContext": filtered_context}
+        return {
+            "candidates": candidates,
+            "filteredContext": filtered_context,
+            "kbFacts": kb_fact_context["kbFacts"],
+        }
 
     def _kb_fact_candidates(
         self,
         kb_graph: Dict[str, Any],
         *,
         query: str,
-        allow_personal_facts: bool,
+        user_id: str,
+        persona_scope: str,
+        digital_human_id: str,
     ) -> Dict[str, List[Dict[str, Any]]]:
         candidates: List[Dict[str, Any]] = []
         filtered_context: List[Dict[str, Any]] = []
+        eligible_facts: List[Dict[str, Any]] = []
         facts = kb_graph.get("facts") or []
         for index, fact in enumerate(facts):
             if not isinstance(fact, dict):
@@ -473,9 +481,15 @@ class ContextPacketBuilder:
             if not statement:
                 continue
             ref_id = str(fact.get("id") or f"kb_fact_{index + 1}").strip()
-            if not allow_personal_facts:
+            persona_filter_reason = self._kb_fact_persona_filter_reason(
+                fact,
+                user_id=user_id,
+                persona_scope=persona_scope,
+                digital_human_id=digital_human_id,
+            )
+            if persona_filter_reason:
                 filtered_context.append(
-                    self._filtered_kb_fact_context(fact, ref_id, "kb_fact_persona_scope_unavailable")
+                    self._filtered_kb_fact_context(fact, ref_id, persona_filter_reason)
                 )
                 continue
             if not self._generation_allowed(fact):
@@ -488,6 +502,13 @@ class ContextPacketBuilder:
             if not self._kb_fact_confidence_allows_generation(fact):
                 filtered_context.append(
                     self._filtered_kb_fact_context(fact, ref_id, "kb_fact_low_confidence")
+                )
+                continue
+            if not self._kb_fact_evidence_allows_generation(fact, persona_scope=persona_scope):
+                filtered_context.append(
+                    self._filtered_kb_fact_context(
+                        fact, ref_id, "kb_fact_evidence_status_not_allowed"
+                    )
                 )
                 continue
             score_breakdown = {
@@ -514,9 +535,60 @@ class ContextPacketBuilder:
                     },
                 }
             )
+            eligible_facts.append(fact)
             if len(candidates) >= 8:
                 break
-        return {"candidates": candidates, "filteredContext": filtered_context}
+        return {
+            "candidates": candidates,
+            "filteredContext": filtered_context,
+            "kbFacts": eligible_facts,
+        }
+
+    @classmethod
+    def _kb_fact_persona_filter_reason(
+        cls,
+        fact: Dict[str, Any],
+        *,
+        user_id: str,
+        persona_scope: str,
+        digital_human_id: str,
+    ) -> Optional[str]:
+        owner_user_id = cls._optional_text(fact.get("ownerUserId"))
+        fact_scope = cls._normal_kb_fact_persona_scope(fact.get("personaScope"))
+        fact_digital_human_id = cls._optional_text(fact.get("digitalHumanId"))
+
+        if persona_scope == "family":
+            if owner_user_id is None or fact_scope is None or fact_digital_human_id is None:
+                return "kb_fact_family_metadata_missing"
+            if owner_user_id != user_id:
+                return "kb_fact_owner_user_id_mismatch"
+            if fact_scope != "family":
+                return "kb_fact_persona_scope_mismatch"
+            if fact_digital_human_id != digital_human_id:
+                return "kb_fact_digital_human_id_mismatch"
+            return None
+
+        if digital_human_id != user_id:
+            return "kb_fact_digital_human_id_mismatch"
+        if owner_user_id is not None and owner_user_id != user_id:
+            return "kb_fact_owner_user_id_mismatch"
+        if fact_scope is not None and fact_scope != "personal":
+            return "kb_fact_persona_scope_mismatch"
+        if fact_digital_human_id is not None and fact_digital_human_id != user_id:
+            return "kb_fact_digital_human_id_mismatch"
+        return None
+
+    @classmethod
+    def _normal_kb_fact_persona_scope(cls, value: Any) -> Optional[str]:
+        scope = cls._optional_text(value)
+        if scope is None:
+            return None
+        normalized = scope.lower()
+        if normalized in {"personal", "self"}:
+            return "personal"
+        if normalized == "family":
+            return "family"
+        return normalized
 
     @staticmethod
     def _filtered_kb_fact_context(
@@ -530,6 +602,10 @@ class ContextPacketBuilder:
             "kind": "fact",
             "reason": reason,
             "confidence": str(fact.get("confidence") or "unknown"),
+            "ownerUserId": str(fact.get("ownerUserId") or ""),
+            "personaScope": str(fact.get("personaScope") or ""),
+            "digitalHumanId": str(fact.get("digitalHumanId") or ""),
+            "evidenceStatus": str(fact.get("evidenceStatus") or ""),
         }
 
     @staticmethod
@@ -709,6 +785,17 @@ class ContextPacketBuilder:
     @staticmethod
     def _kb_fact_confidence_allows_generation(fact: Dict[str, Any]) -> bool:
         return str(fact.get("confidence") or "").strip().lower() in {"high", "confirmed"}
+
+    @staticmethod
+    def _kb_fact_evidence_allows_generation(
+        fact: Dict[str, Any],
+        *,
+        persona_scope: str,
+    ) -> bool:
+        evidence_status = str(fact.get("evidenceStatus") or "").strip().lower()
+        if not evidence_status:
+            return persona_scope == "personal"
+        return evidence_status in {"observed", "confirmed"}
 
     @staticmethod
     def _generation_text_value(value: Any) -> str:
