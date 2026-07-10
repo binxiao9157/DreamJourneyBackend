@@ -1,10 +1,11 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 from math import ceil
+from threading import RLock
 from typing import Any, Dict, List, Optional
 import uuid
 
-from app.services.knowledge_store import KnowledgeRevisionConflict
+from app.services.knowledge_store import KnowledgeRevisionConflict, apply_kb_mutation_v2
 from app.services.user_identity import stable_user_id
 
 
@@ -13,6 +14,7 @@ class InMemoryStore:
         self._users: Dict[str, Dict[str, Any]] = {}
         self._kb_snapshots: Dict[str, Dict[str, Any]] = {}
         self._kb_changes: Dict[str, List[Dict[str, Any]]] = {}
+        self._kb_lock = RLock()
         self._memories: Dict[str, List[Dict[str, Any]]] = {}
         self._archive_items: Dict[str, List[Dict[str, Any]]] = {}
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
@@ -395,69 +397,96 @@ class InMemoryStore:
     def apply_kb_mutation(
         self,
         user_id: str,
-        graph: Dict[str, Any],
+        graph: Optional[Dict[str, Any]],
         *,
         operation_id: str,
         base_revision: Optional[int],
+        mutation: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        changes = self._kb_changes.setdefault(user_id, [])
-        existing = next((item for item in changes if item["operationId"] == operation_id), None)
-        if existing is not None:
-            return {
+        with self._kb_lock:
+            changes = self._kb_changes.setdefault(user_id, [])
+            existing = next((item for item in changes if item["operationId"] == operation_id), None)
+            if existing is not None:
+                stored_mutation = existing.get("mutation")
+                return {
+                    "userId": user_id,
+                    "graph": deepcopy(existing["graph"]),
+                    "revision": existing["revision"],
+                    "updatedAt": existing["createdAt"],
+                    "operationId": operation_id,
+                    "duplicate": True,
+                    "mutationSchemaVersion": 2 if stored_mutation is not None else 1,
+                    "mutation": deepcopy(stored_mutation),
+                }
+
+            current = self._kb_snapshots.get(user_id)
+            current_revision = int((current or {}).get("revision") or 0)
+            if base_revision is not None and base_revision != current_revision:
+                raise KnowledgeRevisionConflict(
+                    current_revision=current_revision,
+                    expected_revision=base_revision,
+                )
+
+            if mutation is None:
+                if not isinstance(graph, dict):
+                    raise ValueError("graph must be an object")
+                next_graph = deepcopy(graph)
+                normalized_mutation = None
+            else:
+                next_graph, normalized_mutation = apply_kb_mutation_v2(
+                    deepcopy((current or {}).get("graph") or {}),
+                    mutation,
+                )
+
+            revision = current_revision + 1
+            updated_at = self._now()
+            snapshot = {
                 "userId": user_id,
-                "graph": deepcopy(existing["graph"]),
-                "revision": existing["revision"],
-                "updatedAt": existing["createdAt"],
+                "graph": deepcopy(next_graph),
+                "revision": revision,
+                "updatedAt": updated_at,
+            }
+            change = {
+                "revision": revision,
                 "operationId": operation_id,
-                "duplicate": True,
+                "graph": deepcopy(next_graph),
+                "createdAt": updated_at,
+                "mutationSchemaVersion": 2 if normalized_mutation is not None else 1,
+                "mutation": deepcopy(normalized_mutation),
+            }
+            self._kb_snapshots[user_id] = snapshot
+            changes.append(change)
+            return {
+                **deepcopy(snapshot),
+                "operationId": operation_id,
+                "duplicate": False,
+                "mutationSchemaVersion": change["mutationSchemaVersion"],
+                "mutation": deepcopy(normalized_mutation),
             }
 
-        current = self._kb_snapshots.get(user_id)
-        current_revision = int((current or {}).get("revision") or 0)
-        if base_revision is not None and base_revision != current_revision:
-            raise KnowledgeRevisionConflict(
-                current_revision=current_revision,
-                expected_revision=base_revision,
-            )
-
-        revision = current_revision + 1
-        updated_at = self._now()
-        snapshot = {
-            "userId": user_id,
-            "graph": deepcopy(graph),
-            "revision": revision,
-            "updatedAt": updated_at,
-        }
-        change = {
-            "revision": revision,
-            "operationId": operation_id,
-            "graph": deepcopy(graph),
-            "createdAt": updated_at,
-        }
-        self._kb_snapshots[user_id] = snapshot
-        changes.append(change)
-        return {
-            **deepcopy(snapshot),
-            "operationId": operation_id,
-            "duplicate": False,
-        }
-
     def get_kb_snapshot(self, user_id: str) -> Optional[Dict[str, Any]]:
-        snapshot = self._kb_snapshots.get(user_id)
-        if snapshot is None:
-            return None
-        return deepcopy(snapshot["graph"])
+        with self._kb_lock:
+            snapshot = self._kb_snapshots.get(user_id)
+            if snapshot is None:
+                return None
+            return deepcopy(snapshot["graph"])
 
     def get_kb_snapshot_record(self, user_id: str) -> Optional[Dict[str, Any]]:
-        snapshot = self._kb_snapshots.get(user_id)
-        return None if snapshot is None else deepcopy(snapshot)
+        with self._kb_lock:
+            snapshot = self._kb_snapshots.get(user_id)
+            return None if snapshot is None else deepcopy(snapshot)
 
     def list_kb_changes(self, user_id: str, since_revision: int) -> List[Dict[str, Any]]:
-        return [
-            deepcopy(item)
-            for item in self._kb_changes.get(user_id, [])
-            if int(item.get("revision") or 0) > since_revision
-        ]
+        with self._kb_lock:
+            changes = []
+            for stored in self._kb_changes.get(user_id, []):
+                if int(stored.get("revision") or 0) <= since_revision:
+                    continue
+                item = deepcopy(stored)
+                item.setdefault("mutationSchemaVersion", 2 if item.get("mutation") is not None else 1)
+                item.setdefault("mutation", None)
+                changes.append(item)
+            return changes
 
     def add_memory(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)

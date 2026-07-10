@@ -660,6 +660,71 @@ class StoreTests(unittest.TestCase):
             )
         self.assertEqual(conflict.exception.current_revision, 1)
 
+    def test_memory_store_applies_v2_delta_atomically_and_keeps_original_idempotency_result(self):
+        store = InMemoryStore()
+        metadata = {"privacyMetadata": {"scope": "generationAllowed"}}
+        store.apply_kb_mutation(
+            "u1",
+            {
+                "people": [{"id": "shared", "name": "Person", **metadata}],
+                "places": [{"id": "place-1", "name": "Garden", **metadata}],
+                "events": [],
+                "facts": [
+                    {"id": "shared", "statement": "Old shared fact", **metadata},
+                    {"id": "gone", "statement": "Delete me", **metadata},
+                ],
+            },
+            operation_id="seed",
+            base_revision=0,
+        )
+        mutation = {
+            "upserts": {
+                "events": [
+                    {
+                        "id": "event-1",
+                        "title": "Garden visit",
+                        "participantIds": ["shared"],
+                        "locationId": "place-1",
+                        **metadata,
+                    }
+                ],
+                "facts": [{"id": "shared", "statement": "Recreated fact", **metadata}],
+            },
+            "tombstones": [
+                {"entityType": "facts", "entityId": "shared", "deletedAt": "2026-07-11T00:00:00Z"},
+                {"entityType": "facts", "entityId": "gone", "deletedAt": "2026-07-11T00:00:00Z"},
+            ],
+        }
+
+        first = store.apply_kb_mutation(
+            "u1",
+            None,
+            operation_id="v2-op",
+            base_revision=1,
+            mutation=mutation,
+        )
+        repeated = store.apply_kb_mutation(
+            "u1",
+            None,
+            operation_id="v2-op",
+            base_revision=0,
+            mutation={"upserts": {}, "tombstones": []},
+        )
+
+        self.assertEqual(first["revision"], 2)
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(repeated["duplicate"])
+        self.assertEqual(repeated["graph"], first["graph"])
+        self.assertEqual(repeated["mutation"], first["mutation"])
+        self.assertEqual([item["id"] for item in first["graph"]["people"]], ["shared"])
+        self.assertEqual([item["id"] for item in first["graph"]["facts"]], ["shared"])
+        self.assertEqual(first["graph"]["facts"][0]["statement"], "Recreated fact")
+        self.assertEqual(first["graph"]["events"][0]["participantIds"], ["shared"])
+        self.assertEqual(first["graph"]["events"][0]["locationId"], "place-1")
+        change = store.list_kb_changes("u1", since_revision=1)[0]
+        self.assertEqual(change["mutationSchemaVersion"], 2)
+        self.assertEqual(change["mutation"], first["mutation"])
+
     def test_memory_store_rejects_legacy_zero_base_without_losing_newer_snapshot(self):
         store = InMemoryStore()
         store.apply_kb_mutation(
@@ -744,9 +809,224 @@ class KnowledgeSyncAPITests(unittest.TestCase):
         self.assertEqual(changes.status_code, 200)
         self.assertEqual(changes.json()["currentRevision"], 2)
         self.assertEqual([item["operationId"] for item in changes.json()["changes"]], ["mutation-1"])
+        self.assertEqual(changes.json()["changes"][0]["mutationSchemaVersion"], 1)
+        self.assertIsNone(changes.json()["changes"][0]["mutation"])
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(conflict.json()["detail"]["code"], "knowledgeRevisionConflict")
         self.assertEqual(conflict.json()["detail"]["currentRevision"], 2)
+
+    def test_v2_mutation_upserts_tombstones_idempotency_and_change_metadata(self):
+        metadata = {"privacyMetadata": {"scope": "generationAllowed"}}
+        seeded = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "kb_v2_user",
+                "operationId": "seed-v1",
+                "baseRevision": 0,
+                "graph": {
+                    "people": [{"id": "shared", "name": "Person", **metadata}],
+                    "places": [{"id": "place-1", "name": "Garden", **metadata}],
+                    "events": [],
+                    "facts": [
+                        {"id": "shared", "statement": "Old shared fact", **metadata},
+                        {"id": "gone", "statement": "Delete me", **metadata},
+                    ],
+                },
+            },
+        )
+        mutation = {
+            "userId": "kb_v2_user",
+            "operationId": "v2-op",
+            "baseRevision": 1,
+            "mutationSchemaVersion": 2,
+            "upserts": {
+                "events": [
+                    {
+                        "id": "event-1",
+                        "title": "Garden visit",
+                        "participantIds": ["shared"],
+                        "locationId": "place-1",
+                        **metadata,
+                    }
+                ],
+                "facts": [{"id": "shared", "statement": "Recreated fact", **metadata}],
+            },
+            "tombstones": [
+                {"entityType": "facts", "entityId": "shared", "deletedAt": "2026-07-11T00:00:00Z"},
+                {"entityType": "facts", "entityId": "gone", "deletedAt": "2026-07-11T00:00:00Z"},
+            ],
+        }
+
+        applied = self.client.post("/kb/mutations", json=mutation)
+        repeated = self.client.post("/kb/mutations", json=mutation)
+        stale = self.client.post(
+            "/kb/mutations",
+            json={**mutation, "operationId": "v2-stale", "baseRevision": 1},
+        )
+        changes = self.client.get("/kb/changes/kb_v2_user?sinceRevision=1")
+
+        self.assertEqual(seeded.status_code, 200)
+        self.assertEqual(applied.status_code, 200)
+        self.assertEqual(applied.json()["revision"], 2)
+        self.assertEqual(applied.json()["mutationSchemaVersion"], 2)
+        self.assertEqual(applied.json()["mutation"]["tombstones"], mutation["tombstones"])
+        self.assertEqual([item["id"] for item in applied.json()["graph"]["people"]], ["shared"])
+        self.assertEqual([item["id"] for item in applied.json()["graph"]["facts"]], ["shared"])
+        self.assertEqual(applied.json()["graph"]["facts"][0]["statement"], "Recreated fact")
+        self.assertEqual(applied.json()["graph"]["events"][0]["participantIds"], ["shared"])
+        self.assertEqual(applied.json()["graph"]["events"][0]["locationId"], "place-1")
+        self.assertEqual(repeated.status_code, 200)
+        self.assertTrue(repeated.json()["duplicate"])
+        self.assertEqual(repeated.json()["graph"], applied.json()["graph"])
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json()["detail"]["currentRevision"], 2)
+        self.assertEqual(changes.status_code, 200)
+        self.assertEqual(len(changes.json()["changes"]), 1)
+        self.assertEqual(changes.json()["changes"][0]["mutationSchemaVersion"], 2)
+        self.assertEqual(changes.json()["changes"][0]["mutation"], applied.json()["mutation"])
+
+    def test_duplicate_operation_response_uses_original_schema_across_replays(self):
+        first_v1 = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "kb_replay_v1",
+                "operationId": "shared-op",
+                "baseRevision": 0,
+                "graph": {"facts": []},
+            },
+        )
+        replayed_as_v2 = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "kb_replay_v1",
+                "operationId": "shared-op",
+                "baseRevision": 999,
+                "mutationSchemaVersion": 2,
+                "upserts": {},
+                "tombstones": [],
+            },
+        )
+        first_v2 = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "kb_replay_v2",
+                "operationId": "shared-op",
+                "baseRevision": 0,
+                "mutationSchemaVersion": 2,
+                "upserts": {
+                    "facts": [
+                        {
+                            "id": "replay-fact",
+                            "statement": "schema replay",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ]
+                },
+                "tombstones": [],
+            },
+        )
+        replayed_as_v1 = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "kb_replay_v2",
+                "operationId": "shared-op",
+                "baseRevision": 999,
+                "graph": {"facts": [{"id": "must-not-apply"}]},
+            },
+        )
+
+        self.assertEqual(first_v1.status_code, 200)
+        self.assertEqual(replayed_as_v2.status_code, 200)
+        self.assertTrue(replayed_as_v2.json()["duplicate"])
+        self.assertNotIn("mutationSchemaVersion", replayed_as_v2.json())
+        self.assertNotIn("mutation", replayed_as_v2.json())
+        self.assertNotIn("graph", replayed_as_v2.json())
+        self.assertEqual(first_v2.status_code, 200)
+        self.assertEqual(replayed_as_v1.status_code, 200)
+        self.assertTrue(replayed_as_v1.json()["duplicate"])
+        self.assertEqual(replayed_as_v1.json()["mutationSchemaVersion"], 2)
+        self.assertEqual(replayed_as_v1.json()["mutation"], first_v2.json()["mutation"])
+        self.assertEqual(replayed_as_v1.json()["graph"], first_v2.json()["graph"])
+
+    def test_v2_mutation_rejects_invalid_types_ids_and_non_syncable_upserts(self):
+        metadata = {"privacyMetadata": {"scope": "generationAllowed"}}
+        invalid_cases = {
+            "empty mutation": {
+                "upserts": {},
+                "tombstones": [],
+            },
+            "unknown upsert type": {
+                "upserts": {"memories": [{"id": "m1", **metadata}]},
+                "tombstones": [],
+            },
+            "empty id": {
+                "upserts": {"facts": [{"id": " ", "statement": "invalid", **metadata}]},
+                "tombstones": [],
+            },
+            "missing metadata": {
+                "upserts": {"facts": [{"id": "f1", "statement": "private by default"}]},
+                "tombstones": [],
+            },
+            "local only": {
+                "upserts": {
+                    "facts": [
+                        {
+                            "id": "f1",
+                            "statement": "private",
+                            "privacyMetadata": {"scope": "localOnly"},
+                        }
+                    ]
+                },
+                "tombstones": [],
+            },
+            "malformed scope": {
+                "upserts": {
+                    "facts": [
+                        {
+                            "id": "f1",
+                            "statement": "invalid",
+                            "privacyMetadata": {"scope": ["generationAllowed"]},
+                        }
+                    ]
+                },
+                "tombstones": [],
+            },
+            "unknown tombstone type": {
+                "upserts": {},
+                "tombstones": [
+                    {"entityType": "memories", "entityId": "m1", "deletedAt": "2026-07-11T00:00:00Z"}
+                ],
+            },
+            "invalid tombstone timestamp": {
+                "upserts": {},
+                "tombstones": [
+                    {"entityType": "facts", "entityId": "f1", "deletedAt": "not-a-timestamp"}
+                ],
+            },
+            "tombstone timestamp without timezone": {
+                "upserts": {},
+                "tombstones": [
+                    {"entityType": "facts", "entityId": "f1", "deletedAt": "2026-07-11T00:00:00"}
+                ],
+            },
+        }
+
+        for index, (label, delta) in enumerate(invalid_cases.items()):
+            with self.subTest(label=label):
+                response = self.client.post(
+                    "/kb/mutations",
+                    json={
+                        "userId": "kb_v2_invalid",
+                        "operationId": f"invalid-{index}",
+                        "baseRevision": 0,
+                        "mutationSchemaVersion": 2,
+                        **delta,
+                    },
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+
+        snapshot = self.client.get("/kb/snapshot/kb_v2_invalid")
+        self.assertEqual(snapshot.status_code, 404)
 
     def test_legacy_sync_is_compatible_noop_after_a_newer_revision_exists(self):
         first_legacy = self.client.post(

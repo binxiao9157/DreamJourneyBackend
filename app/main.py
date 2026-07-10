@@ -27,7 +27,10 @@ from app.services.privacy import (
     sanitize_mailbox_letter_payload,
 )
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
-from app.services.knowledge_store import KnowledgeRevisionConflict
+from app.services.knowledge_store import (
+    KnowledgeMutationValidationError,
+    KnowledgeRevisionConflict,
+)
 from app.services.passwords import make_password_credential, verify_password
 from app.services.runtime_config import RuntimeConfigService
 from app.services.context_packet import ContextPacketBuilder
@@ -1530,23 +1533,45 @@ def kb_snapshot(user_id: str) -> Dict[str, Any]:
 def mutate_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id = str(payload.get("userId") or "").strip()
     operation_id = str(payload.get("operationId") or "").strip()
-    graph = payload.get("graph")
     base_revision = payload.get("baseRevision")
+    mutation_schema_version = payload.get("mutationSchemaVersion", 1)
     if not user_id:
         raise HTTPException(status_code=400, detail="userId is required")
     if not operation_id:
         raise HTTPException(status_code=400, detail="operationId is required")
-    if not isinstance(graph, dict):
-        raise HTTPException(status_code=400, detail="graph must be an object")
-    if base_revision is not None and (not isinstance(base_revision, int) or base_revision < 0):
+    if (
+        isinstance(mutation_schema_version, bool)
+        or not isinstance(mutation_schema_version, int)
+        or mutation_schema_version not in (1, 2)
+    ):
+        raise HTTPException(status_code=400, detail="mutationSchemaVersion must be 1 or 2")
+    if base_revision is not None and (
+        isinstance(base_revision, bool)
+        or not isinstance(base_revision, int)
+        or base_revision < 0
+    ):
         raise HTTPException(status_code=400, detail="baseRevision must be a non-negative integer")
-    filtered = filter_syncable_graph(graph)
+
+    mutation = None
+    if mutation_schema_version == 2:
+        mutation = {
+            "upserts": payload.get("upserts", {}),
+            "tombstones": payload.get("tombstones", []),
+        }
+        graph = None
+    else:
+        graph = payload.get("graph")
+        if not isinstance(graph, dict):
+            raise HTTPException(status_code=400, detail="graph must be an object")
+        graph = filter_syncable_graph(graph)
+
     try:
         result = store.apply_kb_mutation(
             user_id,
-            filtered,
+            graph,
             operation_id=operation_id,
             base_revision=base_revision,
+            mutation=mutation,
         )
     except KnowledgeRevisionConflict as exc:
         raise HTTPException(
@@ -1557,7 +1582,10 @@ def mutate_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "currentRevision": exc.current_revision,
             },
         )
-    return {
+    except KnowledgeMutationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    response = {
         "status": "duplicate" if result["duplicate"] else "applied",
         "userId": user_id,
         "operationId": operation_id,
@@ -1565,6 +1593,15 @@ def mutate_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
         "updatedAt": result["updatedAt"],
         "duplicate": result["duplicate"],
     }
+    if result.get("mutationSchemaVersion") == 2:
+        response.update(
+            {
+                "graph": result["graph"],
+                "mutationSchemaVersion": 2,
+                "mutation": result["mutation"],
+            }
+        )
+    return response
 
 
 @app.get("/kb/changes/{user_id}")

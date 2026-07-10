@@ -7,7 +7,7 @@ import uuid
 from psycopg.types.json import Jsonb
 
 from app.services.user_identity import stable_user_id
-from app.services.knowledge_store import KnowledgeRevisionConflict
+from app.services.knowledge_store import KnowledgeRevisionConflict, apply_kb_mutation_v2
 
 
 class PostgresStore:
@@ -45,10 +45,15 @@ class PostgresStore:
                 revision BIGINT NOT NULL,
                 operation_id TEXT NOT NULL,
                 graph JSONB NOT NULL,
+                mutation JSONB,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (user_id, revision),
                 UNIQUE (user_id, operation_id)
             )
+            """,
+            """
+            ALTER TABLE kb_changes
+                ADD COLUMN IF NOT EXISTS mutation JSONB
             """,
             """
             CREATE INDEX IF NOT EXISTS idx_kb_changes_user_revision
@@ -556,10 +561,11 @@ class PostgresStore:
     def apply_kb_mutation(
         self,
         user_id: str,
-        graph: Dict[str, Any],
+        graph: Optional[Dict[str, Any]],
         *,
         operation_id: str,
         base_revision: Optional[int],
+        mutation: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         connection = self._open_connection()
         try:
@@ -570,7 +576,7 @@ class PostgresStore:
                 )
                 cursor.execute(
                     """
-                    SELECT revision, graph, created_at
+                    SELECT revision, graph, mutation, created_at
                     FROM kb_changes
                     WHERE user_id = %s AND operation_id = %s
                     """,
@@ -578,6 +584,7 @@ class PostgresStore:
                 )
                 existing = cursor.fetchone()
                 if existing is not None:
+                    stored_mutation = existing.get("mutation")
                     connection.commit()
                     return {
                         "userId": user_id,
@@ -586,6 +593,8 @@ class PostgresStore:
                         "updatedAt": self._iso_value(existing.get("created_at")),
                         "operationId": operation_id,
                         "duplicate": True,
+                        "mutationSchemaVersion": 2 if stored_mutation is not None else 1,
+                        "mutation": deepcopy(stored_mutation),
                     }
 
                 cursor.execute(
@@ -605,6 +614,17 @@ class PostgresStore:
                         expected_revision=base_revision,
                     )
 
+                if mutation is None:
+                    if not isinstance(graph, dict):
+                        raise ValueError("graph must be an object")
+                    next_graph = deepcopy(graph)
+                    normalized_mutation = None
+                else:
+                    next_graph, normalized_mutation = apply_kb_mutation_v2(
+                        deepcopy((current or {}).get("graph") or {}),
+                        mutation,
+                    )
+
                 revision = current_revision + 1
                 cursor.execute(
                     """
@@ -616,16 +636,20 @@ class PostgresStore:
                         updated_at = NOW()
                     RETURNING graph, revision, updated_at
                     """,
-                    self._adapt_params((user_id, graph, revision)),
+                    self._adapt_params((user_id, next_graph, revision)),
                 )
                 saved = cursor.fetchone()
                 cursor.execute(
                     """
-                    INSERT INTO kb_changes (user_id, revision, operation_id, graph, created_at)
-                    VALUES (%s, %s, %s, %s, NOW())
-                    RETURNING revision, operation_id, graph, created_at
+                    INSERT INTO kb_changes (
+                        user_id, revision, operation_id, graph, mutation, created_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    RETURNING revision, operation_id, graph, mutation, created_at
                     """,
-                    self._adapt_params((user_id, revision, operation_id, graph)),
+                    self._adapt_params(
+                        (user_id, revision, operation_id, next_graph, normalized_mutation)
+                    ),
                 )
                 change = cursor.fetchone()
             connection.commit()
@@ -636,6 +660,8 @@ class PostgresStore:
                 "updatedAt": self._iso_value(saved.get("updated_at") or change.get("created_at")),
                 "operationId": operation_id,
                 "duplicate": False,
+                "mutationSchemaVersion": 2 if normalized_mutation is not None else 1,
+                "mutation": deepcopy(normalized_mutation),
             }
         except Exception:
             self._rollback(connection)
@@ -667,7 +693,7 @@ class PostgresStore:
     def list_kb_changes(self, user_id: str, since_revision: int) -> List[Dict[str, Any]]:
         rows = self._fetchall(
             """
-            SELECT revision, operation_id, graph, created_at
+            SELECT revision, operation_id, graph, mutation, created_at
             FROM kb_changes
             WHERE user_id = %s AND revision > %s
             ORDER BY revision ASC
@@ -680,6 +706,8 @@ class PostgresStore:
                 "operationId": str(row["operation_id"]),
                 "graph": deepcopy(row["graph"]),
                 "createdAt": self._iso_value(row.get("created_at")),
+                "mutationSchemaVersion": 2 if row.get("mutation") is not None else 1,
+                "mutation": deepcopy(row.get("mutation")),
             }
             for row in rows
         ]

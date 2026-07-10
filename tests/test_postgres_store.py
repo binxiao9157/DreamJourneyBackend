@@ -77,7 +77,7 @@ class FakeCursor:
             session_id = params[0]
             item = self.connection.digital_human_sessions.get(session_id)
             self.result = None if item is None else {"payload": dict(item)}
-        elif normalized.startswith("SELECT revision, graph, created_at FROM kb_changes"):
+        elif normalized.startswith("SELECT revision, graph, mutation, created_at FROM kb_changes"):
             user_id, operation_id = params
             item = next(
                 (
@@ -103,7 +103,9 @@ class FakeCursor:
             user_id = params[0]
             value = self.connection.kb_snapshots.get(user_id)
             self.result = None if value is None else {"graph": value}
-        elif normalized.startswith("SELECT revision, operation_id, graph, created_at FROM kb_changes"):
+        elif normalized.startswith(
+            "SELECT revision, operation_id, graph, mutation, created_at FROM kb_changes"
+        ):
             user_id, since_revision = params
             self.result = [
                 dict(item)
@@ -369,12 +371,14 @@ class FakeCursor:
                 "updated_at": "2026-07-10T00:00:00+00:00",
             }
         elif normalized.startswith("INSERT INTO kb_changes"):
-            user_id, revision, operation_id, graph = params
+            user_id, revision, operation_id, graph, mutation = params
             graph = unwrap_jsonb(graph)
+            mutation = unwrap_jsonb(mutation)
             item = {
                 "revision": revision,
                 "operation_id": operation_id,
                 "graph": dict(graph),
+                "mutation": None if mutation is None else dict(mutation),
                 "created_at": "2026-07-10T00:00:00+00:00",
             }
             self.connection.kb_changes.setdefault(user_id, []).append(item)
@@ -723,6 +727,8 @@ class PostgresStoreTests(unittest.TestCase):
         sql = "\n".join(statement for statement, _ in connection.executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS users", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS kb_snapshots", sql)
+        self.assertIn("ALTER TABLE kb_changes", sql)
+        self.assertIn("ADD COLUMN IF NOT EXISTS mutation JSONB", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS memories", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS archive_items", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS mailbox_letters", sql)
@@ -987,9 +993,148 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertTrue(repeated["duplicate"])
         self.assertEqual(store.get_kb_snapshot("u1")["facts"][0]["statement"], "第一条事实")
         self.assertEqual([item["operationId"] for item in store.list_kb_changes("u1", 0)], ["op-1"])
+        self.assertEqual(store.list_kb_changes("u1", 0)[0]["mutationSchemaVersion"], 1)
+        self.assertIsNone(store.list_kb_changes("u1", 0)[0]["mutation"])
 
         with self.assertRaises(KnowledgeRevisionConflict):
             store.apply_kb_mutation("u1", {"facts": []}, operation_id="op-2", base_revision=0)
+
+    def test_store_applies_v2_kb_mutation_and_persists_change_metadata(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        metadata = {"privacyMetadata": {"scope": "generationAllowed"}}
+        store.apply_kb_mutation(
+            "u1",
+            {
+                "people": [{"id": "shared", "name": "Person", **metadata}],
+                "places": [{"id": "place-1", "name": "Garden", **metadata}],
+                "events": [],
+                "facts": [
+                    {"id": "shared", "statement": "Old shared fact", **metadata},
+                    {"id": "gone", "statement": "Delete me", **metadata},
+                ],
+            },
+            operation_id="seed",
+            base_revision=0,
+        )
+        mutation = {
+            "upserts": {
+                "events": [
+                    {
+                        "id": "event-1",
+                        "title": "Garden visit",
+                        "participantIds": ["shared"],
+                        "locationId": "place-1",
+                        **metadata,
+                    }
+                ],
+                "facts": [{"id": "shared", "statement": "Recreated fact", **metadata}],
+            },
+            "tombstones": [
+                {"entityType": "facts", "entityId": "shared", "deletedAt": "2026-07-11T00:00:00Z"},
+                {"entityType": "facts", "entityId": "gone", "deletedAt": "2026-07-11T00:00:00Z"},
+            ],
+        }
+
+        applied = store.apply_kb_mutation(
+            "u1",
+            None,
+            operation_id="v2-op",
+            base_revision=1,
+            mutation=mutation,
+        )
+        repeated = store.apply_kb_mutation(
+            "u1",
+            None,
+            operation_id="v2-op",
+            base_revision=0,
+            mutation={"upserts": {}, "tombstones": []},
+        )
+
+        self.assertEqual(applied["revision"], 2)
+        self.assertFalse(applied["duplicate"])
+        self.assertTrue(repeated["duplicate"])
+        self.assertEqual(repeated["graph"], applied["graph"])
+        self.assertEqual(repeated["mutation"], applied["mutation"])
+        self.assertEqual([item["id"] for item in applied["graph"]["people"]], ["shared"])
+        self.assertEqual([item["id"] for item in applied["graph"]["facts"]], ["shared"])
+        self.assertEqual(applied["graph"]["events"][0]["participantIds"], ["shared"])
+        self.assertEqual(applied["graph"]["events"][0]["locationId"], "place-1")
+        change = store.list_kb_changes("u1", 1)[0]
+        self.assertEqual(change["mutationSchemaVersion"], 2)
+        self.assertEqual(change["mutation"], applied["mutation"])
+        self.assertGreaterEqual(connection.commits, 3)
+        self.assertEqual(connection.rollbacks, 0)
+        self.assertGreaterEqual(connection.closes, 3)
+
+    def test_change_feed_reads_historical_rows_without_mutation_metadata(self):
+        connection = FakeConnection()
+        connection.kb_changes["u1"] = [
+            {
+                "revision": 1,
+                "operation_id": "historical-v1",
+                "graph": {"facts": []},
+                "created_at": "2026-07-10T00:00:00+00:00",
+            }
+        ]
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        change = store.list_kb_changes("u1", 0)[0]
+
+        self.assertEqual(change["operationId"], "historical-v1")
+        self.assertEqual(change["mutationSchemaVersion"], 1)
+        self.assertIsNone(change["mutation"])
+
+    def test_duplicate_operation_uses_persisted_schema_across_replays(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        first_v1 = store.apply_kb_mutation(
+            "v1-user",
+            {"facts": []},
+            operation_id="shared-op",
+            base_revision=0,
+        )
+        replayed_as_v2 = store.apply_kb_mutation(
+            "v1-user",
+            None,
+            operation_id="shared-op",
+            base_revision=999,
+            mutation={"upserts": {}, "tombstones": []},
+        )
+        first_v2 = store.apply_kb_mutation(
+            "v2-user",
+            None,
+            operation_id="shared-op",
+            base_revision=0,
+            mutation={
+                "upserts": {
+                    "facts": [
+                        {
+                            "id": "replay-fact",
+                            "statement": "schema replay",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ]
+                },
+                "tombstones": [],
+            },
+        )
+        replayed_as_v1 = store.apply_kb_mutation(
+            "v2-user",
+            {"facts": [{"id": "must-not-apply"}]},
+            operation_id="shared-op",
+            base_revision=999,
+        )
+
+        self.assertEqual(first_v1["mutationSchemaVersion"], 1)
+        self.assertEqual(replayed_as_v2["mutationSchemaVersion"], 1)
+        self.assertIsNone(replayed_as_v2["mutation"])
+        self.assertEqual(replayed_as_v2["graph"], first_v1["graph"])
+        self.assertEqual(first_v2["mutationSchemaVersion"], 2)
+        self.assertEqual(replayed_as_v1["mutationSchemaVersion"], 2)
+        self.assertEqual(replayed_as_v1["mutation"], first_v2["mutation"])
+        self.assertEqual(replayed_as_v1["graph"], first_v2["graph"])
 
     def test_kb_mutations_use_request_exclusive_connections_and_close_each_lease(self):
         barrier = Barrier(2)
