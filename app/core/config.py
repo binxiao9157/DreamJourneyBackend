@@ -30,6 +30,9 @@ class Settings:
     database_url: str = "postgresql://dreamjourney:dreamjourney@postgres:5432/dreamjourney"
     redis_url: str = "redis://redis:6379/0"
     backend_api_token: Optional[str] = None
+    auth_access_ttl_seconds: int = 900
+    auth_refresh_ttl_seconds: int = 30 * 24 * 60 * 60
+    auth_ownership_mode: str = "shadow"
 
     deepseek_api_key: Optional[str] = None
     deepseek_base_url: str = "https://api.deepseek.com/v1/chat/completions"
@@ -77,6 +80,18 @@ class Settings:
             database_url=_env("DATABASE_URL", cls.database_url) or cls.database_url,
             redis_url=_env("REDIS_URL", cls.redis_url) or cls.redis_url,
             backend_api_token=_env("BACKEND_API_TOKEN"),
+            auth_access_ttl_seconds=_env_int(
+                "AUTH_ACCESS_TTL_SECONDS",
+                cls.auth_access_ttl_seconds,
+            ),
+            auth_refresh_ttl_seconds=_env_int(
+                "AUTH_REFRESH_TTL_SECONDS",
+                cls.auth_refresh_ttl_seconds,
+            ),
+            auth_ownership_mode=_env(
+                "AUTH_OWNERSHIP_MODE",
+                cls.auth_ownership_mode,
+            ) or cls.auth_ownership_mode,
             deepseek_api_key=_env("DEEPSEEK_API_KEY"),
             deepseek_base_url=_env("DEEPSEEK_BASE_URL", cls.deepseek_base_url) or cls.deepseek_base_url,
             volcengine_api_key=_env("VOLCENGINE_API_KEY"),

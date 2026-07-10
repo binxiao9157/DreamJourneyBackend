@@ -149,6 +149,25 @@ class PostgresStore:
                 ON digital_human_sessions(user_id, device_id, status)
             """,
             """
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                access_token_hash TEXT UNIQUE NOT NULL,
+                refresh_token_hash TEXT UNIQUE NOT NULL,
+                status TEXT NOT NULL,
+                payload JSONB NOT NULL,
+                access_expires_at TIMESTAMPTZ NOT NULL,
+                refresh_expires_at TIMESTAMPTZ NOT NULL,
+                revoked_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_status
+                ON auth_sessions(user_id, status, updated_at DESC)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS profiles (
                 user_id TEXT PRIMARY KEY,
                 payload JSONB NOT NULL,
@@ -197,6 +216,89 @@ class PostgresStore:
             for statement in statements:
                 cursor.execute(statement)
         connection.commit()
+
+    def save_auth_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(session)
+        row = self._fetchone(
+            """
+            INSERT INTO auth_sessions (
+                id, user_id, access_token_hash, refresh_token_hash, status, payload,
+                access_expires_at, refresh_expires_at, created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            RETURNING payload
+            """,
+            (
+                item["sessionId"],
+                item["userId"],
+                item["accessTokenHash"],
+                item["refreshTokenHash"],
+                item["status"],
+                item,
+                item["accessExpiresAt"],
+                item["refreshExpiresAt"],
+                item["createdAt"],
+            ),
+            commit=True,
+        )
+        return deepcopy(row["payload"])
+
+    def get_auth_session_by_access_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            "SELECT payload FROM auth_sessions WHERE access_token_hash = %s",
+            (token_hash,),
+        )
+        return None if row is None else deepcopy(row["payload"])
+
+    def consume_auth_session_refresh(
+        self,
+        refresh_token_hash: str,
+        consumed_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        patch = {"status": "rotated", "rotatedAt": consumed_at_iso}
+        row = self._fetchone(
+            """
+            UPDATE auth_sessions
+            SET status = 'rotated',
+                payload = payload || %s,
+                revoked_at = %s,
+                updated_at = NOW()
+            WHERE refresh_token_hash = %s
+              AND status = 'active'
+              AND refresh_expires_at > %s
+            RETURNING payload
+            """,
+            (patch, consumed_at_iso, refresh_token_hash, consumed_at_iso),
+            commit=True,
+        )
+        return None if row is None else deepcopy(row["payload"])
+
+    def revoke_auth_session_by_access_token_hash(
+        self,
+        access_token_hash: str,
+        revoked_at_iso: str,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        patch = {
+            "status": "revoked",
+            "revokedAt": revoked_at_iso,
+            "revokeReason": reason,
+        }
+        row = self._fetchone(
+            """
+            UPDATE auth_sessions
+            SET status = 'revoked',
+                payload = payload || %s,
+                revoked_at = %s,
+                updated_at = NOW()
+            WHERE access_token_hash = %s
+              AND status = 'active'
+            RETURNING payload
+            """,
+            (patch, revoked_at_iso, access_token_hash),
+            commit=True,
+        )
+        return None if row is None else deepcopy(row["payload"])
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
@@ -343,6 +445,7 @@ class PostgresStore:
                 "push_device_tokens",
                 "voice_profiles",
                 "digital_human_sessions",
+                "auth_sessions",
             ):
                 self._fetchall(f"DELETE FROM {table} WHERE user_id = %s RETURNING payload", (user_id,))
             tombstone = {

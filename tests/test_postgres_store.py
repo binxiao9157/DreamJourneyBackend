@@ -1,7 +1,9 @@
 import unittest
+from datetime import datetime, timezone
 
 from psycopg.types.json import Jsonb
 
+from app.services.auth_sessions import AuthSessionError, AuthSessionService
 from app.services.in_memory_store import InMemoryStore
 from app.services.postgres_store import PostgresStore
 
@@ -208,6 +210,76 @@ class FakeCursor:
                     if item.get("viewerFamilyMemberID") is None
                 ]
             self.result = {"payload": snapshots[0]} if snapshots else None
+        elif normalized.startswith("SELECT payload FROM auth_sessions WHERE access_token_hash"):
+            token_hash = params[0]
+            session = next(
+                (
+                    item
+                    for item in self.connection.auth_sessions.values()
+                    if item.get("accessTokenHash") == token_hash
+                ),
+                None,
+            )
+            self.result = None if session is None else {"payload": dict(session)}
+        elif normalized.startswith("SELECT payload FROM auth_sessions WHERE refresh_token_hash"):
+            token_hash = params[0]
+            session = next(
+                (
+                    item
+                    for item in self.connection.auth_sessions.values()
+                    if item.get("refreshTokenHash") == token_hash
+                ),
+                None,
+            )
+            self.result = None if session is None else {"payload": dict(session)}
+        elif normalized.startswith("INSERT INTO auth_sessions"):
+            session_id = params[0]
+            payload = unwrap_jsonb(params[5])
+            self.connection.auth_sessions[session_id] = dict(payload)
+            self.result = {"payload": payload}
+        elif normalized.startswith("UPDATE auth_sessions"):
+            patch = unwrap_jsonb(params[0])
+            if "WHERE refresh_token_hash = %s" in normalized:
+                _, refresh_token_hash, cutoff_iso = params[1:]
+                match = next(
+                    (
+                        item
+                        for item in self.connection.auth_sessions.values()
+                        if item.get("refreshTokenHash") == refresh_token_hash
+                        and item.get("status") == "active"
+                        and str(item.get("refreshExpiresAt") or "") > cutoff_iso
+                    ),
+                    None,
+                )
+            else:
+                access_token_hash = params[2]
+                match = next(
+                    (
+                        item
+                        for item in self.connection.auth_sessions.values()
+                        if item.get("accessTokenHash") == access_token_hash
+                        and item.get("status") == "active"
+                    ),
+                    None,
+                )
+            if match is None:
+                self.result = None
+            else:
+                match.update(patch)
+                self.result = {"payload": dict(match)}
+        elif normalized.startswith("DELETE FROM auth_sessions"):
+            user_id = params[0]
+            deleted = [
+                {"payload": item}
+                for item in self.connection.auth_sessions.values()
+                if item.get("userId") == user_id
+            ]
+            self.connection.auth_sessions = {
+                session_id: item
+                for session_id, item in self.connection.auth_sessions.items()
+                if item.get("userId") != user_id
+            }
+            self.result = deleted
         elif normalized.startswith("INSERT INTO digital_human_sessions"):
             session_id = params[0]
             payload = unwrap_jsonb(params[7])
@@ -526,6 +598,7 @@ class FakeConnection:
         self.voice_profiles = {}
         self.voice_clone_slots = {}
         self.digital_human_sessions = {}
+        self.auth_sessions = {}
         self.profiles = {}
         self.password_credentials = {}
         self.family_members = {}
@@ -595,7 +668,33 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("voice_profile_id TEXT UNIQUE", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS digital_human_sessions", sql)
         self.assertIn("idx_digital_human_sessions_resource_status", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS auth_sessions", sql)
+        self.assertIn("idx_auth_sessions_user_status", sql)
         self.assertGreaterEqual(connection.commits, 1)
+
+    def test_postgres_store_persists_and_rotates_opaque_auth_sessions(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        service = AuthSessionService(
+            store,
+            access_ttl_seconds=900,
+            refresh_ttl_seconds=3600,
+        )
+        now = datetime.now(timezone.utc)
+
+        issued = service.issue("user-auth", now=now)
+        resolved = service.resolve_access_token(issued["accessToken"], now=now)
+        refreshed = service.refresh(issued["refreshToken"], now=now)
+
+        self.assertEqual(resolved["userId"], "user-auth")
+        self.assertNotEqual(refreshed["accessToken"], issued["accessToken"])
+        self.assertIsNone(service.resolve_access_token(issued["accessToken"], now=now))
+        with self.assertRaises(AuthSessionError):
+            service.refresh(issued["refreshToken"], now=now)
+        auth_sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("UPDATE auth_sessions", auth_sql)
+        self.assertIn("WHERE refresh_token_hash = %s AND status = 'active'", auth_sql)
+        self.assertNotIn("SELECT payload FROM auth_sessions WHERE refresh_token_hash", auth_sql)
 
     def test_in_memory_store_arbitrates_digital_human_session_leases(self):
         store = InMemoryStore()

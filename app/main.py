@@ -1,9 +1,11 @@
 import hashlib
+import json
+import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 try:
     from fastapi import FastAPI, HTTPException, Request
@@ -13,6 +15,8 @@ except ImportError as exc:  # pragma: no cover - exercised only without runtime 
 
 from app.core.config import settings
 from app.services.amap import AMapDistrictProxy
+from app.services.auth_sessions import AuthSessionError, AuthSessionService
+from app.services.authorization_policy import CrossAccountAuthorizationPolicy
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.privacy import (
     filter_syncable_graph,
@@ -45,6 +49,17 @@ from app.services.user_identity import stable_user_id
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 store = make_store(settings)
+logger = logging.getLogger(__name__)
+
+BACKEND_API_TOKEN = settings.backend_api_token or ""
+AUTH_ACCESS_TTL_SECONDS = max(60, settings.auth_access_ttl_seconds)
+AUTH_REFRESH_TTL_SECONDS = max(AUTH_ACCESS_TTL_SECONDS + 60, settings.auth_refresh_ttl_seconds)
+AUTH_OWNERSHIP_MODE = (
+    settings.auth_ownership_mode
+    if settings.auth_ownership_mode in {"shadow", "enforce"}
+    else "shadow"
+)
+AUTH_OWNERSHIP_MAX_JSON_INSPECTION_BYTES = 256 * 1024
 
 ARCHIVE_MEDIA_UPLOAD_PROVIDER = "mockObjectStorage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_DISPLAY_NAME = "Mock Object Storage"
@@ -194,21 +209,224 @@ def _digital_human_session_response(
     return response
 
 
-def _request_backend_api_token(request: Request) -> str:
+def _request_bearer_token(request: Request) -> str:
     authorization = str(request.headers.get("authorization") or "").strip()
     if authorization.lower().startswith("bearer "):
         return authorization[7:].strip()
+    return ""
+
+
+def _request_backend_api_token(request: Request) -> str:
     return str(request.headers.get("x-dreamjourney-api-token") or "").strip()
+
+
+def _auth_session_service() -> AuthSessionService:
+    return AuthSessionService(
+        store,
+        access_ttl_seconds=AUTH_ACCESS_TTL_SECONDS,
+        refresh_ttl_seconds=AUTH_REFRESH_TTL_SECONDS,
+    )
+
+
+def _tokens_match(left: str, right: str) -> bool:
+    return bool(left and right and secrets.compare_digest(left, right))
+
+
+def _configured_backend_api_token() -> str:
+    return BACKEND_API_TOKEN or str(settings.backend_api_token or "")
+
+
+def _ownership_path_user_id(path: str) -> str:
+    patterns = (
+        r"^/profile/([^/]+)$",
+        r"^/voice/profiles/([^/]+)(?:/|$)",
+        r"^/kb/snapshot/([^/]+)$",
+        r"^/memories/([^/]+)$",
+        r"^/archive/items/([^/]+)(?:/|$)",
+        r"^/mailbox/letters/([^/]+)(?:/|$)",
+        r"^/echo/delayed-replies/([^/]+)$",
+        r"^/family/members/([^/]+)(?:/|$)",
+        r"^/care/snapshots/(?:latest/)?([^/]+)$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, path)
+        if match:
+            return match.group(1)
+    return ""
+
+
+async def _ownership_claim_user_ids(request: Request) -> Tuple[set[str], str, Dict[str, Any]]:
+    claims = {
+        str(request.headers.get("x-dreamjourney-user-id") or "").strip(),
+        str(request.query_params.get("userId") or "").strip(),
+        str(request.query_params.get("viewerUserId") or "").strip(),
+        _ownership_path_user_id(request.url.path),
+    }
+    content_type = str(request.headers.get("content-type") or "").lower()
+    payload_context: Dict[str, Any] = {}
+    if "application/json" in content_type:
+        try:
+            content_length = int(request.headers.get("content-length") or "0")
+        except ValueError:
+            content_length = 0
+        if content_length > AUTH_OWNERSHIP_MAX_JSON_INSPECTION_BYTES:
+            return {claim for claim in claims if claim}, "uninspectedLargeBody", payload_context
+        try:
+            payload = json.loads((await request.body()).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            payload_context = payload
+            for key in ("userId", "viewerUserId", "authenticatedUserId"):
+                claims.add(str(payload.get(key) or "").strip())
+    return {claim for claim in claims if claim}, "inspected", payload_context
+
+
+def _ownership_log_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _request_user_principal_id(request: Request) -> Optional[str]:
+    principal = getattr(request.state, "auth_principal", {})
+    if principal.get("kind") != "user":
+        return None
+    user_id = str(principal.get("userId") or "").strip()
+    return user_id or None
+
+
+def _require_user_principal_identity(request: Request, expected_user_id: str, detail: str) -> None:
+    principal_user_id = _request_user_principal_id(request)
+    if principal_user_id is not None and principal_user_id != expected_user_id:
+        raise HTTPException(status_code=403, detail=detail)
+
+
+def _authorization_fallback_headers(ownership_decision: str) -> Dict[str, str]:
+    if ownership_decision == "match":
+        decision = "allowClaimMatch"
+        reason = "principalClaimsMatch"
+    elif ownership_decision == "mismatch":
+        decision = "denyClaimMismatch"
+        reason = "principalClaimsMismatch"
+    elif ownership_decision == "unclaimed":
+        decision = "observeUnclaimed"
+        reason = "noOwnershipClaim"
+    else:
+        decision = "observeUninspected"
+        reason = "requestBodyNotInspected"
+    return {
+        "policy": "ownershipFallback",
+        "decision": decision,
+        "reason": reason,
+    }
+
+
+def _set_auth_diagnostic_headers(
+    response: Any,
+    *,
+    principal_kind: str,
+    ownership_decision: str,
+    authorization_headers: Dict[str, str],
+) -> Any:
+    response.headers["X-DreamJourney-Auth-Principal"] = principal_kind
+    response.headers["X-DreamJourney-Ownership-Mode"] = AUTH_OWNERSHIP_MODE
+    response.headers["X-DreamJourney-Ownership-Decision"] = ownership_decision
+    response.headers["X-DreamJourney-Authorization-Policy"] = authorization_headers["policy"]
+    response.headers["X-DreamJourney-Authorization-Decision"] = authorization_headers["decision"]
+    response.headers["X-DreamJourney-Authorization-Reason"] = authorization_headers["reason"]
+    return response
 
 
 @app.middleware("http")
 async def require_backend_api_token(request: Request, call_next):
-    if request.url.path == "/health" or not settings.backend_api_token:
+    if request.url.path == "/health":
         return await call_next(request)
-    token = _request_backend_api_token(request)
-    if not token or not secrets.compare_digest(token, settings.backend_api_token):
-        return JSONResponse(status_code=401, content={"detail": "invalid backend api token"})
-    return await call_next(request)
+
+    bearer_token = _request_bearer_token(request)
+    backend_header_token = _request_backend_api_token(request)
+    configured_backend_token = _configured_backend_api_token()
+    principal: Dict[str, Any] = {"kind": "anonymous"}
+
+    if bearer_token and _tokens_match(bearer_token, configured_backend_token):
+        principal = {"kind": "system"}
+    elif bearer_token:
+        session = _auth_session_service().resolve_access_token(bearer_token)
+        if session is None:
+            return JSONResponse(status_code=401, content={"detail": "invalid or expired access token"})
+        principal = {
+            "kind": "user",
+            "userId": str(session.get("userId") or ""),
+            "sessionId": str(session.get("sessionId") or ""),
+        }
+    elif configured_backend_token:
+        if not _tokens_match(backend_header_token, configured_backend_token):
+            return JSONResponse(status_code=401, content={"detail": "invalid backend api token"})
+        principal = {"kind": "system"}
+
+    request.state.auth_principal = principal
+    ownership_decision = "system" if principal["kind"] == "system" else principal["kind"]
+    authorization_headers = {
+        "policy": str(principal["kind"]),
+        "decision": "allowSystem" if principal["kind"] == "system" else "observeAnonymous",
+        "reason": "systemPrincipal" if principal["kind"] == "system" else "noCredential",
+    }
+    if principal["kind"] == "user":
+        claims, inspection_decision, payload_context = await _ownership_claim_user_ids(request)
+        principal_user_id = str(principal.get("userId") or "")
+        if inspection_decision != "inspected":
+            ownership_decision = inspection_decision
+        else:
+            ownership_decision = "unclaimed" if not claims else (
+                "match" if claims == {principal_user_id} else "mismatch"
+            )
+        try:
+            policy_decision = CrossAccountAuthorizationPolicy(store).evaluate(
+                method=request.method,
+                path=request.url.path,
+                principal_user_id=principal_user_id,
+                query=dict(request.query_params),
+                payload=payload_context,
+            )
+        except Exception:  # pragma: no cover - defensive fallback for external stores
+            logger.exception("authorization_policy_evaluation_failed method=%s", request.method)
+            policy_decision = None
+
+        should_block = False
+        if policy_decision is not None and policy_decision.decision != "fallback":
+            authorization_headers = policy_decision.header_values()
+            if policy_decision.allowed is True:
+                ownership_decision = "delegated" if policy_decision.delegated else "match"
+            elif policy_decision.allowed is False:
+                ownership_decision = "mismatch"
+                should_block = policy_decision.terminal
+        else:
+            authorization_headers = _authorization_fallback_headers(ownership_decision)
+            should_block = ownership_decision == "mismatch"
+
+        if authorization_headers["decision"] in {"deny", "denyClaimMismatch"}:
+            logger.warning(
+                "authorization_denied mode=%s policy=%s reason=%s principal=%s claims=%s method=%s",
+                AUTH_OWNERSHIP_MODE,
+                authorization_headers["policy"],
+                authorization_headers["reason"],
+                _ownership_log_hash(principal_user_id),
+                sorted(_ownership_log_hash(claim) for claim in claims),
+                request.method,
+            )
+        if should_block and AUTH_OWNERSHIP_MODE == "enforce":
+            return _set_auth_diagnostic_headers(
+                JSONResponse(status_code=403, content={"detail": "authorization denied"}),
+                principal_kind="user",
+                ownership_decision=ownership_decision,
+                authorization_headers=authorization_headers,
+            )
+
+    response = await call_next(request)
+    return _set_auth_diagnostic_headers(
+        response,
+        principal_kind=str(principal["kind"]),
+        ownership_decision=ownership_decision,
+        authorization_headers=authorization_headers,
+    )
 
 
 @app.on_event("startup")
@@ -389,13 +607,45 @@ def login(payload: Dict[str, Any]) -> Dict[str, Any]:
             nickname=nickname,
         )
         user["passwordConfigured"] = credential is not None
-        return {"status": "restored", "user": user}
+        return {
+            "status": "restored",
+            "user": user,
+            "auth": _auth_session_service().issue(user_id),
+        }
 
     user = store.upsert_user(phone=phone, nickname=nickname)
     if password and credential is None:
         credential = store.save_password_credential(user_id, make_password_credential(password))
     user["passwordConfigured"] = credential is not None
-    return {"user": user}
+    return {
+        "user": user,
+        "auth": _auth_session_service().issue(user_id),
+    }
+
+
+@app.post("/auth/refresh")
+def refresh_auth_session(payload: Dict[str, Any]) -> Dict[str, Any]:
+    refresh_token = str(payload.get("refreshToken") or "").strip()
+    try:
+        auth = _auth_session_service().refresh(refresh_token)
+    except AuthSessionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    return {"status": "refreshed", "auth": auth}
+
+
+@app.post("/auth/logout")
+def logout_auth_session(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    principal = getattr(request.state, "auth_principal", {})
+    if principal.get("kind") != "user":
+        raise HTTPException(status_code=401, detail="user access token is required")
+    revoked = _auth_session_service().revoke_access_token(_request_bearer_token(request))
+    if revoked is None:
+        raise HTTPException(status_code=401, detail="invalid access token")
+    return {
+        "status": "revoked",
+        "sessionId": revoked.get("sessionId"),
+        "contractVersion": revoked.get("contractVersion", 1),
+    }
 
 
 def _store_get_user(user_id: str) -> Optional[Dict[str, Any]]:
@@ -1335,11 +1585,17 @@ def list_archive_items(user_id: str) -> Dict[str, Any]:
 
 @app.get("/archive/time-letters/{owner_user_id}/{item_id}/detail")
 def get_time_letter_detail(
+    request: Request,
     owner_user_id: str,
     item_id: str,
     viewerUserId: str,
     now: Optional[str] = None,
 ) -> Dict[str, Any]:
+    _require_user_principal_identity(
+        request,
+        viewerUserId,
+        "authenticated user does not match timeLetter viewer",
+    )
     now_iso = str(now or datetime.now(timezone.utc).isoformat()).strip()
     try:
         return time_letter_detail_for_viewer(
@@ -1628,10 +1884,13 @@ def family_members(user_id: str) -> Dict[str, Any]:
 
 
 @app.post("/family/members/{user_id}/{member_id}/accept")
-def accept_family_member(user_id: str, member_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def accept_family_member(request: Request, user_id: str, member_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     phone = str(payload.get("phone") or "").strip()
     if not phone:
         raise HTTPException(status_code=400, detail="phone is required")
+    principal_user_id = _request_user_principal_id(request)
+    if principal_user_id is not None and principal_user_id not in {user_id, stable_user_id(phone)}:
+        raise HTTPException(status_code=403, detail="authenticated user does not match family invitation")
     member = store.accept_family_member(user_id, member_id, phone=phone)
     if member is None:
         raise HTTPException(status_code=404, detail="family member not found or phone mismatch")
@@ -1639,10 +1898,15 @@ def accept_family_member(user_id: str, member_id: str, payload: Dict[str, Any]) 
 
 
 @app.post("/family/invitations/{invitation_code}/accept")
-def accept_family_invitation_code(invitation_code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def accept_family_invitation_code(request: Request, invitation_code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     phone = str(payload.get("phone") or "").strip()
     if not phone:
         raise HTTPException(status_code=400, detail="phone is required")
+    _require_user_principal_identity(
+        request,
+        stable_user_id(phone),
+        "authenticated user does not match family invitation",
+    )
     member = store.accept_family_invitation_code(invitation_code, phone=phone)
     if member is None:
         raise HTTPException(status_code=404, detail="invitation not found or phone mismatch")
@@ -1668,16 +1932,33 @@ def _normalized_phone(value: Any) -> str:
 def _ensure_active_family_viewer(
     user_id: str,
     viewer_family_member_id: Optional[str],
+    requester_user_id: Optional[str] = None,
     requester_phone: Optional[str] = None,
     require_requester_identity: bool = False,
 ) -> None:
     if viewer_family_member_id is None:
+        if requester_user_id is not None and requester_user_id != user_id:
+            raise HTTPException(status_code=403, detail="authenticated user is not the care snapshot owner")
         return
     for member in store.list_family_members(user_id):
         if str(member.get("id") or "") != viewer_family_member_id:
             continue
         if member.get("accessStatus") == "active" and member.get("invitationStatus") == "accepted":
             if require_requester_identity:
+                if requester_user_id is not None:
+                    member_phone = str(member.get("phone") or "").strip()
+                    expected_user_id = stable_user_id(member_phone) if member_phone else ""
+                    explicit_member_user_ids = {
+                        str(member.get("memberUserId") or "").strip(),
+                        str(member.get("acceptedUserId") or "").strip(),
+                        str(member.get("recipientUserId") or "").strip(),
+                    }
+                    allowed_user_ids = {
+                        value for value in {expected_user_id, *explicit_member_user_ids} if value
+                    }
+                    if requester_user_id in allowed_user_ids:
+                        return
+                    raise HTTPException(status_code=403, detail="authenticated user is not authorized for this care snapshot")
                 normalized_requester_phone = _normalized_phone(requester_phone)
                 if not normalized_requester_phone:
                     raise HTTPException(status_code=403, detail="requester identity is required")
@@ -1691,7 +1972,7 @@ def _ensure_active_family_viewer(
 
 
 @app.post("/care/snapshots")
-def save_care_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
+def save_care_snapshot(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id = str(payload.get("userId") or "").strip()
     snapshot = payload.get("snapshot")
     viewer_family_member_id = _normalize_viewer_family_member_id(payload.get("viewerFamilyMemberID"))
@@ -1699,6 +1980,11 @@ def save_care_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="userId is required")
     if not isinstance(snapshot, dict):
         raise HTTPException(status_code=400, detail="snapshot must be an object")
+    _require_user_principal_identity(
+        request,
+        user_id,
+        "authenticated user is not the care snapshot owner",
+    )
     _ensure_active_family_viewer(user_id, viewer_family_member_id)
     try:
         sanitized_snapshot = sanitize_care_snapshot_payload(snapshot)
@@ -1714,6 +2000,7 @@ def save_care_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/care/snapshots/latest/{user_id}")
 def latest_care_snapshot(
+    request: Request,
     user_id: str,
     viewerFamilyMemberID: str = None,
     requesterPhone: str = None,
@@ -1722,6 +2009,7 @@ def latest_care_snapshot(
     _ensure_active_family_viewer(
         user_id,
         viewer_family_member_id,
+        requester_user_id=_request_user_principal_id(request),
         requester_phone=requesterPhone,
         require_requester_identity=True,
     )
@@ -1736,6 +2024,7 @@ def latest_care_snapshot(
 
 @app.get("/care/snapshots/{user_id}")
 def care_snapshot_history(
+    request: Request,
     user_id: str,
     viewerFamilyMemberID: str = None,
     requesterPhone: str = None,
@@ -1745,6 +2034,7 @@ def care_snapshot_history(
     _ensure_active_family_viewer(
         user_id,
         viewer_family_member_id,
+        requester_user_id=_request_user_principal_id(request),
         requester_phone=requesterPhone,
         require_requester_identity=True,
     )

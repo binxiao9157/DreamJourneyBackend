@@ -6,6 +6,8 @@
 
 - `GET /health`
 - `POST /auth/login`
+- `POST /auth/refresh`
+- `POST /auth/logout`
 - `GET /config/runtime`
 - `POST /voice/realtime-token`
 - `POST /voice/profiles`
@@ -46,6 +48,15 @@
 
 `/kb/sync` 会过滤 KBLite 图谱里的 `localOnly` 实体，并清理事件、事实中的无效引用。
 
+## 登录会话与 ownership shadow
+
+- `/auth/login` 返回短期 opaque access token 和可轮换 refresh token；数据库只保存 SHA-256 hash，不保存原始 token。
+- iOS 业务请求使用用户 access token；`BACKEND_API_TOKEN` 通过独立 header 保留部署兼容和系统级 smoke。
+- `/auth/refresh` 每次成功同时轮换 access/refresh token，旧 refresh token 重放返回 `401`。
+- `/auth/logout` 撤销当前会话，账号清理时同时删除该用户的 auth sessions。
+- `AUTH_OWNERSHIP_MODE=shadow` 只记录 authenticated user 与 payload/path actor 的 `match/mismatch/unclaimed`，不会拦截现有请求。
+- `AUTH_OWNERSHIP_MODE=enforce` 会对 mismatch 返回 `403`，只能在 shadow 证据审阅和跨账号规则补齐后启用。
+
 ## 本地启动
 
 ```bash
@@ -83,6 +94,7 @@ curl http://127.0.0.1:3100/health
 - `archive_items`
 - `voice_profiles`
 - `family_members`
+- `auth_sessions`
 
 如需本机临时无数据库调试，可设置：
 

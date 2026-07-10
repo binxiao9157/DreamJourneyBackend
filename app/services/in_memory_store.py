@@ -22,6 +22,74 @@ class InMemoryStore:
         self._voice_profiles: Dict[str, List[Dict[str, Any]]] = {}
         self._voice_clone_slots: Dict[str, Dict[str, Any]] = {}
         self._digital_human_sessions: Dict[str, Dict[str, Any]] = {}
+        self._auth_sessions: Dict[str, Dict[str, Any]] = {}
+
+    def save_auth_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(session)
+        self._auth_sessions[str(item["sessionId"])] = item
+        return deepcopy(item)
+
+    def get_auth_session_by_access_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        session = next(
+            (
+                item
+                for item in self._auth_sessions.values()
+                if item.get("accessTokenHash") == token_hash
+            ),
+            None,
+        )
+        return None if session is None else deepcopy(session)
+
+    def consume_auth_session_refresh(
+        self,
+        refresh_token_hash: str,
+        consumed_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        session_id, session = next(
+            (
+                (key, item)
+                for key, item in self._auth_sessions.items()
+                if item.get("refreshTokenHash") == refresh_token_hash
+            ),
+            (None, None),
+        )
+        if session_id is None or session is None or session.get("status") != "active":
+            return None
+        if self._parse_iso_datetime(str(session.get("refreshExpiresAt") or "")) <= self._parse_iso_datetime(consumed_at_iso):
+            expired = deepcopy(session)
+            expired["status"] = "expired"
+            expired["expiredAt"] = consumed_at_iso
+            self._auth_sessions[session_id] = expired
+            return None
+
+        consumed = deepcopy(session)
+        consumed["status"] = "rotated"
+        consumed["rotatedAt"] = consumed_at_iso
+        self._auth_sessions[session_id] = consumed
+        return deepcopy(consumed)
+
+    def revoke_auth_session_by_access_token_hash(
+        self,
+        access_token_hash: str,
+        revoked_at_iso: str,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        session_id, session = next(
+            (
+                (key, item)
+                for key, item in self._auth_sessions.items()
+                if item.get("accessTokenHash") == access_token_hash
+            ),
+            (None, None),
+        )
+        if session_id is None or session is None:
+            return None
+        revoked = deepcopy(session)
+        revoked["status"] = "revoked"
+        revoked["revokedAt"] = revoked_at_iso
+        revoked["revokeReason"] = reason
+        self._auth_sessions[session_id] = revoked
+        return deepcopy(revoked)
 
     def acquire_digital_human_session_lease(
         self,
@@ -275,6 +343,11 @@ class InMemoryStore:
                 session_id: lease
                 for session_id, lease in self._digital_human_sessions.items()
                 if lease.get("userId") != user_id
+            }
+            self._auth_sessions = {
+                session_id: session
+                for session_id, session in self._auth_sessions.items()
+                if session.get("userId") != user_id
             }
             for slot in self._voice_clone_slots.values():
                 if slot.get("userId") != user_id:

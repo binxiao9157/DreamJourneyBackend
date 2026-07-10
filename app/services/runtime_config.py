@@ -35,6 +35,53 @@ class RuntimeConfigService:
                 "voiceClone": voice_clone_provider.is_configured,
                 "digitalHumanSession": True,
                 "digitalHumanSessionLease": True,
+                "authSession": True,
+            },
+            "auth": {
+                "mode": "opaqueAccessRefresh",
+                "loginEndpoint": "/auth/login",
+                "refreshEndpoint": "/auth/refresh",
+                "logoutEndpoint": "/auth/logout",
+                "tokenType": "Bearer",
+                "accessTTLSeconds": max(60, self.settings.auth_access_ttl_seconds),
+                "refreshTTLSeconds": max(
+                    max(60, self.settings.auth_access_ttl_seconds) + 60,
+                    self.settings.auth_refresh_ttl_seconds,
+                ),
+                "refreshRotation": True,
+                "ownershipMode": (
+                    self.settings.auth_ownership_mode
+                    if self.settings.auth_ownership_mode in {"shadow", "enforce"}
+                    else "shadow"
+                ),
+                "crossAccountPolicy": {
+                    "mode": (
+                        self.settings.auth_ownership_mode
+                        if self.settings.auth_ownership_mode in {"shadow", "enforce"}
+                        else "shadow"
+                    ),
+                    "coveredPolicies": [
+                        "careSnapshotRead",
+                        "careSnapshotWrite",
+                        "timeLetterDetail",
+                        "familyInvitationAccept",
+                        "familyMemberAccept",
+                        "systemOnly",
+                    ],
+                    "diagnosticHeaders": [
+                        "X-DreamJourney-Authorization-Policy",
+                        "X-DreamJourney-Authorization-Decision",
+                        "X-DreamJourney-Authorization-Reason",
+                    ],
+                    "productionEnforceReady": False,
+                    "enforceBlockers": [
+                        "smsIdentityProof",
+                        "deployedShadowEvidence",
+                    ],
+                    "contractVersion": 1,
+                },
+                "legacyBackendTokenCompatible": True,
+                "contractVersion": 1,
             },
             "archive": {
                 "uploadIntentEndpoint": "/archive/media/upload-intent",
