@@ -13,6 +13,11 @@ from app import main as main_module
 from app.main import app
 from app.core.config import Settings
 from app.services.in_memory_store import InMemoryStore
+from app.services.knowledge_extraction import (
+    KnowledgeExtractionValidationError,
+    filter_extraction_by_evidence,
+    normalize_knowledge_extraction_input,
+)
 from app.services.knowledge_store import KnowledgeRevisionConflict
 from app.services.postgres_store import PostgresStore
 from app.services.privacy import filter_syncable_graph, sanitize_care_snapshot_payload
@@ -559,6 +564,107 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertIn("陈建国", serialized)
         self.assertIn("严格的 JSON", serialized)
 
+    def test_knowledge_extraction_proxy_builds_user_evidence_only_prompt(self):
+        proxy = DeepSeekKnowledgeExtractionProxy(Settings(deepseek_api_key="deepseek-secret"))
+
+        request = proxy.redacted_request(
+            turns=[
+                {"index": 0, "role": "user", "text": "我父亲年轻时在南京工作。"},
+                {"index": 1, "role": "assistant", "text": "那一定留下了很多回忆。"},
+            ],
+            source_policy="userEvidenceOnly",
+            existing_summary="（暂无已有知识）",
+        )
+
+        prompt = request["json"]["messages"][1]["content"]
+        system_prompt = request["json"]["messages"][0]["content"]
+        self.assertIn("sourcePolicy=userEvidenceOnly", prompt)
+        self.assertIn('"index":0,"role":"user"', prompt)
+        self.assertIn('"sourceTurnIndices":[0]', prompt)
+        self.assertIn("role=assistant", prompt)
+        self.assertIn("不得作为证据", prompt)
+        self.assertIn("Only role=user turns", system_prompt)
+
+    def test_knowledge_extraction_v2_strictly_validates_turns(self):
+        valid_payload = {
+            "extractionSchemaVersion": 2,
+            "sourcePolicy": "userEvidenceOnly",
+            "turns": [
+                {"index": 0, "role": "user", "text": " 用户证据 "},
+                {"index": 1, "role": "assistant", "text": "助手回复"},
+            ],
+        }
+
+        normalized = normalize_knowledge_extraction_input(valid_payload)
+
+        self.assertEqual(normalized.schema_version, 2)
+        self.assertEqual(normalized.turns[0]["text"], "用户证据")
+        self.assertEqual(normalized.user_turn_indices, frozenset({0}))
+
+        invalid_payloads = [
+            {**valid_payload, "extractionSchemaVersion": True},
+            {**valid_payload, "sourcePolicy": "allTurns"},
+            {**valid_payload, "turns": []},
+            {**valid_payload, "turns": [{"index": 1, "role": "user", "text": "文本"}]},
+            {**valid_payload, "turns": [{"index": 0, "role": "system", "text": "文本"}]},
+            {**valid_payload, "turns": [{"index": 0, "role": "user", "text": "  "}]},
+            {**valid_payload, "turns": [{"index": 0, "role": "user", "text": 42}]},
+            {
+                **valid_payload,
+                "turns": [{"index": 0, "role": "user", "text": "知" * 4001}],
+            },
+            {
+                **valid_payload,
+                "turns": [
+                    {"index": index, "role": "user", "text": "证据"}
+                    for index in range(201)
+                ],
+            },
+        ]
+        for invalid_payload in invalid_payloads:
+            with self.subTest(payload=invalid_payload):
+                with self.assertRaises(KnowledgeExtractionValidationError):
+                    normalize_knowledge_extraction_input(invalid_payload)
+
+    def test_knowledge_extraction_filters_invalid_provider_evidence(self):
+        extraction_input = normalize_knowledge_extraction_input(
+            {
+                "extractionSchemaVersion": 2,
+                "sourcePolicy": "userEvidenceOnly",
+                "turns": [
+                    {"index": 0, "role": "user", "text": "用户证据"},
+                    {"index": 1, "role": "assistant", "text": "助手回复"},
+                ],
+            }
+        )
+        provider_extraction = {
+            "people": [{"name": "陈建国", "sourceTurnIndices": [0]}],
+            "places": [{"name": "南京"}],
+            "events": [{"title": "助手编造事件", "sourceTurnIndices": [1]}],
+            "facts": [
+                {"statement": "越界事实", "sourceTurnIndices": [2]},
+                {"statement": "错误索引类型", "sourceTurnIndices": ["0"]},
+            ],
+        }
+
+        extraction, policy = filter_extraction_by_evidence(provider_extraction, extraction_input)
+
+        self.assertEqual(extraction["people"], provider_extraction["people"])
+        self.assertEqual(extraction["places"], [])
+        self.assertEqual(extraction["events"], [])
+        self.assertEqual(extraction["facts"], [])
+        self.assertEqual(policy["acceptedEntityCount"], 1)
+        self.assertEqual(policy["filteredEntityCount"], 4)
+        self.assertEqual(
+            policy["filteredReasons"],
+            {
+                "invalidSourceTurnIndices": 1,
+                "missingSourceTurnIndices": 1,
+                "nonUserSourceTurnIndices": 1,
+                "outOfRangeSourceTurnIndices": 1,
+            },
+        )
+
     def test_kb_extract_endpoint_rejects_non_ai_privacy_scope(self):
         client = TestClient(app)
 
@@ -607,6 +713,127 @@ class TokenAndProxyTests(unittest.TestCase):
             payload["context"]["privacyMetadata"]["sourceRefs"][0]["title"],
             "对话来源",
         )
+        self.assertEqual(payload["evidencePolicy"]["sourcePolicy"], "legacyTranscript")
+        self.assertNotIn("existingSummary", payload["context"])
+
+    def test_kb_extract_legacy_transcript_keeps_provider_entities_without_v2_evidence(self):
+        provider_extraction = {
+            "people": [],
+            "places": [],
+            "events": [],
+            "facts": [{"statement": "旧版实体不要求来源索引"}],
+        }
+        with patch(
+            "app.main.DeepSeekKnowledgeExtractionProxy.request_extraction",
+            return_value=provider_extraction,
+        ):
+            response = TestClient(app).post(
+                "/kb/extract",
+                json={
+                    "userId": "u1",
+                    "transcript": "[长辈]: 旧版 transcript。",
+                    "privacyMetadata": {"scope": "generationAllowed"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["extraction"], provider_extraction)
+        self.assertEqual(payload["evidencePolicy"]["sourcePolicy"], "legacyTranscript")
+        self.assertEqual(payload["evidencePolicy"]["acceptedEntityCount"], 1)
+        self.assertEqual(payload["evidencePolicy"]["filteredEntityCount"], 0)
+
+    def test_kb_extract_v2_dry_run_returns_evidence_policy_without_context_text(self):
+        response = TestClient(app).post(
+            "/kb/extract?dryRun=true",
+            json={
+                "userId": "u1",
+                "extractionSchemaVersion": 2,
+                "sourcePolicy": "userEvidenceOnly",
+                "turns": [
+                    {"index": 0, "role": "user", "text": "用户正文哨兵"},
+                    {"index": 1, "role": "assistant", "text": "助手正文哨兵"},
+                ],
+                "existingSummary": "已有知识正文哨兵",
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["extractionSchemaVersion"], 2)
+        self.assertEqual(
+            payload["evidencePolicy"],
+            {
+                "version": 1,
+                "sourcePolicy": "userEvidenceOnly",
+                "userTurnCount": 1,
+                "acceptedEntityCount": 0,
+                "filteredEntityCount": 0,
+                "filteredReasons": {},
+            },
+        )
+        self.assertNotIn("turns", payload["context"])
+        self.assertNotIn("existingSummary", payload["context"])
+        self.assertNotIn("正文哨兵", str(payload["evidencePolicy"]))
+        prompt = payload["request"]["json"]["messages"][1]["content"]
+        self.assertIn("sourcePolicy=userEvidenceOnly", prompt)
+
+    def test_kb_extract_v2_filters_provider_entities_before_responding(self):
+        provider_extraction = {
+            "people": [{"name": "陈建国", "sourceTurnIndices": [0]}],
+            "places": [{"name": "无来源地点", "sourceTurnIndices": []}],
+            "events": [{"title": "助手事件", "sourceTurnIndices": [1]}],
+            "facts": [{"statement": "越界事实", "sourceTurnIndices": [9]}],
+        }
+        with patch(
+            "app.main.DeepSeekKnowledgeExtractionProxy.request_extraction",
+            return_value=provider_extraction,
+        ) as request_extraction:
+            response = TestClient(app).post(
+                "/kb/extract",
+                json={
+                    "userId": "u1",
+                    "extractionSchemaVersion": 2,
+                    "sourcePolicy": "userEvidenceOnly",
+                    "turns": [
+                        {"index": 0, "role": "user", "text": "我叫陈建国。"},
+                        {"index": 1, "role": "assistant", "text": "你住在南京。"},
+                    ],
+                    "privacyMetadata": {"scope": "generationAllowed"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["extraction"]["people"], provider_extraction["people"])
+        self.assertEqual(payload["extraction"]["places"], [])
+        self.assertEqual(payload["extraction"]["events"], [])
+        self.assertEqual(payload["extraction"]["facts"], [])
+        self.assertEqual(payload["evidencePolicy"]["acceptedEntityCount"], 1)
+        self.assertEqual(payload["evidencePolicy"]["filteredEntityCount"], 3)
+        self.assertNotIn("turns", payload["context"])
+        self.assertEqual(request_extraction.call_args.kwargs["source_policy"], "userEvidenceOnly")
+
+    def test_kb_extract_v2_rejects_malformed_turn_fields(self):
+        base_payload = {
+            "userId": "u1",
+            "extractionSchemaVersion": 2,
+            "sourcePolicy": "userEvidenceOnly",
+            "privacyMetadata": {"scope": "generationAllowed"},
+        }
+        invalid_turns = [
+            [{"index": 1, "role": "user", "text": "索引错误"}],
+            [{"index": 0, "role": "system", "text": "角色错误"}],
+            [{"index": 0, "role": "user", "text": ""}],
+        ]
+        for turns in invalid_turns:
+            with self.subTest(turns=turns):
+                response = TestClient(app).post(
+                    "/kb/extract?dryRun=true",
+                    json={**base_payload, "turns": turns},
+                )
+                self.assertEqual(response.status_code, 400, response.text)
 
 
 class StoreTests(unittest.TestCase):
@@ -2841,6 +3068,7 @@ class ArchiveAPITests(unittest.TestCase):
                         {
                             "id": "fact_1",
                             "statement": "小时候常去仓桥直街。",
+                            "confidence": "high",
                             "privacyMetadata": {"scope": "generationAllowed"},
                         }
                     ],
@@ -3147,12 +3375,26 @@ class ArchiveAPITests(unittest.TestCase):
                         {
                             "id": "fact_context_1",
                             "statement": "妈妈喜欢在西湖边散步。",
+                            "confidence": "high",
                             "privacyMetadata": {"scope": "generationAllowed"},
                         },
                         {
                             "id": "fact_context_2",
                             "statement": "用户小时候常听越剧。",
+                            "confidence": "confirmed",
                             "privacyMetadata": {"scope": "generationAllowed"},
+                        },
+                        {
+                            "id": "fact_context_low",
+                            "statement": "未经确认的低置信候选。",
+                            "confidence": "low",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        },
+                        {
+                            "id": "fact_context_family_circle",
+                            "statement": "只允许家庭同步但不允许生成。",
+                            "confidence": "high",
+                            "privacyMetadata": {"scope": "familyCircle"},
                         },
                     ],
                 },
@@ -3229,6 +3471,12 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(packet["debug"]["sourceCounts"]["selectedContextCare"], 1)
         self.assertNotIn("internalDebug", str(packet["selectedContext"]))
         self.assertNotIn("dailyTrend", str(packet["selectedContext"]))
+        filtered_by_ref = {item["refId"]: item["reason"] for item in packet["filteredContext"]}
+        self.assertEqual(filtered_by_ref["fact_context_low"], "kb_fact_low_confidence")
+        self.assertEqual(
+            filtered_by_ref["fact_context_family_circle"],
+            "kb_fact_privacy_scope_not_generation_allowed",
+        )
 
         generation = packet["generationContext"]
         generation_refs = {item["refId"] for item in generation["sourceRefs"]}
@@ -3243,6 +3491,8 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertIn("和妈妈在西湖边散步。", generation["text"])
         self.assertIn("妈妈喜欢在西湖边散步。", generation["text"])
         self.assertIn("用温和语气回应。", generation["text"])
+        self.assertNotIn("未经确认的低置信候选。", generation["text"])
+        self.assertNotIn("只允许家庭同步但不允许生成。", generation["text"])
         self.assertNotIn("internalDebug", generation["text"])
         self.assertNotIn("dailyTrend", generation["text"])
 
@@ -3279,6 +3529,22 @@ class ArchiveAPITests(unittest.TestCase):
             json={"phone": "13900001111"},
         )
         self.assertEqual(accepted.status_code, 200)
+        other_member = client.post(
+            "/family/invite",
+            json={
+                "userId": user_id,
+                "id": "family_time_other_viewer",
+                "name": "陈岚",
+                "relation": "女儿",
+                "phone": "13900002222",
+            },
+        )
+        self.assertEqual(other_member.status_code, 200)
+        other_accepted = client.post(
+            f"/family/members/{user_id}/family_time_other_viewer/accept",
+            json={"phone": "13900002222"},
+        )
+        self.assertEqual(other_accepted.status_code, 200)
         client.post(
             "/archive/items",
             json={
@@ -3324,9 +3590,119 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertNotIn("archive_time_letter_future", generation_refs)
         self.assertNotIn("还没到打开时间。", packet["generationContext"]["text"])
 
+        mismatch_response = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "query": "这封信写了什么？",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "viewerFamilyMemberID": "family_time_other_viewer",
+            },
+        )
+        self.assertEqual(mismatch_response.status_code, 200)
+        mismatch_packet = mismatch_response.json()["contextPacket"]
+        mismatch_reasons = {
+            item["refId"]: item["reason"] for item in mismatch_packet["filteredContext"]
+        }
+        self.assertEqual(
+            mismatch_reasons["archive_time_letter_future"],
+            "time_letter_recipient_mismatch",
+        )
+        self.assertNotIn("还没到打开时间。", mismatch_packet["generationContext"]["text"])
+
+        owner_response = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "query": "这封信写了什么？",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+            },
+        )
+        self.assertEqual(owner_response.status_code, 200)
+        owner_reasons = {
+            item["refId"]: item["reason"]
+            for item in owner_response.json()["contextPacket"]["filteredContext"]
+        }
+        self.assertEqual(owner_reasons["archive_time_letter_future"], "time_letter_not_due")
+
+    def test_context_build_low_confidence_prefix_does_not_starve_high_fact(self):
+        client = TestClient(app)
+        user_id = "context_user_fact_confidence_window"
+        low_facts = [
+            {
+                "id": f"fact_low_{index}",
+                "statement": f"低置信候选 {index}",
+                "confidence": "low",
+                "privacyMetadata": {"scope": "generationAllowed"},
+            }
+            for index in range(8)
+        ]
+        high_fact = {
+            "id": "fact_high_after_low_prefix",
+            "statement": "这是可用于回响的已确认事实。",
+            "confidence": "confirmed",
+            "privacyMetadata": {"scope": "generationAllowed"},
+        }
+        synced = client.post(
+            "/kb/sync",
+            json={
+                "userId": user_id,
+                "graph": {
+                    "people": [],
+                    "places": [],
+                    "events": [],
+                    "facts": low_facts + [high_fact],
+                },
+            },
+        )
+        self.assertEqual(synced.status_code, 200)
+
+        response = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "query": "已确认事实",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        packet = response.json()["contextPacket"]
+        selected_refs = {item["refId"] for item in packet["selectedContext"]}
+        generation_refs = {item["refId"] for item in packet["generationContext"]["sourceRefs"]}
+        self.assertIn("fact_high_after_low_prefix", selected_refs)
+        self.assertIn("fact_high_after_low_prefix", generation_refs)
+        self.assertIn("这是可用于回响的已确认事实。", packet["generationContext"]["text"])
+        self.assertEqual(packet["memory"]["kbFacts"][0]["id"], "fact_high_after_low_prefix")
+
     def test_context_build_blocks_pending_family_viewer_and_summarizes_care_snapshot(self):
         client = TestClient(app)
         user_id = "context_user_family_policy"
+        client.post(
+            "/kb/sync",
+            json={
+                "userId": user_id,
+                "graph": {
+                    "people": [],
+                    "places": [],
+                    "events": [],
+                    "facts": [
+                        {
+                            "id": "fact_family_viewer_private",
+                            "statement": "当前查看者的个人事实不可注入家庭角色。",
+                            "confidence": "high",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ],
+                },
+            },
+        )
         member = client.post(
             "/family/invite",
             json={
@@ -3386,11 +3762,16 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertIn("family_viewer_not_active", pending_packet["fallbacks"])
         filtered_by_ref = {item["refId"]: item["reason"] for item in pending_packet["filteredContext"]}
         self.assertEqual(filtered_by_ref["archive_family_pending_blocked"], "family_viewer_not_active")
+        self.assertEqual(
+            filtered_by_ref["fact_family_viewer_private"],
+            "kb_fact_persona_scope_unavailable",
+        )
         pending_generation_refs = {
             item["refId"] for item in pending_packet["generationContext"]["sourceRefs"]
         }
         self.assertNotIn("archive_family_pending_blocked", pending_generation_refs)
         self.assertNotIn("家庭成员未接受前不应可用。", pending_packet["generationContext"]["text"])
+        self.assertNotIn("当前查看者的个人事实不可注入家庭角色。", pending_packet["generationContext"]["text"])
 
         accepted = client.post(
             f"/family/members/{user_id}/family_pending_context/accept",
@@ -3424,6 +3805,53 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertIn("care:latest", active_generation_refs)
         self.assertIn("家庭成员未接受前不应可用。", active_packet["generationContext"]["text"])
         self.assertIn("家庭关怀摘要", active_packet["generationContext"]["text"])
+        self.assertNotIn("当前查看者的个人事实不可注入家庭角色。", active_packet["generationContext"]["text"])
+
+    def test_context_build_does_not_substitute_owner_care_for_family_viewer(self):
+        client = TestClient(app)
+        user_id = "context_user_care_viewer_isolation"
+        viewer_id = "family_care_viewer"
+        invited = client.post(
+            "/family/invite",
+            json={
+                "userId": user_id,
+                "id": viewer_id,
+                "name": "林静文",
+                "relation": "女儿",
+                "phone": "13900003333",
+            },
+        )
+        self.assertEqual(invited.status_code, 200)
+        accepted = client.post(
+            f"/family/members/{user_id}/{viewer_id}/accept",
+            json={"phone": "13900003333"},
+        )
+        self.assertEqual(accepted.status_code, 200)
+        main_module.store.save_care_snapshot(
+            user_id,
+            {
+                "riskLevel": "watch",
+                "summary": "仅本人可见的关怀摘要",
+                "suggestions": ["仅本人建议"],
+            },
+        )
+
+        response = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "viewerFamilyMemberID": viewer_id,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        packet = response.json()["contextPacket"]
+        self.assertIsNone(packet["care"]["latest"])
+        self.assertNotIn("care:latest", {item["refId"] for item in packet["selectedContext"]})
+        self.assertNotIn("仅本人可见的关怀摘要", packet["generationContext"]["text"])
 
     def test_context_build_reports_fallbacks_when_voice_and_digital_human_are_unavailable(self):
         client = TestClient(app)

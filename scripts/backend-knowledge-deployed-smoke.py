@@ -77,6 +77,7 @@ def main():
             {
                 "id": f"knowledge_deployed_fact_{suffix}",
                 "statement": first_statement,
+                "confidence": "high",
                 "privacyMetadata": {
                     "scope": "generationAllowed",
                     "sourceRefs": [
@@ -112,6 +113,7 @@ def main():
                 {
                     "id": mutation_fact_id,
                     "statement": second_statement,
+                    "confidence": "high",
                     "privacyMetadata": {
                         "scope": "generationAllowed",
                         "sourceRefs": [

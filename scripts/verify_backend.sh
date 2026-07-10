@@ -59,6 +59,9 @@ STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" scripts/backend-knowledge-delta-
 echo "== Backend knowledge v2 smoke =="
 STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" scripts/backend-knowledge-v2-smoke.py
 
+echo "== Backend knowledge evidence smoke =="
+STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" scripts/backend-knowledge-evidence-smoke.py
+
 echo "== Backend diff --check =="
 git diff --check
 git diff --cached --check

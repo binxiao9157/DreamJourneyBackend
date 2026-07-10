@@ -46,12 +46,20 @@ class ContextPacketBuilder:
         archive_trace_candidates = archive_context["traceCandidates"]
         kb_graph = self.store.get_kb_snapshot(user_id) or {}
         care_snapshot = None
-        if family_viewer_active:
+        care_viewer_authorized = self._care_viewer_authorized(
+            user_id=user_id,
+            persona_scope=persona_scope,
+            digital_human_id=digital_human_id,
+            viewer_family_member_id=viewer_family_member_id,
+            family_viewer_active=family_viewer_active,
+        )
+        if care_viewer_authorized:
             care_snapshot = self._summarized_care_snapshot(
                 self._latest_care_snapshot(user_id, persona_scope, viewer_family_member_id)
             )
-        supplemental_trace_candidates = self._supplemental_context_candidates(
+        supplemental_context = self._supplemental_context_candidates(
             kb_graph=kb_graph,
+            user_id=user_id,
             persona_scope=persona_scope,
             digital_human_id=digital_human_id,
             lifecycle_mode=lifecycle_mode,
@@ -60,8 +68,9 @@ class ContextPacketBuilder:
             care_snapshot=care_snapshot,
             query=query,
         )
+        filtered_context.extend(supplemental_context["filteredContext"])
         selected_context, ranking_trace = self._rank_context_candidates(
-            archive_trace_candidates + supplemental_trace_candidates
+            archive_trace_candidates + supplemental_context["candidates"]
         )
         generation_context = self._build_generation_context(
             selected_context=selected_context,
@@ -135,7 +144,9 @@ class ContextPacketBuilder:
                 "kbPeople": self._kb_people(kb_graph),
                 "kbPlaces": self._kb_places(kb_graph),
                 "kbEvents": self._kb_events(kb_graph),
-                "kbFacts": self._kb_facts(kb_graph),
+                "kbFacts": self._kb_facts(kb_graph)
+                if persona_scope == "personal" and digital_human_id == user_id
+                else [],
             },
             "selectedContext": selected_context,
             "filteredContext": filtered_context,
@@ -222,9 +233,22 @@ class ContextPacketBuilder:
         persona_scope: str,
         viewer_family_member_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
-        if persona_scope == "family" and viewer_family_member_id:
+        if viewer_family_member_id:
             return self.store.get_latest_care_snapshot(user_id, viewer_family_member_id=viewer_family_member_id)
         return self.store.get_latest_care_snapshot(user_id)
+
+    @staticmethod
+    def _care_viewer_authorized(
+        *,
+        user_id: str,
+        persona_scope: str,
+        digital_human_id: str,
+        viewer_family_member_id: Optional[str],
+        family_viewer_active: bool,
+    ) -> bool:
+        if viewer_family_member_id:
+            return family_viewer_active
+        return persona_scope == "personal" and digital_human_id == user_id
 
     @staticmethod
     def _summarized_care_snapshot(item: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -332,12 +356,14 @@ class ContextPacketBuilder:
             delivery_state = self._time_letter_delivery_state(item)
             if delivery_state in {"draft", "editing"}:
                 return "time_letter_draft"
-            if (
-                viewer_family_member_id
-                and self._time_letter_targets_viewer(item, viewer_family_member_id)
-                and self._time_letter_opens_in_future(item)
+            if viewer_family_member_id and not self._time_letter_targets_viewer(
+                item, viewer_family_member_id
             ):
+                return "time_letter_recipient_mismatch"
+            if viewer_family_member_id and self._time_letter_opens_in_future(item):
                 return "time_letter_not_open_for_recipient"
+            if self._time_letter_opens_in_future(item):
+                return "time_letter_not_due"
 
         analysis_status = str(item.get("analysisStatus") or "").strip()
         if analysis_status == "failed" and not self._archive_has_usable_context(item):
@@ -398,6 +424,7 @@ class ContextPacketBuilder:
         self,
         *,
         kb_graph: Dict[str, Any],
+        user_id: str,
         persona_scope: str,
         digital_human_id: str,
         lifecycle_mode: str,
@@ -405,9 +432,16 @@ class ContextPacketBuilder:
         family_viewer_active: bool,
         care_snapshot: Optional[Dict[str, Any]],
         query: str,
-    ) -> List[Dict[str, Any]]:
+    ) -> Dict[str, List[Dict[str, Any]]]:
         candidates: List[Dict[str, Any]] = []
-        candidates.extend(self._kb_fact_candidates(kb_graph, query=query))
+        filtered_context: List[Dict[str, Any]] = []
+        kb_fact_context = self._kb_fact_candidates(
+            kb_graph,
+            query=query,
+            allow_personal_facts=persona_scope == "personal" and digital_human_id == user_id,
+        )
+        candidates.extend(kb_fact_context["candidates"])
+        filtered_context.extend(kb_fact_context["filteredContext"])
         candidates.append(
             self._persona_candidate(
                 persona_scope=persona_scope,
@@ -420,18 +454,42 @@ class ContextPacketBuilder:
         care_candidate = self._care_candidate(care_snapshot, query=query)
         if care_candidate is not None:
             candidates.append(care_candidate)
-        return candidates
+        return {"candidates": candidates, "filteredContext": filtered_context}
 
-    def _kb_fact_candidates(self, kb_graph: Dict[str, Any], *, query: str) -> List[Dict[str, Any]]:
+    def _kb_fact_candidates(
+        self,
+        kb_graph: Dict[str, Any],
+        *,
+        query: str,
+        allow_personal_facts: bool,
+    ) -> Dict[str, List[Dict[str, Any]]]:
         candidates: List[Dict[str, Any]] = []
+        filtered_context: List[Dict[str, Any]] = []
         facts = kb_graph.get("facts") or []
-        for index, fact in enumerate(facts[:8]):
+        for index, fact in enumerate(facts):
             if not isinstance(fact, dict):
                 continue
             statement = str(fact.get("statement") or "").strip()
             if not statement:
                 continue
             ref_id = str(fact.get("id") or f"kb_fact_{index + 1}").strip()
+            if not allow_personal_facts:
+                filtered_context.append(
+                    self._filtered_kb_fact_context(fact, ref_id, "kb_fact_persona_scope_unavailable")
+                )
+                continue
+            if not self._generation_allowed(fact):
+                filtered_context.append(
+                    self._filtered_kb_fact_context(
+                        fact, ref_id, "kb_fact_privacy_scope_not_generation_allowed"
+                    )
+                )
+                continue
+            if not self._kb_fact_confidence_allows_generation(fact):
+                filtered_context.append(
+                    self._filtered_kb_fact_context(fact, ref_id, "kb_fact_low_confidence")
+                )
+                continue
             score_breakdown = {
                 "base": 32,
                 "userText": 12,
@@ -456,7 +514,23 @@ class ContextPacketBuilder:
                     },
                 }
             )
-        return candidates
+            if len(candidates) >= 8:
+                break
+        return {"candidates": candidates, "filteredContext": filtered_context}
+
+    @staticmethod
+    def _filtered_kb_fact_context(
+        fact: Dict[str, Any],
+        ref_id: str,
+        reason: str,
+    ) -> Dict[str, Any]:
+        return {
+            "source": "kbFact",
+            "refId": ref_id,
+            "kind": "fact",
+            "reason": reason,
+            "confidence": str(fact.get("confidence") or "unknown"),
+        }
 
     @staticmethod
     def _persona_candidate(
@@ -560,8 +634,12 @@ class ContextPacketBuilder:
                 archive_by_ref.setdefault(ref_id, item)
 
         kb_fact_by_ref: Dict[str, Dict[str, Any]] = {}
-        for index, fact in enumerate((kb_graph.get("facts") or [])[:8]):
-            if not isinstance(fact, dict) or not self._generation_allowed(fact):
+        for index, fact in enumerate(kb_graph.get("facts") or []):
+            if (
+                not isinstance(fact, dict)
+                or not self._generation_allowed(fact)
+                or not self._kb_fact_confidence_allows_generation(fact)
+            ):
                 continue
             statement = self._generation_text_value(fact.get("statement"))
             if not statement:
@@ -569,6 +647,8 @@ class ContextPacketBuilder:
             ref_id = str(fact.get("id") or f"kb_fact_{index + 1}").strip()
             if ref_id:
                 kb_fact_by_ref.setdefault(ref_id, fact)
+            if len(kb_fact_by_ref) >= 8:
+                break
 
         rendered_entries: List[tuple[Dict[str, str], str]] = []
         seen_refs = set()
@@ -625,6 +705,10 @@ class ContextPacketBuilder:
         if not isinstance(privacy_metadata, dict):
             return False
         return str(privacy_metadata.get("scope") or "") in AI_PROCESSABLE_SCOPES
+
+    @staticmethod
+    def _kb_fact_confidence_allows_generation(fact: Dict[str, Any]) -> bool:
+        return str(fact.get("confidence") or "").strip().lower() in {"high", "confirmed"}
 
     @staticmethod
     def _generation_text_value(value: Any) -> str:
@@ -1056,11 +1140,24 @@ class ContextPacketBuilder:
 
     @staticmethod
     def _kb_facts(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
-        return [
-            {"id": item.get("id"), "statement": item.get("statement")}
-            for item in (graph.get("facts") or [])[:8]
-            if isinstance(item, dict)
-        ]
+        facts: List[Dict[str, Any]] = []
+        for item in graph.get("facts") or []:
+            if (
+                not isinstance(item, dict)
+                or not ContextPacketBuilder._generation_allowed(item)
+                or not ContextPacketBuilder._kb_fact_confidence_allows_generation(item)
+            ):
+                continue
+            facts.append(
+                {
+                    "id": item.get("id"),
+                    "statement": item.get("statement"),
+                    "confidence": item.get("confidence"),
+                }
+            )
+            if len(facts) >= 8:
+                break
+        return facts
 
     def _first_usable_voice_profile(
         self,

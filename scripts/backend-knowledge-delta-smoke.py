@@ -36,6 +36,7 @@ def main() -> None:
                     {
                         "id": "knowledge_delta_fact",
                         "statement": "院子里曾经种过桂花树。",
+                        "confidence": "high",
                         "privacyMetadata": {"scope": "generationAllowed"},
                     }
                 ],

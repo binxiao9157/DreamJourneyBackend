@@ -1,10 +1,11 @@
 import json
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
 from app.core.config import Settings
+from app.services.knowledge_extraction import LEGACY_TRANSCRIPT, USER_EVIDENCE_ONLY
 
 
 class ArchiveAnalysisStatus(str, Enum):
@@ -295,17 +296,34 @@ class DeepSeekKnowledgeExtractionProxy:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    def build_request(self, transcript: str, existing_summary: str = "") -> Dict[str, Any]:
+    def build_request(
+        self,
+        transcript: str = "",
+        existing_summary: str = "",
+        *,
+        turns: Optional[List[Dict[str, Any]]] = None,
+        source_policy: str = LEGACY_TRANSCRIPT,
+    ) -> Dict[str, Any]:
         transcript = transcript.strip()
-        if not transcript:
+        if turns is None and not transcript:
             raise ValueError("transcript is required")
+        if turns is not None:
+            if not turns:
+                raise ValueError("turns are required")
+            if source_policy != USER_EVIDENCE_ONLY:
+                raise ValueError("structured turns require sourcePolicy userEvidenceOnly")
 
         prompt = self.build_prompt(
             transcript=transcript,
             existing_summary=existing_summary or "（暂无已有知识）",
+            turns=turns,
+            source_policy=source_policy,
         )
+        system_content = "You are a precise strict JSON extractor. 只输出严格JSON。"
+        if turns is not None:
+            system_content += " Only role=user turns are admissible evidence."
         messages = [
-            {"role": "system", "content": "You are a precise strict JSON extractor. 只输出严格JSON。"},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": prompt},
         ]
         return {
@@ -322,11 +340,23 @@ class DeepSeekKnowledgeExtractionProxy:
             },
         }
 
-    def request_extraction(self, transcript: str, existing_summary: str = "") -> Dict[str, Any]:
+    def request_extraction(
+        self,
+        transcript: str = "",
+        existing_summary: str = "",
+        *,
+        turns: Optional[List[Dict[str, Any]]] = None,
+        source_policy: str = LEGACY_TRANSCRIPT,
+    ) -> Dict[str, Any]:
         if not self.settings.deepseek_api_key:
             raise ValueError("DEEPSEEK_API_KEY is not configured")
 
-        request = self.build_request(transcript=transcript, existing_summary=existing_summary)
+        request = self.build_request(
+            transcript=transcript,
+            existing_summary=existing_summary,
+            turns=turns,
+            source_policy=source_policy,
+        )
         with httpx.Client(timeout=60) as client:
             response = client.post(
                 request["url"],
@@ -338,8 +368,20 @@ class DeepSeekKnowledgeExtractionProxy:
         content = DeepSeekImageAnalysisProxy._extract_content(response.json())
         return self.parse_extraction(content)
 
-    def redacted_request(self, transcript: str, existing_summary: str = "") -> Dict[str, Any]:
-        request = self.build_request(transcript=transcript, existing_summary=existing_summary)
+    def redacted_request(
+        self,
+        transcript: str = "",
+        existing_summary: str = "",
+        *,
+        turns: Optional[List[Dict[str, Any]]] = None,
+        source_policy: str = LEGACY_TRANSCRIPT,
+    ) -> Dict[str, Any]:
+        request = self.build_request(
+            transcript=transcript,
+            existing_summary=existing_summary,
+            turns=turns,
+            source_policy=source_policy,
+        )
         request["headers"] = {
             "Content-Type": "application/json",
             "Authorization": "Bearer <server-side>",
@@ -347,28 +389,60 @@ class DeepSeekKnowledgeExtractionProxy:
         return request
 
     @staticmethod
-    def build_prompt(transcript: str, existing_summary: str) -> str:
+    def build_prompt(
+        transcript: str,
+        existing_summary: str,
+        *,
+        turns: Optional[List[Dict[str, Any]]] = None,
+        source_policy: str = LEGACY_TRANSCRIPT,
+    ) -> str:
+        if turns is None:
+            conversation_heading = "【本轮对话】"
+            conversation_content = transcript
+            evidence_rules = ""
+            source_indices_example = "[1]"
+        else:
+            conversation_heading = "【本轮结构化对话（JSON）】"
+            conversation_content = json.dumps(turns, ensure_ascii=False, separators=(",", ":"))
+            first_user_index = next(
+                (
+                    turn.get("index")
+                    for turn in turns
+                    if isinstance(turn, dict) and turn.get("role") == "user"
+                ),
+                None,
+            )
+            source_indices_example = (
+                json.dumps([first_user_index]) if isinstance(first_user_index, int) else "[]"
+            )
+            evidence_rules = f"""
+5. sourcePolicy={source_policy}：只允许 role=user 的 turn 作为事实证据。
+6. 每个实体必须输出至少一个 sourceTurnIndices，且所有索引都必须指向输入中 role=user 的 turn。
+7. role=assistant 的内容仅可帮助理解上下文，不得作为证据，也不得提取只由 assistant 陈述的信息。
+8. 不得编造、改写或引用输入中不存在的 turn index。
+9. 输入中没有 role=user 的 turn 时，必须输出四个空数组。"""
+
         return f"""你是一个家庭记忆提取器。从以下对话中提取本轮新出现的信息。
 
 【已有知识】（避免重复提取，只提取新信息）
 {existing_summary}
 
-【本轮对话】
-{transcript}
+{conversation_heading}
+{conversation_content}
 
 请输出严格的 JSON，不要 markdown，不要解释：
 {{
   "people": [
-    {{"name":"姓名或称呼","aliases":[],"relation":"关系","traits":[],"briefBio":"简介","sourceTurnIndices":[1]}}
+    {{"name":"姓名或称呼","aliases":[],"relation":"关系","traits":[],"briefBio":"简介","sourceTurnIndices":{source_indices_example}}}
   ],
   "places": [
-    {{"name":"地点名","category":"hometown/lived/visited/worked","latitude":null,"longitude":null,"description":"描述","relatedPeople":[],"sourceTurnIndices":[1]}}
+    {{"name":"地点名","category":"hometown/lived/visited/worked","latitude":null,"longitude":null,"description":"描述","relatedPeople":[],"sourceTurnIndices":{source_indices_example}}}
   ],
   "events": [
-    {{"title":"事件标题","description":"描述","year":null,"month":null,"location":"地点名","participants":[],"sourceTurnIndices":[1]}}
+    {{"title":"事件标题","description":"描述","year":null,"month":null,"location":"地点名","participants":[],"sourceTurnIndices":{source_indices_example}}}
   ],
   "facts": [
-    {{"statement":"一句事实陈述","confidence":"high/medium/low","relatedPeople":[],"relatedPlaces":[],"relatedEvents":[],"sourceTurnIndices":[1]}}
+    {{"statement":"一句事实陈述","confidence":"high/medium/low","relatedPeople":[],"relatedPlaces":[],"relatedEvents":[],"sourceTurnIndices":{source_indices_example}}}
   ]
 }}
 
@@ -376,7 +450,7 @@ class DeepSeekKnowledgeExtractionProxy:
 1. 用户明确陈述为 high，推测为 medium，不确定为 low。
 2. 本轮没有新信息时输出四个空数组。
 3. 不要把“妈妈、爸爸、爷爷、奶奶”等泛称单独作为人物，除非同时出现具体姓名或可区分身份。
-4. 不要输出任何 JSON 之外的文字。"""
+4. 不要输出任何 JSON 之外的文字。{evidence_rules}"""
 
     @classmethod
     def parse_extraction(cls, content: str) -> Dict[str, Any]:

@@ -31,6 +31,13 @@ from app.services.knowledge_store import (
     KnowledgeMutationValidationError,
     KnowledgeRevisionConflict,
 )
+from app.services.knowledge_extraction import (
+    KnowledgeExtractionValidationError,
+    empty_evidence_policy,
+    filter_extraction_by_evidence,
+    normalize_knowledge_extraction_input,
+    sanitize_knowledge_extraction_context,
+)
 from app.services.passwords import make_password_credential, verify_password
 from app.services.runtime_config import RuntimeConfigService
 from app.services.context_packet import ContextPacketBuilder
@@ -1623,13 +1630,16 @@ def extract_kb(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
     user_id = str(payload.get("userId") or "").strip()
     if not user_id:
         raise HTTPException(status_code=400, detail="userId is required")
-    transcript = str(payload.get("transcript") or "").strip()
-    if not transcript:
-        raise HTTPException(status_code=400, detail="transcript is required")
+    try:
+        extraction_input = normalize_knowledge_extraction_input(payload)
+    except KnowledgeExtractionValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     existing_summary = str(payload.get("existingSummary") or "").strip()
 
     try:
-        safe_context = sanitize_knowledge_extraction_payload(payload)
+        safe_context = sanitize_knowledge_extraction_context(
+            sanitize_knowledge_extraction_payload(payload)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
@@ -1637,19 +1647,31 @@ def extract_kb(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
     try:
         if not dryRun:
             extraction = proxy.request_extraction(
-                transcript=transcript,
+                transcript=extraction_input.transcript,
                 existing_summary=existing_summary,
+                turns=extraction_input.turns,
+                source_policy=extraction_input.source_policy,
             )
-            return {
+            extraction, evidence_policy = filter_extraction_by_evidence(
+                extraction,
+                extraction_input,
+            )
+            response = {
                 "provider": "deepseek",
                 "capability": "kbExtract",
                 "userId": user_id,
                 "extraction": extraction,
+                "evidencePolicy": evidence_policy,
                 "context": safe_context,
             }
+            if extraction_input.schema_version == 2:
+                response["extractionSchemaVersion"] = 2
+            return response
         request = proxy.redacted_request(
-            transcript=transcript,
+            transcript=extraction_input.transcript,
             existing_summary=existing_summary,
+            turns=extraction_input.turns,
+            source_policy=extraction_input.source_policy,
         )
     except ValueError as exc:
         status_code = 503 if "DEEPSEEK_API_KEY" in str(exc) else 502
@@ -1657,14 +1679,18 @@ def extract_kb(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
-    return {
+    response = {
         "provider": "deepseek",
         "capability": "kbExtract",
         "userId": user_id,
         "request": request,
+        "evidencePolicy": empty_evidence_policy(extraction_input),
         "context": safe_context,
         "note": "dryRun=true returns the redacted upstream request without calling DeepSeek.",
     }
+    if extraction_input.schema_version == 2:
+        response["extractionSchemaVersion"] = 2
+    return response
 
 
 @app.post("/memories")

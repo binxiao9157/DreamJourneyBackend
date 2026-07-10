@@ -98,8 +98,15 @@ def main() -> None:
                         {
                             "id": "fact_v2_smoke_1",
                             "statement": "妈妈喜欢在西湖边散步。",
+                            "confidence": "high",
                             "privacyMetadata": {"scope": "generationAllowed"},
-                        }
+                        },
+                        {
+                            "id": "fact_v2_smoke_low",
+                            "statement": "低置信候选不可进入回响。",
+                            "confidence": "low",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        },
                     ],
                 },
             },
@@ -239,6 +246,10 @@ def main() -> None:
             owner_reasons.get("archive_v2_draft_letter") == "time_letter_draft",
             "draft timeLetter should be filtered",
         )
+        require(
+            owner_reasons.get("fact_v2_smoke_low") == "kb_fact_low_confidence",
+            "low-confidence KBLite fact should be filtered",
+        )
         require(owner_packet.get("rankingTrace"), "rankingTrace should be emitted")
         owner_generation = owner_packet.get("generationContext") or {}
         owner_generation_text = str(owner_generation.get("text") or "")
@@ -249,6 +260,14 @@ def main() -> None:
         )
         require("archive_v2_selected" in owner_generation_refs, "selected archive should enter generationContext")
         require("fact_v2_smoke_1" in owner_generation_refs, "selected KB fact should enter generationContext")
+        require(
+            "fact_v2_smoke_low" not in owner_generation_refs,
+            "low-confidence KB fact should not enter generationContext",
+        )
+        require(
+            "低置信候选不可进入回响。" not in owner_generation_text,
+            "low-confidence KB fact text should not leak",
+        )
         require("care:latest" in owner_generation_refs, "selected care summary should enter generationContext")
         require(
             "archive_v2_failed_empty" not in owner_generation_refs,
