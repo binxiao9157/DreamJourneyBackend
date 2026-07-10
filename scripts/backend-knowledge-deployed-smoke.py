@@ -96,26 +96,38 @@ def main():
     require(base_revision >= 1, "sync must return a positive revision")
 
     second_statement = f"院子里曾经种过桂花树 {suffix}"
-    mutated_graph = dict(initial_graph)
-    mutated_graph["sessionCount"] = 2
-    mutated_graph["facts"] = initial_graph["facts"] + [
-        {
-            "id": f"knowledge_deployed_mutation_{suffix}",
-            "statement": second_statement,
-            "privacyMetadata": {
-                "scope": "generationAllowed",
-                "sourceRefs": [
-                    {"kind": "qaSmoke", "id": f"mutation-{suffix}", "title": "部署验收"},
-                ],
-            },
-        },
-    ]
+    mutation_fact_id = f"knowledge_deployed_mutation_{suffix}"
+    seeded_fact_id = f"knowledge_deployed_fact_{suffix}"
     operation_id = f"knowledge-deployed-smoke-{suffix}"
     mutation_payload = {
         "userId": user_id,
         "operationId": operation_id,
         "baseRevision": base_revision,
-        "graph": mutated_graph,
+        "mutationSchemaVersion": 2,
+        "upserts": {
+            "people": [],
+            "places": [],
+            "events": [],
+            "facts": [
+                {
+                    "id": mutation_fact_id,
+                    "statement": second_statement,
+                    "privacyMetadata": {
+                        "scope": "generationAllowed",
+                        "sourceRefs": [
+                            {"kind": "qaSmoke", "id": f"mutation-{suffix}", "title": "部署验收"},
+                        ],
+                    },
+                },
+            ],
+        },
+        "tombstones": [
+            {
+                "entityType": "facts",
+                "entityId": seeded_fact_id,
+                "deletedAt": "2026-07-11T00:00:00Z",
+            },
+        ],
     }
     applied = request_json(
         "POST",
@@ -134,6 +146,13 @@ def main():
     require(applied.get("duplicate") is False, "first mutation must apply")
     require(repeated.get("duplicate") is True, "repeated operation must be idempotent")
     require(int(repeated.get("revision") or 0) == applied_revision, "duplicate must keep revision")
+    require(applied.get("mutationSchemaVersion") == 2, "mutation response must expose V2 metadata")
+    require(repeated.get("mutation") == applied.get("mutation"), "duplicate must preserve mutation metadata")
+    authoritative_facts = (applied.get("graph") or {}).get("facts") or []
+    require(
+        [item.get("id") for item in authoritative_facts] == [mutation_fact_id],
+        "V2 tombstone/upsert must return the authoritative graph",
+    )
 
     changes = request_json(
         "GET",
@@ -144,6 +163,8 @@ def main():
     change_items = changes.get("changes") or []
     require(len(change_items) == 1, "change feed must contain one mutation")
     require(change_items[0].get("operationId") == operation_id, "operation id must round-trip")
+    require(change_items[0].get("mutationSchemaVersion") == 2, "change feed must expose V2 metadata")
+    require(change_items[0].get("mutation") == applied.get("mutation"), "change feed mutation mismatch")
 
     legacy_retry = request_json(
         "POST",
@@ -162,6 +183,10 @@ def main():
     require(
         any(item.get("statement") == second_statement for item in snapshot_facts),
         "stale legacy sync must not overwrite the latest graph",
+    )
+    require(
+        all(item.get("statement") != first_statement for item in snapshot_facts),
+        "tombstoned knowledge must not be restored by stale legacy sync",
     )
 
     context = request_json(
@@ -209,6 +234,8 @@ def main():
                 "baseURL": BASE_URL,
                 "revisionAdvanced": True,
                 "idempotentRetry": True,
+                "mutationSchemaVersion": 2,
+                "tombstoneVerified": True,
                 "legacySyncNoOpVerified": True,
                 "changeCount": len(change_items),
                 "generationVersion": generation.get("version"),
