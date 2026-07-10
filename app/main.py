@@ -87,12 +87,18 @@ DIGITAL_HUMAN_MODE_LABELS = {
 ACCOUNT_DELETION_RETENTION_DAYS = 30
 ACCOUNT_RESTORE_LIMIT = 1
 ACCOUNT_DELETION_CONTRACT_VERSION = 1
-DIGITAL_HUMAN_SESSION_CONTRACT_VERSION = 1
+DIGITAL_HUMAN_SESSION_CONTRACT_VERSION = 2
+DIGITAL_HUMAN_SESSION_LEASE_CONTRACT_VERSION = 1
 DIGITAL_HUMAN_SESSION_PROVIDER = "tencent"
 DIGITAL_HUMAN_SESSION_MOCK_PROVIDER_MODE = "mockContract"
 DIGITAL_HUMAN_SESSION_CLOUD_PROVIDER_MODE = "cloudRender"
 DIGITAL_HUMAN_SESSION_DRIVE_MODE = "streamText"
-DIGITAL_HUMAN_SESSION_TTL_SECONDS = 180
+DIGITAL_HUMAN_SESSION_TTL_SECONDS = max(60, settings.tencent_digital_human_session_ttl_seconds)
+DIGITAL_HUMAN_SESSION_HEARTBEAT_INTERVAL_SECONDS = max(
+    10,
+    min(settings.tencent_digital_human_heartbeat_interval_seconds, DIGITAL_HUMAN_SESSION_TTL_SECONDS // 2),
+)
+DIGITAL_HUMAN_MAX_CONCURRENT_SESSIONS = max(1, settings.tencent_digital_human_max_concurrent_sessions)
 
 
 def _digital_human_provider_ready() -> bool:
@@ -104,6 +110,88 @@ def _digital_human_provider_ready() -> bool:
             or settings.tencent_digital_human_virtualman_project_id
         )
     )
+
+
+def _digital_human_session_resource_key(
+    *,
+    provider_mode: str,
+    provider_asset_id: Optional[str],
+    provider_project_id: Optional[str],
+    persona_id: str,
+) -> str:
+    provider_resource = provider_asset_id or provider_project_id or f"mock-persona:{persona_id}"
+    seed = f"{DIGITAL_HUMAN_SESSION_PROVIDER}:{provider_mode}:{provider_resource}"
+    return "dh_resource_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+
+
+def _digital_human_session_lease_response(lease: Dict[str, Any], *, reused: bool) -> Dict[str, Any]:
+    session_id = str(lease.get("sessionId") or "")
+    return {
+        "status": str(lease.get("status") or "active"),
+        "reused": reused,
+        "createdAt": lease.get("createdAt"),
+        "heartbeatAt": lease.get("heartbeatAt"),
+        "expiresAt": lease.get("expiresAt"),
+        "heartbeatIntervalSeconds": DIGITAL_HUMAN_SESSION_HEARTBEAT_INTERVAL_SECONDS,
+        "heartbeatEndpoint": f"/digital-human/sessions/{session_id}/heartbeat",
+        "releaseEndpoint": f"/digital-human/sessions/{session_id}/release",
+        "contractVersion": DIGITAL_HUMAN_SESSION_LEASE_CONTRACT_VERSION,
+    }
+
+
+def _digital_human_session_response(
+    lease: Dict[str, Any],
+    *,
+    provider_asset_id: Optional[str],
+    provider_project_id: Optional[str],
+    cloud_render_ready: bool,
+    reused: bool,
+) -> Dict[str, Any]:
+    expires_at = str(lease.get("expiresAt") or "")
+    credential: Dict[str, Any] = {
+        "mode": "backend-issued-tencent-cloud" if cloud_render_ready else "backend-issued-mock",
+        "expiresAt": expires_at.replace("+00:00", "Z"),
+    }
+    if cloud_render_ready:
+        credential["appkey"] = settings.tencent_digital_human_app_key
+        credential["accesstoken"] = settings.tencent_digital_human_access_token
+
+    response: Dict[str, Any] = {
+        "sessionId": lease["sessionId"],
+        "userId": lease["userId"],
+        "provider": DIGITAL_HUMAN_SESSION_PROVIDER,
+        "providerMode": lease["providerMode"],
+        "personaId": lease["personaId"],
+        "scene": lease["scene"],
+        "deviceId": lease["deviceId"],
+        "lifecycleMode": lease["lifecycleMode"],
+        "lifecycleModeLabel": DIGITAL_HUMAN_MODE_LABELS[lease["lifecycleMode"]],
+        "assetKey": provider_asset_id,
+        "driveMode": DIGITAL_HUMAN_SESSION_DRIVE_MODE,
+        "alphaEnabled": True,
+        "smartActionEnabled": False,
+        "sessionPolicy": {
+            "allowInterrupt": True,
+            "maxDurationSeconds": DIGITAL_HUMAN_SESSION_TTL_SECONDS,
+            "proactiveSpeechAllowed": False,
+        },
+        "credential": credential,
+        "lease": _digital_human_session_lease_response(lease, reused=reused),
+        "fallback": {
+            "mode": "none" if cloud_render_ready else "audioOnly",
+            "reason": (
+                "tencent cloud-render session credential issued"
+                if cloud_render_ready
+                else "tencent runtime is not connected in this mock contract"
+            ),
+        },
+        "contractVersion": DIGITAL_HUMAN_SESSION_CONTRACT_VERSION,
+    }
+    if provider_asset_id:
+        response["providerAssetId"] = provider_asset_id
+    if provider_project_id:
+        response["providerProjectId"] = provider_project_id
+    return response
 
 
 def _request_backend_api_token(request: Request) -> str:
@@ -153,6 +241,9 @@ def create_digital_human_session(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"unsupported lifecycleMode: {lifecycle_mode}")
     if lifecycle_mode == "silent":
         raise HTTPException(status_code=409, detail="silent mode must not create a digital human render session")
+    if not device_id:
+        legacy_device_seed = f"{user_id}:{persona_id}:{scene}"
+        device_id = "legacy_" + hashlib.sha256(legacy_device_seed.encode("utf-8")).hexdigest()[:16]
 
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=DIGITAL_HUMAN_SESSION_TTL_SECONDS)
@@ -169,50 +260,111 @@ def create_digital_human_session(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not cloud_render_ready:
         provider_asset_id = "mock_asset_" + hashlib.sha256(persona_id.encode("utf-8")).hexdigest()[:12]
         provider_project_id = None
-
-    credential: Dict[str, Any] = {
-        "mode": "backend-issued-tencent-cloud" if cloud_render_ready else "backend-issued-mock",
-        "expiresAt": expires_at.isoformat().replace("+00:00", "Z"),
-    }
-    if cloud_render_ready:
-        credential["appkey"] = settings.tencent_digital_human_app_key
-        credential["accesstoken"] = settings.tencent_digital_human_access_token
-
-    response: Dict[str, Any] = {
+    resource_key = _digital_human_session_resource_key(
+        provider_mode=provider_mode,
+        provider_asset_id=provider_asset_id,
+        provider_project_id=provider_project_id,
+        persona_id=persona_id,
+    )
+    now_iso = now.isoformat()
+    candidate = {
         "sessionId": session_id,
-        "provider": DIGITAL_HUMAN_SESSION_PROVIDER,
-        "providerMode": provider_mode,
+        "resourceKey": resource_key,
+        "userId": user_id,
+        "deviceId": device_id,
         "personaId": persona_id,
         "scene": scene,
-        "deviceId": device_id,
         "lifecycleMode": lifecycle_mode,
-        "lifecycleModeLabel": DIGITAL_HUMAN_MODE_LABELS[lifecycle_mode],
-        "assetKey": provider_asset_id,
-        "driveMode": DIGITAL_HUMAN_SESSION_DRIVE_MODE,
-        "alphaEnabled": True,
-        "smartActionEnabled": False,
-        "sessionPolicy": {
-            "allowInterrupt": True,
-            "maxDurationSeconds": DIGITAL_HUMAN_SESSION_TTL_SECONDS,
-            "proactiveSpeechAllowed": False,
-        },
-        "credential": credential,
-        "fallback": {
-            "mode": "none" if cloud_render_ready else "audioOnly",
-            "reason": (
-                "tencent cloud-render session credential issued"
-                if cloud_render_ready
-                else "tencent runtime is not connected in this mock contract"
-            ),
-        },
-        "contractVersion": DIGITAL_HUMAN_SESSION_CONTRACT_VERSION,
+        "providerMode": provider_mode,
+        "status": "active",
+        "createdAt": now_iso,
+        "heartbeatAt": now_iso,
+        "expiresAt": expires_at.isoformat(),
     }
-    if provider_asset_id:
-        response["providerAssetId"] = provider_asset_id
-    if provider_project_id:
-        response["providerProjectId"] = provider_project_id
+    lease_result = store.acquire_digital_human_session_lease(
+        candidate,
+        max_concurrent_sessions=DIGITAL_HUMAN_MAX_CONCURRENT_SESSIONS,
+        now_iso=now_iso,
+    )
+    if lease_result["outcome"] == "conflict":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "digital_human_session_capacity_exhausted",
+                "message": "digital human session capacity is currently exhausted",
+                "activeSessionCount": lease_result["activeSessionCount"],
+                "maxConcurrentSessions": DIGITAL_HUMAN_MAX_CONCURRENT_SESSIONS,
+                "retryAfterSeconds": lease_result["retryAfterSeconds"],
+            },
+        )
+    lease = lease_result["lease"]
+    return _digital_human_session_response(
+        lease,
+        provider_asset_id=provider_asset_id,
+        provider_project_id=provider_project_id,
+        cloud_render_ready=cloud_render_ready,
+        reused=lease_result["outcome"] == "reused",
+    )
 
-    return response
+
+@app.post("/digital-human/sessions/{session_id}/heartbeat")
+def heartbeat_digital_human_session(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = str(payload.get("userId") or "").strip()
+    device_id = str(payload.get("deviceId") or "").strip()
+    if not user_id or not device_id:
+        raise HTTPException(status_code=400, detail="userId and deviceId are required")
+    now = datetime.now(timezone.utc)
+    result = store.heartbeat_digital_human_session_lease(
+        session_id,
+        user_id=user_id,
+        device_id=device_id,
+        heartbeat_at_iso=now.isoformat(),
+        expires_at_iso=(now + timedelta(seconds=DIGITAL_HUMAN_SESSION_TTL_SECONDS)).isoformat(),
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="digital human session lease not found")
+    if result["outcome"] != "active":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "digital_human_session_lease_inactive",
+                "status": result["lease"].get("status"),
+                "message": "digital human session lease is no longer active",
+            },
+        )
+    return {
+        "status": "active",
+        "sessionId": session_id,
+        "lease": _digital_human_session_lease_response(result["lease"], reused=True),
+    }
+
+
+@app.post("/digital-human/sessions/{session_id}/release")
+def release_digital_human_session(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = str(payload.get("userId") or "").strip()
+    device_id = str(payload.get("deviceId") or "").strip()
+    reason = str(payload.get("reason") or "clientRelease").strip()[:80] or "clientRelease"
+    if not user_id or not device_id:
+        raise HTTPException(status_code=400, detail="userId and deviceId are required")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    result = store.release_digital_human_session_lease(
+        session_id,
+        user_id=user_id,
+        device_id=device_id,
+        released_at_iso=now_iso,
+        reason=reason,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="digital human session lease not found")
+    return {
+        "status": result["outcome"],
+        "sessionId": session_id,
+        "lease": {
+            **_digital_human_session_lease_response(result["lease"], reused=False),
+            "releaseReason": result["lease"].get("releaseReason"),
+            "releasedAt": result["lease"].get("releasedAt"),
+        },
+    }
 
 
 @app.post("/auth/login")

@@ -1,5 +1,6 @@
 from copy import deepcopy
 from datetime import datetime, timezone
+from math import ceil
 from typing import Any, Dict, List, Optional
 
 from app.services.user_identity import stable_user_id
@@ -20,6 +21,152 @@ class InMemoryStore:
         self._push_device_tokens: Dict[str, List[Dict[str, Any]]] = {}
         self._voice_profiles: Dict[str, List[Dict[str, Any]]] = {}
         self._voice_clone_slots: Dict[str, Dict[str, Any]] = {}
+        self._digital_human_sessions: Dict[str, Dict[str, Any]] = {}
+
+    def acquire_digital_human_session_lease(
+        self,
+        candidate: Dict[str, Any],
+        *,
+        max_concurrent_sessions: int,
+        now_iso: str,
+    ) -> Dict[str, Any]:
+        item = deepcopy(candidate)
+        now = self._parse_iso_datetime(now_iso)
+        bounded_capacity = max(1, max_concurrent_sessions)
+
+        for session_id, lease in list(self._digital_human_sessions.items()):
+            if lease.get("status") != "active":
+                continue
+            expires_at = self._parse_iso_datetime(str(lease.get("expiresAt") or ""))
+            if expires_at > now:
+                continue
+            expired = deepcopy(lease)
+            expired["status"] = "expired"
+            expired["expiredAt"] = now_iso
+            expired["updatedAt"] = now_iso
+            self._digital_human_sessions[session_id] = expired
+
+        reusable = next(
+            (
+                lease
+                for lease in self._digital_human_sessions.values()
+                if lease.get("status") == "active"
+                and self._same_digital_human_context(lease, item)
+            ),
+            None,
+        )
+        if reusable is not None:
+            updated = deepcopy(reusable)
+            updated["heartbeatAt"] = item.get("heartbeatAt") or now_iso
+            updated["expiresAt"] = item.get("expiresAt")
+            updated["updatedAt"] = now_iso
+            self._digital_human_sessions[str(updated["sessionId"])] = updated
+            return {
+                "outcome": "reused",
+                "lease": deepcopy(updated),
+                "activeSessionCount": self._active_digital_human_session_count(str(item.get("resourceKey") or "")),
+                "retryAfterSeconds": 0,
+            }
+
+        for session_id, lease in list(self._digital_human_sessions.items()):
+            if lease.get("status") != "active":
+                continue
+            if lease.get("userId") != item.get("userId") or lease.get("deviceId") != item.get("deviceId"):
+                continue
+            released = deepcopy(lease)
+            released["status"] = "released"
+            released["releasedAt"] = now_iso
+            released["releaseReason"] = "supersededByDeviceContext"
+            released["updatedAt"] = now_iso
+            self._digital_human_sessions[session_id] = released
+
+        resource_key = str(item.get("resourceKey") or "")
+        active = [
+            lease
+            for lease in self._digital_human_sessions.values()
+            if lease.get("status") == "active" and lease.get("resourceKey") == resource_key
+        ]
+        if len(active) >= bounded_capacity:
+            retry_after = min(
+                max(1, ceil((self._parse_iso_datetime(str(lease.get("expiresAt") or "")) - now).total_seconds()))
+                for lease in active
+            )
+            return {
+                "outcome": "conflict",
+                "lease": None,
+                "activeSessionCount": len(active),
+                "retryAfterSeconds": retry_after,
+            }
+
+        item["status"] = "active"
+        item.setdefault("createdAt", now_iso)
+        item.setdefault("heartbeatAt", now_iso)
+        item["updatedAt"] = now_iso
+        self._digital_human_sessions[str(item["sessionId"])] = item
+        return {
+            "outcome": "created",
+            "lease": deepcopy(item),
+            "activeSessionCount": len(active) + 1,
+            "retryAfterSeconds": 0,
+        }
+
+    def heartbeat_digital_human_session_lease(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        device_id: str,
+        heartbeat_at_iso: str,
+        expires_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        lease = self._digital_human_sessions.get(session_id)
+        if lease is None or lease.get("userId") != user_id or lease.get("deviceId") != device_id:
+            return None
+        if lease.get("status") != "active":
+            return {"outcome": self._inactive_digital_human_outcome(lease), "lease": deepcopy(lease)}
+        if self._parse_iso_datetime(str(lease.get("expiresAt") or "")) <= self._parse_iso_datetime(heartbeat_at_iso):
+            expired = deepcopy(lease)
+            expired["status"] = "expired"
+            expired["expiredAt"] = heartbeat_at_iso
+            expired["updatedAt"] = heartbeat_at_iso
+            self._digital_human_sessions[session_id] = expired
+            return {"outcome": "expired", "lease": deepcopy(expired)}
+
+        updated = deepcopy(lease)
+        updated["heartbeatAt"] = heartbeat_at_iso
+        updated["expiresAt"] = expires_at_iso
+        updated["updatedAt"] = heartbeat_at_iso
+        self._digital_human_sessions[session_id] = updated
+        return {"outcome": "active", "lease": deepcopy(updated)}
+
+    def release_digital_human_session_lease(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        device_id: str,
+        released_at_iso: str,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        lease = self._digital_human_sessions.get(session_id)
+        if lease is None or lease.get("userId") != user_id or lease.get("deviceId") != device_id:
+            return None
+        if lease.get("status") == "released":
+            return {"outcome": "alreadyReleased", "lease": deepcopy(lease)}
+        if lease.get("status") == "expired":
+            return {"outcome": "alreadyExpired", "lease": deepcopy(lease)}
+
+        updated = deepcopy(lease)
+        updated["status"] = "released"
+        updated["releasedAt"] = released_at_iso
+        updated["releaseReason"] = reason
+        updated["updatedAt"] = released_at_iso
+        self._digital_human_sessions[session_id] = updated
+        return {"outcome": "released", "lease": deepcopy(updated)}
+
+    def get_digital_human_session_lease(self, session_id: str) -> Optional[Dict[str, Any]]:
+        lease = self._digital_human_sessions.get(session_id)
+        return None if lease is None else deepcopy(lease)
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
@@ -124,6 +271,11 @@ class InMemoryStore:
             self._care_snapshots.pop(user_id, None)
             self._echo_delayed_replies.pop(user_id, None)
             self._push_device_tokens.pop(user_id, None)
+            self._digital_human_sessions = {
+                session_id: lease
+                for session_id, lease in self._digital_human_sessions.items()
+                if lease.get("userId") != user_id
+            }
             for slot in self._voice_clone_slots.values():
                 if slot.get("userId") != user_id:
                     continue
@@ -647,3 +799,25 @@ class InMemoryStore:
         if not value:
             return datetime.min.replace(tzinfo=timezone.utc)
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    @staticmethod
+    def _same_digital_human_context(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+        return all(
+            left.get(key) == right.get(key)
+            for key in ("resourceKey", "userId", "deviceId", "personaId", "scene", "lifecycleMode")
+        )
+
+    def _active_digital_human_session_count(self, resource_key: str) -> int:
+        return sum(
+            1
+            for lease in self._digital_human_sessions.values()
+            if lease.get("status") == "active" and lease.get("resourceKey") == resource_key
+        )
+
+    @staticmethod
+    def _inactive_digital_human_outcome(lease: Dict[str, Any]) -> str:
+        if lease.get("status") == "released":
+            return "alreadyReleased"
+        if lease.get("status") == "expired":
+            return "expired"
+        return "inactive"

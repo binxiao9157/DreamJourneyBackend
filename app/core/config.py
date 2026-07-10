@@ -63,6 +63,9 @@ class Settings:
     tencent_digital_human_app_id: Optional[str] = None
     tencent_digital_human_secret_id: Optional[str] = None
     tencent_digital_human_secret_key: Optional[str] = None
+    tencent_digital_human_session_ttl_seconds: int = 180
+    tencent_digital_human_heartbeat_interval_seconds: int = 45
+    tencent_digital_human_max_concurrent_sessions: int = 1
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -104,6 +107,18 @@ class Settings:
             tencent_digital_human_app_id=_env("TENCENT_DIGITAL_HUMAN_APP_ID"),
             tencent_digital_human_secret_id=_env("TENCENT_DIGITAL_HUMAN_SECRET_ID"),
             tencent_digital_human_secret_key=_env("TENCENT_DIGITAL_HUMAN_SECRET_KEY"),
+            tencent_digital_human_session_ttl_seconds=_env_int(
+                "TENCENT_DIGITAL_HUMAN_SESSION_TTL_SECONDS",
+                cls.tencent_digital_human_session_ttl_seconds,
+            ),
+            tencent_digital_human_heartbeat_interval_seconds=_env_int(
+                "TENCENT_DIGITAL_HUMAN_HEARTBEAT_INTERVAL_SECONDS",
+                cls.tencent_digital_human_heartbeat_interval_seconds,
+            ),
+            tencent_digital_human_max_concurrent_sessions=_env_int(
+                "TENCENT_DIGITAL_HUMAN_MAX_CONCURRENT_SESSIONS",
+                cls.tencent_digital_human_max_concurrent_sessions,
+            ),
         )
 
 

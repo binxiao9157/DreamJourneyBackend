@@ -10,6 +10,33 @@ def unwrap_jsonb(value):
     return value.obj if isinstance(value, Jsonb) else value
 
 
+def make_digital_human_lease(
+    session_id,
+    *,
+    user_id="u1",
+    device_id="device-1",
+    persona_id="persona-1",
+    resource_key="resource-1",
+    lifecycle_mode="sunlight",
+    created_at="2026-07-10T00:00:00+00:00",
+    expires_at="2026-07-10T00:03:00+00:00",
+):
+    return {
+        "sessionId": session_id,
+        "resourceKey": resource_key,
+        "userId": user_id,
+        "deviceId": device_id,
+        "personaId": persona_id,
+        "scene": "echo",
+        "lifecycleMode": lifecycle_mode,
+        "providerMode": "cloudRender",
+        "status": "active",
+        "createdAt": created_at,
+        "heartbeatAt": created_at,
+        "expiresAt": expires_at,
+    }
+
+
 class FakeCursor:
     def __init__(self, connection):
         self.connection = connection
@@ -26,7 +53,24 @@ class FakeCursor:
         self.connection.executed.append((normalized, params))
         params = params or ()
 
-        if normalized.startswith("SELECT graph FROM kb_snapshots"):
+        if normalized.startswith("SELECT pg_advisory_xact_lock"):
+            self.result = {"locked": True}
+        elif normalized.startswith("SELECT id, payload FROM digital_human_sessions"):
+            resource_key, user_id, device_id = params
+            self.result = [
+                {"id": item.get("sessionId"), "payload": dict(item)}
+                for item in self.connection.digital_human_sessions.values()
+                if item.get("status") == "active"
+                and (
+                    item.get("resourceKey") == resource_key
+                    or (item.get("userId") == user_id and item.get("deviceId") == device_id)
+                )
+            ]
+        elif normalized.startswith("SELECT payload FROM digital_human_sessions"):
+            session_id = params[0]
+            item = self.connection.digital_human_sessions.get(session_id)
+            self.result = None if item is None else {"payload": dict(item)}
+        elif normalized.startswith("SELECT graph FROM kb_snapshots"):
             user_id = params[0]
             value = self.connection.kb_snapshots.get(user_id)
             self.result = None if value is None else {"graph": value}
@@ -164,6 +208,29 @@ class FakeCursor:
                     if item.get("viewerFamilyMemberID") is None
                 ]
             self.result = {"payload": snapshots[0]} if snapshots else None
+        elif normalized.startswith("INSERT INTO digital_human_sessions"):
+            session_id = params[0]
+            payload = unwrap_jsonb(params[7])
+            self.connection.digital_human_sessions[session_id] = dict(payload)
+            self.result = {"payload": payload}
+        elif normalized.startswith("UPDATE digital_human_sessions"):
+            payload = unwrap_jsonb(params[6])
+            session_id = params[10]
+            self.connection.digital_human_sessions[session_id] = dict(payload)
+            self.result = {"payload": payload}
+        elif normalized.startswith("DELETE FROM digital_human_sessions"):
+            user_id = params[0]
+            deleted = [
+                {"payload": item}
+                for item in self.connection.digital_human_sessions.values()
+                if item.get("userId") == user_id
+            ]
+            self.connection.digital_human_sessions = {
+                session_id: item
+                for session_id, item in self.connection.digital_human_sessions.items()
+                if item.get("userId") != user_id
+            }
+            self.result = deleted
         elif normalized.startswith("INSERT INTO users"):
             user_id, phone, nickname, payload = params
             payload = unwrap_jsonb(payload)
@@ -458,6 +525,7 @@ class FakeConnection:
         self.push_device_tokens = {}
         self.voice_profiles = {}
         self.voice_clone_slots = {}
+        self.digital_human_sessions = {}
         self.profiles = {}
         self.password_credentials = {}
         self.family_members = {}
@@ -525,7 +593,199 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS care_snapshots", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS voice_clone_slots", sql)
         self.assertIn("voice_profile_id TEXT UNIQUE", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS digital_human_sessions", sql)
+        self.assertIn("idx_digital_human_sessions_resource_status", sql)
         self.assertGreaterEqual(connection.commits, 1)
+
+    def test_in_memory_store_arbitrates_digital_human_session_leases(self):
+        store = InMemoryStore()
+        first = store.acquire_digital_human_session_lease(
+            make_digital_human_lease("session-1"),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:00:00+00:00",
+        )
+        repeated = store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-duplicate",
+                expires_at="2026-07-10T00:04:00+00:00",
+            ),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:01:00+00:00",
+        )
+        conflict = store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-2",
+                user_id="u2",
+                device_id="device-2",
+            ),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:01:00+00:00",
+        )
+
+        self.assertEqual(first["outcome"], "created")
+        self.assertEqual(repeated["outcome"], "reused")
+        self.assertEqual(repeated["lease"]["sessionId"], "session-1")
+        self.assertEqual(repeated["lease"]["expiresAt"], "2026-07-10T00:04:00+00:00")
+        self.assertEqual(conflict["outcome"], "conflict")
+        self.assertEqual(conflict["activeSessionCount"], 1)
+        self.assertGreater(conflict["retryAfterSeconds"], 0)
+
+        heartbeat = store.heartbeat_digital_human_session_lease(
+            "session-1",
+            user_id="u1",
+            device_id="device-1",
+            heartbeat_at_iso="2026-07-10T00:02:00+00:00",
+            expires_at_iso="2026-07-10T00:05:00+00:00",
+        )
+        released = store.release_digital_human_session_lease(
+            "session-1",
+            user_id="u1",
+            device_id="device-1",
+            released_at_iso="2026-07-10T00:02:30+00:00",
+            reason="pageExit",
+        )
+        repeated_release = store.release_digital_human_session_lease(
+            "session-1",
+            user_id="u1",
+            device_id="device-1",
+            released_at_iso="2026-07-10T00:02:40+00:00",
+            reason="pageExit",
+        )
+
+        self.assertEqual(heartbeat["outcome"], "active")
+        self.assertEqual(heartbeat["lease"]["expiresAt"], "2026-07-10T00:05:00+00:00")
+        self.assertEqual(released["outcome"], "released")
+        self.assertEqual(released["lease"]["releaseReason"], "pageExit")
+        self.assertEqual(repeated_release["outcome"], "alreadyReleased")
+
+        after_release = store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-2",
+                user_id="u2",
+                device_id="device-2",
+                created_at="2026-07-10T00:03:00+00:00",
+                expires_at="2026-07-10T00:06:00+00:00",
+            ),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:03:00+00:00",
+        )
+        self.assertEqual(after_release["outcome"], "created")
+
+    def test_in_memory_store_replaces_same_device_context_and_expires_abandoned_lease(self):
+        store = InMemoryStore()
+        store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-old",
+                expires_at="2026-07-10T00:01:00+00:00",
+            ),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:00:00+00:00",
+        )
+        replacement = store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-new",
+                persona_id="persona-2",
+                lifecycle_mode="star",
+                created_at="2026-07-10T00:00:30+00:00",
+                expires_at="2026-07-10T00:03:30+00:00",
+            ),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:00:30+00:00",
+        )
+
+        self.assertEqual(replacement["outcome"], "created")
+        old = store.get_digital_human_session_lease("session-old")
+        self.assertEqual(old["status"], "released")
+        self.assertEqual(old["releaseReason"], "supersededByDeviceContext")
+
+        after_expiry = store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-after-expiry",
+                user_id="u2",
+                device_id="device-2",
+                created_at="2026-07-10T00:04:00+00:00",
+                expires_at="2026-07-10T00:07:00+00:00",
+            ),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:04:00+00:00",
+        )
+        self.assertEqual(after_expiry["outcome"], "created")
+        self.assertEqual(store.get_digital_human_session_lease("session-new")["status"], "expired")
+
+    def test_postgres_store_arbitrates_digital_human_session_leases_under_advisory_lock(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        first = store.acquire_digital_human_session_lease(
+            make_digital_human_lease("session-1"),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:00:00+00:00",
+        )
+        repeated = store.acquire_digital_human_session_lease(
+            make_digital_human_lease("session-duplicate"),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:01:00+00:00",
+        )
+        conflict = store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-2",
+                user_id="u2",
+                device_id="device-2",
+            ),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:01:00+00:00",
+        )
+        heartbeat = store.heartbeat_digital_human_session_lease(
+            "session-1",
+            user_id="u1",
+            device_id="device-1",
+            heartbeat_at_iso="2026-07-10T00:02:00+00:00",
+            expires_at_iso="2026-07-10T00:05:00+00:00",
+        )
+        released = store.release_digital_human_session_lease(
+            "session-1",
+            user_id="u1",
+            device_id="device-1",
+            released_at_iso="2026-07-10T00:02:30+00:00",
+            reason="pageExit",
+        )
+
+        self.assertEqual(first["outcome"], "created")
+        self.assertEqual(repeated["outcome"], "reused")
+        self.assertEqual(conflict["outcome"], "conflict")
+        self.assertEqual(heartbeat["outcome"], "active")
+        self.assertEqual(released["outcome"], "released")
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("pg_advisory_xact_lock", sql)
+        self.assertNotIn("accesstoken", str(connection.digital_human_sessions))
+        self.assertNotIn("appkey", str(connection.digital_human_sessions))
+
+    def test_postgres_store_expires_abandoned_digital_human_lease_before_capacity_check(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-expiring",
+                expires_at="2026-07-10T00:01:00+00:00",
+            ),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:00:00+00:00",
+        )
+
+        acquired = store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-after-expiry",
+                user_id="u2",
+                device_id="device-2",
+                created_at="2026-07-10T00:02:00+00:00",
+                expires_at="2026-07-10T00:05:00+00:00",
+            ),
+            max_concurrent_sessions=1,
+            now_iso="2026-07-10T00:02:00+00:00",
+        )
+
+        self.assertEqual(acquired["outcome"], "created")
+        self.assertEqual(store.get_digital_human_session_lease("session-expiring")["status"], "expired")
 
     def test_store_persists_kb_snapshot_by_user(self):
         connection = FakeConnection()

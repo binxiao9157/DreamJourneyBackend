@@ -34,6 +34,7 @@ class RuntimeConfigService:
                 "archiveMediaUploadIntent": True,
                 "voiceClone": voice_clone_provider.is_configured,
                 "digitalHumanSession": True,
+                "digitalHumanSessionLease": True,
             },
             "archive": {
                 "uploadIntentEndpoint": "/archive/media/upload-intent",
@@ -146,7 +147,26 @@ class RuntimeConfigService:
                 "assetMode": digital_human_asset_mode,
                 "defaultReleaseVisible": False,
                 "requiresBackendIssuedCredential": True,
-                "contractVersion": 1,
+                "sessionLease": {
+                    "enabled": True,
+                    "heartbeatEndpointTemplate": "/digital-human/sessions/{sessionId}/heartbeat",
+                    "releaseEndpointTemplate": "/digital-human/sessions/{sessionId}/release",
+                    "ttlSeconds": max(60, self.settings.tencent_digital_human_session_ttl_seconds),
+                    "heartbeatIntervalSeconds": max(
+                        10,
+                        min(
+                            self.settings.tencent_digital_human_heartbeat_interval_seconds,
+                            max(60, self.settings.tencent_digital_human_session_ttl_seconds) // 2,
+                        ),
+                    ),
+                    "maxConcurrentSessions": max(
+                        1,
+                        self.settings.tencent_digital_human_max_concurrent_sessions,
+                    ),
+                    "conflictStatusCode": 409,
+                    "contractVersion": 1,
+                },
+                "contractVersion": 2,
             },
             "privacy": {
                 "localOnly": "never_upload",

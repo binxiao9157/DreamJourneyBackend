@@ -2,14 +2,23 @@ import unittest
 
 from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app.core.config import settings
 from app.main import app
+from app.services.in_memory_store import InMemoryStore
 
 
 client = TestClient(app)
 
 
 class DigitalHumanSessionAPITests(unittest.TestCase):
+    def setUp(self):
+        self.previous_store = main_module.store
+        main_module.store = InMemoryStore()
+
+    def tearDown(self):
+        main_module.store = self.previous_store
+
     def test_create_digital_human_session_returns_tencent_mock_contract(self):
         response = client.post(
             "/digital-human/sessions",
@@ -37,7 +46,97 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
         self.assertEqual(body["credential"]["mode"], "backend-issued-mock")
         self.assertTrue(body["credential"]["expiresAt"])
         self.assertEqual(body["fallback"]["mode"], "audioOnly")
-        self.assertEqual(body["contractVersion"], 1)
+        self.assertEqual(body["contractVersion"], 2)
+        self.assertEqual(body["userId"], "user_qa")
+        self.assertEqual(body["lease"]["status"], "active")
+        self.assertFalse(body["lease"]["reused"])
+        self.assertEqual(body["lease"]["contractVersion"], 1)
+        self.assertEqual(body["lease"]["heartbeatEndpoint"], f"/digital-human/sessions/{body['sessionId']}/heartbeat")
+        self.assertEqual(body["lease"]["releaseEndpoint"], f"/digital-human/sessions/{body['sessionId']}/release")
+        self.assertGreater(body["lease"]["heartbeatIntervalSeconds"], 0)
+
+        persisted = main_module.store.get_digital_human_session_lease(body["sessionId"])
+        self.assertNotIn("credential", persisted)
+        self.assertNotIn("appkey", str(persisted))
+        self.assertNotIn("accesstoken", str(persisted))
+
+    def test_session_lease_reuses_same_context_and_rejects_competing_device(self):
+        payload = {
+            "userId": "user_qa",
+            "personaId": "persona_mother_001",
+            "scene": "echo",
+            "deviceId": "ios-device-1",
+            "lifecycleMode": "star",
+        }
+        first = client.post("/digital-human/sessions", json=payload)
+        repeated = client.post("/digital-human/sessions", json=payload)
+        conflict = client.post(
+            "/digital-human/sessions",
+            json={**payload, "userId": "user_other", "deviceId": "ios-device-2"},
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.json()["sessionId"], first.json()["sessionId"])
+        self.assertTrue(repeated.json()["lease"]["reused"])
+        self.assertEqual(conflict.status_code, 409)
+        detail = conflict.json()["detail"]
+        self.assertEqual(detail["code"], "digital_human_session_capacity_exhausted")
+        self.assertEqual(detail["activeSessionCount"], 1)
+        self.assertGreater(detail["retryAfterSeconds"], 0)
+
+    def test_session_lease_heartbeat_and_release_are_owner_scoped_and_idempotent(self):
+        created = client.post(
+            "/digital-human/sessions",
+            json={
+                "userId": "user_qa",
+                "personaId": "persona_mother_001",
+                "scene": "echo",
+                "deviceId": "ios-device-1",
+                "lifecycleMode": "star",
+            },
+        ).json()
+        session_id = created["sessionId"]
+        original_expiry = created["lease"]["expiresAt"]
+
+        heartbeat = client.post(
+            f"/digital-human/sessions/{session_id}/heartbeat",
+            json={"userId": "user_qa", "deviceId": "ios-device-1"},
+        )
+        wrong_owner = client.post(
+            f"/digital-human/sessions/{session_id}/heartbeat",
+            json={"userId": "user_other", "deviceId": "ios-device-2"},
+        )
+        released = client.post(
+            f"/digital-human/sessions/{session_id}/release",
+            json={"userId": "user_qa", "deviceId": "ios-device-1", "reason": "pageExit"},
+        )
+        repeated_release = client.post(
+            f"/digital-human/sessions/{session_id}/release",
+            json={"userId": "user_qa", "deviceId": "ios-device-1", "reason": "pageExit"},
+        )
+
+        self.assertEqual(heartbeat.status_code, 200)
+        self.assertEqual(heartbeat.json()["status"], "active")
+        self.assertGreaterEqual(heartbeat.json()["lease"]["expiresAt"], original_expiry)
+        self.assertEqual(wrong_owner.status_code, 404)
+        self.assertEqual(released.status_code, 200)
+        self.assertEqual(released.json()["status"], "released")
+        self.assertEqual(released.json()["lease"]["releaseReason"], "pageExit")
+        self.assertEqual(repeated_release.status_code, 200)
+        self.assertEqual(repeated_release.json()["status"], "alreadyReleased")
+
+        next_device = client.post(
+            "/digital-human/sessions",
+            json={
+                "userId": "user_other",
+                "personaId": "persona_mother_001",
+                "scene": "echo",
+                "deviceId": "ios-device-2",
+                "lifecycleMode": "star",
+            },
+        )
+        self.assertEqual(next_device.status_code, 200)
 
     def test_create_digital_human_session_rejects_silent_mode(self):
         response = client.post(
@@ -79,6 +178,13 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
         self.assertEqual(digital_human["providerMode"], "mockContract")
         self.assertFalse(digital_human["realProviderReady"])
         self.assertEqual(digital_human["sessionEndpoint"], "/digital-human/sessions")
+        self.assertTrue(digital_human["sessionLease"]["enabled"])
+        self.assertEqual(digital_human["sessionLease"]["contractVersion"], 1)
+        self.assertEqual(digital_human["sessionLease"]["maxConcurrentSessions"], 1)
+        self.assertGreater(digital_human["sessionLease"]["ttlSeconds"], 0)
+        self.assertGreater(digital_human["sessionLease"]["heartbeatIntervalSeconds"], 0)
+        self.assertIn("{sessionId}", digital_human["sessionLease"]["heartbeatEndpointTemplate"])
+        self.assertIn("{sessionId}", digital_human["sessionLease"]["releaseEndpointTemplate"])
         self.assertEqual(digital_human["fallbackMode"], "audioOnly")
         self.assertFalse(digital_human["defaultReleaseVisible"])
         self.assertFalse(digital_human["sdkAdapterLinked"])
@@ -140,6 +246,8 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
             self.assertEqual(body["credential"]["appkey"], "qa_appkey")
             self.assertEqual(body["credential"]["accesstoken"], "qa_accesstoken")
             self.assertEqual(body["fallback"]["mode"], "none")
+            self.assertEqual(body["contractVersion"], 2)
+            self.assertEqual(body["lease"]["status"], "active")
         finally:
             for key, value in previous_values.items():
                 object.__setattr__(settings, key, value)

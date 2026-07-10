@@ -1,5 +1,6 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from math import ceil
 from typing import Any, Callable, Dict, List, Optional
 import uuid
 
@@ -121,6 +122,31 @@ class PostgresStore:
             """
             CREATE INDEX IF NOT EXISTS idx_voice_clone_slots_user_updated
                 ON voice_clone_slots(user_id, updated_at DESC)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS digital_human_sessions (
+                id TEXT PRIMARY KEY,
+                resource_key TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                persona_id TEXT NOT NULL,
+                scene TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload JSONB NOT NULL,
+                heartbeat_at TIMESTAMPTZ NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                released_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_digital_human_sessions_resource_status
+                ON digital_human_sessions(resource_key, status, expires_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_digital_human_sessions_user_device
+                ON digital_human_sessions(user_id, device_id, status)
             """,
             """
             CREATE TABLE IF NOT EXISTS profiles (
@@ -316,6 +342,7 @@ class PostgresStore:
                 "echo_delayed_replies",
                 "push_device_tokens",
                 "voice_profiles",
+                "digital_human_sessions",
             ):
                 self._fetchall(f"DELETE FROM {table} WHERE user_id = %s RETURNING payload", (user_id,))
             tombstone = {
@@ -415,6 +442,254 @@ class PostgresStore:
             (user_id,),
         )
         return None if row is None else deepcopy(row["graph"])
+
+    def acquire_digital_human_session_lease(
+        self,
+        candidate: Dict[str, Any],
+        *,
+        max_concurrent_sessions: int,
+        now_iso: str,
+    ) -> Dict[str, Any]:
+        item = deepcopy(candidate)
+        resource_key = str(item.get("resourceKey") or "")
+        user_id = str(item.get("userId") or "")
+        device_id = str(item.get("deviceId") or "")
+        now = self._parse_iso_datetime(now_iso)
+        bounded_capacity = max(1, max_concurrent_sessions)
+        connection = self._connect()
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                lock_keys = sorted(
+                    {
+                        f"digital-human-device:{user_id}:{device_id}",
+                        f"digital-human-resource:{resource_key}",
+                    }
+                )
+                for lock_key in lock_keys:
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                        (lock_key,),
+                    )
+                cursor.execute(
+                    """
+                    SELECT id, payload FROM digital_human_sessions
+                    WHERE status = 'active'
+                      AND (resource_key = %s OR (user_id = %s AND device_id = %s))
+                    FOR UPDATE
+                    """,
+                    (resource_key, user_id, device_id),
+                )
+                rows = cursor.fetchall()
+                active: List[Dict[str, Any]] = []
+                for row in rows:
+                    lease = deepcopy(row["payload"])
+                    if self._parse_iso_datetime(str(lease.get("expiresAt") or "")) <= now:
+                        expired = deepcopy(lease)
+                        expired["status"] = "expired"
+                        expired["expiredAt"] = now_iso
+                        expired["updatedAt"] = now_iso
+                        self._update_digital_human_session_cursor(cursor, expired)
+                    else:
+                        active.append(lease)
+
+                reusable = next(
+                    (lease for lease in active if self._same_digital_human_context(lease, item)),
+                    None,
+                )
+                if reusable is not None:
+                    updated = deepcopy(reusable)
+                    updated["heartbeatAt"] = item.get("heartbeatAt") or now_iso
+                    updated["expiresAt"] = item.get("expiresAt")
+                    updated["updatedAt"] = now_iso
+                    self._update_digital_human_session_cursor(cursor, updated)
+                    connection.commit()
+                    return {
+                        "outcome": "reused",
+                        "lease": updated,
+                        "activeSessionCount": len(
+                            [lease for lease in active if lease.get("resourceKey") == resource_key]
+                        ),
+                        "retryAfterSeconds": 0,
+                    }
+
+                remaining: List[Dict[str, Any]] = []
+                for lease in active:
+                    if lease.get("userId") == user_id and lease.get("deviceId") == device_id:
+                        released = deepcopy(lease)
+                        released["status"] = "released"
+                        released["releasedAt"] = now_iso
+                        released["releaseReason"] = "supersededByDeviceContext"
+                        released["updatedAt"] = now_iso
+                        self._update_digital_human_session_cursor(cursor, released)
+                    else:
+                        remaining.append(lease)
+
+                resource_active = [
+                    lease
+                    for lease in remaining
+                    if lease.get("resourceKey") == resource_key and lease.get("status") == "active"
+                ]
+                if len(resource_active) >= bounded_capacity:
+                    retry_after = min(
+                        max(
+                            1,
+                            ceil(
+                                (
+                                    self._parse_iso_datetime(str(lease.get("expiresAt") or "")) - now
+                                ).total_seconds()
+                            ),
+                        )
+                        for lease in resource_active
+                    )
+                    connection.commit()
+                    return {
+                        "outcome": "conflict",
+                        "lease": None,
+                        "activeSessionCount": len(resource_active),
+                        "retryAfterSeconds": retry_after,
+                    }
+
+                item["status"] = "active"
+                item.setdefault("createdAt", now_iso)
+                item.setdefault("heartbeatAt", now_iso)
+                item["updatedAt"] = now_iso
+                cursor.execute(
+                    """
+                    INSERT INTO digital_human_sessions (
+                        id, resource_key, user_id, device_id, persona_id, scene, status,
+                        payload, heartbeat_at, expires_at, released_at, created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NOW())
+                    RETURNING payload
+                    """,
+                    self._adapt_params(
+                        (
+                            item["sessionId"],
+                            resource_key,
+                            user_id,
+                            device_id,
+                            item.get("personaId"),
+                            item.get("scene"),
+                            "active",
+                            item,
+                            item.get("heartbeatAt"),
+                            item.get("expiresAt"),
+                            item.get("createdAt"),
+                        )
+                    ),
+                )
+                row = cursor.fetchone()
+            connection.commit()
+            saved = deepcopy(row["payload"] if row is not None else item)
+            return {
+                "outcome": "created",
+                "lease": saved,
+                "activeSessionCount": len(resource_active) + 1,
+                "retryAfterSeconds": 0,
+            }
+        except Exception:
+            self._rollback(connection)
+            raise
+
+    def heartbeat_digital_human_session_lease(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        device_id: str,
+        heartbeat_at_iso: str,
+        expires_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        connection = self._connect()
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (f"digital-human-session:{session_id}",),
+                )
+                cursor.execute(
+                    "SELECT payload FROM digital_human_sessions WHERE id = %s FOR UPDATE",
+                    (session_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                lease = deepcopy(row["payload"])
+                if lease.get("userId") != user_id or lease.get("deviceId") != device_id:
+                    connection.commit()
+                    return None
+                if lease.get("status") != "active":
+                    connection.commit()
+                    return {"outcome": self._inactive_digital_human_outcome(lease), "lease": lease}
+                if self._parse_iso_datetime(str(lease.get("expiresAt") or "")) <= self._parse_iso_datetime(heartbeat_at_iso):
+                    lease["status"] = "expired"
+                    lease["expiredAt"] = heartbeat_at_iso
+                    lease["updatedAt"] = heartbeat_at_iso
+                    self._update_digital_human_session_cursor(cursor, lease)
+                    connection.commit()
+                    return {"outcome": "expired", "lease": lease}
+                lease["heartbeatAt"] = heartbeat_at_iso
+                lease["expiresAt"] = expires_at_iso
+                lease["updatedAt"] = heartbeat_at_iso
+                self._update_digital_human_session_cursor(cursor, lease)
+            connection.commit()
+            return {"outcome": "active", "lease": deepcopy(lease)}
+        except Exception:
+            self._rollback(connection)
+            raise
+
+    def release_digital_human_session_lease(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        device_id: str,
+        released_at_iso: str,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        connection = self._connect()
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (f"digital-human-session:{session_id}",),
+                )
+                cursor.execute(
+                    "SELECT payload FROM digital_human_sessions WHERE id = %s FOR UPDATE",
+                    (session_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                lease = deepcopy(row["payload"])
+                if lease.get("userId") != user_id or lease.get("deviceId") != device_id:
+                    connection.commit()
+                    return None
+                if lease.get("status") == "released":
+                    connection.commit()
+                    return {"outcome": "alreadyReleased", "lease": lease}
+                if lease.get("status") == "expired":
+                    connection.commit()
+                    return {"outcome": "alreadyExpired", "lease": lease}
+                lease["status"] = "released"
+                lease["releasedAt"] = released_at_iso
+                lease["releaseReason"] = reason
+                lease["updatedAt"] = released_at_iso
+                self._update_digital_human_session_cursor(cursor, lease)
+            connection.commit()
+            return {"outcome": "released", "lease": deepcopy(lease)}
+        except Exception:
+            self._rollback(connection)
+            raise
+
+    def get_digital_human_session_lease(self, session_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            "SELECT payload FROM digital_human_sessions WHERE id = %s",
+            (session_id,),
+        )
+        return None if row is None else deepcopy(row["payload"])
 
     def add_memory(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = self._with_identity(payload, "memory", user_id)
@@ -1160,6 +1435,58 @@ class PostgresStore:
         if not value:
             return datetime.min.replace(tzinfo=timezone.utc)
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    def _update_digital_human_session_cursor(self, cursor: Any, lease: Dict[str, Any]) -> None:
+        released_at = lease.get("releasedAt")
+        cursor.execute(
+            """
+            UPDATE digital_human_sessions
+            SET resource_key = %s,
+                user_id = %s,
+                device_id = %s,
+                persona_id = %s,
+                scene = %s,
+                status = %s,
+                payload = %s,
+                heartbeat_at = %s,
+                expires_at = %s,
+                released_at = %s,
+                updated_at = NOW()
+            WHERE id = %s
+            RETURNING payload
+            """,
+            self._adapt_params(
+                (
+                    lease.get("resourceKey"),
+                    lease.get("userId"),
+                    lease.get("deviceId"),
+                    lease.get("personaId"),
+                    lease.get("scene"),
+                    lease.get("status"),
+                    lease,
+                    lease.get("heartbeatAt") or lease.get("createdAt"),
+                    lease.get("expiresAt"),
+                    released_at,
+                    lease.get("sessionId"),
+                )
+            ),
+        )
+        cursor.fetchone()
+
+    @staticmethod
+    def _same_digital_human_context(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+        return all(
+            left.get(key) == right.get(key)
+            for key in ("resourceKey", "userId", "deviceId", "personaId", "scene", "lifecycleMode")
+        )
+
+    @staticmethod
+    def _inactive_digital_human_outcome(lease: Dict[str, Any]) -> str:
+        if lease.get("status") == "released":
+            return "alreadyReleased"
+        if lease.get("status") == "expired":
+            return "expired"
+        return "inactive"
 
     @staticmethod
     def _voice_clone_slot_payload(row: Dict[str, Any]) -> Dict[str, Any]:
