@@ -2,7 +2,9 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from math import ceil
 from typing import Any, Dict, List, Optional
+import uuid
 
+from app.services.knowledge_store import KnowledgeRevisionConflict
 from app.services.user_identity import stable_user_id
 
 
@@ -10,6 +12,7 @@ class InMemoryStore:
     def __init__(self):
         self._users: Dict[str, Dict[str, Any]] = {}
         self._kb_snapshots: Dict[str, Dict[str, Any]] = {}
+        self._kb_changes: Dict[str, List[Dict[str, Any]]] = {}
         self._memories: Dict[str, List[Dict[str, Any]]] = {}
         self._archive_items: Dict[str, List[Dict[str, Any]]] = {}
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
@@ -332,6 +335,7 @@ class InMemoryStore:
             self._profiles.pop(user_id, None)
             self._password_credentials.pop(user_id, None)
             self._kb_snapshots.pop(user_id, None)
+            self._kb_changes.pop(user_id, None)
             self._memories.pop(user_id, None)
             self._archive_items.pop(user_id, None)
             self._mailbox_letters.pop(user_id, None)
@@ -381,19 +385,79 @@ class InMemoryStore:
         return None if credential is None else deepcopy(credential)
 
     def save_kb_snapshot(self, user_id: str, graph: Dict[str, Any]) -> Dict[str, Any]:
+        return self.apply_kb_mutation(
+            user_id,
+            graph,
+            operation_id=f"legacy-sync-{uuid.uuid4().hex}",
+            base_revision=None,
+        )
+
+    def apply_kb_mutation(
+        self,
+        user_id: str,
+        graph: Dict[str, Any],
+        *,
+        operation_id: str,
+        base_revision: Optional[int],
+    ) -> Dict[str, Any]:
+        changes = self._kb_changes.setdefault(user_id, [])
+        existing = next((item for item in changes if item["operationId"] == operation_id), None)
+        if existing is not None:
+            return {
+                "userId": user_id,
+                "graph": deepcopy(existing["graph"]),
+                "revision": existing["revision"],
+                "updatedAt": existing["createdAt"],
+                "operationId": operation_id,
+                "duplicate": True,
+            }
+
+        current = self._kb_snapshots.get(user_id)
+        current_revision = int((current or {}).get("revision") or 0)
+        if base_revision is not None and base_revision != current_revision:
+            raise KnowledgeRevisionConflict(
+                current_revision=current_revision,
+                expected_revision=base_revision,
+            )
+
+        revision = current_revision + 1
+        updated_at = self._now()
         snapshot = {
             "userId": user_id,
             "graph": deepcopy(graph),
-            "updatedAt": self._now(),
+            "revision": revision,
+            "updatedAt": updated_at,
+        }
+        change = {
+            "revision": revision,
+            "operationId": operation_id,
+            "graph": deepcopy(graph),
+            "createdAt": updated_at,
         }
         self._kb_snapshots[user_id] = snapshot
-        return deepcopy(snapshot)
+        changes.append(change)
+        return {
+            **deepcopy(snapshot),
+            "operationId": operation_id,
+            "duplicate": False,
+        }
 
     def get_kb_snapshot(self, user_id: str) -> Optional[Dict[str, Any]]:
         snapshot = self._kb_snapshots.get(user_id)
         if snapshot is None:
             return None
         return deepcopy(snapshot["graph"])
+
+    def get_kb_snapshot_record(self, user_id: str) -> Optional[Dict[str, Any]]:
+        snapshot = self._kb_snapshots.get(user_id)
+        return None if snapshot is None else deepcopy(snapshot)
+
+    def list_kb_changes(self, user_id: str, since_revision: int) -> List[Dict[str, Any]]:
+        return [
+            deepcopy(item)
+            for item in self._kb_changes.get(user_id, [])
+            if int(item.get("revision") or 0) > since_revision
+        ]
 
     def add_memory(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)

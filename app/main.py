@@ -27,6 +27,7 @@ from app.services.privacy import (
     sanitize_mailbox_letter_payload,
 )
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
+from app.services.knowledge_store import KnowledgeRevisionConflict
 from app.services.passwords import make_password_credential, verify_password
 from app.services.runtime_config import RuntimeConfigService
 from app.services.context_packet import ContextPacketBuilder
@@ -239,6 +240,7 @@ def _ownership_path_user_id(path: str) -> str:
         r"^/profile/([^/]+)$",
         r"^/voice/profiles/([^/]+)(?:/|$)",
         r"^/kb/snapshot/([^/]+)$",
+        r"^/kb/changes/([^/]+)$",
         r"^/memories/([^/]+)$",
         r"^/archive/items/([^/]+)(?:/|$)",
         r"^/mailbox/letters/([^/]+)(?:/|$)",
@@ -1448,31 +1450,135 @@ def amap_district(keyword: str, dryRun: bool = False) -> Dict[str, Any]:
 def sync_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id = str(payload.get("userId") or "").strip()
     graph = payload.get("graph") or {}
+    has_base_revision = payload.get("baseRevision") is not None
+    base_revision = payload.get("baseRevision")
+    operation_id = str(payload.get("operationId") or "").strip()
     if not user_id:
         raise HTTPException(status_code=400, detail="userId is required")
     if not isinstance(graph, dict):
         raise HTTPException(status_code=400, detail="graph must be an object")
+    if has_base_revision and (
+        isinstance(base_revision, bool)
+        or not isinstance(base_revision, int)
+        or base_revision < 0
+    ):
+        raise HTTPException(status_code=400, detail="baseRevision must be a non-negative integer")
+    if not operation_id:
+        operation_id = f"legacy-sync-{secrets.token_hex(16)}"
     filtered = filter_syncable_graph(graph)
-    snapshot = store.save_kb_snapshot(user_id, filtered)
+    compatibility_noop = False
+    try:
+        snapshot = store.apply_kb_mutation(
+            user_id,
+            filtered,
+            operation_id=operation_id,
+            base_revision=base_revision if has_base_revision else 0,
+        )
+    except KnowledgeRevisionConflict as exc:
+        if has_base_revision:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "knowledgeRevisionConflict",
+                    "expectedRevision": exc.expected_revision,
+                    "currentRevision": exc.current_revision,
+                },
+            )
+        current = store.get_kb_snapshot_record(user_id)
+        if current is None:
+            raise HTTPException(status_code=409, detail="knowledge snapshot changed during sync")
+        snapshot = {
+            **current,
+            "operationId": operation_id,
+            "duplicate": False,
+        }
+        compatibility_noop = True
+    response_graph = snapshot["graph"]
+    duplicate = bool(snapshot.get("duplicate"))
     return {
         "status": "synced",
         "userId": user_id,
+        "operationId": operation_id,
         "updatedAt": snapshot["updatedAt"],
+        "revision": snapshot["revision"],
+        "applied": not duplicate and not compatibility_noop,
+        "duplicate": duplicate,
+        "compatibilityNoOp": compatibility_noop,
         "counts": {
-            "people": len(filtered.get("people", [])),
-            "places": len(filtered.get("places", [])),
-            "events": len(filtered.get("events", [])),
-            "facts": len(filtered.get("facts", [])),
+            "people": len(response_graph.get("people", [])),
+            "places": len(response_graph.get("places", [])),
+            "events": len(response_graph.get("events", [])),
+            "facts": len(response_graph.get("facts", [])),
         },
     }
 
 
 @app.get("/kb/snapshot/{user_id}")
 def kb_snapshot(user_id: str) -> Dict[str, Any]:
-    graph = store.get_kb_snapshot(user_id)
-    if graph is None:
+    snapshot = store.get_kb_snapshot_record(user_id)
+    if snapshot is None:
         raise HTTPException(status_code=404, detail="snapshot not found")
-    return {"userId": user_id, "graph": graph}
+    return {
+        "userId": user_id,
+        "graph": snapshot["graph"],
+        "revision": snapshot["revision"],
+        "updatedAt": snapshot["updatedAt"],
+    }
+
+
+@app.post("/kb/mutations")
+def mutate_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = str(payload.get("userId") or "").strip()
+    operation_id = str(payload.get("operationId") or "").strip()
+    graph = payload.get("graph")
+    base_revision = payload.get("baseRevision")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+    if not operation_id:
+        raise HTTPException(status_code=400, detail="operationId is required")
+    if not isinstance(graph, dict):
+        raise HTTPException(status_code=400, detail="graph must be an object")
+    if base_revision is not None and (not isinstance(base_revision, int) or base_revision < 0):
+        raise HTTPException(status_code=400, detail="baseRevision must be a non-negative integer")
+    filtered = filter_syncable_graph(graph)
+    try:
+        result = store.apply_kb_mutation(
+            user_id,
+            filtered,
+            operation_id=operation_id,
+            base_revision=base_revision,
+        )
+    except KnowledgeRevisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "knowledgeRevisionConflict",
+                "expectedRevision": exc.expected_revision,
+                "currentRevision": exc.current_revision,
+            },
+        )
+    return {
+        "status": "duplicate" if result["duplicate"] else "applied",
+        "userId": user_id,
+        "operationId": operation_id,
+        "revision": result["revision"],
+        "updatedAt": result["updatedAt"],
+        "duplicate": result["duplicate"],
+    }
+
+
+@app.get("/kb/changes/{user_id}")
+def kb_changes(user_id: str, sinceRevision: int = 0) -> Dict[str, Any]:
+    if sinceRevision < 0:
+        raise HTTPException(status_code=400, detail="sinceRevision must be non-negative")
+    snapshot = store.get_kb_snapshot_record(user_id)
+    current_revision = int((snapshot or {}).get("revision") or 0)
+    return {
+        "userId": user_id,
+        "sinceRevision": sinceRevision,
+        "currentRevision": current_revision,
+        "changes": store.list_kb_changes(user_id, sinceRevision),
+    }
 
 
 @app.post("/kb/extract")

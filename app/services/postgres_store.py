@@ -7,6 +7,7 @@ import uuid
 from psycopg.types.json import Jsonb
 
 from app.services.user_identity import stable_user_id
+from app.services.knowledge_store import KnowledgeRevisionConflict
 
 
 class PostgresStore:
@@ -30,8 +31,28 @@ class PostgresStore:
             CREATE TABLE IF NOT EXISTS kb_snapshots (
                 user_id TEXT PRIMARY KEY,
                 graph JSONB NOT NULL,
+                revision BIGINT NOT NULL DEFAULT 0,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
+            """,
+            """
+            ALTER TABLE kb_snapshots
+                ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS kb_changes (
+                user_id TEXT NOT NULL,
+                revision BIGINT NOT NULL,
+                operation_id TEXT NOT NULL,
+                graph JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (user_id, revision),
+                UNIQUE (user_id, operation_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_kb_changes_user_revision
+                ON kb_changes(user_id, revision ASC)
             """,
             """
             CREATE TABLE IF NOT EXISTS memories (
@@ -432,6 +453,10 @@ class PostgresStore:
                 """,
                 (user_id,),
             )
+            self._fetchall(
+                "DELETE FROM kb_changes WHERE user_id = %s RETURNING revision",
+                (user_id,),
+            )
             for table in (
                 "profiles",
                 "password_credentials",
@@ -521,23 +546,102 @@ class PostgresStore:
         return None if row is None else deepcopy(row["payload"])
 
     def save_kb_snapshot(self, user_id: str, graph: Dict[str, Any]) -> Dict[str, Any]:
-        row = self._fetchone(
-            """
-            INSERT INTO kb_snapshots (user_id, graph, updated_at)
-            VALUES (%s, %s, NOW())
-            ON CONFLICT (user_id) DO UPDATE SET
-                graph = EXCLUDED.graph,
-                updated_at = NOW()
-            RETURNING graph
-            """,
-            (user_id, graph),
-            commit=True,
+        return self.apply_kb_mutation(
+            user_id,
+            graph,
+            operation_id=f"legacy-sync-{uuid.uuid4().hex}",
+            base_revision=None,
         )
-        return {
-            "userId": user_id,
-            "graph": deepcopy(row["graph"]),
-            "updatedAt": self._now(),
-        }
+
+    def apply_kb_mutation(
+        self,
+        user_id: str,
+        graph: Dict[str, Any],
+        *,
+        operation_id: str,
+        base_revision: Optional[int],
+    ) -> Dict[str, Any]:
+        connection = self._open_connection()
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (f"knowledge:{user_id}",),
+                )
+                cursor.execute(
+                    """
+                    SELECT revision, graph, created_at
+                    FROM kb_changes
+                    WHERE user_id = %s AND operation_id = %s
+                    """,
+                    (user_id, operation_id),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    connection.commit()
+                    return {
+                        "userId": user_id,
+                        "graph": deepcopy(existing["graph"]),
+                        "revision": int(existing["revision"]),
+                        "updatedAt": self._iso_value(existing.get("created_at")),
+                        "operationId": operation_id,
+                        "duplicate": True,
+                    }
+
+                cursor.execute(
+                    """
+                    SELECT graph, revision, updated_at
+                    FROM kb_snapshots
+                    WHERE user_id = %s
+                    FOR UPDATE
+                    """,
+                    (user_id,),
+                )
+                current = cursor.fetchone()
+                current_revision = int((current or {}).get("revision") or 0)
+                if base_revision is not None and base_revision != current_revision:
+                    raise KnowledgeRevisionConflict(
+                        current_revision=current_revision,
+                        expected_revision=base_revision,
+                    )
+
+                revision = current_revision + 1
+                cursor.execute(
+                    """
+                    INSERT INTO kb_snapshots (user_id, graph, revision, updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        graph = EXCLUDED.graph,
+                        revision = EXCLUDED.revision,
+                        updated_at = NOW()
+                    RETURNING graph, revision, updated_at
+                    """,
+                    self._adapt_params((user_id, graph, revision)),
+                )
+                saved = cursor.fetchone()
+                cursor.execute(
+                    """
+                    INSERT INTO kb_changes (user_id, revision, operation_id, graph, created_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    RETURNING revision, operation_id, graph, created_at
+                    """,
+                    self._adapt_params((user_id, revision, operation_id, graph)),
+                )
+                change = cursor.fetchone()
+            connection.commit()
+            return {
+                "userId": user_id,
+                "graph": deepcopy(saved["graph"]),
+                "revision": int(saved["revision"]),
+                "updatedAt": self._iso_value(saved.get("updated_at") or change.get("created_at")),
+                "operationId": operation_id,
+                "duplicate": False,
+            }
+        except Exception:
+            self._rollback(connection)
+            raise
+        finally:
+            self._close(connection)
 
     def get_kb_snapshot(self, user_id: str) -> Optional[Dict[str, Any]]:
         row = self._fetchone(
@@ -545,6 +649,40 @@ class PostgresStore:
             (user_id,),
         )
         return None if row is None else deepcopy(row["graph"])
+
+    def get_kb_snapshot_record(self, user_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            "SELECT graph, revision, updated_at FROM kb_snapshots WHERE user_id = %s",
+            (user_id,),
+        )
+        if row is None:
+            return None
+        return {
+            "userId": user_id,
+            "graph": deepcopy(row["graph"]),
+            "revision": int(row.get("revision") or 0),
+            "updatedAt": self._iso_value(row.get("updated_at")),
+        }
+
+    def list_kb_changes(self, user_id: str, since_revision: int) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT revision, operation_id, graph, created_at
+            FROM kb_changes
+            WHERE user_id = %s AND revision > %s
+            ORDER BY revision ASC
+            """,
+            (user_id, since_revision),
+        )
+        return [
+            {
+                "revision": int(row["revision"]),
+                "operationId": str(row["operation_id"]),
+                "graph": deepcopy(row["graph"]),
+                "createdAt": self._iso_value(row.get("created_at")),
+            }
+            for row in rows
+        ]
 
     def acquire_digital_human_session_lease(
         self,
@@ -1493,15 +1631,17 @@ class PostgresStore:
     def _connect(self):
         if self._connection is not None:
             return self._connection
+        self._connection = self._open_connection()
+        return self._connection
+
+    def _open_connection(self):
         if self._connection_factory is not None:
-            self._connection = self._connection_factory()
-            return self._connection
+            return self._connection_factory()
         try:
             import psycopg
         except ImportError as exc:
             raise RuntimeError("psycopg is not installed. Run `pip install -r requirements.txt`.") from exc
-        self._connection = psycopg.connect(self.dsn)
-        return self._connection
+        return psycopg.connect(self.dsn)
 
     @staticmethod
     def _dict_row_factory():
@@ -1516,6 +1656,19 @@ class PostgresStore:
         rollback = getattr(connection, "rollback", None)
         if callable(rollback):
             rollback()
+
+    @staticmethod
+    def _close(connection: Any) -> None:
+        close = getattr(connection, "close", None)
+        if callable(close):
+            close()
+
+    @staticmethod
+    def _iso_value(value: Any) -> str:
+        if value is None:
+            return PostgresStore._now()
+        isoformat = getattr(value, "isoformat", None)
+        return isoformat() if callable(isoformat) else str(value)
 
     @staticmethod
     def _with_identity(payload: Dict[str, Any], prefix: str, user_id: str) -> Dict[str, Any]:

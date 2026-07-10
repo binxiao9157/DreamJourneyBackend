@@ -92,7 +92,7 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertIn("careSnapshotRead", policy["coveredPolicies"])
         self.assertIn("timeLetterDetail", policy["coveredPolicies"])
         self.assertTrue(policy["principalBoundRouteEnforcement"])
-        self.assertEqual(policy["routeOwnershipAudit"]["routeCount"], 54)
+        self.assertEqual(policy["routeOwnershipAudit"]["routeCount"], 56)
         self.assertEqual(policy["routeOwnershipAudit"]["unclassifiedCount"], 0)
         self.assertEqual(
             policy["diagnosticHeaders"],
@@ -167,6 +167,7 @@ class AuthSessionAPITests(unittest.TestCase):
             ("GET", "/profile/user_other"),
             ("GET", "/voice/profiles/user_other"),
             ("GET", "/kb/snapshot/user_other"),
+            ("GET", "/kb/changes/user_other"),
             ("GET", "/memories/user_other"),
             ("GET", "/archive/items/user_other"),
             ("GET", "/mailbox/letters/user_other"),
@@ -189,6 +190,7 @@ class AuthSessionAPITests(unittest.TestCase):
             ("POST", "/voice/realtime-token"),
             ("POST", "/archive/items"),
             ("POST", "/kb/sync"),
+            ("POST", "/kb/mutations"),
             ("POST", "/devices/push-token"),
             ("POST", "/echo/delayed-replies"),
             ("POST", "/family/invite"),

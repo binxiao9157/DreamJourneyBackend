@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 from typing import Any, Dict, List
 
@@ -43,6 +44,15 @@ def selected_refs(packet: Dict[str, Any]) -> List[str]:
     return [
         str(item.get("refId") or "")
         for item in (packet.get("selectedContext") or [])
+        if isinstance(item, dict) and item.get("refId")
+    ]
+
+
+def generation_refs(packet: Dict[str, Any]) -> List[str]:
+    generation = packet.get("generationContext") or {}
+    return [
+        str(item.get("refId") or "")
+        for item in (generation.get("sourceRefs") or [])
         if isinstance(item, dict) and item.get("refId")
     ]
 
@@ -122,6 +132,21 @@ def main() -> None:
                 "detectedLocations": ["西湖"],
                 "detectedScenes": ["散步"],
                 "tags": ["亲情"],
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        post_archive(
+            client,
+            {
+                "userId": user_id,
+                "id": "archive_v2_draft_letter",
+                "kind": "timeLetter",
+                "title": "尚未完成的信",
+                "note": "draft generation sentinel",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "deliveryStatus": "draft",
+                "metadata": {"timeLetterStatus": "draft"},
                 "privacyMetadata": {"scope": "generationAllowed"},
             },
         )
@@ -210,7 +235,44 @@ def main() -> None:
             owner_reasons.get("archive_v2_failed_empty") == "analysis_failed_empty_context",
             "failed empty image analysis should be filtered",
         )
+        require(
+            owner_reasons.get("archive_v2_draft_letter") == "time_letter_draft",
+            "draft timeLetter should be filtered",
+        )
         require(owner_packet.get("rankingTrace"), "rankingTrace should be emitted")
+        owner_generation = owner_packet.get("generationContext") or {}
+        owner_generation_text = str(owner_generation.get("text") or "")
+        owner_generation_refs = generation_refs(owner_packet)
+        require(
+            owner_generation.get("version") == "echo-generation-context-v1",
+            "generationContext version should be stable",
+        )
+        require("archive_v2_selected" in owner_generation_refs, "selected archive should enter generationContext")
+        require("fact_v2_smoke_1" in owner_generation_refs, "selected KB fact should enter generationContext")
+        require("care:latest" in owner_generation_refs, "selected care summary should enter generationContext")
+        require(
+            "archive_v2_failed_empty" not in owner_generation_refs,
+            "failed empty image should not enter generationContext",
+        )
+        require(
+            "archive_v2_draft_letter" not in owner_generation_refs,
+            "draft timeLetter should not enter generationContext",
+        )
+        require("draft generation sentinel" not in owner_generation_text, "draft text should not leak")
+        require(
+            len(owner_generation_text) <= int(owner_generation.get("maxChars") or 0),
+            "generationContext text should honor maxChars",
+        )
+        require(
+            owner_generation.get("contentHash")
+            == "sha256:" + hashlib.sha256(owner_generation_text.encode("utf-8")).hexdigest(),
+            "generationContext contentHash should hash the emitted text",
+        )
+        require("voice" not in owner_generation, "generationContext should not contain voice runtime state")
+        require(
+            "digitalHuman" not in owner_generation,
+            "generationContext should not contain digital-human runtime state",
+        )
 
         pending_family_packet = context_packet(
             client,
@@ -230,6 +292,10 @@ def main() -> None:
         require(
             pending_family_packet.get("policy", {}).get("canUseFamilyData") is False,
             "pending family viewer should not use family data",
+        )
+        require(
+            "archive_v2_family_pending" not in generation_refs(pending_family_packet),
+            "pending family archive should not enter generationContext",
         )
 
         accepted = client.post(
@@ -252,6 +318,10 @@ def main() -> None:
             recipient_reasons.get("archive_v2_future_letter") == "time_letter_not_open_for_recipient",
             "future timeLetter should be hidden from recipient",
         )
+        require(
+            "archive_v2_future_letter" not in generation_refs(recipient_packet),
+            "future timeLetter should not enter recipient generationContext",
+        )
 
         result = {
             "completed": True,
@@ -264,6 +334,14 @@ def main() -> None:
             "pendingFamilyFilteredReasons": pending_reasons,
             "recipientFilteredReasons": recipient_reasons,
             "rankingTraceCount": len(owner_packet.get("rankingTrace") or []),
+            "generationContext": {
+                "version": owner_generation.get("version"),
+                "sourceRefs": owner_generation_refs,
+                "sourceCounts": owner_generation.get("sourceCounts"),
+                "contentHash": owner_generation.get("contentHash"),
+                "textLength": len(owner_generation_text),
+                "truncated": owner_generation.get("truncated"),
+            },
             "policy": {
                 "pendingFamilyCanUseFamilyData": pending_family_packet.get("policy", {}).get("canUseFamilyData"),
                 "recipientFamilyViewerActive": recipient_packet.get("policy", {}).get("familyViewerActive"),

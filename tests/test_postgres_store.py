@@ -1,10 +1,13 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Barrier
 
 from psycopg.types.json import Jsonb
 
 from app.services.auth_sessions import AuthSessionError, AuthSessionService
 from app.services.in_memory_store import InMemoryStore
+from app.services.knowledge_store import KnowledgeRevisionConflict
 from app.services.postgres_store import PostgresStore
 
 
@@ -56,6 +59,8 @@ class FakeCursor:
         params = params or ()
 
         if normalized.startswith("SELECT pg_advisory_xact_lock"):
+            if self.connection.advisory_barrier is not None:
+                self.connection.advisory_barrier.wait(timeout=2)
             self.result = {"locked": True}
         elif normalized.startswith("SELECT id, payload FROM digital_human_sessions"):
             resource_key, user_id, device_id = params
@@ -72,10 +77,39 @@ class FakeCursor:
             session_id = params[0]
             item = self.connection.digital_human_sessions.get(session_id)
             self.result = None if item is None else {"payload": dict(item)}
+        elif normalized.startswith("SELECT revision, graph, created_at FROM kb_changes"):
+            user_id, operation_id = params
+            item = next(
+                (
+                    change
+                    for change in self.connection.kb_changes.get(user_id, [])
+                    if change["operation_id"] == operation_id
+                ),
+                None,
+            )
+            self.result = None if item is None else dict(item)
+        elif normalized.startswith("SELECT graph, revision, updated_at FROM kb_snapshots"):
+            user_id = params[0]
+            value = self.connection.kb_snapshots.get(user_id)
+            if value is None:
+                self.result = None
+            else:
+                self.result = {
+                    "graph": value,
+                    "revision": self.connection.kb_snapshot_revisions.get(user_id, 0),
+                    "updated_at": "2026-07-10T00:00:00+00:00",
+                }
         elif normalized.startswith("SELECT graph FROM kb_snapshots"):
             user_id = params[0]
             value = self.connection.kb_snapshots.get(user_id)
             self.result = None if value is None else {"graph": value}
+        elif normalized.startswith("SELECT revision, operation_id, graph, created_at FROM kb_changes"):
+            user_id, since_revision = params
+            self.result = [
+                dict(item)
+                for item in self.connection.kb_changes.get(user_id, [])
+                if int(item["revision"]) > since_revision
+            ]
         elif normalized.startswith("SELECT payload FROM memories"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.memories.get(user_id, [])]
@@ -321,10 +355,30 @@ class FakeCursor:
             self.connection.users[user_id] = dict(payload)
             self.result = {"payload": payload}
         elif normalized.startswith("INSERT INTO kb_snapshots"):
-            user_id, graph = params
+            if len(params) == 3:
+                user_id, graph, revision = params
+            else:
+                user_id, graph = params
+                revision = self.connection.kb_snapshot_revisions.get(user_id, 0) + 1
             graph = unwrap_jsonb(graph)
             self.connection.kb_snapshots[user_id] = dict(graph)
-            self.result = {"graph": graph}
+            self.connection.kb_snapshot_revisions[user_id] = revision
+            self.result = {
+                "graph": graph,
+                "revision": revision,
+                "updated_at": "2026-07-10T00:00:00+00:00",
+            }
+        elif normalized.startswith("INSERT INTO kb_changes"):
+            user_id, revision, operation_id, graph = params
+            graph = unwrap_jsonb(graph)
+            item = {
+                "revision": revision,
+                "operation_id": operation_id,
+                "graph": dict(graph),
+                "created_at": "2026-07-10T00:00:00+00:00",
+            }
+            self.connection.kb_changes.setdefault(user_id, []).append(item)
+            self.result = dict(item)
         elif normalized.startswith("INSERT INTO memories"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
@@ -585,11 +639,16 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self):
+    def __init__(self, *, advisory_barrier=None):
         self.executed = []
         self.commits = 0
+        self.rollbacks = 0
+        self.closes = 0
+        self.advisory_barrier = advisory_barrier
         self.users = {}
         self.kb_snapshots = {}
+        self.kb_snapshot_revisions = {}
+        self.kb_changes = {}
         self.memories = {}
         self.archive_items = {}
         self.mailbox_letters = {}
@@ -610,6 +669,12 @@ class FakeConnection:
 
     def commit(self):
         self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        self.closes += 1
 
 
 class FailingCursor:
@@ -636,12 +701,16 @@ class FailingConnection:
     def __init__(self, error):
         self.error = error
         self.rollbacks = 0
+        self.closes = 0
 
     def cursor(self, row_factory=None):
         return FailingCursor(self.error)
 
     def rollback(self):
         self.rollbacks += 1
+
+    def close(self):
+        self.closes += 1
 
 
 class PostgresStoreTests(unittest.TestCase):
@@ -895,6 +964,124 @@ class PostgresStoreTests(unittest.TestCase):
 
         self.assertEqual(store.get_kb_snapshot("u1")["people"][0]["id"], "p1")
         self.assertEqual(store.get_kb_snapshot("u2")["people"][0]["id"], "p2")
+
+    def test_store_applies_idempotent_kb_mutation_and_change_feed(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        first = store.apply_kb_mutation(
+            "u1",
+            {"facts": [{"id": "f1", "statement": "第一条事实"}]},
+            operation_id="op-1",
+            base_revision=0,
+        )
+        repeated = store.apply_kb_mutation(
+            "u1",
+            {"facts": [{"id": "f1", "statement": "不应覆盖"}]},
+            operation_id="op-1",
+            base_revision=0,
+        )
+
+        self.assertEqual(first["revision"], 1)
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(repeated["duplicate"])
+        self.assertEqual(store.get_kb_snapshot("u1")["facts"][0]["statement"], "第一条事实")
+        self.assertEqual([item["operationId"] for item in store.list_kb_changes("u1", 0)], ["op-1"])
+
+        with self.assertRaises(KnowledgeRevisionConflict):
+            store.apply_kb_mutation("u1", {"facts": []}, operation_id="op-2", base_revision=0)
+
+    def test_kb_mutations_use_request_exclusive_connections_and_close_each_lease(self):
+        barrier = Barrier(2)
+        connections = []
+
+        def connection_factory():
+            connection = FakeConnection(advisory_barrier=barrier)
+            connections.append(connection)
+            return connection
+
+        store = PostgresStore(connection_factory=connection_factory)
+        self.assertIsNone(store.get_kb_snapshot("cache-warmup"))
+        cached_connection = connections[0]
+        self.assertIsNone(store.get_kb_snapshot("cache-reuse"))
+        self.assertEqual(len(connections), 1)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    store.apply_kb_mutation,
+                    f"u{index}",
+                    {"facts": [{"id": f"f{index}"}]},
+                    operation_id=f"op-{index}",
+                    base_revision=0,
+                )
+                for index in (1, 2)
+            ]
+            results = [future.result(timeout=3) for future in futures]
+
+        mutation_connections = connections[1:]
+        self.assertEqual([result["revision"] for result in results], [1, 1])
+        self.assertEqual(len(mutation_connections), 2)
+        self.assertIsNot(mutation_connections[0], mutation_connections[1])
+        self.assertIs(store._connection, cached_connection)
+        self.assertEqual(cached_connection.closes, 0)
+        self.assertEqual([connection.commits for connection in mutation_connections], [1, 1])
+        self.assertEqual([connection.rollbacks for connection in mutation_connections], [0, 0])
+        self.assertEqual([connection.closes for connection in mutation_connections], [1, 1])
+        self.assertTrue(
+            all(
+                any("pg_advisory_xact_lock" in sql for sql, _ in connection.executed)
+                for connection in mutation_connections
+            )
+        )
+
+    def test_failed_kb_mutation_rolls_back_and_closes_exclusive_connection(self):
+        connection = FailingConnection(RuntimeError("mutation failed"))
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        with self.assertRaisesRegex(RuntimeError, "mutation failed"):
+            store.apply_kb_mutation(
+                "u1",
+                {"facts": []},
+                operation_id="op-failed",
+                base_revision=0,
+            )
+
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertEqual(connection.closes, 1)
+        self.assertIsNone(store._connection)
+
+    def test_postgres_store_rejects_legacy_zero_base_without_losing_newer_snapshot(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        store.apply_kb_mutation(
+            "u1",
+            {"facts": [{"id": "f1", "statement": "initial"}]},
+            operation_id="initial",
+            base_revision=0,
+        )
+        store.apply_kb_mutation(
+            "u1",
+            {"facts": [{"id": "f1", "statement": "newest"}]},
+            operation_id="newest",
+            base_revision=1,
+        )
+
+        with self.assertRaises(KnowledgeRevisionConflict):
+            store.apply_kb_mutation(
+                "u1",
+                {"facts": [{"id": "f1", "statement": "stale legacy"}]},
+                operation_id="legacy-stale",
+                base_revision=0,
+            )
+
+        snapshot = store.get_kb_snapshot_record("u1")
+        self.assertEqual(snapshot["revision"], 2)
+        self.assertEqual(snapshot["graph"]["facts"][0]["statement"], "newest")
+        self.assertEqual(
+            [change["operationId"] for change in store.list_kb_changes("u1", 0)],
+            ["initial", "newest"],
+        )
 
     def test_kb_snapshot_survives_store_recreation(self):
         connection = FakeConnection()

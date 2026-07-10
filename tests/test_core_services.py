@@ -13,6 +13,7 @@ from app import main as main_module
 from app.main import app
 from app.core.config import Settings
 from app.services.in_memory_store import InMemoryStore
+from app.services.knowledge_store import KnowledgeRevisionConflict
 from app.services.postgres_store import PostgresStore
 from app.services.privacy import filter_syncable_graph, sanitize_care_snapshot_payload
 from app.services.runtime_config import RuntimeConfigService
@@ -627,6 +628,251 @@ class StoreTests(unittest.TestCase):
 
         self.assertEqual(store.get_kb_snapshot("u1")["people"][0]["id"], "p1")
         self.assertEqual(store.get_kb_snapshot("u2")["people"][0]["id"], "p2")
+
+    def test_store_applies_idempotent_knowledge_mutations_and_lists_changes(self):
+        store = InMemoryStore()
+        first = store.apply_kb_mutation(
+            "u1",
+            {"facts": [{"id": "f1", "statement": "第一条事实"}]},
+            operation_id="op-1",
+            base_revision=0,
+        )
+        repeated = store.apply_kb_mutation(
+            "u1",
+            {"facts": [{"id": "f1", "statement": "重复请求不应覆盖"}]},
+            operation_id="op-1",
+            base_revision=0,
+        )
+
+        self.assertEqual(first["revision"], 1)
+        self.assertFalse(first["duplicate"])
+        self.assertEqual(repeated["revision"], 1)
+        self.assertTrue(repeated["duplicate"])
+        self.assertEqual(store.get_kb_snapshot("u1")["facts"][0]["statement"], "第一条事实")
+        self.assertEqual(len(store.list_kb_changes("u1", since_revision=0)), 1)
+
+        with self.assertRaises(KnowledgeRevisionConflict) as conflict:
+            store.apply_kb_mutation(
+                "u1",
+                {"facts": []},
+                operation_id="op-2",
+                base_revision=0,
+            )
+        self.assertEqual(conflict.exception.current_revision, 1)
+
+    def test_memory_store_rejects_legacy_zero_base_without_losing_newer_snapshot(self):
+        store = InMemoryStore()
+        store.apply_kb_mutation(
+            "u1",
+            {"facts": [{"id": "f1", "statement": "initial"}]},
+            operation_id="initial",
+            base_revision=0,
+        )
+        store.apply_kb_mutation(
+            "u1",
+            {"facts": [{"id": "f1", "statement": "newest"}]},
+            operation_id="newest",
+            base_revision=1,
+        )
+
+        with self.assertRaises(KnowledgeRevisionConflict):
+            store.apply_kb_mutation(
+                "u1",
+                {"facts": [{"id": "f1", "statement": "stale legacy"}]},
+                operation_id="legacy-stale",
+                base_revision=0,
+            )
+
+        snapshot = store.get_kb_snapshot_record("u1")
+        self.assertEqual(snapshot["revision"], 2)
+        self.assertEqual(snapshot["graph"]["facts"][0]["statement"], "newest")
+        self.assertEqual(
+            [change["operationId"] for change in store.list_kb_changes("u1", 0)],
+            ["initial", "newest"],
+        )
+
+
+class KnowledgeSyncAPITests(unittest.TestCase):
+    def setUp(self):
+        self.previous_store = main_module.store
+        main_module.store = InMemoryStore()
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        main_module.store = self.previous_store
+
+    def test_sync_mutation_change_feed_and_revision_conflict(self):
+        synced = self.client.post(
+            "/kb/sync",
+            json={"userId": "kb_user", "graph": {"facts": []}},
+        )
+        applied = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "kb_user",
+                "operationId": "mutation-1",
+                "baseRevision": 1,
+                "graph": {"facts": [{"id": "fact-1", "statement": "记得桂花香"}]},
+            },
+        )
+        repeated = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "kb_user",
+                "operationId": "mutation-1",
+                "baseRevision": 1,
+                "graph": {"facts": [{"id": "fact-1", "statement": "不应覆盖"}]},
+            },
+        )
+        changes = self.client.get("/kb/changes/kb_user?sinceRevision=1")
+        conflict = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "kb_user",
+                "operationId": "mutation-2",
+                "baseRevision": 1,
+                "graph": {"facts": []},
+            },
+        )
+
+        self.assertEqual(synced.status_code, 200)
+        self.assertEqual(synced.json()["revision"], 1)
+        self.assertEqual(applied.status_code, 200)
+        self.assertEqual(applied.json()["revision"], 2)
+        self.assertFalse(applied.json()["duplicate"])
+        self.assertTrue(repeated.json()["duplicate"])
+        self.assertEqual(changes.status_code, 200)
+        self.assertEqual(changes.json()["currentRevision"], 2)
+        self.assertEqual([item["operationId"] for item in changes.json()["changes"]], ["mutation-1"])
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json()["detail"]["code"], "knowledgeRevisionConflict")
+        self.assertEqual(conflict.json()["detail"]["currentRevision"], 2)
+
+    def test_legacy_sync_is_compatible_noop_after_a_newer_revision_exists(self):
+        first_legacy = self.client.post(
+            "/kb/sync",
+            json={
+                "userId": "legacy_user",
+                "graph": {
+                    "facts": [
+                        {
+                            "id": "fact-1",
+                            "statement": "initial",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ]
+                },
+            },
+        )
+        modern = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "legacy_user",
+                "operationId": "modern-1",
+                "baseRevision": 1,
+                "graph": {
+                    "facts": [
+                        {
+                            "id": "fact-1",
+                            "statement": "newest",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ]
+                },
+            },
+        )
+        stale_legacy = self.client.post(
+            "/kb/sync",
+            json={
+                "userId": "legacy_user",
+                "graph": {
+                    "facts": [
+                        {
+                            "id": "fact-1",
+                            "statement": "stale legacy",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ]
+                },
+            },
+        )
+        snapshot = self.client.get("/kb/snapshot/legacy_user")
+        changes = self.client.get("/kb/changes/legacy_user?sinceRevision=0")
+
+        self.assertEqual(first_legacy.status_code, 200)
+        self.assertEqual(first_legacy.json()["revision"], 1)
+        self.assertTrue(first_legacy.json()["applied"])
+        self.assertFalse(first_legacy.json()["compatibilityNoOp"])
+        self.assertEqual(modern.status_code, 200)
+        self.assertEqual(modern.json()["revision"], 2)
+        self.assertEqual(stale_legacy.status_code, 200)
+        self.assertEqual(stale_legacy.json()["status"], "synced")
+        self.assertEqual(stale_legacy.json()["revision"], 2)
+        self.assertFalse(stale_legacy.json()["applied"])
+        self.assertTrue(stale_legacy.json()["compatibilityNoOp"])
+        self.assertEqual(stale_legacy.json()["counts"]["facts"], 1)
+        self.assertEqual(snapshot.json()["revision"], 2)
+        self.assertEqual(snapshot.json()["graph"]["facts"][0]["statement"], "newest")
+        self.assertEqual(
+            [change["operationId"] for change in changes.json()["changes"]],
+            [first_legacy.json()["operationId"], "modern-1"],
+        )
+
+    def test_sync_accepts_explicit_base_revision_and_idempotency_key(self):
+        first = self.client.post(
+            "/kb/sync",
+            json={
+                "userId": "sync_cas_user",
+                "operationId": "sync-1",
+                "baseRevision": 0,
+                "graph": {
+                    "facts": [
+                        {
+                            "id": "fact-1",
+                            "statement": "first",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ]
+                },
+            },
+        )
+        repeated = self.client.post(
+            "/kb/sync",
+            json={
+                "userId": "sync_cas_user",
+                "operationId": "sync-1",
+                "baseRevision": 0,
+                "graph": {
+                    "facts": [
+                        {
+                            "id": "fact-1",
+                            "statement": "must not replace",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ]
+                },
+            },
+        )
+        stale = self.client.post(
+            "/kb/sync",
+            json={
+                "userId": "sync_cas_user",
+                "operationId": "sync-stale",
+                "baseRevision": 0,
+                "graph": {"facts": []},
+            },
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["operationId"], "sync-1")
+        self.assertTrue(first.json()["applied"])
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.json()["revision"], 1)
+        self.assertFalse(repeated.json()["applied"])
+        self.assertTrue(repeated.json()["duplicate"])
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json()["detail"]["code"], "knowledgeRevisionConflict")
+        self.assertEqual(stale.json()["detail"]["currentRevision"], 1)
 
     def test_store_keeps_latest_care_snapshot_by_user_and_viewer(self):
         store = InMemoryStore()
@@ -2524,6 +2770,87 @@ class ArchiveAPITests(unittest.TestCase):
             len([item for item in packet["selectedContext"] if item["source"] == "archive"]),
         )
 
+        generation = packet["generationContext"]
+        generation_refs = {item["refId"] for item in generation["sourceRefs"]}
+        self.assertEqual(generation["version"], "echo-generation-context-v1")
+        self.assertIn("archive_trace_ready_1", generation_refs)
+        self.assertTrue(
+            {
+                "archive_trace_failed_empty",
+                "archive_trace_family_blocked",
+                "archive_trace_time_draft",
+            }.isdisjoint(generation_refs)
+        )
+        self.assertNotIn("草稿不应该进入回响。", generation["text"])
+        self.assertNotIn("外婆家的照片", generation["text"])
+        self.assertEqual(generation["sourceCounts"]["archive"], 1)
+        self.assertLessEqual(len(generation["text"]), generation["maxChars"])
+        self.assertRegex(generation["contentHash"], r"^sha256:[0-9a-f]{64}$")
+        self.assertNotIn("voice", generation)
+        self.assertNotIn("digitalHuman", generation)
+
+    def test_context_build_caps_generation_context_and_hashes_truncated_text_stably(self):
+        client = TestClient(app)
+        user_id = "context_user_generation_limit"
+        client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "archive_generation_limit",
+                "kind": "textNote",
+                "title": "超长记忆",
+                "note": "记" * 13000,
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        payload = {
+            "userId": user_id,
+            "intent": "echo_chat",
+            "query": "超长记忆",
+            "personaScope": "personal",
+            "digitalHumanId": user_id,
+        }
+
+        first = client.post("/context/build", json=payload).json()["contextPacket"]
+        second = client.post("/context/build", json=payload).json()["contextPacket"]
+        first_generation = first["generationContext"]
+        second_generation = second["generationContext"]
+
+        self.assertEqual(first_generation["maxChars"], 12000)
+        self.assertEqual(len(first_generation["text"]), 12000)
+        self.assertTrue(first_generation["truncated"])
+        self.assertEqual(first_generation["text"], second_generation["text"])
+        self.assertEqual(first_generation["contentHash"], second_generation["contentHash"])
+        self.assertEqual(
+            first_generation["sourceRefs"],
+            [{"source": "archive", "refId": "archive_generation_limit", "kind": "textNote"}],
+        )
+        self.assertEqual(first_generation["sourceCounts"]["archive"], 1)
+        self.assertEqual(first_generation["sourceCounts"]["persona"], 0)
+
+    def test_generation_context_has_stable_empty_contract(self):
+        builder = main_module.ContextPacketBuilder(main_module.store, main_module.settings)
+        generation = builder._build_generation_context(
+            selected_context=[],
+            archive_candidates=[],
+            kb_graph={},
+            care_snapshot=None,
+        )
+
+        self.assertEqual(generation["text"], "")
+        self.assertEqual(generation["sourceRefs"], [])
+        self.assertEqual(
+            generation["sourceCounts"],
+            {"archive": 0, "kbFact": 0, "persona": 0, "care": 0},
+        )
+        self.assertEqual(
+            generation["contentHash"],
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        self.assertFalse(generation["truncated"])
+
     def test_context_build_includes_kblite_persona_and_care_signals_in_v2_trace(self):
         client = TestClient(app)
         user_id = "context_user_v2_sources"
@@ -2623,6 +2950,36 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertNotIn("internalDebug", str(packet["selectedContext"]))
         self.assertNotIn("dailyTrend", str(packet["selectedContext"]))
 
+        generation = packet["generationContext"]
+        generation_refs = {item["refId"] for item in generation["sourceRefs"]}
+        self.assertIn("archive_context_sources_1", generation_refs)
+        self.assertIn("fact_context_1", generation_refs)
+        self.assertIn(f"persona:personal:{user_id}", generation_refs)
+        self.assertIn("care:latest", generation_refs)
+        self.assertEqual(generation["sourceCounts"]["archive"], 1)
+        self.assertEqual(generation["sourceCounts"]["kbFact"], 2)
+        self.assertEqual(generation["sourceCounts"]["persona"], 1)
+        self.assertEqual(generation["sourceCounts"]["care"], 1)
+        self.assertIn("和妈妈在西湖边散步。", generation["text"])
+        self.assertIn("妈妈喜欢在西湖边散步。", generation["text"])
+        self.assertIn("用温和语气回应。", generation["text"])
+        self.assertNotIn("internalDebug", generation["text"])
+        self.assertNotIn("dailyTrend", generation["text"])
+
+        repeated = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "query": "妈妈和西湖的记忆有哪些？",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "lifecycleMode": "sunlight",
+            },
+        ).json()["contextPacket"]["generationContext"]
+        self.assertEqual(generation["text"], repeated["text"])
+        self.assertEqual(generation["contentHash"], repeated["contentHash"])
+
     def test_context_build_filters_unopened_time_letter_for_family_recipient(self):
         client = TestClient(app)
         user_id = "context_user_time_letter_policy"
@@ -2683,6 +3040,9 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(packet["memory"]["archiveItems"], [])
         filtered_by_ref = {item["refId"]: item["reason"] for item in packet["filteredContext"]}
         self.assertEqual(filtered_by_ref["archive_time_letter_future"], "time_letter_not_open_for_recipient")
+        generation_refs = {item["refId"] for item in packet["generationContext"]["sourceRefs"]}
+        self.assertNotIn("archive_time_letter_future", generation_refs)
+        self.assertNotIn("还没到打开时间。", packet["generationContext"]["text"])
 
     def test_context_build_blocks_pending_family_viewer_and_summarizes_care_snapshot(self):
         client = TestClient(app)
@@ -2746,6 +3106,11 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertIn("family_viewer_not_active", pending_packet["fallbacks"])
         filtered_by_ref = {item["refId"]: item["reason"] for item in pending_packet["filteredContext"]}
         self.assertEqual(filtered_by_ref["archive_family_pending_blocked"], "family_viewer_not_active")
+        pending_generation_refs = {
+            item["refId"] for item in pending_packet["generationContext"]["sourceRefs"]
+        }
+        self.assertNotIn("archive_family_pending_blocked", pending_generation_refs)
+        self.assertNotIn("家庭成员未接受前不应可用。", pending_packet["generationContext"]["text"])
 
         accepted = client.post(
             f"/family/members/{user_id}/family_pending_context/accept",
@@ -2772,6 +3137,13 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(active_packet["care"]["latest"]["snapshot"]["suggestions"], ["轻声询问近况"])
         self.assertNotIn("dailyTrend", active_packet["care"]["latest"]["snapshot"])
         self.assertNotIn("internalDebug", str(active_packet["care"]["latest"]))
+        active_generation_refs = {
+            item["refId"] for item in active_packet["generationContext"]["sourceRefs"]
+        }
+        self.assertIn("archive_family_pending_blocked", active_generation_refs)
+        self.assertIn("care:latest", active_generation_refs)
+        self.assertIn("家庭成员未接受前不应可用。", active_packet["generationContext"]["text"])
+        self.assertIn("家庭关怀摘要", active_packet["generationContext"]["text"])
 
     def test_context_build_reports_fallbacks_when_voice_and_digital_human_are_unavailable(self):
         client = TestClient(app)

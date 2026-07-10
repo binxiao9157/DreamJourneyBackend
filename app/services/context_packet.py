@@ -1,3 +1,4 @@
+import hashlib
 import time
 import uuid
 from copy import deepcopy
@@ -5,11 +6,15 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.core.config import Settings
+from app.services.privacy import AI_PROCESSABLE_SCOPES
 from app.services.runtime_config import RuntimeConfigService
 
 
 class ContextPacketBuilder:
     schema_version = 1
+    generation_context_version = "echo-generation-context-v1"
+    generation_context_max_chars = 12000
+    generation_context_sources = ("archive", "kbFact", "persona", "care")
 
     def __init__(self, store: Any, settings: Settings):
         self.store = store
@@ -57,6 +62,12 @@ class ContextPacketBuilder:
         )
         selected_context, ranking_trace = self._rank_context_candidates(
             archive_trace_candidates + supplemental_trace_candidates
+        )
+        generation_context = self._build_generation_context(
+            selected_context=selected_context,
+            archive_candidates=archive_trace_candidates,
+            kb_graph=kb_graph,
+            care_snapshot=care_snapshot,
         )
         voice_profiles = self.store.list_voice_profiles(user_id)
         usable_voice_profile = self._first_usable_voice_profile(voice_profiles, persona_scope, digital_human_id, user_id)
@@ -129,6 +140,7 @@ class ContextPacketBuilder:
             "selectedContext": selected_context,
             "filteredContext": filtered_context,
             "rankingTrace": ranking_trace,
+            "generationContext": generation_context,
             "care": {
                 "latest": care_snapshot,
                 "viewerFamilyMemberID": viewer_family_member_id,
@@ -531,6 +543,193 @@ class ContextPacketBuilder:
             for index, candidate in enumerate(ranked[:24])
         ]
         return selected, ranking
+
+    def _build_generation_context(
+        self,
+        *,
+        selected_context: List[Dict[str, Any]],
+        archive_candidates: List[Dict[str, Any]],
+        kb_graph: Dict[str, Any],
+        care_snapshot: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        archive_by_ref: Dict[str, Dict[str, Any]] = {}
+        for candidate in archive_candidates:
+            item = candidate.get("item")
+            ref_id = str(candidate.get("refId") or "").strip()
+            if ref_id and isinstance(item, dict) and self._generation_allowed(item):
+                archive_by_ref.setdefault(ref_id, item)
+
+        kb_fact_by_ref: Dict[str, Dict[str, Any]] = {}
+        for index, fact in enumerate((kb_graph.get("facts") or [])[:8]):
+            if not isinstance(fact, dict) or not self._generation_allowed(fact):
+                continue
+            statement = self._generation_text_value(fact.get("statement"))
+            if not statement:
+                continue
+            ref_id = str(fact.get("id") or f"kb_fact_{index + 1}").strip()
+            if ref_id:
+                kb_fact_by_ref.setdefault(ref_id, fact)
+
+        rendered_entries: List[tuple[Dict[str, str], str]] = []
+        seen_refs = set()
+        for selected in selected_context:
+            source = str(selected.get("source") or "").strip()
+            ref_id = str(selected.get("refId") or "").strip()
+            ref_key = (source, ref_id)
+            if source not in self.generation_context_sources or not ref_id or ref_key in seen_refs:
+                continue
+
+            line = ""
+            if source == "archive":
+                line = self._archive_generation_line(archive_by_ref.get(ref_id))
+            elif source == "kbFact":
+                line = self._kb_fact_generation_line(kb_fact_by_ref.get(ref_id))
+            elif source == "persona":
+                line = self._persona_generation_line(selected)
+            elif source == "care" and ref_id == "care:latest":
+                line = self._care_generation_line(care_snapshot)
+            if not line:
+                continue
+
+            seen_refs.add(ref_key)
+            rendered_entries.append(
+                (
+                    {
+                        "source": source,
+                        "refId": ref_id,
+                        "kind": str(selected.get("kind") or "unknown"),
+                    },
+                    line,
+                )
+            )
+
+        text, source_refs, truncated = self._bounded_generation_text(rendered_entries)
+        source_counts = {source: 0 for source in self.generation_context_sources}
+        for source_ref in source_refs:
+            source = source_ref["source"]
+            source_counts[source] += 1
+
+        return {
+            "version": self.generation_context_version,
+            "text": text,
+            "sourceRefs": source_refs,
+            "sourceCounts": source_counts,
+            "contentHash": "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "maxChars": self.generation_context_max_chars,
+            "truncated": truncated,
+        }
+
+    @staticmethod
+    def _generation_allowed(item: Dict[str, Any]) -> bool:
+        privacy_metadata = item.get("privacyMetadata")
+        if not isinstance(privacy_metadata, dict):
+            return False
+        return str(privacy_metadata.get("scope") or "") in AI_PROCESSABLE_SCOPES
+
+    @staticmethod
+    def _generation_text_value(value: Any) -> str:
+        return " ".join(str(value or "").split())
+
+    @classmethod
+    def _generation_text_list(cls, value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        result: List[str] = []
+        for entry in value:
+            text = cls._generation_text_value(entry)
+            if text and text not in result:
+                result.append(text)
+        return result
+
+    @classmethod
+    def _archive_generation_line(cls, item: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(item, dict):
+            return ""
+
+        parts: List[str] = []
+        for key, label in (("title", "title"), ("note", "note"), ("description", "description")):
+            text = cls._generation_text_value(item.get(key))
+            if text:
+                parts.append(f"{label}={text}")
+        for key, label in (
+            ("detectedPeople", "people"),
+            ("detectedLocations", "locations"),
+            ("detectedScenes", "scenes"),
+            ("tags", "tags"),
+        ):
+            values = cls._generation_text_list(item.get(key))
+            if values:
+                parts.append(f"{label}={', '.join(values)}")
+        if not parts:
+            return ""
+
+        kind = cls._generation_text_value(item.get("kind")) or "unknown"
+        return f"[archive] kind={kind}; " + "; ".join(parts)
+
+    @classmethod
+    def _kb_fact_generation_line(cls, fact: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(fact, dict):
+            return ""
+        statement = cls._generation_text_value(fact.get("statement"))
+        return f"[kbFact] {statement}" if statement else ""
+
+    @classmethod
+    def _persona_generation_line(cls, selected: Dict[str, Any]) -> str:
+        signals = selected.get("signals")
+        if not isinstance(signals, dict):
+            return ""
+        parts = []
+        for key, label in (("personaScope", "scope"), ("lifecycleMode", "lifecycle")):
+            text = cls._generation_text_value(signals.get(key))
+            if text:
+                parts.append(f"{label}={text}")
+        return "[persona] " + "; ".join(parts) if parts else ""
+
+    @classmethod
+    def _care_generation_line(cls, care_snapshot: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(care_snapshot, dict):
+            return ""
+        snapshot = care_snapshot.get("snapshot")
+        if not isinstance(snapshot, dict):
+            return ""
+
+        parts: List[str] = []
+        for key, label in (("riskLevel", "risk"), ("summary", "summary"), ("trendSummary", "trend")):
+            text = cls._generation_text_value(snapshot.get(key))
+            if text:
+                parts.append(f"{label}={text}")
+        suggestions = cls._generation_text_list(snapshot.get("suggestions"))
+        if suggestions:
+            parts.append(f"suggestions={'; '.join(suggestions)}")
+        return "[care] " + "; ".join(parts) if parts else ""
+
+    @classmethod
+    def _bounded_generation_text(
+        cls,
+        entries: List[tuple[Dict[str, str], str]],
+    ) -> tuple[str, List[Dict[str, str]], bool]:
+        lines: List[str] = []
+        source_refs: List[Dict[str, str]] = []
+        truncated = False
+        current_length = 0
+
+        for source_ref, line in entries:
+            separator_length = 1 if lines else 0
+            available = cls.generation_context_max_chars - current_length - separator_length
+            if available <= 0:
+                truncated = True
+                break
+            if len(line) > available:
+                truncated = True
+                if not lines:
+                    lines.append(line[:available])
+                    source_refs.append(source_ref)
+                break
+            lines.append(line)
+            source_refs.append(source_ref)
+            current_length += separator_length + len(line)
+
+        return "\n".join(lines), source_refs, truncated
 
     @staticmethod
     def _selected_context_entry(candidate: Dict[str, Any], *, rank: int) -> Dict[str, Any]:
