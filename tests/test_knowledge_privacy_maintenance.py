@@ -85,6 +85,9 @@ class MaintenanceCursor:
         normalized = " ".join(sql.split())
         params = params or ()
         self.connection.executed.append((normalized, params))
+        if normalized == "SET LOCAL lock_timeout = '5s'":
+            self.result = None
+            return
         if normalized.startswith("SELECT pg_advisory_xact_lock"):
             self.result = {"locked": True}
             return
@@ -309,6 +312,7 @@ class KnowledgePrivacyMaintenanceTests(unittest.TestCase):
         self.assertEqual(dry_run["changed"]["receiptResults"], 2)
         self.assertEqual(dry_run["changed"]["receiptPayloadHashes"], 1)
         statements = [statement for statement, _ in connection.executed]
+        self.assertEqual(statements[0], "SET LOCAL lock_timeout = '5s'")
         user_lock_index = next(
             index
             for index, statement in enumerate(statements)

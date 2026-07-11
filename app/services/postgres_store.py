@@ -922,6 +922,7 @@ class PostgresStore:
         receipt_hash_updates = []
         try:
             with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute("SET LOCAL lock_timeout = '5s'")
                 cursor.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
                     ("knowledge-privacy-metadata-maintenance:v1",),
