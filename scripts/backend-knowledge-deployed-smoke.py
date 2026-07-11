@@ -94,7 +94,7 @@ def main():
         access_token=access_token,
     )
     base_revision = int(synced.get("revision") or 0)
-    require(base_revision >= 1, "sync must return a positive revision")
+    require(base_revision == 1, "fresh deployed smoke user must start at revision 1")
 
     second_statement = f"院子里曾经种过桂花树 {suffix}"
     mutation_fact_id = f"knowledge_deployed_mutation_{suffix}"
@@ -168,6 +168,69 @@ def main():
     require(change_items[0].get("mutationSchemaVersion") == 2, "change feed must expose V2 metadata")
     require(change_items[0].get("mutation") == applied.get("mutation"), "change feed mutation mismatch")
 
+    first_page = request_json(
+        "GET",
+        f"/kb/changes/{user_id}?sinceRevision=0&limit=1",
+        access_token=access_token,
+    )
+    require(first_page.get("targetRevision") == applied_revision, "first page must pin current revision")
+    require(first_page.get("currentRevision") == applied_revision, "paged current revision must equal target")
+    require(first_page.get("nextSinceRevision") == 1, "first page watermark must advance once")
+    require(first_page.get("hasMore") is True, "first page must report a remaining revision")
+    require(first_page.get("pageLimit") == 1, "page limit must round-trip")
+    require(
+        [item.get("revision") for item in first_page.get("changes") or []] == [1],
+        "first page must contain only revision 1",
+    )
+
+    post_target_fact_id = f"knowledge_deployed_post_target_{suffix}"
+    post_target = request_json(
+        "POST",
+        "/kb/mutations",
+        {
+            "userId": user_id,
+            "operationId": f"knowledge-deployed-post-target-{suffix}",
+            "baseRevision": applied_revision,
+            "mutationSchemaVersion": 2,
+            "upserts": {
+                "people": [],
+                "places": [],
+                "events": [],
+                "facts": [
+                    {
+                        "id": post_target_fact_id,
+                        "statement": f"分页固定目标后的新知识 {suffix}",
+                        "confidence": "high",
+                        "privacyMetadata": {
+                            "scope": "generationAllowed",
+                            "sourceRefs": [
+                                {"kind": "qaSmoke", "id": f"post-target-{suffix}", "title": "分页验收"},
+                            ],
+                        },
+                    },
+                ],
+            },
+            "tombstones": [],
+        },
+        access_token=access_token,
+    )
+    latest_revision = int(post_target.get("revision") or 0)
+    require(latest_revision == applied_revision + 1, "post-target mutation must create a newer revision")
+
+    second_page = request_json(
+        "GET",
+        f"/kb/changes/{user_id}?sinceRevision=1&targetRevision={applied_revision}&limit=1",
+        access_token=access_token,
+    )
+    require(second_page.get("targetRevision") == applied_revision, "later page must retain the pinned target")
+    require(second_page.get("currentRevision") == applied_revision, "new writes must not move paged current")
+    require(second_page.get("nextSinceRevision") == applied_revision, "terminal watermark must reach target")
+    require(second_page.get("hasMore") is False, "target page must be terminal")
+    require(
+        [item.get("revision") for item in second_page.get("changes") or []] == [applied_revision],
+        "post-target revision must not enter the pinned pagination run",
+    )
+
     legacy_retry = request_json(
         "POST",
         "/kb/sync",
@@ -175,7 +238,7 @@ def main():
         access_token=access_token,
     )
     require(legacy_retry.get("compatibilityNoOp") is True, "stale legacy sync must become a no-op")
-    require(int(legacy_retry.get("revision") or 0) == applied_revision, "legacy no-op must keep revision")
+    require(int(legacy_retry.get("revision") or 0) == latest_revision, "legacy no-op must keep revision")
     snapshot = request_json(
         "GET",
         f"/kb/snapshot/{user_id}",
@@ -225,7 +288,7 @@ def main():
     )
     require((conflict.get("detail") or {}).get("code") == "knowledgeRevisionConflict", "conflict code mismatch")
     require(
-        int((conflict.get("detail") or {}).get("currentRevision") or 0) == applied_revision,
+        int((conflict.get("detail") or {}).get("currentRevision") or 0) == latest_revision,
         "conflict must expose current revision",
     )
 
@@ -240,6 +303,9 @@ def main():
                 "tombstoneVerified": True,
                 "legacySyncNoOpVerified": True,
                 "changeCount": len(change_items),
+                "stablePaginationVerified": True,
+                "paginationTargetRevision": applied_revision,
+                "postTargetRevisionExcluded": True,
                 "generationVersion": generation.get("version"),
                 "generationSourceCount": len(generation.get("sourceRefs") or []),
                 "generationHashVerified": True,
