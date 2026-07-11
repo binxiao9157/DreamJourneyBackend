@@ -129,6 +129,35 @@ class PrivacyFilteringTests(unittest.TestCase):
             "档案素材",
         )
 
+    def test_backend_sync_uses_canonical_and_explicit_legacy_source_titles(self):
+        graph = {
+            "people": [
+                {
+                    "id": "p1",
+                    "privacyMetadata": {
+                        "scope": "generationAllowed",
+                        "sourceRefs": [
+                            {"kind": "conversationPhoto", "id": "photo-1"},
+                            {"kind": "conversationSession", "id": "session-1"},
+                            {"kind": "archiveImageAnalysis", "id": "analysis-1"},
+                        ],
+                    },
+                }
+            ],
+            "places": [],
+            "events": [],
+            "facts": [],
+        }
+
+        source_refs = filter_syncable_graph(graph)["people"][0]["privacyMetadata"][
+            "sourceRefs"
+        ]
+
+        self.assertEqual(
+            [item["title"] for item in source_refs],
+            ["对话照片", "旧版对话会话来源", "旧版档案图像分析"],
+        )
+
     def test_care_snapshot_sanitizer_keeps_only_aggregate_fields(self):
         snapshot = {
             "generatedAt": "2026-06-13T00:00:00Z",
@@ -804,6 +833,7 @@ class TokenAndProxyTests(unittest.TestCase):
                     "userId": "u1",
                     "extractionSchemaVersion": 2,
                     "sourcePolicy": "userEvidenceOnly",
+                    "sessionId": 77,
                     "turns": [
                         {"index": 0, "role": "user", "text": "我叫陈建国。"},
                         {"index": 1, "role": "assistant", "text": "你住在南京。"},
@@ -820,6 +850,17 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(payload["extraction"]["facts"], [])
         self.assertEqual(payload["evidencePolicy"]["acceptedEntityCount"], 1)
         self.assertEqual(payload["evidencePolicy"]["filteredEntityCount"], 3)
+        proposal = payload["mutationProposal"]
+        self.assertEqual(len(proposal["upserts"]["people"]), 1)
+        self.assertEqual(proposal["upserts"]["places"], [])
+        self.assertEqual(proposal["upserts"]["events"], [])
+        self.assertEqual(proposal["upserts"]["facts"], [])
+        self.assertEqual(
+            proposal["upserts"]["people"][0]["privacyMetadata"]["sourceRefs"][0][
+                "id"
+            ],
+            "session-77:turn-0",
+        )
         self.assertNotIn("turns", payload["context"])
         self.assertEqual(request_extraction.call_args.kwargs["source_policy"], "userEvidenceOnly")
 

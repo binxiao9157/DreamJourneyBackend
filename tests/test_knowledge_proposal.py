@@ -227,12 +227,113 @@ class KnowledgeProposalBuilderTests(unittest.TestCase):
                 self.assertEqual(
                     entity["privacyMetadata"]["sourceRefs"][0]["title"], "对话来源"
                 )
+                self.assertEqual(
+                    entity["privacyMetadata"]["sourceRefs"][0]["id"],
+                    "session-42:turn-0",
+                )
         self.assertEqual(person["evidenceStatus"], "observed")
         self.assertEqual(fact["evidenceStatus"], "observed")
         self.assertEqual(candidate["evidenceStatus"], "candidate")
         self.assertNotIn("RAW_", str(proposal))
         self.assertNotIn("陈建国", str(proposal["proposalPolicy"]))
         normalize_kb_mutation_v2(proposal["upserts"], proposal["tombstones"])
+
+    def test_entity_turn_refs_are_canonical_and_preserve_only_existing_sources(self):
+        context = safe_context(31)
+        context["privacyMetadata"]["sourceRefs"] = [
+            {
+                "kind": "conversationSession",
+                "id": "request-session-ref",
+                "title": "must-not-be-authoritative",
+            },
+            {
+                "kind": "conversationTurn",
+                "id": "request-turn-ref",
+                "title": "must-not-be-authoritative",
+            },
+            {
+                "kind": "conversationPhoto",
+                "id": "photo-1",
+                "title": "private photo title",
+            },
+        ]
+        proposal = build_knowledge_mutation_proposal(
+            user_id="user-1",
+            persona_scope="personal",
+            digital_human_id=None,
+            extraction={
+                "people": [
+                    {
+                        "name": "陈建国",
+                        "sourceTurnIndices": [2, 0, 2],
+                    }
+                ],
+                "places": [
+                    {
+                        "name": "南京",
+                        "sourceTurnIndices": [1],
+                    }
+                ],
+            },
+            safe_context=context,
+            snapshot={
+                "revision": 7,
+                "graph": {
+                    "people": [
+                        {
+                            "id": "person-1",
+                            "name": "陈建国",
+                            "privacyMetadata": {
+                                "scope": "generationAllowed",
+                                "sourceRefs": [
+                                    {
+                                        "kind": "conversationTurn",
+                                        "id": "session-9:turn-1",
+                                        "title": "old raw title",
+                                    },
+                                    {
+                                        "kind": "conversationSession",
+                                        "id": "legacy-session-9",
+                                        "title": "old legacy title",
+                                    },
+                                    {
+                                        "kind": "memoryArchiveItem",
+                                        "id": "archive-1",
+                                        "title": "old archive title",
+                                    },
+                                ],
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        source_refs = proposal["upserts"]["people"][0]["privacyMetadata"]["sourceRefs"]
+        self.assertEqual(
+            [(item["kind"], item["id"]) for item in source_refs],
+            [
+                ("conversationTurn", "session-9:turn-1"),
+                ("conversationSession", "legacy-session-9"),
+                ("memoryArchiveItem", "archive-1"),
+                ("conversationTurn", "session-31:turn-2"),
+                ("conversationTurn", "session-31:turn-0"),
+            ],
+        )
+        self.assertNotIn("request-session-ref", str(source_refs))
+        self.assertNotIn("request-turn-ref", str(source_refs))
+        self.assertEqual(source_refs[1]["title"], "旧版对话会话来源")
+        self.assertEqual(source_refs[2]["title"], "档案素材")
+        self.assertNotIn("photo-1", str(source_refs))
+        place_source_refs = proposal["upserts"]["places"][0]["privacyMetadata"][
+            "sourceRefs"
+        ]
+        self.assertEqual(
+            [(item["kind"], item["id"]) for item in place_source_refs],
+            [("conversationTurn", "session-31:turn-1")],
+        )
+        self.assertNotIn("session-31:turn-0", str(place_source_refs))
+        self.assertNotIn("session-31:turn-2", str(place_source_refs))
 
 
 class KnowledgeProposalEndpointTests(unittest.TestCase):
@@ -290,6 +391,18 @@ class KnowledgeProposalEndpointTests(unittest.TestCase):
         self.assertEqual(payload["extraction"], provider_extraction)
         self.assertEqual(payload["evidencePolicy"]["acceptedEntityCount"], 1)
         self.assertEqual(payload["mutationProposal"]["baseRevision"], 1)
+        self.assertEqual(
+            payload["mutationProposal"]["upserts"]["people"][0][
+                "privacyMetadata"
+            ]["sourceRefs"],
+            [
+                {
+                    "kind": "conversationTurn",
+                    "id": "session-12:turn-0",
+                    "title": "对话来源",
+                }
+            ],
+        )
         self.assertEqual(
             payload["mutationProposal"]["upserts"]["people"][0]["id"], "legacy-person"
         )

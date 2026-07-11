@@ -46,6 +46,7 @@ from app.services.knowledge_proposal import (
     KnowledgeProposalValidationError,
     build_knowledge_mutation_proposal,
 )
+from app.services.knowledge_source_ref_audit import audit_knowledge_source_refs
 from app.services.knowledge_governance import (
     GOVERNANCE_SCHEMA_VERSION,
     KnowledgeGovernanceNotFound,
@@ -1815,6 +1816,14 @@ def kb_changes(
         "hasMore": has_more,
         "pageLimit": limit,
         "changes": changes,
+    }
+
+
+@app.get("/kb/source-ref-audit/{user_id}")
+def kb_source_ref_audit(user_id: str) -> Dict[str, Any]:
+    return {
+        "userId": user_id,
+        **audit_knowledge_source_refs(store.get_kb_snapshot_record(user_id)),
     }
 
 

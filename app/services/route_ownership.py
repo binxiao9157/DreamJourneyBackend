@@ -132,6 +132,7 @@ class RouteOwnershipRegistry:
             _owner_body("POST", "/kb/governance/actions", "knowledgeOwner"),
             _owner_path("GET", "/kb/snapshot/{user_id}", "knowledgeOwner"),
             _owner_path("GET", "/kb/changes/{user_id}", "knowledgeOwner"),
+            _owner_path("GET", "/kb/source-ref-audit/{user_id}", "knowledgeOwner"),
             _owner_body("POST", "/kb/extract", "knowledgeOwner"),
             _owner_body("POST", "/memories", "memoryOwner"),
             _owner_path("GET", "/memories/{user_id}", "memoryOwner"),

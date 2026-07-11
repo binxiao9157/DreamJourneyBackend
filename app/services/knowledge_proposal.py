@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from app.services.knowledge_store import KNOWLEDGE_ENTITY_TYPES, normalize_kb_mutation_v2
+from app.services.knowledge_source_refs import source_ref_title
 from app.services.privacy import SYNCABLE_SCOPES
 
 
@@ -74,17 +75,6 @@ EXTRACTION_FIELDS = {
     "events": {"title", "description", "year", "month"},
     "facts": {"statement", "confidence"},
 }
-SOURCE_TITLE_BY_KIND = {
-    "conversationTurn": "\u5bf9\u8bdd\u6765\u6e90",
-    "memoryArchiveItem": "\u6863\u6848\u7d20\u6750",
-    "timeMailboxLetter": "\u65f6\u7a7a\u4fe1\u4ef6",
-    "kbLiteEntity": "\u77e5\u8bc6\u6761\u76ee",
-    "memoir": "\u56de\u5fc6\u5f55",
-    "importRecord": "\u5bfc\u5165\u8bb0\u5f55",
-    "userAuthorization": "\u6388\u6743\u8bb0\u5f55",
-}
-
-
 class KnowledgeProposalValidationError(ValueError):
     pass
 
@@ -116,6 +106,7 @@ def build_knowledge_mutation_proposal(
         raise KnowledgeProposalValidationError("safe context must be an object")
 
     privacy_metadata = _safe_privacy_metadata(safe_context.get("privacyMetadata"))
+    source_session_id = _source_session_id(safe_context)
     source_session_ids = _source_session_ids(safe_context)
     snapshot_record = snapshot if isinstance(snapshot, dict) else {}
     graph = snapshot_record.get("graph")
@@ -168,6 +159,7 @@ def build_knowledge_mutation_proposal(
                     persona_scope=normalized_scope,
                     digital_human_id=normalized_digital_human_id,
                     privacy_metadata=privacy_metadata,
+                    source_session_id=source_session_id,
                     source_session_ids=source_session_ids,
                 )
                 continue
@@ -199,6 +191,7 @@ def build_knowledge_mutation_proposal(
                     persona_scope=normalized_scope,
                     digital_human_id=normalized_digital_human_id,
                     privacy_metadata=privacy_metadata,
+                    source_session_id=source_session_id,
                     source_session_ids=source_session_ids,
                 ),
             }
@@ -380,6 +373,7 @@ def _build_upsert(
     persona_scope: str,
     digital_human_id: str,
     privacy_metadata: Dict[str, Any],
+    source_session_id: int,
     source_session_ids: List[int],
 ) -> Dict[str, Any]:
     upsert: Dict[str, Any] = {"id": entity_id}
@@ -403,7 +397,12 @@ def _build_upsert(
         upsert["confidence"] = "medium"
 
     existing_privacy = existing.get("privacyMetadata") if existing is not None else None
-    upsert["privacyMetadata"] = _merge_privacy_metadata(existing_privacy, privacy_metadata)
+    upsert["privacyMetadata"] = _merge_privacy_metadata(
+        existing_privacy,
+        privacy_metadata,
+        source_session_id=source_session_id,
+        source_turn_indices=extracted.get("sourceTurnIndices"),
+    )
     upsert["ownerUserId"] = owner_user_id
     upsert["personaScope"] = persona_scope
     upsert["digitalHumanId"] = digital_human_id
@@ -472,17 +471,34 @@ def _safe_source_refs(value: Any) -> List[Dict[str, str]]:
             {
                 "kind": kind,
                 "id": source_id,
-                "title": SOURCE_TITLE_BY_KIND.get(kind, "\u6765\u6e90\u8bb0\u5f55"),
+                "title": source_ref_title(kind),
             }
         )
     return result
 
 
-def _merge_privacy_metadata(existing: Any, current: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_privacy_metadata(
+    existing: Any,
+    current: Dict[str, Any],
+    *,
+    source_session_id: int,
+    source_turn_indices: Any,
+) -> Dict[str, Any]:
     existing_refs = _safe_source_refs(existing.get("sourceRefs")) if isinstance(existing, dict) else []
+    canonical_turn_refs = [
+        {
+            "kind": "conversationTurn",
+            "id": f"session-{source_session_id}:turn-{turn_index}",
+            "title": source_ref_title("conversationTurn"),
+        }
+        for turn_index in _unique_ints(source_turn_indices)
+    ]
     return {
         "scope": current["scope"],
-        "sourceRefs": _merge_source_refs(existing_refs, current.get("sourceRefs", [])),
+        "sourceRefs": _merge_source_refs(
+            existing_refs,
+            canonical_turn_refs,
+        ),
     }
 
 
@@ -507,6 +523,15 @@ def _source_session_ids(safe_context: Dict[str, Any]) -> List[int]:
     if "sessionId" in safe_context:
         values.append(safe_context.get("sessionId"))
     return _unique_ints(values)
+
+
+def _source_session_id(safe_context: Dict[str, Any]) -> int:
+    value = safe_context.get("sessionId")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise KnowledgeProposalValidationError(
+            "safe context sessionId must be a non-negative integer"
+        )
+    return value
 
 
 def _unique_ints(*groups: Any) -> List[int]:

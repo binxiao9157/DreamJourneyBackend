@@ -17,6 +17,7 @@ def main() -> None:
         "userId": "knowledge_evidence_smoke_user",
         "extractionSchemaVersion": 2,
         "sourcePolicy": "userEvidenceOnly",
+        "sessionId": 20260711,
         "turns": [
             {"index": 0, "role": "user", "text": "我父亲年轻时在南京工作。"},
             {"index": 1, "role": "assistant", "text": "他一定很喜欢南京。"},

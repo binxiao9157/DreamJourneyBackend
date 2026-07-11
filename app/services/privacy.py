@@ -1,6 +1,8 @@
 from copy import deepcopy
 from typing import Any, Dict, Iterable, List
 
+from app.services.knowledge_source_refs import source_ref_title
+
 
 SYNCABLE_SCOPES = {"generationAllowed", "familyCircle"}
 AI_PROCESSABLE_SCOPES = {"generationAllowed"}
@@ -152,15 +154,7 @@ def _filter_ids(values: Iterable[str], allowed: set) -> List[str]:
 
 
 def _external_source_title(kind: str) -> str:
-    return {
-        "conversationTurn": "对话来源",
-        "memoryArchiveItem": "档案素材",
-        "timeMailboxLetter": "时空信件",
-        "kbLiteEntity": "知识条目",
-        "memoir": "回忆录",
-        "importRecord": "导入记录",
-        "userAuthorization": "授权记录",
-    }.get(kind, "来源记录")
+    return source_ref_title(kind)
 
 
 def _redact_source_ref_titles(entity: Dict[str, Any]) -> Dict[str, Any]:
