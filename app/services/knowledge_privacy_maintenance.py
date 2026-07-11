@@ -7,6 +7,11 @@ from app.services.knowledge_store import (
     KNOWLEDGE_ENTITY_TYPES,
     knowledge_operation_payload_fingerprint,
     normalize_kb_mutation_v2,
+    is_compact_knowledge_operation_receipt_result,
+)
+from app.services.knowledge_receipt_maintenance import (
+    KnowledgeReceiptMaintenanceError,
+    canonicalize_compact_knowledge_receipt_result,
 )
 
 
@@ -90,6 +95,12 @@ def canonicalize_persisted_receipt_result(
     if not isinstance(result, dict):
         raise KnowledgePrivacyMetadataError("receipt result must be an object")
 
+    if is_compact_knowledge_operation_receipt_result(result):
+        try:
+            return canonicalize_compact_knowledge_receipt_result(result)
+        except KnowledgeReceiptMaintenanceError as exc:
+            raise KnowledgePrivacyMetadataError(str(exc)) from exc
+
     canonical = deepcopy(result)
     if "graph" in canonical:
         canonical["graph"] = canonicalize_persisted_knowledge_graph(
@@ -115,6 +126,8 @@ def canonical_receipt_payload_hash(
     canonical_result: Dict[str, Any],
     current_payload_hash: str,
 ) -> str:
+    if is_compact_knowledge_operation_receipt_result(canonical_result):
+        return current_payload_hash
     if operation_kind != KB_OPERATION_MUTATION or schema_version != 2:
         return current_payload_hash
     mutation = canonical_result.get("mutation")

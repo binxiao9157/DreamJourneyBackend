@@ -347,6 +347,37 @@ class KnowledgeGovernanceAPITests(unittest.TestCase):
             },
         )
 
+    def test_governance_compact_receipt_keeps_summary_after_change_compaction(self):
+        first = self.client.post("/kb/governance/actions", json=self.payload())
+        main_module.store._kb_changes[USER_ID] = [
+            change
+            for change in main_module.store._kb_changes[USER_ID]
+            if change["operationId"] != "govern-fact"
+        ]
+
+        duplicate = self.client.post(
+            "/kb/governance/actions",
+            json=self.payload(base_revision=999),
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertTrue(duplicate.json()["duplicate"])
+        self.assertTrue(duplicate.json()["receiptCompacted"])
+        self.assertEqual(duplicate.json()["originalRevision"], first.json()["revision"])
+        self.assertEqual(duplicate.json()["summary"], first.json()["summary"])
+        self.assertEqual(duplicate.json()["mutation"]["upserts"]["facts"], [])
+
+        envelope = main_module.store._kb_operation_receipts[USER_ID]["govern-fact"][
+            "result"
+        ]
+        self.assertNotIn("graph", envelope)
+        self.assertNotIn("mutation", envelope)
+        self.assertEqual(
+            envelope["governanceSummary"]["target"],
+            {"entityType": "facts", "entityId": "fact-1"},
+        )
+
     def test_endpoint_maps_invalid_correction_and_missing_target(self):
         invalid = self.payload(operation_id="invalid-correction")
         invalid["action"]["correction"] = {"ownerUserId": "other"}
@@ -482,6 +513,46 @@ class KnowledgeGovernanceAPITests(unittest.TestCase):
             },
         )
         self.assertEqual(len(main_module.store.list_kb_changes(USER_ID, 0)), 1)
+
+    def test_archive_compact_receipt_keeps_cascade_summary_without_change(self):
+        main_module.store.add_archive_item(
+            USER_ID,
+            {"id": "archive-compact", "kind": "photo", "title": "source"},
+        )
+        snapshot = main_module.store.get_kb_snapshot_record(USER_ID)
+        for entity_type in ENTITY_CASES:
+            snapshot["graph"][entity_type][0]["privacyMetadata"]["sourceRefs"] = [
+                {"kind": "memoryArchiveItem", "id": "archive-compact", "title": "private"}
+            ]
+        main_module.store._kb_snapshots[USER_ID] = snapshot
+
+        first = self.client.delete(
+            f"/archive/items/{USER_ID}/archive-compact?operationId=delete-compact"
+        )
+        main_module.store._kb_changes[USER_ID] = [
+            change
+            for change in main_module.store._kb_changes[USER_ID]
+            if change["operationId"] != "delete-compact"
+        ]
+        duplicate = self.client.delete(
+            f"/archive/items/{USER_ID}/archive-compact?operationId=delete-compact"
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertTrue(duplicate.json()["receiptCompacted"])
+        self.assertEqual(duplicate.json()["cascade"]["affectedEntityCount"], 4)
+        self.assertTrue(duplicate.json()["cascade"]["sourceMatched"])
+        self.assertEqual(main_module.store.list_archive_items(USER_ID), [])
+        receipt = main_module.store._kb_operation_receipts[USER_ID]["delete-compact"]
+        envelope = receipt["result"]
+        self.assertEqual(receipt["operationKind"], "archive.delete")
+        self.assertNotIn("operationKind", envelope)
+        self.assertEqual(
+            envelope["governanceSummary"]["sourceRef"],
+            {"kind": "memoryArchiveItem", "id": "archive-compact"},
+        )
+        self.assertNotIn("private", str(envelope))
 
 
 if __name__ == "__main__":

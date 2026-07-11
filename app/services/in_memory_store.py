@@ -10,8 +10,11 @@ from app.services.knowledge_store import (
     KB_OPERATION_MUTATION,
     KnowledgeRevisionConflict,
     apply_kb_mutation_v2,
+    compact_knowledge_operation_receipt_result,
+    is_compact_knowledge_operation_receipt_result,
     knowledge_operation_payload_fingerprint,
     normalize_kb_mutation_v2,
+    rebuild_compact_knowledge_operation_result,
     verify_knowledge_operation_receipt,
 )
 from app.services.archive_store import (
@@ -425,6 +428,8 @@ class InMemoryStore:
         operation_schema_version: Optional[int] = None,
         operation_payload: Optional[Any] = None,
         allow_revision_noop: bool = False,
+        receipt_governance_summary: Optional[Dict[str, Any]] = None,
+        record_compatibility_noop_receipt: bool = True,
     ) -> Dict[str, Any]:
         normalized_requested_mutation = None
         if mutation is not None:
@@ -456,7 +461,11 @@ class InMemoryStore:
                     operation_kind=operation_kind,
                     payload_hash=payload_hash,
                 )
-                result = deepcopy(receipt["result"])
+                result = self._rebuild_kb_operation_receipt_locked(
+                    user_id,
+                    operation_id,
+                    receipt["result"],
+                )
                 result["duplicate"] = True
                 result["operationPayloadVerified"] = True
                 return result
@@ -490,14 +499,16 @@ class InMemoryStore:
                         "mutation": None,
                         "compatibilityNoOp": True,
                     }
-                    self._store_kb_operation_receipt_locked(
-                        user_id,
-                        operation_id,
-                        operation_kind,
-                        schema_version,
-                        payload_hash,
-                        result,
-                    )
+                    if record_compatibility_noop_receipt:
+                        self._store_kb_operation_receipt_locked(
+                            user_id,
+                            operation_id,
+                            operation_kind,
+                            schema_version,
+                            payload_hash,
+                            result,
+                            governance_summary=receipt_governance_summary,
+                        )
                     return result
                 raise KnowledgeRevisionConflict(
                     current_revision=current_revision,
@@ -548,6 +559,7 @@ class InMemoryStore:
                 schema_version,
                 payload_hash,
                 result,
+                governance_summary=receipt_governance_summary,
             )
             return result
 
@@ -573,7 +585,11 @@ class InMemoryStore:
                     operation_kind=operation_kind,
                     payload_hash=payload_hash,
                 )
-                result = deepcopy(receipt["result"])
+                result = self._rebuild_kb_operation_receipt_locked(
+                    user_id,
+                    operation_id,
+                    receipt["result"],
+                )
                 result["duplicate"] = True
                 result["operationPayloadVerified"] = True
                 return result
@@ -608,13 +624,45 @@ class InMemoryStore:
         schema_version: int,
         payload_hash: str,
         result: Dict[str, Any],
+        *,
+        governance_summary: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._kb_operation_receipts.setdefault(user_id, {})[operation_id] = {
             "operationKind": operation_kind,
             "schemaVersion": schema_version,
             "payloadHash": payload_hash,
-            "result": deepcopy(result),
+            "result": compact_knowledge_operation_receipt_result(
+                result,
+                operation_id=operation_id,
+                operation_kind=operation_kind,
+                governance_summary=governance_summary,
+            ),
         }
+
+    def _rebuild_kb_operation_receipt_locked(
+        self,
+        user_id: str,
+        operation_id: str,
+        receipt_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not is_compact_knowledge_operation_receipt_result(receipt_result):
+            return deepcopy(receipt_result)
+        change = next(
+            (
+                item
+                for item in self._kb_changes.get(user_id, [])
+                if item.get("operationId") == operation_id
+            ),
+            None,
+        )
+        snapshot = self._kb_snapshots.get(user_id)
+        return rebuild_compact_knowledge_operation_result(
+            receipt_result,
+            user_id=user_id,
+            operation_id=operation_id,
+            change=None if change is None else deepcopy(change),
+            snapshot=None if snapshot is None else deepcopy(snapshot),
+        )
 
     def get_kb_snapshot(self, user_id: str) -> Optional[Dict[str, Any]]:
         with self._kb_lock:
@@ -753,6 +801,7 @@ class InMemoryStore:
         operation_id: str,
         base_revision: int,
         mutation: Optional[Dict[str, Any]] = None,
+        governance_summary: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         operation_kind = KB_OPERATION_ARCHIVE_DELETE
         schema_version = 1
@@ -770,7 +819,11 @@ class InMemoryStore:
                     operation_kind=operation_kind,
                     payload_hash=payload_hash,
                 )
-                result = deepcopy(receipt["result"])
+                result = self._rebuild_kb_operation_receipt_locked(
+                    user_id,
+                    operation_id,
+                    receipt["result"],
+                )
                 result["item"] = None
                 result["duplicate"] = True
                 result["operationPayloadVerified"] = True
@@ -857,6 +910,7 @@ class InMemoryStore:
                 schema_version,
                 payload_hash,
                 receipt_result,
+                governance_summary=governance_summary,
             )
             return result
 

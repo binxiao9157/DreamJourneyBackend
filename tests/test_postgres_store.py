@@ -1472,6 +1472,126 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(change["mutationSchemaVersion"], 1)
         self.assertIsNone(change["mutation"])
 
+    def test_postgres_receipts_are_compact_and_fallback_to_current_snapshot(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        mutation = {
+            "upserts": {
+                "facts": [
+                    {
+                        "id": "fact-1",
+                        "statement": "private postgres receipt body",
+                        "privacyMetadata": {"scope": "generationAllowed"},
+                    }
+                ]
+            },
+            "tombstones": [],
+        }
+        first = store.apply_kb_mutation(
+            "compact-user",
+            None,
+            operation_id="compact-op",
+            base_revision=0,
+            mutation=mutation,
+        )
+        envelope = connection.kb_operation_receipts["compact-user"]["compact-op"][
+            "result"
+        ]
+
+        self.assertEqual(envelope["receiptEnvelopeVersion"], 1)
+        self.assertNotIn("userId", envelope)
+        self.assertNotIn("operationId", envelope)
+        self.assertNotIn("operationKind", envelope)
+        self.assertNotIn("operationSchemaVersion", envelope)
+        self.assertNotIn("graph", envelope)
+        self.assertNotIn("mutation", envelope)
+        self.assertNotIn("private postgres receipt body", str(envelope))
+
+        from_change = store.apply_kb_mutation(
+            "compact-user",
+            None,
+            operation_id="compact-op",
+            base_revision=999,
+            mutation=mutation,
+        )
+        self.assertEqual(from_change["graph"], first["graph"])
+        self.assertEqual(from_change["mutation"], first["mutation"])
+        self.assertTrue(from_change["receiptCompacted"])
+        self.assertEqual(from_change["originalRevision"], 1)
+
+        store.apply_kb_mutation(
+            "compact-user",
+            {"facts": [{"id": "current"}]},
+            operation_id="newer-op",
+            base_revision=1,
+        )
+        connection.kb_changes["compact-user"] = [
+            change
+            for change in connection.kb_changes["compact-user"]
+            if change["operation_id"] != "compact-op"
+        ]
+        from_snapshot = store.apply_kb_mutation(
+            "compact-user",
+            None,
+            operation_id="compact-op",
+            base_revision=999,
+            mutation=mutation,
+        )
+
+        self.assertTrue(from_snapshot["receiptCompacted"])
+        self.assertEqual(from_snapshot["originalRevision"], 1)
+        self.assertEqual(from_snapshot["revision"], 2)
+        self.assertEqual(from_snapshot["graph"]["facts"][0]["id"], "current")
+        self.assertEqual(from_snapshot["mutation"], {
+            "upserts": {"people": [], "places": [], "events": [], "facts": []},
+            "tombstones": [],
+        })
+
+    def test_postgres_reads_legacy_receipt_and_validates_before_compact_lookup(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        graph = {"facts": [{"id": "fact-1"}]}
+        first = store.apply_kb_mutation(
+            "receipt-user",
+            graph,
+            operation_id="receipt-op",
+            base_revision=0,
+        )
+        receipt = connection.kb_operation_receipts["receipt-user"]["receipt-op"]
+        compact_envelope = deepcopy(receipt["result"])
+        receipt["result"] = deepcopy(first)
+
+        legacy = store.apply_kb_mutation(
+            "receipt-user",
+            graph,
+            operation_id="receipt-op",
+            base_revision=999,
+        )
+        self.assertTrue(legacy["duplicate"])
+        self.assertEqual(legacy["graph"], graph)
+
+        receipt["result"] = compact_envelope
+        connection.executed.clear()
+        with self.assertRaises(KnowledgeOperationPayloadConflict):
+            store.apply_kb_mutation(
+                "receipt-user",
+                {"facts": [{"id": "different"}]},
+                operation_id="receipt-op",
+                base_revision=999,
+            )
+        statements = [statement for statement, _ in connection.executed]
+        receipt_index = next(
+            index
+            for index, statement in enumerate(statements)
+            if "FROM kb_operation_receipts" in statement
+        )
+        self.assertFalse(
+            any(
+                "FROM kb_changes" in statement or "FROM kb_snapshots" in statement
+                for statement in statements[receipt_index + 1 :]
+            )
+        )
+
     def test_legacy_change_replay_without_receipt_is_unverified(self):
         connection = FakeConnection()
         connection.kb_changes["u1"] = [

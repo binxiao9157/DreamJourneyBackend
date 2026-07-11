@@ -1485,6 +1485,7 @@ def sync_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
     has_base_revision = payload.get("baseRevision") is not None
     base_revision = payload.get("baseRevision")
     operation_id = str(payload.get("operationId") or "").strip()
+    has_client_operation_id = bool(operation_id)
     if not user_id:
         raise HTTPException(status_code=400, detail="userId is required")
     if not isinstance(graph, dict):
@@ -1509,6 +1510,7 @@ def sync_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
             operation_schema_version=1,
             operation_payload=filtered,
             allow_revision_noop=not has_base_revision,
+            record_compatibility_noop_receipt=has_client_operation_id,
         )
     except KnowledgeOperationPayloadConflict as exc:
         raise HTTPException(
@@ -1540,7 +1542,7 @@ def sync_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
     compatibility_noop = bool(snapshot.get("compatibilityNoOp", compatibility_noop))
     response_graph = snapshot["graph"]
     duplicate = bool(snapshot.get("duplicate"))
-    return {
+    response = {
         "status": "synced",
         "userId": user_id,
         "operationId": operation_id,
@@ -1557,6 +1559,10 @@ def sync_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
             "facts": len(response_graph.get("facts", [])),
         },
     }
+    if bool(snapshot.get("receiptCompacted")):
+        response["receiptCompacted"] = True
+        response["originalRevision"] = snapshot["originalRevision"]
+    return response
 
 
 @app.get("/kb/snapshot/{user_id}")
@@ -1655,6 +1661,9 @@ def mutate_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "mutation": result["mutation"],
             }
         )
+    if bool(result.get("receiptCompacted")):
+        response["receiptCompacted"] = True
+        response["originalRevision"] = result["originalRevision"]
     return response
 
 
@@ -1715,6 +1724,7 @@ def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
                 operation_kind=KB_OPERATION_GOVERNANCE,
                 operation_schema_version=governance_schema_version,
                 operation_payload=normalized_action,
+                receipt_governance_summary=governance["summary"],
             )
     except KnowledgeGovernanceNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -1738,7 +1748,7 @@ def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
             },
         ) from exc
 
-    summary = summarize_knowledge_governance_mutation(
+    summary = result.get("governanceSummary") or summarize_knowledge_governance_mutation(
         result.get("mutation"),
         operation_id=operation_id,
     )
@@ -1747,7 +1757,7 @@ def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
             status_code=409,
             detail={"code": "knowledgeGovernanceOperationConflict"},
         )
-    return {
+    response = {
         "governanceSchemaVersion": GOVERNANCE_SCHEMA_VERSION,
         "mutationSchemaVersion": 2,
         "status": "duplicate" if result["duplicate"] else "applied",
@@ -1761,6 +1771,10 @@ def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
         "mutation": result["mutation"],
         "summary": summary,
     }
+    if bool(result.get("receiptCompacted")):
+        response["receiptCompacted"] = True
+        response["originalRevision"] = result["originalRevision"]
+    return response
 
 
 @app.get("/kb/changes/{user_id}")
@@ -2064,6 +2078,7 @@ def delete_archive_item(
             operation_id=operation_id,
             base_revision=base_revision,
             mutation=mutation,
+            governance_summary=None if governance is None else governance["summary"],
         )
     except ArchiveItemNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -2091,16 +2106,20 @@ def delete_archive_item(
 
     summary = None if governance is None else governance["summary"]
     if result["duplicate"]:
-        summary = summarize_knowledge_governance_mutation(
+        summary = result.get("governanceSummary") or summarize_knowledge_governance_mutation(
             result.get("mutation"),
             operation_id=operation_id,
         ) or summary
-        if summary is None and result.get("mutation") is not None:
+        if (
+            summary is None
+            and result.get("mutation") is not None
+            and not bool(result.get("receiptCompacted"))
+        ):
             raise HTTPException(
                 status_code=409,
                 detail={"code": "knowledgeGovernanceOperationConflict"},
             )
-    return {
+    response = {
         "status": "duplicate" if result["duplicate"] else "deleted",
         "id": item_id,
         "item": result["item"],
@@ -2114,6 +2133,10 @@ def delete_archive_item(
             "sourceMatched": summary is not None,
         },
     }
+    if bool(result.get("receiptCompacted")):
+        response["receiptCompacted"] = True
+        response["originalRevision"] = result["originalRevision"]
+    return response
 
 
 @app.post("/archive/image-analysis")

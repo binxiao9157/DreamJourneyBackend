@@ -1234,6 +1234,126 @@ class StoreTests(unittest.TestCase):
 
         self.assertNotIn("u1", store._kb_operation_receipts)
 
+    def test_memory_receipts_are_compact_and_rebuild_from_change_then_snapshot(self):
+        store = InMemoryStore()
+        mutation = {
+            "upserts": {
+                "facts": [
+                    {
+                        "id": "fact-1",
+                        "statement": "private receipt body",
+                        "privacyMetadata": {"scope": "generationAllowed"},
+                    }
+                ]
+            },
+            "tombstones": [],
+        }
+        first = store.apply_kb_mutation(
+            "compact-user",
+            None,
+            operation_id="compact-op",
+            base_revision=0,
+            mutation=mutation,
+        )
+
+        envelope = store._kb_operation_receipts["compact-user"]["compact-op"]["result"]
+        self.assertEqual(envelope["receiptEnvelopeVersion"], 1)
+        self.assertEqual(envelope["revision"], 1)
+        self.assertNotIn("userId", envelope)
+        self.assertNotIn("operationId", envelope)
+        self.assertNotIn("operationKind", envelope)
+        self.assertNotIn("operationSchemaVersion", envelope)
+        self.assertNotIn("graph", envelope)
+        self.assertNotIn("mutation", envelope)
+        self.assertNotIn("private receipt body", str(envelope))
+
+        from_change = store.apply_kb_mutation(
+            "compact-user",
+            None,
+            operation_id="compact-op",
+            base_revision=999,
+            mutation=mutation,
+        )
+        self.assertEqual(from_change["graph"], first["graph"])
+        self.assertEqual(from_change["mutation"], first["mutation"])
+        self.assertTrue(from_change["receiptCompacted"])
+        self.assertEqual(from_change["originalRevision"], 1)
+
+        store.apply_kb_mutation(
+            "compact-user",
+            {"facts": [{"id": "fact-2", "statement": "current"}]},
+            operation_id="newer-op",
+            base_revision=1,
+        )
+        store._kb_changes["compact-user"] = [
+            change
+            for change in store._kb_changes["compact-user"]
+            if change["operationId"] != "compact-op"
+        ]
+        from_snapshot = store.apply_kb_mutation(
+            "compact-user",
+            None,
+            operation_id="compact-op",
+            base_revision=999,
+            mutation=mutation,
+        )
+        self.assertTrue(from_snapshot["receiptCompacted"])
+        self.assertEqual(from_snapshot["originalRevision"], 1)
+        self.assertEqual(from_snapshot["revision"], 2)
+        self.assertEqual(from_snapshot["graph"]["facts"][0]["id"], "fact-2")
+        self.assertEqual(
+            from_snapshot["mutation"],
+            {
+                "upserts": {
+                    "people": [],
+                    "places": [],
+                    "events": [],
+                    "facts": [],
+                },
+                "tombstones": [],
+            },
+        )
+
+    def test_memory_reads_legacy_full_receipt_and_checks_fingerprint_first(self):
+        store = InMemoryStore()
+        graph = {"facts": [{"id": "legacy-fact"}]}
+        first = store.apply_kb_mutation(
+            "legacy-receipt-user",
+            graph,
+            operation_id="legacy-receipt-op",
+            base_revision=0,
+        )
+        receipt = store._kb_operation_receipts["legacy-receipt-user"]["legacy-receipt-op"]
+        receipt["result"] = deepcopy(first)
+
+        legacy_replay = store.apply_kb_mutation(
+            "legacy-receipt-user",
+            graph,
+            operation_id="legacy-receipt-op",
+            base_revision=999,
+        )
+        self.assertTrue(legacy_replay["duplicate"])
+        self.assertEqual(legacy_replay["graph"], graph)
+
+        receipt["result"] = {
+            "receiptEnvelopeVersion": 1,
+            "userId": "legacy-receipt-user",
+            "operationId": "legacy-receipt-op",
+            "operationKind": "kb.mutation",
+            "operationSchemaVersion": 1,
+            "revision": 1,
+            "mutationSchemaVersion": 1,
+        }
+        store._kb_changes["legacy-receipt-user"] = []
+        store._kb_snapshots.pop("legacy-receipt-user")
+        with self.assertRaises(KnowledgeOperationPayloadConflict):
+            store.apply_kb_mutation(
+                "legacy-receipt-user",
+                {"facts": [{"id": "different"}]},
+                operation_id="legacy-receipt-op",
+                base_revision=999,
+            )
+
 
 class KnowledgeSyncAPITests(unittest.TestCase):
     def setUp(self):
@@ -1833,6 +1953,94 @@ class KnowledgeSyncAPITests(unittest.TestCase):
             [change["operationId"] for change in changes.json()["changes"]],
             [first_legacy.json()["operationId"], "modern-1"],
         )
+
+    def test_server_generated_legacy_sync_noop_does_not_store_receipt(self):
+        first = self.client.post(
+            "/kb/sync",
+            json={"userId": "generated-noop-user", "graph": {"facts": []}},
+        )
+        modern = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "generated-noop-user",
+                "operationId": "generated-noop-modern",
+                "baseRevision": 1,
+                "graph": {"facts": [{"id": "newest"}]},
+            },
+        )
+        stale = self.client.post(
+            "/kb/sync",
+            json={"userId": "generated-noop-user", "graph": {"facts": []}},
+        )
+
+        receipts = main_module.store._kb_operation_receipts["generated-noop-user"]
+        self.assertTrue(first.json()["applied"])
+        self.assertEqual(modern.status_code, 200, modern.text)
+        self.assertTrue(stale.json()["compatibilityNoOp"])
+        self.assertNotIn(stale.json()["operationId"], receipts)
+        self.assertIn(first.json()["operationId"], receipts)
+        self.assertIn("generated-noop-modern", receipts)
+        sync_receipt = receipts[first.json()["operationId"]]
+        sync_envelope = sync_receipt["result"]
+        self.assertEqual(sync_receipt["operationKind"], "kb.sync")
+        self.assertNotIn("operationKind", sync_envelope)
+        self.assertNotIn("graph", sync_envelope)
+        self.assertNotIn("mutation", sync_envelope)
+
+    def test_mutation_api_marks_snapshot_fallback_after_receipt_change_compaction(self):
+        mutation = {
+            "userId": "api-compact-user",
+            "operationId": "api-compact-op",
+            "baseRevision": 0,
+            "mutationSchemaVersion": 2,
+            "upserts": {
+                "facts": [
+                    {
+                        "id": "fact-1",
+                        "statement": "original",
+                        "privacyMetadata": {"scope": "generationAllowed"},
+                    }
+                ]
+            },
+            "tombstones": [],
+        }
+        first = self.client.post("/kb/mutations", json=mutation)
+        newer = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "api-compact-user",
+                "operationId": "api-newer-op",
+                "baseRevision": 1,
+                "graph": {
+                    "facts": [
+                        {
+                            "id": "current",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ]
+                },
+            },
+        )
+        main_module.store._kb_changes["api-compact-user"] = [
+            change
+            for change in main_module.store._kb_changes["api-compact-user"]
+            if change["operationId"] != "api-compact-op"
+        ]
+        duplicate = self.client.post(
+            "/kb/mutations",
+            json={**mutation, "baseRevision": 999},
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(newer.status_code, 200, newer.text)
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        body = duplicate.json()
+        self.assertTrue(body["duplicate"])
+        self.assertTrue(body["receiptCompacted"])
+        self.assertEqual(body["originalRevision"], 1)
+        self.assertEqual(body["revision"], 2)
+        self.assertEqual(body["graph"]["facts"][0]["id"], "current")
+        self.assertEqual(body["mutation"]["upserts"]["facts"], [])
 
     def test_sync_accepts_explicit_base_revision_and_idempotency_key(self):
         first = self.client.post(

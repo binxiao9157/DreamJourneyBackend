@@ -1,5 +1,6 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import json
 from math import ceil
 from typing import Any, Callable, Dict, List, Optional
 import uuid
@@ -12,8 +13,11 @@ from app.services.knowledge_store import (
     KB_OPERATION_MUTATION,
     KnowledgeRevisionConflict,
     apply_kb_mutation_v2,
+    compact_knowledge_operation_receipt_result,
+    is_compact_knowledge_operation_receipt_result,
     knowledge_operation_payload_fingerprint,
     normalize_kb_mutation_v2,
+    rebuild_compact_knowledge_operation_result,
     verify_knowledge_operation_receipt,
 )
 from app.services.knowledge_privacy_maintenance import (
@@ -22,6 +26,9 @@ from app.services.knowledge_privacy_maintenance import (
     canonicalize_persisted_knowledge_graph,
     canonicalize_persisted_knowledge_mutation,
     canonicalize_persisted_receipt_result,
+)
+from app.services.knowledge_receipt_maintenance import (
+    compact_persisted_knowledge_receipt_result,
 )
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
@@ -638,6 +645,8 @@ class PostgresStore:
         operation_schema_version: Optional[int] = None,
         operation_payload: Optional[Any] = None,
         allow_revision_noop: bool = False,
+        receipt_governance_summary: Optional[Dict[str, Any]] = None,
+        record_compatibility_noop_receipt: bool = True,
     ) -> Dict[str, Any]:
         normalized_requested_mutation = None
         if mutation is not None:
@@ -734,15 +743,17 @@ class PostgresStore:
                             "mutation": None,
                             "compatibilityNoOp": True,
                         }
-                        self._insert_kb_operation_receipt_cursor(
-                            cursor,
-                            user_id,
-                            operation_id,
-                            operation_kind=operation_kind,
-                            schema_version=schema_version,
-                            payload_hash=payload_hash,
-                            result=result,
-                        )
+                        if record_compatibility_noop_receipt:
+                            self._insert_kb_operation_receipt_cursor(
+                                cursor,
+                                user_id,
+                                operation_id,
+                                operation_kind=operation_kind,
+                                schema_version=schema_version,
+                                payload_hash=payload_hash,
+                                result=result,
+                                governance_summary=receipt_governance_summary,
+                            )
                         connection.commit()
                         return result
                     raise KnowledgeRevisionConflict(
@@ -807,6 +818,7 @@ class PostgresStore:
                     schema_version=schema_version,
                     payload_hash=payload_hash,
                     result=result,
+                    governance_summary=receipt_governance_summary,
                 )
             connection.commit()
             return result
@@ -847,7 +859,41 @@ class PostgresStore:
                 operation_kind=operation_kind,
                 payload_hash=payload_hash,
             )
-            result = deepcopy(receipt["result"])
+            receipt_result = receipt["result"]
+            if is_compact_knowledge_operation_receipt_result(receipt_result):
+                existing = self._fetchone(
+                    """
+                    SELECT revision, graph, mutation, created_at
+                    FROM kb_changes
+                    WHERE user_id = %s AND operation_id = %s
+                    """,
+                    (user_id, operation_id),
+                )
+                snapshot = None
+                if existing is None:
+                    snapshot_row = self._fetchone(
+                        """
+                        SELECT graph, revision, updated_at
+                        FROM kb_snapshots
+                        WHERE user_id = %s
+                        """,
+                        (user_id,),
+                    )
+                    if snapshot_row is not None:
+                        snapshot = {
+                            "graph": deepcopy(snapshot_row.get("graph") or {}),
+                            "revision": int(snapshot_row.get("revision") or 0),
+                            "updatedAt": self._iso_value(snapshot_row.get("updated_at")),
+                        }
+                result = rebuild_compact_knowledge_operation_result(
+                    receipt_result,
+                    user_id=user_id,
+                    operation_id=operation_id,
+                    change=self._kb_change_replay_row(existing),
+                    snapshot=snapshot,
+                )
+            else:
+                result = deepcopy(receipt_result)
             result["duplicate"] = True
             result["operationPayloadVerified"] = True
             return result
@@ -1159,6 +1205,449 @@ class PostgresStore:
                 except Exception:
                     self._rollback(coordinator)
             self._close(coordinator)
+
+    def maintain_knowledge_operation_receipts(
+        self,
+        keep_days: int = 30,
+        batch_size: int = 100,
+        apply: bool = False,
+        lock_timeout_ms: int = 5000,
+        statement_timeout_ms: int = 30000,
+    ) -> Dict[str, Any]:
+        if (
+            isinstance(keep_days, bool)
+            or not isinstance(keep_days, int)
+            or keep_days < 0
+        ):
+            raise ValueError("keep_days must be a non-negative integer")
+        for name, value in (
+            ("batch_size", batch_size),
+            ("lock_timeout_ms", lock_timeout_ms),
+            ("statement_timeout_ms", statement_timeout_ms),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if not isinstance(apply, bool):
+            raise ValueError("apply must be a boolean")
+
+        created_at_cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
+        report: Dict[str, Any] = {
+            "schemaVersion": 1,
+            "mode": "apply" if apply else "dryRun",
+            "status": "ok",
+            "retention": {
+                "keepDays": keep_days,
+                "createdAtCutoff": created_at_cutoff.isoformat(),
+            },
+            "batchSize": batch_size,
+            "timeouts": {
+                "lockTimeoutMilliseconds": lock_timeout_ms,
+                "statementTimeoutMilliseconds": statement_timeout_ms,
+            },
+            "scannedUsers": 0,
+            "processedUsers": 0,
+            "failedUsers": 0,
+            "failureReasons": {
+                "lockTimeout": 0,
+                "statementTimeout": 0,
+                "error": 0,
+            },
+            **self._new_knowledge_receipt_maintenance_counts(),
+        }
+
+        last_user_id: Optional[str] = None
+        while True:
+            users = self._knowledge_receipt_maintenance_user_page(
+                created_at_cutoff=created_at_cutoff,
+                last_user_id=last_user_id,
+                limit=batch_size,
+                statement_timeout_ms=statement_timeout_ms,
+            )
+            if not users:
+                break
+            report["scannedUsers"] += len(users)
+
+            for user in users:
+                user_id = str(user["user_id"])
+                user_report = self._new_knowledge_receipt_maintenance_counts()
+                connection = self._open_connection()
+                try:
+                    with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                        cursor.execute(
+                            "SELECT set_config('statement_timeout', %s, true)",
+                            (f"{statement_timeout_ms}ms",),
+                        )
+                        cursor.execute(
+                            "SELECT set_config('lock_timeout', %s, true)",
+                            (f"{lock_timeout_ms}ms",),
+                        )
+                        cursor.execute(
+                            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                            (f"knowledge:{user_id}",),
+                        )
+                        self._maintain_knowledge_operation_receipts_user_cursor(
+                            cursor,
+                            user_id=user_id,
+                            created_at_cutoff=created_at_cutoff,
+                            batch_size=batch_size,
+                            apply=apply,
+                            report=user_report,
+                        )
+                    if apply:
+                        connection.commit()
+                    else:
+                        self._rollback(connection)
+                except Exception as exc:
+                    self._rollback(connection)
+                    self._mark_knowledge_receipt_user_report_failed(user_report)
+                    self._merge_knowledge_receipt_maintenance_counts(report, user_report)
+                    report["failedUsers"] += 1
+                    reason = self._postgres_timeout_reason(exc) or "error"
+                    report["failureReasons"][reason] += 1
+                    report["status"] = "partial"
+                    continue
+                finally:
+                    self._close(connection)
+
+                report["processedUsers"] += 1
+                self._merge_knowledge_receipt_maintenance_counts(report, user_report)
+
+            last_user_id = str(users[-1]["user_id"])
+            if len(users) < batch_size:
+                break
+
+        report["byKind"] = dict(sorted(report["byKind"].items()))
+        return report
+
+    def _knowledge_receipt_maintenance_user_page(
+        self,
+        *,
+        created_at_cutoff: datetime,
+        last_user_id: Optional[str],
+        limit: int,
+        statement_timeout_ms: int,
+    ) -> List[Dict[str, Any]]:
+        connection = self._open_connection()
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (f"{statement_timeout_ms}ms",),
+                )
+                if last_user_id is None:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT user_id
+                        FROM kb_operation_receipts
+                        WHERE created_at < %s
+                        ORDER BY user_id
+                        LIMIT %s
+                        """,
+                        (created_at_cutoff, limit),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT user_id
+                        FROM kb_operation_receipts
+                        WHERE created_at < %s AND user_id > %s
+                        ORDER BY user_id
+                        LIMIT %s
+                        """,
+                        (created_at_cutoff, last_user_id, limit),
+                    )
+                users = cursor.fetchall()
+            connection.commit()
+            return users
+        except Exception:
+            self._rollback(connection)
+            raise
+        finally:
+            self._close(connection)
+
+    def _maintain_knowledge_operation_receipts_user_cursor(
+        self,
+        cursor: Any,
+        *,
+        user_id: str,
+        created_at_cutoff: datetime,
+        batch_size: int,
+        apply: bool,
+        report: Dict[str, Any],
+    ) -> None:
+        last_operation_id: Optional[str] = None
+        lock_clause = "FOR UPDATE" if apply else ""
+        while True:
+            if last_operation_id is None:
+                cursor.execute(
+                    f"""
+                    SELECT operation_id, operation_kind, result
+                    FROM kb_operation_receipts
+                    WHERE user_id = %s AND created_at < %s
+                    ORDER BY operation_id
+                    LIMIT %s
+                    {lock_clause}
+                    """,
+                    (user_id, created_at_cutoff, batch_size),
+                )
+            else:
+                cursor.execute(
+                    f"""
+                    SELECT operation_id, operation_kind, result
+                    FROM kb_operation_receipts
+                    WHERE user_id = %s
+                      AND created_at < %s
+                      AND operation_id > %s
+                    ORDER BY operation_id
+                    LIMIT %s
+                    {lock_clause}
+                    """,
+                    (
+                        user_id,
+                        created_at_cutoff,
+                        last_operation_id,
+                        batch_size,
+                    ),
+                )
+            rows = cursor.fetchall()
+            if not rows:
+                return
+
+            updates = []
+            update_operation_kinds = []
+            for row in rows:
+                operation_id = str(row["operation_id"])
+                operation_kind = str(row["operation_kind"])
+                result = row["result"]
+                before_bytes = self._estimated_json_bytes(result)
+                kind_report = self._knowledge_receipt_kind_counts(
+                    report,
+                    operation_kind,
+                )
+                self._increment_knowledge_receipt_count(
+                    report,
+                    kind_report,
+                    "scanned",
+                )
+                self._increment_knowledge_receipt_bytes(
+                    report,
+                    kind_report,
+                    before=before_bytes,
+                    after=before_bytes,
+                )
+                last_operation_id = operation_id
+
+                try:
+                    compact_result = compact_persisted_knowledge_receipt_result(
+                        result,
+                        operation_id=operation_id,
+                        operation_kind=operation_kind,
+                    )
+                except Exception:
+                    self._increment_knowledge_receipt_count(
+                        report,
+                        kind_report,
+                        "candidate",
+                    )
+                    self._increment_knowledge_receipt_count(
+                        report,
+                        kind_report,
+                        "failed",
+                    )
+                    raise
+
+                if compact_result == result:
+                    self._increment_knowledge_receipt_count(
+                        report,
+                        kind_report,
+                        "alreadyCompact",
+                    )
+                    self._increment_knowledge_receipt_count(
+                        report,
+                        kind_report,
+                        "skipped",
+                    )
+                    continue
+
+                self._increment_knowledge_receipt_count(
+                    report,
+                    kind_report,
+                    "candidate",
+                )
+
+                after_bytes = self._estimated_json_bytes(compact_result)
+                self._replace_knowledge_receipt_after_bytes(
+                    report,
+                    kind_report,
+                    previous_after=before_bytes,
+                    after=after_bytes,
+                )
+                if apply:
+                    updates.append(
+                        self._adapt_params((compact_result, user_id, operation_id))
+                    )
+                    update_operation_kinds.append(operation_kind)
+
+            if apply and updates:
+                cursor.executemany(
+                    """
+                    UPDATE kb_operation_receipts
+                    SET result = %s
+                    WHERE user_id = %s AND operation_id = %s
+                    """,
+                    updates,
+                )
+                report["updated"] += len(updates)
+                for operation_kind in update_operation_kinds:
+                    kind_report = self._knowledge_receipt_kind_counts(
+                        report,
+                        operation_kind,
+                    )
+                    kind_report["updated"] += 1
+
+            if len(rows) < batch_size:
+                return
+
+    @staticmethod
+    def _new_knowledge_receipt_maintenance_counts() -> Dict[str, Any]:
+        return {
+            "scanned": 0,
+            "candidate": 0,
+            "updated": 0,
+            "skipped": 0,
+            "alreadyCompact": 0,
+            "failed": 0,
+            "byKind": {},
+            "estimatedBytes": {
+                "before": 0,
+                "after": 0,
+                "saved": 0,
+            },
+        }
+
+    @staticmethod
+    def _knowledge_receipt_kind_counts(
+        report: Dict[str, Any],
+        operation_kind: str,
+    ) -> Dict[str, Any]:
+        return report["byKind"].setdefault(
+            operation_kind,
+            {
+                "scanned": 0,
+                "candidate": 0,
+                "updated": 0,
+                "skipped": 0,
+                "alreadyCompact": 0,
+                "failed": 0,
+                "estimatedBytes": {
+                    "before": 0,
+                    "after": 0,
+                    "saved": 0,
+                },
+            },
+        )
+
+    @staticmethod
+    def _increment_knowledge_receipt_count(
+        report: Dict[str, Any],
+        kind_report: Dict[str, Any],
+        key: str,
+    ) -> None:
+        report[key] += 1
+        kind_report[key] += 1
+
+    @staticmethod
+    def _increment_knowledge_receipt_bytes(
+        report: Dict[str, Any],
+        kind_report: Dict[str, Any],
+        *,
+        before: int,
+        after: int,
+    ) -> None:
+        for target in (report["estimatedBytes"], kind_report["estimatedBytes"]):
+            target["before"] += before
+            target["after"] += after
+            target["saved"] = target["before"] - target["after"]
+
+    @staticmethod
+    def _replace_knowledge_receipt_after_bytes(
+        report: Dict[str, Any],
+        kind_report: Dict[str, Any],
+        *,
+        previous_after: int,
+        after: int,
+    ) -> None:
+        for target in (report["estimatedBytes"], kind_report["estimatedBytes"]):
+            target["after"] += after - previous_after
+            target["saved"] = target["before"] - target["after"]
+
+    @classmethod
+    def _mark_knowledge_receipt_user_report_failed(
+        cls,
+        report: Dict[str, Any],
+    ) -> None:
+        report["updated"] = 0
+        report["failed"] = report["candidate"]
+        report["estimatedBytes"]["after"] = report["estimatedBytes"]["before"]
+        report["estimatedBytes"]["saved"] = 0
+        for kind_report in report["byKind"].values():
+            kind_report["updated"] = 0
+            kind_report["failed"] = kind_report["candidate"]
+            kind_report["estimatedBytes"]["after"] = kind_report[
+                "estimatedBytes"
+            ]["before"]
+            kind_report["estimatedBytes"]["saved"] = 0
+
+    @classmethod
+    def _merge_knowledge_receipt_maintenance_counts(
+        cls,
+        target: Dict[str, Any],
+        source: Dict[str, Any],
+    ) -> None:
+        for key in (
+            "scanned",
+            "candidate",
+            "updated",
+            "skipped",
+            "alreadyCompact",
+            "failed",
+        ):
+            target[key] += source[key]
+        for key in ("before", "after"):
+            target["estimatedBytes"][key] += source["estimatedBytes"][key]
+        target["estimatedBytes"]["saved"] = (
+            target["estimatedBytes"]["before"]
+            - target["estimatedBytes"]["after"]
+        )
+        for operation_kind, source_kind in source["byKind"].items():
+            target_kind = cls._knowledge_receipt_kind_counts(target, operation_kind)
+            for key in (
+                "scanned",
+                "candidate",
+                "updated",
+                "skipped",
+                "alreadyCompact",
+                "failed",
+            ):
+                target_kind[key] += source_kind[key]
+            for key in ("before", "after"):
+                target_kind["estimatedBytes"][key] += source_kind[
+                    "estimatedBytes"
+                ][key]
+            target_kind["estimatedBytes"]["saved"] = (
+                target_kind["estimatedBytes"]["before"]
+                - target_kind["estimatedBytes"]["after"]
+            )
+
+    @staticmethod
+    def _estimated_json_bytes(value: Any) -> int:
+        serialized = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return len(serialized.encode("utf-8"))
 
     def _compact_kb_change_feed_user_cursor(
         self,
@@ -1867,6 +2356,7 @@ class PostgresStore:
         operation_id: str,
         base_revision: int,
         mutation: Optional[Dict[str, Any]] = None,
+        governance_summary: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         operation_kind = KB_OPERATION_ARCHIVE_DELETE
         schema_version = 1
@@ -2019,6 +2509,7 @@ class PostgresStore:
                     schema_version=schema_version,
                     payload_hash=payload_hash,
                     result={**deepcopy(result), "item": None},
+                    governance_summary=governance_summary,
                 )
             connection.commit()
             return result
@@ -2671,7 +3162,43 @@ class PostgresStore:
             operation_kind=operation_kind,
             payload_hash=payload_hash,
         )
-        result = deepcopy(receipt["result"])
+        receipt_result = receipt["result"]
+        if is_compact_knowledge_operation_receipt_result(receipt_result):
+            cursor.execute(
+                """
+                SELECT revision, graph, mutation, created_at
+                FROM kb_changes
+                WHERE user_id = %s AND operation_id = %s
+                """,
+                (user_id, operation_id),
+            )
+            existing = cursor.fetchone()
+            snapshot = None
+            if existing is None:
+                cursor.execute(
+                    """
+                    SELECT graph, revision, updated_at
+                    FROM kb_snapshots
+                    WHERE user_id = %s
+                    """,
+                    (user_id,),
+                )
+                snapshot_row = cursor.fetchone()
+                if snapshot_row is not None:
+                    snapshot = {
+                        "graph": deepcopy(snapshot_row.get("graph") or {}),
+                        "revision": int(snapshot_row.get("revision") or 0),
+                        "updatedAt": self._iso_value(snapshot_row.get("updated_at")),
+                    }
+            result = rebuild_compact_knowledge_operation_result(
+                receipt_result,
+                user_id=user_id,
+                operation_id=operation_id,
+                change=self._kb_change_replay_row(existing),
+                snapshot=snapshot,
+            )
+        else:
+            result = deepcopy(receipt_result)
         result["duplicate"] = True
         result["operationPayloadVerified"] = True
         return result
@@ -2686,7 +3213,14 @@ class PostgresStore:
         schema_version: int,
         payload_hash: str,
         result: Dict[str, Any],
+        governance_summary: Optional[Dict[str, Any]] = None,
     ) -> None:
+        compact_result = compact_knowledge_operation_receipt_result(
+            result,
+            operation_id=operation_id,
+            operation_kind=operation_kind,
+            governance_summary=governance_summary,
+        )
         cursor.execute(
             """
             INSERT INTO kb_operation_receipts (
@@ -2702,10 +3236,22 @@ class PostgresStore:
                     operation_kind,
                     schema_version,
                     payload_hash,
-                    result,
+                    compact_result,
                 )
             ),
         )
+
+    def _kb_change_replay_row(self, row: Any) -> Optional[Dict[str, Any]]:
+        if row is None:
+            return None
+        mutation = deepcopy(row.get("mutation"))
+        return {
+            "revision": int(row.get("revision") or 0),
+            "graph": deepcopy(row.get("graph") or {}),
+            "updatedAt": self._iso_value(row.get("created_at")),
+            "mutationSchemaVersion": 2 if mutation is not None else 1,
+            "mutation": mutation,
+        }
 
     def _insert_payload(self, table: str, user_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
         row = self._fetchone(
