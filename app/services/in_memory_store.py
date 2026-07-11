@@ -625,16 +625,31 @@ class InMemoryStore:
             snapshot = self._kb_snapshots.get(user_id)
             return None if snapshot is None else deepcopy(snapshot)
 
-    def list_kb_changes(self, user_id: str, since_revision: int) -> List[Dict[str, Any]]:
+    def list_kb_changes(
+        self,
+        user_id: str,
+        since_revision: int,
+        through_revision: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         with self._kb_lock:
             changes = []
-            for stored in self._kb_changes.get(user_id, []):
-                if int(stored.get("revision") or 0) <= since_revision:
+            stored_changes = sorted(
+                self._kb_changes.get(user_id, []),
+                key=lambda item: int(item.get("revision") or 0),
+            )
+            for stored in stored_changes:
+                revision = int(stored.get("revision") or 0)
+                if revision <= since_revision:
+                    continue
+                if through_revision is not None and revision > through_revision:
                     continue
                 item = deepcopy(stored)
                 item.setdefault("mutationSchemaVersion", 2 if item.get("mutation") is not None else 1)
                 item.setdefault("mutation", None)
                 changes.append(item)
+                if limit is not None and len(changes) >= limit:
+                    break
             return changes
 
     def add_memory(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:

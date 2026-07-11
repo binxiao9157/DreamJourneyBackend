@@ -849,15 +849,31 @@ class PostgresStore:
             "updatedAt": self._iso_value(row.get("updated_at")),
         }
 
-    def list_kb_changes(self, user_id: str, since_revision: int) -> List[Dict[str, Any]]:
+    def list_kb_changes(
+        self,
+        user_id: str,
+        since_revision: int,
+        through_revision: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        where_clauses = ["user_id = %s", "revision > %s"]
+        params: List[Any] = [user_id, since_revision]
+        if through_revision is not None:
+            where_clauses.append("revision <= %s")
+            params.append(through_revision)
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT %s"
+            params.append(limit)
         rows = self._fetchall(
-            """
+            f"""
             SELECT revision, operation_id, graph, mutation, created_at
             FROM kb_changes
-            WHERE user_id = %s AND revision > %s
+            WHERE {' AND '.join(where_clauses)}
             ORDER BY revision ASC
+            {limit_clause}
             """,
-            (user_id, since_revision),
+            tuple(params),
         )
         return [
             {

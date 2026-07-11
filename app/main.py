@@ -1763,16 +1763,58 @@ def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/kb/changes/{user_id}")
-def kb_changes(user_id: str, sinceRevision: int = 0) -> Dict[str, Any]:
+def kb_changes(
+    user_id: str,
+    sinceRevision: int = 0,
+    targetRevision: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
     if sinceRevision < 0:
         raise HTTPException(status_code=400, detail="sinceRevision must be non-negative")
     snapshot = store.get_kb_snapshot_record(user_id)
     current_revision = int((snapshot or {}).get("revision") or 0)
+
+    if limit is None:
+        return {
+            "userId": user_id,
+            "sinceRevision": sinceRevision,
+            "currentRevision": current_revision,
+            "changes": store.list_kb_changes(user_id, sinceRevision),
+        }
+
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    target_revision = current_revision if targetRevision is None else targetRevision
+    if not 0 <= sinceRevision <= target_revision <= current_revision:
+        raise HTTPException(
+            status_code=400,
+            detail="revisions must satisfy 0 <= sinceRevision <= targetRevision <= current revision",
+        )
+
+    changes = store.list_kb_changes(
+        user_id,
+        sinceRevision,
+        through_revision=target_revision,
+        limit=limit,
+    )
+    next_since_revision = (
+        int(changes[-1]["revision"])
+        if changes
+        else sinceRevision
+    )
+    has_more = next_since_revision < target_revision
+    if has_more and not changes:
+        raise HTTPException(status_code=500, detail="knowledge change feed has a revision gap")
+
     return {
         "userId": user_id,
         "sinceRevision": sinceRevision,
-        "currentRevision": current_revision,
-        "changes": store.list_kb_changes(user_id, sinceRevision),
+        "currentRevision": target_revision,
+        "targetRevision": target_revision,
+        "nextSinceRevision": next_since_revision,
+        "hasMore": has_more,
+        "pageLimit": limit,
+        "changes": changes,
     }
 
 

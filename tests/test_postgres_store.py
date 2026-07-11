@@ -165,12 +165,26 @@ class FakeCursor:
         elif normalized.startswith(
             "SELECT revision, operation_id, graph, mutation, created_at FROM kb_changes"
         ):
-            user_id, since_revision = params
-            self.result = [
+            user_id, since_revision = params[:2]
+            param_index = 2
+            through_revision = None
+            if "revision <= %s" in normalized:
+                through_revision = params[param_index]
+                param_index += 1
+            limit = None
+            if "LIMIT %s" in normalized:
+                limit = params[param_index]
+            matches = [
                 dict(item)
                 for item in self.connection.kb_changes.get(user_id, [])
                 if int(item["revision"]) > since_revision
+                and (
+                    through_revision is None
+                    or int(item["revision"]) <= through_revision
+                )
             ]
+            matches.sort(key=lambda item: int(item["revision"]))
+            self.result = matches if limit is None else matches[:limit]
         elif normalized.startswith("SELECT payload FROM memories"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.memories.get(user_id, [])]
@@ -1157,6 +1171,33 @@ class PostgresStoreTests(unittest.TestCase):
 
         with self.assertRaises(KnowledgeRevisionConflict):
             store.apply_kb_mutation("u1", {"facts": []}, operation_id="op-2", base_revision=0)
+
+    def test_change_feed_uses_revision_upper_bound_order_and_sql_limit(self):
+        connection = FakeConnection()
+        connection.kb_changes["u1"] = [
+            {
+                "revision": revision,
+                "operation_id": f"op-{revision}",
+                "graph": {"facts": []},
+                "mutation": None,
+                "created_at": "2026-07-10T00:00:00+00:00",
+            }
+            for revision in [4, 2, 3, 1]
+        ]
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        changes = store.list_kb_changes(
+            "u1",
+            since_revision=1,
+            through_revision=4,
+            limit=2,
+        )
+
+        self.assertEqual([item["revision"] for item in changes], [2, 3])
+        sql, params = connection.executed[-1]
+        self.assertIn("revision > %s AND revision <= %s", sql)
+        self.assertIn("ORDER BY revision ASC LIMIT %s", sql)
+        self.assertEqual(params, ("u1", 1, 4, 2))
 
     def test_store_applies_v2_kb_mutation_and_persists_change_metadata(self):
         connection = FakeConnection()

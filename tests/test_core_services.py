@@ -904,6 +904,35 @@ class StoreTests(unittest.TestCase):
             )
         self.assertEqual(conflict.exception.current_revision, 1)
 
+    def test_memory_change_feed_applies_revision_upper_bound_limit_and_order(self):
+        store = InMemoryStore()
+        for revision in range(1, 5):
+            store.apply_kb_mutation(
+                "u1",
+                {"facts": [{"id": f"f{revision}"}]},
+                operation_id=f"op-{revision}",
+                base_revision=revision - 1,
+            )
+
+        bounded = store.list_kb_changes(
+            "u1",
+            since_revision=1,
+            through_revision=4,
+            limit=2,
+        )
+        through_only = store.list_kb_changes(
+            "u1",
+            since_revision=1,
+            through_revision=3,
+        )
+
+        self.assertEqual([item["revision"] for item in bounded], [2, 3])
+        self.assertEqual([item["revision"] for item in through_only], [2, 3])
+        self.assertEqual(
+            [item["revision"] for item in store.list_kb_changes("u1", 1)],
+            [2, 3, 4],
+        )
+
     def test_memory_store_applies_v2_delta_atomically_and_keeps_original_idempotency_result(self):
         store = InMemoryStore()
         metadata = {"privacyMetadata": {"scope": "generationAllowed"}}
@@ -1098,6 +1127,88 @@ class KnowledgeSyncAPITests(unittest.TestCase):
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(conflict.json()["detail"]["code"], "knowledgeRevisionConflict")
         self.assertEqual(conflict.json()["detail"]["currentRevision"], 2)
+
+    def test_change_feed_pagination_keeps_a_stable_target_revision(self):
+        user_id = "paged-kb-user"
+        for revision in range(1, 5):
+            main_module.store.apply_kb_mutation(
+                user_id,
+                {"facts": [{"id": f"fact-{revision}"}]},
+                operation_id=f"page-op-{revision}",
+                base_revision=revision - 1,
+            )
+
+        legacy = self.client.get(f"/kb/changes/{user_id}?sinceRevision=0")
+        first = self.client.get(
+            f"/kb/changes/{user_id}?sinceRevision=0&limit=2"
+        )
+        main_module.store.apply_kb_mutation(
+            user_id,
+            {"facts": [{"id": "fact-5"}]},
+            operation_id="page-op-5",
+            base_revision=4,
+        )
+        second = self.client.get(
+            f"/kb/changes/{user_id}?sinceRevision=2&targetRevision=4&limit=2"
+        )
+        terminal = self.client.get(
+            f"/kb/changes/{user_id}?sinceRevision=4&targetRevision=4&limit=2"
+        )
+        live_legacy = self.client.get(f"/kb/changes/{user_id}?sinceRevision=0")
+
+        self.assertEqual(legacy.status_code, 200)
+        self.assertEqual(
+            set(legacy.json()),
+            {"userId", "sinceRevision", "currentRevision", "changes"},
+        )
+        self.assertEqual(legacy.json()["currentRevision"], 4)
+        self.assertEqual([item["revision"] for item in legacy.json()["changes"]], [1, 2, 3, 4])
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["targetRevision"], 4)
+        self.assertEqual(first.json()["currentRevision"], 4)
+        self.assertEqual(first.json()["nextSinceRevision"], 2)
+        self.assertTrue(first.json()["hasMore"])
+        self.assertEqual(first.json()["pageLimit"], 2)
+        self.assertEqual([item["revision"] for item in first.json()["changes"]], [1, 2])
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["currentRevision"], 4)
+        self.assertEqual(second.json()["targetRevision"], 4)
+        self.assertEqual(second.json()["nextSinceRevision"], 4)
+        self.assertFalse(second.json()["hasMore"])
+        self.assertEqual([item["revision"] for item in second.json()["changes"]], [3, 4])
+
+        self.assertEqual(terminal.status_code, 200)
+        self.assertEqual(terminal.json()["changes"], [])
+        self.assertEqual(terminal.json()["nextSinceRevision"], 4)
+        self.assertFalse(terminal.json()["hasMore"])
+        self.assertEqual(live_legacy.json()["currentRevision"], 5)
+        self.assertEqual(
+            [item["revision"] for item in live_legacy.json()["changes"]],
+            [1, 2, 3, 4, 5],
+        )
+
+    def test_change_feed_pagination_validates_limit_and_revision_window(self):
+        main_module.store.apply_kb_mutation(
+            "paged-validation-user",
+            {"facts": []},
+            operation_id="validation-op",
+            base_revision=0,
+        )
+
+        invalid_urls = [
+            "/kb/changes/paged-validation-user?limit=0",
+            "/kb/changes/paged-validation-user?limit=101",
+            "/kb/changes/paged-validation-user?sinceRevision=1&targetRevision=0&limit=1",
+            "/kb/changes/paged-validation-user?targetRevision=2&limit=1",
+            "/kb/changes/paged-validation-user?targetRevision=-1&limit=1",
+        ]
+
+        for url in invalid_urls:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 400, response.text)
 
     def test_receipt_rejects_cross_kind_reuse_and_legacy_replay_is_unverified(self):
         synced = self.client.post(
