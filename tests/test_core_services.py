@@ -13,6 +13,7 @@ from app import main as main_module
 from app.main import app
 from app.core.config import Settings
 from app.services.in_memory_store import InMemoryStore
+from app.services.archive_store import ArchiveItemOwnershipConflict
 from app.services.knowledge_extraction import (
     KnowledgeExtractionValidationError,
     filter_extraction_by_evidence,
@@ -1514,6 +1515,22 @@ class KnowledgeSyncAPITests(unittest.TestCase):
         self.assertEqual(old_item["userId"], "u1")
         self.assertEqual([item["id"] for item in store.list_archive_items("u1")], ["archive-new", "archive-old"])
         self.assertEqual([item["id"] for item in store.list_archive_items("u2")], ["archive-other"])
+
+    def test_store_rejects_archive_id_reuse_by_another_owner(self):
+        store = InMemoryStore()
+        original = store.add_archive_item(
+            "u1",
+            {"id": "shared-archive-id", "title": "u1 source"},
+        )
+
+        with self.assertRaisesRegex(ArchiveItemOwnershipConflict, "another owner"):
+            store.add_archive_item(
+                "u2",
+                {"id": "shared-archive-id", "title": "u2 takeover"},
+            )
+
+        self.assertEqual(store.list_archive_items("u1"), [original])
+        self.assertEqual(store.list_archive_items("u2"), [])
 
     def test_store_lists_mailbox_letters_by_user(self):
         store = InMemoryStore()

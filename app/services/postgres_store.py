@@ -8,6 +8,12 @@ from psycopg.types.json import Jsonb
 
 from app.services.user_identity import stable_user_id
 from app.services.knowledge_store import KnowledgeRevisionConflict, apply_kb_mutation_v2
+from app.services.archive_store import (
+    ArchiveItemDeletionForbidden,
+    ArchiveItemNotFound,
+    ArchiveItemOwnershipConflict,
+    is_sealed_time_letter,
+)
 
 
 class PostgresStore:
@@ -969,7 +975,22 @@ class PostgresStore:
 
     def add_archive_item(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = self._with_identity(payload, "archive", user_id)
-        return self._insert_payload("archive_items", user_id, item)
+        row = self._fetchone(
+            """
+            INSERT INTO archive_items (user_id, id, payload, created_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (id) DO UPDATE SET
+                payload = EXCLUDED.payload,
+                created_at = NOW()
+            WHERE archive_items.user_id = EXCLUDED.user_id
+            RETURNING payload
+            """,
+            (user_id, item["id"], item),
+            commit=True,
+        )
+        if row is None:
+            raise ArchiveItemOwnershipConflict("archive item id belongs to another owner")
+        return deepcopy(row["payload"])
 
     def list_archive_items(self, user_id: str) -> List[Dict[str, Any]]:
         return self._list_payloads("archive_items", user_id)
@@ -985,6 +1006,137 @@ class PostgresStore:
             commit=True,
         )
         return None if row is None else deepcopy(row["payload"])
+
+    def delete_archive_item_with_kb_mutation(
+        self,
+        user_id: str,
+        item_id: str,
+        *,
+        operation_id: str,
+        base_revision: int,
+        mutation: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        connection = self._open_connection()
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (f"knowledge:{user_id}",),
+                )
+                cursor.execute(
+                    """
+                    SELECT revision, graph, mutation, created_at
+                    FROM kb_changes
+                    WHERE user_id = %s AND operation_id = %s
+                    """,
+                    (user_id, operation_id),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    stored_mutation = existing.get("mutation")
+                    connection.commit()
+                    return {
+                        "item": None,
+                        "duplicate": True,
+                        "revision": int(existing["revision"]),
+                        "graph": deepcopy(existing["graph"]),
+                        "mutationSchemaVersion": 2 if stored_mutation is not None else 1,
+                        "mutation": deepcopy(stored_mutation),
+                    }
+
+                cursor.execute(
+                    """
+                    SELECT payload
+                    FROM archive_items
+                    WHERE user_id = %s AND id = %s
+                    FOR UPDATE
+                    """,
+                    (user_id, item_id),
+                )
+                archive_row = cursor.fetchone()
+                if archive_row is None:
+                    raise ArchiveItemNotFound("archive item not found")
+                item = deepcopy(archive_row["payload"])
+                if is_sealed_time_letter(item):
+                    raise ArchiveItemDeletionForbidden("sealed timeLetter cannot be deleted")
+
+                cursor.execute(
+                    """
+                    SELECT graph, revision, updated_at
+                    FROM kb_snapshots
+                    WHERE user_id = %s
+                    FOR UPDATE
+                    """,
+                    (user_id,),
+                )
+                current = cursor.fetchone()
+                current_revision = int((current or {}).get("revision") or 0)
+                if base_revision != current_revision:
+                    raise KnowledgeRevisionConflict(
+                        current_revision=current_revision,
+                        expected_revision=base_revision,
+                    )
+
+                graph = deepcopy((current or {}).get("graph") or {})
+                revision = current_revision
+                normalized_mutation = None
+                if mutation is not None:
+                    graph, normalized_mutation = apply_kb_mutation_v2(graph, mutation)
+                    revision += 1
+                    cursor.execute(
+                        """
+                        INSERT INTO kb_snapshots (user_id, graph, revision, updated_at)
+                        VALUES (%s, %s, %s, NOW())
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            graph = EXCLUDED.graph,
+                            revision = EXCLUDED.revision,
+                            updated_at = NOW()
+                        RETURNING graph, revision, updated_at
+                        """,
+                        self._adapt_params((user_id, graph, revision)),
+                    )
+                    saved = cursor.fetchone()
+                    graph = deepcopy(saved["graph"])
+                    revision = int(saved["revision"])
+                    cursor.execute(
+                        """
+                        INSERT INTO kb_changes (
+                            user_id, revision, operation_id, graph, mutation, created_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, NOW())
+                        RETURNING revision, operation_id, graph, mutation, created_at
+                        """,
+                        self._adapt_params(
+                            (user_id, revision, operation_id, graph, normalized_mutation)
+                        ),
+                    )
+                    cursor.fetchone()
+
+                cursor.execute(
+                    """
+                    DELETE FROM archive_items
+                    WHERE user_id = %s AND id = %s
+                    RETURNING payload
+                    """,
+                    (user_id, item_id),
+                )
+                deleted = cursor.fetchone()
+                if deleted is None:
+                    raise ArchiveItemNotFound("archive item not found")
+            connection.commit()
+            return {
+                "item": deepcopy(deleted["payload"]),
+                "duplicate": False,
+                "revision": revision,
+                "graph": graph,
+                "mutationSchemaVersion": 2 if normalized_mutation is not None else None,
+                "mutation": deepcopy(normalized_mutation),
+            }
+        except Exception:
+            self._rollback(connection)
+            raise
+        finally:
+            self._close(connection)
 
     def mark_due_time_letters_delivered(
         self,

@@ -1,4 +1,5 @@
 import unittest
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from threading import Barrier
@@ -6,6 +7,11 @@ from threading import Barrier
 from psycopg.types.json import Jsonb
 
 from app.services.auth_sessions import AuthSessionError, AuthSessionService
+from app.services.archive_store import (
+    ArchiveItemDeletionForbidden,
+    ArchiveItemNotFound,
+    ArchiveItemOwnershipConflict,
+)
 from app.services.in_memory_store import InMemoryStore
 from app.services.knowledge_store import KnowledgeRevisionConflict
 from app.services.postgres_store import PostgresStore
@@ -40,6 +46,50 @@ def make_digital_human_lease(
         "heartbeatAt": created_at,
         "expiresAt": expires_at,
     }
+
+
+ARCHIVE_DELETE_GRAPH = {
+    "facts": [
+        {
+            "id": "fact-1",
+            "statement": "source",
+            "privacyMetadata": {"scope": "generationAllowed"},
+        }
+    ]
+}
+
+
+def archive_delete_mutation():
+    return {
+        "upserts": {},
+        "tombstones": [
+            {
+                "entityType": "facts",
+                "entityId": "fact-1",
+                "deletedAt": "2026-07-11T00:00:00Z",
+            }
+        ],
+    }
+
+
+def seed_archive_delete_state(connection, *, item=None):
+    graph = deepcopy(ARCHIVE_DELETE_GRAPH)
+    archive_item = deepcopy(
+        item or {"id": "archive-1", "userId": "u1", "kind": "photo"}
+    )
+    connection.kb_snapshots["u1"] = graph
+    connection.kb_snapshot_revisions["u1"] = 1
+    connection.kb_changes["u1"] = [
+        {
+            "revision": 1,
+            "operation_id": "seed",
+            "graph": deepcopy(graph),
+            "mutation": None,
+            "created_at": "2026-07-10T00:00:00+00:00",
+        }
+    ]
+    connection.archive_items["u1"] = [archive_item]
+    return archive_item
 
 
 class FakeCursor:
@@ -138,6 +188,19 @@ class FakeCursor:
                 {"user_id": user_id, "id": item.get("id"), "payload": item}
                 for user_id, item in matches
             ]
+        elif normalized.startswith(
+            "SELECT payload FROM archive_items WHERE user_id = %s AND id = %s"
+        ):
+            user_id, item_id = params
+            item = next(
+                (
+                    item
+                    for item in self.connection.archive_items.get(user_id, [])
+                    if item.get("id") == item_id
+                ),
+                None,
+            )
+            self.result = None if item is None else {"payload": item}
         elif normalized.startswith("SELECT payload FROM archive_items"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.archive_items.get(user_id, [])]
@@ -391,6 +454,18 @@ class FakeCursor:
         elif normalized.startswith("INSERT INTO archive_items"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
+            conflicting_owner = next(
+                (
+                    owner_id
+                    for owner_id, owner_items in self.connection.archive_items.items()
+                    if owner_id != user_id
+                    and any(item.get("id") == item_id for item in owner_items)
+                ),
+                None,
+            )
+            if conflicting_owner is not None and "WHERE archive_items.user_id = EXCLUDED.user_id" in normalized:
+                self.result = None
+                return
             items = self.connection.archive_items.setdefault(user_id, [])
             items[:] = [item for item in items if item.get("id") != item_id]
             items.insert(0, dict(payload))
@@ -715,6 +790,50 @@ class FailingConnection:
 
     def close(self):
         self.closes += 1
+
+
+class FailOnArchiveDeleteCursor(FakeCursor):
+    def execute(self, sql, params=None):
+        normalized = " ".join(sql.split())
+        if (
+            self.connection.fail_archive_delete
+            and normalized.startswith("DELETE FROM archive_items")
+            and len(params or ()) == 2
+        ):
+            raise RuntimeError("archive delete failed")
+        return super().execute(sql, params)
+
+
+class TransactionalFailingConnection(FakeConnection):
+    def __init__(self):
+        super().__init__()
+        self.fail_archive_delete = False
+        self._capture_committed_state()
+
+    def cursor(self, row_factory=None):
+        return FailOnArchiveDeleteCursor(self)
+
+    def commit(self):
+        super().commit()
+        self._capture_committed_state()
+
+    def rollback(self):
+        super().rollback()
+        state = deepcopy(self._committed_state)
+        self.kb_snapshots = state["kb_snapshots"]
+        self.kb_snapshot_revisions = state["kb_snapshot_revisions"]
+        self.kb_changes = state["kb_changes"]
+        self.archive_items = state["archive_items"]
+
+    def _capture_committed_state(self):
+        self._committed_state = deepcopy(
+            {
+                "kb_snapshots": self.kb_snapshots,
+                "kb_snapshot_revisions": self.kb_snapshot_revisions,
+                "kb_changes": self.kb_changes,
+                "archive_items": self.archive_items,
+            }
+        )
 
 
 class PostgresStoreTests(unittest.TestCase):
@@ -1349,6 +1468,203 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(deleted["id"], "time-letter-1")
         self.assertIsNone(missing)
         self.assertEqual(store.list_archive_items("u1"), [])
+
+    def test_combined_archive_delete_applies_kb_mutation_in_one_transaction(self):
+        connection = FakeConnection()
+        item = seed_archive_delete_state(connection)
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        result = store.delete_archive_item_with_kb_mutation(
+            "u1",
+            "archive-1",
+            operation_id="delete-1",
+            base_revision=1,
+            mutation=archive_delete_mutation(),
+        )
+
+        self.assertEqual(
+            set(result),
+            {"item", "duplicate", "revision", "graph", "mutationSchemaVersion", "mutation"},
+        )
+        self.assertEqual(result["item"], item)
+        self.assertFalse(result["duplicate"])
+        self.assertEqual(result["revision"], 2)
+        self.assertEqual(result["graph"]["facts"], [])
+        self.assertEqual(result["mutationSchemaVersion"], 2)
+        self.assertEqual(connection.archive_items["u1"], [])
+        self.assertEqual(connection.kb_snapshot_revisions["u1"], 2)
+        self.assertEqual(len(connection.kb_changes["u1"]), 2)
+        self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.rollbacks, 0)
+        self.assertEqual(connection.closes, 1)
+        sql = [statement for statement, _ in connection.executed]
+        self.assertLess(
+            next(i for i, statement in enumerate(sql) if "pg_advisory_xact_lock" in statement),
+            next(i for i, statement in enumerate(sql) if "FROM archive_items" in statement),
+        )
+        self.assertTrue(any("FROM kb_snapshots" in statement and "FOR UPDATE" in statement for statement in sql))
+
+    def test_combined_archive_delete_without_mutation_keeps_revision(self):
+        connection = FakeConnection()
+        item = seed_archive_delete_state(connection)
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        result = store.delete_archive_item_with_kb_mutation(
+            "u1",
+            "archive-1",
+            operation_id="delete-only",
+            base_revision=1,
+        )
+
+        self.assertEqual(result["item"], item)
+        self.assertEqual(result["revision"], 1)
+        self.assertEqual(result["graph"], ARCHIVE_DELETE_GRAPH)
+        self.assertIsNone(result["mutationSchemaVersion"])
+        self.assertIsNone(result["mutation"])
+        self.assertEqual(connection.kb_snapshot_revisions["u1"], 1)
+        self.assertEqual(len(connection.kb_changes["u1"]), 1)
+        self.assertTrue(
+            any(
+                statement.startswith("SELECT revision, graph, mutation, created_at FROM kb_changes")
+                for statement, _ in connection.executed
+            ),
+            "combined delete must detect a previously recorded operation before touching the archive",
+        )
+
+    def test_combined_archive_delete_revision_conflict_rolls_back(self):
+        connection = FakeConnection()
+        item = seed_archive_delete_state(connection)
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        with self.assertRaises(KnowledgeRevisionConflict):
+            store.delete_archive_item_with_kb_mutation(
+                "u1",
+                "archive-1",
+                operation_id="stale-delete",
+                base_revision=0,
+                mutation=archive_delete_mutation(),
+            )
+
+        self.assertEqual(connection.archive_items["u1"], [item])
+        self.assertEqual(connection.kb_snapshot_revisions["u1"], 1)
+        self.assertEqual(len(connection.kb_changes["u1"]), 1)
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertEqual(connection.closes, 1)
+
+    def test_combined_archive_delete_rejects_sealed_time_letter(self):
+        connection = FakeConnection()
+        item = seed_archive_delete_state(
+            connection,
+            item={
+                "id": "archive-1",
+                "userId": "u1",
+                "kind": "timeLetter",
+                "metadata": {"deliveryState": "sealed"},
+            },
+        )
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        with self.assertRaisesRegex(
+            ArchiveItemDeletionForbidden,
+            "sealed timeLetter cannot be deleted",
+        ):
+            store.delete_archive_item_with_kb_mutation(
+                "u1",
+                "archive-1",
+                operation_id="sealed-delete",
+                base_revision=1,
+            )
+
+        self.assertEqual(connection.archive_items["u1"], [item])
+        self.assertEqual(connection.rollbacks, 1)
+
+    def test_combined_archive_delete_raises_for_missing_item(self):
+        connection = FakeConnection()
+        seed_archive_delete_state(connection)
+        connection.archive_items["u1"] = []
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        with self.assertRaisesRegex(ArchiveItemNotFound, "archive item not found"):
+            store.delete_archive_item_with_kb_mutation(
+                "u1",
+                "missing",
+                operation_id="missing-delete",
+                base_revision=1,
+            )
+
+        self.assertEqual(connection.rollbacks, 1)
+
+    def test_combined_archive_delete_duplicate_returns_stored_mutation(self):
+        connection = FakeConnection()
+        seed_archive_delete_state(connection)
+        store = PostgresStore(connection_factory=lambda: connection)
+        first = store.delete_archive_item_with_kb_mutation(
+            "u1",
+            "archive-1",
+            operation_id="duplicate-delete",
+            base_revision=1,
+            mutation=archive_delete_mutation(),
+        )
+
+        repeated = store.delete_archive_item_with_kb_mutation(
+            "u1",
+            "archive-1",
+            operation_id="duplicate-delete",
+            base_revision=0,
+            mutation={"upserts": {}, "tombstones": []},
+        )
+
+        self.assertTrue(repeated["duplicate"])
+        self.assertIsNone(repeated["item"])
+        self.assertEqual(repeated["revision"], first["revision"])
+        self.assertEqual(repeated["graph"], first["graph"])
+        self.assertEqual(repeated["mutation"], first["mutation"])
+        self.assertEqual(connection.kb_snapshot_revisions["u1"], 2)
+        self.assertEqual(len(connection.kb_changes["u1"]), 2)
+        self.assertEqual(connection.commits, 2)
+
+    def test_combined_archive_delete_sql_failure_rolls_back_all_changes(self):
+        connection = TransactionalFailingConnection()
+        item = seed_archive_delete_state(connection)
+        connection._capture_committed_state()
+        connection.fail_archive_delete = True
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        with self.assertRaisesRegex(RuntimeError, "archive delete failed"):
+            store.delete_archive_item_with_kb_mutation(
+                "u1",
+                "archive-1",
+                operation_id="failed-delete",
+                base_revision=1,
+                mutation=archive_delete_mutation(),
+            )
+
+        self.assertEqual(connection.archive_items["u1"], [item])
+        self.assertEqual(connection.kb_snapshot_revisions["u1"], 1)
+        self.assertEqual(connection.kb_snapshots["u1"], ARCHIVE_DELETE_GRAPH)
+        self.assertEqual(len(connection.kb_changes["u1"]), 1)
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertEqual(connection.closes, 1)
+
+    def test_store_rejects_archive_id_reuse_by_another_owner(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        original = store.add_archive_item(
+            "u1",
+            {"id": "shared-archive-id", "title": "u1 source"},
+        )
+
+        with self.assertRaisesRegex(ArchiveItemOwnershipConflict, "another owner"):
+            store.add_archive_item(
+                "u2",
+                {"id": "shared-archive-id", "title": "u2 takeover"},
+            )
+
+        self.assertEqual(store.list_archive_items("u1"), [original])
+        self.assertEqual(store.list_archive_items("u2"), [])
+        self.assertGreaterEqual(connection.commits, 2)
 
     def test_store_marks_due_time_letters_delivered_once(self):
         connection = FakeConnection()

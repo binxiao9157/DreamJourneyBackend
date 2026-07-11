@@ -129,6 +129,7 @@ class RouteOwnershipRegistry:
             _rule("GET", "/maps/district", service, "authenticatedDistrictMap"),
             _owner_body("POST", "/kb/sync", "knowledgeOwner"),
             _owner_body("POST", "/kb/mutations", "knowledgeOwner"),
+            _owner_body("POST", "/kb/governance/actions", "knowledgeOwner"),
             _owner_path("GET", "/kb/snapshot/{user_id}", "knowledgeOwner"),
             _owner_path("GET", "/kb/changes/{user_id}", "knowledgeOwner"),
             _owner_body("POST", "/kb/extract", "knowledgeOwner"),

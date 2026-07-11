@@ -42,7 +42,19 @@ from app.services.knowledge_proposal import (
     KnowledgeProposalValidationError,
     build_knowledge_mutation_proposal,
 )
+from app.services.knowledge_governance import (
+    GOVERNANCE_SCHEMA_VERSION,
+    KnowledgeGovernanceNotFound,
+    KnowledgeGovernanceValidationError,
+    build_knowledge_governance_mutation,
+    summarize_knowledge_governance_mutation,
+)
 from app.services.passwords import make_password_credential, verify_password
+from app.services.archive_store import (
+    ArchiveItemDeletionForbidden,
+    ArchiveItemNotFound,
+    ArchiveItemOwnershipConflict,
+)
 from app.services.runtime_config import RuntimeConfigService
 from app.services.context_packet import ContextPacketBuilder
 from app.services.store_factory import init_store, make_store
@@ -1615,6 +1627,90 @@ def mutate_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
     return response
 
 
+@app.post("/kb/governance/actions")
+def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    governance_schema_version = payload.get("governanceSchemaVersion")
+    user_id = str(payload.get("userId") or "").strip()
+    operation_id = str(payload.get("operationId") or "").strip()
+    base_revision = payload.get("baseRevision")
+    if (
+        isinstance(governance_schema_version, bool)
+        or not isinstance(governance_schema_version, int)
+        or governance_schema_version != GOVERNANCE_SCHEMA_VERSION
+    ):
+        raise HTTPException(status_code=400, detail="governanceSchemaVersion must be 1")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+    if not operation_id:
+        raise HTTPException(status_code=400, detail="operationId is required")
+    if isinstance(base_revision, bool) or not isinstance(base_revision, int) or base_revision < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="baseRevision is required and must be a non-negative integer",
+        )
+    _require_user_principal_identity(
+        request,
+        user_id,
+        "authenticated user is not the knowledge owner",
+    )
+
+    snapshot = store.get_kb_snapshot_record(user_id)
+    try:
+        governance = build_knowledge_governance_mutation(
+            user_id=user_id,
+            operation_id=operation_id,
+            base_revision=base_revision,
+            action=payload.get("action"),
+            snapshot=snapshot,
+        )
+        result = store.apply_kb_mutation(
+            user_id,
+            None,
+            operation_id=operation_id,
+            base_revision=base_revision,
+            mutation={
+                "upserts": governance["upserts"],
+                "tombstones": governance["tombstones"],
+            },
+        )
+    except KnowledgeGovernanceNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (KnowledgeGovernanceValidationError, KnowledgeMutationValidationError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KnowledgeRevisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "knowledgeRevisionConflict",
+                "expectedRevision": exc.expected_revision,
+                "currentRevision": exc.current_revision,
+            },
+        )
+
+    summary = summarize_knowledge_governance_mutation(
+        result.get("mutation"),
+        operation_id=operation_id,
+    )
+    if summary is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "knowledgeGovernanceOperationConflict"},
+        )
+    return {
+        "governanceSchemaVersion": GOVERNANCE_SCHEMA_VERSION,
+        "mutationSchemaVersion": 2,
+        "status": "duplicate" if result["duplicate"] else "applied",
+        "userId": user_id,
+        "operationId": operation_id,
+        "revision": result["revision"],
+        "updatedAt": result["updatedAt"],
+        "duplicate": result["duplicate"],
+        "graph": result["graph"],
+        "mutation": result["mutation"],
+        "summary": summary,
+    }
+
+
 @app.get("/kb/changes/{user_id}")
 def kb_changes(user_id: str, sinceRevision: int = 0) -> Dict[str, Any]:
     if sinceRevision < 0:
@@ -1730,7 +1826,13 @@ def create_archive_photo(payload: Dict[str, Any]) -> Dict[str, Any]:
         safe_payload = sanitize_archive_item_payload(payload)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
-    item = store.add_archive_item(user_id, safe_payload)
+    try:
+        item = store.add_archive_item(user_id, safe_payload)
+    except ArchiveItemOwnershipConflict:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "archiveItemOwnershipConflict"},
+        )
     return {"status": "queued", "item": item}
 
 
@@ -1743,7 +1845,13 @@ def create_archive_item(payload: Dict[str, Any]) -> Dict[str, Any]:
         safe_payload = sanitize_archive_item_payload(payload)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
-    item = store.add_archive_item(user_id, safe_payload)
+    try:
+        item = store.add_archive_item(user_id, safe_payload)
+    except ArchiveItemOwnershipConflict:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "archiveItemOwnershipConflict"},
+        )
     return {"status": "saved", "item": item}
 
 
@@ -1786,32 +1894,88 @@ def get_time_letter_detail(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
-def _is_sealed_time_letter(item: Dict[str, Any]) -> bool:
-    if str(item.get("kind") or "").strip() != "timeLetter":
-        return False
-    metadata = item.get("metadata")
-    metadata_delivery_state = ""
-    if isinstance(metadata, dict):
-        metadata_delivery_state = str(metadata.get("deliveryState") or "").strip()
-    delivery_state = str(item.get("deliveryState") or metadata_delivery_state).strip()
-    return delivery_state == "sealed"
-
-
 @app.delete("/archive/items/{user_id}/{item_id}")
-def delete_archive_item(user_id: str, item_id: str) -> Dict[str, Any]:
-    existing = next(
-        (item for item in store.list_archive_items(user_id) if str(item.get("id") or "") == item_id),
-        None,
-    )
-    if existing is None:
-        raise HTTPException(status_code=404, detail="archive item not found")
-    if _is_sealed_time_letter(existing):
-        raise HTTPException(status_code=409, detail="sealed timeLetter cannot be deleted")
+def delete_archive_item(
+    user_id: str,
+    item_id: str,
+    operationId: Optional[str] = None,
+) -> Dict[str, Any]:
+    operation_id = str(operationId or "").strip() or f"archive-delete-{secrets.token_hex(16)}"
+    snapshot = store.get_kb_snapshot_record(user_id)
+    base_revision = int((snapshot or {}).get("revision") or 0)
+    decided_at = datetime.now(timezone.utc).isoformat()
+    governance = None
+    try:
+        governance = build_knowledge_governance_mutation(
+            user_id=user_id,
+            operation_id=operation_id,
+            base_revision=base_revision,
+            action={
+                "kind": "deleteSource",
+                "sourceRef": {"kind": "memoryArchiveItem", "id": item_id},
+                "decidedAt": decided_at,
+            },
+            snapshot=snapshot,
+        )
+    except KnowledgeGovernanceNotFound:
+        governance = None
+    except KnowledgeGovernanceValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-    deleted = store.delete_archive_item(user_id, item_id)
-    if deleted is None:
-        raise HTTPException(status_code=404, detail="archive item not found")
-    return {"status": "deleted", "id": item_id, "item": deleted}
+    mutation = None
+    if governance is not None:
+        mutation = {
+            "upserts": governance["upserts"],
+            "tombstones": governance["tombstones"],
+        }
+    try:
+        result = store.delete_archive_item_with_kb_mutation(
+            user_id,
+            item_id,
+            operation_id=operation_id,
+            base_revision=base_revision,
+            mutation=mutation,
+        )
+    except ArchiveItemNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ArchiveItemDeletionForbidden as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except KnowledgeRevisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "knowledgeRevisionConflict",
+                "expectedRevision": exc.expected_revision,
+                "currentRevision": exc.current_revision,
+            },
+        )
+    except KnowledgeMutationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    summary = None if governance is None else governance["summary"]
+    if result["duplicate"]:
+        summary = summarize_knowledge_governance_mutation(
+            result.get("mutation"),
+            operation_id=operation_id,
+        ) or summary
+        if summary is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "knowledgeGovernanceOperationConflict"},
+            )
+    return {
+        "status": "duplicate" if result["duplicate"] else "deleted",
+        "id": item_id,
+        "item": result["item"],
+        "cascade": {
+            "action": "deleteSource",
+            "operationId": operation_id,
+            "revision": result["revision"],
+            "duplicate": result["duplicate"],
+            "affectedEntityCount": int((summary or {}).get("affectedEntityCount") or 0),
+            "sourceMatched": summary is not None,
+        },
+    }
 
 
 @app.post("/archive/image-analysis")

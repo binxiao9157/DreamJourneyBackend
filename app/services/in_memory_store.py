@@ -6,6 +6,12 @@ from typing import Any, Dict, List, Optional
 import uuid
 
 from app.services.knowledge_store import KnowledgeRevisionConflict, apply_kb_mutation_v2
+from app.services.archive_store import (
+    ArchiveItemDeletionForbidden,
+    ArchiveItemNotFound,
+    ArchiveItemOwnershipConflict,
+    is_sealed_time_letter,
+)
 from app.services.user_identity import stable_user_id
 
 
@@ -15,6 +21,7 @@ class InMemoryStore:
         self._kb_snapshots: Dict[str, Dict[str, Any]] = {}
         self._kb_changes: Dict[str, List[Dict[str, Any]]] = {}
         self._kb_lock = RLock()
+        self._archive_lock = RLock()
         self._memories: Dict[str, List[Dict[str, Any]]] = {}
         self._archive_items: Dict[str, List[Dict[str, Any]]] = {}
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
@@ -503,26 +510,122 @@ class InMemoryStore:
         item = deepcopy(payload)
         item.setdefault("id", f"archive_{len(self._archive_items.get(user_id, [])) + 1}")
         item["userId"] = user_id
-        items = self._archive_items.setdefault(user_id, [])
-        existing = next((entry for entry in items if entry.get("id") == item["id"]), None)
-        if existing is not None:
-            item.setdefault("createdAt", existing.get("createdAt") or self._now())
-        else:
-            item.setdefault("createdAt", self._now())
-        item.setdefault("updatedAt", self._now())
-        items[:] = [entry for entry in items if entry.get("id") != item["id"]]
-        items.insert(0, item)
-        return deepcopy(item)
+        with self._archive_lock:
+            conflicting_owner = next(
+                (
+                    owner_id
+                    for owner_id, owner_items in self._archive_items.items()
+                    if owner_id != user_id
+                    and any(entry.get("id") == item["id"] for entry in owner_items)
+                ),
+                None,
+            )
+            if conflicting_owner is not None:
+                raise ArchiveItemOwnershipConflict("archive item id belongs to another owner")
+            items = self._archive_items.setdefault(user_id, [])
+            existing = next((entry for entry in items if entry.get("id") == item["id"]), None)
+            if existing is not None:
+                item.setdefault("createdAt", existing.get("createdAt") or self._now())
+            else:
+                item.setdefault("createdAt", self._now())
+            item.setdefault("updatedAt", self._now())
+            items[:] = [entry for entry in items if entry.get("id") != item["id"]]
+            items.insert(0, item)
+            return deepcopy(item)
 
     def list_archive_items(self, user_id: str) -> List[Dict[str, Any]]:
-        return deepcopy(self._archive_items.get(user_id, []))
+        with self._archive_lock:
+            return deepcopy(self._archive_items.get(user_id, []))
 
     def delete_archive_item(self, user_id: str, item_id: str) -> Optional[Dict[str, Any]]:
-        items = self._archive_items.get(user_id, [])
-        for index, item in enumerate(items):
-            if item.get("id") == item_id:
-                return deepcopy(items.pop(index))
-        return None
+        with self._archive_lock:
+            items = self._archive_items.get(user_id, [])
+            for index, item in enumerate(items):
+                if item.get("id") == item_id:
+                    return deepcopy(items.pop(index))
+            return None
+
+    def delete_archive_item_with_kb_mutation(
+        self,
+        user_id: str,
+        item_id: str,
+        *,
+        operation_id: str,
+        base_revision: int,
+        mutation: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        with self._archive_lock, self._kb_lock:
+            existing = next(
+                (
+                    change
+                    for change in self._kb_changes.get(user_id, [])
+                    if change["operationId"] == operation_id
+                ),
+                None,
+            )
+            if existing is not None:
+                stored_mutation = existing.get("mutation")
+                return {
+                    "item": None,
+                    "duplicate": True,
+                    "revision": int(existing["revision"]),
+                    "graph": deepcopy(existing["graph"]),
+                    "mutationSchemaVersion": 2 if stored_mutation is not None else 1,
+                    "mutation": deepcopy(stored_mutation),
+                }
+
+            items = self._archive_items.get(user_id, [])
+            item_index = next(
+                (index for index, item in enumerate(items) if item.get("id") == item_id),
+                None,
+            )
+            if item_index is None:
+                raise ArchiveItemNotFound("archive item not found")
+            item = items[item_index]
+            if is_sealed_time_letter(item):
+                raise ArchiveItemDeletionForbidden("sealed timeLetter cannot be deleted")
+
+            current = self._kb_snapshots.get(user_id)
+            current_revision = int((current or {}).get("revision") or 0)
+            if base_revision != current_revision:
+                raise KnowledgeRevisionConflict(
+                    current_revision=current_revision,
+                    expected_revision=base_revision,
+                )
+
+            graph = deepcopy((current or {}).get("graph") or {})
+            revision = current_revision
+            normalized_mutation = None
+            if mutation is not None:
+                graph, normalized_mutation = apply_kb_mutation_v2(graph, mutation)
+                revision += 1
+                updated_at = self._now()
+                self._kb_snapshots[user_id] = {
+                    "userId": user_id,
+                    "graph": deepcopy(graph),
+                    "revision": revision,
+                    "updatedAt": updated_at,
+                }
+                self._kb_changes.setdefault(user_id, []).append(
+                    {
+                        "revision": revision,
+                        "operationId": operation_id,
+                        "graph": deepcopy(graph),
+                        "createdAt": updated_at,
+                        "mutationSchemaVersion": 2,
+                        "mutation": deepcopy(normalized_mutation),
+                    }
+                )
+
+            deleted = deepcopy(items.pop(item_index))
+            return {
+                "item": deleted,
+                "duplicate": False,
+                "revision": revision,
+                "graph": graph,
+                "mutationSchemaVersion": 2 if normalized_mutation is not None else None,
+                "mutation": deepcopy(normalized_mutation),
+            }
 
     def mark_due_time_letters_delivered(
         self,
