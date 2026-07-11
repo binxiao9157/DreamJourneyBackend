@@ -975,6 +975,28 @@ class StoreTests(unittest.TestCase):
             [2, 3, 4],
         )
 
+    def test_memory_change_page_includes_atomic_revision_and_feed_floor(self):
+        store = InMemoryStore()
+        for revision in range(1, 5):
+            store.apply_kb_mutation(
+                "u1",
+                {"facts": [{"id": f"f{revision}"}]},
+                operation_id=f"op-{revision}",
+                base_revision=revision - 1,
+            )
+        store._kb_change_feed_minimum_since_revisions["u1"] = 1
+
+        page = store.get_kb_change_page(
+            "u1",
+            since_revision=1,
+            through_revision=4,
+            limit=2,
+        )
+
+        self.assertEqual(page["currentRevision"], 4)
+        self.assertEqual(page["minimumSinceRevision"], 1)
+        self.assertEqual([item["revision"] for item in page["changes"]], [2, 3])
+
     def test_memory_store_applies_v2_delta_atomically_and_keeps_original_idempotency_result(self):
         store = InMemoryStore()
         metadata = {"privacyMetadata": {"scope": "generationAllowed"}}
@@ -1352,6 +1374,100 @@ class KnowledgeSyncAPITests(unittest.TestCase):
             with self.subTest(url=url):
                 response = self.client.get(url)
                 self.assertEqual(response.status_code, 400, response.text)
+
+    def test_change_feed_rejects_invalid_target_before_store_access(self):
+        invalid_urls = [
+            "/kb/changes/prevalidation-user?sinceRevision=2&targetRevision=1&limit=1",
+            "/kb/changes/prevalidation-user?sinceRevision=0&targetRevision=-1&limit=1",
+            "/kb/changes/prevalidation-user?targetRevision=-1",
+        ]
+
+        for url in invalid_urls:
+            with self.subTest(url=url), patch.object(
+                main_module.store,
+                "get_kb_change_page",
+                side_effect=AssertionError("store must not be accessed"),
+            ) as get_page:
+                response = self.client.get(url)
+
+                self.assertEqual(response.status_code, 400, response.text)
+                get_page.assert_not_called()
+
+    def test_change_feed_second_page_returns_gone_when_compacted_mid_pagination(self):
+        user_id = "mid-page-compaction-user"
+        for revision in range(1, 5):
+            main_module.store.apply_kb_mutation(
+                user_id,
+                {"facts": [{"id": f"fact-{revision}"}]},
+                operation_id=f"mid-page-op-{revision}",
+                base_revision=revision - 1,
+            )
+
+        first = self.client.get(
+            f"/kb/changes/{user_id}?sinceRevision=0&limit=2"
+        )
+        main_module.store._kb_changes[user_id] = [
+            change
+            for change in main_module.store._kb_changes[user_id]
+            if change["revision"] > 3
+        ]
+        main_module.store._kb_change_feed_minimum_since_revisions[user_id] = 3
+        second = self.client.get(
+            f"/kb/changes/{user_id}?sinceRevision=2&targetRevision=4&limit=2"
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["nextSinceRevision"], 2)
+        self.assertEqual(first.json()["targetRevision"], 4)
+        self.assertEqual(second.status_code, 410, second.text)
+        self.assertEqual(second.json()["detail"]["code"], "knowledgeChangeFeedCompacted")
+        self.assertEqual(second.json()["detail"]["minimumSinceRevision"], 3)
+
+    def test_change_feed_returns_structured_gone_below_compaction_floor(self):
+        user_id = "compacted-feed-user"
+        for revision in range(1, 4):
+            main_module.store.apply_kb_mutation(
+                user_id,
+                {"facts": [{"id": f"fact-{revision}"}]},
+                operation_id=f"compacted-op-{revision}",
+                base_revision=revision - 1,
+            )
+        main_module.store._kb_changes[user_id] = [
+            change
+            for change in main_module.store._kb_changes[user_id]
+            if change["revision"] > 2
+        ]
+        main_module.store._kb_change_feed_minimum_since_revisions[user_id] = 2
+
+        compacted = self.client.get(
+            f"/kb/changes/{user_id}?sinceRevision=1&limit=10"
+        )
+        compacted_unpaged = self.client.get(
+            f"/kb/changes/{user_id}?sinceRevision=1"
+        )
+        retained = self.client.get(
+            f"/kb/changes/{user_id}?sinceRevision=2&limit=10"
+        )
+
+        self.assertEqual(compacted.status_code, 410)
+        self.assertEqual(compacted_unpaged.status_code, 410)
+        self.assertEqual(
+            compacted.json()["detail"],
+            {
+                "code": "knowledgeChangeFeedCompacted",
+                "message": "requested revision is no longer retained",
+                "userId": user_id,
+                "sinceRevision": 1,
+                "minimumSinceRevision": 2,
+                "currentRevision": 3,
+                "snapshotRevision": 3,
+            },
+        )
+        self.assertEqual(retained.status_code, 200, retained.text)
+        self.assertEqual(
+            [change["revision"] for change in retained.json()["changes"]],
+            [3],
+        )
 
     def test_receipt_rejects_cross_kind_reuse_and_legacy_replay_is_unverified(self):
         synced = self.client.post(

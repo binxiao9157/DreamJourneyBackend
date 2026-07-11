@@ -1772,19 +1772,51 @@ def kb_changes(
 ) -> Dict[str, Any]:
     if sinceRevision < 0:
         raise HTTPException(status_code=400, detail="sinceRevision must be non-negative")
-    snapshot = store.get_kb_snapshot_record(user_id)
-    current_revision = int((snapshot or {}).get("revision") or 0)
+    if limit is not None and (limit < 1 or limit > 100):
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    if targetRevision is not None and (
+        targetRevision < 0 or sinceRevision > targetRevision
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="revisions must satisfy 0 <= sinceRevision <= targetRevision",
+        )
+
+    page = store.get_kb_change_page(
+        user_id,
+        sinceRevision,
+        through_revision=targetRevision if limit is not None else None,
+        limit=limit,
+    )
+    current_revision = int(page["currentRevision"])
+    if targetRevision is not None and targetRevision > current_revision:
+        raise HTTPException(
+            status_code=400,
+            detail="targetRevision must not exceed current revision",
+        )
+    minimum_since_revision = int(page["minimumSinceRevision"])
+    if sinceRevision < minimum_since_revision:
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "knowledgeChangeFeedCompacted",
+                "message": "requested revision is no longer retained",
+                "userId": user_id,
+                "sinceRevision": sinceRevision,
+                "minimumSinceRevision": minimum_since_revision,
+                "currentRevision": current_revision,
+                "snapshotRevision": current_revision,
+            },
+        )
 
     if limit is None:
         return {
             "userId": user_id,
             "sinceRevision": sinceRevision,
             "currentRevision": current_revision,
-            "changes": store.list_kb_changes(user_id, sinceRevision),
+            "changes": page["changes"],
         }
 
-    if limit < 1 or limit > 100:
-        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
     target_revision = current_revision if targetRevision is None else targetRevision
     if not 0 <= sinceRevision <= target_revision <= current_revision:
         raise HTTPException(
@@ -1792,12 +1824,7 @@ def kb_changes(
             detail="revisions must satisfy 0 <= sinceRevision <= targetRevision <= current revision",
         )
 
-    changes = store.list_kb_changes(
-        user_id,
-        sinceRevision,
-        through_revision=target_revision,
-        limit=limit,
-    )
+    changes = page["changes"]
     next_since_revision = (
         int(changes[-1]["revision"])
         if changes

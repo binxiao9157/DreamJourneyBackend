@@ -158,6 +158,16 @@ class FakeCursor:
                     "revision": self.connection.kb_snapshot_revisions.get(user_id, 0),
                     "updated_at": "2026-07-10T00:00:00+00:00",
                 }
+        elif normalized.startswith(
+            "SELECT minimum_since_revision FROM kb_change_feed_state"
+        ):
+            user_id = params[0]
+            minimum = self.connection.kb_change_feed_minimum_since_revisions.get(user_id)
+            self.result = (
+                None
+                if minimum is None
+                else {"minimum_since_revision": minimum}
+            )
         elif normalized.startswith("SELECT graph FROM kb_snapshots"):
             user_id = params[0]
             value = self.connection.kb_snapshots.get(user_id)
@@ -294,6 +304,14 @@ class FakeCursor:
             user_id = params[0]
             user = self.connection.users.get(user_id)
             self.result = None if user is None else {"payload": user}
+        elif normalized.startswith("SELECT id, payload FROM users WHERE id = %s"):
+            user_id = params[0]
+            user = self.connection.users.get(user_id)
+            self.result = (
+                None
+                if user is None
+                else {"id": user_id, "payload": deepcopy(user)}
+            )
         elif normalized.startswith("SELECT id, payload FROM users"):
             self.result = [
                 {"id": user_id, "payload": user}
@@ -442,6 +460,16 @@ class FakeCursor:
             payload = unwrap_jsonb(payload)
             self.connection.users[user_id] = dict(payload)
             self.result = {"payload": payload}
+        elif normalized.startswith("INSERT INTO kb_change_feed_state"):
+            user_id = params[0]
+            minimum = int(params[1]) if len(params) > 1 else 0
+            self.connection.kb_change_feed_minimum_since_revisions.setdefault(
+                user_id,
+                minimum,
+            )
+            self.result = {
+                "minimum_since_revision": self.connection.kb_change_feed_minimum_since_revisions[user_id]
+            }
         elif normalized.startswith("INSERT INTO kb_snapshots"):
             if len(params) == 3:
                 user_id, graph, revision = params
@@ -527,6 +555,13 @@ class FakeCursor:
                 for operation_id in self.connection.kb_operation_receipts.pop(user_id, {})
             ]
             self.result = deleted
+        elif normalized.startswith("DELETE FROM kb_change_feed_state"):
+            user_id = params[0]
+            minimum = self.connection.kb_change_feed_minimum_since_revisions.pop(
+                user_id,
+                None,
+            )
+            self.result = [] if minimum is None else [{"user_id": user_id}]
         elif normalized.startswith("UPDATE archive_items"):
             payload, user_id, item_id = params[:3]
             cutoff_iso = params[3] if len(params) > 3 else None
@@ -769,6 +804,7 @@ class FakeConnection:
         self.kb_snapshots = {}
         self.kb_snapshot_revisions = {}
         self.kb_changes = {}
+        self.kb_change_feed_minimum_since_revisions = {}
         self.kb_operation_receipts = {}
         self.memories = {}
         self.archive_items = {}
@@ -865,6 +901,9 @@ class TransactionalFailingConnection(FakeConnection):
         self.kb_snapshots = state["kb_snapshots"]
         self.kb_snapshot_revisions = state["kb_snapshot_revisions"]
         self.kb_changes = state["kb_changes"]
+        self.kb_change_feed_minimum_since_revisions = state[
+            "kb_change_feed_minimum_since_revisions"
+        ]
         self.kb_operation_receipts = state["kb_operation_receipts"]
         self.archive_items = state["archive_items"]
 
@@ -874,6 +913,7 @@ class TransactionalFailingConnection(FakeConnection):
                 "kb_snapshots": self.kb_snapshots,
                 "kb_snapshot_revisions": self.kb_snapshot_revisions,
                 "kb_changes": self.kb_changes,
+                "kb_change_feed_minimum_since_revisions": self.kb_change_feed_minimum_since_revisions,
                 "kb_operation_receipts": self.kb_operation_receipts,
                 "archive_items": self.archive_items,
             }
@@ -892,6 +932,7 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS kb_snapshots", sql)
         self.assertIn("ALTER TABLE kb_changes", sql)
         self.assertIn("ADD COLUMN IF NOT EXISTS mutation JSONB", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS kb_change_feed_state", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS kb_operation_receipts", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS memories", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS archive_items", sql)
@@ -1198,6 +1239,50 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("revision > %s AND revision <= %s", sql)
         self.assertIn("ORDER BY revision ASC LIMIT %s", sql)
         self.assertEqual(params, ("u1", 1, 4, 2))
+
+    def test_change_page_reads_floor_snapshot_and_changes_under_user_lock(self):
+        connection = FakeConnection()
+        connection.kb_snapshots["u1"] = {"facts": []}
+        connection.kb_snapshot_revisions["u1"] = 4
+        connection.kb_change_feed_minimum_since_revisions["u1"] = 1
+        connection.kb_changes["u1"] = [
+            {
+                "revision": revision,
+                "operation_id": f"op-{revision}",
+                "graph": {"facts": []},
+                "mutation": None,
+                "created_at": "2026-07-10T00:00:00+00:00",
+            }
+            for revision in range(2, 5)
+        ]
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        page = store.get_kb_change_page(
+            "u1",
+            since_revision=1,
+            through_revision=4,
+            limit=2,
+        )
+
+        self.assertEqual(page["currentRevision"], 4)
+        self.assertEqual(page["minimumSinceRevision"], 1)
+        self.assertEqual([item["revision"] for item in page["changes"]], [2, 3])
+        sql = [statement for statement, _ in connection.executed]
+        self.assertIn("SELECT pg_advisory_xact_lock(hashtext(%s))", sql[0])
+        self.assertTrue(any("FROM kb_change_feed_state" in statement for statement in sql))
+        self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.rollbacks, 0)
+        self.assertEqual(connection.closes, 1)
+
+    def test_change_page_rolls_back_and_closes_on_sql_failure(self):
+        connection = FailingConnection(RuntimeError("change page failed"))
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        with self.assertRaisesRegex(RuntimeError, "change page failed"):
+            store.get_kb_change_page("u1", since_revision=0)
+
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertEqual(connection.closes, 1)
 
     def test_store_applies_v2_kb_mutation_and_persists_change_metadata(self):
         connection = FakeConnection()
@@ -2221,6 +2306,18 @@ class PostgresStoreTests(unittest.TestCase):
                 for sql, _ in connection.executed
             )
         )
+        sql = [statement for statement, _ in connection.executed]
+        user_lock_index = next(
+            index
+            for index, statement in enumerate(sql)
+            if "pg_advisory_xact_lock" in statement
+        )
+        change_delete_index = next(
+            index
+            for index, statement in enumerate(sql)
+            if statement.startswith("DELETE FROM kb_changes")
+        )
+        self.assertLess(user_lock_index, change_delete_index)
 
     def test_store_persists_echo_delayed_replies_by_user(self):
         connection = FakeConnection()

@@ -81,6 +81,14 @@ class PostgresStore:
                 ON kb_changes(user_id, revision ASC)
             """,
             """
+            CREATE TABLE IF NOT EXISTS kb_change_feed_state (
+                user_id TEXT PRIMARY KEY,
+                minimum_since_revision BIGINT NOT NULL DEFAULT 0,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CHECK (minimum_since_revision >= 0)
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS kb_operation_receipts (
                 user_id TEXT NOT NULL,
                 operation_id TEXT NOT NULL,
@@ -482,6 +490,24 @@ class PostgresStore:
             deadline = self._parse_iso_datetime(str(user.get("restoreDeadline") or user.get("purgeAfter") or ""))
             if not user_id or deadline > cutoff:
                 continue
+            self._fetchone(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                (f"knowledge:{user_id}",),
+            )
+            locked_user = self._fetchone(
+                "SELECT id, payload FROM users WHERE id = %s FOR UPDATE",
+                (user_id,),
+            )
+            if locked_user is None:
+                self._rollback(self._connect())
+                continue
+            user = deepcopy(locked_user["payload"])
+            deadline = self._parse_iso_datetime(
+                str(user.get("restoreDeadline") or user.get("purgeAfter") or "")
+            )
+            if user.get("deletionState") != "softDeleted" or deadline > cutoff:
+                self._rollback(self._connect())
+                continue
             self._fetchall(
                 """
                 UPDATE voice_clone_slots
@@ -497,6 +523,10 @@ class PostgresStore:
             )
             self._fetchall(
                 "DELETE FROM kb_operation_receipts WHERE user_id = %s RETURNING operation_id",
+                (user_id,),
+            )
+            self._fetchall(
+                "DELETE FROM kb_change_feed_state WHERE user_id = %s RETURNING user_id",
                 (user_id,),
             )
             for table in (
@@ -535,6 +565,7 @@ class PostgresStore:
             )
             if updated is not None:
                 purged.append(deepcopy(updated["payload"]))
+        self._rollback(self._connect())
         return purged
 
     def save_profile(self, user_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -635,6 +666,14 @@ class PostgresStore:
                 cursor.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
                     (f"knowledge:{user_id}",),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO kb_change_feed_state (user_id, minimum_since_revision, updated_at)
+                    VALUES (%s, 0, NOW())
+                    ON CONFLICT (user_id) DO NOTHING
+                    """,
+                    (user_id,),
                 )
                 receipt_result = self._kb_operation_receipt_replay_cursor(
                     cursor,
@@ -893,6 +932,431 @@ class PostgresStore:
             }
             for row in rows
         ]
+
+    def get_kb_change_page(
+        self,
+        user_id: str,
+        since_revision: int,
+        through_revision: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        connection = self._open_connection()
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (f"knowledge:{user_id}",),
+                )
+                cursor.execute(
+                    """
+                    SELECT minimum_since_revision
+                    FROM kb_change_feed_state
+                    WHERE user_id = %s
+                    """,
+                    (user_id,),
+                )
+                state = cursor.fetchone()
+                cursor.execute(
+                    """
+                    SELECT graph, revision, updated_at
+                    FROM kb_snapshots
+                    WHERE user_id = %s
+                    """,
+                    (user_id,),
+                )
+                snapshot = cursor.fetchone()
+                rows = self._list_kb_change_rows_cursor(
+                    cursor,
+                    user_id,
+                    since_revision,
+                    through_revision=through_revision,
+                    limit=limit,
+                )
+            connection.commit()
+            return {
+                "currentRevision": int((snapshot or {}).get("revision") or 0),
+                "minimumSinceRevision": int(
+                    (state or {}).get("minimum_since_revision") or 0
+                ),
+                "changes": self._kb_change_rows_payload(rows),
+            }
+        except Exception:
+            self._rollback(connection)
+            raise
+        finally:
+            self._close(connection)
+
+    def maintain_kb_change_feed_compaction(
+        self,
+        *,
+        keep_recent_revisions: int = 1000,
+        keep_days: int = 30,
+        apply: bool = False,
+        now: Optional[datetime] = None,
+        lock_timeout_ms: int = 5000,
+        statement_timeout_ms: int = 30000,
+    ) -> Dict[str, Any]:
+        if (
+            isinstance(keep_recent_revisions, bool)
+            or not isinstance(keep_recent_revisions, int)
+            or keep_recent_revisions < 1
+        ):
+            raise ValueError("keep_recent_revisions must be a positive integer")
+        if isinstance(keep_days, bool) or not isinstance(keep_days, int) or keep_days < 1:
+            raise ValueError("keep_days must be a positive integer")
+        if (
+            isinstance(lock_timeout_ms, bool)
+            or not isinstance(lock_timeout_ms, int)
+            or lock_timeout_ms < 1
+        ):
+            raise ValueError("lock_timeout_ms must be a positive integer")
+        if (
+            isinstance(statement_timeout_ms, bool)
+            or not isinstance(statement_timeout_ms, int)
+            or statement_timeout_ms < 1
+        ):
+            raise ValueError("statement_timeout_ms must be a positive integer")
+
+        now_value = now or datetime.now(timezone.utc)
+        if now_value.tzinfo is None or now_value.utcoffset() is None:
+            raise ValueError("now must include a timezone")
+        now_value = now_value.astimezone(timezone.utc)
+        created_at_cutoff = now_value - timedelta(days=keep_days)
+        report = {
+            "schemaVersion": 1,
+            "mode": "apply" if apply else "dryRun",
+            "status": "ok",
+            "retention": {
+                "keepRecentRevisions": keep_recent_revisions,
+                "keepDays": keep_days,
+                "createdAtCutoff": created_at_cutoff.isoformat(),
+                "policy": "union",
+            },
+            "timeouts": {
+                "lockTimeoutMilliseconds": lock_timeout_ms,
+                "statementTimeoutMilliseconds": statement_timeout_ms,
+            },
+            "compactorAlreadyRunning": False,
+            "scannedUsers": 0,
+            "processedUsers": 0,
+            "skippedUsers": 0,
+            "skipReasons": {
+                "lockTimeout": 0,
+                "statementTimeout": 0,
+            },
+            "scannedChanges": 0,
+            "plannedChanges": 0,
+            "deletedChanges": 0,
+            "plannedFloorAdvances": 0,
+            "advancedUsers": 0,
+            "legacyBarriers": 0,
+            "retentionBarriers": 0,
+            "revisionGapBarriers": 0,
+        }
+
+        coordinator = self._open_connection()
+        session_lock_acquired = False
+        try:
+            with coordinator.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    "SELECT pg_try_advisory_lock(hashtext(%s)) AS locked",
+                    ("knowledge-change-feed-compaction:v1",),
+                )
+                lock_row = cursor.fetchone()
+                session_lock_acquired = bool((lock_row or {}).get("locked"))
+                if not session_lock_acquired:
+                    report["status"] = "skipped"
+                    report["compactorAlreadyRunning"] = True
+                    self._rollback(coordinator)
+                    return report
+                cursor.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (f"{statement_timeout_ms}ms",),
+                )
+                cursor.execute(
+                    """
+                    SELECT user_id FROM (
+                        SELECT user_id FROM kb_snapshots
+                        UNION
+                        SELECT user_id FROM kb_changes
+                        UNION
+                        SELECT user_id FROM kb_change_feed_state
+                    ) AS knowledge_users
+                    ORDER BY user_id
+                    """
+                )
+                users = cursor.fetchall()
+                report["scannedUsers"] = len(users)
+            coordinator.commit()
+
+            for user in users:
+                user_id = str(user["user_id"])
+                connection = self._open_connection()
+                try:
+                    with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                        cursor.execute(
+                            "SELECT set_config('lock_timeout', %s, true)",
+                            (f"{lock_timeout_ms}ms",),
+                        )
+                        cursor.execute(
+                            "SELECT set_config('statement_timeout', %s, true)",
+                            (f"{statement_timeout_ms}ms",),
+                        )
+                        cursor.execute(
+                            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                            (f"knowledge:{user_id}",),
+                        )
+                        user_report = self._compact_kb_change_feed_user_cursor(
+                            cursor,
+                            user_id=user_id,
+                            keep_recent_revisions=keep_recent_revisions,
+                            created_at_cutoff=created_at_cutoff,
+                            apply=apply,
+                        )
+                    if apply:
+                        connection.commit()
+                    else:
+                        self._rollback(connection)
+                except Exception as exc:
+                    self._rollback(connection)
+                    timeout_reason = self._postgres_timeout_reason(exc)
+                    if timeout_reason is None:
+                        raise
+                    report["skippedUsers"] += 1
+                    report["skipReasons"][timeout_reason] += 1
+                    continue
+                finally:
+                    self._close(connection)
+
+                report["processedUsers"] += 1
+                for key in (
+                    "scannedChanges",
+                    "plannedChanges",
+                    "deletedChanges",
+                    "plannedFloorAdvances",
+                    "advancedUsers",
+                    "legacyBarriers",
+                    "retentionBarriers",
+                    "revisionGapBarriers",
+                ):
+                    report[key] += user_report[key]
+            if report["skippedUsers"]:
+                report["status"] = "partial"
+            return report
+        except Exception:
+            self._rollback(coordinator)
+            raise
+        finally:
+            if session_lock_acquired:
+                try:
+                    with coordinator.cursor(row_factory=self._dict_row_factory()) as cursor:
+                        cursor.execute(
+                            "SELECT pg_advisory_unlock(hashtext(%s)) AS unlocked",
+                            ("knowledge-change-feed-compaction:v1",),
+                        )
+                        cursor.fetchone()
+                    coordinator.commit()
+                except Exception:
+                    self._rollback(coordinator)
+            self._close(coordinator)
+
+    def _compact_kb_change_feed_user_cursor(
+        self,
+        cursor: Any,
+        *,
+        user_id: str,
+        keep_recent_revisions: int,
+        created_at_cutoff: datetime,
+        apply: bool,
+    ) -> Dict[str, int]:
+        report = {
+            "scannedChanges": 0,
+            "plannedChanges": 0,
+            "deletedChanges": 0,
+            "plannedFloorAdvances": 0,
+            "advancedUsers": 0,
+            "legacyBarriers": 0,
+            "retentionBarriers": 0,
+            "revisionGapBarriers": 0,
+        }
+        cursor.execute(
+            "SELECT revision FROM kb_snapshots WHERE user_id = %s",
+            (user_id,),
+        )
+        snapshot = cursor.fetchone()
+        current_revision = int((snapshot or {}).get("revision") or 0)
+        cursor.execute(
+            """
+            SELECT minimum_since_revision
+            FROM kb_change_feed_state
+            WHERE user_id = %s
+            """,
+            (user_id,),
+        )
+        state = cursor.fetchone()
+        minimum_since_revision = int(
+            (state or {}).get("minimum_since_revision") or 0
+        )
+        cursor.execute(
+            """
+            SELECT c.revision, c.created_at,
+                   EXISTS (
+                       SELECT 1
+                       FROM kb_operation_receipts r
+                       WHERE r.user_id = c.user_id
+                         AND r.operation_id = c.operation_id
+                   ) AS has_receipt
+            FROM kb_changes c
+            WHERE c.user_id = %s
+              AND c.revision > %s
+            ORDER BY c.revision ASC
+            """,
+            (user_id, minimum_since_revision),
+        )
+        rows = cursor.fetchall()
+        report["scannedChanges"] = len(rows)
+        revision_cutoff = current_revision - keep_recent_revisions
+        planned_revisions = []
+        expected_revision = minimum_since_revision + 1
+        for row in rows:
+            revision = int(row["revision"])
+            if revision != expected_revision:
+                report["revisionGapBarriers"] += 1
+                break
+            created_at = self._datetime_value(row.get("created_at"))
+            if (
+                revision > revision_cutoff
+                or created_at is None
+                or created_at >= created_at_cutoff
+            ):
+                report["retentionBarriers"] += 1
+                break
+            if not bool(row.get("has_receipt")):
+                report["legacyBarriers"] += 1
+                break
+            planned_revisions.append(revision)
+
+            expected_revision += 1
+
+        if not planned_revisions:
+            return report
+        report["plannedChanges"] = len(planned_revisions)
+        report["plannedFloorAdvances"] = 1
+        if not apply:
+            return report
+
+        cursor.execute(
+            """
+            DELETE FROM kb_changes c
+            WHERE c.user_id = %s
+              AND c.revision = ANY(%s)
+              AND EXISTS (
+                  SELECT 1
+                  FROM kb_operation_receipts r
+                  WHERE r.user_id = c.user_id
+                    AND r.operation_id = c.operation_id
+              )
+            RETURNING c.revision
+            """,
+            (user_id, planned_revisions),
+        )
+        deleted_revisions = sorted(
+            int(row["revision"]) for row in cursor.fetchall()
+        )
+        if deleted_revisions != planned_revisions:
+            raise RuntimeError(
+                "knowledge change feed compaction delete set changed during transaction"
+            )
+        new_minimum = planned_revisions[-1]
+        cursor.execute(
+            """
+            INSERT INTO kb_change_feed_state (
+                user_id, minimum_since_revision, updated_at
+            )
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (user_id) DO UPDATE
+            SET minimum_since_revision = EXCLUDED.minimum_since_revision,
+                updated_at = NOW()
+            RETURNING minimum_since_revision
+            """,
+            (user_id, new_minimum),
+        )
+        saved_state = cursor.fetchone()
+        if int(saved_state["minimum_since_revision"]) != new_minimum:
+            raise RuntimeError("knowledge change feed compaction floor update failed")
+        report["deletedChanges"] = len(deleted_revisions)
+        report["advancedUsers"] = 1
+        return report
+
+    @staticmethod
+    def _postgres_timeout_reason(exc: Exception) -> Optional[str]:
+        sqlstate = getattr(exc, "sqlstate", None)
+        if sqlstate is None:
+            sqlstate = getattr(getattr(exc, "diag", None), "sqlstate", None)
+        if sqlstate == "55P03":
+            return "lockTimeout"
+        if sqlstate == "57014":
+            return "statementTimeout"
+        return None
+
+    def _list_kb_change_rows_cursor(
+        self,
+        cursor: Any,
+        user_id: str,
+        since_revision: int,
+        *,
+        through_revision: Optional[int],
+        limit: Optional[int],
+    ) -> List[Dict[str, Any]]:
+        where_clauses = ["user_id = %s", "revision > %s"]
+        params: List[Any] = [user_id, since_revision]
+        if through_revision is not None:
+            where_clauses.append("revision <= %s")
+            params.append(through_revision)
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT %s"
+            params.append(limit)
+        cursor.execute(
+            f"""
+            SELECT revision, operation_id, graph, mutation, created_at
+            FROM kb_changes
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY revision ASC
+            {limit_clause}
+            """,
+            tuple(params),
+        )
+        return cursor.fetchall()
+
+    @classmethod
+    def _kb_change_rows_payload(cls, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [
+            {
+                "revision": int(row["revision"]),
+                "operationId": str(row["operation_id"]),
+                "graph": deepcopy(row["graph"]),
+                "createdAt": cls._iso_value(row.get("created_at")),
+                "mutationSchemaVersion": 2 if row.get("mutation") is not None else 1,
+                "mutation": deepcopy(row.get("mutation")),
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _datetime_value(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        else:
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc)
 
     def maintain_knowledge_privacy_metadata(self, *, apply: bool = False) -> Dict[str, Any]:
         report = {
@@ -1417,6 +1881,14 @@ class PostgresStore:
                 cursor.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
                     (f"knowledge:{user_id}",),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO kb_change_feed_state (user_id, minimum_since_revision, updated_at)
+                    VALUES (%s, 0, NOW())
+                    ON CONFLICT (user_id) DO NOTHING
+                    """,
+                    (user_id,),
                 )
                 receipt_result = self._kb_operation_receipt_replay_cursor(
                     cursor,

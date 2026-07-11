@@ -95,6 +95,30 @@ def main() -> None:
             [item.get("revision") for item in second_page_body.get("changes") or []] == [2],
             "writes after target must not enter the pagination run",
         )
+
+        main_module.store._kb_changes[user_id] = [
+            change
+            for change in main_module.store._kb_changes[user_id]
+            if change["revision"] > 2
+        ]
+        main_module.store._kb_change_feed_minimum_since_revisions[user_id] = 2
+        compacted = client.get(f"/kb/changes/{user_id}?sinceRevision=1&limit=10")
+        require(compacted.status_code == 410, compacted.text)
+        compacted_detail = compacted.json().get("detail") or {}
+        require(
+            compacted_detail.get("code") == "knowledgeChangeFeedCompacted",
+            "compacted feed should return the structured error code",
+        )
+        require(
+            compacted_detail.get("minimumSinceRevision") == 2,
+            "compacted feed should expose its minimum cursor",
+        )
+        retained = client.get(f"/kb/changes/{user_id}?sinceRevision=2&limit=10")
+        require(retained.status_code == 200, retained.text)
+        require(
+            [item.get("revision") for item in retained.json().get("changes") or []] == [3],
+            "the minimum cursor should continue from retained changes",
+        )
         print("Backend knowledge delta smoke passed")
     finally:
         main_module.store = previous_store

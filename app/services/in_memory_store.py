@@ -28,6 +28,7 @@ class InMemoryStore:
         self._users: Dict[str, Dict[str, Any]] = {}
         self._kb_snapshots: Dict[str, Dict[str, Any]] = {}
         self._kb_changes: Dict[str, List[Dict[str, Any]]] = {}
+        self._kb_change_feed_minimum_since_revisions: Dict[str, int] = {}
         self._kb_operation_receipts: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._kb_lock = RLock()
         self._archive_lock = RLock()
@@ -354,6 +355,7 @@ class InMemoryStore:
             self._password_credentials.pop(user_id, None)
             self._kb_snapshots.pop(user_id, None)
             self._kb_changes.pop(user_id, None)
+            self._kb_change_feed_minimum_since_revisions.pop(user_id, None)
             self._kb_operation_receipts.pop(user_id, None)
             self._memories.pop(user_id, None)
             self._archive_items.pop(user_id, None)
@@ -446,6 +448,7 @@ class InMemoryStore:
             semantic_payload,
         )
         with self._kb_lock:
+            self._kb_change_feed_minimum_since_revisions.setdefault(user_id, 0)
             receipt = self._kb_operation_receipts.get(user_id, {}).get(operation_id)
             if receipt is not None:
                 verify_knowledge_operation_receipt(
@@ -633,24 +636,64 @@ class InMemoryStore:
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         with self._kb_lock:
-            changes = []
-            stored_changes = sorted(
-                self._kb_changes.get(user_id, []),
-                key=lambda item: int(item.get("revision") or 0),
+            return self._list_kb_changes_locked(
+                user_id,
+                since_revision,
+                through_revision=through_revision,
+                limit=limit,
             )
-            for stored in stored_changes:
-                revision = int(stored.get("revision") or 0)
-                if revision <= since_revision:
-                    continue
-                if through_revision is not None and revision > through_revision:
-                    continue
-                item = deepcopy(stored)
-                item.setdefault("mutationSchemaVersion", 2 if item.get("mutation") is not None else 1)
-                item.setdefault("mutation", None)
-                changes.append(item)
-                if limit is not None and len(changes) >= limit:
-                    break
-            return changes
+
+    def get_kb_change_page(
+        self,
+        user_id: str,
+        since_revision: int,
+        through_revision: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        with self._kb_lock:
+            snapshot = self._kb_snapshots.get(user_id)
+            return {
+                "currentRevision": int((snapshot or {}).get("revision") or 0),
+                "minimumSinceRevision": int(
+                    self._kb_change_feed_minimum_since_revisions.get(user_id, 0)
+                ),
+                "changes": self._list_kb_changes_locked(
+                    user_id,
+                    since_revision,
+                    through_revision=through_revision,
+                    limit=limit,
+                ),
+            }
+
+    def _list_kb_changes_locked(
+        self,
+        user_id: str,
+        since_revision: int,
+        *,
+        through_revision: Optional[int],
+        limit: Optional[int],
+    ) -> List[Dict[str, Any]]:
+        changes = []
+        stored_changes = sorted(
+            self._kb_changes.get(user_id, []),
+            key=lambda item: int(item.get("revision") or 0),
+        )
+        for stored in stored_changes:
+            revision = int(stored.get("revision") or 0)
+            if revision <= since_revision:
+                continue
+            if through_revision is not None and revision > through_revision:
+                continue
+            item = deepcopy(stored)
+            item.setdefault(
+                "mutationSchemaVersion",
+                2 if item.get("mutation") is not None else 1,
+            )
+            item.setdefault("mutation", None)
+            changes.append(item)
+            if limit is not None and len(changes) >= limit:
+                break
+        return changes
 
     def add_memory(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
@@ -719,6 +762,7 @@ class InMemoryStore:
             {"itemId": item_id},
         )
         with self._archive_lock, self._kb_lock:
+            self._kb_change_feed_minimum_since_revisions.setdefault(user_id, 0)
             receipt = self._kb_operation_receipts.get(user_id, {}).get(operation_id)
             if receipt is not None:
                 verify_knowledge_operation_receipt(
