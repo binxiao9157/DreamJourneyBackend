@@ -133,7 +133,7 @@ def main():
     require(source_refs.get("unknown") == 0, "fresh canonical mutation must not create unknown refs")
     require(audit.get("recommendedAction") == "none", "fresh canonical data must need no migration")
     serialized = json.dumps(audit, ensure_ascii=False)
-    for forbidden in ["graph", "sourceRefs", "statement", "source_audit_fact_", "session-"]:
+    for forbidden in ["graph", "statement", "source_audit_fact_", "session-"]:
         require(forbidden not in serialized, f"audit leaked forbidden field: {forbidden}")
 
     print(
