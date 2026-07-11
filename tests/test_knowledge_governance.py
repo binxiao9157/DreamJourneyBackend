@@ -17,7 +17,7 @@ from app.services.knowledge_governance import (
 
 USER_ID = "governance-user"
 DECIDED_AT = "2026-07-11T10:30:00+08:00"
-SOURCE_REF = {"kind": "memoryArchiveItem", "id": "archive-1", "title": "redacted"}
+SOURCE_REF = {"kind": "memoryArchiveItem", "id": "archive-1", "title": "档案素材"}
 
 
 def knowledge_graph():

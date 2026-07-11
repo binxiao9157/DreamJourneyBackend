@@ -5,7 +5,11 @@ import hashlib
 import json
 from typing import Any, Dict, List, Tuple
 
-from app.services.privacy import SYNCABLE_SCOPES, filter_syncable_graph
+from app.services.privacy import (
+    SYNCABLE_SCOPES,
+    canonicalize_source_ref_titles,
+    filter_syncable_graph,
+)
 
 
 KNOWLEDGE_ENTITY_TYPES = ("people", "places", "events", "facts")
@@ -102,7 +106,7 @@ def normalize_kb_mutation_v2(upserts: Any, tombstones: Any) -> Dict[str, Any]:
                 raise KnowledgeMutationValidationError(
                     f"upserts.{entity_type}[{entity_id}] is not syncable"
                 )
-            normalized_entities.append(deepcopy(entity))
+            normalized_entities.append(canonicalize_source_ref_titles(entity))
         normalized_upserts[entity_type] = normalized_entities
 
     if not isinstance(tombstones, list):

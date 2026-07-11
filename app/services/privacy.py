@@ -179,6 +179,11 @@ def _redact_source_ref_titles(entity: Dict[str, Any]) -> Dict[str, Any]:
     return entity
 
 
+def canonicalize_source_ref_titles(entity: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy with source reference titles replaced by server-safe labels."""
+    return _redact_source_ref_titles(deepcopy(entity))
+
+
 def filter_syncable_graph(graph: Dict[str, Any]) -> Dict[str, Any]:
     """Return a backend-safe KBLite graph without localOnly entities."""
     people = [_redact_source_ref_titles(deepcopy(item)) for item in graph.get("people", []) if _is_syncable(item)]

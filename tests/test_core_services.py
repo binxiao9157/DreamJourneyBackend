@@ -3,6 +3,7 @@ import os
 import urllib.error
 import unittest
 import wave
+from copy import deepcopy
 from io import BytesIO
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -1038,6 +1039,107 @@ class StoreTests(unittest.TestCase):
         change = store.list_kb_changes("u1", since_revision=1)[0]
         self.assertEqual(change["mutationSchemaVersion"], 2)
         self.assertEqual(change["mutation"], first["mutation"])
+
+    def test_memory_v2_mutation_uses_one_canonical_source_ref_contract(self):
+        store = InMemoryStore()
+        raw_title = "RAW_SOURCE_TITLE_SENTINEL_MEMORY"
+        raw_mutation = {
+            "upserts": {
+                "facts": [
+                    {
+                        "id": "fact-1",
+                        "statement": "Original body",
+                        "relatedPersonIds": ["partial-person"],
+                        "privacyMetadata": {
+                            "scope": "generationAllowed",
+                            "sourceRefs": [
+                                {
+                                    "kind": "conversationTurn",
+                                    "id": "turn-1",
+                                    "title": raw_title,
+                                    "locator": "turn:1",
+                                }
+                            ],
+                        },
+                    }
+                ]
+            },
+            "tombstones": [],
+        }
+        canonical_mutation = deepcopy(raw_mutation)
+        canonical_mutation["upserts"]["facts"][0]["privacyMetadata"]["sourceRefs"][0][
+            "title"
+        ] = "对话来源"
+
+        first = store.apply_kb_mutation(
+            "canonical-user",
+            None,
+            operation_id="canonical-op",
+            base_revision=0,
+            mutation=raw_mutation,
+        )
+        replay = store.apply_kb_mutation(
+            "canonical-user",
+            None,
+            operation_id="canonical-op",
+            base_revision=999,
+            mutation=canonical_mutation,
+        )
+        change = store.list_kb_changes("canonical-user", since_revision=0)[0]
+        receipt = store._kb_operation_receipts["canonical-user"]["canonical-op"]
+
+        source_ref = first["mutation"]["upserts"]["facts"][0]["privacyMetadata"][
+            "sourceRefs"
+        ][0]
+        self.assertEqual(
+            source_ref,
+            {
+                "kind": "conversationTurn",
+                "id": "turn-1",
+                "title": "对话来源",
+                "locator": "turn:1",
+            },
+        )
+        self.assertEqual(
+            first["mutation"]["upserts"]["facts"][0]["relatedPersonIds"],
+            ["partial-person"],
+        )
+        self.assertEqual(
+            raw_mutation["upserts"]["facts"][0]["privacyMetadata"]["sourceRefs"][0][
+                "title"
+            ],
+            raw_title,
+        )
+        self.assertTrue(replay["duplicate"])
+        self.assertTrue(replay["operationPayloadVerified"])
+        self.assertEqual(replay["mutation"], first["mutation"])
+        for surface in (first, change, receipt, replay):
+            self.assertNotIn(raw_title, str(surface))
+
+        changed_kind = deepcopy(canonical_mutation)
+        changed_kind["upserts"]["facts"][0]["privacyMetadata"]["sourceRefs"][0][
+            "kind"
+        ] = "conversationPhoto"
+        changed_id = deepcopy(canonical_mutation)
+        changed_id["upserts"]["facts"][0]["privacyMetadata"]["sourceRefs"][0][
+            "id"
+        ] = "turn-2"
+        changed_body = deepcopy(canonical_mutation)
+        changed_body["upserts"]["facts"][0]["statement"] = "Changed body"
+        for field, changed_mutation in (
+            ("kind", changed_kind),
+            ("id", changed_id),
+            ("body", changed_body),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(KnowledgeOperationPayloadConflict):
+                    store.apply_kb_mutation(
+                        "canonical-user",
+                        None,
+                        operation_id="canonical-op",
+                        base_revision=1,
+                        mutation=changed_mutation,
+                    )
 
     def test_memory_store_rejects_legacy_zero_base_without_losing_newer_snapshot(self):
         store = InMemoryStore()

@@ -16,6 +16,13 @@ from app.services.knowledge_store import (
     normalize_kb_mutation_v2,
     verify_knowledge_operation_receipt,
 )
+from app.services.knowledge_privacy_maintenance import (
+    KnowledgePrivacyMetadataError,
+    canonical_receipt_payload_hash,
+    canonicalize_persisted_knowledge_graph,
+    canonicalize_persisted_knowledge_mutation,
+    canonicalize_persisted_receipt_result,
+)
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -886,6 +893,217 @@ class PostgresStore:
             }
             for row in rows
         ]
+
+    def maintain_knowledge_privacy_metadata(self, *, apply: bool = False) -> Dict[str, Any]:
+        report = {
+            "schemaVersion": 1,
+            "mode": "apply" if apply else "dryRun",
+            "status": "ok",
+            "scanned": {
+                "users": 0,
+                "snapshots": 0,
+                "changes": 0,
+                "receipts": 0,
+            },
+            "changed": {
+                "snapshotGraphs": 0,
+                "changeGraphs": 0,
+                "changeMutations": 0,
+                "receiptResults": 0,
+                "receiptPayloadHashes": 0,
+            },
+            "invalidRecordCount": 0,
+        }
+        connection = self._open_connection()
+        snapshot_updates = []
+        change_graph_updates = []
+        change_mutation_updates = []
+        receipt_result_updates = []
+        receipt_hash_updates = []
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    ("knowledge-privacy-metadata-maintenance:v1",),
+                )
+                cursor.execute(
+                    """
+                    SELECT user_id FROM (
+                        SELECT user_id FROM kb_snapshots
+                        UNION
+                        SELECT user_id FROM kb_changes
+                        UNION
+                        SELECT user_id FROM kb_operation_receipts
+                    ) AS knowledge_users
+                    ORDER BY user_id
+                    """
+                )
+                user_rows = cursor.fetchall()
+                user_ids = sorted(
+                    {
+                        str(row.get("user_id") or "")
+                        for row in user_rows
+                        if str(row.get("user_id") or "")
+                    }
+                )
+                report["scanned"]["users"] = len(user_ids)
+                for user_id in user_ids:
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                        (f"knowledge:{user_id}",),
+                    )
+                cursor.execute(
+                    """
+                    LOCK TABLE kb_snapshots, kb_changes, kb_operation_receipts
+                    IN SHARE ROW EXCLUSIVE MODE
+                    """
+                )
+
+                cursor.execute(
+                    "SELECT user_id, graph FROM kb_snapshots ORDER BY user_id"
+                )
+                snapshot_rows = cursor.fetchall()
+                report["scanned"]["snapshots"] = len(snapshot_rows)
+                for row in snapshot_rows:
+                    try:
+                        canonical_graph = canonicalize_persisted_knowledge_graph(
+                            row.get("graph")
+                        )
+                    except KnowledgePrivacyMetadataError:
+                        report["invalidRecordCount"] += 1
+                        continue
+                    if canonical_graph != row.get("graph"):
+                        report["changed"]["snapshotGraphs"] += 1
+                        snapshot_updates.append((canonical_graph, row["user_id"]))
+
+                cursor.execute(
+                    """
+                    SELECT user_id, revision, graph, mutation
+                    FROM kb_changes
+                    ORDER BY user_id, revision
+                    """
+                )
+                change_rows = cursor.fetchall()
+                report["scanned"]["changes"] = len(change_rows)
+                for row in change_rows:
+                    try:
+                        canonical_graph = canonicalize_persisted_knowledge_graph(
+                            row.get("graph")
+                        )
+                        canonical_mutation = (
+                            None
+                            if row.get("mutation") is None
+                            else canonicalize_persisted_knowledge_mutation(
+                                row.get("mutation")
+                            )
+                        )
+                    except KnowledgePrivacyMetadataError:
+                        report["invalidRecordCount"] += 1
+                        continue
+                    if canonical_graph != row.get("graph"):
+                        report["changed"]["changeGraphs"] += 1
+                        change_graph_updates.append(
+                            (canonical_graph, row["user_id"], row["revision"])
+                        )
+                    if canonical_mutation != row.get("mutation"):
+                        report["changed"]["changeMutations"] += 1
+                        change_mutation_updates.append(
+                            (canonical_mutation, row["user_id"], row["revision"])
+                        )
+
+                cursor.execute(
+                    """
+                    SELECT user_id, operation_id, operation_kind, schema_version,
+                           payload_hash, result
+                    FROM kb_operation_receipts
+                    ORDER BY user_id, operation_id
+                    """
+                )
+                receipt_rows = cursor.fetchall()
+                report["scanned"]["receipts"] = len(receipt_rows)
+                for row in receipt_rows:
+                    operation_kind = str(row.get("operation_kind") or "")
+                    schema_version = int(row.get("schema_version") or 0)
+                    try:
+                        canonical_result = canonicalize_persisted_receipt_result(
+                            row.get("result"),
+                            require_v2_mutation=(
+                                operation_kind == KB_OPERATION_MUTATION
+                                and schema_version == 2
+                            ),
+                        )
+                        canonical_hash = canonical_receipt_payload_hash(
+                            operation_kind=operation_kind,
+                            schema_version=schema_version,
+                            canonical_result=canonical_result,
+                            current_payload_hash=str(row.get("payload_hash") or ""),
+                        )
+                    except (KnowledgePrivacyMetadataError, TypeError, ValueError):
+                        report["invalidRecordCount"] += 1
+                        continue
+                    if canonical_result != row.get("result"):
+                        report["changed"]["receiptResults"] += 1
+                        receipt_result_updates.append(
+                            (canonical_result, row["user_id"], row["operation_id"])
+                        )
+                    if canonical_hash != str(row.get("payload_hash") or ""):
+                        report["changed"]["receiptPayloadHashes"] += 1
+                        receipt_hash_updates.append(
+                            (canonical_hash, row["user_id"], row["operation_id"])
+                        )
+
+                if report["invalidRecordCount"]:
+                    report["status"] = "invalidRecords"
+                    if apply:
+                        raise KnowledgePrivacyMetadataError(
+                            "knowledge privacy maintenance refused invalid historical records"
+                        )
+
+                if apply:
+                    for params in snapshot_updates:
+                        cursor.execute(
+                            "UPDATE kb_snapshots SET graph = %s WHERE user_id = %s",
+                            self._adapt_params(params),
+                        )
+                    for params in change_graph_updates:
+                        cursor.execute(
+                            """
+                            UPDATE kb_changes SET graph = %s
+                            WHERE user_id = %s AND revision = %s
+                            """,
+                            self._adapt_params(params),
+                        )
+                    for params in change_mutation_updates:
+                        cursor.execute(
+                            """
+                            UPDATE kb_changes SET mutation = %s
+                            WHERE user_id = %s AND revision = %s
+                            """,
+                            self._adapt_params(params),
+                        )
+                    for params in receipt_result_updates:
+                        cursor.execute(
+                            """
+                            UPDATE kb_operation_receipts SET result = %s
+                            WHERE user_id = %s AND operation_id = %s
+                            """,
+                            self._adapt_params(params),
+                        )
+                    for params in receipt_hash_updates:
+                        cursor.execute(
+                            """
+                            UPDATE kb_operation_receipts SET payload_hash = %s
+                            WHERE user_id = %s AND operation_id = %s
+                            """,
+                            params,
+                        )
+            connection.commit()
+            return report
+        except Exception:
+            self._rollback(connection)
+            raise
+        finally:
+            self._close(connection)
 
     def acquire_digital_human_session_lease(
         self,
