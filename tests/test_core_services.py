@@ -19,7 +19,10 @@ from app.services.knowledge_extraction import (
     filter_extraction_by_evidence,
     normalize_knowledge_extraction_input,
 )
-from app.services.knowledge_store import KnowledgeRevisionConflict
+from app.services.knowledge_store import (
+    KnowledgeOperationPayloadConflict,
+    KnowledgeRevisionConflict,
+)
 from app.services.postgres_store import PostgresStore
 from app.services.privacy import filter_syncable_graph, sanitize_care_snapshot_payload
 from app.services.runtime_config import RuntimeConfigService
@@ -871,9 +874,9 @@ class StoreTests(unittest.TestCase):
         )
         repeated = store.apply_kb_mutation(
             "u1",
-            {"facts": [{"id": "f1", "statement": "重复请求不应覆盖"}]},
+            {"facts": [{"id": "f1", "statement": "第一条事实"}]},
             operation_id="op-1",
-            base_revision=0,
+            base_revision=999,
         )
 
         self.assertEqual(first["revision"], 1)
@@ -882,6 +885,15 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(repeated["duplicate"])
         self.assertEqual(store.get_kb_snapshot("u1")["facts"][0]["statement"], "第一条事实")
         self.assertEqual(len(store.list_kb_changes("u1", since_revision=0)), 1)
+        self.assertTrue(repeated["operationPayloadVerified"])
+
+        with self.assertRaises(KnowledgeOperationPayloadConflict):
+            store.apply_kb_mutation(
+                "u1",
+                {"facts": [{"id": "f1", "statement": "不同事实"}]},
+                operation_id="op-1",
+                base_revision=1,
+            )
 
         with self.assertRaises(KnowledgeRevisionConflict) as conflict:
             store.apply_kb_mutation(
@@ -940,7 +952,7 @@ class StoreTests(unittest.TestCase):
             None,
             operation_id="v2-op",
             base_revision=0,
-            mutation={"upserts": {}, "tombstones": []},
+            mutation=mutation,
         )
 
         self.assertEqual(first["revision"], 2)
@@ -987,6 +999,46 @@ class StoreTests(unittest.TestCase):
             [change["operationId"] for change in store.list_kb_changes("u1", 0)],
             ["initial", "newest"],
         )
+
+    def test_memory_store_keeps_legacy_change_replays_unverified(self):
+        store = InMemoryStore()
+        store._kb_changes["u1"] = [
+            {
+                "revision": 1,
+                "operationId": "legacy-op",
+                "graph": {"facts": []},
+                "createdAt": "2026-07-10T00:00:00+00:00",
+                "mutation": None,
+            }
+        ]
+
+        replay = store.apply_kb_mutation(
+            "u1",
+            {"facts": [{"id": "different"}]},
+            operation_id="legacy-op",
+            base_revision=999,
+        )
+
+        self.assertTrue(replay["duplicate"])
+        self.assertFalse(replay["operationPayloadVerified"])
+
+    def test_memory_purge_removes_operation_receipts(self):
+        store = InMemoryStore()
+        store.apply_kb_mutation(
+            "u1",
+            {"facts": []},
+            operation_id="purge-op",
+            base_revision=0,
+        )
+        store._users["u1"] = {
+            "id": "u1",
+            "deletionState": "softDeleted",
+            "restoreDeadline": "2026-01-01T00:00:00+00:00",
+        }
+
+        store.purge_expired_deleted_users("2026-01-02T00:00:00+00:00")
+
+        self.assertNotIn("u1", store._kb_operation_receipts)
 
 
 class KnowledgeSyncAPITests(unittest.TestCase):
@@ -1046,6 +1098,59 @@ class KnowledgeSyncAPITests(unittest.TestCase):
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(conflict.json()["detail"]["code"], "knowledgeRevisionConflict")
         self.assertEqual(conflict.json()["detail"]["currentRevision"], 2)
+
+    def test_receipt_rejects_cross_kind_reuse_and_legacy_replay_is_unverified(self):
+        synced = self.client.post(
+            "/kb/sync",
+            json={
+                "userId": "receipt-user",
+                "operationId": "shared-operation",
+                "baseRevision": 0,
+                "graph": {"facts": []},
+            },
+        )
+        cross_kind = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "receipt-user",
+                "operationId": "shared-operation",
+                "baseRevision": 1,
+                "graph": {"facts": []},
+            },
+        )
+        main_module.store._kb_changes["legacy-user"] = [
+            {
+                "revision": 3,
+                "operationId": "legacy-operation",
+                "graph": {"facts": []},
+                "createdAt": "2026-07-10T00:00:00+00:00",
+                "mutation": None,
+            }
+        ]
+        legacy = self.client.post(
+            "/kb/mutations",
+            json={
+                "userId": "legacy-user",
+                "operationId": "legacy-operation",
+                "baseRevision": 999,
+                "graph": {"facts": [{"id": "different"}]},
+            },
+        )
+
+        self.assertEqual(synced.status_code, 200)
+        self.assertTrue(synced.json()["operationPayloadVerified"])
+        self.assertNotIn("payloadHash", synced.json())
+        self.assertEqual(cross_kind.status_code, 409)
+        self.assertEqual(
+            cross_kind.json()["detail"],
+            {
+                "code": "knowledgeOperationPayloadConflict",
+                "operationId": "shared-operation",
+            },
+        )
+        self.assertEqual(legacy.status_code, 200)
+        self.assertTrue(legacy.json()["duplicate"])
+        self.assertFalse(legacy.json()["operationPayloadVerified"])
 
     def test_v2_mutation_upserts_tombstones_idempotency_and_change_metadata(self):
         metadata = {"privacyMetadata": {"scope": "generationAllowed"}}
@@ -1117,7 +1222,7 @@ class KnowledgeSyncAPITests(unittest.TestCase):
         self.assertEqual(changes.json()["changes"][0]["mutationSchemaVersion"], 2)
         self.assertEqual(changes.json()["changes"][0]["mutation"], applied.json()["mutation"])
 
-    def test_duplicate_operation_response_uses_original_schema_across_replays(self):
+    def test_operation_id_rejects_cross_schema_replays(self):
         first_v1 = self.client.post(
             "/kb/mutations",
             json={
@@ -1134,7 +1239,15 @@ class KnowledgeSyncAPITests(unittest.TestCase):
                 "operationId": "shared-op",
                 "baseRevision": 999,
                 "mutationSchemaVersion": 2,
-                "upserts": {},
+                "upserts": {
+                    "facts": [
+                        {
+                            "id": "different-fact",
+                            "statement": "different schema",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ]
+                },
                 "tombstones": [],
             },
         )
@@ -1168,17 +1281,17 @@ class KnowledgeSyncAPITests(unittest.TestCase):
         )
 
         self.assertEqual(first_v1.status_code, 200)
-        self.assertEqual(replayed_as_v2.status_code, 200)
-        self.assertTrue(replayed_as_v2.json()["duplicate"])
-        self.assertNotIn("mutationSchemaVersion", replayed_as_v2.json())
-        self.assertNotIn("mutation", replayed_as_v2.json())
-        self.assertNotIn("graph", replayed_as_v2.json())
+        self.assertEqual(replayed_as_v2.status_code, 409)
+        self.assertEqual(
+            replayed_as_v2.json()["detail"]["code"],
+            "knowledgeOperationPayloadConflict",
+        )
         self.assertEqual(first_v2.status_code, 200)
-        self.assertEqual(replayed_as_v1.status_code, 200)
-        self.assertTrue(replayed_as_v1.json()["duplicate"])
-        self.assertEqual(replayed_as_v1.json()["mutationSchemaVersion"], 2)
-        self.assertEqual(replayed_as_v1.json()["mutation"], first_v2.json()["mutation"])
-        self.assertEqual(replayed_as_v1.json()["graph"], first_v2.json()["graph"])
+        self.assertEqual(replayed_as_v1.status_code, 409)
+        self.assertEqual(
+            replayed_as_v1.json()["detail"]["code"],
+            "knowledgeOperationPayloadConflict",
+        )
 
     def test_v2_mutation_rejects_invalid_types_ids_and_non_syncable_upserts(self):
         metadata = {"privacyMetadata": {"scope": "generationAllowed"}}
@@ -1297,6 +1410,23 @@ class KnowledgeSyncAPITests(unittest.TestCase):
             "/kb/sync",
             json={
                 "userId": "legacy_user",
+                "operationId": "legacy-noop",
+                "graph": {
+                    "facts": [
+                        {
+                            "id": "fact-1",
+                            "statement": "stale legacy",
+                            "privacyMetadata": {"scope": "generationAllowed"},
+                        }
+                    ]
+                },
+            },
+        )
+        repeated_stale_legacy = self.client.post(
+            "/kb/sync",
+            json={
+                "userId": "legacy_user",
+                "operationId": "legacy-noop",
                 "graph": {
                     "facts": [
                         {
@@ -1322,6 +1452,10 @@ class KnowledgeSyncAPITests(unittest.TestCase):
         self.assertEqual(stale_legacy.json()["revision"], 2)
         self.assertFalse(stale_legacy.json()["applied"])
         self.assertTrue(stale_legacy.json()["compatibilityNoOp"])
+        self.assertTrue(stale_legacy.json()["operationPayloadVerified"])
+        self.assertEqual(repeated_stale_legacy.status_code, 200)
+        self.assertTrue(repeated_stale_legacy.json()["duplicate"])
+        self.assertTrue(repeated_stale_legacy.json()["compatibilityNoOp"])
         self.assertEqual(stale_legacy.json()["counts"]["facts"], 1)
         self.assertEqual(snapshot.json()["revision"], 2)
         self.assertEqual(snapshot.json()["graph"]["facts"][0]["statement"], "newest")
@@ -1358,11 +1492,20 @@ class KnowledgeSyncAPITests(unittest.TestCase):
                     "facts": [
                         {
                             "id": "fact-1",
-                            "statement": "must not replace",
+                            "statement": "first",
                             "privacyMetadata": {"scope": "generationAllowed"},
                         }
                     ]
                 },
+            },
+        )
+        payload_conflict = self.client.post(
+            "/kb/sync",
+            json={
+                "userId": "sync_cas_user",
+                "operationId": "sync-1",
+                "baseRevision": 1,
+                "graph": {"facts": []},
             },
         )
         stale = self.client.post(
@@ -1382,6 +1525,15 @@ class KnowledgeSyncAPITests(unittest.TestCase):
         self.assertEqual(repeated.json()["revision"], 1)
         self.assertFalse(repeated.json()["applied"])
         self.assertTrue(repeated.json()["duplicate"])
+        self.assertTrue(repeated.json()["operationPayloadVerified"])
+        self.assertEqual(payload_conflict.status_code, 409)
+        self.assertEqual(
+            payload_conflict.json()["detail"],
+            {
+                "code": "knowledgeOperationPayloadConflict",
+                "operationId": "sync-1",
+            },
+        )
         self.assertEqual(stale.status_code, 409)
         self.assertEqual(stale.json()["detail"]["code"], "knowledgeRevisionConflict")
         self.assertEqual(stale.json()["detail"]["currentRevision"], 1)

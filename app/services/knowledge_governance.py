@@ -98,7 +98,7 @@ def build_knowledge_governance_mutation(
     owner_user_id = _required_text(user_id, "userId")
     normalized_operation_id = _required_text(operation_id, "operationId")
     _validate_base_revision(base_revision)
-    normalized_action = _normalize_action(action)
+    normalized_action = normalize_knowledge_governance_action(action)
     graph = _snapshot_graph(snapshot)
 
     if normalized_action["kind"] == "deleteSource":
@@ -300,7 +300,7 @@ def _build_delete_source_upserts(
     }
 
 
-def _normalize_action(action: Any) -> Dict[str, Any]:
+def normalize_knowledge_governance_action(action: Any) -> Dict[str, Any]:
     if not isinstance(action, dict):
         raise KnowledgeGovernanceValidationError("action must be an object")
     kind = _required_text(action.get("kind"), "action.kind")

@@ -28,7 +28,11 @@ from app.services.privacy import (
 )
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
+    KB_OPERATION_GOVERNANCE,
+    KB_OPERATION_MUTATION,
+    KB_OPERATION_SYNC,
     KnowledgeMutationValidationError,
+    KnowledgeOperationPayloadConflict,
     KnowledgeRevisionConflict,
 )
 from app.services.knowledge_extraction import (
@@ -47,6 +51,7 @@ from app.services.knowledge_governance import (
     KnowledgeGovernanceNotFound,
     KnowledgeGovernanceValidationError,
     build_knowledge_governance_mutation,
+    normalize_knowledge_governance_action,
     summarize_knowledge_governance_mutation,
 )
 from app.services.passwords import make_password_credential, verify_password
@@ -1499,7 +1504,19 @@ def sync_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
             filtered,
             operation_id=operation_id,
             base_revision=base_revision if has_base_revision else 0,
+            operation_kind=KB_OPERATION_SYNC,
+            operation_schema_version=1,
+            operation_payload=filtered,
+            allow_revision_noop=not has_base_revision,
         )
+    except KnowledgeOperationPayloadConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "knowledgeOperationPayloadConflict",
+                "operationId": operation_id,
+            },
+        ) from exc
     except KnowledgeRevisionConflict as exc:
         if has_base_revision:
             raise HTTPException(
@@ -1519,6 +1536,7 @@ def sync_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
             "duplicate": False,
         }
         compatibility_noop = True
+    compatibility_noop = bool(snapshot.get("compatibilityNoOp", compatibility_noop))
     response_graph = snapshot["graph"]
     duplicate = bool(snapshot.get("duplicate"))
     return {
@@ -1529,6 +1547,7 @@ def sync_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
         "revision": snapshot["revision"],
         "applied": not duplicate and not compatibility_noop,
         "duplicate": duplicate,
+        "operationPayloadVerified": bool(snapshot.get("operationPayloadVerified")),
         "compatibilityNoOp": compatibility_noop,
         "counts": {
             "people": len(response_graph.get("people", [])),
@@ -1595,7 +1614,17 @@ def mutate_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
             operation_id=operation_id,
             base_revision=base_revision,
             mutation=mutation,
+            operation_kind=KB_OPERATION_MUTATION,
+            operation_schema_version=mutation_schema_version,
         )
+    except KnowledgeOperationPayloadConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "knowledgeOperationPayloadConflict",
+                "operationId": operation_id,
+            },
+        ) from exc
     except KnowledgeRevisionConflict as exc:
         raise HTTPException(
             status_code=409,
@@ -1615,6 +1644,7 @@ def mutate_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
         "revision": result["revision"],
         "updatedAt": result["updatedAt"],
         "duplicate": result["duplicate"],
+        "operationPayloadVerified": bool(result.get("operationPayloadVerified")),
     }
     if result.get("mutationSchemaVersion") == 2:
         response.update(
@@ -1654,25 +1684,37 @@ def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
         "authenticated user is not the knowledge owner",
     )
 
-    snapshot = store.get_kb_snapshot_record(user_id)
     try:
-        governance = build_knowledge_governance_mutation(
-            user_id=user_id,
-            operation_id=operation_id,
-            base_revision=base_revision,
-            action=payload.get("action"),
-            snapshot=snapshot,
-        )
-        result = store.apply_kb_mutation(
+        normalized_action = normalize_knowledge_governance_action(payload.get("action"))
+        result = store.get_kb_operation_replay(
             user_id,
-            None,
-            operation_id=operation_id,
-            base_revision=base_revision,
-            mutation={
-                "upserts": governance["upserts"],
-                "tombstones": governance["tombstones"],
-            },
+            operation_id,
+            operation_kind=KB_OPERATION_GOVERNANCE,
+            operation_schema_version=governance_schema_version,
+            operation_payload=normalized_action,
         )
+        if result is None:
+            snapshot = store.get_kb_snapshot_record(user_id)
+            governance = build_knowledge_governance_mutation(
+                user_id=user_id,
+                operation_id=operation_id,
+                base_revision=base_revision,
+                action=normalized_action,
+                snapshot=snapshot,
+            )
+            result = store.apply_kb_mutation(
+                user_id,
+                None,
+                operation_id=operation_id,
+                base_revision=base_revision,
+                mutation={
+                    "upserts": governance["upserts"],
+                    "tombstones": governance["tombstones"],
+                },
+                operation_kind=KB_OPERATION_GOVERNANCE,
+                operation_schema_version=governance_schema_version,
+                operation_payload=normalized_action,
+            )
     except KnowledgeGovernanceNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except (KnowledgeGovernanceValidationError, KnowledgeMutationValidationError) as exc:
@@ -1686,6 +1728,14 @@ def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
                 "currentRevision": exc.current_revision,
             },
         )
+    except KnowledgeOperationPayloadConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "knowledgeOperationPayloadConflict",
+                "operationId": operation_id,
+            },
+        ) from exc
 
     summary = summarize_knowledge_governance_mutation(
         result.get("mutation"),
@@ -1705,6 +1755,7 @@ def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
         "revision": result["revision"],
         "updatedAt": result["updatedAt"],
         "duplicate": result["duplicate"],
+        "operationPayloadVerified": bool(result.get("operationPayloadVerified")),
         "graph": result["graph"],
         "mutation": result["mutation"],
         "summary": summary,
@@ -1951,6 +2002,14 @@ def delete_archive_item(
         )
     except KnowledgeMutationValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except KnowledgeOperationPayloadConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "knowledgeOperationPayloadConflict",
+                "operationId": operation_id,
+            },
+        ) from exc
 
     summary = None if governance is None else governance["summary"]
     if result["duplicate"]:
@@ -1958,7 +2017,7 @@ def delete_archive_item(
             result.get("mutation"),
             operation_id=operation_id,
         ) or summary
-        if summary is None:
+        if summary is None and result.get("mutation") is not None:
             raise HTTPException(
                 status_code=409,
                 detail={"code": "knowledgeGovernanceOperationConflict"},
@@ -1967,6 +2026,7 @@ def delete_archive_item(
         "status": "duplicate" if result["duplicate"] else "deleted",
         "id": item_id,
         "item": result["item"],
+        "operationPayloadVerified": bool(result.get("operationPayloadVerified")),
         "cascade": {
             "action": "deleteSource",
             "operationId": operation_id,

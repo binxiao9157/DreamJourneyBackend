@@ -5,7 +5,15 @@ from threading import RLock
 from typing import Any, Dict, List, Optional
 import uuid
 
-from app.services.knowledge_store import KnowledgeRevisionConflict, apply_kb_mutation_v2
+from app.services.knowledge_store import (
+    KB_OPERATION_ARCHIVE_DELETE,
+    KB_OPERATION_MUTATION,
+    KnowledgeRevisionConflict,
+    apply_kb_mutation_v2,
+    knowledge_operation_payload_fingerprint,
+    normalize_kb_mutation_v2,
+    verify_knowledge_operation_receipt,
+)
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -20,6 +28,7 @@ class InMemoryStore:
         self._users: Dict[str, Dict[str, Any]] = {}
         self._kb_snapshots: Dict[str, Dict[str, Any]] = {}
         self._kb_changes: Dict[str, List[Dict[str, Any]]] = {}
+        self._kb_operation_receipts: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._kb_lock = RLock()
         self._archive_lock = RLock()
         self._memories: Dict[str, List[Dict[str, Any]]] = {}
@@ -345,6 +354,7 @@ class InMemoryStore:
             self._password_credentials.pop(user_id, None)
             self._kb_snapshots.pop(user_id, None)
             self._kb_changes.pop(user_id, None)
+            self._kb_operation_receipts.pop(user_id, None)
             self._memories.pop(user_id, None)
             self._archive_items.pop(user_id, None)
             self._mailbox_letters.pop(user_id, None)
@@ -409,8 +419,45 @@ class InMemoryStore:
         operation_id: str,
         base_revision: Optional[int],
         mutation: Optional[Dict[str, Any]] = None,
+        operation_kind: str = KB_OPERATION_MUTATION,
+        operation_schema_version: Optional[int] = None,
+        operation_payload: Optional[Any] = None,
+        allow_revision_noop: bool = False,
     ) -> Dict[str, Any]:
+        normalized_requested_mutation = None
+        if mutation is not None:
+            normalized_requested_mutation = normalize_kb_mutation_v2(
+                mutation.get("upserts", {}) if isinstance(mutation, dict) else None,
+                mutation.get("tombstones", []) if isinstance(mutation, dict) else None,
+            )
+        schema_version = operation_schema_version or (
+            2 if normalized_requested_mutation is not None else 1
+        )
+        semantic_payload = operation_payload
+        if semantic_payload is None:
+            semantic_payload = (
+                normalized_requested_mutation
+                if normalized_requested_mutation is not None
+                else graph
+            )
+        payload_hash = knowledge_operation_payload_fingerprint(
+            operation_kind,
+            schema_version,
+            semantic_payload,
+        )
         with self._kb_lock:
+            receipt = self._kb_operation_receipts.get(user_id, {}).get(operation_id)
+            if receipt is not None:
+                verify_knowledge_operation_receipt(
+                    receipt,
+                    operation_kind=operation_kind,
+                    payload_hash=payload_hash,
+                )
+                result = deepcopy(receipt["result"])
+                result["duplicate"] = True
+                result["operationPayloadVerified"] = True
+                return result
+
             changes = self._kb_changes.setdefault(user_id, [])
             existing = next((item for item in changes if item["operationId"] == operation_id), None)
             if existing is not None:
@@ -422,6 +469,7 @@ class InMemoryStore:
                     "updatedAt": existing["createdAt"],
                     "operationId": operation_id,
                     "duplicate": True,
+                    "operationPayloadVerified": False,
                     "mutationSchemaVersion": 2 if stored_mutation is not None else 1,
                     "mutation": deepcopy(stored_mutation),
                 }
@@ -429,6 +477,25 @@ class InMemoryStore:
             current = self._kb_snapshots.get(user_id)
             current_revision = int((current or {}).get("revision") or 0)
             if base_revision is not None and base_revision != current_revision:
+                if allow_revision_noop and current is not None:
+                    result = {
+                        **deepcopy(current),
+                        "operationId": operation_id,
+                        "duplicate": False,
+                        "operationPayloadVerified": True,
+                        "mutationSchemaVersion": 1,
+                        "mutation": None,
+                        "compatibilityNoOp": True,
+                    }
+                    self._store_kb_operation_receipt_locked(
+                        user_id,
+                        operation_id,
+                        operation_kind,
+                        schema_version,
+                        payload_hash,
+                        result,
+                    )
+                    return result
                 raise KnowledgeRevisionConflict(
                     current_revision=current_revision,
                     expected_revision=base_revision,
@@ -442,7 +509,7 @@ class InMemoryStore:
             else:
                 next_graph, normalized_mutation = apply_kb_mutation_v2(
                     deepcopy((current or {}).get("graph") or {}),
-                    mutation,
+                    normalized_requested_mutation,
                 )
 
             revision = current_revision + 1
@@ -461,15 +528,90 @@ class InMemoryStore:
                 "mutationSchemaVersion": 2 if normalized_mutation is not None else 1,
                 "mutation": deepcopy(normalized_mutation),
             }
-            self._kb_snapshots[user_id] = snapshot
-            changes.append(change)
-            return {
+            result = {
                 **deepcopy(snapshot),
                 "operationId": operation_id,
                 "duplicate": False,
+                "operationPayloadVerified": True,
                 "mutationSchemaVersion": change["mutationSchemaVersion"],
                 "mutation": deepcopy(normalized_mutation),
             }
+            self._kb_snapshots[user_id] = snapshot
+            changes.append(change)
+            self._store_kb_operation_receipt_locked(
+                user_id,
+                operation_id,
+                operation_kind,
+                schema_version,
+                payload_hash,
+                result,
+            )
+            return result
+
+    def get_kb_operation_replay(
+        self,
+        user_id: str,
+        operation_id: str,
+        *,
+        operation_kind: str,
+        operation_schema_version: int,
+        operation_payload: Any,
+    ) -> Optional[Dict[str, Any]]:
+        payload_hash = knowledge_operation_payload_fingerprint(
+            operation_kind,
+            operation_schema_version,
+            operation_payload,
+        )
+        with self._kb_lock:
+            receipt = self._kb_operation_receipts.get(user_id, {}).get(operation_id)
+            if receipt is not None:
+                verify_knowledge_operation_receipt(
+                    receipt,
+                    operation_kind=operation_kind,
+                    payload_hash=payload_hash,
+                )
+                result = deepcopy(receipt["result"])
+                result["duplicate"] = True
+                result["operationPayloadVerified"] = True
+                return result
+            existing = next(
+                (
+                    item
+                    for item in self._kb_changes.get(user_id, [])
+                    if item["operationId"] == operation_id
+                ),
+                None,
+            )
+            if existing is None:
+                return None
+            stored_mutation = existing.get("mutation")
+            return {
+                "userId": user_id,
+                "graph": deepcopy(existing["graph"]),
+                "revision": existing["revision"],
+                "updatedAt": existing["createdAt"],
+                "operationId": operation_id,
+                "duplicate": True,
+                "operationPayloadVerified": False,
+                "mutationSchemaVersion": 2 if stored_mutation is not None else 1,
+                "mutation": deepcopy(stored_mutation),
+            }
+
+    def _store_kb_operation_receipt_locked(
+        self,
+        user_id: str,
+        operation_id: str,
+        operation_kind: str,
+        schema_version: int,
+        payload_hash: str,
+        result: Dict[str, Any],
+    ) -> None:
+        self._kb_operation_receipts.setdefault(user_id, {})[operation_id] = {
+            "operationKind": operation_kind,
+            "schemaVersion": schema_version,
+            "payloadHash": payload_hash,
+            "result": deepcopy(result),
+        }
 
     def get_kb_snapshot(self, user_id: str) -> Optional[Dict[str, Any]]:
         with self._kb_lock:
@@ -554,7 +696,27 @@ class InMemoryStore:
         base_revision: int,
         mutation: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        operation_kind = KB_OPERATION_ARCHIVE_DELETE
+        schema_version = 1
+        payload_hash = knowledge_operation_payload_fingerprint(
+            operation_kind,
+            schema_version,
+            {"itemId": item_id},
+        )
         with self._archive_lock, self._kb_lock:
+            receipt = self._kb_operation_receipts.get(user_id, {}).get(operation_id)
+            if receipt is not None:
+                verify_knowledge_operation_receipt(
+                    receipt,
+                    operation_kind=operation_kind,
+                    payload_hash=payload_hash,
+                )
+                result = deepcopy(receipt["result"])
+                result["item"] = None
+                result["duplicate"] = True
+                result["operationPayloadVerified"] = True
+                return result
+
             existing = next(
                 (
                     change
@@ -568,6 +730,7 @@ class InMemoryStore:
                 return {
                     "item": None,
                     "duplicate": True,
+                    "operationPayloadVerified": False,
                     "revision": int(existing["revision"]),
                     "graph": deepcopy(existing["graph"]),
                     "mutationSchemaVersion": 2 if stored_mutation is not None else 1,
@@ -618,14 +781,25 @@ class InMemoryStore:
                 )
 
             deleted = deepcopy(items.pop(item_index))
-            return {
+            result = {
                 "item": deleted,
                 "duplicate": False,
+                "operationPayloadVerified": True,
                 "revision": revision,
                 "graph": graph,
                 "mutationSchemaVersion": 2 if normalized_mutation is not None else None,
                 "mutation": deepcopy(normalized_mutation),
             }
+            receipt_result = {**deepcopy(result), "item": None}
+            self._store_kb_operation_receipt_locked(
+                user_id,
+                operation_id,
+                operation_kind,
+                schema_version,
+                payload_hash,
+                receipt_result,
+            )
+            return result
 
     def mark_due_time_letters_delivered(
         self,

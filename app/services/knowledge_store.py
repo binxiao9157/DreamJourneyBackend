@@ -1,16 +1,26 @@
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
+import json
 from typing import Any, Dict, List, Tuple
 
 from app.services.privacy import SYNCABLE_SCOPES, filter_syncable_graph
 
 
 KNOWLEDGE_ENTITY_TYPES = ("people", "places", "events", "facts")
+KB_OPERATION_SYNC = "kb.sync"
+KB_OPERATION_MUTATION = "kb.mutation"
+KB_OPERATION_GOVERNANCE = "kb.governance"
+KB_OPERATION_ARCHIVE_DELETE = "archive.delete"
 
 
 class KnowledgeMutationValidationError(ValueError):
     pass
+
+
+class KnowledgeOperationPayloadConflict(Exception):
+    """An operation ID was already bound to different semantic input."""
 
 
 @dataclass
@@ -23,6 +33,38 @@ class KnowledgeRevisionConflict(Exception):
             "knowledge revision conflict: "
             f"expected {self.expected_revision}, current {self.current_revision}"
         )
+
+
+def knowledge_operation_payload_fingerprint(
+    operation_kind: str,
+    schema_version: int,
+    semantic_payload: Any,
+) -> str:
+    canonical = json.dumps(
+        {
+            "operationKind": operation_kind,
+            "schemaVersion": schema_version,
+            "payload": semantic_payload,
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def verify_knowledge_operation_receipt(
+    receipt: Dict[str, Any],
+    *,
+    operation_kind: str,
+    payload_hash: str,
+) -> None:
+    if (
+        receipt.get("operationKind") != operation_kind
+        or receipt.get("payloadHash") != payload_hash
+    ):
+        raise KnowledgeOperationPayloadConflict()
 
 
 def normalize_kb_mutation_v2(upserts: Any, tombstones: Any) -> Dict[str, Any]:

@@ -7,7 +7,15 @@ import uuid
 from psycopg.types.json import Jsonb
 
 from app.services.user_identity import stable_user_id
-from app.services.knowledge_store import KnowledgeRevisionConflict, apply_kb_mutation_v2
+from app.services.knowledge_store import (
+    KB_OPERATION_ARCHIVE_DELETE,
+    KB_OPERATION_MUTATION,
+    KnowledgeRevisionConflict,
+    apply_kb_mutation_v2,
+    knowledge_operation_payload_fingerprint,
+    normalize_kb_mutation_v2,
+    verify_knowledge_operation_receipt,
+)
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -64,6 +72,18 @@ class PostgresStore:
             """
             CREATE INDEX IF NOT EXISTS idx_kb_changes_user_revision
                 ON kb_changes(user_id, revision ASC)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS kb_operation_receipts (
+                user_id TEXT NOT NULL,
+                operation_id TEXT NOT NULL,
+                operation_kind TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                payload_hash TEXT NOT NULL,
+                result JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (user_id, operation_id)
+            )
             """,
             """
             CREATE TABLE IF NOT EXISTS memories (
@@ -468,6 +488,10 @@ class PostgresStore:
                 "DELETE FROM kb_changes WHERE user_id = %s RETURNING revision",
                 (user_id,),
             )
+            self._fetchall(
+                "DELETE FROM kb_operation_receipts WHERE user_id = %s RETURNING operation_id",
+                (user_id,),
+            )
             for table in (
                 "profiles",
                 "password_credentials",
@@ -572,7 +596,32 @@ class PostgresStore:
         operation_id: str,
         base_revision: Optional[int],
         mutation: Optional[Dict[str, Any]] = None,
+        operation_kind: str = KB_OPERATION_MUTATION,
+        operation_schema_version: Optional[int] = None,
+        operation_payload: Optional[Any] = None,
+        allow_revision_noop: bool = False,
     ) -> Dict[str, Any]:
+        normalized_requested_mutation = None
+        if mutation is not None:
+            normalized_requested_mutation = normalize_kb_mutation_v2(
+                mutation.get("upserts", {}) if isinstance(mutation, dict) else None,
+                mutation.get("tombstones", []) if isinstance(mutation, dict) else None,
+            )
+        schema_version = operation_schema_version or (
+            2 if normalized_requested_mutation is not None else 1
+        )
+        semantic_payload = operation_payload
+        if semantic_payload is None:
+            semantic_payload = (
+                normalized_requested_mutation
+                if normalized_requested_mutation is not None
+                else graph
+            )
+        payload_hash = knowledge_operation_payload_fingerprint(
+            operation_kind,
+            schema_version,
+            semantic_payload,
+        )
         connection = self._open_connection()
         try:
             with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
@@ -580,6 +629,16 @@ class PostgresStore:
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
                     (f"knowledge:{user_id}",),
                 )
+                receipt_result = self._kb_operation_receipt_replay_cursor(
+                    cursor,
+                    user_id,
+                    operation_id,
+                    operation_kind=operation_kind,
+                    payload_hash=payload_hash,
+                )
+                if receipt_result is not None:
+                    connection.commit()
+                    return receipt_result
                 cursor.execute(
                     """
                     SELECT revision, graph, mutation, created_at
@@ -599,6 +658,7 @@ class PostgresStore:
                         "updatedAt": self._iso_value(existing.get("created_at")),
                         "operationId": operation_id,
                         "duplicate": True,
+                        "operationPayloadVerified": False,
                         "mutationSchemaVersion": 2 if stored_mutation is not None else 1,
                         "mutation": deepcopy(stored_mutation),
                     }
@@ -615,6 +675,30 @@ class PostgresStore:
                 current = cursor.fetchone()
                 current_revision = int((current or {}).get("revision") or 0)
                 if base_revision is not None and base_revision != current_revision:
+                    if allow_revision_noop and current is not None:
+                        result = {
+                            "userId": user_id,
+                            "graph": deepcopy(current["graph"]),
+                            "revision": current_revision,
+                            "updatedAt": self._iso_value(current.get("updated_at")),
+                            "operationId": operation_id,
+                            "duplicate": False,
+                            "operationPayloadVerified": True,
+                            "mutationSchemaVersion": 1,
+                            "mutation": None,
+                            "compatibilityNoOp": True,
+                        }
+                        self._insert_kb_operation_receipt_cursor(
+                            cursor,
+                            user_id,
+                            operation_id,
+                            operation_kind=operation_kind,
+                            schema_version=schema_version,
+                            payload_hash=payload_hash,
+                            result=result,
+                        )
+                        connection.commit()
+                        return result
                     raise KnowledgeRevisionConflict(
                         current_revision=current_revision,
                         expected_revision=base_revision,
@@ -628,7 +712,7 @@ class PostgresStore:
                 else:
                     next_graph, normalized_mutation = apply_kb_mutation_v2(
                         deepcopy((current or {}).get("graph") or {}),
-                        mutation,
+                        normalized_requested_mutation,
                     )
 
                 revision = current_revision + 1
@@ -658,22 +742,91 @@ class PostgresStore:
                     ),
                 )
                 change = cursor.fetchone()
+                result = {
+                    "userId": user_id,
+                    "graph": deepcopy(saved["graph"]),
+                    "revision": int(saved["revision"]),
+                    "updatedAt": self._iso_value(saved.get("updated_at") or change.get("created_at")),
+                    "operationId": operation_id,
+                    "duplicate": False,
+                    "operationPayloadVerified": True,
+                    "mutationSchemaVersion": 2 if normalized_mutation is not None else 1,
+                    "mutation": deepcopy(normalized_mutation),
+                }
+                self._insert_kb_operation_receipt_cursor(
+                    cursor,
+                    user_id,
+                    operation_id,
+                    operation_kind=operation_kind,
+                    schema_version=schema_version,
+                    payload_hash=payload_hash,
+                    result=result,
+                )
             connection.commit()
-            return {
-                "userId": user_id,
-                "graph": deepcopy(saved["graph"]),
-                "revision": int(saved["revision"]),
-                "updatedAt": self._iso_value(saved.get("updated_at") or change.get("created_at")),
-                "operationId": operation_id,
-                "duplicate": False,
-                "mutationSchemaVersion": 2 if normalized_mutation is not None else 1,
-                "mutation": deepcopy(normalized_mutation),
-            }
+            return result
         except Exception:
             self._rollback(connection)
             raise
         finally:
             self._close(connection)
+
+    def get_kb_operation_replay(
+        self,
+        user_id: str,
+        operation_id: str,
+        *,
+        operation_kind: str,
+        operation_schema_version: int,
+        operation_payload: Any,
+    ) -> Optional[Dict[str, Any]]:
+        payload_hash = knowledge_operation_payload_fingerprint(
+            operation_kind,
+            operation_schema_version,
+            operation_payload,
+        )
+        receipt = self._fetchone(
+            """
+            SELECT operation_kind, schema_version, payload_hash, result
+            FROM kb_operation_receipts
+            WHERE user_id = %s AND operation_id = %s
+            """,
+            (user_id, operation_id),
+        )
+        if receipt is not None:
+            verify_knowledge_operation_receipt(
+                {
+                    "operationKind": receipt["operation_kind"],
+                    "payloadHash": receipt["payload_hash"],
+                },
+                operation_kind=operation_kind,
+                payload_hash=payload_hash,
+            )
+            result = deepcopy(receipt["result"])
+            result["duplicate"] = True
+            result["operationPayloadVerified"] = True
+            return result
+        existing = self._fetchone(
+            """
+            SELECT revision, graph, mutation, created_at
+            FROM kb_changes
+            WHERE user_id = %s AND operation_id = %s
+            """,
+            (user_id, operation_id),
+        )
+        if existing is None:
+            return None
+        stored_mutation = existing.get("mutation")
+        return {
+            "userId": user_id,
+            "graph": deepcopy(existing["graph"]),
+            "revision": int(existing["revision"]),
+            "updatedAt": self._iso_value(existing.get("created_at")),
+            "operationId": operation_id,
+            "duplicate": True,
+            "operationPayloadVerified": False,
+            "mutationSchemaVersion": 2 if stored_mutation is not None else 1,
+            "mutation": deepcopy(stored_mutation),
+        }
 
     def get_kb_snapshot(self, user_id: str) -> Optional[Dict[str, Any]]:
         row = self._fetchone(
@@ -1016,6 +1169,13 @@ class PostgresStore:
         base_revision: int,
         mutation: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        operation_kind = KB_OPERATION_ARCHIVE_DELETE
+        schema_version = 1
+        payload_hash = knowledge_operation_payload_fingerprint(
+            operation_kind,
+            schema_version,
+            {"itemId": item_id},
+        )
         connection = self._open_connection()
         try:
             with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
@@ -1023,6 +1183,17 @@ class PostgresStore:
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
                     (f"knowledge:{user_id}",),
                 )
+                receipt_result = self._kb_operation_receipt_replay_cursor(
+                    cursor,
+                    user_id,
+                    operation_id,
+                    operation_kind=operation_kind,
+                    payload_hash=payload_hash,
+                )
+                if receipt_result is not None:
+                    receipt_result["item"] = None
+                    connection.commit()
+                    return receipt_result
                 cursor.execute(
                     """
                     SELECT revision, graph, mutation, created_at
@@ -1038,6 +1209,7 @@ class PostgresStore:
                     return {
                         "item": None,
                         "duplicate": True,
+                        "operationPayloadVerified": False,
                         "revision": int(existing["revision"]),
                         "graph": deepcopy(existing["graph"]),
                         "mutationSchemaVersion": 2 if stored_mutation is not None else 1,
@@ -1123,15 +1295,26 @@ class PostgresStore:
                 deleted = cursor.fetchone()
                 if deleted is None:
                     raise ArchiveItemNotFound("archive item not found")
+                result = {
+                    "item": deepcopy(deleted["payload"]),
+                    "duplicate": False,
+                    "operationPayloadVerified": True,
+                    "revision": revision,
+                    "graph": graph,
+                    "mutationSchemaVersion": 2 if normalized_mutation is not None else None,
+                    "mutation": deepcopy(normalized_mutation),
+                }
+                self._insert_kb_operation_receipt_cursor(
+                    cursor,
+                    user_id,
+                    operation_id,
+                    operation_kind=operation_kind,
+                    schema_version=schema_version,
+                    payload_hash=payload_hash,
+                    result={**deepcopy(result), "item": None},
+                )
             connection.commit()
-            return {
-                "item": deepcopy(deleted["payload"]),
-                "duplicate": False,
-                "revision": revision,
-                "graph": graph,
-                "mutationSchemaVersion": 2 if normalized_mutation is not None else None,
-                "mutation": deepcopy(normalized_mutation),
-            }
+            return result
         except Exception:
             self._rollback(connection)
             raise
@@ -1752,6 +1935,70 @@ class PostgresStore:
                 (user_id, viewer_family_member_id, bounded_limit),
             )
         return [deepcopy(row["payload"]) for row in rows]
+
+    def _kb_operation_receipt_replay_cursor(
+        self,
+        cursor: Any,
+        user_id: str,
+        operation_id: str,
+        *,
+        operation_kind: str,
+        payload_hash: str,
+    ) -> Optional[Dict[str, Any]]:
+        cursor.execute(
+            """
+            SELECT operation_kind, schema_version, payload_hash, result
+            FROM kb_operation_receipts
+            WHERE user_id = %s AND operation_id = %s
+            """,
+            (user_id, operation_id),
+        )
+        receipt = cursor.fetchone()
+        if receipt is None:
+            return None
+        verify_knowledge_operation_receipt(
+            {
+                "operationKind": receipt["operation_kind"],
+                "payloadHash": receipt["payload_hash"],
+            },
+            operation_kind=operation_kind,
+            payload_hash=payload_hash,
+        )
+        result = deepcopy(receipt["result"])
+        result["duplicate"] = True
+        result["operationPayloadVerified"] = True
+        return result
+
+    def _insert_kb_operation_receipt_cursor(
+        self,
+        cursor: Any,
+        user_id: str,
+        operation_id: str,
+        *,
+        operation_kind: str,
+        schema_version: int,
+        payload_hash: str,
+        result: Dict[str, Any],
+    ) -> None:
+        cursor.execute(
+            """
+            INSERT INTO kb_operation_receipts (
+                user_id, operation_id, operation_kind, schema_version,
+                payload_hash, result, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            """,
+            self._adapt_params(
+                (
+                    user_id,
+                    operation_id,
+                    operation_kind,
+                    schema_version,
+                    payload_hash,
+                    result,
+                )
+            ),
+        )
 
     def _insert_payload(self, table: str, user_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
         row = self._fetchone(

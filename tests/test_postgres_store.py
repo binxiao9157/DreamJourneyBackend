@@ -13,7 +13,10 @@ from app.services.archive_store import (
     ArchiveItemOwnershipConflict,
 )
 from app.services.in_memory_store import InMemoryStore
-from app.services.knowledge_store import KnowledgeRevisionConflict
+from app.services.knowledge_store import (
+    KnowledgeOperationPayloadConflict,
+    KnowledgeRevisionConflict,
+)
 from app.services.postgres_store import PostgresStore
 
 
@@ -127,6 +130,12 @@ class FakeCursor:
             session_id = params[0]
             item = self.connection.digital_human_sessions.get(session_id)
             self.result = None if item is None else {"payload": dict(item)}
+        elif normalized.startswith(
+            "SELECT operation_kind, schema_version, payload_hash, result FROM kb_operation_receipts"
+        ):
+            user_id, operation_id = params
+            item = self.connection.kb_operation_receipts.get(user_id, {}).get(operation_id)
+            self.result = None if item is None else deepcopy(item)
         elif normalized.startswith("SELECT revision, graph, mutation, created_at FROM kb_changes"):
             user_id, operation_id = params
             item = next(
@@ -433,6 +442,17 @@ class FakeCursor:
                 "revision": revision,
                 "updated_at": "2026-07-10T00:00:00+00:00",
             }
+        elif normalized.startswith("INSERT INTO kb_operation_receipts"):
+            user_id, operation_id, operation_kind, schema_version, payload_hash, result = params
+            result = unwrap_jsonb(result)
+            item = {
+                "operation_kind": operation_kind,
+                "schema_version": schema_version,
+                "payload_hash": payload_hash,
+                "result": deepcopy(result),
+            }
+            self.connection.kb_operation_receipts.setdefault(user_id, {})[operation_id] = item
+            self.result = None
         elif normalized.startswith("INSERT INTO kb_changes"):
             user_id, revision, operation_id, graph, mutation = params
             graph = unwrap_jsonb(graph)
@@ -486,6 +506,13 @@ class FakeCursor:
                     break
             else:
                 self.result = None
+        elif normalized.startswith("DELETE FROM kb_operation_receipts"):
+            user_id = params[0]
+            deleted = [
+                {"operation_id": operation_id}
+                for operation_id in self.connection.kb_operation_receipts.pop(user_id, {})
+            ]
+            self.result = deleted
         elif normalized.startswith("UPDATE archive_items"):
             payload, user_id, item_id = params[:3]
             cutoff_iso = params[3] if len(params) > 3 else None
@@ -728,6 +755,7 @@ class FakeConnection:
         self.kb_snapshots = {}
         self.kb_snapshot_revisions = {}
         self.kb_changes = {}
+        self.kb_operation_receipts = {}
         self.memories = {}
         self.archive_items = {}
         self.mailbox_letters = {}
@@ -823,6 +851,7 @@ class TransactionalFailingConnection(FakeConnection):
         self.kb_snapshots = state["kb_snapshots"]
         self.kb_snapshot_revisions = state["kb_snapshot_revisions"]
         self.kb_changes = state["kb_changes"]
+        self.kb_operation_receipts = state["kb_operation_receipts"]
         self.archive_items = state["archive_items"]
 
     def _capture_committed_state(self):
@@ -831,6 +860,7 @@ class TransactionalFailingConnection(FakeConnection):
                 "kb_snapshots": self.kb_snapshots,
                 "kb_snapshot_revisions": self.kb_snapshot_revisions,
                 "kb_changes": self.kb_changes,
+                "kb_operation_receipts": self.kb_operation_receipts,
                 "archive_items": self.archive_items,
             }
         )
@@ -848,6 +878,7 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS kb_snapshots", sql)
         self.assertIn("ALTER TABLE kb_changes", sql)
         self.assertIn("ADD COLUMN IF NOT EXISTS mutation JSONB", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS kb_operation_receipts", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS memories", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS archive_items", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS mailbox_letters", sql)
@@ -1102,9 +1133,9 @@ class PostgresStoreTests(unittest.TestCase):
         )
         repeated = store.apply_kb_mutation(
             "u1",
-            {"facts": [{"id": "f1", "statement": "不应覆盖"}]},
+            {"facts": [{"id": "f1", "statement": "第一条事实"}]},
             operation_id="op-1",
-            base_revision=0,
+            base_revision=999,
         )
 
         self.assertEqual(first["revision"], 1)
@@ -1114,6 +1145,15 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual([item["operationId"] for item in store.list_kb_changes("u1", 0)], ["op-1"])
         self.assertEqual(store.list_kb_changes("u1", 0)[0]["mutationSchemaVersion"], 1)
         self.assertIsNone(store.list_kb_changes("u1", 0)[0]["mutation"])
+        self.assertTrue(repeated["operationPayloadVerified"])
+
+        with self.assertRaises(KnowledgeOperationPayloadConflict):
+            store.apply_kb_mutation(
+                "u1",
+                {"facts": [{"id": "f1", "statement": "different"}]},
+                operation_id="op-1",
+                base_revision=1,
+            )
 
         with self.assertRaises(KnowledgeRevisionConflict):
             store.apply_kb_mutation("u1", {"facts": []}, operation_id="op-2", base_revision=0)
@@ -1167,7 +1207,7 @@ class PostgresStoreTests(unittest.TestCase):
             None,
             operation_id="v2-op",
             base_revision=0,
-            mutation={"upserts": {}, "tombstones": []},
+            mutation=mutation,
         )
 
         self.assertEqual(applied["revision"], 2)
@@ -1204,7 +1244,30 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(change["mutationSchemaVersion"], 1)
         self.assertIsNone(change["mutation"])
 
-    def test_duplicate_operation_uses_persisted_schema_across_replays(self):
+    def test_legacy_change_replay_without_receipt_is_unverified(self):
+        connection = FakeConnection()
+        connection.kb_changes["u1"] = [
+            {
+                "revision": 1,
+                "operation_id": "legacy-op",
+                "graph": {"facts": []},
+                "mutation": None,
+                "created_at": "2026-07-10T00:00:00+00:00",
+            }
+        ]
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        replay = store.apply_kb_mutation(
+            "u1",
+            {"facts": [{"id": "different"}]},
+            operation_id="legacy-op",
+            base_revision=999,
+        )
+
+        self.assertTrue(replay["duplicate"])
+        self.assertFalse(replay["operationPayloadVerified"])
+
+    def test_operation_id_rejects_cross_schema_replays(self):
         connection = FakeConnection()
         store = PostgresStore(connection_factory=lambda: connection)
 
@@ -1214,13 +1277,25 @@ class PostgresStoreTests(unittest.TestCase):
             operation_id="shared-op",
             base_revision=0,
         )
-        replayed_as_v2 = store.apply_kb_mutation(
-            "v1-user",
-            None,
-            operation_id="shared-op",
-            base_revision=999,
-            mutation={"upserts": {}, "tombstones": []},
-        )
+        with self.assertRaises(KnowledgeOperationPayloadConflict):
+            store.apply_kb_mutation(
+                "v1-user",
+                None,
+                operation_id="shared-op",
+                base_revision=999,
+                mutation={
+                    "upserts": {
+                        "facts": [
+                            {
+                                "id": "different-fact",
+                                "statement": "different schema",
+                                "privacyMetadata": {"scope": "generationAllowed"},
+                            }
+                        ]
+                    },
+                    "tombstones": [],
+                },
+            )
         first_v2 = store.apply_kb_mutation(
             "v2-user",
             None,
@@ -1239,21 +1314,16 @@ class PostgresStoreTests(unittest.TestCase):
                 "tombstones": [],
             },
         )
-        replayed_as_v1 = store.apply_kb_mutation(
-            "v2-user",
-            {"facts": [{"id": "must-not-apply"}]},
-            operation_id="shared-op",
-            base_revision=999,
-        )
+        with self.assertRaises(KnowledgeOperationPayloadConflict):
+            store.apply_kb_mutation(
+                "v2-user",
+                {"facts": [{"id": "must-not-apply"}]},
+                operation_id="shared-op",
+                base_revision=999,
+            )
 
         self.assertEqual(first_v1["mutationSchemaVersion"], 1)
-        self.assertEqual(replayed_as_v2["mutationSchemaVersion"], 1)
-        self.assertIsNone(replayed_as_v2["mutation"])
-        self.assertEqual(replayed_as_v2["graph"], first_v1["graph"])
         self.assertEqual(first_v2["mutationSchemaVersion"], 2)
-        self.assertEqual(replayed_as_v1["mutationSchemaVersion"], 2)
-        self.assertEqual(replayed_as_v1["mutation"], first_v2["mutation"])
-        self.assertEqual(replayed_as_v1["graph"], first_v2["graph"])
 
     def test_kb_mutations_use_request_exclusive_connections_and_close_each_lease(self):
         barrier = Barrier(2)
@@ -1484,7 +1554,15 @@ class PostgresStoreTests(unittest.TestCase):
 
         self.assertEqual(
             set(result),
-            {"item", "duplicate", "revision", "graph", "mutationSchemaVersion", "mutation"},
+            {
+                "item",
+                "duplicate",
+                "operationPayloadVerified",
+                "revision",
+                "graph",
+                "mutationSchemaVersion",
+                "mutation",
+            },
         )
         self.assertEqual(result["item"], item)
         self.assertFalse(result["duplicate"])
@@ -1644,6 +1722,7 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(connection.kb_snapshot_revisions["u1"], 1)
         self.assertEqual(connection.kb_snapshots["u1"], ARCHIVE_DELETE_GRAPH)
         self.assertEqual(len(connection.kb_changes["u1"]), 1)
+        self.assertEqual(connection.kb_operation_receipts.get("u1", {}), {})
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
         self.assertEqual(connection.closes, 1)
@@ -1971,6 +2050,34 @@ class PostgresStoreTests(unittest.TestCase):
                 self.assertEqual(len(purged), 1)
                 self.assertEqual(slot["status"], "retired")
                 self.assertIsNone(replacement)
+
+    def test_postgres_account_purge_removes_operation_receipts(self):
+        connection = FakeConnection()
+        connection.users["u1"] = {
+            "id": "u1",
+            "deletionState": "softDeleted",
+            "restoreDeadline": "2026-01-01T00:00:00+00:00",
+        }
+        connection.kb_operation_receipts["u1"] = {
+            "purge-op": {
+                "operation_kind": "kb.sync",
+                "schema_version": 1,
+                "payload_hash": "fingerprint",
+                "result": {},
+            }
+        }
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        purged = store.purge_expired_deleted_users("2026-01-02T00:00:00+00:00")
+
+        self.assertEqual(len(purged), 1)
+        self.assertNotIn("u1", connection.kb_operation_receipts)
+        self.assertTrue(
+            any(
+                sql.startswith("DELETE FROM kb_operation_receipts")
+                for sql, _ in connection.executed
+            )
+        )
 
     def test_store_persists_echo_delayed_replies_by_user(self):
         connection = FakeConnection()

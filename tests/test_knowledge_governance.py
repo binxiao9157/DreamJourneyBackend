@@ -305,7 +305,10 @@ class KnowledgeGovernanceAPITests(unittest.TestCase):
 
     def test_endpoint_keeps_duplicate_operation_idempotent_and_maps_revision_conflict(self):
         first = self.client.post("/kb/governance/actions", json=self.payload())
-        duplicate = self.client.post("/kb/governance/actions", json=self.payload())
+        duplicate = self.client.post(
+            "/kb/governance/actions",
+            json=self.payload(base_revision=999),
+        )
         conflict = self.client.post(
             "/kb/governance/actions",
             json=self.payload(operation_id="stale-operation", base_revision=1),
@@ -314,11 +317,35 @@ class KnowledgeGovernanceAPITests(unittest.TestCase):
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(duplicate.status_code, 200, duplicate.text)
         self.assertTrue(duplicate.json()["duplicate"])
+        self.assertTrue(duplicate.json()["operationPayloadVerified"])
         self.assertEqual(duplicate.json()["revision"], 2)
         self.assertEqual(duplicate.json()["mutation"], first.json()["mutation"])
         self.assertEqual(duplicate.json()["summary"], first.json()["summary"])
         self.assertEqual(conflict.status_code, 409, conflict.text)
         self.assertEqual(conflict.json()["detail"]["code"], "knowledgeRevisionConflict")
+
+    def test_governance_receipt_is_checked_before_snapshot_dependent_build(self):
+        first = self.client.post("/kb/governance/actions", json=self.payload())
+        main_module.store._kb_snapshots.pop(USER_ID)
+        duplicate = self.client.post(
+            "/kb/governance/actions",
+            json=self.payload(base_revision=999),
+        )
+        changed = self.payload(base_revision=999)
+        changed["action"]["correction"] = {"statement": "Different correction"}
+        conflict = self.client.post("/kb/governance/actions", json=changed)
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertTrue(duplicate.json()["duplicate"])
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(
+            conflict.json()["detail"],
+            {
+                "code": "knowledgeOperationPayloadConflict",
+                "operationId": "govern-fact",
+            },
+        )
 
     def test_endpoint_maps_invalid_correction_and_missing_target(self):
         invalid = self.payload(operation_id="invalid-correction")
@@ -424,12 +451,36 @@ class KnowledgeGovernanceAPITests(unittest.TestCase):
             {"id": "unreferenced", "kind": "photo"},
         )
 
-        response = self.client.delete(f"/archive/items/{USER_ID}/unreferenced")
+        response = self.client.delete(
+            f"/archive/items/{USER_ID}/unreferenced?operationId=delete-unreferenced"
+        )
+        repeated = self.client.delete(
+            f"/archive/items/{USER_ID}/unreferenced?operationId=delete-unreferenced"
+        )
+        main_module.store.add_archive_item(
+            USER_ID,
+            {"id": "another-item", "kind": "photo"},
+        )
+        conflict = self.client.delete(
+            f"/archive/items/{USER_ID}/another-item?operationId=delete-unreferenced"
+        )
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["cascade"]["affectedEntityCount"], 0)
         self.assertFalse(response.json()["cascade"]["sourceMatched"])
         self.assertEqual(response.json()["cascade"]["revision"], 1)
+        self.assertTrue(response.json()["operationPayloadVerified"])
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertTrue(repeated.json()["cascade"]["duplicate"])
+        self.assertFalse(repeated.json()["cascade"]["sourceMatched"])
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(
+            conflict.json()["detail"],
+            {
+                "code": "knowledgeOperationPayloadConflict",
+                "operationId": "delete-unreferenced",
+            },
+        )
         self.assertEqual(len(main_module.store.list_kb_changes(USER_ID, 0)), 1)
 
 

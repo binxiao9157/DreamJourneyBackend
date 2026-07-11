@@ -5,7 +5,10 @@ from app.services.archive_store import (
     ArchiveItemNotFound,
 )
 from app.services.in_memory_store import InMemoryStore
-from app.services.knowledge_store import KnowledgeRevisionConflict
+from app.services.knowledge_store import (
+    KnowledgeOperationPayloadConflict,
+    KnowledgeRevisionConflict,
+)
 
 
 PRIVACY_METADATA = {"privacyMetadata": {"scope": "generationAllowed"}}
@@ -53,7 +56,15 @@ class InMemoryArchiveDeletionTests(unittest.TestCase):
 
         self.assertEqual(
             set(result),
-            {"item", "duplicate", "revision", "graph", "mutationSchemaVersion", "mutation"},
+            {
+                "item",
+                "duplicate",
+                "operationPayloadVerified",
+                "revision",
+                "graph",
+                "mutationSchemaVersion",
+                "mutation",
+            },
         )
         self.assertEqual(result["item"], item)
         self.assertFalse(result["duplicate"])
@@ -143,11 +154,30 @@ class InMemoryArchiveDeletionTests(unittest.TestCase):
         )
 
         self.assertTrue(repeated["duplicate"])
+        self.assertTrue(repeated["operationPayloadVerified"])
         self.assertIsNone(repeated["item"])
         self.assertEqual(repeated["revision"], first["revision"])
         self.assertEqual(repeated["graph"], first["graph"])
         self.assertEqual(repeated["mutation"], first["mutation"])
         self.assertEqual(len(self.store.list_kb_changes("u1", 0)), 2)
+
+    def test_operation_id_cannot_be_reused_for_another_archive_item(self):
+        self.add_archive()
+        self.store.add_archive_item("u1", {"id": "archive-2", "kind": "photo"})
+        self.store.delete_archive_item_with_kb_mutation(
+            "u1",
+            "archive-1",
+            operation_id="shared-delete",
+            base_revision=1,
+        )
+
+        with self.assertRaises(KnowledgeOperationPayloadConflict):
+            self.store.delete_archive_item_with_kb_mutation(
+                "u1",
+                "archive-2",
+                operation_id="shared-delete",
+                base_revision=1,
+            )
 
 
 if __name__ == "__main__":
