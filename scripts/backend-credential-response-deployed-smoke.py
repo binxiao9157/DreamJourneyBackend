@@ -91,6 +91,9 @@ def main():
     require(runtime.get("capabilities", {}).get("realtimeToken") is False, "realtime token capability must be disabled")
     require(runtime.get("capabilities", {}).get("digitalHumanSession") is False, "digital-human session capability must be disabled")
     require(runtime.get("voice", {}).get("credentialMode") == "blockedStaticCredential", "voice credential mode must be blocked")
+    require(runtime.get("voice", {}).get("accessPath") == "backendProxyOrText", "voice access path must remain backend proxy or text")
+    require(runtime.get("voice", {}).get("mobileDirectAllowed") is False, "voice direct mobile path must remain denied")
+    require((runtime.get("voice", {}).get("decisionReceipt") or {}).get("decision") == "keepDirectMobileClosed", "runtime must expose the direct-mobile denial receipt")
     require(runtime.get("digitalHuman", {}).get("credentialMode") == "blockedStaticCredential", "digital-human credential mode must be blocked")
 
     voice = request_json(
@@ -102,6 +105,15 @@ def main():
     assert_no_provider_credentials(voice)
     require(voice.get("status") == "blocked", "realtime voice must return blocked")
     require(voice.get("providerReady") is False, "realtime voice Provider must not be ready")
+    require(voice.get("accessPath") == "backendProxyOrText", "realtime voice must select backendProxyOrText")
+    require(voice.get("mobileDirectAllowed") is False, "realtime voice must deny mobile direct access")
+    require(voice.get("brokerStatus") == "providerContractNotVerified", "broker status must remain unverified")
+    receipt = voice.get("decisionReceipt") or {}
+    required = ["scope", "ttl", "audience", "revocation"]
+    require(receipt.get("decision") == "keepDirectMobileClosed", "voice must expose a closed-path decision receipt")
+    require(receipt.get("requiredProperties") == required, "voice receipt must list scoped credential requirements")
+    require(receipt.get("verifiedProperties") == [], "voice receipt must not claim unverified properties")
+    require(receipt.get("missingProperties") == required, "voice receipt must list every missing property")
     require("expiresAt" not in voice and "expiresInSeconds" not in voice, "blocked response must not invent TTL metadata")
 
     digital_human = request_json(

@@ -84,6 +84,12 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
         self.assertFalse(body["capabilities"]["digitalHumanSession"])
         self.assertFalse(body["auth"]["legacyBackendTokenCompatible"])
         self.assertEqual(body["voice"]["credentialMode"], "blockedStaticCredential")
+        self.assertEqual(body["voice"]["accessPath"], "backendProxyOrText")
+        self.assertFalse(body["voice"]["mobileDirectAllowed"])
+        self.assertEqual(
+            body["voice"]["decisionReceipt"]["reasonCode"],
+            "scopedSessionCredentialContractNotVerified",
+        )
         self.assertEqual(body["digitalHuman"]["credentialMode"], "blockedStaticCredential")
         self.assertFalse(body["digitalHuman"]["releaseVisible"])
         self.assert_value_free(body)
@@ -126,6 +132,17 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
         self.assertFalse(body["providerReady"])
         self.assertFalse(body["releaseVisible"])
         self.assertFalse(body["retryable"])
+        self.assertEqual(body["accessPath"], "backendProxyOrText")
+        self.assertFalse(body["mobileDirectAllowed"])
+        self.assertEqual(body["brokerStatus"], "providerContractNotVerified")
+        receipt = body["decisionReceipt"]
+        self.assertEqual(receipt["decision"], "keepDirectMobileClosed")
+        self.assertEqual(
+            receipt["requiredProperties"],
+            ["scope", "ttl", "audience", "revocation"],
+        )
+        self.assertEqual(receipt["verifiedProperties"], [])
+        self.assertEqual(receipt["missingProperties"], receipt["requiredProperties"])
         self.assertEqual(body["fallback"]["mode"], "backendProxyOrText")
         self.assertNotIn("expiresAt", body)
         self.assertNotIn("expiresInSeconds", body)

@@ -3,6 +3,7 @@ from typing import Any, Dict
 from app.core.config import Settings
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.route_ownership import RouteOwnershipRegistry
+from app.services.tokens import TokenService
 from app.services.tts import VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice_clone_speaker_ids
 
@@ -18,6 +19,7 @@ class RuntimeConfigService:
         voice_clone_speaker_ids = self._voice_clone_speaker_ids()
         digital_human_asset_mode = self._digital_human_asset_mode()
         route_ownership_audit = RouteOwnershipRegistry().audit_summary()
+        realtime_voice = TokenService(self.settings).realtime_config(user_id="runtime-capability")
         return {
             "environment": self.settings.environment,
             "baseURL": self.settings.public_base_url,
@@ -104,17 +106,10 @@ class RuntimeConfigService:
             },
             "archiveImageAnalysis": archive_image_analysis.public_capability(),
             "voice": {
+                **realtime_voice,
                 "voiceType": self.settings.volcengine_voice_type,
                 "realtimeResourceID": self.settings.volcengine_realtime_resource_id,
                 "runtimeConfigEndpoint": "/voice/realtime-token",
-                "credentialMode": "blockedStaticCredential",
-                "providerReady": False,
-                "releaseVisible": False,
-                "fallback": {
-                    "enabled": True,
-                    "mode": "backendProxyOrText",
-                },
-                "contractVersion": 2,
             },
             "voiceClone": {
                 "enabled": voice_clone_provider.is_configured,

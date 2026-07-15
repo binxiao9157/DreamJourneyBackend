@@ -314,6 +314,24 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(payload["credentialMode"], "blockedStaticCredential")
         self.assertFalse(payload["providerReady"])
         self.assertFalse(payload["releaseVisible"])
+        self.assertEqual(payload["accessPath"], "backendProxyOrText")
+        self.assertFalse(payload["mobileDirectAllowed"])
+        self.assertEqual(payload["brokerStatus"], "providerContractNotVerified")
+        receipt = payload["decisionReceipt"]
+        self.assertEqual(receipt["decision"], "keepDirectMobileClosed")
+        self.assertEqual(
+            receipt["reasonCode"],
+            "scopedSessionCredentialContractNotVerified",
+        )
+        self.assertEqual(
+            receipt["requiredProperties"],
+            ["scope", "ttl", "audience", "revocation"],
+        )
+        self.assertEqual(receipt["verifiedProperties"], [])
+        self.assertEqual(
+            receipt["missingProperties"],
+            ["scope", "ttl", "audience", "revocation"],
+        )
         self.assertNotIn("expiresInSeconds", payload)
         self.assertNotIn("expiresAt", payload)
         self.assertEqual(payload["fallback"]["mode"], "backendProxyOrText")
@@ -329,6 +347,12 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(config["voice"]["runtimeConfigEndpoint"], "/voice/realtime-token")
         self.assertEqual(config["voice"]["credentialMode"], "blockedStaticCredential")
         self.assertFalse(config["voice"]["providerReady"])
+        self.assertEqual(config["voice"]["accessPath"], "backendProxyOrText")
+        self.assertFalse(config["voice"]["mobileDirectAllowed"])
+        self.assertEqual(
+            config["voice"]["decisionReceipt"]["decision"],
+            "keepDirectMobileClosed",
+        )
         self.assertEqual(config["voice"]["fallback"]["mode"], "backendProxyOrText")
         self.assertTrue(config["voice"]["fallback"]["enabled"])
 
