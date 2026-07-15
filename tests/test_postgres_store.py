@@ -18,6 +18,7 @@ from app.services.knowledge_store import (
     KnowledgeRevisionConflict,
 )
 from app.services.postgres_store import PostgresStore
+from app.services.store_factory import init_store
 
 
 def unwrap_jsonb(value):
@@ -115,6 +116,20 @@ class FakeCursor:
             if self.connection.advisory_barrier is not None:
                 self.connection.advisory_barrier.wait(timeout=2)
             self.result = {"locked": True}
+        elif (
+            normalized.startswith("SELECT id, payload FROM digital_human_sessions")
+            and "expires_at <= %s" in normalized
+        ):
+            now = datetime.fromisoformat(str(params[0]).replace("Z", "+00:00"))
+            self.result = [
+                {"id": item.get("sessionId"), "payload": dict(item)}
+                for item in self.connection.digital_human_sessions.values()
+                if item.get("status") == "active"
+                and datetime.fromisoformat(
+                    str(item.get("expiresAt") or "").replace("Z", "+00:00")
+                )
+                <= now
+            ]
         elif normalized.startswith("SELECT id, payload FROM digital_human_sessions"):
             resource_key, user_id, device_id = params
             self.result = [
@@ -130,6 +145,16 @@ class FakeCursor:
             session_id = params[0]
             item = self.connection.digital_human_sessions.get(session_id)
             self.result = None if item is None else {"payload": dict(item)}
+        elif normalized.startswith(
+            "SELECT COUNT(*) AS count FROM digital_human_sessions WHERE status = 'active'"
+        ):
+            self.result = {
+                "count": sum(
+                    1
+                    for item in self.connection.digital_human_sessions.values()
+                    if item.get("status") == "active"
+                )
+            }
         elif normalized.startswith(
             "SELECT operation_kind, schema_version, payload_hash, result FROM kb_operation_receipts"
         ):
@@ -1165,6 +1190,93 @@ class PostgresStoreTests(unittest.TestCase):
 
         self.assertEqual(acquired["outcome"], "created")
         self.assertEqual(store.get_digital_human_session_lease("session-expiring")["status"], "expired")
+
+    def test_in_memory_store_drains_elapsed_digital_human_leases_idempotently(self):
+        store = InMemoryStore()
+        store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-expired",
+                expires_at="2026-07-10T00:01:00+00:00",
+            ),
+            max_concurrent_sessions=2,
+            now_iso="2026-07-10T00:00:00+00:00",
+        )
+        store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-active",
+                user_id="u2",
+                device_id="device-2",
+                expires_at="2026-07-10T00:05:00+00:00",
+            ),
+            max_concurrent_sessions=2,
+            now_iso="2026-07-10T00:00:00+00:00",
+        )
+
+        first = store.drain_expired_digital_human_session_leases(
+            now_iso="2026-07-10T00:02:00+00:00"
+        )
+        repeated = store.drain_expired_digital_human_session_leases(
+            now_iso="2026-07-10T00:02:30+00:00"
+        )
+
+        self.assertEqual(first["expiredLeaseCount"], 1)
+        self.assertEqual(first["activeLeaseCount"], 1)
+        self.assertEqual(repeated["expiredLeaseCount"], 0)
+        self.assertEqual(repeated["activeLeaseCount"], 1)
+        self.assertEqual(store.get_digital_human_session_lease("session-expired")["status"], "expired")
+
+    def test_postgres_store_drains_elapsed_digital_human_leases_idempotently(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-expired",
+                expires_at="2026-07-10T00:01:00+00:00",
+            ),
+            max_concurrent_sessions=2,
+            now_iso="2026-07-10T00:00:00+00:00",
+        )
+        store.acquire_digital_human_session_lease(
+            make_digital_human_lease(
+                "session-active",
+                user_id="u2",
+                device_id="device-2",
+                expires_at="2026-07-10T00:05:00+00:00",
+            ),
+            max_concurrent_sessions=2,
+            now_iso="2026-07-10T00:00:00+00:00",
+        )
+
+        first = store.drain_expired_digital_human_session_leases(
+            now_iso="2026-07-10T00:02:00+00:00"
+        )
+        repeated = store.drain_expired_digital_human_session_leases(
+            now_iso="2026-07-10T00:02:30+00:00"
+        )
+
+        self.assertEqual(first["expiredLeaseCount"], 1)
+        self.assertEqual(first["activeLeaseCount"], 1)
+        self.assertEqual(repeated["expiredLeaseCount"], 0)
+        self.assertEqual(repeated["activeLeaseCount"], 1)
+        self.assertEqual(connection.digital_human_sessions["session-expired"]["status"], "expired")
+
+    def test_store_initialization_drains_elapsed_digital_human_leases(self):
+        class DrainAwareStore:
+            def __init__(self):
+                self.events = []
+
+            def init_schema(self):
+                self.events.append("schema")
+
+            def drain_expired_digital_human_session_leases(self, *, now_iso):
+                self.events.append(("drain", now_iso))
+
+        store = DrainAwareStore()
+        init_store(store)
+
+        self.assertEqual(store.events[0], "schema")
+        self.assertEqual(store.events[1][0], "drain")
+        self.assertTrue(store.events[1][1].endswith("+00:00"))
 
     def test_store_persists_kb_snapshot_by_user(self):
         connection = FakeConnection()

@@ -2207,6 +2207,38 @@ class PostgresStore:
             self._rollback(connection)
             raise
 
+    def drain_expired_digital_human_session_leases(self, *, now_iso: str) -> Dict[str, int]:
+        connection = self._connect()
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, payload FROM digital_human_sessions
+                    WHERE status = 'active' AND expires_at <= %s
+                    FOR UPDATE
+                    """,
+                    (now_iso,),
+                )
+                rows = cursor.fetchall()
+                for row in rows:
+                    lease = deepcopy(row["payload"])
+                    lease["status"] = "expired"
+                    lease["expiredAt"] = now_iso
+                    lease["updatedAt"] = now_iso
+                    self._update_digital_human_session_cursor(cursor, lease)
+                cursor.execute(
+                    "SELECT COUNT(*) AS count FROM digital_human_sessions WHERE status = 'active'"
+                )
+                active_row = cursor.fetchone()
+            connection.commit()
+            return {
+                "expiredLeaseCount": len(rows),
+                "activeLeaseCount": int((active_row or {}).get("count") or 0),
+            }
+        except Exception:
+            self._rollback(connection)
+            raise
+
     def heartbeat_digital_human_session_lease(
         self,
         session_id: str,

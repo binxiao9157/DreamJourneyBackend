@@ -203,6 +203,29 @@ class InMemoryStore:
             "retryAfterSeconds": 0,
         }
 
+    def drain_expired_digital_human_session_leases(self, *, now_iso: str) -> Dict[str, int]:
+        now = self._parse_iso_datetime(now_iso)
+        expired_count = 0
+        for session_id, lease in list(self._digital_human_sessions.items()):
+            if lease.get("status") != "active":
+                continue
+            if self._parse_iso_datetime(str(lease.get("expiresAt") or "")) > now:
+                continue
+            expired = deepcopy(lease)
+            expired["status"] = "expired"
+            expired["expiredAt"] = now_iso
+            expired["updatedAt"] = now_iso
+            self._digital_human_sessions[session_id] = expired
+            expired_count += 1
+        return {
+            "expiredLeaseCount": expired_count,
+            "activeLeaseCount": sum(
+                1
+                for lease in self._digital_human_sessions.values()
+                if lease.get("status") == "active"
+            ),
+        }
+
     def heartbeat_digital_human_session_lease(
         self,
         session_id: str,
