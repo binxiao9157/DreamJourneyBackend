@@ -16,6 +16,9 @@ fi
 echo "== Backend unittest =="
 STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" -m unittest discover tests
 
+echo "== Credential response boundary smoke =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-credential-response-boundary-smoke.sh
+
 echo "== Backend py_compile =="
 "$PYTHON_BIN" -m compileall -q app tests
 "$PYTHON_BIN" -m py_compile scripts/*.py

@@ -16,7 +16,6 @@ class RuntimeConfigService:
         voice_clone_provider = VoiceCloneProviderFactory(self.settings).make()
         voice_clone_tts_provider = VoiceCloneTTSProviderFactory(self.settings).make()
         voice_clone_speaker_ids = self._voice_clone_speaker_ids()
-        digital_human_ready = self._digital_human_ready()
         digital_human_asset_mode = self._digital_human_asset_mode()
         route_ownership_audit = RouteOwnershipRegistry().audit_summary()
         return {
@@ -26,17 +25,14 @@ class RuntimeConfigService:
                 "deepseekProxy": bool(self.settings.deepseek_api_key),
                 "archiveImageAnalysis": archive_image_analysis.enabled,
                 "ttsProxy": bool(self.settings.volcengine_api_key and self.settings.volcengine_voice_type),
-                "realtimeToken": bool(
-                    (self.settings.volcengine_app_id and self.settings.volcengine_app_token)
-                    or self.settings.volcengine_api_key
-                ),
+                "realtimeToken": False,
                 "amapDistrictProxy": bool(self.settings.amap_web_service_key),
                 "kbSync": True,
                 "familyCircle": True,
                 "archiveMediaUploadIntent": True,
                 "voiceClone": voice_clone_provider.is_configured,
-                "digitalHumanSession": True,
-                "digitalHumanSessionLease": True,
+                "digitalHumanSession": False,
+                "digitalHumanSessionLease": False,
                 "authSession": True,
             },
             "auth": {
@@ -88,8 +84,8 @@ class RuntimeConfigService:
                     ],
                     "contractVersion": 1,
                 },
-                "legacyBackendTokenCompatible": True,
-                "contractVersion": 1,
+                "legacyBackendTokenCompatible": False,
+                "contractVersion": 2,
             },
             "archive": {
                 "uploadIntentEndpoint": "/archive/media/upload-intent",
@@ -111,10 +107,14 @@ class RuntimeConfigService:
                 "voiceType": self.settings.volcengine_voice_type,
                 "realtimeResourceID": self.settings.volcengine_realtime_resource_id,
                 "runtimeConfigEndpoint": "/voice/realtime-token",
+                "credentialMode": "blockedStaticCredential",
+                "providerReady": False,
+                "releaseVisible": False,
                 "fallback": {
                     "enabled": True,
-                    "mode": "localBuildSettings",
+                    "mode": "backendProxyOrText",
                 },
+                "contractVersion": 2,
             },
             "voiceClone": {
                 "enabled": voice_clone_provider.is_configured,
@@ -165,45 +165,29 @@ class RuntimeConfigService:
                 "contractVersion": 2,
             },
             "digitalHuman": {
-                "enabled": True,
+                "enabled": False,
                 "provider": "tencent",
-                "providerMode": "cloudRender" if digital_human_ready else "mockContract",
-                "realProviderReady": digital_human_ready,
+                "providerMode": "blocked",
+                "realProviderReady": False,
                 "sdkProvider": "tencent-cloud-digital-human",
-                "sdkAuthMode": "appkeyAccessToken",
-                "sdkAdapterLinked": digital_human_ready,
-                "sdkReadinessMessage": (
-                    "Tencent cloud-render digital human session is ready."
-                    if digital_human_ready
-                    else "Tencent digital human appkey/accesstoken and native adapter are not linked in this build."
-                ),
-                "requiredServerEnv": [
-                    "TENCENT_DIGITAL_HUMAN_APP_KEY",
-                    "TENCENT_DIGITAL_HUMAN_ACCESS_TOKEN",
-                ],
-                "requiredAssetEnv": [
-                    "TENCENT_DIGITAL_HUMAN_ASSET_VIRTUALMAN_KEY",
-                    "TENCENT_DIGITAL_HUMAN_VIRTUALMAN_PROJECT_ID",
-                ],
-                "providerFieldAliases": [
-                    "asset_virtualman_key",
-                    "virtualman_project_id",
-                    "appkey",
-                    "accesstoken",
-                ],
-                "optionalASREnv": [
-                    "TENCENT_DIGITAL_HUMAN_APP_ID",
-                    "TENCENT_DIGITAL_HUMAN_SECRET_ID",
-                    "TENCENT_DIGITAL_HUMAN_SECRET_KEY",
-                ],
+                "sdkAuthMode": "credentialBrokerRequired",
+                "credentialMode": "blockedStaticCredential",
+                "sdkAdapterLinked": False,
+                "sdkReadinessMessage": "Tencent session credential broker is unavailable; digital human rendering is blocked.",
                 "sessionEndpoint": "/digital-human/sessions",
                 "driveModes": ["streamText", "sendAudio"],
-                "fallbackMode": "audioOnly",
+                "fallbackMode": "text",
                 "assetMode": digital_human_asset_mode,
                 "defaultReleaseVisible": False,
+                "releaseVisible": False,
                 "requiresBackendIssuedCredential": True,
+                "credentialBroker": {
+                    "required": True,
+                    "status": "unavailable",
+                    "requiredProperties": ["scope", "audience", "ttl", "revocation"],
+                },
                 "sessionLease": {
-                    "enabled": True,
+                    "enabled": False,
                     "heartbeatEndpointTemplate": "/digital-human/sessions/{sessionId}/heartbeat",
                     "releaseEndpointTemplate": "/digital-human/sessions/{sessionId}/release",
                     "ttlSeconds": max(60, self.settings.tencent_digital_human_session_ttl_seconds),
@@ -221,7 +205,7 @@ class RuntimeConfigService:
                     "conflictStatusCode": 409,
                     "contractVersion": 1,
                 },
-                "contractVersion": 2,
+                "contractVersion": 3,
             },
             "privacy": {
                 "localOnly": "never_upload",
@@ -232,16 +216,6 @@ class RuntimeConfigService:
 
     def _voice_clone_speaker_ids(self) -> list[str]:
         return configured_voice_clone_speaker_ids(self.settings)
-
-    def _digital_human_ready(self) -> bool:
-        return bool(
-            self.settings.tencent_digital_human_app_key
-            and self.settings.tencent_digital_human_access_token
-            and (
-                self.settings.tencent_digital_human_asset_virtualman_key
-                or self.settings.tencent_digital_human_virtualman_project_id
-            )
-        )
 
     def _digital_human_asset_mode(self) -> str:
         if self.settings.tencent_digital_human_asset_virtualman_key:

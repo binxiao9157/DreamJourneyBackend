@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import urllib.error
 import unittest
@@ -300,7 +301,7 @@ class RuntimeConfigTests(unittest.TestCase):
 
 
 class TokenAndProxyTests(unittest.TestCase):
-    def test_realtime_token_uses_legacy_credentials_without_exposing_app_token(self):
+    def test_realtime_token_blocks_static_credentials_without_fake_expiry(self):
         settings = Settings(
             volcengine_app_id="test-app-id",
             volcengine_app_key="PlgvMymc7f3tQnJ6",
@@ -309,28 +310,26 @@ class TokenAndProxyTests(unittest.TestCase):
 
         payload = TokenService(settings).realtime_config(user_id="u1")
 
-        self.assertEqual(payload["authMode"], "legacy")
-        self.assertEqual(payload["appID"], "test-app-id")
-        self.assertEqual(payload["appKey"], "PlgvMymc7f3tQnJ6")
-        self.assertEqual(payload["appToken"], "access-token-secret")
-        self.assertEqual(payload["resourceID"], "volc.speech.dialog")
-        self.assertEqual(payload["address"], "wss://openspeech.bytedance.com")
-        self.assertEqual(payload["uri"], "/api/v3/realtime/dialogue")
-        self.assertEqual(payload["expiresInSeconds"], 3600)
-        expires_at = datetime.fromisoformat(payload["expiresAt"].replace("Z", "+00:00"))
-        self.assertGreater(expires_at, datetime.now(timezone.utc))
-        self.assertEqual(payload["fallback"]["mode"], "localBuildSettings")
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["credentialMode"], "blockedStaticCredential")
+        self.assertFalse(payload["providerReady"])
+        self.assertFalse(payload["releaseVisible"])
+        self.assertNotIn("expiresInSeconds", payload)
+        self.assertNotIn("expiresAt", payload)
+        self.assertEqual(payload["fallback"]["mode"], "backendProxyOrText")
         self.assertTrue(payload["fallback"]["enabled"])
-        self.assertNotIn("tokenRef", payload)
+        self.assertNotIn("access-token-secret", str(payload))
 
     def test_runtime_config_documents_realtime_token_endpoint_and_fallback(self):
         settings = Settings(volcengine_app_id="test-app-id", volcengine_app_token="access-token-secret")
 
         config = RuntimeConfigService(settings).public_config()
 
-        self.assertTrue(config["capabilities"]["realtimeToken"])
+        self.assertFalse(config["capabilities"]["realtimeToken"])
         self.assertEqual(config["voice"]["runtimeConfigEndpoint"], "/voice/realtime-token")
-        self.assertEqual(config["voice"]["fallback"]["mode"], "localBuildSettings")
+        self.assertEqual(config["voice"]["credentialMode"], "blockedStaticCredential")
+        self.assertFalse(config["voice"]["providerReady"])
+        self.assertEqual(config["voice"]["fallback"]["mode"], "backendProxyOrText")
         self.assertTrue(config["voice"]["fallback"]["enabled"])
 
     def test_tts_proxy_builds_volcengine_request(self):
@@ -497,8 +496,10 @@ class TokenAndProxyTests(unittest.TestCase):
         self.assertEqual(payload["audio"]["data"], "U09VTkQ=")
         self.assertEqual(payload["audio"]["format"], "mp3")
         self.assertEqual(payload["providerMode"], "volcengineVoiceCloneV1TTS")
-        self.assertEqual(payload["providerRequestId"], "req-synthesis-001")
-        self.assertEqual(payload["providerLogId"], "log-synthesis-001")
+        self.assertTrue(payload["providerRequestIdHash"].startswith("sha256:"))
+        self.assertTrue(payload["providerLogIdHash"].startswith("sha256:"))
+        self.assertNotIn("req-synthesis-001", response.text)
+        self.assertNotIn("log-synthesis-001", response.text)
         self.assertEqual(payload["visemeTimeline"]["source"], "providerVisemeTimeline")
         self.assertEqual(payload["visemeTimeline"]["frames"][1]["mouthShape"], "aa")
         self.assertNotIn("X-Api-Key", response.text)
@@ -3471,7 +3472,9 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertEqual(profile["voiceProfileId"], voice_profile_id)
         self.assertEqual(profile["providerMode"], "volcengineVoiceCloneV3")
         self.assertTrue(profile["realCloneProviderReady"])
-        self.assertEqual(profile["providerRequestId"], "provider-request-1")
+        self.assertTrue(profile["providerRequestIdHash"].startswith("sha256:"))
+        self.assertNotIn("providerRequestId", profile)
+        self.assertNotIn("provider-request-1", json.dumps(profile, sort_keys=True))
         self.assertEqual(profile["providerStatus"], "pending")
         self.assertNotIn("audioBase64", profile)
         self.assertNotIn("rawSampleURL", profile)
@@ -3512,7 +3515,9 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertEqual(profile["voiceProfileId"], voice_profile_id)
         self.assertEqual(profile["sampleStatus"], "failed")
         self.assertEqual(profile["providerStatus"], "failed")
-        self.assertIn("Invalid X-Api-Key", profile["providerMessage"])
+        self.assertEqual(profile["providerErrorCode"], "providerOperationFailed")
+        self.assertTrue(profile["providerErrorReferenceHash"].startswith("sha256:"))
+        self.assertNotIn("Invalid X-Api-Key", created.text)
         self.assertNotIn("audioBase64", profile)
 
     def test_voice_clone_profile_persists_provider_request_and_log_ids_on_failure(self):
@@ -3552,8 +3557,10 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertEqual(created.status_code, 200)
         profile = created.json()["profile"]
         self.assertEqual(profile["sampleStatus"], "failed")
-        self.assertEqual(profile.get("providerRequestId"), "req-train-123")
-        self.assertEqual(profile.get("providerLogId"), "logid-train-456")
+        self.assertTrue(profile["providerRequestIdHash"].startswith("sha256:"))
+        self.assertTrue(profile["providerLogIdHash"].startswith("sha256:"))
+        self.assertNotIn("req-train-123", created.text)
+        self.assertNotIn("logid-train-456", created.text)
         self.assertNotIn("audioBase64", profile)
 
     def test_voice_clone_profile_contract_requires_authorization_and_persists_lifecycle(self):
@@ -5426,7 +5433,9 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
         self.assertEqual(failure["analysisFailureReason"], "provider_unavailable")
         self.assertTrue(failure["analysisRetryable"])
         self.assertEqual(failure["provider"], "deepseek/text-only")
-        self.assertIn("vision provider unavailable", failure["providerMessage"])
+        self.assertEqual(failure["providerErrorCode"], "providerUnavailable")
+        self.assertTrue(failure["providerErrorReferenceHash"].startswith("sha256:"))
+        self.assertNotIn("vision provider unavailable", str(failure))
 
     def test_image_analysis_parse_requires_structured_json(self):
         proxy = DeepSeekImageAnalysisProxy(Settings(deepseek_api_key="deepseek-secret"))
@@ -5565,8 +5574,9 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
         self.assertEqual(payload["analysisFailureReason"], "provider_unavailable")
         self.assertTrue(payload["analysisRetryable"])
         self.assertEqual(payload["provider"], "deepseek/text-only")
-        self.assertIn("providerMessage", payload)
-        self.assertIn("DEEPSEEK_API_KEY is not configured", payload["providerMessage"])
+        self.assertEqual(payload["providerErrorCode"], "providerUnavailable")
+        self.assertTrue(payload["providerErrorReferenceHash"].startswith("sha256:"))
+        self.assertNotIn("DEEPSEEK_API_KEY is not configured", response.text)
 
 
 class MailboxAPITests(unittest.TestCase):

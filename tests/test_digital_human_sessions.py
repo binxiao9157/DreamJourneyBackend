@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -19,7 +20,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
     def tearDown(self):
         main_module.store = self.previous_store
 
-    def test_create_digital_human_session_returns_tencent_mock_contract(self):
+    def test_create_digital_human_session_is_blocked_without_scoped_broker(self):
         response = client.post(
             "/digital-human/sessions",
             json={
@@ -31,36 +32,18 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["provider"], "tencent")
-        self.assertEqual(body["providerMode"], "mockContract")
-        self.assertEqual(body["personaId"], "persona_mother_001")
-        self.assertEqual(body["scene"], "echo")
-        self.assertEqual(body["driveMode"], "streamText")
-        self.assertTrue(body["alphaEnabled"])
-        self.assertFalse(body["smartActionEnabled"])
-        self.assertTrue(body["sessionPolicy"]["allowInterrupt"])
-        self.assertFalse(body["sessionPolicy"]["proactiveSpeechAllowed"])
-        self.assertEqual(body["sessionPolicy"]["maxDurationSeconds"], 180)
-        self.assertEqual(body["credential"]["mode"], "backend-issued-mock")
-        self.assertTrue(body["credential"]["expiresAt"])
-        self.assertEqual(body["fallback"]["mode"], "audioOnly")
-        self.assertEqual(body["contractVersion"], 2)
-        self.assertEqual(body["userId"], "user_qa")
-        self.assertEqual(body["lease"]["status"], "active")
-        self.assertFalse(body["lease"]["reused"])
-        self.assertEqual(body["lease"]["contractVersion"], 1)
-        self.assertEqual(body["lease"]["heartbeatEndpoint"], f"/digital-human/sessions/{body['sessionId']}/heartbeat")
-        self.assertEqual(body["lease"]["releaseEndpoint"], f"/digital-human/sessions/{body['sessionId']}/release")
-        self.assertGreater(body["lease"]["heartbeatIntervalSeconds"], 0)
+        self.assertEqual(response.status_code, 503)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["code"], "digital_human_credential_broker_unavailable")
+        self.assertEqual(detail["credentialMode"], "blockedStaticCredential")
+        self.assertFalse(detail["providerReady"])
+        self.assertFalse(detail["releaseVisible"])
+        self.assertFalse(detail["retryable"])
+        self.assertEqual(detail["fallbackMode"], "text")
+        self.assertEqual(detail["contractVersion"], 3)
+        self.assertEqual(main_module.store._digital_human_sessions, {})
 
-        persisted = main_module.store.get_digital_human_session_lease(body["sessionId"])
-        self.assertNotIn("credential", persisted)
-        self.assertNotIn("appkey", str(persisted))
-        self.assertNotIn("accesstoken", str(persisted))
-
-    def test_session_lease_reuses_same_context_and_rejects_competing_device(self):
+    def test_blocked_session_requests_never_allocate_or_reuse_a_lease(self):
         payload = {
             "userId": "user_qa",
             "personaId": "persona_mother_001",
@@ -75,29 +58,34 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
             json={**payload, "userId": "user_other", "deviceId": "ios-device-2"},
         )
 
-        self.assertEqual(first.status_code, 200)
-        self.assertEqual(repeated.status_code, 200)
-        self.assertEqual(repeated.json()["sessionId"], first.json()["sessionId"])
-        self.assertTrue(repeated.json()["lease"]["reused"])
-        self.assertEqual(conflict.status_code, 409)
-        detail = conflict.json()["detail"]
-        self.assertEqual(detail["code"], "digital_human_session_capacity_exhausted")
-        self.assertEqual(detail["activeSessionCount"], 1)
-        self.assertGreater(detail["retryAfterSeconds"], 0)
+        self.assertEqual(first.status_code, 503)
+        self.assertEqual(repeated.status_code, 503)
+        self.assertEqual(conflict.status_code, 503)
+        self.assertEqual(main_module.store._digital_human_sessions, {})
 
     def test_session_lease_heartbeat_and_release_are_owner_scoped_and_idempotent(self):
-        created = client.post(
-            "/digital-human/sessions",
-            json={
+        session_id = "dh_session_legacy_001"
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        original_expiry = (now + timedelta(seconds=120)).isoformat()
+        main_module.store.acquire_digital_human_session_lease(
+            {
+                "sessionId": session_id,
+                "resourceKey": "legacy_resource",
                 "userId": "user_qa",
+                "deviceId": "ios-device-1",
                 "personaId": "persona_mother_001",
                 "scene": "echo",
-                "deviceId": "ios-device-1",
                 "lifecycleMode": "star",
+                "providerMode": "legacyCloudRender",
+                "status": "active",
+                "createdAt": now_iso,
+                "heartbeatAt": now_iso,
+                "expiresAt": original_expiry,
             },
-        ).json()
-        session_id = created["sessionId"]
-        original_expiry = created["lease"]["expiresAt"]
+            max_concurrent_sessions=1,
+            now_iso=now_iso,
+        )
 
         heartbeat = client.post(
             f"/digital-human/sessions/{session_id}/heartbeat",
@@ -136,7 +124,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
                 "lifecycleMode": "star",
             },
         )
-        self.assertEqual(next_device.status_code, 200)
+        self.assertEqual(next_device.status_code, 503)
 
     def test_create_digital_human_session_rejects_silent_mode(self):
         response = client.post(
@@ -167,43 +155,38 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "personaId is required")
 
-    def test_runtime_config_exposes_digital_human_session_capability(self):
+    def test_runtime_config_blocks_digital_human_without_scoped_broker(self):
         response = client.get("/config/runtime")
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertTrue(body["capabilities"]["digitalHumanSession"])
+        self.assertFalse(body["capabilities"]["digitalHumanSession"])
         digital_human = body["digitalHuman"]
         self.assertEqual(digital_human["provider"], "tencent")
-        self.assertEqual(digital_human["providerMode"], "mockContract")
+        self.assertEqual(digital_human["providerMode"], "blocked")
         self.assertFalse(digital_human["realProviderReady"])
         self.assertEqual(digital_human["sessionEndpoint"], "/digital-human/sessions")
-        self.assertTrue(digital_human["sessionLease"]["enabled"])
+        self.assertFalse(digital_human["sessionLease"]["enabled"])
         self.assertEqual(digital_human["sessionLease"]["contractVersion"], 1)
         self.assertEqual(digital_human["sessionLease"]["maxConcurrentSessions"], 1)
         self.assertGreater(digital_human["sessionLease"]["ttlSeconds"], 0)
         self.assertGreater(digital_human["sessionLease"]["heartbeatIntervalSeconds"], 0)
         self.assertIn("{sessionId}", digital_human["sessionLease"]["heartbeatEndpointTemplate"])
         self.assertIn("{sessionId}", digital_human["sessionLease"]["releaseEndpointTemplate"])
-        self.assertEqual(digital_human["fallbackMode"], "audioOnly")
+        self.assertEqual(digital_human["fallbackMode"], "text")
         self.assertFalse(digital_human["defaultReleaseVisible"])
         self.assertFalse(digital_human["sdkAdapterLinked"])
         self.assertEqual(digital_human["sdkProvider"], "tencent-cloud-digital-human")
-        self.assertEqual(digital_human["sdkAuthMode"], "appkeyAccessToken")
-        self.assertIn("TENCENT_DIGITAL_HUMAN_APP_KEY", digital_human["requiredServerEnv"])
-        self.assertIn("TENCENT_DIGITAL_HUMAN_ACCESS_TOKEN", digital_human["requiredServerEnv"])
-        self.assertIn("TENCENT_DIGITAL_HUMAN_ASSET_VIRTUALMAN_KEY", digital_human["requiredAssetEnv"])
-        self.assertIn("TENCENT_DIGITAL_HUMAN_VIRTUALMAN_PROJECT_ID", digital_human["requiredAssetEnv"])
-        self.assertIn("asset_virtualman_key", digital_human["providerFieldAliases"])
-        self.assertIn("virtualman_project_id", digital_human["providerFieldAliases"])
-        self.assertIn("TENCENT_DIGITAL_HUMAN_SECRET_ID", digital_human["optionalASREnv"])
-        self.assertIn("TENCENT_DIGITAL_HUMAN_SECRET_KEY", digital_human["optionalASREnv"])
+        self.assertEqual(digital_human["sdkAuthMode"], "credentialBrokerRequired")
+        self.assertEqual(digital_human["credentialMode"], "blockedStaticCredential")
+        self.assertFalse(digital_human["releaseVisible"])
+        self.assertEqual(digital_human["credentialBroker"]["status"], "unavailable")
         self.assertEqual(
             digital_human["sdkReadinessMessage"],
-            "Tencent digital human appkey/accesstoken and native adapter are not linked in this build.",
+            "Tencent session credential broker is unavailable; digital human rendering is blocked.",
         )
 
-    def test_create_digital_human_session_returns_cloud_render_contract_when_configured(self):
+    def test_static_provider_configuration_does_not_reenable_session_response(self):
         previous_values = {
             "tencent_digital_human_app_key": getattr(settings, "tencent_digital_human_app_key", None),
             "tencent_digital_human_access_token": getattr(settings, "tencent_digital_human_access_token", None),
@@ -235,24 +218,17 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(response.status_code, 200)
-            body = response.json()
-            self.assertEqual(body["provider"], "tencent")
-            self.assertEqual(body["providerMode"], "cloudRender")
-            self.assertEqual(body["assetKey"], "asset_qa")
-            self.assertEqual(body["providerAssetId"], "asset_qa")
-            self.assertNotIn("providerProjectId", body)
-            self.assertEqual(body["credential"]["mode"], "backend-issued-tencent-cloud")
-            self.assertEqual(body["credential"]["appkey"], "qa_appkey")
-            self.assertEqual(body["credential"]["accesstoken"], "qa_accesstoken")
-            self.assertEqual(body["fallback"]["mode"], "none")
-            self.assertEqual(body["contractVersion"], 2)
-            self.assertEqual(body["lease"]["status"], "active")
+            self.assertEqual(response.status_code, 503)
+            detail = response.json()["detail"]
+            self.assertEqual(detail["code"], "digital_human_credential_broker_unavailable")
+            self.assertNotIn("qa_appkey", response.text)
+            self.assertNotIn("qa_accesstoken", response.text)
+            self.assertEqual(main_module.store._digital_human_sessions, {})
         finally:
             for key, value in previous_values.items():
                 object.__setattr__(settings, key, value)
 
-    def test_runtime_config_reports_cloud_render_ready_when_configured(self):
+    def test_runtime_config_stays_blocked_when_only_static_provider_values_exist(self):
         previous_values = {
             "tencent_digital_human_app_key": getattr(settings, "tencent_digital_human_app_key", None),
             "tencent_digital_human_access_token": getattr(settings, "tencent_digital_human_access_token", None),
@@ -277,11 +253,13 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             digital_human = response.json()["digitalHuman"]
-            self.assertEqual(digital_human["providerMode"], "cloudRender")
-            self.assertTrue(digital_human["realProviderReady"])
-            self.assertTrue(digital_human["sdkAdapterLinked"])
+            self.assertEqual(digital_human["providerMode"], "blocked")
+            self.assertFalse(digital_human["realProviderReady"])
+            self.assertFalse(digital_human["sdkAdapterLinked"])
             self.assertEqual(digital_human["assetMode"], "project")
-            self.assertEqual(digital_human["sdkReadinessMessage"], "Tencent cloud-render digital human session is ready.")
+            self.assertEqual(digital_human["credentialMode"], "blockedStaticCredential")
+            self.assertNotIn("qa_appkey", response.text)
+            self.assertNotIn("qa_accesstoken", response.text)
         finally:
             for key, value in previous_values.items():
                 object.__setattr__(settings, key, value)

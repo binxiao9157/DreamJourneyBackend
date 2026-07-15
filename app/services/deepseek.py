@@ -1,3 +1,4 @@
+import hashlib
 import json
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -246,7 +247,10 @@ class DeepSeekImageAnalysisProxy:
             "provider": provider,
         }
         if provider_message:
-            payload["providerMessage"] = provider_message
+            payload["providerErrorCode"] = "providerUnavailable"
+            payload["providerErrorReferenceHash"] = (
+                "sha256:" + hashlib.sha256(provider_message.encode("utf-8")).hexdigest()[:16]
+            )
         return payload
 
     @staticmethod

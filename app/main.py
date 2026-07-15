@@ -133,41 +133,15 @@ DIGITAL_HUMAN_MODE_LABELS = {
 ACCOUNT_DELETION_RETENTION_DAYS = 30
 ACCOUNT_RESTORE_LIMIT = 1
 ACCOUNT_DELETION_CONTRACT_VERSION = 1
-DIGITAL_HUMAN_SESSION_CONTRACT_VERSION = 2
+DIGITAL_HUMAN_SESSION_CONTRACT_VERSION = 3
 DIGITAL_HUMAN_SESSION_LEASE_CONTRACT_VERSION = 1
 DIGITAL_HUMAN_SESSION_PROVIDER = "tencent"
-DIGITAL_HUMAN_SESSION_MOCK_PROVIDER_MODE = "mockContract"
-DIGITAL_HUMAN_SESSION_CLOUD_PROVIDER_MODE = "cloudRender"
-DIGITAL_HUMAN_SESSION_DRIVE_MODE = "streamText"
 DIGITAL_HUMAN_SESSION_TTL_SECONDS = max(60, settings.tencent_digital_human_session_ttl_seconds)
 DIGITAL_HUMAN_SESSION_HEARTBEAT_INTERVAL_SECONDS = max(
     10,
     min(settings.tencent_digital_human_heartbeat_interval_seconds, DIGITAL_HUMAN_SESSION_TTL_SECONDS // 2),
 )
 DIGITAL_HUMAN_MAX_CONCURRENT_SESSIONS = max(1, settings.tencent_digital_human_max_concurrent_sessions)
-
-
-def _digital_human_provider_ready() -> bool:
-    return bool(
-        settings.tencent_digital_human_app_key
-        and settings.tencent_digital_human_access_token
-        and (
-            settings.tencent_digital_human_asset_virtualman_key
-            or settings.tencent_digital_human_virtualman_project_id
-        )
-    )
-
-
-def _digital_human_session_resource_key(
-    *,
-    provider_mode: str,
-    provider_asset_id: Optional[str],
-    provider_project_id: Optional[str],
-    persona_id: str,
-) -> str:
-    provider_resource = provider_asset_id or provider_project_id or f"mock-persona:{persona_id}"
-    seed = f"{DIGITAL_HUMAN_SESSION_PROVIDER}:{provider_mode}:{provider_resource}"
-    return "dh_resource_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
 
 
 def _digital_human_session_lease_response(lease: Dict[str, Any], *, reused: bool) -> Dict[str, Any]:
@@ -183,61 +157,6 @@ def _digital_human_session_lease_response(lease: Dict[str, Any], *, reused: bool
         "releaseEndpoint": f"/digital-human/sessions/{session_id}/release",
         "contractVersion": DIGITAL_HUMAN_SESSION_LEASE_CONTRACT_VERSION,
     }
-
-
-def _digital_human_session_response(
-    lease: Dict[str, Any],
-    *,
-    provider_asset_id: Optional[str],
-    provider_project_id: Optional[str],
-    cloud_render_ready: bool,
-    reused: bool,
-) -> Dict[str, Any]:
-    expires_at = str(lease.get("expiresAt") or "")
-    credential: Dict[str, Any] = {
-        "mode": "backend-issued-tencent-cloud" if cloud_render_ready else "backend-issued-mock",
-        "expiresAt": expires_at.replace("+00:00", "Z"),
-    }
-    if cloud_render_ready:
-        credential["appkey"] = settings.tencent_digital_human_app_key
-        credential["accesstoken"] = settings.tencent_digital_human_access_token
-
-    response: Dict[str, Any] = {
-        "sessionId": lease["sessionId"],
-        "userId": lease["userId"],
-        "provider": DIGITAL_HUMAN_SESSION_PROVIDER,
-        "providerMode": lease["providerMode"],
-        "personaId": lease["personaId"],
-        "scene": lease["scene"],
-        "deviceId": lease["deviceId"],
-        "lifecycleMode": lease["lifecycleMode"],
-        "lifecycleModeLabel": DIGITAL_HUMAN_MODE_LABELS[lease["lifecycleMode"]],
-        "assetKey": provider_asset_id,
-        "driveMode": DIGITAL_HUMAN_SESSION_DRIVE_MODE,
-        "alphaEnabled": True,
-        "smartActionEnabled": False,
-        "sessionPolicy": {
-            "allowInterrupt": True,
-            "maxDurationSeconds": DIGITAL_HUMAN_SESSION_TTL_SECONDS,
-            "proactiveSpeechAllowed": False,
-        },
-        "credential": credential,
-        "lease": _digital_human_session_lease_response(lease, reused=reused),
-        "fallback": {
-            "mode": "none" if cloud_render_ready else "audioOnly",
-            "reason": (
-                "tencent cloud-render session credential issued"
-                if cloud_render_ready
-                else "tencent runtime is not connected in this mock contract"
-            ),
-        },
-        "contractVersion": DIGITAL_HUMAN_SESSION_CONTRACT_VERSION,
-    }
-    if provider_asset_id:
-        response["providerAssetId"] = provider_asset_id
-    if provider_project_id:
-        response["providerProjectId"] = provider_project_id
-    return response
 
 
 def _request_bearer_token(request: Request) -> str:
@@ -362,6 +281,35 @@ def _set_auth_diagnostic_headers(
     return response
 
 
+NO_STORE_PATH_PREFIXES = (
+    "/auth/",
+    "/voice/",
+    "/digital-human/",
+)
+NO_STORE_EXACT_PATHS = {
+    "/config/runtime",
+    "/tts",
+    "/archive/image-analysis",
+}
+ANONYMOUS_AUTH_PATHS = {
+    "/auth/login",
+    "/auth/refresh",
+    "/config/runtime",
+}
+
+
+def _requires_no_store(path: str) -> bool:
+    return path in NO_STORE_EXACT_PATHS or path.startswith(NO_STORE_PATH_PREFIXES)
+
+
+def _set_no_store_headers(response: Any) -> Any:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    response.headers["Vary"] = "Authorization, X-DreamJourney-Api-Token"
+    return response
+
+
 @app.middleware("http")
 async def require_backend_api_token(request: Request, call_next):
     if request.url.path == "/health":
@@ -383,10 +331,12 @@ async def require_backend_api_token(request: Request, call_next):
             "userId": str(session.get("userId") or ""),
             "sessionId": str(session.get("sessionId") or ""),
         }
-    elif configured_backend_token:
+    elif backend_header_token:
         if not _tokens_match(backend_header_token, configured_backend_token):
             return JSONResponse(status_code=401, content={"detail": "invalid backend api token"})
         principal = {"kind": "system"}
+    elif configured_backend_token and request.url.path not in ANONYMOUS_AUTH_PATHS:
+        return JSONResponse(status_code=401, content={"detail": "invalid backend api token"})
 
     request.state.auth_principal = principal
     ownership_decision = "system" if principal["kind"] == "system" else principal["kind"]
@@ -456,6 +406,14 @@ async def require_backend_api_token(request: Request, call_next):
     )
 
 
+@app.middleware("http")
+async def prevent_sensitive_response_caching(request: Request, call_next):
+    response = await call_next(request)
+    if _requires_no_store(request.url.path):
+        return _set_no_store_headers(response)
+    return response
+
+
 @app.on_event("startup")
 def startup() -> None:
     init_store(store)
@@ -476,7 +434,6 @@ def create_digital_human_session(payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id = str(payload.get("userId") or "").strip()
     persona_id = str(payload.get("personaId") or "").strip()
     scene = str(payload.get("scene") or "echo").strip() or "echo"
-    device_id = str(payload.get("deviceId") or "").strip()
     lifecycle_mode = str(payload.get("lifecycleMode") or "sunlight").strip() or "sunlight"
     if not user_id:
         raise HTTPException(status_code=400, detail="userId is required")
@@ -486,69 +443,19 @@ def create_digital_human_session(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"unsupported lifecycleMode: {lifecycle_mode}")
     if lifecycle_mode == "silent":
         raise HTTPException(status_code=409, detail="silent mode must not create a digital human render session")
-    if not device_id:
-        legacy_device_seed = f"{user_id}:{persona_id}:{scene}"
-        device_id = "legacy_" + hashlib.sha256(legacy_device_seed.encode("utf-8")).hexdigest()[:16]
-
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(seconds=DIGITAL_HUMAN_SESSION_TTL_SECONDS)
-    session_seed = f"{user_id}:{persona_id}:{scene}:{device_id}:{now.isoformat()}"
-    session_id = "dh_session_" + hashlib.sha256(session_seed.encode("utf-8")).hexdigest()[:24]
-    cloud_render_ready = _digital_human_provider_ready()
-    provider_mode = (
-        DIGITAL_HUMAN_SESSION_CLOUD_PROVIDER_MODE
-        if cloud_render_ready
-        else DIGITAL_HUMAN_SESSION_MOCK_PROVIDER_MODE
-    )
-    provider_asset_id = settings.tencent_digital_human_asset_virtualman_key
-    provider_project_id = settings.tencent_digital_human_virtualman_project_id
-    if not cloud_render_ready:
-        provider_asset_id = "mock_asset_" + hashlib.sha256(persona_id.encode("utf-8")).hexdigest()[:12]
-        provider_project_id = None
-    resource_key = _digital_human_session_resource_key(
-        provider_mode=provider_mode,
-        provider_asset_id=provider_asset_id,
-        provider_project_id=provider_project_id,
-        persona_id=persona_id,
-    )
-    now_iso = now.isoformat()
-    candidate = {
-        "sessionId": session_id,
-        "resourceKey": resource_key,
-        "userId": user_id,
-        "deviceId": device_id,
-        "personaId": persona_id,
-        "scene": scene,
-        "lifecycleMode": lifecycle_mode,
-        "providerMode": provider_mode,
-        "status": "active",
-        "createdAt": now_iso,
-        "heartbeatAt": now_iso,
-        "expiresAt": expires_at.isoformat(),
-    }
-    lease_result = store.acquire_digital_human_session_lease(
-        candidate,
-        max_concurrent_sessions=DIGITAL_HUMAN_MAX_CONCURRENT_SESSIONS,
-        now_iso=now_iso,
-    )
-    if lease_result["outcome"] == "conflict":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "digital_human_session_capacity_exhausted",
-                "message": "digital human session capacity is currently exhausted",
-                "activeSessionCount": lease_result["activeSessionCount"],
-                "maxConcurrentSessions": DIGITAL_HUMAN_MAX_CONCURRENT_SESSIONS,
-                "retryAfterSeconds": lease_result["retryAfterSeconds"],
-            },
-        )
-    lease = lease_result["lease"]
-    return _digital_human_session_response(
-        lease,
-        provider_asset_id=provider_asset_id,
-        provider_project_id=provider_project_id,
-        cloud_render_ready=cloud_render_ready,
-        reused=lease_result["outcome"] == "reused",
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "code": "digital_human_credential_broker_unavailable",
+            "message": "digital human rendering requires a revocable scoped session credential broker",
+            "provider": DIGITAL_HUMAN_SESSION_PROVIDER,
+            "providerReady": False,
+            "credentialMode": "blockedStaticCredential",
+            "releaseVisible": False,
+            "retryable": False,
+            "fallbackMode": "text",
+            "contractVersion": DIGITAL_HUMAN_SESSION_CONTRACT_VERSION,
+        },
     )
 
 
@@ -961,6 +868,16 @@ def _voice_clone_provider_speaker_id(profile: Dict[str, Any]) -> str:
 def _voice_clone_public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     public_profile = dict(profile)
     public_profile.pop("providerSpeakerId", None)
+    provider_request_id = str(public_profile.pop("providerRequestId", "") or "").strip()
+    provider_log_id = str(public_profile.pop("providerLogId", "") or "").strip()
+    provider_message = str(public_profile.pop("providerMessage", "") or "").strip()
+    if provider_request_id:
+        public_profile["providerRequestIdHash"] = _provider_reference_hash(provider_request_id)
+    if provider_log_id:
+        public_profile["providerLogIdHash"] = _provider_reference_hash(provider_log_id)
+    if provider_message:
+        public_profile["providerErrorCode"] = "providerOperationFailed"
+        public_profile["providerErrorReferenceHash"] = _provider_reference_hash(provider_message)
     public_profile.setdefault(
         "providerBindingMode",
         "legacyDirectProviderId"
@@ -969,6 +886,45 @@ def _voice_clone_public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     )
     public_profile.setdefault("providerSlotManaged", public_profile.get("providerBindingMode") == "exclusiveSlot")
     return public_profile
+
+
+def _provider_reference_hash(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _provider_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    public_payload = dict(payload)
+    provider_request_id = str(
+        public_payload.pop("providerRequestId", "")
+        or public_payload.pop("request_id", "")
+        or public_payload.pop("reqid", "")
+        or ""
+    ).strip()
+    provider_log_id = str(
+        public_payload.pop("providerLogId", "")
+        or public_payload.pop("log_id", "")
+        or public_payload.pop("logid", "")
+        or ""
+    ).strip()
+    provider_message = str(
+        public_payload.pop("providerMessage", "")
+        or public_payload.pop("message", "")
+        or ""
+    ).strip()
+    for key in tuple(public_payload):
+        normalized_key = "".join(character for character in key.lower() if character.isalnum())
+        if normalized_key in {"appkey", "accesstoken", "apptoken", "apikey", "secretkey"}:
+            public_payload.pop(key, None)
+    if provider_request_id:
+        public_payload["providerRequestIdHash"] = _provider_reference_hash(provider_request_id)
+    if provider_log_id:
+        public_payload["providerLogIdHash"] = _provider_reference_hash(provider_log_id)
+    if provider_message:
+        public_payload["providerMessageHash"] = _provider_reference_hash(provider_message)
+    return public_payload
 
 
 def _voice_clone_slot_status(sample_status: str) -> str:
@@ -1388,7 +1344,18 @@ def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
                 audio_format=result["audioFormat"],
             )
     except ValueError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        detail = {
+            "code": "voice_synthesis_provider_failed",
+            "message": "voice synthesis provider failed",
+            "retryable": True,
+        }
+        provider_request_hash = _provider_reference_hash(getattr(exc, "provider_request_id", ""))
+        provider_log_hash = _provider_reference_hash(getattr(exc, "provider_log_id", ""))
+        if provider_request_hash:
+            detail["providerRequestIdHash"] = provider_request_hash
+        if provider_log_hash:
+            detail["providerLogIdHash"] = provider_log_hash
+        raise HTTPException(status_code=502, detail=detail) from exc
 
     response = {
         "status": "synthesized",
@@ -1403,9 +1370,9 @@ def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     provider_request_id = str(result.get("providerRequestId") or "").strip()
     provider_log_id = str(result.get("providerLogId") or "").strip()
     if provider_request_id:
-        response["providerRequestId"] = provider_request_id
+        response["providerRequestIdHash"] = _provider_reference_hash(provider_request_id)
     if provider_log_id:
-        response["providerLogId"] = provider_log_id[:160]
+        response["providerLogIdHash"] = _provider_reference_hash(provider_log_id)
     if output_mode != "default":
         response["outputMode"] = output_mode
     return response
@@ -1434,12 +1401,14 @@ def tts(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
     proxy = VolcTTSProxy(settings)
     try:
         if not dryRun:
-            return proxy.request_tts(
-                text=text,
-                user_id=user_id,
-                voice_type=voice_type,
-                encoding=encoding,
-                speed_ratio=speed_ratio,
+            return _provider_public_payload(
+                proxy.request_tts(
+                    text=text,
+                    user_id=user_id,
+                    voice_type=voice_type,
+                    encoding=encoding,
+                    speed_ratio=speed_ratio,
+                )
             )
         request = proxy.build_request(
             text=text,
@@ -1449,7 +1418,14 @@ def tts(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
             speed_ratio=speed_ratio,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "tts_request_invalid",
+                "message": "TTS request is unavailable",
+                "errorReferenceHash": _provider_reference_hash(exc),
+            },
+        ) from exc
 
     return {
         "provider": "volcengine",
