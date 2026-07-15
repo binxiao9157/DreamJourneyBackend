@@ -36,11 +36,23 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
         detail = response.json()["detail"]
         self.assertEqual(detail["code"], "digital_human_credential_broker_unavailable")
         self.assertEqual(detail["credentialMode"], "blockedStaticCredential")
+        self.assertEqual(detail["accessPath"], "textFallback")
+        self.assertFalse(detail["mobileDirectAllowed"])
+        self.assertEqual(detail["brokerStatus"], "providerContractNotVerified")
         self.assertFalse(detail["providerReady"])
         self.assertFalse(detail["releaseVisible"])
         self.assertFalse(detail["retryable"])
         self.assertEqual(detail["fallbackMode"], "text")
-        self.assertEqual(detail["contractVersion"], 3)
+        receipt = detail["decisionReceipt"]
+        required = ["scope", "ttl", "audience", "revocation"]
+        self.assertEqual(receipt["decision"], "keepDirectMobileClosed")
+        self.assertEqual(receipt["reasonCode"], "scopedSessionCredentialContractNotVerified")
+        self.assertEqual(receipt["requiredProperties"], required)
+        self.assertEqual(receipt["verifiedProperties"], [])
+        self.assertEqual(receipt["missingProperties"], required)
+        self.assertNotIn("expiresAt", detail)
+        self.assertNotIn("expiresInSeconds", detail)
+        self.assertEqual(detail["contractVersion"], 4)
         self.assertEqual(main_module.store._digital_human_sessions, {})
 
     def test_blocked_session_requests_never_allocate_or_reuse_a_lease(self):
@@ -177,13 +189,23 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
         self.assertFalse(digital_human["defaultReleaseVisible"])
         self.assertFalse(digital_human["sdkAdapterLinked"])
         self.assertEqual(digital_human["sdkProvider"], "tencent-cloud-digital-human")
-        self.assertEqual(digital_human["sdkAuthMode"], "credentialBrokerRequired")
+        self.assertEqual(digital_human["sdkAuthMode"], "staticProjectCredentialUnsupportedOnMobile")
         self.assertEqual(digital_human["credentialMode"], "blockedStaticCredential")
+        self.assertEqual(digital_human["accessPath"], "textFallback")
+        self.assertFalse(digital_human["mobileDirectAllowed"])
+        self.assertEqual(digital_human["brokerStatus"], "providerContractNotVerified")
         self.assertFalse(digital_human["releaseVisible"])
-        self.assertEqual(digital_human["credentialBroker"]["status"], "unavailable")
+        self.assertEqual(digital_human["credentialBroker"]["status"], "providerContractNotVerified")
+        required = ["scope", "ttl", "audience", "revocation"]
+        receipt = digital_human["decisionReceipt"]
+        self.assertEqual(receipt["decision"], "keepDirectMobileClosed")
+        self.assertEqual(receipt["requiredProperties"], required)
+        self.assertEqual(receipt["verifiedProperties"], [])
+        self.assertEqual(receipt["missingProperties"], required)
+        self.assertEqual(digital_human["contractVersion"], 4)
         self.assertEqual(
             digital_human["sdkReadinessMessage"],
-            "Tencent session credential broker is unavailable; digital human rendering is blocked.",
+            "Tencent mobile SDK only exposes project-level static credentials; digital human rendering is blocked.",
         )
 
     def test_static_provider_configuration_does_not_reenable_session_response(self):

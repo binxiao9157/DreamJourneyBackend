@@ -94,7 +94,12 @@ def main():
     require(runtime.get("voice", {}).get("accessPath") == "backendProxyOrText", "voice access path must remain backend proxy or text")
     require(runtime.get("voice", {}).get("mobileDirectAllowed") is False, "voice direct mobile path must remain denied")
     require((runtime.get("voice", {}).get("decisionReceipt") or {}).get("decision") == "keepDirectMobileClosed", "runtime must expose the direct-mobile denial receipt")
-    require(runtime.get("digitalHuman", {}).get("credentialMode") == "blockedStaticCredential", "digital-human credential mode must be blocked")
+    runtime_digital_human = runtime.get("digitalHuman", {})
+    require(runtime_digital_human.get("credentialMode") == "blockedStaticCredential", "digital-human credential mode must be blocked")
+    require(runtime_digital_human.get("accessPath") == "textFallback", "digital-human access path must remain text fallback")
+    require(runtime_digital_human.get("mobileDirectAllowed") is False, "digital-human direct mobile path must remain denied")
+    require(runtime_digital_human.get("brokerStatus") == "providerContractNotVerified", "digital-human broker status must remain unverified")
+    require((runtime_digital_human.get("decisionReceipt") or {}).get("decision") == "keepDirectMobileClosed", "runtime must expose the digital-human denial receipt")
 
     voice = request_json(
         "POST",
@@ -132,8 +137,17 @@ def main():
     assert_no_provider_credentials(digital_human)
     detail = digital_human.get("detail") or {}
     require(detail.get("code") == "digital_human_credential_broker_unavailable", "digital human must fail with broker-unavailable")
+    require(detail.get("accessPath") == "textFallback", "digital human must select text fallback")
+    require(detail.get("mobileDirectAllowed") is False, "digital human must deny mobile direct access")
+    require(detail.get("brokerStatus") == "providerContractNotVerified", "digital-human broker status must remain unverified")
     require(detail.get("releaseVisible") is False, "blocked digital human must not be release visible")
     require(detail.get("retryable") is False, "blocked digital human must not pretend a retry can mint credentials")
+    digital_human_receipt = detail.get("decisionReceipt") or {}
+    require(digital_human_receipt.get("decision") == "keepDirectMobileClosed", "digital human must expose a closed-path decision receipt")
+    require(digital_human_receipt.get("requiredProperties") == required, "digital-human receipt must list scoped credential requirements")
+    require(digital_human_receipt.get("verifiedProperties") == [], "digital-human receipt must not claim unverified properties")
+    require(digital_human_receipt.get("missingProperties") == required, "digital-human receipt must list every missing property")
+    require("expiresAt" not in detail and "expiresInSeconds" not in detail, "digital-human response must not invent TTL metadata")
 
     print("Backend credential response deployed smoke passed: no-store + value-free blocked contracts")
 

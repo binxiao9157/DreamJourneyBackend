@@ -2,6 +2,7 @@ from typing import Any, Dict
 
 from app.core.config import Settings
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
+from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.route_ownership import RouteOwnershipRegistry
 from app.services.tokens import TokenService
 from app.services.tts import VoiceCloneTTSProviderFactory
@@ -18,6 +19,7 @@ class RuntimeConfigService:
         voice_clone_tts_provider = VoiceCloneTTSProviderFactory(self.settings).make()
         voice_clone_speaker_ids = self._voice_clone_speaker_ids()
         digital_human_asset_mode = self._digital_human_asset_mode()
+        digital_human_access = DigitalHumanAccessPolicy().blocked_mobile_contract()
         route_ownership_audit = RouteOwnershipRegistry().audit_summary()
         realtime_voice = TokenService(self.settings).realtime_config(user_id="runtime-capability")
         return {
@@ -160,15 +162,14 @@ class RuntimeConfigService:
                 "contractVersion": 2,
             },
             "digitalHuman": {
+                **digital_human_access,
                 "enabled": False,
-                "provider": "tencent",
                 "providerMode": "blocked",
                 "realProviderReady": False,
                 "sdkProvider": "tencent-cloud-digital-human",
-                "sdkAuthMode": "credentialBrokerRequired",
-                "credentialMode": "blockedStaticCredential",
+                "sdkAuthMode": "staticProjectCredentialUnsupportedOnMobile",
                 "sdkAdapterLinked": False,
-                "sdkReadinessMessage": "Tencent session credential broker is unavailable; digital human rendering is blocked.",
+                "sdkReadinessMessage": "Tencent mobile SDK only exposes project-level static credentials; digital human rendering is blocked.",
                 "sessionEndpoint": "/digital-human/sessions",
                 "driveModes": ["streamText", "sendAudio"],
                 "fallbackMode": "text",
@@ -178,8 +179,10 @@ class RuntimeConfigService:
                 "requiresBackendIssuedCredential": True,
                 "credentialBroker": {
                     "required": True,
-                    "status": "unavailable",
-                    "requiredProperties": ["scope", "audience", "ttl", "revocation"],
+                    "status": digital_human_access["brokerStatus"],
+                    "requiredProperties": ["scope", "ttl", "audience", "revocation"],
+                    "verifiedProperties": [],
+                    "missingProperties": ["scope", "ttl", "audience", "revocation"],
                 },
                 "sessionLease": {
                     "enabled": False,
@@ -200,7 +203,6 @@ class RuntimeConfigService:
                     "conflictStatusCode": 409,
                     "contractVersion": 1,
                 },
-                "contractVersion": 3,
             },
             "privacy": {
                 "localOnly": "never_upload",

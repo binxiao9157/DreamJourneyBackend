@@ -18,6 +18,7 @@ from app.services.amap import AMapDistrictProxy
 from app.services.auth_sessions import AuthSessionError, AuthSessionService
 from app.services.authorization_policy import CrossAccountAuthorizationPolicy
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
+from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.privacy import (
     filter_syncable_graph,
     sanitize_archive_item_payload,
@@ -133,9 +134,7 @@ DIGITAL_HUMAN_MODE_LABELS = {
 ACCOUNT_DELETION_RETENTION_DAYS = 30
 ACCOUNT_RESTORE_LIMIT = 1
 ACCOUNT_DELETION_CONTRACT_VERSION = 1
-DIGITAL_HUMAN_SESSION_CONTRACT_VERSION = 3
 DIGITAL_HUMAN_SESSION_LEASE_CONTRACT_VERSION = 1
-DIGITAL_HUMAN_SESSION_PROVIDER = "tencent"
 DIGITAL_HUMAN_SESSION_TTL_SECONDS = max(60, settings.tencent_digital_human_session_ttl_seconds)
 DIGITAL_HUMAN_SESSION_HEARTBEAT_INTERVAL_SECONDS = max(
     10,
@@ -443,18 +442,13 @@ def create_digital_human_session(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"unsupported lifecycleMode: {lifecycle_mode}")
     if lifecycle_mode == "silent":
         raise HTTPException(status_code=409, detail="silent mode must not create a digital human render session")
+    blocked_contract = DigitalHumanAccessPolicy().blocked_mobile_contract()
     raise HTTPException(
         status_code=503,
         detail={
+            **blocked_contract,
             "code": "digital_human_credential_broker_unavailable",
             "message": "digital human rendering requires a revocable scoped session credential broker",
-            "provider": DIGITAL_HUMAN_SESSION_PROVIDER,
-            "providerReady": False,
-            "credentialMode": "blockedStaticCredential",
-            "releaseVisible": False,
-            "retryable": False,
-            "fallbackMode": "text",
-            "contractVersion": DIGITAL_HUMAN_SESSION_CONTRACT_VERSION,
         },
     )
 
