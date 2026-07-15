@@ -208,6 +208,7 @@ PUBLIC_BASE_URL=https://dreamjourney-api.liftora.cn
 STORE_BACKEND=postgres
 
 DATABASE_URL=postgresql://dreamjourney:dreamjourney@postgres:5432/dreamjourney
+POSTGRES_PASSWORD=YOUR_POSTGRES_PASSWORD
 REDIS_URL=redis://redis:6379/0
 
 DEEPSEEK_API_KEY=你的DeepSeekKey
@@ -216,7 +217,7 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com/v1/chat/completions
 VOLCENGINE_API_KEY=你的火山APIKey
 VOLCENGINE_VOICE_TYPE=zh_female_cancan_mars_bigtts
 VOLCENGINE_APP_ID=你的实时对话AppID
-VOLCENGINE_APP_KEY=PlgvMymc7f3tQnJ6
+VOLCENGINE_APP_KEY=YOUR_VOLCENGINE_APP_KEY
 VOLCENGINE_APP_TOKEN=你的实时对话AccessToken
 VOLCENGINE_REALTIME_RESOURCE_ID=volc.speech.dialog
 VOLCENGINE_REALTIME_ADDRESS=wss://openspeech.bytedance.com

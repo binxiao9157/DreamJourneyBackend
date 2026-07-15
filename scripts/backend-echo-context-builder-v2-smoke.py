@@ -65,7 +65,7 @@ def main() -> None:
         store_backend="memory",
         volcengine_voice_clone_tts_api_key="voice-clone-tts-secret",
         tencent_digital_human_app_key="dh-appkey",
-        tencent_digital_human_access_token="dh-token",
+        tencent_digital_human_access_token="fixture-digital-human-access-token",
         tencent_digital_human_virtualman_project_id="dh-project",
     )
 

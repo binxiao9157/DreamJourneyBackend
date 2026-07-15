@@ -18,7 +18,7 @@ services:
     environment:
       POSTGRES_DB: dreamjourney
       POSTGRES_USER: dreamjourney
-      POSTGRES_PASSWORD: dreamjourney
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

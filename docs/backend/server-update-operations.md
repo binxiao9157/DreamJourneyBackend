@@ -104,6 +104,7 @@ PUBLIC_BASE_URL=https://www.mmdd10.tech/dreamjourney-api
 STORE_BACKEND=postgres
 
 DATABASE_URL=postgresql://dreamjourney:dreamjourney@postgres:5432/dreamjourney
+POSTGRES_PASSWORD=YOUR_POSTGRES_PASSWORD
 REDIS_URL=redis://redis:6379/0
 
 BACKEND_API_TOKEN=<服务器自定义强随机 token>
@@ -115,7 +116,7 @@ VOLCENGINE_API_KEY=<火山新版 API Key>
 VOLCENGINE_VOICE_TYPE=zh_female_cancan_mars_bigtts
 
 VOLCENGINE_APP_ID=<火山实时对话 App ID>
-VOLCENGINE_APP_KEY=PlgvMymc7f3tQnJ6
+VOLCENGINE_APP_KEY=YOUR_VOLCENGINE_APP_KEY
 VOLCENGINE_APP_TOKEN=<火山实时对话 Access Token>
 VOLCENGINE_REALTIME_RESOURCE_ID=volc.speech.dialog
 VOLCENGINE_REALTIME_ADDRESS=wss://openspeech.bytedance.com

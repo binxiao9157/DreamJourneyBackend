@@ -256,7 +256,7 @@ class RuntimeConfigTests(unittest.TestCase):
 
     def test_runtime_config_separates_voice_clone_training_and_synthesis_capabilities(self):
         settings = Settings(
-            volcengine_voice_clone_api_key="voice-clone-train-key",
+            volcengine_voice_clone_api_key="fixture-voice-clone-api-key",
             volcengine_voice_clone_tts_api_key=None,
         )
 
@@ -304,7 +304,7 @@ class TokenAndProxyTests(unittest.TestCase):
     def test_realtime_token_blocks_static_credentials_without_fake_expiry(self):
         settings = Settings(
             volcengine_app_id="test-app-id",
-            volcengine_app_key="PlgvMymc7f3tQnJ6",
+            volcengine_app_key="fixture-volcengine-app-key",
             volcengine_app_token="access-token-secret",
         )
 
@@ -3784,7 +3784,7 @@ class ArchiveAPITests(unittest.TestCase):
             store_backend="memory",
             volcengine_voice_clone_tts_api_key="voice-clone-tts-secret",
             tencent_digital_human_app_key="dh-appkey",
-            tencent_digital_human_access_token="dh-token",
+            tencent_digital_human_access_token="fixture-digital-human-access-token",
             tencent_digital_human_virtualman_project_id="dh-project",
         )
 
