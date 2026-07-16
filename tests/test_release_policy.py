@@ -14,10 +14,45 @@ from app.services.release_policy import (
     ReleasePolicyService,
     ReleasePolicySnapshot,
     ReleasePolicyVersionDowngrade,
+    normalize_release_policy_audience,
 )
 
 
 class ReleasePolicyServiceTests(unittest.TestCase):
+    def test_qa_audience_requires_nonproduction_system_principal(self):
+        self.assertEqual(
+            normalize_release_policy_audience(
+                "qa",
+                environment="production",
+                principal_kind="user",
+            ),
+            "owner",
+        )
+        self.assertEqual(
+            normalize_release_policy_audience(
+                "qa",
+                environment="production",
+                principal_kind="system",
+            ),
+            "owner",
+        )
+        self.assertEqual(
+            normalize_release_policy_audience(
+                "qa",
+                environment="development",
+                principal_kind="user",
+            ),
+            "owner",
+        )
+        self.assertEqual(
+            normalize_release_policy_audience(
+                "qa",
+                environment="development",
+                principal_kind="system",
+            ),
+            "qa",
+        )
+
     def test_closed_pilot_snapshot_explicitly_allows_only_owner_text_core(self):
         now = datetime(2026, 7, 16, 1, 0, tzinfo=timezone.utc)
         snapshot = ReleasePolicyService().build_snapshot(

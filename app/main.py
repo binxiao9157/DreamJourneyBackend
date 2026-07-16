@@ -69,6 +69,7 @@ from app.services.release_policy import (
     ReleasePolicyService,
     ReleasePolicySnapshot,
     ReleasePolicyVersionDowngrade,
+    normalize_release_policy_audience,
 )
 from app.services.context_packet import ContextPacketBuilder
 from app.services.store_factory import init_store, make_store
@@ -318,9 +319,13 @@ def _release_policy_bool_header(request: Request, name: str) -> Optional[bool]:
     return None
 
 
-def _release_policy_audience(request: Request) -> str:
-    value = str(request.headers.get("x-dreamjourney-policy-audience") or "owner").strip()
-    return value if value in {"owner", "family", "visitor", "qa"} else "owner"
+def _release_policy_audience(request: Request, principal: Dict[str, Any]) -> str:
+    value = str(request.headers.get("x-dreamjourney-policy-audience") or "owner")
+    return normalize_release_policy_audience(
+        value,
+        environment=settings.environment,
+        principal_kind=str(principal.get("kind") or "anonymous"),
+    )
 
 
 def _set_release_policy_diagnostic_headers(response: Any, diagnostic: Dict[str, str]) -> Any:
@@ -389,7 +394,7 @@ def _evaluate_release_policy_command(
     try:
         captured = RELEASE_POLICY_COMMAND_GATE.capture(
             feature=feature,
-            audience=_release_policy_audience(request),
+            audience=_release_policy_audience(request, principal),
             cohort=str(
                 request.headers.get("x-dreamjourney-policy-cohort")
                 or "closedPilotAdultSelf"

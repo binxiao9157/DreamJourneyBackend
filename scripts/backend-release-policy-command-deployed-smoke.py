@@ -21,7 +21,14 @@ def require(condition, message):
         raise AssertionError(message)
 
 
-def request_json(path, *, method="GET", payload=None, expected_statuses=(200,)):
+def request_json(
+    path,
+    *,
+    method="GET",
+    payload=None,
+    expected_statuses=(200,),
+    extra_headers=None,
+):
     headers = {"Accept": "application/json"}
     body = None
     if API_TOKEN:
@@ -29,6 +36,8 @@ def request_json(path, *, method="GET", payload=None, expected_statuses=(200,)):
     if payload is not None:
         headers["Content-Type"] = "application/json"
         body = json.dumps(payload).encode("utf-8")
+    if extra_headers:
+        headers.update(extra_headers)
     request = urllib.request.Request(
         f"{BASE_URL}{path}",
         headers=headers,
@@ -77,6 +86,11 @@ def main():
         method="POST",
         payload={},
         expected_statuses=(400,),
+        extra_headers={
+            "X-DreamJourney-Policy-Audience": "qa",
+            "X-DreamJourney-Feature": "profileSettings",
+            "X-DreamJourney-Feature-Allowed": "true",
+        },
     )
     require(status == 400, "profile fixture should reach validation without persistence")
     require(
@@ -85,7 +99,7 @@ def main():
     )
     require(
         headers.get("x-dreamjourney-release-policy-decision") == "allow",
-        "server-captured owner-core command must be allowed",
+        "production must normalize a forged QA audience to the owner core policy",
     )
     require(
         headers.get("x-dreamjourney-release-policy-decision-id", "").startswith("server:"),
@@ -118,7 +132,7 @@ def main():
 
     print(
         "Backend release-policy command deployed smoke passed: "
-        f"mode={EXPECTED_MODE} core=allow hidden={expected_decision}"
+        f"mode={EXPECTED_MODE} forgedQA=owner core=allow hidden={expected_decision}"
     )
 
 

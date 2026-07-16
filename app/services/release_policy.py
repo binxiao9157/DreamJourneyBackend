@@ -11,6 +11,23 @@ ReleaseAudience = Literal["owner", "family", "visitor", "qa"]
 Gate = Literal["G0", "G1", "G2", "G3", "G4"]
 
 
+def normalize_release_policy_audience(
+    requested: str,
+    *,
+    environment: str,
+    principal_kind: str,
+) -> ReleaseAudience:
+    normalized = requested.strip()
+    if normalized == "qa":
+        is_production = environment.strip().lower() in {"production", "prod"}
+        if not is_production and principal_kind == "system":
+            return "qa"
+        return "owner"
+    if normalized in {"owner", "family", "visitor"}:
+        return normalized  # type: ignore[return-value]
+    return "owner"
+
+
 class ReleasePolicyVersionDowngrade(RuntimeError):
     def __init__(self, *, known_revision: int, server_revision: int):
         super().__init__("client knows a newer release policy revision")
