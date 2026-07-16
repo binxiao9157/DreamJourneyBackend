@@ -33,6 +33,7 @@ class Settings:
     auth_access_ttl_seconds: int = 900
     auth_refresh_ttl_seconds: int = 30 * 24 * 60 * 60
     auth_ownership_mode: str = "shadow"
+    release_policy_command_mode: str = "observe"
 
     deepseek_api_key: Optional[str] = None
     deepseek_base_url: str = "https://api.deepseek.com/v1/chat/completions"
@@ -92,6 +93,10 @@ class Settings:
                 "AUTH_OWNERSHIP_MODE",
                 cls.auth_ownership_mode,
             ) or cls.auth_ownership_mode,
+            release_policy_command_mode=_env(
+                "RELEASE_POLICY_COMMAND_MODE",
+                cls.release_policy_command_mode,
+            ) or cls.release_policy_command_mode,
             deepseek_api_key=_env("DEEPSEEK_API_KEY"),
             deepseek_base_url=_env("DEEPSEEK_BASE_URL", cls.deepseek_base_url) or cls.deepseek_base_url,
             volcengine_api_key=_env("VOLCENGINE_API_KEY"),

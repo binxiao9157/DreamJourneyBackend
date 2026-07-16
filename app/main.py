@@ -64,6 +64,8 @@ from app.services.archive_store import (
 )
 from app.services.runtime_config import RuntimeConfigService
 from app.services.release_policy import (
+    ReleasePolicyCommandGate,
+    ReleasePolicyFeatureAccessDenied,
     ReleasePolicyService,
     ReleasePolicySnapshot,
     ReleasePolicyVersionDowngrade,
@@ -98,6 +100,15 @@ AUTH_OWNERSHIP_MODE = (
     if settings.auth_ownership_mode in {"shadow", "enforce"}
     else "shadow"
 )
+RELEASE_POLICY_COMMAND_MODE = (
+    settings.release_policy_command_mode
+    if settings.release_policy_command_mode in {"observe", "enforce"}
+    else "observe"
+)
+RELEASE_POLICY_SERVICE = ReleasePolicyService(
+    shadow_mode=RELEASE_POLICY_COMMAND_MODE != "enforce"
+)
+RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(RELEASE_POLICY_SERVICE)
 ARCHIVE_MEDIA_UPLOAD_PROVIDER = "mockObjectStorage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_DISPLAY_NAME = "Mock Object Storage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_MODE = "mock"
@@ -217,18 +228,21 @@ async def _ownership_claim_user_ids(request: Request) -> Tuple[set[str], str, Di
         str(request.query_params.get("viewerUserId") or "").strip(),
         _ownership_path_user_id(request.url.path),
     }
-    content_type = str(request.headers.get("content-type") or "").lower()
-    payload_context: Dict[str, Any] = {}
-    if "application/json" in content_type:
-        try:
-            payload = json.loads((await request.body()).decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            payload = None
-        if isinstance(payload, dict):
-            payload_context = payload
-            for key in ("userId", "viewerUserId", "authenticatedUserId"):
-                claims.add(str(payload.get(key) or "").strip())
+    payload_context = await _request_json_payload(request)
+    for key in ("userId", "viewerUserId", "authenticatedUserId"):
+        claims.add(str(payload_context.get(key) or "").strip())
     return {claim for claim in claims if claim}, "inspected", payload_context
+
+
+async def _request_json_payload(request: Request) -> Dict[str, Any]:
+    content_type = str(request.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        return {}
+    try:
+        payload = json.loads((await request.body()).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _ownership_log_hash(value: str) -> str:
@@ -283,6 +297,154 @@ def _set_auth_diagnostic_headers(
     response.headers["X-DreamJourney-Authorization-Decision"] = authorization_headers["decision"]
     response.headers["X-DreamJourney-Authorization-Reason"] = authorization_headers["reason"]
     return response
+
+
+def _release_policy_int_header(request: Request, name: str) -> Optional[int]:
+    value = str(request.headers.get(name) or "").strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _release_policy_bool_header(request: Request, name: str) -> Optional[bool]:
+    value = str(request.headers.get(name) or "").strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+def _release_policy_audience(request: Request) -> str:
+    value = str(request.headers.get("x-dreamjourney-policy-audience") or "owner").strip()
+    return value if value in {"owner", "family", "visitor", "qa"} else "owner"
+
+
+def _set_release_policy_diagnostic_headers(response: Any, diagnostic: Dict[str, str]) -> Any:
+    if not diagnostic:
+        return response
+    response.headers["X-DreamJourney-Release-Policy-Mode"] = RELEASE_POLICY_COMMAND_MODE
+    response.headers["X-DreamJourney-Release-Policy-Feature"] = diagnostic.get("feature", "none")
+    response.headers["X-DreamJourney-Release-Policy-Decision"] = diagnostic.get("decision", "notApplicable")
+    response.headers["X-DreamJourney-Release-Policy-Decision-Id"] = diagnostic.get(
+        "decisionId",
+        "none",
+    )
+    response.headers["X-DreamJourney-Release-Policy-Reason"] = diagnostic.get("reason", "notApplicable")
+    response.headers["X-DreamJourney-Release-Policy-Revision"] = diagnostic.get("policyRevision", "0")
+    return response
+
+
+def _release_policy_denied_response(error: ReleasePolicyFeatureAccessDenied) -> JSONResponse:
+    response = JSONResponse(
+        status_code=403,
+        content={
+            "detail": {
+                "code": "release_policy_denied",
+                "feature": error.feature,
+                "reason": error.reason,
+                "policyRevision": error.policy_revision,
+                "retryable": False,
+            }
+        },
+    )
+    return _set_release_policy_diagnostic_headers(
+        response,
+        {
+            "feature": error.feature,
+            "decision": "deny",
+            "reason": error.reason,
+            "policyRevision": str(error.policy_revision),
+        },
+    )
+
+
+def _release_policy_account_generation(principal: Dict[str, Any]) -> str:
+    if principal.get("kind") == "system":
+        return "system"
+    source = str(
+        principal.get("sessionId")
+        or principal.get("userId")
+        or "anonymous"
+    )
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
+
+
+def _evaluate_release_policy_command(
+    request: Request,
+    payload: Dict[str, Any],
+    principal: Dict[str, Any],
+) -> Tuple[Optional[JSONResponse], Dict[str, str]]:
+    feature = RELEASE_POLICY_COMMAND_GATE.feature_for_request(
+        request.method,
+        request.url.path,
+        payload,
+    )
+    if feature is None:
+        return None, {}
+
+    try:
+        captured = RELEASE_POLICY_COMMAND_GATE.capture(
+            feature=feature,
+            audience=_release_policy_audience(request),
+            cohort=str(
+                request.headers.get("x-dreamjourney-policy-cohort")
+                or "closedPilotAdultSelf"
+            ).strip(),
+            client_build=_release_policy_int_header(
+                request,
+                "x-dreamjourney-client-build",
+            ) or 1,
+            client_policy_version=str(
+                request.headers.get("x-dreamjourney-policy-version") or ""
+            ).strip() or None,
+            client_policy_revision=_release_policy_int_header(
+                request,
+                "x-dreamjourney-policy-revision",
+            ),
+            client_account_generation=str(
+                request.headers.get("x-dreamjourney-account-generation") or ""
+            ).strip() or None,
+            client_allowed=_release_policy_bool_header(
+                request,
+                "x-dreamjourney-feature-allowed",
+            ),
+            client_decision_id=str(
+                request.headers.get("x-dreamjourney-feature-decision-id") or ""
+            ).strip() or None,
+            client_feature=str(
+                request.headers.get("x-dreamjourney-feature") or ""
+            ).strip() or None,
+            expected_account_generation=_release_policy_account_generation(principal),
+            require_client_capture=principal.get("kind") != "system",
+        )
+        RELEASE_POLICY_COMMAND_GATE.revalidate_effect(captured)
+        return None, {
+            "feature": feature,
+            "decision": "allow",
+            "decisionId": captured.decision_id,
+            "reason": captured.server_reason,
+            "policyRevision": str(captured.policy_revision),
+        }
+    except ReleasePolicyFeatureAccessDenied as error:
+        logger.warning(
+            "release_policy_command_denied mode=%s feature=%s reason=%s revision=%s",
+            RELEASE_POLICY_COMMAND_MODE,
+            error.feature,
+            error.reason,
+            error.policy_revision,
+        )
+        if RELEASE_POLICY_COMMAND_MODE == "enforce":
+            return _release_policy_denied_response(error), {}
+        return None, {
+            "feature": error.feature,
+            "decision": "observeDeny",
+            "reason": error.reason,
+            "policyRevision": str(error.policy_revision),
+        }
 
 
 NO_STORE_PATH_PREFIXES = (
@@ -351,6 +513,7 @@ async def require_backend_api_token(request: Request, call_next):
         "decision": "allowSystem" if principal["kind"] == "system" else "observeAnonymous",
         "reason": "systemPrincipal" if principal["kind"] == "system" else "noCredential",
     }
+    payload_context: Dict[str, Any] = {}
     if principal["kind"] == "user":
         claims, inspection_decision, payload_context = await _ownership_claim_user_ids(request)
         principal_user_id = str(principal.get("userId") or "")
@@ -403,7 +566,24 @@ async def require_backend_api_token(request: Request, call_next):
                 authorization_headers=authorization_headers,
             )
 
+    if principal["kind"] != "user":
+        payload_context = await _request_json_payload(request)
+
+    release_policy_response, release_policy_diagnostic = _evaluate_release_policy_command(
+        request,
+        payload_context,
+        principal,
+    )
+    if release_policy_response is not None:
+        return _set_auth_diagnostic_headers(
+            release_policy_response,
+            principal_kind=str(principal["kind"]),
+            ownership_decision=ownership_decision,
+            authorization_headers=authorization_headers,
+        )
+
     response = await call_next(request)
+    response = _set_release_policy_diagnostic_headers(response, release_policy_diagnostic)
     return _set_auth_diagnostic_headers(
         response,
         principal_kind=str(principal["kind"]),
@@ -444,7 +624,7 @@ def release_policy(
     feature: Optional[str] = Query(default=None, min_length=1, max_length=100),
 ) -> ReleasePolicySnapshot:
     try:
-        return ReleasePolicyService().build_snapshot(
+        return RELEASE_POLICY_SERVICE.build_snapshot(
             audience=audience,  # type: ignore[arg-type]
             cohort=cohort,
             client_build=clientBuild,

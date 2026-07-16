@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterable, Literal, Optional, Set
+from typing import Any, Iterable, Literal, Mapping, Optional, Set
 
 from pydantic import BaseModel, ConfigDict
 
@@ -15,6 +16,31 @@ class ReleasePolicyVersionDowngrade(RuntimeError):
         super().__init__("client knows a newer release policy revision")
         self.known_revision = known_revision
         self.server_revision = server_revision
+
+
+class ReleasePolicyFeatureAccessDenied(RuntimeError):
+    def __init__(self, *, feature: str, reason: str, policy_revision: int):
+        super().__init__(f"release policy denied {feature}: {reason}")
+        self.feature = feature
+        self.reason = reason
+        self.policy_revision = policy_revision
+
+
+@dataclass(frozen=True)
+class ReleasePolicyCommandCapture:
+    decision_id: str
+    feature: str
+    policy_version: str
+    policy_revision: int
+    emergency_revision: int
+    account_generation: str
+    audience: ReleaseAudience
+    cohort: str
+    client_build: int
+    expires_at: datetime
+    server_reason: str
+    client_policy_revision: int
+    client_allowed: bool
 
 
 class ReleasePolicyFeatureDecision(BaseModel):
@@ -103,12 +129,14 @@ class ReleasePolicyService:
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         emergency_revision: int = 0,
         emergency_disabled_features: Optional[Iterable[str]] = None,
+        shadow_mode: bool = True,
     ) -> None:
         self.policy_revision = max(1, policy_revision)
         self.min_client_build = max(1, min_client_build)
         self.ttl_seconds = max(60, ttl_seconds)
         self.emergency_revision = max(0, emergency_revision)
         self.emergency_disabled_features: Set[str] = set(emergency_disabled_features or ())
+        self.shadow_mode = shadow_mode
 
     def public_descriptor(self) -> dict[str, object]:
         return {
@@ -120,7 +148,8 @@ class ReleasePolicyService:
             "minClient": self.min_client_build,
             "emergencyRevision": self.emergency_revision,
             "source": "server",
-            "shadowMode": True,
+            "shadowMode": self.shadow_mode,
+            "commandMode": "observe" if self.shadow_mode else "enforce",
         }
 
     def build_snapshot(
@@ -169,8 +198,12 @@ class ReleasePolicyService:
             audience=audience,
             cohort=normalized_cohort,
             source="server",
-            shadowMode=True,
-            snapshotDecision="clientBelowMinimum" if client_below_minimum else "shadowAllowlist",
+            shadowMode=self.shadow_mode,
+            snapshotDecision=(
+                "clientBelowMinimum"
+                if client_below_minimum
+                else ("shadowAllowlist" if self.shadow_mode else "enforcedAllowlist")
+            ),
             features=decisions,
         )
 
@@ -217,4 +250,204 @@ class ReleasePolicyService:
             cohort=cohort,
             requiredGates=required_gates,
             reason=reason,
+        )
+
+
+class ReleasePolicyCommandGate:
+    """Captures client policy metadata but always re-evaluates server authority."""
+
+    _PREFIX_FEATURES: tuple[tuple[str, str], ...] = (
+        ("/digital-human/", "digitalHumanLivePanel"),
+        ("/voice/", "voiceCloneShell"),
+        ("/tts", "voiceCloneShell"),
+        ("/family/", "familyManagement"),
+        ("/care/", "careDashboard"),
+        ("/mailbox/letters", "timeLetters"),
+        ("/archive/time-letters/", "timeLetters"),
+        ("/archive/image-analysis", "archiveLocalAnalysis"),
+        ("/archive/photos", "archiveRemoteFetch"),
+        ("/profile", "profileSettings"),
+        ("/context/build", "echoTextInput"),
+        ("/echo/delayed-replies", "echoTextInput"),
+        ("/auth/delete", "accountDeletion"),
+        ("/auth/restore", "accountDeletion"),
+        ("/auth/purge-expired-deletions", "accountDeletion"),
+        ("/auth/password", "accountPasswordChange"),
+    )
+
+    def __init__(self, policy_service: ReleasePolicyService):
+        self.policy_service = policy_service
+
+    def capture(
+        self,
+        *,
+        feature: str,
+        audience: ReleaseAudience,
+        cohort: str,
+        client_build: int,
+        client_policy_version: Optional[str],
+        client_policy_revision: Optional[int],
+        client_account_generation: Optional[str],
+        client_allowed: Optional[bool],
+        client_decision_id: Optional[str] = None,
+        client_feature: Optional[str] = None,
+        expected_account_generation: Optional[str] = None,
+        require_client_capture: bool = True,
+        now: Optional[datetime] = None,
+    ) -> ReleasePolicyCommandCapture:
+        snapshot = self.policy_service.build_snapshot(
+            audience=audience,
+            cohort=cohort,
+            client_build=client_build,
+            requested_feature=feature,
+            now=now,
+        )
+        decision = snapshot.features[0]
+        if not decision.enabled:
+            self._deny(decision.feature, decision.reason, snapshot.policyRevision)
+
+        normalized_version = (client_policy_version or "").strip()
+        normalized_generation = (client_account_generation or "").strip()
+        normalized_decision_id = (client_decision_id or "").strip()
+        normalized_client_feature = (client_feature or "").strip()
+        if normalized_client_feature and normalized_client_feature != feature:
+            self._deny(feature, "featureMetadataMismatch", snapshot.policyRevision)
+        if require_client_capture:
+            if (
+                not normalized_version
+                or not normalized_decision_id
+                or client_policy_revision is None
+                or not normalized_generation
+                or client_allowed is not True
+            ):
+                self._deny(feature, "missingCapturedPolicy", snapshot.policyRevision)
+            if normalized_version != snapshot.policyVersion:
+                self._deny(feature, "policyVersionMismatch", snapshot.policyRevision)
+            if client_policy_revision > snapshot.policyRevision:
+                self._deny(feature, "policyRevisionAheadOfServer", snapshot.policyRevision)
+            normalized_expected_generation = (expected_account_generation or "").strip()
+            if (
+                normalized_expected_generation
+                and normalized_generation != normalized_expected_generation
+            ):
+                self._deny(feature, "accountGenerationMismatch", snapshot.policyRevision)
+        else:
+            normalized_decision_id = (
+                f"server:{snapshot.policyVersion}:{snapshot.policyRevision}:{feature}"
+            )
+            normalized_version = snapshot.policyVersion
+            normalized_generation = (expected_account_generation or "system").strip() or "system"
+            client_policy_revision = snapshot.policyRevision
+
+        return ReleasePolicyCommandCapture(
+            decision_id=normalized_decision_id,
+            feature=feature,
+            policy_version=snapshot.policyVersion,
+            policy_revision=snapshot.policyRevision,
+            emergency_revision=snapshot.emergencyRevision,
+            account_generation=normalized_generation,
+            audience=audience,
+            cohort=snapshot.cohort,
+            client_build=max(1, client_build),
+            expires_at=snapshot.expiresAt,
+            server_reason=decision.reason,
+            client_policy_revision=client_policy_revision,
+            client_allowed=True,
+        )
+
+    def revalidate_effect(
+        self,
+        captured: ReleasePolicyCommandCapture,
+        *,
+        policy_service: Optional[ReleasePolicyService] = None,
+        now: Optional[datetime] = None,
+    ) -> ReleasePolicyCommandCapture:
+        current_service = policy_service or self.policy_service
+        effective_now = now or datetime.now(timezone.utc)
+        if captured.expires_at <= effective_now:
+            self._deny(
+                captured.feature,
+                "capturedPolicyExpiredBeforeEffect",
+                current_service.policy_revision,
+            )
+        snapshot = current_service.build_snapshot(
+            audience=captured.audience,
+            cohort=captured.cohort,
+            client_build=captured.client_build,
+            requested_feature=captured.feature,
+            now=effective_now,
+        )
+        decision = snapshot.features[0]
+        if snapshot.is_expired(effective_now):
+            self._deny(captured.feature, "policyExpiredBeforeEffect", snapshot.policyRevision)
+        if snapshot.policyVersion != captured.policy_version:
+            self._deny(captured.feature, "policyVersionChanged", snapshot.policyRevision)
+        if not decision.enabled:
+            self._deny(captured.feature, decision.reason, snapshot.policyRevision)
+        return captured
+
+    def feature_for_request(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Mapping[str, Any]],
+    ) -> Optional[str]:
+        normalized_path = (path or "").split("?", 1)[0]
+        for prefix, feature in self._PREFIX_FEATURES:
+            if normalized_path == prefix:
+                return feature
+            if prefix.endswith("/") and normalized_path.startswith(prefix):
+                return feature
+            if not prefix.endswith("/") and normalized_path.startswith(f"{prefix}/"):
+                return feature
+
+        body = payload or {}
+        if normalized_path == "/archive/media/upload-intent":
+            return self._archive_media_feature(body)
+        if normalized_path == "/archive/items" and method.upper() == "POST":
+            return self._archive_item_feature(body)
+        if method.upper() == "GET" and normalized_path.startswith("/archive/items/"):
+            return "archiveRemoteFetch"
+        return None
+
+    @staticmethod
+    def _archive_media_feature(payload: Mapping[str, Any]) -> str:
+        kind = str(
+            payload.get("mediaType")
+            or payload.get("kind")
+            or payload.get("assetKind")
+            or ""
+        ).strip().lower()
+        if kind in {"audio", "voice", "recording"}:
+            return "archiveAudioUpload"
+        if kind in {"video", "movie"}:
+            return "archiveVideoUpload"
+        return "archiveRemoteFetch"
+
+    @staticmethod
+    def _archive_item_feature(payload: Mapping[str, Any]) -> Optional[str]:
+        metadata = payload.get("metadata")
+        nested = metadata if isinstance(metadata, Mapping) else {}
+        kind = str(
+            payload.get("kind")
+            or payload.get("type")
+            or payload.get("assetKind")
+            or nested.get("kind")
+            or nested.get("assetKind")
+            or ""
+        ).strip().lower()
+        if kind in {"timeletter", "time_letter", "letter"}:
+            return "timeLetters"
+        if kind in {"audio", "voice", "recording"}:
+            return "archiveAudioUpload"
+        if kind in {"video", "movie"}:
+            return "archiveVideoUpload"
+        return None
+
+    @staticmethod
+    def _deny(feature: str, reason: str, policy_revision: int) -> None:
+        raise ReleasePolicyFeatureAccessDenied(
+            feature=feature,
+            reason=reason,
+            policy_revision=policy_revision,
         )

@@ -23,7 +23,9 @@ class RuntimeConfigService:
         digital_human_access = DigitalHumanAccessPolicy().blocked_mobile_contract()
         route_ownership_audit = RouteOwnershipRegistry().audit_summary()
         realtime_voice = TokenService(self.settings).realtime_config(user_id="runtime-capability")
-        release_policy = ReleasePolicyService()
+        release_policy = ReleasePolicyService(
+            shadow_mode=self.settings.release_policy_command_mode != "enforce"
+        )
         return {
             "environment": self.settings.environment,
             "baseURL": self.settings.public_base_url,

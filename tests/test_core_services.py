@@ -253,6 +253,9 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertFalse(archive["realProviderReady"])
         self.assertEqual(archive["providerSwitchContractVersion"], 1)
         self.assertEqual(archive["clientUploadAction"], "metadataOnly")
+        release_policy = config["releasePolicy"]
+        self.assertTrue(release_policy["shadowMode"])
+        self.assertEqual(release_policy["commandMode"], "observe")
 
     def test_runtime_config_separates_voice_clone_training_and_synthesis_capabilities(self):
         settings = Settings(
