@@ -122,7 +122,9 @@ RELEASE_POLICY_SERVICE = ReleasePolicyService(
     shadow_mode=RELEASE_POLICY_COMMAND_MODE != "enforce",
 )
 RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(RELEASE_POLICY_SERVICE)
-RELEASE_POLICY_DECISION_RECORDER = ReleasePolicyDecisionRecorder()
+RELEASE_POLICY_DECISION_RECORDER = ReleasePolicyDecisionRecorder(
+    environment=settings.environment,
+)
 ARCHIVE_MEDIA_UPLOAD_PROVIDER = "mockObjectStorage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_DISPLAY_NAME = "Mock Object Storage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_MODE = "mock"

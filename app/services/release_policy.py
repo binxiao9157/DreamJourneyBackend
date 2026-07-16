@@ -8,6 +8,8 @@ from typing import Any, Deque, Iterable, Literal, Mapping, Optional, Set
 
 from pydantic import BaseModel, ConfigDict
 
+from app.observability.events import map_release_policy_operation_event
+
 
 ReleaseAudience = Literal["owner", "family", "visitor", "qa"]
 Gate = Literal["G0", "G1", "G2", "G3", "G4"]
@@ -71,8 +73,9 @@ class ReleasePolicyDecisionRecorder:
 
     RUNTIME_CONTRACT_VERSION = 2
 
-    def __init__(self, *, max_events: int = 500) -> None:
+    def __init__(self, *, max_events: int = 500, environment: str = "runtime") -> None:
         self._events: Deque[ReleasePolicyDecisionEvent] = deque(maxlen=max(1, max_events))
+        self._environment = environment.strip() or "runtime"
         self._lock = Lock()
 
     def record(
@@ -128,8 +131,22 @@ class ReleasePolicyDecisionRecorder:
             events = list(self._events)
         decisions = Counter(item.decision for item in events)
         features = Counter(item.feature for item in events)
+        operation_events = [
+            map_release_policy_operation_event(
+                feature=item.feature,
+                policy_version=item.policyVersion,
+                client_build=item.clientBuild,
+                decision=item.decision,
+                reason=item.reason,
+                route=item.route,
+                occurred_at=item.occurredAt,
+                environment=self._environment,
+            ).model_dump(mode="json")
+            for item in events
+        ]
         return {
             "schemaVersion": 1,
+            "eventEnvelopeSchemaVersion": 1,
             "runtimeContractVersion": self.RUNTIME_CONTRACT_VERSION,
             "eventCount": len(events),
             "legacyRuntimeAliasHitCount": decisions.get("legacyRuntimeAliasObserved", 0),
@@ -139,6 +156,7 @@ class ReleasePolicyDecisionRecorder:
             "windowStartedAt": events[0].occurredAt if events else None,
             "windowEndedAt": events[-1].occurredAt if events else None,
             "events": [item.model_dump(mode="json") for item in events],
+            "operationEvents": operation_events,
         }
 
 

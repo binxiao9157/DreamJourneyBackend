@@ -466,7 +466,7 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
 class ReleasePolicyDecisionRecorderTests(unittest.TestCase):
     def test_summary_contains_only_allowlisted_fields_and_tracks_legacy_contract_hits(self):
         now = datetime(2026, 7, 16, 2, 0, tzinfo=timezone.utc)
-        recorder = ReleasePolicyDecisionRecorder(max_events=8)
+        recorder = ReleasePolicyDecisionRecorder(max_events=8, environment="test")
         recorder.record(
             feature="familyManagement",
             policy_version="release-policy-v2",
@@ -486,6 +486,10 @@ class ReleasePolicyDecisionRecorderTests(unittest.TestCase):
         self.assertEqual(summary["eventCount"], 2)
         self.assertEqual(summary["legacyRuntimeAliasHitCount"], 1)
         self.assertEqual(summary["decisionCounts"]["deny"], 1)
+        self.assertEqual(summary["eventEnvelopeSchemaVersion"], 1)
+        self.assertEqual(len(summary["operationEvents"]), 2)
+        self.assertEqual(summary["operationEvents"][0]["type"], "operation")
+        self.assertEqual(summary["operationEvents"][0]["env"], "test")
         serialized = str(summary)
         self.assertNotIn("userId", serialized)
         self.assertNotIn("phone", serialized)

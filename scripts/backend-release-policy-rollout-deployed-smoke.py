@@ -140,6 +140,24 @@ def main():
         observations.get("typedRuntimeContractHitCount", 0) >= 1,
         "typed runtime contract hit must be observed",
     )
+    require(
+        observations.get("eventEnvelopeSchemaVersion") == 1,
+        "operation evidence envelope schema must be available",
+    )
+    operation_events = observations.get("operationEvents") or []
+    require(operation_events, "operation evidence envelope must contain rollout events")
+    require(
+        all(event.get("type") == "operation" for event in operation_events),
+        "rollout evidence must map to operation events",
+    )
+    require(
+        all(event.get("schemaVersion") == 1 for event in operation_events),
+        "rollout operation events must use schema version 1",
+    )
+    require(
+        all(event.get("principalHash") is None for event in operation_events),
+        "rollout operation events must not bind a principal",
+    )
     serialized = json.dumps(observations, ensure_ascii=False).lower()
     for forbidden in ("userid", "phone", "token", "authorization", "requestbody"):
         require(forbidden not in serialized, f"observation summary leaked {forbidden}")
@@ -160,6 +178,7 @@ def main():
             "legacyRuntimeAliasHitCount",
             0,
         ),
+        "operationEventCount": len(operation_events),
     }
     if OUTPUT_PATH:
         with open(OUTPUT_PATH, "w", encoding="utf-8") as handle:
