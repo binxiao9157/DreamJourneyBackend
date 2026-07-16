@@ -59,6 +59,18 @@
 - `RELEASE_POLICY_COMMAND_MODE=observe` 会为受控 command 重新计算服务端发布策略并输出诊断响应头，但暂不拦截旧客户端；这是默认迁移模式。
 - `RELEASE_POLICY_COMMAND_MODE=enforce` 会在受控 command 缺少有效 captured decision、账号代际不匹配或服务端策略拒绝时返回 `403 release_policy_denied`。只能在 observe mismatch 与旧客户端覆盖完成后按 cohort 切换。
 
+## Runtime capability 五轴合同
+
+`GET /config/runtime` 的 `capabilitySnapshots` 为扩展能力提供独立五轴：
+
+- `implemented`：代码/合同已实现；
+- `enabled`：当前环境配置允许尝试；
+- `providerReady`：真实 Provider effect 前置条件已满足；
+- `releaseVisible`：服务端发布策略允许当前 cohort 看到；
+- `externalVerified`：G3/G4 外部证据有效且未过期。
+
+这五个字段不能互相推导。Provider 已配置不代表功能可以公开，mock/text-only Provider 不能标记为 ready，缺失或过期外部证据不能由代码自行签署。旧 runtime bool 继续保留给旧客户端，iOS 新客户端在五轴合同缺失时按 unknown/deny 处理。
+
 ## 本地启动
 
 ```bash

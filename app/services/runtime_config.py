@@ -8,6 +8,10 @@ from app.services.release_policy import ReleasePolicyService
 from app.services.tokens import TokenService
 from app.services.tts import VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice_clone_speaker_ids
+from app.services.runtime_capabilities import (
+    RuntimeCapabilityComposer,
+    RuntimeCapabilityInput,
+)
 
 
 class RuntimeConfigService:
@@ -26,9 +30,18 @@ class RuntimeConfigService:
         release_policy = ReleasePolicyService(
             shadow_mode=self.settings.release_policy_command_mode != "enforce"
         )
+        capability_snapshots = self._capability_snapshots(
+            archive_image_analysis=archive_image_analysis,
+            voice_clone_provider=voice_clone_provider,
+            voice_clone_tts_provider=voice_clone_tts_provider,
+            digital_human_access=digital_human_access,
+            release_policy=release_policy,
+        )
         return {
             "environment": self.settings.environment,
             "baseURL": self.settings.public_base_url,
+            "capabilitySnapshotSchemaVersion": RuntimeCapabilityComposer.SCHEMA_VERSION,
+            "capabilitySnapshots": capability_snapshots,
             "capabilities": {
                 "deepseekProxy": bool(self.settings.deepseek_api_key),
                 "archiveImageAnalysis": archive_image_analysis.enabled,
@@ -226,3 +239,149 @@ class RuntimeConfigService:
         if self.settings.tencent_digital_human_virtualman_project_id:
             return "project"
         return "missing"
+
+    def _capability_snapshots(
+        self,
+        *,
+        archive_image_analysis: Any,
+        voice_clone_provider: Any,
+        voice_clone_tts_provider: Any,
+        digital_human_access: Dict[str, Any],
+        release_policy: ReleasePolicyService,
+    ) -> Dict[str, Dict[str, Any]]:
+        composer = RuntimeCapabilityComposer()
+        release_decisions = {
+            feature: release_policy.build_snapshot(
+                audience="owner",
+                cohort="closedPilotAdultSelf",
+                client_build=release_policy.min_client_build,
+                requested_feature=feature,
+            ).features[0]
+            for feature in (
+                "archiveLocalAnalysis",
+                "archiveAudioUpload",
+                "archiveVideoUpload",
+                "timeLetters",
+                "familyManagement",
+                "familySpace",
+                "voiceCloneShell",
+                "digitalHumanLivePanel",
+            )
+        }
+
+        image_enabled = archive_image_analysis.enabled
+        image_provider_ready = image_enabled and archive_image_analysis.supports_vision
+        voice_enabled = voice_clone_provider.is_configured
+        voice_provider_ready = voice_enabled and voice_clone_tts_provider.is_configured
+        digital_human_enabled = bool(digital_human_access.get("enabled", False))
+        digital_human_provider_ready = bool(digital_human_access.get("providerReady", False))
+
+        inputs = (
+            RuntimeCapabilityInput(
+                capability="archiveImageAnalysis",
+                implemented=True,
+                enabled=image_enabled,
+                provider_ready=image_provider_ready,
+                release_visible=release_decisions["archiveLocalAnalysis"].releaseVisible,
+                external_verified=False,
+                provider=archive_image_analysis.provider_id,
+                fallback_mode=archive_image_analysis.fallback_mode,
+                reason=(
+                    "providerVisionUnsupported"
+                    if image_enabled and not archive_image_analysis.supports_vision
+                    else "runtimeDisabled"
+                    if not image_enabled
+                    else "externalEvidenceMissing"
+                ),
+            ),
+            RuntimeCapabilityInput(
+                capability="archiveAudioUpload",
+                implemented=True,
+                enabled=True,
+                provider_ready=False,
+                release_visible=release_decisions["archiveAudioUpload"].releaseVisible,
+                external_verified=False,
+                provider="mockObjectStorage",
+                fallback_mode="metadataOnly",
+                reason="mockProviderOnly",
+            ),
+            RuntimeCapabilityInput(
+                capability="archiveVideoUpload",
+                implemented=True,
+                enabled=True,
+                provider_ready=False,
+                release_visible=release_decisions["archiveVideoUpload"].releaseVisible,
+                external_verified=False,
+                provider="mockObjectStorage",
+                fallback_mode="metadataOnly",
+                reason="mockProviderOnly",
+            ),
+            RuntimeCapabilityInput(
+                capability="timeLetters",
+                implemented=True,
+                enabled=True,
+                provider_ready=True,
+                release_visible=release_decisions["timeLetters"].releaseVisible,
+                external_verified=False,
+                provider="internalScheduler",
+                fallback_mode="localDraftOnly",
+                reason="externalEvidenceMissing",
+            ),
+            RuntimeCapabilityInput(
+                capability="familyManagement",
+                implemented=True,
+                enabled=True,
+                provider_ready=True,
+                release_visible=release_decisions["familyManagement"].releaseVisible,
+                external_verified=False,
+                provider="internalFamilyService",
+                fallback_mode="hiddenContract",
+                reason="externalEvidenceMissing",
+            ),
+            RuntimeCapabilityInput(
+                capability="familySpace",
+                implemented=True,
+                enabled=True,
+                provider_ready=True,
+                release_visible=release_decisions["familySpace"].releaseVisible,
+                external_verified=False,
+                provider="internalPersonaService",
+                fallback_mode="ownerOnly",
+                reason="externalEvidenceMissing",
+            ),
+            RuntimeCapabilityInput(
+                capability="voiceCloneShell",
+                implemented=True,
+                enabled=voice_enabled,
+                provider_ready=voice_provider_ready,
+                release_visible=release_decisions["voiceCloneShell"].releaseVisible,
+                external_verified=False,
+                provider=voice_clone_provider.provider_mode,
+                fallback_mode=("providerProxy" if voice_provider_ready else "hiddenContract"),
+                reason=(
+                    "runtimeDisabled"
+                    if not voice_enabled
+                    else "synthesisProviderUnavailable"
+                    if not voice_provider_ready
+                    else "externalEvidenceMissing"
+                ),
+            ),
+            RuntimeCapabilityInput(
+                capability="digitalHumanLivePanel",
+                implemented=True,
+                enabled=digital_human_enabled,
+                provider_ready=digital_human_provider_ready,
+                release_visible=release_decisions["digitalHumanLivePanel"].releaseVisible,
+                external_verified=False,
+                provider=str(digital_human_access.get("provider") or "tencent"),
+                fallback_mode=str(digital_human_access.get("fallbackMode") or "text"),
+                reason=str(
+                    (digital_human_access.get("decisionReceipt") or {}).get("reasonCode")
+                    or "runtimeDisabled"
+                ),
+            ),
+        )
+        return {
+            item.capability: item.model_dump(mode="json")
+            for item in (composer.compose(value) for value in inputs)
+        }
