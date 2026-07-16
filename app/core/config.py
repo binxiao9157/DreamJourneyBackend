@@ -21,6 +21,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    value = _env(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = "DreamJourney Backend"
@@ -28,6 +38,9 @@ class Settings:
     public_base_url: Optional[str] = None
     store_backend: str = "postgres"
     database_url: str = "postgresql://dreamjourney:dreamjourney@postgres:5432/dreamjourney"
+    database_pool_min_size: int = 1
+    database_pool_max_size: int = 10
+    database_pool_timeout_seconds: float = 5.0
     redis_url: str = "redis://redis:6379/0"
     backend_api_token: Optional[str] = None
     auth_access_ttl_seconds: int = 900
@@ -86,6 +99,18 @@ class Settings:
             public_base_url=_env("PUBLIC_BASE_URL"),
             store_backend=_env("STORE_BACKEND", cls.store_backend) or cls.store_backend,
             database_url=_env("DATABASE_URL", cls.database_url) or cls.database_url,
+            database_pool_min_size=_env_int(
+                "DB_POOL_MIN_SIZE",
+                cls.database_pool_min_size,
+            ),
+            database_pool_max_size=_env_int(
+                "DB_POOL_MAX_SIZE",
+                cls.database_pool_max_size,
+            ),
+            database_pool_timeout_seconds=_env_float(
+                "DB_POOL_TIMEOUT_SECONDS",
+                cls.database_pool_timeout_seconds,
+            ),
             redis_url=_env("REDIS_URL", cls.redis_url) or cls.redis_url,
             backend_api_token=_env("BACKEND_API_TOKEN"),
             auth_access_ttl_seconds=_env_int(

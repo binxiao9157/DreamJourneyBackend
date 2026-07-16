@@ -74,7 +74,8 @@ from app.services.release_policy import (
     parse_release_policy_feature_set,
 )
 from app.services.context_packet import ContextPacketBuilder
-from app.services.store_factory import init_store, make_store
+from app.db.pool import ConnectionPoolExhausted
+from app.services.store_factory import close_store, init_store, make_store
 from app.services.tokens import TokenService
 from app.services.tts import TencentAudioDrivePCMAdapter, VolcTTSProxy, VoiceCloneTTSProviderFactory
 from app.services.time_letters import (
@@ -694,9 +695,50 @@ async def prevent_sensitive_response_caching(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def database_request_unit_of_work(request: Request, call_next):
+    unit_of_work_factory = getattr(store, "request_unit_of_work", None)
+    if request.url.path == "/health" or not callable(unit_of_work_factory):
+        return await call_next(request)
+
+    correlation_id = secrets.token_hex(16)
+    command_id = secrets.token_hex(16)
+    try:
+        with unit_of_work_factory(
+            correlation_id=correlation_id,
+            command_id=command_id,
+        ) as unit_of_work:
+            response = await call_next(request)
+            if int(getattr(response, "status_code", 500)) >= 400:
+                unit_of_work.mark_rollback("httpErrorResponse")
+    except ConnectionPoolExhausted:
+        logger.error("database_pool_exhausted correlation=%s", correlation_id)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "code": "database_pool_exhausted",
+                    "message": "database capacity is temporarily unavailable",
+                }
+            },
+            headers={
+                "Cache-Control": "no-store",
+                "Retry-After": "1",
+                "X-DreamJourney-Correlation-Id": correlation_id,
+            },
+        )
+    response.headers["X-DreamJourney-Correlation-Id"] = correlation_id
+    return response
+
+
 @app.on_event("startup")
 def startup() -> None:
     init_store(store)
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    close_store(store)
 
 
 @app.get("/health")
@@ -742,7 +784,11 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
     principal = getattr(request.state, "auth_principal", {})
     if principal.get("kind") != "system":
         raise HTTPException(status_code=403, detail="system principal required")
-    return RELEASE_POLICY_DECISION_RECORDER.summary()
+    summary = RELEASE_POLICY_DECISION_RECORDER.summary()
+    unit_of_work_metrics = getattr(store, "uow_metrics", None)
+    if callable(unit_of_work_metrics):
+        summary["databaseUnitOfWork"] = unit_of_work_metrics()
+    return summary
 
 
 @app.post("/digital-human/sessions")

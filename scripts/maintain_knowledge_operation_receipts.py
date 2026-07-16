@@ -10,7 +10,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import settings
 from app.services.postgres_store import PostgresStore
-from app.services.store_factory import make_store
+from app.services.store_factory import close_store, make_store, open_store
 
 
 def main() -> None:
@@ -51,13 +51,17 @@ def main() -> None:
     backend_store = make_store(settings)
     if not isinstance(backend_store, PostgresStore):
         raise RuntimeError("knowledge receipt maintenance requires STORE_BACKEND=postgres")
-    report = backend_store.maintain_knowledge_operation_receipts(
-        keep_days=args.keep_days,
-        batch_size=args.batch_size,
-        apply=args.apply,
-        lock_timeout_ms=args.lock_timeout_ms,
-        statement_timeout_ms=args.statement_timeout_ms,
-    )
+    open_store(backend_store)
+    try:
+        report = backend_store.maintain_knowledge_operation_receipts(
+            keep_days=args.keep_days,
+            batch_size=args.batch_size,
+            apply=args.apply,
+            lock_timeout_ms=args.lock_timeout_ms,
+            statement_timeout_ms=args.statement_timeout_ms,
+        )
+    finally:
+        close_store(backend_store)
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
 
 

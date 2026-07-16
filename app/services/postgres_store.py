@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
@@ -7,6 +9,8 @@ import uuid
 
 from psycopg.types.json import Jsonb
 
+from app.db.pool import ConnectionPoolExhausted, FactoryConnectionPool, PsycopgConnectionPool
+from app.db.uow import DatabaseUnitOfWork, UnitOfWorkMetrics
 from app.observability.events import (
     EvidenceEventConflict,
     canonicalize_evidence_event,
@@ -47,10 +51,75 @@ from app.services.archive_store import (
 
 
 class PostgresStore:
-    def __init__(self, dsn: str = None, connection_factory: Callable[[], Any] = None):
+    def __init__(
+        self,
+        dsn: str = None,
+        connection_factory: Callable[[], Any] = None,
+        pool: Any = None,
+        pool_min_size: int = 1,
+        pool_max_size: int = 10,
+        pool_timeout_seconds: float = 5.0,
+    ):
         self.dsn = dsn
         self._connection_factory = connection_factory
-        self._connection = None
+        if pool is not None:
+            self._pool = pool
+        elif connection_factory is not None:
+            self._pool = FactoryConnectionPool(connection_factory)
+        else:
+            self._pool = PsycopgConnectionPool(
+                dsn,
+                min_size=pool_min_size,
+                max_size=pool_max_size,
+                timeout_seconds=pool_timeout_seconds,
+            )
+        self._pool_timeout_seconds = max(0.1, pool_timeout_seconds)
+        self._uow_metrics = UnitOfWorkMetrics()
+        self._current_uow: ContextVar[Optional[DatabaseUnitOfWork]] = ContextVar(
+            f"dreamjourney_postgres_uow_{id(self)}",
+            default=None,
+        )
+
+    def open_pool(self, *, wait: bool = True) -> None:
+        self._pool.open(wait=wait)
+
+    def close_pool(self) -> None:
+        self._pool.close()
+
+    @contextmanager
+    def request_unit_of_work(
+        self,
+        *,
+        correlation_id: str,
+        command_id: str,
+    ):
+        existing = self._current_uow.get()
+        if existing is not None:
+            try:
+                yield existing
+            except Exception:
+                existing.mark_rollback("nestedWorkUnitFailure")
+                raise
+            return
+        candidate = DatabaseUnitOfWork(
+            self._pool,
+            self._uow_metrics,
+            correlation_id=correlation_id,
+            command_id=command_id,
+            checkout_timeout_seconds=self._pool_timeout_seconds,
+        )
+        with candidate as active:
+            token = self._current_uow.set(active)
+            try:
+                yield active
+            finally:
+                self._current_uow.reset(token)
+
+    def uow_metrics(self) -> Dict[str, Any]:
+        return {
+            **self._uow_metrics.snapshot(),
+            "pool": self._pool.stats(),
+        }
 
     def init_schema(self) -> None:
         statements = [
@@ -346,11 +415,17 @@ class PostgresStore:
                 ON care_snapshots(user_id, viewer_family_member_id, created_at DESC)
             """,
         ]
-        connection = self._connect()
-        with connection.cursor() as cursor:
-            for statement in statements:
-                cursor.execute(statement)
-        connection.commit()
+        connection = self._open_connection()
+        try:
+            with connection.cursor() as cursor:
+                for statement in statements:
+                    cursor.execute(statement)
+            self._commit(connection)
+        except Exception:
+            self._rollback(connection)
+            raise
+        finally:
+            self._close(connection)
 
     def append_evidence_event(
         self,
@@ -495,7 +570,7 @@ class PostgresStore:
 
     def expire_evidence_events(self, cutoff_iso: str) -> Dict[str, Any]:
         cutoff = normalize_evidence_timestamp(cutoff_iso)
-        connection = self._connect()
+        connection = self._open_connection()
         try:
             with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
                 cursor.execute(
@@ -516,10 +591,12 @@ class PostgresStore:
                     (cutoff,),
                 )
                 expired_rows = cursor.fetchall()
-            connection.commit()
+            self._commit(connection)
         except Exception:
             self._rollback(connection)
             raise
+        finally:
+            self._close(connection)
         expired_ids = sorted(str(row.get("event_id") or "") for row in expired_rows)
         return {
             "schemaVersion": 1,
@@ -736,6 +813,12 @@ class PostgresStore:
         return None if row is None else deepcopy(row["payload"])
 
     def purge_expired_deleted_users(self, cutoff_iso: str) -> List[Dict[str, Any]]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"account-purge-{uuid.uuid4().hex}",
+                command_id="purgeExpiredDeletedUsers",
+            ):
+                return self.purge_expired_deleted_users(cutoff_iso)
         cutoff = self._parse_iso_datetime(cutoff_iso)
         rows = self._fetchall(
             """
@@ -759,14 +842,12 @@ class PostgresStore:
                 (user_id,),
             )
             if locked_user is None:
-                self._rollback(self._connect())
                 continue
             user = deepcopy(locked_user["payload"])
             deadline = self._parse_iso_datetime(
                 str(user.get("restoreDeadline") or user.get("purgeAfter") or "")
             )
             if user.get("deletionState") != "softDeleted" or deadline > cutoff:
-                self._rollback(self._connect())
                 continue
             self._fetchall(
                 """
@@ -825,7 +906,6 @@ class PostgresStore:
             )
             if updated is not None:
                 purged.append(deepcopy(updated["payload"]))
-        self._rollback(self._connect())
         return purged
 
     def save_profile(self, user_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -945,7 +1025,7 @@ class PostgresStore:
                     payload_hash=payload_hash,
                 )
                 if receipt_result is not None:
-                    connection.commit()
+                    self._commit(connection)
                     return receipt_result
                 cursor.execute(
                     """
@@ -958,7 +1038,7 @@ class PostgresStore:
                 existing = cursor.fetchone()
                 if existing is not None:
                     stored_mutation = existing.get("mutation")
-                    connection.commit()
+                    self._commit(connection)
                     return {
                         "userId": user_id,
                         "graph": deepcopy(existing["graph"]),
@@ -1007,7 +1087,7 @@ class PostgresStore:
                                 result=result,
                                 governance_summary=receipt_governance_summary,
                             )
-                        connection.commit()
+                        self._commit(connection)
                         return result
                     raise KnowledgeRevisionConflict(
                         current_revision=current_revision,
@@ -1073,7 +1153,7 @@ class PostgresStore:
                     result=result,
                     governance_summary=receipt_governance_summary,
                 )
-            connection.commit()
+            self._commit(connection)
             return result
         except Exception:
             self._rollback(connection)
@@ -1271,7 +1351,7 @@ class PostgresStore:
                     through_revision=through_revision,
                     limit=limit,
                 )
-            connection.commit()
+            self._commit(connection)
             return {
                 "currentRevision": int((snapshot or {}).get("revision") or 0),
                 "minimumSinceRevision": int(
@@ -1386,7 +1466,7 @@ class PostgresStore:
                 )
                 users = cursor.fetchall()
                 report["scannedUsers"] = len(users)
-            coordinator.commit()
+            self._commit(coordinator)
 
             for user in users:
                 user_id = str(user["user_id"])
@@ -1413,7 +1493,7 @@ class PostgresStore:
                             apply=apply,
                         )
                     if apply:
-                        connection.commit()
+                        self._commit(connection)
                     else:
                         self._rollback(connection)
                 except Exception as exc:
@@ -1454,7 +1534,7 @@ class PostgresStore:
                             ("knowledge-change-feed-compaction:v1",),
                         )
                         cursor.fetchone()
-                    coordinator.commit()
+                    self._commit(coordinator)
                 except Exception:
                     self._rollback(coordinator)
             self._close(coordinator)
@@ -1547,7 +1627,7 @@ class PostgresStore:
                             report=user_report,
                         )
                     if apply:
-                        connection.commit()
+                        self._commit(connection)
                     else:
                         self._rollback(connection)
                 except Exception as exc:
@@ -1610,7 +1690,7 @@ class PostgresStore:
                         (created_at_cutoff, last_user_id, limit),
                     )
                 users = cursor.fetchall()
-            connection.commit()
+            self._commit(connection)
             return users
         except Exception:
             self._rollback(connection)
@@ -2304,7 +2384,7 @@ class PostgresStore:
                             """,
                             params,
                         )
-            connection.commit()
+            self._commit(connection)
             return report
         except Exception:
             self._rollback(connection)
@@ -2325,7 +2405,7 @@ class PostgresStore:
         device_id = str(item.get("deviceId") or "")
         now = self._parse_iso_datetime(now_iso)
         bounded_capacity = max(1, max_concurrent_sessions)
-        connection = self._connect()
+        connection = self._open_connection()
         try:
             with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
                 lock_keys = sorted(
@@ -2371,7 +2451,7 @@ class PostgresStore:
                     updated["expiresAt"] = item.get("expiresAt")
                     updated["updatedAt"] = now_iso
                     self._update_digital_human_session_cursor(cursor, updated)
-                    connection.commit()
+                    self._commit(connection)
                     return {
                         "outcome": "reused",
                         "lease": updated,
@@ -2410,7 +2490,7 @@ class PostgresStore:
                         )
                         for lease in resource_active
                     )
-                    connection.commit()
+                    self._commit(connection)
                     return {
                         "outcome": "conflict",
                         "lease": None,
@@ -2448,7 +2528,7 @@ class PostgresStore:
                     ),
                 )
                 row = cursor.fetchone()
-            connection.commit()
+            self._commit(connection)
             saved = deepcopy(row["payload"] if row is not None else item)
             return {
                 "outcome": "created",
@@ -2459,9 +2539,11 @@ class PostgresStore:
         except Exception:
             self._rollback(connection)
             raise
+        finally:
+            self._close(connection)
 
     def drain_expired_digital_human_session_leases(self, *, now_iso: str) -> Dict[str, int]:
-        connection = self._connect()
+        connection = self._open_connection()
         try:
             with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
                 cursor.execute(
@@ -2483,7 +2565,7 @@ class PostgresStore:
                     "SELECT COUNT(*) AS count FROM digital_human_sessions WHERE status = 'active'"
                 )
                 active_row = cursor.fetchone()
-            connection.commit()
+            self._commit(connection)
             return {
                 "expiredLeaseCount": len(rows),
                 "activeLeaseCount": int((active_row or {}).get("count") or 0),
@@ -2491,6 +2573,8 @@ class PostgresStore:
         except Exception:
             self._rollback(connection)
             raise
+        finally:
+            self._close(connection)
 
     def heartbeat_digital_human_session_lease(
         self,
@@ -2501,7 +2585,7 @@ class PostgresStore:
         heartbeat_at_iso: str,
         expires_at_iso: str,
     ) -> Optional[Dict[str, Any]]:
-        connection = self._connect()
+        connection = self._open_connection()
         try:
             with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
                 cursor.execute(
@@ -2514,31 +2598,33 @@ class PostgresStore:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    connection.commit()
+                    self._commit(connection)
                     return None
                 lease = deepcopy(row["payload"])
                 if lease.get("userId") != user_id or lease.get("deviceId") != device_id:
-                    connection.commit()
+                    self._commit(connection)
                     return None
                 if lease.get("status") != "active":
-                    connection.commit()
+                    self._commit(connection)
                     return {"outcome": self._inactive_digital_human_outcome(lease), "lease": lease}
                 if self._parse_iso_datetime(str(lease.get("expiresAt") or "")) <= self._parse_iso_datetime(heartbeat_at_iso):
                     lease["status"] = "expired"
                     lease["expiredAt"] = heartbeat_at_iso
                     lease["updatedAt"] = heartbeat_at_iso
                     self._update_digital_human_session_cursor(cursor, lease)
-                    connection.commit()
+                    self._commit(connection)
                     return {"outcome": "expired", "lease": lease}
                 lease["heartbeatAt"] = heartbeat_at_iso
                 lease["expiresAt"] = expires_at_iso
                 lease["updatedAt"] = heartbeat_at_iso
                 self._update_digital_human_session_cursor(cursor, lease)
-            connection.commit()
+            self._commit(connection)
             return {"outcome": "active", "lease": deepcopy(lease)}
         except Exception:
             self._rollback(connection)
             raise
+        finally:
+            self._close(connection)
 
     def release_digital_human_session_lease(
         self,
@@ -2549,7 +2635,7 @@ class PostgresStore:
         released_at_iso: str,
         reason: str,
     ) -> Optional[Dict[str, Any]]:
-        connection = self._connect()
+        connection = self._open_connection()
         try:
             with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
                 cursor.execute(
@@ -2562,28 +2648,30 @@ class PostgresStore:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    connection.commit()
+                    self._commit(connection)
                     return None
                 lease = deepcopy(row["payload"])
                 if lease.get("userId") != user_id or lease.get("deviceId") != device_id:
-                    connection.commit()
+                    self._commit(connection)
                     return None
                 if lease.get("status") == "released":
-                    connection.commit()
+                    self._commit(connection)
                     return {"outcome": "alreadyReleased", "lease": lease}
                 if lease.get("status") == "expired":
-                    connection.commit()
+                    self._commit(connection)
                     return {"outcome": "alreadyExpired", "lease": lease}
                 lease["status"] = "released"
                 lease["releasedAt"] = released_at_iso
                 lease["releaseReason"] = reason
                 lease["updatedAt"] = released_at_iso
                 self._update_digital_human_session_cursor(cursor, lease)
-            connection.commit()
+            self._commit(connection)
             return {"outcome": "released", "lease": deepcopy(lease)}
         except Exception:
             self._rollback(connection)
             raise
+        finally:
+            self._close(connection)
 
     def get_digital_human_session_lease(self, session_id: str) -> Optional[Dict[str, Any]]:
         row = self._fetchone(
@@ -2674,7 +2762,7 @@ class PostgresStore:
                 )
                 if receipt_result is not None:
                     receipt_result["item"] = None
-                    connection.commit()
+                    self._commit(connection)
                     return receipt_result
                 cursor.execute(
                     """
@@ -2687,7 +2775,7 @@ class PostgresStore:
                 existing = cursor.fetchone()
                 if existing is not None:
                     stored_mutation = existing.get("mutation")
-                    connection.commit()
+                    self._commit(connection)
                     return {
                         "item": None,
                         "duplicate": True,
@@ -2796,7 +2884,7 @@ class PostgresStore:
                     result={**deepcopy(result), "item": None},
                     governance_summary=governance_summary,
                 )
-            connection.commit()
+            self._commit(connection)
             return result
         except Exception:
             self._rollback(connection)
@@ -3566,47 +3654,56 @@ class PostgresStore:
         return [deepcopy(row["payload"]) for row in rows]
 
     def _fetchone(self, sql: str, params: tuple = (), commit: bool = False) -> Optional[Dict[str, Any]]:
-        connection = self._connect()
+        active = self._current_uow.get()
+        if active is None:
+            with self.request_unit_of_work(
+                correlation_id=f"repo-{uuid.uuid4().hex}",
+                command_id="repositoryFetchOne",
+            ):
+                return self._fetchone(sql, params, commit=commit)
+        connection = active.connection
         try:
             with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
                 cursor.execute(sql, self._adapt_params(params))
                 row = cursor.fetchone()
-            if commit:
-                connection.commit()
             return row
         except Exception:
-            self._rollback(connection)
+            active.mark_rollback("statementFailure")
             raise
 
     def _fetchall(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
-        connection = self._connect()
+        active = self._current_uow.get()
+        if active is None:
+            with self.request_unit_of_work(
+                correlation_id=f"repo-{uuid.uuid4().hex}",
+                command_id="repositoryFetchAll",
+            ):
+                return self._fetchall(sql, params)
+        connection = active.connection
         try:
             with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
                 cursor.execute(sql, self._adapt_params(params))
                 rows = cursor.fetchall()
             return rows
         except Exception:
-            self._rollback(connection)
+            active.mark_rollback("statementFailure")
             raise
 
     @staticmethod
     def _adapt_params(params: tuple) -> tuple:
         return tuple(Jsonb(param) if isinstance(param, dict) else param for param in params)
 
-    def _connect(self):
-        if self._connection is not None:
-            return self._connection
-        self._connection = self._open_connection()
-        return self._connection
-
     def _open_connection(self):
-        if self._connection_factory is not None:
-            return self._connection_factory()
+        active = self._current_uow.get()
+        if active is not None:
+            return active.connection
         try:
-            import psycopg
-        except ImportError as exc:
-            raise RuntimeError("psycopg is not installed. Run `pip install -r requirements.txt`.") from exc
-        return psycopg.connect(self.dsn)
+            connection = self._pool.getconn(timeout=self._pool_timeout_seconds)
+        except ConnectionPoolExhausted:
+            self._uow_metrics.pool_exhausted()
+            raise
+        self._uow_metrics.checkout()
+        return connection
 
     @staticmethod
     def _dict_row_factory():
@@ -3616,17 +3713,34 @@ class PostgresStore:
         except ImportError:
             return None
 
-    @staticmethod
-    def _rollback(connection: Any) -> None:
+    def _commit(self, connection: Any) -> None:
+        active = self._current_uow.get()
+        if active is not None and active.connection is connection:
+            return
+        connection.commit()
+        self._uow_metrics.committed()
+
+    def _rollback(self, connection: Any) -> None:
+        active = self._current_uow.get()
+        if active is not None and active.connection is connection:
+            active.mark_rollback("repositoryRollback")
+            return
         rollback = getattr(connection, "rollback", None)
         if callable(rollback):
             rollback()
+            self._uow_metrics.rolled_back()
 
-    @staticmethod
-    def _close(connection: Any) -> None:
-        close = getattr(connection, "close", None)
-        if callable(close):
-            close()
+    def _close(self, connection: Any) -> None:
+        active = self._current_uow.get()
+        if active is not None and active.connection is connection:
+            return
+        try:
+            self._pool.putconn(connection)
+        except Exception:
+            self._uow_metrics.return_failed()
+            raise
+        finally:
+            self._uow_metrics.release()
 
     @staticmethod
     def _iso_value(value: Any) -> str:

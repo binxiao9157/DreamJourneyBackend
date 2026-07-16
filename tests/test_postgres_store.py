@@ -1957,7 +1957,7 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(first_v1["mutationSchemaVersion"], 1)
         self.assertEqual(first_v2["mutationSchemaVersion"], 2)
 
-    def test_kb_mutations_use_request_exclusive_connections_and_close_each_lease(self):
+    def test_kb_mutations_and_reads_do_not_keep_a_shared_connection(self):
         barrier = Barrier(2)
         connections = []
 
@@ -1968,9 +1968,10 @@ class PostgresStoreTests(unittest.TestCase):
 
         store = PostgresStore(connection_factory=connection_factory)
         self.assertIsNone(store.get_kb_snapshot("cache-warmup"))
-        cached_connection = connections[0]
         self.assertIsNone(store.get_kb_snapshot("cache-reuse"))
-        self.assertEqual(len(connections), 1)
+        read_connections = connections[:2]
+        self.assertEqual(len(read_connections), 2)
+        self.assertEqual([connection.closes for connection in read_connections], [1, 1])
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [
@@ -1985,12 +1986,11 @@ class PostgresStoreTests(unittest.TestCase):
             ]
             results = [future.result(timeout=3) for future in futures]
 
-        mutation_connections = connections[1:]
+        mutation_connections = connections[2:]
         self.assertEqual([result["revision"] for result in results], [1, 1])
         self.assertEqual(len(mutation_connections), 2)
         self.assertIsNot(mutation_connections[0], mutation_connections[1])
-        self.assertIs(store._connection, cached_connection)
-        self.assertEqual(cached_connection.closes, 0)
+        self.assertFalse(hasattr(store, "_connection"))
         self.assertEqual([connection.commits for connection in mutation_connections], [1, 1])
         self.assertEqual([connection.rollbacks for connection in mutation_connections], [0, 0])
         self.assertEqual([connection.closes for connection in mutation_connections], [1, 1])
@@ -2015,7 +2015,7 @@ class PostgresStoreTests(unittest.TestCase):
 
         self.assertEqual(connection.rollbacks, 1)
         self.assertEqual(connection.closes, 1)
-        self.assertIsNone(store._connection)
+        self.assertFalse(hasattr(store, "_connection"))
 
     def test_postgres_store_rejects_legacy_zero_base_without_losing_newer_snapshot(self):
         connection = FakeConnection()
@@ -2648,9 +2648,10 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(retired["status"], "retired")
 
     def test_account_purge_retires_voice_clone_slots_without_recycling_them(self):
+        postgres_connection = FakeConnection()
         stores = [
             InMemoryStore(),
-            PostgresStore(connection_factory=lambda: FakeConnection()),
+            PostgresStore(connection_factory=lambda: postgres_connection),
         ]
 
         for store in stores:

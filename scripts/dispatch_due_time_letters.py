@@ -11,7 +11,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import settings
-from app.services.store_factory import make_store
+from app.services.store_factory import close_store, make_store, open_store
 from app.services.time_letters import dispatch_due_time_letters_for_store
 
 
@@ -48,7 +48,11 @@ def main() -> None:
     limit = max(1, min(args.limit, 200))
 
     backend_store = make_store(settings)
-    result = dispatch_due_time_letters_for_store(backend_store, now_iso=args.now, limit=limit)
+    open_store(backend_store)
+    try:
+        result = dispatch_due_time_letters_for_store(backend_store, now_iso=args.now, limit=limit)
+    finally:
+        close_store(backend_store)
     payload = result if args.full else _summary(result)
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
