@@ -147,3 +147,15 @@ scripts/run-backend-readiness-postgres-smoke.sh
 BACKEND_BASE_URL=https://dreamjourney-api.liftora.cn \
   scripts/run-backend-readiness-deployed-smoke.sh
 ```
+
+## PostgreSQL backups
+
+Compose volume 不是备份。`scripts/db/backup_postgres.sh` 生成加密 custom-format artifact，并在成功后写 value-free manifest；`scripts/db/verify_backup_manifest.py` 校验 schema head、checksum、size 和有效期。systemd service/timer、失败 alert receipt、audit-only retention 和服务器安装步骤见 `docs/backend/2026-07-16-postgres-backup-operations.md`。
+
+本地不访问真实数据库的合同 smoke：
+
+```bash
+scripts/db/run-backup-postgres-smoke.sh
+```
+
+该 smoke 覆盖连续备份、加密读取、中断、磁盘不足、损坏 checksum、告警回执和“永不自动删除最后有效备份”。隔离 restore 与 RPO/RTO 不在本项宣称范围内。

@@ -34,6 +34,11 @@ test -f requirements.txt
 test -f scripts/migrate_db.py
 test -f scripts/backend-readiness-postgres-smoke.py
 test -f scripts/backend-readiness-deployed-smoke.py
+test -f scripts/db/backup_postgres.sh
+test -f scripts/db/audit_backup_retention.sh
+test -f scripts/db/verify_backup_manifest.py
+test -f scripts/db/verify_latest_backup.py
+test -f deploy/systemd/dreamjourney-db-backup.timer
 test -f db/migrations/0001_existing_schema_baseline.sql
 test -f db/migrations/0001_existing_schema_baseline.json
 grep -q "COPY db ./db" Dockerfile
@@ -86,6 +91,9 @@ STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" scripts/backend-knowledge-eviden
 
 echo "== Backend knowledge receipt maintenance smoke =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-knowledge-receipt-maintenance-smoke.sh
+
+echo "== PostgreSQL backup contract smoke =="
+PYTHON_BIN="$PYTHON_BIN" scripts/db/run-backup-postgres-smoke.sh
 
 echo "== Backend diff --check =="
 git diff --check

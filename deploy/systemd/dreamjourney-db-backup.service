@@ -1,0 +1,19 @@
+[Unit]
+Description=DreamJourney verified PostgreSQL backup
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+OnFailure=dreamjourney-db-backup-alert@%n.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/services/dreamjourney/DreamJourneyBackend
+EnvironmentFile=-/etc/dreamjourney/backup.env
+ExecStart=/opt/services/dreamjourney/DreamJourneyBackend/scripts/db/backup_postgres.sh
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077

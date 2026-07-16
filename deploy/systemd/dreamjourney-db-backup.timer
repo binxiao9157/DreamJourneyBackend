@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule DreamJourney verified PostgreSQL backups
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=dreamjourney-db-backup.service
+
+[Install]
+WantedBy=timers.target

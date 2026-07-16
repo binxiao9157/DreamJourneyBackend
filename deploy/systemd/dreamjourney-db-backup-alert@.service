@@ -1,0 +1,11 @@
+[Unit]
+Description=Record DreamJourney PostgreSQL backup failure for %i
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/services/dreamjourney/DreamJourneyBackend
+EnvironmentFile=-/etc/dreamjourney/backup.env
+ExecStart=/opt/services/dreamjourney/DreamJourneyBackend/scripts/db/backup_alert.sh %i
+UMask=0077

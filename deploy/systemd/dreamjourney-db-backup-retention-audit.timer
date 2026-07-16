@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule DreamJourney PostgreSQL backup retention audits
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+Persistent=true
+Unit=dreamjourney-db-backup-retention-audit.service
+
+[Install]
+WantedBy=timers.target

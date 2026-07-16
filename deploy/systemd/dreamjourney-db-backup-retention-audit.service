@@ -1,0 +1,12 @@
+[Unit]
+Description=Audit DreamJourney PostgreSQL backup retention without deleting artifacts
+OnFailure=dreamjourney-db-backup-alert@%n.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/services/dreamjourney/DreamJourneyBackend
+EnvironmentFile=-/etc/dreamjourney/backup.env
+ExecStart=/opt/services/dreamjourney/DreamJourneyBackend/scripts/db/audit_backup_retention.sh
+UMask=0077
