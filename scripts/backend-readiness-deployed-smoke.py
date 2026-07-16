@@ -31,7 +31,9 @@ def request_json(path, *, expected_status=200):
     with response:
         payload = json.loads(response.read().decode("utf-8"))
         require(response.status == expected_status, f"GET {path} returned {response.status}")
-        return payload, dict(response.headers.items())
+        return payload, {
+            str(key).lower(): value for key, value in response.headers.items()
+        }
 
 
 def main():
@@ -65,9 +67,9 @@ def main():
     serialized = json.dumps(ready, sort_keys=True).lower()
     for forbidden in ("postgresql://", "database_url", "dsn", "secret", "token", "checksum", "select ", "create "):
         require(forbidden not in serialized, f"readiness leaks {forbidden}")
-    require(ready_headers.get("Cache-Control") == "no-store", "readiness no-store")
-    require("X-DreamJourney-Correlation-Id" not in ready_headers, "readiness bypasses business UoW")
-    require(live_headers.get("Cache-Control") == "no-store", "liveness no-store")
+    require(ready_headers.get("cache-control") == "no-store", "readiness no-store")
+    require("x-dreamjourney-correlation-id" not in ready_headers, "readiness bypasses business UoW")
+    require(live_headers.get("cache-control") == "no-store", "liveness no-store")
     require(health.get("deprecated") is True, "legacy health is deprecated")
     require(health.get("readinessEndpoint") == "/ready", "legacy health points to readiness")
 
