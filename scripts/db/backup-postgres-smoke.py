@@ -140,6 +140,7 @@ else:
         retention_payload = json.loads(retention.stdout)
         require(retention_payload["action"] == "auditOnly", "retention must be audit only")
         require(retention_payload["automaticDeletion"] is False, "automatic deletion forbidden")
+        require(not (backup_root / ".backup.lock.d").exists(), "successful backup lock release")
 
         failure_env = dict(env)
         failure_env["BACKUP_MIN_FREE_BYTES"] = "1000000000000000"
@@ -151,7 +152,11 @@ else:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        require(failed.returncode != 0, "insufficient space must fail")
+        require(
+            failed.returncode != 0,
+            "insufficient space must fail: "
+            f"stdout={failed.stdout[-500:]} stderr={failed.stderr[-500:]}",
+        )
         failure_manifests = sorted((backup_root / "failures").glob("*.failure.json"))
         require(failure_manifests, "failure manifest")
         failure_payload = json.loads(failure_manifests[-1].read_text(encoding="utf-8"))
