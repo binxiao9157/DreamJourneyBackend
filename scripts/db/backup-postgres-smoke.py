@@ -17,6 +17,7 @@ VERIFY_LATEST_SCRIPT = ROOT_DIR / "scripts/db/verify_latest_backup.py"
 RETENTION_SCRIPT = ROOT_DIR / "scripts/db/audit_backup_retention.py"
 ALERT_SCRIPT = ROOT_DIR / "scripts/db/backup_alert.sh"
 DEPLOYED_SMOKE = ROOT_DIR / "scripts/db/backup-deployed-smoke.py"
+BACKUP_SHELL = "/bin/bash" if Path("/bin/bash").is_file() else shutil.which("bash")
 
 
 def require(condition, message):
@@ -99,8 +100,9 @@ else:
             }
         )
 
-        first = run(["bash", str(BACKUP_SCRIPT)], env=env)
-        second = run(["bash", str(BACKUP_SCRIPT)], env=env)
+        require(BACKUP_SHELL, "bash is required for backup smoke")
+        first = run([BACKUP_SHELL, str(BACKUP_SCRIPT)], env=env)
+        second = run([BACKUP_SHELL, str(BACKUP_SCRIPT)], env=env)
         require('"status":"verified"' in first.stdout, "first verified backup")
         require('"status":"verified"' in second.stdout, "second verified backup")
         manifests = sorted(backup_root.glob("*.manifest.json"))
@@ -145,7 +147,7 @@ else:
         failure_env = dict(env)
         failure_env["BACKUP_MIN_FREE_BYTES"] = "1000000000000000"
         failed = subprocess.run(
-            ["bash", str(BACKUP_SCRIPT)],
+            [BACKUP_SHELL, str(BACKUP_SCRIPT)],
             cwd=ROOT_DIR,
             env=failure_env,
             text=True,
@@ -166,7 +168,7 @@ else:
         interrupted_env = dict(env)
         interrupted_env["FAKE_DOCKER_DELAY_DUMP"] = "1"
         interrupted = subprocess.Popen(
-            ["bash", str(BACKUP_SCRIPT)],
+            [BACKUP_SHELL, str(BACKUP_SCRIPT)],
             cwd=ROOT_DIR,
             env=interrupted_env,
             text=True,

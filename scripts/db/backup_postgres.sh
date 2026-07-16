@@ -86,7 +86,9 @@ if (( required_bytes < BACKUP_MIN_FREE_BYTES )); then
   required_bytes="$BACKUP_MIN_FREE_BYTES"
 fi
 available_bytes="$($PYTHON_BIN -c 'import shutil,sys; print(shutil.disk_usage(sys.argv[1]).free)' "$BACKUP_ROOT")"
-(( available_bytes >= required_bytes ))
+if (( available_bytes < required_bytes )); then
+  write_failure 1
+fi
 
 failure_code="pgDumpFailed"
 "$DOCKER_BIN" compose exec -T "$BACKUP_DB_SERVICE" \
