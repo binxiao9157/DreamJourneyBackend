@@ -271,7 +271,7 @@ class StoreLifecycleTests(unittest.TestCase):
                 events.append(("open", wait))
 
             def init_schema(self):
-                events.append(("schema", True))
+                raise AssertionError("API startup must not execute schema DDL")
 
             def drain_expired_digital_human_session_leases(self, *, now_iso):
                 events.append(("drain", bool(now_iso)))
@@ -285,7 +285,7 @@ class StoreLifecycleTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            [("open", True), ("schema", True), ("drain", True), ("close", True)],
+            [("open", True), ("drain", True), ("close", True)],
         )
 
 

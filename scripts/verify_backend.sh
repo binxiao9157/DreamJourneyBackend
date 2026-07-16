@@ -31,6 +31,10 @@ test -f Dockerfile
 test -f docker-compose.yml
 test -f .env.example
 test -f requirements.txt
+test -f scripts/migrate_db.py
+test -f db/migrations/0001_existing_schema_baseline.sql
+test -f db/migrations/0001_existing_schema_baseline.json
+grep -q "COPY db ./db" Dockerfile
 grep -q "psycopg" requirements.txt
 
 echo "== Backend FastAPI smoke =="

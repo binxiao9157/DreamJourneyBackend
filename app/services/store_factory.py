@@ -33,9 +33,6 @@ def close_store(store) -> None:
 def init_store(store) -> None:
     open_store(store, wait=True)
     try:
-        init_schema = getattr(store, "init_schema", None)
-        if callable(init_schema):
-            init_schema()
         drain_expired_sessions = getattr(store, "drain_expired_digital_human_session_leases", None)
         if callable(drain_expired_sessions):
             drain_expired_sessions(now_iso=datetime.now(timezone.utc).isoformat())

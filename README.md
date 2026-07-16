@@ -118,3 +118,21 @@ STORE_BACKEND=memory uvicorn app.main:app --reload --port 8080
 ```
 
 内存模式只用于开发调试，进程重启会丢数据；云服务器长期测试请保持 `STORE_BACKEND=postgres`。
+
+## Database migrations
+
+API startup does not create or alter database objects. Run the versioned migrator before starting a new API build:
+
+```bash
+python scripts/migrate_db.py --dry-run --build-id "$DEPLOY_BUILD_ID"
+python scripts/migrate_db.py --apply --build-id "$DEPLOY_BUILD_ID"
+python scripts/migrate_db.py --verify --build-id "$DEPLOY_BUILD_ID"
+```
+
+For the first rollout to an existing DreamJourney database, inspect the dry-run result and then use the explicit baseline receipt path. It verifies all known relations, columns, and triggers and does not replay baseline DDL:
+
+```bash
+python scripts/migrate_db.py --apply --adopt-existing-baseline --build-id "$DEPLOY_BUILD_ID"
+```
+
+Do not use baseline adoption for a partially matching schema. Do not run automatic down migrations in production; stop the rollout and use a forward fix or an isolated restore.

@@ -1070,46 +1070,10 @@ class TransactionalFailingConnection(FakeConnection):
 
 
 class PostgresStoreTests(unittest.TestCase):
-    def test_init_schema_creates_required_tables(self):
-        connection = FakeConnection()
-        store = PostgresStore(connection_factory=lambda: connection)
+    def test_store_has_no_schema_ddl_entrypoint(self):
+        store = PostgresStore(connection_factory=lambda: FakeConnection())
 
-        store.init_schema()
-
-        sql = "\n".join(statement for statement, _ in connection.executed)
-        self.assertIn("CREATE TABLE IF NOT EXISTS users", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS kb_snapshots", sql)
-        self.assertIn("ALTER TABLE kb_changes", sql)
-        self.assertIn("ADD COLUMN IF NOT EXISTS mutation JSONB", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS kb_change_feed_state", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS kb_operation_receipts", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS memories", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS archive_items", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS mailbox_letters", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS echo_delayed_replies", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS push_device_tokens", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS profiles", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS password_credentials", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS family_members", sql)
-        self.assertIn("idx_family_members_invitation_code", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS care_snapshots", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS voice_clone_slots", sql)
-        self.assertIn("voice_profile_id TEXT UNIQUE", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS digital_human_sessions", sql)
-        self.assertIn("idx_digital_human_sessions_resource_status", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS auth_sessions", sql)
-        self.assertIn("idx_auth_sessions_user_status", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS evidence_events", sql)
-        self.assertIn("idx_evidence_events_operation_time", sql)
-        self.assertIn("idx_evidence_events_operation_kind_time", sql)
-        self.assertIn("idx_evidence_events_type_time", sql)
-        self.assertIn("retention_class TEXT NOT NULL", sql)
-        self.assertIn("legal_hold BOOLEAN NOT NULL DEFAULT FALSE", sql)
-        self.assertIn("octet_length(payload::text) <= 16384", sql)
-        self.assertIn("payload_hash ~ '^[0-9a-f]{64}$'", sql)
-        self.assertIn("CREATE OR REPLACE FUNCTION reject_evidence_event_update", sql)
-        self.assertIn("CREATE TRIGGER evidence_events_no_update", sql)
-        self.assertGreaterEqual(connection.commits, 1)
+        self.assertFalse(hasattr(store, "init_schema"))
 
     def test_postgres_evidence_store_is_append_only_idempotent_and_restart_readable(self):
         connection = FakeConnection()
@@ -1438,7 +1402,7 @@ class PostgresStoreTests(unittest.TestCase):
                 self.events = []
 
             def init_schema(self):
-                self.events.append("schema")
+                raise AssertionError("API startup must not execute schema DDL")
 
             def drain_expired_digital_human_session_leases(self, *, now_iso):
                 self.events.append(("drain", now_iso))
@@ -1446,9 +1410,8 @@ class PostgresStoreTests(unittest.TestCase):
         store = DrainAwareStore()
         init_store(store)
 
-        self.assertEqual(store.events[0], "schema")
-        self.assertEqual(store.events[1][0], "drain")
-        self.assertTrue(store.events[1][1].endswith("+00:00"))
+        self.assertEqual(store.events[0][0], "drain")
+        self.assertTrue(store.events[0][1].endswith("+00:00"))
 
     def test_store_persists_kb_snapshot_by_user(self):
         connection = FakeConnection()
