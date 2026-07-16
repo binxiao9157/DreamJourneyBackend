@@ -43,6 +43,9 @@ def assert_no_provider_credentials(value, path="response"):
 
 def request_json(method, path, payload=None, expected=200, access_token=None):
     headers = {"Accept": "application/json"}
+    if path == "/config/runtime":
+        headers["X-DreamJourney-Runtime-Contract-Version"] = "2"
+        headers["X-DreamJourney-Client-Build"] = "9001"
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
     data = None

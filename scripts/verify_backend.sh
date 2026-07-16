@@ -47,7 +47,13 @@ client = TestClient(app)
 health = client.get("/health")
 assert health.status_code == 200, health.text
 assert health.json()["status"] == "ok"
-config = client.get("/config/runtime")
+config = client.get(
+    "/config/runtime",
+    headers={
+        "X-DreamJourney-Runtime-Contract-Version": "2",
+        "X-DreamJourney-Client-Build": "9001",
+    },
+)
 assert config.status_code == 200, config.text
 assert "capabilities" in config.json()
 print("FastAPI smoke verification passed")

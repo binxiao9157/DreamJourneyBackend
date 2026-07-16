@@ -19,7 +19,11 @@ def require(condition, message):
 def request_runtime():
     request = urllib.request.Request(
         f"{BASE_URL}/config/runtime",
-        headers={"Accept": "application/json"},
+        headers={
+            "Accept": "application/json",
+            "X-DreamJourney-Runtime-Contract-Version": "2",
+            "X-DreamJourney-Client-Build": "9001",
+        },
         method="GET",
     )
     try:

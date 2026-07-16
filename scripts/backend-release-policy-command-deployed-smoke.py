@@ -75,7 +75,13 @@ def main():
     require(API_TOKEN, "BACKEND_API_TOKEN is required")
     require(EXPECTED_MODE in {"observe", "mixed", "enforce"}, "unexpected command mode")
 
-    _, _, runtime = request_json("/config/runtime")
+    _, _, runtime = request_json(
+        "/config/runtime",
+        extra_headers={
+            "X-DreamJourney-Runtime-Contract-Version": "2",
+            "X-DreamJourney-Client-Build": "9001",
+        },
+    )
     descriptor = runtime.get("releasePolicy") or {}
     require(
         descriptor.get("commandMode") == EXPECTED_MODE,
