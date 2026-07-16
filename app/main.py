@@ -63,6 +63,7 @@ from app.services.archive_store import (
     ArchiveItemOwnershipConflict,
 )
 from app.services.runtime_config import RuntimeConfigService
+from app.services.readiness import ReadinessService, liveness_payload
 from app.services.release_policy import (
     ReleasePolicyCommandGate,
     ReleasePolicyDecisionRecorder,
@@ -535,12 +536,16 @@ NO_STORE_PATH_PREFIXES = (
     "/digital-human/",
 )
 NO_STORE_EXACT_PATHS = {
+    "/health",
+    "/live",
+    "/ready",
     "/config/runtime",
     "/v2/release-policy",
     "/ops/release-policy/observations",
     "/tts",
     "/archive/image-analysis",
 }
+INFRASTRUCTURE_PATHS = frozenset({"/health", "/live", "/ready"})
 ANONYMOUS_AUTH_PATHS = {
     "/auth/login",
     "/auth/refresh",
@@ -563,7 +568,7 @@ def _set_no_store_headers(response: Any) -> Any:
 
 @app.middleware("http")
 async def require_backend_api_token(request: Request, call_next):
-    if request.url.path == "/health":
+    if request.url.path in INFRASTRUCTURE_PATHS:
         return await call_next(request)
 
     bearer_token = _request_bearer_token(request)
@@ -698,7 +703,7 @@ async def prevent_sensitive_response_caching(request: Request, call_next):
 @app.middleware("http")
 async def database_request_unit_of_work(request: Request, call_next):
     unit_of_work_factory = getattr(store, "request_unit_of_work", None)
-    if request.url.path == "/health" or not callable(unit_of_work_factory):
+    if request.url.path in INFRASTRUCTURE_PATHS or not callable(unit_of_work_factory):
         return await call_next(request)
 
     correlation_id = secrets.token_hex(16)
@@ -748,7 +753,25 @@ def health() -> Dict[str, Any]:
         "service": settings.app_name,
         "environment": settings.environment,
         "store": settings.store_backend,
+        "deprecated": True,
+        "livenessEndpoint": "/live",
+        "readinessEndpoint": "/ready",
     }
+
+
+@app.get("/live")
+def live() -> Dict[str, str]:
+    return liveness_payload()
+
+
+@app.get("/ready")
+def ready() -> JSONResponse:
+    payload = ReadinessService(settings=settings, store=store).evaluate()
+    return JSONResponse(
+        status_code=200 if payload["status"] == "ready" else 503,
+        content=payload,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/v2/release-policy", response_model=ReleasePolicySnapshot)

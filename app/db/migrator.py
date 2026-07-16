@@ -306,31 +306,34 @@ class PostgresMigrator:
             self._close(connection)
 
     def verify(self) -> Dict[str, Any]:
-        migrations = load_migrations(self.migrations_dir)
         connection = self._connect()
         try:
-            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
-                if not self._ledger_exists(cursor):
-                    raise MigrationNotApplied("schema migration ledger is missing")
-                ledger = self._ledger_rows(cursor)
-            self._validate_known_ledger(migrations, ledger)
-            for migration in migrations:
-                existing = ledger.get(migration.version)
-                if existing is None or existing.get("state") != "applied":
-                    raise MigrationNotApplied(f"migration is not applied: {migration.version}")
-                self._validate_checksum(migration, existing)
-            return self._report(
-                migrations=migrations,
-                ledger=ledger,
-                applied=(),
-                adopted=(),
-                skipped=[item.version for item in migrations],
-                pending=(),
-                baseline_action="none",
-                mode="verify",
-            )
+            return self.verify_connection(connection)
         finally:
             self._close(connection)
+
+    def verify_connection(self, connection: Any) -> Dict[str, Any]:
+        migrations = load_migrations(self.migrations_dir)
+        with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            if not self._ledger_exists(cursor):
+                raise MigrationNotApplied("schema migration ledger is missing")
+            ledger = self._ledger_rows(cursor)
+        self._validate_known_ledger(migrations, ledger)
+        for migration in migrations:
+            existing = ledger.get(migration.version)
+            if existing is None or existing.get("state") != "applied":
+                raise MigrationNotApplied(f"migration is not applied: {migration.version}")
+            self._validate_checksum(migration, existing)
+        return self._report(
+            migrations=migrations,
+            ledger=ledger,
+            applied=(),
+            adopted=(),
+            skipped=[item.version for item in migrations],
+            pending=(),
+            baseline_action="none",
+            mode="verify",
+        )
 
     def _execute_migration(self, connection: Any, migration: MigrationDefinition) -> None:
         self._record_running(connection, migration)

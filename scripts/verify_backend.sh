@@ -32,6 +32,8 @@ test -f docker-compose.yml
 test -f .env.example
 test -f requirements.txt
 test -f scripts/migrate_db.py
+test -f scripts/backend-readiness-postgres-smoke.py
+test -f scripts/backend-readiness-deployed-smoke.py
 test -f db/migrations/0001_existing_schema_baseline.sql
 test -f db/migrations/0001_existing_schema_baseline.json
 grep -q "COPY db ./db" Dockerfile
@@ -51,6 +53,13 @@ client = TestClient(app)
 health = client.get("/health")
 assert health.status_code == 200, health.text
 assert health.json()["status"] == "ok"
+assert health.json()["deprecated"] is True
+live = client.get("/live")
+assert live.status_code == 200, live.text
+assert live.json()["status"] == "alive"
+ready = client.get("/ready")
+assert ready.status_code == 200, ready.text
+assert ready.json()["status"] == "ready"
 config = client.get(
     "/config/runtime",
     headers={

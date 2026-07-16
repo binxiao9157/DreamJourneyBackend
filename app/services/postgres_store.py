@@ -9,7 +9,9 @@ import uuid
 
 from psycopg.types.json import Jsonb
 
+from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.db.pool import ConnectionPoolExhausted, FactoryConnectionPool, PsycopgConnectionPool
+from app.db.readiness import PostgresReadinessProbe
 from app.db.uow import DatabaseUnitOfWork, UnitOfWorkMetrics
 from app.observability.events import (
     EvidenceEventConflict,
@@ -120,6 +122,18 @@ class PostgresStore:
             **self._uow_metrics.snapshot(),
             "pool": self._pool.stats(),
         }
+
+    def readiness_probe(self) -> Dict[str, str]:
+        migrator = PostgresMigrator(
+            dsn=self.dsn or "postgres-readiness",
+            migrations_dir=default_migrations_dir(),
+            build_id="readiness",
+        )
+        return PostgresReadinessProbe(
+            pool=self._pool,
+            checkout_timeout_seconds=self._pool_timeout_seconds,
+            schema_verifier=migrator.verify_connection,
+        ).run()
 
     def append_evidence_event(
         self,

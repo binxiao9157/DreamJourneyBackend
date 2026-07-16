@@ -148,7 +148,7 @@ AMAP_WEB_SERVICE_KEY=<高德 WebService Key>
 openssl rand -hex 32
 ```
 
-把生成值写入服务器 `.env` 的 `BACKEND_API_TOKEN`。同一个值需要配置到 iOS 的 `DreamJourneyBackendAPIToken`，否则除 `/health` 外的接口会返回 `401`。
+把生成值写入服务器 `.env` 的 `BACKEND_API_TOKEN`。同一个值需要配置到 iOS 的 `DreamJourneyBackendAPIToken`；`/live`、`/ready`、兼容 `/health` 和显式匿名合同不需要该 token，业务接口仍按认证策略校验。
 
 确保 `.env` 权限正确：
 
@@ -237,16 +237,19 @@ export BACKEND_API_TOKEN='<服务器 .env 中 BACKEND_API_TOKEN 的真实值>'
 export DJ_API='https://www.mmdd10.tech/dreamjourney-api'
 ```
 
-健康检查不需要 token：
+进程存活与流量 readiness 都不需要 token：
 
 ```bash
-curl -i "$DJ_API/health"
+curl -i "$DJ_API/live"
+curl -i "$DJ_API/ready"
 ```
 
-预期包含：
+`/live` 只证明进程存活；`/ready` 必须返回 HTTP `200`、顶层 `status=ready`，且 `database`、`schema`、`auth` 三个 component 均为 `ready`。`/health` 只保留兼容语义，不能继续作为部署放流门。
 
-```json
-{"status":"ok","service":"DreamJourney Backend","environment":"production","store":"postgres"}
+也可以运行不需要业务 token 的 deployed smoke：
+
+```bash
+BACKEND_BASE_URL="$DJ_API" scripts/run-backend-readiness-deployed-smoke.sh
 ```
 
 运行配置需要 token：
@@ -659,7 +662,8 @@ sudo docker compose up -d --build
 确认服务恢复：
 
 ```bash
-curl -i https://www.mmdd10.tech/dreamjourney-api/health
+curl -i https://www.mmdd10.tech/dreamjourney-api/live
+curl -i https://www.mmdd10.tech/dreamjourney-api/ready
 ```
 
 排障完成后回到 `main`：
@@ -676,7 +680,8 @@ sudo docker compose up -d --build
 
 - `git log -1 --oneline` 显示 `f39cc11` 或更新的 `main` HEAD。
 - `sudo docker compose ps` 中 `api`、`postgres`、`redis` 正常运行。
-- `/health` 返回 `status=ok`、`store=postgres`。
+- `/live` 返回 `status=alive`；`/ready` 返回 HTTP `200` 且 database/schema/auth 全部 ready。
+- Docker `api` healthcheck 使用 `/ready`，不再以兼容 `/health` 代替流量 readiness。
 - `/config/runtime` 带 token 后返回能力开关，`realtimeToken=true`。
 - `/config/runtime` 带 token 后返回 `voiceClone.provider=volcengineVoiceCloneV3` 且 `voiceClone.realProviderReady=true`。
 - `/config/runtime` 带 token 后返回 `voiceClone.synthesisEndpoint=/voice/synthesis` 且 `voiceClone.synthesisProviderReady=true`。

@@ -99,6 +99,8 @@ class RouteOwnershipRegistry:
         system = RouteOwnershipCategory.SYSTEM_ONLY
         self.rules = (
             _rule("GET", "/health", public, "publicHealth"),
+            _rule("GET", "/live", public, "publicLiveness"),
+            _rule("GET", "/ready", public, "publicReadiness"),
             _owner_body("POST", "/digital-human/sessions", "digitalHumanOwner"),
             _owner_body("POST", "/digital-human/sessions/{session_id}/heartbeat", "digitalHumanOwner"),
             _owner_body("POST", "/digital-human/sessions/{session_id}/release", "digitalHumanOwner"),

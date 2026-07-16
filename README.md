@@ -5,6 +5,8 @@
 ## 当前接口
 
 - `GET /health`
+- `GET /live`
+- `GET /ready`
 - `POST /auth/login`
 - `POST /auth/refresh`
 - `POST /auth/logout`
@@ -88,7 +90,8 @@ uvicorn app.main:app --reload --port 8080
 cp .env.example .env
 # 编辑 .env，填入 DeepSeek、VolcEngine、AMap 等服务端密钥
 docker compose up -d --build
-curl http://127.0.0.1:3100/health
+curl http://127.0.0.1:3100/live
+curl http://127.0.0.1:3100/ready
 ```
 
 生产建议通过现有 `Nginx` 反向代理到 `127.0.0.1:3100`，启用 HTTPS，再把 iOS 的后端地址配置为公网域名。
@@ -101,15 +104,7 @@ curl http://127.0.0.1:3100/health
 - `SafetyGuardBaseURL`：后续如果把 safety guard 挂到本后端，也指向同域名
 - `AMapWebServiceKey`、`DeepSeekAPIKey`、`VolcEngineAPIKey`、`VolcEngineAppID`、`VolcEngineAppToken`：逐步从 iOS LocalConfig 迁移到后端 `.env`；实时语音会通过 `POST /voice/realtime-token` 下发运行配置。
 
-当前默认使用 Postgres 持久化。API 容器启动时会自动创建以下 JSONB 表：
-
-- `users`
-- `kb_snapshots`
-- `memories`
-- `archive_items`
-- `voice_profiles`
-- `family_members`
-- `auth_sessions`
+当前默认使用 Postgres 持久化。API 启动不会创建或修改业务表，所有 schema 变化必须先通过下方 versioned migrator 执行并验证。
 
 如需本机临时无数据库调试，可设置：
 
@@ -136,3 +131,19 @@ python scripts/migrate_db.py --apply --adopt-existing-baseline --build-id "$DEPL
 ```
 
 Do not use baseline adoption for a partially matching schema. Do not run automatic down migrations in production; stop the rollout and use a forward fix or an isolated restore.
+
+## Liveness and readiness
+
+- `GET /live` 只证明 API 进程存活，不访问数据库，也不能作为业务流量放行依据。
+- `GET /ready` 每次重新检查连接池 checkout、可回滚的数据库读写 probe、migration head/checksum 和生产必需认证配置；任一 required component 为 unknown/down 时返回 `503`。
+- DeepSeek、火山语音和腾讯数智人等扩展 Provider 不进入基础 readiness，Provider 故障只降对应 capability，不阻断 Owner 文字核心。
+- `GET /health` 仅为旧客户端保留并标记 deprecated；Docker、负载均衡和部署脚本必须使用 `/ready`。
+- readiness 响应只包含 component/status/reason/evidenceTimestamp，不返回 DSN、SQL、migration checksum 或凭据。
+
+真实 Postgres 与部署环境 smoke：
+
+```bash
+scripts/run-backend-readiness-postgres-smoke.sh
+BACKEND_BASE_URL=https://dreamjourney-api.liftora.cn \
+  scripts/run-backend-readiness-deployed-smoke.sh
+```
