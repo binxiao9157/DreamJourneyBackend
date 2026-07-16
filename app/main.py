@@ -65,11 +65,13 @@ from app.services.archive_store import (
 from app.services.runtime_config import RuntimeConfigService
 from app.services.release_policy import (
     ReleasePolicyCommandGate,
+    ReleasePolicyDecisionRecorder,
     ReleasePolicyFeatureAccessDenied,
     ReleasePolicyService,
     ReleasePolicySnapshot,
     ReleasePolicyVersionDowngrade,
     normalize_release_policy_audience,
+    parse_release_policy_feature_set,
 )
 from app.services.context_packet import ContextPacketBuilder
 from app.services.store_factory import init_store, make_store
@@ -107,9 +109,20 @@ RELEASE_POLICY_COMMAND_MODE = (
     else "observe"
 )
 RELEASE_POLICY_SERVICE = ReleasePolicyService(
-    shadow_mode=RELEASE_POLICY_COMMAND_MODE != "enforce"
+    policy_revision=settings.release_policy_revision,
+    min_client_build=settings.release_policy_min_client_build,
+    ttl_seconds=settings.release_policy_ttl_seconds,
+    emergency_revision=settings.release_policy_emergency_revision,
+    emergency_disabled_features=parse_release_policy_feature_set(
+        settings.release_policy_emergency_disabled_features
+    ),
+    enforced_features=parse_release_policy_feature_set(
+        settings.release_policy_enforced_features
+    ),
+    shadow_mode=RELEASE_POLICY_COMMAND_MODE != "enforce",
 )
 RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(RELEASE_POLICY_SERVICE)
+RELEASE_POLICY_DECISION_RECORDER = ReleasePolicyDecisionRecorder()
 ARCHIVE_MEDIA_UPLOAD_PROVIDER = "mockObjectStorage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_DISPLAY_NAME = "Mock Object Storage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_MODE = "mock"
@@ -331,7 +344,10 @@ def _release_policy_audience(request: Request, principal: Dict[str, Any]) -> str
 def _set_release_policy_diagnostic_headers(response: Any, diagnostic: Dict[str, str]) -> Any:
     if not diagnostic:
         return response
-    response.headers["X-DreamJourney-Release-Policy-Mode"] = RELEASE_POLICY_COMMAND_MODE
+    response.headers["X-DreamJourney-Release-Policy-Mode"] = diagnostic.get(
+        "mode",
+        RELEASE_POLICY_COMMAND_MODE,
+    )
     response.headers["X-DreamJourney-Release-Policy-Feature"] = diagnostic.get("feature", "none")
     response.headers["X-DreamJourney-Release-Policy-Decision"] = diagnostic.get("decision", "notApplicable")
     response.headers["X-DreamJourney-Release-Policy-Decision-Id"] = diagnostic.get(
@@ -344,14 +360,23 @@ def _set_release_policy_diagnostic_headers(response: Any, diagnostic: Dict[str, 
 
 
 def _release_policy_denied_response(error: ReleasePolicyFeatureAccessDenied) -> JSONResponse:
+    client_upgrade_required = error.reason == "clientBelowMinimum"
     response = JSONResponse(
-        status_code=403,
+        status_code=426 if client_upgrade_required else 403,
         content={
             "detail": {
-                "code": "release_policy_denied",
+                "code": (
+                    "client_upgrade_required"
+                    if client_upgrade_required
+                    else "release_policy_denied"
+                ),
                 "feature": error.feature,
                 "reason": error.reason,
                 "policyRevision": error.policy_revision,
+                "minimumClientBuild": RELEASE_POLICY_SERVICE.min_client_build,
+                "accessMode": RELEASE_POLICY_SERVICE.minimum_client_access_mode(
+                    error.feature
+                ),
                 "retryable": False,
             }
         },
@@ -390,6 +415,20 @@ def _evaluate_release_policy_command(
     )
     if feature is None:
         return None, {}
+    mode = (
+        "enforce"
+        if RELEASE_POLICY_COMMAND_MODE == "enforce"
+        else RELEASE_POLICY_SERVICE.command_mode_for(feature)
+    )
+    client_build = _release_policy_int_header(
+        request,
+        "x-dreamjourney-client-build",
+    ) or 1
+    route_label = RELEASE_POLICY_COMMAND_GATE.route_label_for_request(
+        request.method,
+        request.url.path,
+        payload,
+    )
 
     try:
         captured = RELEASE_POLICY_COMMAND_GATE.capture(
@@ -399,10 +438,7 @@ def _evaluate_release_policy_command(
                 request.headers.get("x-dreamjourney-policy-cohort")
                 or "closedPilotAdultSelf"
             ).strip(),
-            client_build=_release_policy_int_header(
-                request,
-                "x-dreamjourney-client-build",
-            ) or 1,
+            client_build=client_build,
             client_policy_version=str(
                 request.headers.get("x-dreamjourney-policy-version") or ""
             ).strip() or None,
@@ -427,28 +463,49 @@ def _evaluate_release_policy_command(
             require_client_capture=principal.get("kind") != "system",
         )
         RELEASE_POLICY_COMMAND_GATE.revalidate_effect(captured)
+        RELEASE_POLICY_DECISION_RECORDER.record(
+            feature=feature,
+            policy_version=captured.policy_version,
+            client_build=client_build,
+            decision="allow",
+            reason=captured.server_reason,
+            route=route_label,
+        )
         return None, {
             "feature": feature,
             "decision": "allow",
             "decisionId": captured.decision_id,
             "reason": captured.server_reason,
             "policyRevision": str(captured.policy_revision),
+            "mode": mode,
         }
     except ReleasePolicyFeatureAccessDenied as error:
         logger.warning(
             "release_policy_command_denied mode=%s feature=%s reason=%s revision=%s",
-            RELEASE_POLICY_COMMAND_MODE,
+            mode,
             error.feature,
             error.reason,
             error.policy_revision,
         )
-        if RELEASE_POLICY_COMMAND_MODE == "enforce":
-            return _release_policy_denied_response(error), {}
+        decision = "deny" if mode == "enforce" else "observeDeny"
+        RELEASE_POLICY_DECISION_RECORDER.record(
+            feature=error.feature,
+            policy_version=RELEASE_POLICY_SERVICE.POLICY_VERSION,
+            client_build=client_build,
+            decision=decision,
+            reason=error.reason,
+            route=route_label,
+        )
+        if mode == "enforce":
+            response = _release_policy_denied_response(error)
+            response.headers["X-DreamJourney-Release-Policy-Mode"] = mode
+            return response, {}
         return None, {
             "feature": error.feature,
-            "decision": "observeDeny",
+            "decision": decision,
             "reason": error.reason,
             "policyRevision": str(error.policy_revision),
+            "mode": mode,
         }
 
 
@@ -460,6 +517,7 @@ NO_STORE_PATH_PREFIXES = (
 NO_STORE_EXACT_PATHS = {
     "/config/runtime",
     "/v2/release-policy",
+    "/ops/release-policy/observations",
     "/tts",
     "/archive/image-analysis",
 }
@@ -574,6 +632,18 @@ async def require_backend_api_token(request: Request, call_next):
     if principal["kind"] != "user":
         payload_context = await _request_json_payload(request)
 
+    if request.url.path == "/config/runtime":
+        RELEASE_POLICY_DECISION_RECORDER.record_runtime_contract(
+            client_build=_release_policy_int_header(
+                request,
+                "x-dreamjourney-client-build",
+            ) or 0,
+            contract_version=_release_policy_int_header(
+                request,
+                "x-dreamjourney-runtime-contract-version",
+            ) or 0,
+        )
+
     release_policy_response, release_policy_diagnostic = _evaluate_release_policy_command(
         request,
         payload_context,
@@ -646,6 +716,14 @@ def release_policy(
                 "knownPolicyRevision": error.known_revision,
             },
         ) from error
+
+
+@app.get("/ops/release-policy/observations")
+def release_policy_observations(request: Request) -> Dict[str, Any]:
+    principal = getattr(request.state, "auth_principal", {})
+    if principal.get("kind") != "system":
+        raise HTTPException(status_code=403, detail="system principal required")
+    return RELEASE_POLICY_DECISION_RECORDER.summary()
 
 
 @app.post("/digital-human/sessions")

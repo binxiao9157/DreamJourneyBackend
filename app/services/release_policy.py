@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Literal, Mapping, Optional, Set
+from threading import Lock
+from typing import Any, Deque, Iterable, Literal, Mapping, Optional, Set
 
 from pydantic import BaseModel, ConfigDict
 
 
 ReleaseAudience = Literal["owner", "family", "visitor", "qa"]
 Gate = Literal["G0", "G1", "G2", "G3", "G4"]
+ReleasePolicyCommandMode = Literal["observe", "enforce"]
+
+
+def parse_release_policy_feature_set(value: Optional[str]) -> Set[str]:
+    return {
+        item.strip()
+        for item in (value or "").split(",")
+        if item.strip()
+    }
 
 
 def normalize_release_policy_audience(
@@ -41,6 +52,94 @@ class ReleasePolicyFeatureAccessDenied(RuntimeError):
         self.feature = feature
         self.reason = reason
         self.policy_revision = policy_revision
+
+
+class ReleasePolicyDecisionEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    feature: str
+    policyVersion: str
+    clientBuild: int
+    decision: str
+    reason: str
+    route: str
+    occurredAt: datetime
+
+
+class ReleasePolicyDecisionRecorder:
+    """Bounded, value-free rollout evidence until the S0-07 metrics sink lands."""
+
+    RUNTIME_CONTRACT_VERSION = 2
+
+    def __init__(self, *, max_events: int = 500) -> None:
+        self._events: Deque[ReleasePolicyDecisionEvent] = deque(maxlen=max(1, max_events))
+        self._lock = Lock()
+
+    def record(
+        self,
+        *,
+        feature: str,
+        policy_version: str,
+        client_build: int,
+        decision: str,
+        reason: str,
+        route: str,
+        occurred_at: Optional[datetime] = None,
+    ) -> None:
+        instant = occurred_at or datetime.now(timezone.utc)
+        if instant.tzinfo is None:
+            instant = instant.replace(tzinfo=timezone.utc)
+        event = ReleasePolicyDecisionEvent(
+            feature=feature,
+            policyVersion=policy_version,
+            clientBuild=max(0, client_build),
+            decision=decision,
+            reason=reason,
+            route=route,
+            occurredAt=instant,
+        )
+        with self._lock:
+            self._events.append(event)
+
+    def record_runtime_contract(
+        self,
+        *,
+        client_build: int,
+        contract_version: int,
+        occurred_at: Optional[datetime] = None,
+    ) -> None:
+        uses_typed_contract = contract_version >= self.RUNTIME_CONTRACT_VERSION
+        self.record(
+            feature="runtimeConfig",
+            policy_version=ReleasePolicyService.POLICY_VERSION,
+            client_build=client_build,
+            decision="typedRuntimeContract" if uses_typed_contract else "legacyRuntimeAliasObserved",
+            reason=(
+                "capabilitySnapshotContract"
+                if uses_typed_contract
+                else "missingOrOldRuntimeContractVersion"
+            ),
+            route="GET /config/runtime",
+            occurred_at=occurred_at,
+        )
+
+    def summary(self) -> dict[str, object]:
+        with self._lock:
+            events = list(self._events)
+        decisions = Counter(item.decision for item in events)
+        features = Counter(item.feature for item in events)
+        return {
+            "schemaVersion": 1,
+            "runtimeContractVersion": self.RUNTIME_CONTRACT_VERSION,
+            "eventCount": len(events),
+            "legacyRuntimeAliasHitCount": decisions.get("legacyRuntimeAliasObserved", 0),
+            "typedRuntimeContractHitCount": decisions.get("typedRuntimeContract", 0),
+            "decisionCounts": dict(sorted(decisions.items())),
+            "featureCounts": dict(sorted(features.items())),
+            "windowStartedAt": events[0].occurredAt if events else None,
+            "windowEndedAt": events[-1].occurredAt if events else None,
+            "events": [item.model_dump(mode="json") for item in events],
+        }
 
 
 @dataclass(frozen=True)
@@ -146,6 +245,7 @@ class ReleasePolicyService:
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         emergency_revision: int = 0,
         emergency_disabled_features: Optional[Iterable[str]] = None,
+        enforced_features: Optional[Iterable[str]] = None,
         shadow_mode: bool = True,
     ) -> None:
         self.policy_revision = max(1, policy_revision)
@@ -153,7 +253,26 @@ class ReleasePolicyService:
         self.ttl_seconds = max(60, ttl_seconds)
         self.emergency_revision = max(0, emergency_revision)
         self.emergency_disabled_features: Set[str] = set(emergency_disabled_features or ())
+        self.enforced_features: Set[str] = set(enforced_features or ())
+        unknown_rollout_features = (
+            self.emergency_disabled_features | self.enforced_features
+        ).difference(self._FEATURE_GATES)
+        if unknown_rollout_features:
+            raise ValueError(
+                "unknown release policy rollout feature(s): "
+                + ", ".join(sorted(unknown_rollout_features))
+            )
         self.shadow_mode = shadow_mode
+
+    def command_mode_for(self, feature: str) -> ReleasePolicyCommandMode:
+        if feature in self.emergency_disabled_features:
+            return "enforce"
+        if not self.shadow_mode or feature in self.enforced_features:
+            return "enforce"
+        return "observe"
+
+    def minimum_client_access_mode(self, feature: str) -> str:
+        return "readOnly" if feature in self._CLOSED_PILOT_OWNER_VISIBLE else "deny"
 
     def public_descriptor(self) -> dict[str, object]:
         return {
@@ -166,8 +285,19 @@ class ReleasePolicyService:
             "emergencyRevision": self.emergency_revision,
             "source": "server",
             "shadowMode": self.shadow_mode,
-            "commandMode": "observe" if self.shadow_mode else "enforce",
+            "commandMode": self._descriptor_command_mode(),
+            "rolloutContractVersion": 1,
+            "runtimeContractVersion": ReleasePolicyDecisionRecorder.RUNTIME_CONTRACT_VERSION,
+            "canaryFeatures": sorted(self.enforced_features),
+            "killSwitchFeatures": sorted(self.emergency_disabled_features),
         }
+
+    def _descriptor_command_mode(self) -> str:
+        if not self.shadow_mode:
+            return "enforce"
+        if self.enforced_features or self.emergency_disabled_features:
+            return "mixed"
+        return "observe"
 
     def build_snapshot(
         self,
@@ -426,6 +556,28 @@ class ReleasePolicyCommandGate:
         if method.upper() == "GET" and normalized_path.startswith("/archive/items/"):
             return "archiveRemoteFetch"
         return None
+
+    def route_label_for_request(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Mapping[str, Any]],
+    ) -> str:
+        normalized_method = method.upper()
+        normalized_path = (path or "").split("?", 1)[0]
+        for prefix, _ in self._PREFIX_FEATURES:
+            if normalized_path == prefix:
+                return f"{normalized_method} {prefix}"
+            if prefix.endswith("/") and normalized_path.startswith(prefix):
+                return f"{normalized_method} {prefix}*"
+            if not prefix.endswith("/") and normalized_path.startswith(f"{prefix}/"):
+                return f"{normalized_method} {prefix}/*"
+        if normalized_path in {"/archive/media/upload-intent", "/archive/items"}:
+            return f"{normalized_method} {normalized_path}"
+        if normalized_method == "GET" and normalized_path.startswith("/archive/items/"):
+            return "GET /archive/items/*"
+        feature = self.feature_for_request(method, path, payload)
+        return f"{normalized_method} /feature/{feature or 'notApplicable'}"
 
     @staticmethod
     def _archive_media_feature(payload: Mapping[str, Any]) -> str:

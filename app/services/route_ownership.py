@@ -113,6 +113,12 @@ class RouteOwnershipRegistry:
             _owner_path("GET", "/profile/{user_id}", "profileOwner"),
             _rule("GET", "/config/runtime", service, "authenticatedRuntimeConfig"),
             _rule("GET", "/v2/release-policy", public, "publicReleasePolicy"),
+            _rule(
+                "GET",
+                "/ops/release-policy/observations",
+                system,
+                "systemReleasePolicyObservations",
+            ),
             _owner_body("POST", "/context/build", "contextOwner"),
             _owner_body("POST", "/voice/realtime-token", "voiceOwner"),
             _owner_body("POST", "/voice/profiles", "voiceOwner"),

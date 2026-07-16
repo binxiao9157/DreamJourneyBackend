@@ -34,6 +34,12 @@ class Settings:
     auth_refresh_ttl_seconds: int = 30 * 24 * 60 * 60
     auth_ownership_mode: str = "shadow"
     release_policy_command_mode: str = "observe"
+    release_policy_revision: int = 1
+    release_policy_min_client_build: int = 1
+    release_policy_ttl_seconds: int = 300
+    release_policy_emergency_revision: int = 0
+    release_policy_enforced_features: Optional[str] = None
+    release_policy_emergency_disabled_features: Optional[str] = None
 
     deepseek_api_key: Optional[str] = None
     deepseek_base_url: str = "https://api.deepseek.com/v1/chat/completions"
@@ -97,6 +103,26 @@ class Settings:
                 "RELEASE_POLICY_COMMAND_MODE",
                 cls.release_policy_command_mode,
             ) or cls.release_policy_command_mode,
+            release_policy_revision=_env_int(
+                "RELEASE_POLICY_REVISION",
+                cls.release_policy_revision,
+            ),
+            release_policy_min_client_build=_env_int(
+                "RELEASE_POLICY_MIN_CLIENT_BUILD",
+                cls.release_policy_min_client_build,
+            ),
+            release_policy_ttl_seconds=_env_int(
+                "RELEASE_POLICY_TTL_SECONDS",
+                cls.release_policy_ttl_seconds,
+            ),
+            release_policy_emergency_revision=_env_int(
+                "RELEASE_POLICY_EMERGENCY_REVISION",
+                cls.release_policy_emergency_revision,
+            ),
+            release_policy_enforced_features=_env("RELEASE_POLICY_ENFORCED_FEATURES"),
+            release_policy_emergency_disabled_features=_env(
+                "RELEASE_POLICY_EMERGENCY_DISABLED_FEATURES"
+            ),
             deepseek_api_key=_env("DEEPSEEK_API_KEY"),
             deepseek_base_url=_env("DEEPSEEK_BASE_URL", cls.deepseek_base_url) or cls.deepseek_base_url,
             volcengine_api_key=_env("VOLCENGINE_API_KEY"),

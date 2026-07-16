@@ -10,6 +10,16 @@ import urllib.request
 BASE_URL = os.environ.get("BACKEND_BASE_URL", "").rstrip("/")
 API_TOKEN = os.environ.get("BACKEND_API_TOKEN", "").strip()
 EXPECTED_MODE = os.environ.get("EXPECTED_RELEASE_POLICY_COMMAND_MODE", "observe").strip()
+EXPECTED_CANARY = {
+    item.strip()
+    for item in os.environ.get("EXPECTED_RELEASE_POLICY_CANARY_FEATURES", "").split(",")
+    if item.strip()
+}
+EXPECTED_KILL_SWITCH = {
+    item.strip()
+    for item in os.environ.get("EXPECTED_RELEASE_POLICY_KILL_SWITCH_FEATURES", "").split(",")
+    if item.strip()
+}
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "").strip()
 OWNER_CORE = {"echoTextInput", "profileSettings", "legalCenter", "accountDeletion"}
 
@@ -46,7 +56,7 @@ def request_json(path, *, method="GET", payload=None, extra_headers=None, expect
 def main():
     require(BASE_URL, "BACKEND_BASE_URL is required")
     require(API_TOKEN, "BACKEND_API_TOKEN is required")
-    require(EXPECTED_MODE in {"observe", "enforce"}, "invalid expected command mode")
+    require(EXPECTED_MODE in {"observe", "mixed", "enforce"}, "invalid expected command mode")
 
     query = urllib.parse.urlencode({"audience": "owner", "cohort": "closedPilotAdultSelf", "clientBuild": 1})
     _, _, policy = request_json(f"/v2/release-policy?{query}")
@@ -69,7 +79,13 @@ def main():
     )
     require(profile_headers.get("x-dreamjourney-release-policy-decision") == "allow", "forged QA must normalize to owner core")
 
-    expected_family_status = (400,) if EXPECTED_MODE == "observe" else (403,)
+    family_mode = (
+        "enforce"
+        if EXPECTED_MODE == "enforce"
+        or "familyManagement" in EXPECTED_CANARY | EXPECTED_KILL_SWITCH
+        else "observe"
+    )
+    expected_family_status = (400,) if family_mode == "observe" else (403,)
     _, family_headers, _ = request_json(
         "/family/invite",
         method="POST",
@@ -80,8 +96,12 @@ def main():
         },
         expected=expected_family_status,
     )
-    hidden_decision = "observeDeny" if EXPECTED_MODE == "observe" else "deny"
+    hidden_decision = "observeDeny" if family_mode == "observe" else "deny"
     require(family_headers.get("x-dreamjourney-release-policy-decision") == hidden_decision, "hidden command must remain denied")
+    require(
+        family_headers.get("x-dreamjourney-release-policy-mode") == family_mode,
+        "hidden command mode must match feature rollout",
+    )
 
     _, _, unknown = request_json("/v2/release-policy?" + urllib.parse.urlencode({"feature": "futureUnknownFeature"}))
     unknown_decision = (unknown.get("features") or [{}])[0]
@@ -93,6 +113,8 @@ def main():
         "policyVersion": policy.get("policyVersion"),
         "policyRevision": policy.get("policyRevision"),
         "mode": EXPECTED_MODE,
+        "canaryFeatures": sorted(EXPECTED_CANARY),
+        "killSwitchFeatures": sorted(EXPECTED_KILL_SWITCH),
         "features": {
             "publicOwnerCore": sorted(public_features),
             "hiddenCount": len(hidden_features),

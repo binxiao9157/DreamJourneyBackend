@@ -10,6 +10,7 @@ from app.main import app
 from app.services.in_memory_store import InMemoryStore
 from app.services.release_policy import (
     ReleasePolicyCommandGate,
+    ReleasePolicyDecisionRecorder,
     ReleasePolicyFeatureAccessDenied,
     ReleasePolicyService,
     ReleasePolicySnapshot,
@@ -19,6 +20,29 @@ from app.services.release_policy import (
 
 
 class ReleasePolicyServiceTests(unittest.TestCase):
+    def test_feature_canary_and_kill_switch_choose_enforcement_per_feature(self):
+        service = ReleasePolicyService(
+            shadow_mode=True,
+            enforced_features={"familyManagement"},
+            emergency_revision=4,
+            emergency_disabled_features={"profileSettings"},
+        )
+
+        self.assertEqual(service.command_mode_for("timeLetters"), "observe")
+        self.assertEqual(service.command_mode_for("familyManagement"), "enforce")
+        self.assertEqual(service.command_mode_for("profileSettings"), "enforce")
+        descriptor = service.public_descriptor()
+        self.assertEqual(descriptor["commandMode"], "mixed")
+        self.assertEqual(descriptor["canaryFeatures"], ["familyManagement"])
+        self.assertEqual(descriptor["killSwitchFeatures"], ["profileSettings"])
+
+    def test_rollout_feature_configuration_rejects_unknown_aliases(self):
+        with self.assertRaises(ValueError):
+            ReleasePolicyService(enforced_features={"familyManagementLegacy"})
+
+        with self.assertRaises(ValueError):
+            ReleasePolicyService(emergency_disabled_features={"voiceCloneEnabled"})
+
     def test_qa_audience_requires_nonproduction_system_principal(self):
         self.assertEqual(
             normalize_release_policy_audience(
@@ -160,13 +184,16 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
     def setUp(self):
         self.previous_store = main_module.store
         self.previous_backend_token = main_module.BACKEND_API_TOKEN
+        self.previous_recorder = main_module.RELEASE_POLICY_DECISION_RECORDER
         main_module.store = InMemoryStore()
         main_module.BACKEND_API_TOKEN = ""
+        main_module.RELEASE_POLICY_DECISION_RECORDER = ReleasePolicyDecisionRecorder()
         self.client = TestClient(app)
 
     def tearDown(self):
         main_module.store = self.previous_store
         main_module.BACKEND_API_TOKEN = self.previous_backend_token
+        main_module.RELEASE_POLICY_DECISION_RECORDER = self.previous_recorder
 
     def test_release_policy_endpoint_is_anonymous_typed_and_no_store(self):
         response = self.client.get(
@@ -200,6 +227,41 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"]["code"], "release_policy_version_downgrade")
+
+    def test_runtime_contract_observation_is_system_only_and_value_free(self):
+        main_module.BACKEND_API_TOKEN = "release-policy-system-token"
+        system_headers = {"Authorization": "Bearer release-policy-system-token"}
+
+        typed = self.client.get(
+            "/config/runtime",
+            headers={
+                **system_headers,
+                "X-DreamJourney-Client-Build": "42",
+                "X-DreamJourney-Runtime-Contract-Version": "2",
+            },
+        )
+        legacy = self.client.get(
+            "/config/runtime",
+            headers={
+                **system_headers,
+                "X-DreamJourney-Client-Build": "41",
+            },
+        )
+        summary = self.client.get(
+            "/ops/release-policy/observations",
+            headers=system_headers,
+        )
+        anonymous = self.client.get("/ops/release-policy/observations")
+
+        self.assertEqual(typed.status_code, 200)
+        self.assertEqual(legacy.status_code, 200)
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.headers["cache-control"], "no-store")
+        payload = summary.json()
+        self.assertEqual(payload["typedRuntimeContractHitCount"], 1)
+        self.assertEqual(payload["legacyRuntimeAliasHitCount"], 1)
+        self.assertNotIn("token", str(payload).lower())
+        self.assertEqual(anonymous.status_code, 401)
 
     def test_enforced_hidden_route_denies_even_with_client_allow_headers(self):
         previous_mode = main_module.RELEASE_POLICY_COMMAND_MODE
@@ -294,6 +356,151 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
         self.assertEqual(
             response.headers["X-DreamJourney-Release-Policy-Decision-Id"],
             "decision-profile-save",
+        )
+
+    def test_feature_canary_enforces_only_selected_hidden_command(self):
+        previous_service = main_module.RELEASE_POLICY_SERVICE
+        previous_gate = main_module.RELEASE_POLICY_COMMAND_GATE
+        service = ReleasePolicyService(
+            shadow_mode=True,
+            enforced_features={"familyManagement"},
+        )
+        main_module.RELEASE_POLICY_SERVICE = service
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(service)
+        try:
+            family = self.client.post(
+                "/family/invite",
+                json={
+                    "userId": "policy-canary-user",
+                    "name": "测试家人",
+                    "relation": "家人",
+                    "phone": "13800000002",
+                },
+            )
+            time_letter = self.client.post(
+                "/archive/items",
+                json={
+                    "userId": "policy-canary-user",
+                    "id": "policy-time-letter",
+                    "kind": "timeLetter",
+                    "title": "观察态时间信件",
+                    "metadata": {"deliveryStatus": "draft"},
+                },
+            )
+        finally:
+            main_module.RELEASE_POLICY_SERVICE = previous_service
+            main_module.RELEASE_POLICY_COMMAND_GATE = previous_gate
+
+        self.assertEqual(family.status_code, 403)
+        self.assertEqual(
+            family.headers["X-DreamJourney-Release-Policy-Mode"],
+            "enforce",
+        )
+        self.assertEqual(
+            time_letter.headers["X-DreamJourney-Release-Policy-Decision"],
+            "observeDeny",
+        )
+        self.assertEqual(
+            time_letter.headers["X-DreamJourney-Release-Policy-Mode"],
+            "observe",
+        )
+        time_letter_detail = time_letter.json().get("detail")
+        self.assertFalse(
+            isinstance(time_letter_detail, dict)
+            and time_letter_detail.get("code") == "release_policy_denied"
+        )
+
+    def test_kill_switch_enforces_owner_core_while_global_rollout_observes(self):
+        previous_service = main_module.RELEASE_POLICY_SERVICE
+        previous_gate = main_module.RELEASE_POLICY_COMMAND_GATE
+        service = ReleasePolicyService(
+            shadow_mode=True,
+            emergency_revision=5,
+            emergency_disabled_features={"profileSettings"},
+        )
+        main_module.RELEASE_POLICY_SERVICE = service
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(service)
+        try:
+            response = self.client.post(
+                "/profile",
+                json={"userId": "policy-kill-switch-user", "nickname": "被止损"},
+            )
+        finally:
+            main_module.RELEASE_POLICY_SERVICE = previous_service
+            main_module.RELEASE_POLICY_COMMAND_GATE = previous_gate
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"]["reason"], "emergencyRevoked")
+        self.assertEqual(
+            response.headers["X-DreamJourney-Release-Policy-Mode"],
+            "enforce",
+        )
+
+    def test_old_client_canary_returns_upgrade_and_read_only_contract(self):
+        previous_service = main_module.RELEASE_POLICY_SERVICE
+        previous_gate = main_module.RELEASE_POLICY_COMMAND_GATE
+        service = ReleasePolicyService(
+            shadow_mode=True,
+            min_client_build=10,
+            enforced_features={"profileSettings"},
+        )
+        main_module.RELEASE_POLICY_SERVICE = service
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(service)
+        try:
+            response = self.client.post(
+                "/profile",
+                headers={"X-DreamJourney-Client-Build": "9"},
+                json={"userId": "old-client-user", "nickname": "旧版本"},
+            )
+        finally:
+            main_module.RELEASE_POLICY_SERVICE = previous_service
+            main_module.RELEASE_POLICY_COMMAND_GATE = previous_gate
+
+        self.assertEqual(response.status_code, 426)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["code"], "client_upgrade_required")
+        self.assertEqual(detail["minimumClientBuild"], 10)
+        self.assertEqual(detail["accessMode"], "readOnly")
+
+
+class ReleasePolicyDecisionRecorderTests(unittest.TestCase):
+    def test_summary_contains_only_allowlisted_fields_and_tracks_legacy_contract_hits(self):
+        now = datetime(2026, 7, 16, 2, 0, tzinfo=timezone.utc)
+        recorder = ReleasePolicyDecisionRecorder(max_events=8)
+        recorder.record(
+            feature="familyManagement",
+            policy_version="release-policy-v2",
+            client_build=42,
+            decision="deny",
+            reason="notApprovedForClosedPilot",
+            route="POST /family/invite",
+            occurred_at=now,
+        )
+        recorder.record_runtime_contract(
+            client_build=42,
+            contract_version=1,
+            occurred_at=now,
+        )
+
+        summary = recorder.summary()
+        self.assertEqual(summary["eventCount"], 2)
+        self.assertEqual(summary["legacyRuntimeAliasHitCount"], 1)
+        self.assertEqual(summary["decisionCounts"]["deny"], 1)
+        serialized = str(summary)
+        self.assertNotIn("userId", serialized)
+        self.assertNotIn("phone", serialized)
+        self.assertNotIn("token", serialized.lower())
+        self.assertEqual(
+            set(summary["events"][0]),
+            {
+                "feature",
+                "policyVersion",
+                "clientBuild",
+                "decision",
+                "reason",
+                "route",
+                "occurredAt",
+            },
         )
 
 

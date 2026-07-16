@@ -4,7 +4,7 @@ from app.core.config import Settings
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.route_ownership import RouteOwnershipRegistry
-from app.services.release_policy import ReleasePolicyService
+from app.services.release_policy import ReleasePolicyService, parse_release_policy_feature_set
 from app.services.tokens import TokenService
 from app.services.tts import VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice_clone_speaker_ids
@@ -28,7 +28,17 @@ class RuntimeConfigService:
         route_ownership_audit = RouteOwnershipRegistry().audit_summary()
         realtime_voice = TokenService(self.settings).realtime_config(user_id="runtime-capability")
         release_policy = ReleasePolicyService(
-            shadow_mode=self.settings.release_policy_command_mode != "enforce"
+            policy_revision=self.settings.release_policy_revision,
+            min_client_build=self.settings.release_policy_min_client_build,
+            ttl_seconds=self.settings.release_policy_ttl_seconds,
+            emergency_revision=self.settings.release_policy_emergency_revision,
+            emergency_disabled_features=parse_release_policy_feature_set(
+                self.settings.release_policy_emergency_disabled_features
+            ),
+            enforced_features=parse_release_policy_feature_set(
+                self.settings.release_policy_enforced_features
+            ),
+            shadow_mode=self.settings.release_policy_command_mode != "enforce",
         )
         capability_snapshots = self._capability_snapshots(
             archive_image_analysis=archive_image_analysis,

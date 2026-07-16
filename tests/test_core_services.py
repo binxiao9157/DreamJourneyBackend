@@ -256,6 +256,30 @@ class RuntimeConfigTests(unittest.TestCase):
         release_policy = config["releasePolicy"]
         self.assertTrue(release_policy["shadowMode"])
         self.assertEqual(release_policy["commandMode"], "observe")
+        self.assertEqual(release_policy["rolloutContractVersion"], 1)
+        self.assertEqual(release_policy["runtimeContractVersion"], 2)
+        self.assertEqual(release_policy["canaryFeatures"], [])
+        self.assertEqual(release_policy["killSwitchFeatures"], [])
+
+    def test_runtime_config_exposes_typed_canary_and_kill_switch_without_values(self):
+        settings = Settings(
+            release_policy_command_mode="observe",
+            release_policy_revision=8,
+            release_policy_emergency_revision=3,
+            release_policy_enforced_features="familyManagement",
+            release_policy_emergency_disabled_features="digitalHumanLivePanel",
+        )
+
+        release_policy = RuntimeConfigService(settings).public_config()["releasePolicy"]
+
+        self.assertEqual(release_policy["policyRevision"], 8)
+        self.assertEqual(release_policy["emergencyRevision"], 3)
+        self.assertEqual(release_policy["commandMode"], "mixed")
+        self.assertEqual(release_policy["canaryFeatures"], ["familyManagement"])
+        self.assertEqual(
+            release_policy["killSwitchFeatures"],
+            ["digitalHumanLivePanel"],
+        )
 
     def test_runtime_config_separates_voice_clone_training_and_synthesis_capabilities(self):
         settings = Settings(

@@ -14,6 +14,11 @@ API_TOKEN = os.environ.get(
     os.environ.get("DREAMJOURNEY_BACKEND_API_TOKEN", ""),
 ).strip()
 EXPECTED_MODE = os.environ.get("EXPECTED_RELEASE_POLICY_COMMAND_MODE", "observe").strip()
+EXPECTED_CANARY = {
+    item.strip()
+    for item in os.environ.get("EXPECTED_RELEASE_POLICY_CANARY_FEATURES", "").split(",")
+    if item.strip()
+}
 
 
 def require(condition, message):
@@ -68,7 +73,7 @@ def request_json(
 def main():
     require(BASE_URL, "BACKEND_BASE_URL is required")
     require(API_TOKEN, "BACKEND_API_TOKEN is required")
-    require(EXPECTED_MODE in {"observe", "enforce"}, "unexpected command mode")
+    require(EXPECTED_MODE in {"observe", "mixed", "enforce"}, "unexpected command mode")
 
     _, _, runtime = request_json("/config/runtime")
     descriptor = runtime.get("releasePolicy") or {}
@@ -77,9 +82,14 @@ def main():
         "runtime release-policy command mode does not match deployment expectation",
     )
     require(
-        descriptor.get("shadowMode") is (EXPECTED_MODE == "observe"),
+        descriptor.get("shadowMode") is (EXPECTED_MODE != "enforce"),
         "runtime shadowMode must match command mode",
     )
+    if EXPECTED_MODE == "mixed":
+        require(
+            set(descriptor.get("canaryFeatures") or []) == EXPECTED_CANARY,
+            "runtime canary feature set does not match deployment expectation",
+        )
 
     status, headers, _ = request_json(
         "/profile",
@@ -106,14 +116,19 @@ def main():
         "system command must expose a value-free server decision identifier",
     )
 
-    expected_family_statuses = (400,) if EXPECTED_MODE == "observe" else (403,)
+    family_mode = (
+        "enforce"
+        if EXPECTED_MODE == "enforce" or "familyManagement" in EXPECTED_CANARY
+        else "observe"
+    )
+    expected_family_statuses = (400,) if family_mode == "observe" else (403,)
     status, headers, payload = request_json(
         "/family/invite",
         method="POST",
         payload={},
         expected_statuses=expected_family_statuses,
     )
-    expected_decision = "observeDeny" if EXPECTED_MODE == "observe" else "deny"
+    expected_decision = "observeDeny" if family_mode == "observe" else "deny"
     require(
         headers.get("x-dreamjourney-release-policy-feature") == "familyManagement",
         "family command must be classified as familyManagement",
@@ -126,7 +141,11 @@ def main():
         headers.get("x-dreamjourney-release-policy-reason") == "notApprovedForClosedPilot",
         "hidden command must preserve the server denial reason",
     )
-    if EXPECTED_MODE == "enforce":
+    require(
+        headers.get("x-dreamjourney-release-policy-mode") == family_mode,
+        "hidden command mode must match feature rollout",
+    )
+    if family_mode == "enforce":
         detail = payload.get("detail") or {}
         require(detail.get("code") == "release_policy_denied", "enforce must return stable denial")
 
