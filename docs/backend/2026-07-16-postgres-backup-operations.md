@@ -116,3 +116,11 @@ sudo cat /var/backups/dreamjourney/postgres/retention-latest.json
 ```
 
 输出的 `eligibleBackupIds` 只是候选；`automaticDeletion=false`。实际删除要等待 off-host copy、最后有效 backup 保护、Privacy/Legal retention 和 Operations 审批，不能由当前 timer 自动执行。
+
+服务器部署证据可通过一键 smoke 复核：
+
+```bash
+sudo scripts/db/run-backup-deployed-smoke.sh
+```
+
+该命令只返回 value-free 汇总，检查两份当前加密备份、schema head、freshness、权限、retention audit、alert receipt 和两个 timer，不输出 checksum、backupId 或数据库内容。

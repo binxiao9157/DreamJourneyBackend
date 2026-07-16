@@ -38,6 +38,7 @@ test -f scripts/db/backup_postgres.sh
 test -f scripts/db/audit_backup_retention.sh
 test -f scripts/db/verify_backup_manifest.py
 test -f scripts/db/verify_latest_backup.py
+test -f scripts/db/backup-deployed-smoke.py
 test -f deploy/systemd/dreamjourney-db-backup.timer
 test -f db/migrations/0001_existing_schema_baseline.sql
 test -f db/migrations/0001_existing_schema_baseline.json

@@ -1,6 +1,6 @@
 [Unit]
 Description=Audit DreamJourney PostgreSQL backup retention without deleting artifacts
-OnFailure=dreamjourney-db-backup-alert@%n.service
+OnFailure=dreamjourney-db-backup-alert@retention-audit.service
 
 [Service]
 Type=oneshot

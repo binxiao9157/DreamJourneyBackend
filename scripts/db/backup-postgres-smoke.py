@@ -16,6 +16,7 @@ VERIFY_SCRIPT = ROOT_DIR / "scripts/db/verify_backup_manifest.py"
 VERIFY_LATEST_SCRIPT = ROOT_DIR / "scripts/db/verify_latest_backup.py"
 RETENTION_SCRIPT = ROOT_DIR / "scripts/db/audit_backup_retention.py"
 ALERT_SCRIPT = ROOT_DIR / "scripts/db/backup_alert.sh"
+DEPLOYED_SMOKE = ROOT_DIR / "scripts/db/backup-deployed-smoke.py"
 
 
 def require(condition, message):
@@ -32,7 +33,11 @@ def run(command, *, env, expected=0):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    require(result.returncode == expected, f"command failed: {command[0]} status={result.returncode}")
+    require(
+        result.returncode == expected,
+        f"command failed: {command[0]} status={result.returncode} "
+        f"stdout={result.stdout[-500:]} stderr={result.stderr[-500:]}",
+    )
     return result
 
 
@@ -121,7 +126,15 @@ else:
         require(json.loads(latest.stdout)["freshnessGate"] == "passed", "latest backup gate")
 
         retention = run(
-            [sys.executable, str(RETENTION_SCRIPT), str(backup_root), "--keep-minimum", "1"],
+            [
+                sys.executable,
+                str(RETENTION_SCRIPT),
+                str(backup_root),
+                "--keep-minimum",
+                "1",
+                "--output",
+                str(backup_root / "retention-latest.json"),
+            ],
             env=env,
         )
         retention_payload = json.loads(retention.stdout)
@@ -178,6 +191,12 @@ else:
         require(alerts, "failure alert receipt")
         alert_payload = json.loads(alerts[-1].read_text(encoding="utf-8"))
         require(alert_payload["owner"] == "backup-smoke-owner", "alert owner")
+
+        deployed_env = dict(env)
+        deployed_env["EXPECTED_SCHEMA_HEAD"] = "0001"
+        deployed_env["BACKUP_TIMER_VERIFIED"] = "1"
+        deployed = run([sys.executable, str(DEPLOYED_SMOKE)], env=deployed_env)
+        require(json.loads(deployed.stdout)["status"] == "passed", "deployed evidence smoke")
 
         first_payload = json.loads(manifests[0].read_text(encoding="utf-8"))
         artifact = backup_root / first_payload["artifactFile"]

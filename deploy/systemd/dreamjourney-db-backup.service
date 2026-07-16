@@ -3,7 +3,7 @@ Description=DreamJourney verified PostgreSQL backup
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
-OnFailure=dreamjourney-db-backup-alert@%n.service
+OnFailure=dreamjourney-db-backup-alert@database-backup.service
 
 [Service]
 Type=oneshot
