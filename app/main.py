@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 from typing import Any, Dict, Optional, Tuple
 
 try:
-    from fastapi import FastAPI, HTTPException, Request
+    from fastapi import FastAPI, HTTPException, Query, Request
     from fastapi.responses import JSONResponse
 except ImportError as exc:  # pragma: no cover - exercised only without runtime deps
     raise RuntimeError("FastAPI is not installed. Run `pip install -r requirements.txt`.") from exc
@@ -63,6 +63,11 @@ from app.services.archive_store import (
     ArchiveItemOwnershipConflict,
 )
 from app.services.runtime_config import RuntimeConfigService
+from app.services.release_policy import (
+    ReleasePolicyService,
+    ReleasePolicySnapshot,
+    ReleasePolicyVersionDowngrade,
+)
 from app.services.context_packet import ContextPacketBuilder
 from app.services.store_factory import init_store, make_store
 from app.services.tokens import TokenService
@@ -287,6 +292,7 @@ NO_STORE_PATH_PREFIXES = (
 )
 NO_STORE_EXACT_PATHS = {
     "/config/runtime",
+    "/v2/release-policy",
     "/tts",
     "/archive/image-analysis",
 }
@@ -294,6 +300,7 @@ ANONYMOUS_AUTH_PATHS = {
     "/auth/login",
     "/auth/refresh",
     "/config/runtime",
+    "/v2/release-policy",
 }
 
 
@@ -426,6 +433,34 @@ def health() -> Dict[str, Any]:
         "environment": settings.environment,
         "store": settings.store_backend,
     }
+
+
+@app.get("/v2/release-policy", response_model=ReleasePolicySnapshot)
+def release_policy(
+    audience: str = Query(default="owner", pattern="^(owner|family|visitor|qa)$"),
+    cohort: str = Query(default="closedPilotAdultSelf", min_length=1, max_length=80),
+    clientBuild: int = Query(default=1, ge=0),
+    knownPolicyRevision: int = Query(default=0, ge=0),
+    feature: Optional[str] = Query(default=None, min_length=1, max_length=100),
+) -> ReleasePolicySnapshot:
+    try:
+        return ReleasePolicyService().build_snapshot(
+            audience=audience,  # type: ignore[arg-type]
+            cohort=cohort,
+            client_build=clientBuild,
+            known_policy_revision=knownPolicyRevision,
+            requested_feature=feature,
+        )
+    except ReleasePolicyVersionDowngrade as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "release_policy_version_downgrade",
+                "message": "server release policy revision is older than the client snapshot",
+                "serverPolicyRevision": error.server_revision,
+                "knownPolicyRevision": error.known_revision,
+            },
+        ) from error
 
 
 @app.post("/digital-human/sessions")

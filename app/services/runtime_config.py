@@ -4,6 +4,7 @@ from app.core.config import Settings
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.route_ownership import RouteOwnershipRegistry
+from app.services.release_policy import ReleasePolicyService
 from app.services.tokens import TokenService
 from app.services.tts import VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice_clone_speaker_ids
@@ -22,6 +23,7 @@ class RuntimeConfigService:
         digital_human_access = DigitalHumanAccessPolicy().blocked_mobile_contract()
         route_ownership_audit = RouteOwnershipRegistry().audit_summary()
         realtime_voice = TokenService(self.settings).realtime_config(user_id="runtime-capability")
+        release_policy = ReleasePolicyService()
         return {
             "environment": self.settings.environment,
             "baseURL": self.settings.public_base_url,
@@ -38,6 +40,7 @@ class RuntimeConfigService:
                 "digitalHumanSession": False,
                 "digitalHumanSessionLease": False,
                 "authSession": True,
+                "releasePolicy": True,
             },
             "auth": {
                 "mode": "opaqueAccessRefresh",
@@ -91,6 +94,7 @@ class RuntimeConfigService:
                 "legacyBackendTokenCompatible": False,
                 "contractVersion": 2,
             },
+            "releasePolicy": release_policy.public_descriptor(),
             "archive": {
                 "uploadIntentEndpoint": "/archive/media/upload-intent",
                 "storageProvider": "mockObjectStorage",
