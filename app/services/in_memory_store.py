@@ -1,3 +1,4 @@
+from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
 from math import ceil
@@ -24,6 +25,14 @@ from app.services.archive_store import (
     is_sealed_time_letter,
 )
 from app.services.user_identity import stable_user_id
+from app.observability.events import (
+    EvidenceEventConflict,
+    canonicalize_evidence_event,
+    hash_evidence_identifier,
+    normalize_evidence_timestamp,
+    normalize_machine_code,
+    normalize_retention_class,
+)
 
 
 class InMemoryStore:
@@ -35,6 +44,7 @@ class InMemoryStore:
         self._kb_operation_receipts: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._kb_lock = RLock()
         self._archive_lock = RLock()
+        self._evidence_lock = RLock()
         self._memories: Dict[str, List[Dict[str, Any]]] = {}
         self._archive_items: Dict[str, List[Dict[str, Any]]] = {}
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
@@ -48,6 +58,127 @@ class InMemoryStore:
         self._voice_clone_slots: Dict[str, Dict[str, Any]] = {}
         self._digital_human_sessions: Dict[str, Dict[str, Any]] = {}
         self._auth_sessions: Dict[str, Dict[str, Any]] = {}
+        self._evidence_events: Dict[str, Dict[str, Any]] = {}
+
+    def append_evidence_event(
+        self,
+        event: Dict[str, Any],
+        *,
+        retention_class: str,
+        expires_at_iso: Optional[str],
+        legal_hold: bool = False,
+    ) -> Dict[str, Any]:
+        model, payload, payload_hash = canonicalize_evidence_event(event)
+        normalized_retention_class = normalize_retention_class(retention_class)
+        expires_at = (
+            None
+            if not expires_at_iso
+            else normalize_evidence_timestamp(expires_at_iso)
+        )
+        event_id = model.eventId
+        candidate = {
+            "eventId": event_id,
+            "operationId": model.operationId,
+            "eventType": model.type,
+            "schemaVersion": model.schemaVersion,
+            "retentionClass": normalized_retention_class,
+            "expiresAt": expires_at,
+            "legalHold": bool(legal_hold),
+            "payloadHash": payload_hash,
+            "payload": payload,
+            "occurredAt": model.occurredAt.isoformat(),
+            "createdAt": self._now(),
+        }
+        with self._evidence_lock:
+            existing = self._evidence_events.get(event_id)
+            if existing is not None:
+                if any(
+                    existing.get(key) != candidate.get(key)
+                    for key in (
+                        "payloadHash",
+                        "retentionClass",
+                        "expiresAt",
+                        "legalHold",
+                    )
+                ):
+                    raise EvidenceEventConflict(
+                        "eventId already exists with different payload or retention metadata"
+                    )
+                return self._evidence_append_result(existing, outcome="deduplicated")
+            self._evidence_events[event_id] = candidate
+            return self._evidence_append_result(candidate, outcome="appended")
+
+    def summarize_evidence_events(
+        self,
+        *,
+        operation: str,
+        now_iso: Optional[str] = None,
+        event_limit: int = 500,
+    ) -> Dict[str, Any]:
+        normalized_operation = normalize_machine_code(operation)
+        now = self._parse_iso_datetime(now_iso or self._now())
+        with self._evidence_lock:
+            records = [
+                deepcopy(record)
+                for record in self._evidence_events.values()
+                if record["payload"].get("operation") == normalized_operation
+                and self._evidence_record_is_visible(record, now)
+            ]
+        records.sort(key=lambda item: self._parse_iso_datetime(str(item["occurredAt"])))
+        decisions = Counter(str(item["payload"].get("decision") or "unknown") for item in records)
+        features = Counter(str(item["payload"].get("feature") or "unknown") for item in records)
+        bounded_limit = max(1, min(event_limit, 500))
+        return {
+            "eventCount": len(records),
+            "decisionCounts": dict(sorted(decisions.items())),
+            "featureCounts": dict(sorted(features.items())),
+            "windowStartedAt": records[0]["occurredAt"] if records else None,
+            "windowEndedAt": records[-1]["occurredAt"] if records else None,
+            "events": [item["payload"] for item in records[-bounded_limit:]],
+        }
+
+    def expire_evidence_events(self, cutoff_iso: str) -> Dict[str, Any]:
+        cutoff = self._parse_iso_datetime(normalize_evidence_timestamp(cutoff_iso))
+        expired_ids: List[str] = []
+        held_count = 0
+        with self._evidence_lock:
+            for event_id, record in list(self._evidence_events.items()):
+                expires_at = record.get("expiresAt")
+                if not expires_at or self._parse_iso_datetime(str(expires_at)) > cutoff:
+                    continue
+                if record.get("legalHold") is True:
+                    held_count += 1
+                    continue
+                expired_ids.append(event_id)
+                self._evidence_events.pop(event_id, None)
+        return {
+            "schemaVersion": 1,
+            "retentionAction": "expire",
+            "cutoff": cutoff.astimezone(timezone.utc).isoformat(),
+            "expiredCount": len(expired_ids),
+            "heldCount": held_count,
+            "expiredEventIdHashes": [
+                hash_evidence_identifier(event_id) for event_id in sorted(expired_ids)
+            ],
+        }
+
+    @staticmethod
+    def _evidence_record_is_visible(record: Dict[str, Any], now: datetime) -> bool:
+        if record.get("legalHold") is True:
+            return True
+        expires_at = record.get("expiresAt")
+        return not expires_at or InMemoryStore._parse_iso_datetime(str(expires_at)) > now
+
+    @staticmethod
+    def _evidence_append_result(record: Dict[str, Any], *, outcome: str) -> Dict[str, Any]:
+        return {
+            "outcome": outcome,
+            "eventId": record["eventId"],
+            "payloadHash": record["payloadHash"],
+            "retentionClass": record["retentionClass"],
+            "expiresAt": record.get("expiresAt"),
+            "legalHold": bool(record.get("legalHold")),
+        }
 
     def save_auth_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(session)

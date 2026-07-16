@@ -122,8 +122,25 @@ RELEASE_POLICY_SERVICE = ReleasePolicyService(
     shadow_mode=RELEASE_POLICY_COMMAND_MODE != "enforce",
 )
 RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(RELEASE_POLICY_SERVICE)
+_release_policy_event_sink = getattr(store, "append_evidence_event", None)
+_release_policy_event_summary = getattr(store, "summarize_evidence_events", None)
 RELEASE_POLICY_DECISION_RECORDER = ReleasePolicyDecisionRecorder(
     environment=settings.environment,
+    event_sink=(
+        _release_policy_event_sink
+        if callable(_release_policy_event_sink)
+        else None
+    ),
+    event_summary_source=(
+        (
+            lambda: _release_policy_event_summary(
+                operation="releasePolicyDecision",
+            )
+        )
+        if callable(_release_policy_event_summary)
+        else None
+    ),
+    retention_days=settings.evidence_rollout_retention_days,
 )
 ARCHIVE_MEDIA_UPLOAD_PROVIDER = "mockObjectStorage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_DISPLAY_NAME = "Mock Object Storage"

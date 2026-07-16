@@ -7,6 +7,14 @@ import uuid
 
 from psycopg.types.json import Jsonb
 
+from app.observability.events import (
+    EvidenceEventConflict,
+    canonicalize_evidence_event,
+    hash_evidence_identifier,
+    normalize_evidence_timestamp,
+    normalize_machine_code,
+    normalize_retention_class,
+)
 from app.services.user_identity import stable_user_id
 from app.services.knowledge_store import (
     KB_OPERATION_ARCHIVE_DELETE,
@@ -242,6 +250,59 @@ class PostgresStore:
                 ON auth_sessions(user_id, status, updated_at DESC)
             """,
             """
+            CREATE TABLE IF NOT EXISTS evidence_events (
+                event_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                retention_class TEXT NOT NULL,
+                expires_at TIMESTAMPTZ,
+                legal_hold BOOLEAN NOT NULL DEFAULT FALSE,
+                payload_hash TEXT NOT NULL,
+                payload JSONB NOT NULL,
+                occurred_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CHECK (event_type IN ('operation', 'rights', 'incident', 'providerCost')),
+                CHECK (schema_version = 1),
+                CHECK (payload_hash ~ '^[0-9a-f]{64}$'),
+                CHECK (octet_length(payload::text) <= 16384)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_evidence_events_operation_time
+                ON evidence_events(operation_id, occurred_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_evidence_events_type_time
+                ON evidence_events(event_type, occurred_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_evidence_events_operation_kind_time
+                ON evidence_events((payload->>'operation'), occurred_at DESC)
+                WHERE event_type = 'operation'
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_evidence_events_retention
+                ON evidence_events(expires_at ASC)
+                WHERE legal_hold = FALSE AND expires_at IS NOT NULL
+            """,
+            """
+            CREATE OR REPLACE FUNCTION reject_evidence_event_update()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                RAISE EXCEPTION 'evidence_events are append-only';
+            END;
+            $$ LANGUAGE plpgsql
+            """,
+            """
+            DROP TRIGGER IF EXISTS evidence_events_no_update ON evidence_events
+            """,
+            """
+            CREATE TRIGGER evidence_events_no_update
+            BEFORE UPDATE ON evidence_events
+            FOR EACH ROW EXECUTE FUNCTION reject_evidence_event_update()
+            """,
+            """
             CREATE TABLE IF NOT EXISTS profiles (
                 user_id TEXT PRIMARY KEY,
                 payload JSONB NOT NULL,
@@ -290,6 +351,198 @@ class PostgresStore:
             for statement in statements:
                 cursor.execute(statement)
         connection.commit()
+
+    def append_evidence_event(
+        self,
+        event: Dict[str, Any],
+        *,
+        retention_class: str,
+        expires_at_iso: Optional[str],
+        legal_hold: bool = False,
+    ) -> Dict[str, Any]:
+        model, payload, payload_hash = canonicalize_evidence_event(event)
+        normalized_retention_class = normalize_retention_class(retention_class)
+        expires_at = (
+            None
+            if not expires_at_iso
+            else normalize_evidence_timestamp(expires_at_iso)
+        )
+        row = self._fetchone(
+            """
+            INSERT INTO evidence_events (
+                event_id, operation_id, event_type, schema_version,
+                retention_class, expires_at, legal_hold, payload_hash,
+                payload, occurred_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (event_id) DO NOTHING
+            RETURNING event_id, payload_hash, retention_class, expires_at, legal_hold
+            """,
+            (
+                model.eventId,
+                model.operationId,
+                model.type,
+                model.schemaVersion,
+                normalized_retention_class,
+                expires_at,
+                bool(legal_hold),
+                payload_hash,
+                payload,
+                model.occurredAt.isoformat(),
+            ),
+            commit=True,
+        )
+        outcome = "appended"
+        if row is None:
+            row = self._fetchone(
+                """
+                SELECT event_id, payload_hash, retention_class, expires_at, legal_hold
+                FROM evidence_events
+                WHERE event_id = %s
+                """,
+                (model.eventId,),
+            )
+            outcome = "deduplicated"
+        if row is None:
+            raise RuntimeError("evidence event insert did not produce a receipt")
+        stored_expires_at = self._iso_value(row.get("expires_at")) if row.get("expires_at") else None
+        if any(
+            (
+                str(row.get("payload_hash") or "") != payload_hash,
+                str(row.get("retention_class") or "") != normalized_retention_class,
+                stored_expires_at != expires_at,
+                bool(row.get("legal_hold")) != bool(legal_hold),
+            )
+        ):
+            raise EvidenceEventConflict(
+                "eventId already exists with different payload or retention metadata"
+            )
+        return {
+            "outcome": outcome,
+            "eventId": str(row.get("event_id") or model.eventId),
+            "payloadHash": payload_hash,
+            "retentionClass": normalized_retention_class,
+            "expiresAt": expires_at,
+            "legalHold": bool(legal_hold),
+        }
+
+    def summarize_evidence_events(
+        self,
+        *,
+        operation: str,
+        now_iso: Optional[str] = None,
+        event_limit: int = 500,
+    ) -> Dict[str, Any]:
+        normalized_operation = normalize_machine_code(operation)
+        now = self._parse_iso_datetime(now_iso or self._now()).astimezone(timezone.utc).isoformat()
+        where_sql = """
+            event_type = 'operation'
+            AND payload->>'operation' = %s
+            AND (legal_hold = TRUE OR expires_at IS NULL OR expires_at > %s)
+        """
+        aggregate = self._fetchone(
+            f"""
+            SELECT COUNT(*) AS event_count,
+                   MIN(occurred_at) AS window_started_at,
+                   MAX(occurred_at) AS window_ended_at
+            FROM evidence_events
+            WHERE {where_sql}
+            """,
+            (normalized_operation, now),
+        ) or {}
+        decision_rows = self._fetchall(
+            f"""
+            SELECT payload->>'decision' AS value, COUNT(*) AS count
+            FROM evidence_events
+            WHERE {where_sql}
+            GROUP BY payload->>'decision'
+            """,
+            (normalized_operation, now),
+        )
+        feature_rows = self._fetchall(
+            f"""
+            SELECT payload->>'feature' AS value, COUNT(*) AS count
+            FROM evidence_events
+            WHERE {where_sql}
+            GROUP BY payload->>'feature'
+            """,
+            (normalized_operation, now),
+        )
+        bounded_limit = max(1, min(event_limit, 500))
+        event_rows = self._fetchall(
+            f"""
+            SELECT payload
+            FROM evidence_events
+            WHERE {where_sql}
+            ORDER BY occurred_at DESC
+            LIMIT %s
+            """,
+            (normalized_operation, now, bounded_limit),
+        )
+        events = [deepcopy(row["payload"]) for row in reversed(event_rows)]
+        return {
+            "eventCount": int(aggregate.get("event_count") or 0),
+            "decisionCounts": self._evidence_group_counts(decision_rows),
+            "featureCounts": self._evidence_group_counts(feature_rows),
+            "windowStartedAt": self._iso_value(aggregate.get("window_started_at"))
+            if aggregate.get("window_started_at") is not None
+            else None,
+            "windowEndedAt": self._iso_value(aggregate.get("window_ended_at"))
+            if aggregate.get("window_ended_at") is not None
+            else None,
+            "events": events,
+        }
+
+    def expire_evidence_events(self, cutoff_iso: str) -> Dict[str, Any]:
+        cutoff = normalize_evidence_timestamp(cutoff_iso)
+        connection = self._connect()
+        try:
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM evidence_events
+                    WHERE legal_hold = TRUE AND expires_at IS NOT NULL AND expires_at <= %s
+                    """,
+                    (cutoff,),
+                )
+                held_row = cursor.fetchone() or {}
+                cursor.execute(
+                    """
+                    DELETE FROM evidence_events
+                    WHERE legal_hold = FALSE AND expires_at IS NOT NULL AND expires_at <= %s
+                    RETURNING event_id
+                    """,
+                    (cutoff,),
+                )
+                expired_rows = cursor.fetchall()
+            connection.commit()
+        except Exception:
+            self._rollback(connection)
+            raise
+        expired_ids = sorted(str(row.get("event_id") or "") for row in expired_rows)
+        return {
+            "schemaVersion": 1,
+            "retentionAction": "expire",
+            "cutoff": cutoff,
+            "expiredCount": len(expired_ids),
+            "heldCount": int(held_row.get("count") or 0),
+            "expiredEventIdHashes": [
+                hash_evidence_identifier(event_id) for event_id in expired_ids if event_id
+            ],
+        }
+
+    @staticmethod
+    def _evidence_group_counts(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+        return dict(
+            sorted(
+                (
+                    str(row.get("value") or "unknown"),
+                    int(row.get("count") or 0),
+                )
+                for row in rows
+            )
+        )
 
     def save_auth_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(session)

@@ -40,6 +40,7 @@ class Settings:
     release_policy_emergency_revision: int = 0
     release_policy_enforced_features: Optional[str] = None
     release_policy_emergency_disabled_features: Optional[str] = None
+    evidence_rollout_retention_days: int = 30
 
     deepseek_api_key: Optional[str] = None
     deepseek_base_url: str = "https://api.deepseek.com/v1/chat/completions"
@@ -122,6 +123,10 @@ class Settings:
             release_policy_enforced_features=_env("RELEASE_POLICY_ENFORCED_FEATURES"),
             release_policy_emergency_disabled_features=_env(
                 "RELEASE_POLICY_EMERGENCY_DISABLED_FEATURES"
+            ),
+            evidence_rollout_retention_days=_env_int(
+                "EVIDENCE_ROLLOUT_RETENTION_DAYS",
+                cls.evidence_rollout_retention_days,
             ),
             deepseek_api_key=_env("DEEPSEEK_API_KEY"),
             deepseek_base_url=_env("DEEPSEEK_BASE_URL", cls.deepseek_base_url) or cls.deepseek_base_url,

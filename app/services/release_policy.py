@@ -4,7 +4,7 @@ from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import Lock
-from typing import Any, Deque, Iterable, Literal, Mapping, Optional, Set
+from typing import Any, Callable, Deque, Iterable, Literal, Mapping, Optional, Set
 
 from pydantic import BaseModel, ConfigDict
 
@@ -73,9 +73,24 @@ class ReleasePolicyDecisionRecorder:
 
     RUNTIME_CONTRACT_VERSION = 2
 
-    def __init__(self, *, max_events: int = 500, environment: str = "runtime") -> None:
+    def __init__(
+        self,
+        *,
+        max_events: int = 500,
+        environment: str = "runtime",
+        event_sink: Optional[Callable[..., Mapping[str, Any]]] = None,
+        event_summary_source: Optional[Callable[[], Mapping[str, Any]]] = None,
+        retention_days: int = 30,
+    ) -> None:
         self._events: Deque[ReleasePolicyDecisionEvent] = deque(maxlen=max(1, max_events))
         self._environment = environment.strip() or "runtime"
+        self._event_sink = event_sink
+        self._event_summary_source = event_summary_source
+        self._retention_days = max(8, retention_days)
+        self._sink_persisted_count = 0
+        self._sink_deduplicated_count = 0
+        self._sink_failure_count = 0
+        self._source_failure_count = 0
         self._lock = Lock()
 
     def record(
@@ -103,6 +118,35 @@ class ReleasePolicyDecisionRecorder:
         )
         with self._lock:
             self._events.append(event)
+        if self._event_sink is None:
+            return
+        operation_event = map_release_policy_operation_event(
+            feature=event.feature,
+            policy_version=event.policyVersion,
+            client_build=event.clientBuild,
+            decision=event.decision,
+            reason=event.reason,
+            route=event.route,
+            occurred_at=event.occurredAt,
+            environment=self._environment,
+        )
+        try:
+            receipt = self._event_sink(
+                operation_event.model_dump(mode="json"),
+                retention_class="rolloutObservation",
+                expires_at_iso=(
+                    event.occurredAt + timedelta(days=self._retention_days)
+                ).isoformat(),
+                legal_hold=False,
+            )
+            with self._lock:
+                if receipt.get("outcome") == "deduplicated":
+                    self._sink_deduplicated_count += 1
+                else:
+                    self._sink_persisted_count += 1
+        except Exception:
+            with self._lock:
+                self._sink_failure_count += 1
 
     def record_runtime_contract(
         self,
@@ -129,8 +173,10 @@ class ReleasePolicyDecisionRecorder:
     def summary(self) -> dict[str, object]:
         with self._lock:
             events = list(self._events)
-        decisions = Counter(item.decision for item in events)
-        features = Counter(item.feature for item in events)
+            sink_persisted_count = self._sink_persisted_count
+            sink_deduplicated_count = self._sink_deduplicated_count
+            sink_failure_count = self._sink_failure_count
+            source_failure_count = self._source_failure_count
         operation_events = [
             map_release_policy_operation_event(
                 feature=item.feature,
@@ -144,19 +190,81 @@ class ReleasePolicyDecisionRecorder:
             ).model_dump(mode="json")
             for item in events
         ]
+        decisions = Counter(item.decision for item in events)
+        features = Counter(item.feature for item in events)
+        event_count = len(events)
+        window_started_at: object = events[0].occurredAt if events else None
+        window_ended_at: object = events[-1].occurredAt if events else None
+        evidence_source = "memory"
+
+        if self._event_summary_source is not None:
+            try:
+                persisted = self._event_summary_source()
+                persisted_count = int(persisted.get("eventCount") or 0)
+                if persisted_count > 0 or not events:
+                    operation_events = list(persisted.get("events") or [])
+                    decisions = Counter(
+                        {
+                            str(key): int(value)
+                            for key, value in dict(
+                                persisted.get("decisionCounts") or {}
+                            ).items()
+                        }
+                    )
+                    features = Counter(
+                        {
+                            str(key): int(value)
+                            for key, value in dict(
+                                persisted.get("featureCounts") or {}
+                            ).items()
+                        }
+                    )
+                    event_count = persisted_count
+                    window_started_at = persisted.get("windowStartedAt")
+                    window_ended_at = persisted.get("windowEndedAt")
+                    evidence_source = "persistent"
+                else:
+                    evidence_source = "memoryFallback"
+            except Exception:
+                evidence_source = "memoryFallback"
+                with self._lock:
+                    self._source_failure_count += 1
+                    source_failure_count = self._source_failure_count
+
+        compatibility_events = [
+            self._compatibility_event_payload(item) for item in operation_events
+        ]
         return {
             "schemaVersion": 1,
             "eventEnvelopeSchemaVersion": 1,
+            "evidenceStoreContractVersion": 1,
             "runtimeContractVersion": self.RUNTIME_CONTRACT_VERSION,
-            "eventCount": len(events),
+            "eventCount": event_count,
             "legacyRuntimeAliasHitCount": decisions.get("legacyRuntimeAliasObserved", 0),
             "typedRuntimeContractHitCount": decisions.get("typedRuntimeContract", 0),
             "decisionCounts": dict(sorted(decisions.items())),
             "featureCounts": dict(sorted(features.items())),
-            "windowStartedAt": events[0].occurredAt if events else None,
-            "windowEndedAt": events[-1].occurredAt if events else None,
-            "events": [item.model_dump(mode="json") for item in events],
+            "windowStartedAt": window_started_at,
+            "windowEndedAt": window_ended_at,
+            "events": compatibility_events,
             "operationEvents": operation_events,
+            "evidenceSource": evidence_source,
+            "sinkPersistedCount": sink_persisted_count,
+            "sinkDeduplicatedCount": sink_deduplicated_count,
+            "sinkFailureCount": sink_failure_count,
+            "sourceFailureCount": source_failure_count,
+        }
+
+    @staticmethod
+    def _compatibility_event_payload(event: Mapping[str, Any]) -> dict[str, object]:
+        return {
+            "feature": event.get("feature"),
+            "policyVersion": event.get("policyVersion"),
+            "clientBuild": event.get("clientBuild"),
+            "decision": event.get("decision"),
+            "reason": event.get("reason"),
+            "route": event.get("route"),
+            "occurredAt": event.get("occurredAt"),
         }
 
 

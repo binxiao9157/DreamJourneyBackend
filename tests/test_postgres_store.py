@@ -7,6 +7,7 @@ from threading import Barrier
 from psycopg.types.json import Jsonb
 
 from app.services.auth_sessions import AuthSessionError, AuthSessionService
+from app.observability.events import EvidenceEventConflict
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -49,6 +50,33 @@ def make_digital_human_lease(
         "createdAt": created_at,
         "heartbeatAt": created_at,
         "expiresAt": expires_at,
+    }
+
+
+def make_evidence_event(event_id, *, reason="policyAllowed"):
+    return {
+        "eventId": event_id,
+        "schemaVersion": 1,
+        "type": "operation",
+        "operationId": "op_release_policy",
+        "correlationId": None,
+        "principalHash": None,
+        "resourceType": "releasePolicy",
+        "resourceIdHash": None,
+        "state": "succeeded",
+        "reason": reason,
+        "attempt": 1,
+        "occurredAt": "2026-07-16T12:00:00+00:00",
+        "env": "test",
+        "build": "42",
+        "redactionVersion": 1,
+        "operation": "releasePolicyDecision",
+        "route": "GET /config/runtime",
+        "latencyMs": 0,
+        "policyVersion": "release-policy-v1",
+        "clientBuild": 42,
+        "feature": "runtimeConfig",
+        "decision": "typedRuntimeContract",
     }
 
 
@@ -112,7 +140,102 @@ class FakeCursor:
         self.connection.executed.append((normalized, params))
         params = params or ()
 
-        if normalized.startswith("SELECT pg_advisory_xact_lock"):
+        def matching_evidence(operation, now_iso):
+            now = datetime.fromisoformat(str(now_iso).replace("Z", "+00:00"))
+            return [
+                item
+                for item in self.connection.evidence_events.values()
+                if item["event_type"] == "operation"
+                and item["payload"].get("operation") == operation
+                and (
+                    item["legal_hold"]
+                    or item["expires_at"] is None
+                    or datetime.fromisoformat(
+                        str(item["expires_at"]).replace("Z", "+00:00")
+                    )
+                    > now
+                )
+            ]
+
+        if normalized.startswith("INSERT INTO evidence_events"):
+            (
+                event_id,
+                operation_id,
+                event_type,
+                schema_version,
+                retention_class,
+                expires_at,
+                legal_hold,
+                payload_hash,
+                payload,
+                occurred_at,
+            ) = params
+            payload = unwrap_jsonb(payload)
+            if event_id in self.connection.evidence_events:
+                self.result = None
+            else:
+                item = {
+                    "event_id": event_id,
+                    "operation_id": operation_id,
+                    "event_type": event_type,
+                    "schema_version": schema_version,
+                    "retention_class": retention_class,
+                    "expires_at": expires_at,
+                    "legal_hold": legal_hold,
+                    "payload_hash": payload_hash,
+                    "payload": dict(payload),
+                    "occurred_at": occurred_at,
+                }
+                self.connection.evidence_events[event_id] = item
+                self.result = {
+                    key: item[key]
+                    for key in (
+                        "event_id",
+                        "payload_hash",
+                        "retention_class",
+                        "expires_at",
+                        "legal_hold",
+                    )
+                }
+        elif normalized.startswith(
+            "SELECT event_id, payload_hash, retention_class, expires_at, legal_hold FROM evidence_events"
+        ):
+            item = self.connection.evidence_events.get(params[0])
+            self.result = None if item is None else dict(item)
+        elif normalized.startswith("SELECT COUNT(*) AS event_count"):
+            matches = matching_evidence(params[0], params[1])
+            occurred = [item["occurred_at"] for item in matches]
+            self.result = {
+                "event_count": len(matches),
+                "window_started_at": min(occurred) if occurred else None,
+                "window_ended_at": max(occurred) if occurred else None,
+            }
+        elif normalized.startswith("SELECT payload->>'decision' AS value"):
+            counts = {}
+            for item in matching_evidence(params[0], params[1]):
+                value = item["payload"].get("decision")
+                counts[value] = counts.get(value, 0) + 1
+            self.result = [
+                {"value": value, "count": count}
+                for value, count in counts.items()
+            ]
+        elif normalized.startswith("SELECT payload->>'feature' AS value"):
+            counts = {}
+            for item in matching_evidence(params[0], params[1]):
+                value = item["payload"].get("feature")
+                counts[value] = counts.get(value, 0) + 1
+            self.result = [
+                {"value": value, "count": count}
+                for value, count in counts.items()
+            ]
+        elif normalized.startswith("SELECT payload FROM evidence_events"):
+            matches = matching_evidence(params[0], params[1])
+            matches.sort(key=lambda item: item["occurred_at"], reverse=True)
+            self.result = [
+                {"payload": dict(item["payload"])}
+                for item in matches[: int(params[2])]
+            ]
+        elif normalized.startswith("SELECT pg_advisory_xact_lock"):
             if self.connection.advisory_barrier is not None:
                 self.connection.advisory_barrier.wait(timeout=2)
             self.result = {"locked": True}
@@ -840,6 +963,7 @@ class FakeConnection:
         self.voice_clone_slots = {}
         self.digital_human_sessions = {}
         self.auth_sessions = {}
+        self.evidence_events = {}
         self.profiles = {}
         self.password_credentials = {}
         self.family_members = {}
@@ -975,7 +1099,55 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("idx_digital_human_sessions_resource_status", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS auth_sessions", sql)
         self.assertIn("idx_auth_sessions_user_status", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS evidence_events", sql)
+        self.assertIn("idx_evidence_events_operation_time", sql)
+        self.assertIn("idx_evidence_events_operation_kind_time", sql)
+        self.assertIn("idx_evidence_events_type_time", sql)
+        self.assertIn("retention_class TEXT NOT NULL", sql)
+        self.assertIn("legal_hold BOOLEAN NOT NULL DEFAULT FALSE", sql)
+        self.assertIn("octet_length(payload::text) <= 16384", sql)
+        self.assertIn("payload_hash ~ '^[0-9a-f]{64}$'", sql)
+        self.assertIn("CREATE OR REPLACE FUNCTION reject_evidence_event_update", sql)
+        self.assertIn("CREATE TRIGGER evidence_events_no_update", sql)
         self.assertGreaterEqual(connection.commits, 1)
+
+    def test_postgres_evidence_store_is_append_only_idempotent_and_restart_readable(self):
+        connection = FakeConnection()
+        first_store = PostgresStore(connection_factory=lambda: connection)
+        event = make_evidence_event("evt_postgres_release_policy")
+
+        created = first_store.append_evidence_event(
+            event,
+            retention_class="rolloutObservation",
+            expires_at_iso="2026-08-15T12:00:00+00:00",
+        )
+        duplicate = first_store.append_evidence_event(
+            event,
+            retention_class="rolloutObservation",
+            expires_at_iso="2026-08-15T12:00:00+00:00",
+        )
+        recreated_store = PostgresStore(connection_factory=lambda: connection)
+        summary = recreated_store.summarize_evidence_events(
+            operation="releasePolicyDecision",
+            now_iso="2026-07-16T13:00:00+00:00",
+        )
+
+        self.assertEqual(created["outcome"], "appended")
+        self.assertEqual(duplicate["outcome"], "deduplicated")
+        self.assertEqual(summary["eventCount"], 1)
+        self.assertEqual(summary["decisionCounts"], {"typedRuntimeContract": 1})
+        self.assertEqual(summary["featureCounts"], {"runtimeConfig": 1})
+        self.assertEqual(summary["events"][0]["eventId"], event["eventId"])
+
+        with self.assertRaises(EvidenceEventConflict):
+            recreated_store.append_evidence_event(
+                make_evidence_event(
+                    "evt_postgres_release_policy",
+                    reason="tamperedReason",
+                ),
+                retention_class="rolloutObservation",
+                expires_at_iso="2026-08-15T12:00:00+00:00",
+            )
 
     def test_postgres_store_persists_and_rotates_opaque_auth_sessions(self):
         connection = FakeConnection()

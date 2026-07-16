@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Annotated, Literal, Optional, Union
 
@@ -42,6 +43,14 @@ EvidenceState = Literal[
     "observed",
     "cancelled",
     "unknown",
+]
+EvidenceRetentionClass = Literal[
+    "rolloutObservation",
+    "operationalTemporary",
+    "rightsAudit",
+    "incidentAudit",
+    "providerCost",
+    "legalHold",
 ]
 
 
@@ -121,10 +130,59 @@ EvidenceEvent = Annotated[
     Field(discriminator="type"),
 ]
 _EVIDENCE_EVENT_ADAPTER = TypeAdapter(EvidenceEvent)
+_MACHINE_CODE_ADAPTER = TypeAdapter(MachineCode)
+_RETENTION_CLASS_ADAPTER = TypeAdapter(EvidenceRetentionClass)
+MAX_EVIDENCE_EVENT_BYTES = 16_384
+
+
+class EvidenceEventConflict(RuntimeError):
+    pass
+
+
+class EvidenceEventPayloadTooLarge(ValueError):
+    pass
 
 
 def validate_evidence_event(payload: object) -> EvidenceEvent:
     return _EVIDENCE_EVENT_ADAPTER.validate_python(payload)
+
+
+def canonicalize_evidence_event(
+    payload: object,
+    *,
+    max_payload_bytes: int = MAX_EVIDENCE_EVENT_BYTES,
+) -> tuple[EvidenceEvent, dict[str, object], str]:
+    event = validate_evidence_event(payload)
+    normalized = event.model_dump(mode="json")
+    encoded = json.dumps(
+        normalized,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(encoded) > max(1, max_payload_bytes):
+        raise EvidenceEventPayloadTooLarge("evidence event exceeds payload limit")
+    return event, normalized, hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_retention_class(value: str) -> str:
+    _MACHINE_CODE_ADAPTER.validate_python(value)
+    return _RETENTION_CLASS_ADAPTER.validate_python(value)
+
+
+def normalize_machine_code(value: str) -> str:
+    return _MACHINE_CODE_ADAPTER.validate_python(value)
+
+
+def normalize_evidence_timestamp(value: str) -> str:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("evidence timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def hash_evidence_identifier(value: str) -> str:
+    return hashlib.sha256(f"evidence-id-v1|{value}".encode("utf-8")).hexdigest()
 
 
 def map_release_policy_operation_event(

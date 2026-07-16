@@ -144,6 +144,18 @@ def main():
         observations.get("eventEnvelopeSchemaVersion") == 1,
         "operation evidence envelope schema must be available",
     )
+    require(
+        observations.get("evidenceStoreContractVersion") == 1,
+        "evidence store contract must be available",
+    )
+    require(
+        observations.get("evidenceSource") == "persistent",
+        "deployed rollout evidence must use the persistent source",
+    )
+    require(
+        observations.get("sinkFailureCount") == 0,
+        "deployed rollout evidence writer must not fail",
+    )
     operation_events = observations.get("operationEvents") or []
     require(operation_events, "operation evidence envelope must contain rollout events")
     require(
@@ -179,6 +191,8 @@ def main():
             0,
         ),
         "operationEventCount": len(operation_events),
+        "evidenceSource": observations.get("evidenceSource"),
+        "sinkFailureCount": observations.get("sinkFailureCount"),
     }
     if OUTPUT_PATH:
         with open(OUTPUT_PATH, "w", encoding="utf-8") as handle:

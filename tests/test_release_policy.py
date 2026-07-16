@@ -487,6 +487,7 @@ class ReleasePolicyDecisionRecorderTests(unittest.TestCase):
         self.assertEqual(summary["legacyRuntimeAliasHitCount"], 1)
         self.assertEqual(summary["decisionCounts"]["deny"], 1)
         self.assertEqual(summary["eventEnvelopeSchemaVersion"], 1)
+        self.assertEqual(summary["evidenceStoreContractVersion"], 1)
         self.assertEqual(len(summary["operationEvents"]), 2)
         self.assertEqual(summary["operationEvents"][0]["type"], "operation")
         self.assertEqual(summary["operationEvents"][0]["env"], "test")
