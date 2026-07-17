@@ -121,6 +121,7 @@ def main():
             "GET",
             f"/kb/snapshot/{user_id}",
             token=auth["accessToken"],
+            expected_status=404,
         )
         require(
             user_headers.get("x-dreamjourney-route-auth-reason") == "userPrincipalAuthorized",
