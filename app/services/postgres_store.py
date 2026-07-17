@@ -530,6 +530,8 @@ class PostgresStore:
             row = cursor.fetchone()
             if row is None or str(row.get("family_id") or "") != family_id:
                 return {"outcome": "invalid"}
+            if str(family.get("user_id") or "") != str(row.get("user_id") or ""):
+                return {"outcome": "invalid"}
             if str(row.get("status") or "") == "rotated":
                 self._revoke_auth_family_cursor(
                     cursor,
@@ -556,6 +558,11 @@ class PostgresStore:
                 or str(family.get("status") or "") != "active"
             ):
                 return {"outcome": "invalid"}
+            current_version = int(row.get("session_version") or 0)
+            if current_version < 1 or int(
+                family.get("current_session_version") or 0
+            ) != current_version:
+                return {"outcome": "invalid"}
             try:
                 refresh_expires_at = self._parse_iso_datetime(
                     self._iso_value(row.get("refresh_expires_at"))
@@ -578,7 +585,7 @@ class PostgresStore:
                 )
                 return {"outcome": "expired"}
 
-            version = int(row.get("session_version") or 0) + 1
+            version = current_version + 1
             successor_item = deepcopy(successor)
             successor_item.update(
                 {
@@ -600,6 +607,7 @@ class PostgresStore:
                     successor_session_id = %s, rotated_at = %s,
                     revoked_at = NULL, updated_at = NOW()
                 WHERE id = %s AND status = 'active'
+                  AND user_id = %s AND family_id = %s AND session_version = %s
                 """,
                 self._adapt_params(
                     (
@@ -607,6 +615,9 @@ class PostgresStore:
                         successor_item["sessionId"],
                         rotated_at_iso,
                         row["id"],
+                        row["user_id"],
+                        family_id,
+                        current_version,
                     )
                 ),
             )
@@ -618,8 +629,15 @@ class PostgresStore:
                 UPDATE token_families
                 SET current_session_version = %s, updated_at = %s
                 WHERE id = %s AND status = 'active'
+                  AND user_id = %s AND current_session_version = %s
                 """,
-                (version, rotated_at_iso, family_id),
+                (
+                    version,
+                    rotated_at_iso,
+                    family_id,
+                    row["user_id"],
+                    current_version,
+                ),
             )
             if int(cursor.rowcount or 0) != 1:
                 raise RuntimeError("auth token family changed during rotation")

@@ -666,9 +666,14 @@ class FakeCursor:
             family = self.connection.auth_token_families.get(params[0])
             self.result = None if family is None else {"id": family["id"]}
         elif normalized.startswith("UPDATE token_families SET current_session_version"):
-            version, updated_at, family_id = params
+            version, updated_at, family_id, user_id, expected_version = params
             family = self.connection.auth_token_families.get(family_id)
-            if family is not None and family.get("status") == "active":
+            if (
+                family is not None
+                and family.get("status") == "active"
+                and family.get("user_id") == user_id
+                and int(family.get("current_session_version") or 0) == expected_version
+            ):
                 family["current_session_version"] = version
                 family["updated_at"] = updated_at
                 self.rowcount = 1
@@ -731,10 +736,16 @@ class FakeCursor:
             self.rowcount = 1
             self.result = {"payload": payload}
         elif normalized.startswith("UPDATE auth_sessions SET status = 'rotated'") and "WHERE id = %s" in normalized:
-            patch, successor_id, rotated_at, session_id = params
+            patch, successor_id, rotated_at, session_id, user_id, family_id, expected_version = params
             patch = unwrap_jsonb(patch)
             session = self.connection.auth_sessions.get(session_id)
-            if session is not None and session.get("status") == "active":
+            if (
+                session is not None
+                and session.get("status") == "active"
+                and session.get("userId") == user_id
+                and session.get("tokenFamilyId") == family_id
+                and int(session.get("sessionVersion") or 0) == expected_version
+            ):
                 session.update(patch)
                 session["successorSessionId"] = successor_id
                 session["rotatedAt"] = rotated_at
@@ -1419,6 +1430,19 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertIn("UPDATE token_families", auth_sql)
         self.assertIn("INSERT INTO session_events", auth_sql)
         self.assertNotIn("SELECT payload FROM auth_sessions WHERE refresh_token_hash", auth_sql)
+        normalized_statements = [" ".join(statement.split()) for statement, _ in connection.executed]
+        session_rotation = next(
+            statement
+            for statement in normalized_statements
+            if statement.startswith("UPDATE auth_sessions SET status = 'rotated'")
+        )
+        family_rotation = next(
+            statement
+            for statement in normalized_statements
+            if statement.startswith("UPDATE token_families SET current_session_version")
+        )
+        self.assertIn("AND user_id = %s AND family_id = %s AND session_version = %s", session_rotation)
+        self.assertIn("AND user_id = %s AND current_session_version = %s", family_rotation)
 
     def test_postgres_session_revoke_uses_user_family_session_lock_order(self):
         connection = FakeConnection()

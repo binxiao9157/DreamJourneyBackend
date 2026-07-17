@@ -275,6 +275,8 @@ class InMemoryStore:
             family = self._auth_token_families.get(family_id)
             if family is None:
                 return {"outcome": "invalid"}
+            if str(family.get("userId") or "") != str(session.get("userId") or ""):
+                return {"outcome": "invalid"}
             if session.get("status") == "rotated":
                 self._revoke_family_locked(
                     family_id,
@@ -286,6 +288,10 @@ class InMemoryStore:
                 )
                 return {"outcome": "reuseDetected"}
             if session.get("status") != "active" or family.get("status") != "active":
+                return {"outcome": "invalid"}
+            if int(family.get("currentSessionVersion") or 0) != int(
+                session.get("sessionVersion") or 0
+            ):
                 return {"outcome": "invalid"}
             try:
                 refresh_expires_at = self._parse_iso_datetime(

@@ -182,6 +182,9 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertEqual(refreshed.status_code, 200)
         self.assertNotEqual(refreshed_auth["accessToken"], auth["accessToken"])
         self.assertNotEqual(refreshed_auth["refreshToken"], auth["refreshToken"])
+        self.assertEqual(refreshed_auth["subjectId"], auth["userId"])
+        self.assertEqual(refreshed_auth["parentSessionId"], auth["sessionId"])
+        self.assertEqual(refreshed_auth["sessionVersion"], auth["sessionVersion"] + 1)
         self.assertEqual(new_access_before_replay.status_code, 200)
         self.assertEqual(replay.status_code, 401)
 
@@ -258,6 +261,28 @@ class AuthSessionAPITests(unittest.TestCase):
             [event["eventType"] for event in family_events].count("refreshReuseDetected"),
             1,
         )
+
+    def test_refresh_fails_closed_when_family_subject_drifts(self):
+        store = InMemoryStore()
+        service = AuthSessionService(store, access_ttl_seconds=900, refresh_ttl_seconds=3600)
+        issued = service.issue("subject-a")
+        store._auth_token_families[issued["tokenFamilyId"]]["userId"] = "subject-b"
+
+        with self.assertRaises(AuthSessionError) as raised:
+            service.refresh(issued["refreshToken"])
+
+        self.assertEqual(raised.exception.code, "invalid_or_expired_refresh_token")
+
+    def test_refresh_fails_closed_when_family_version_drifts(self):
+        store = InMemoryStore()
+        service = AuthSessionService(store, access_ttl_seconds=900, refresh_ttl_seconds=3600)
+        issued = service.issue("subject-version")
+        store._auth_token_families[issued["tokenFamilyId"]]["currentSessionVersion"] = 7
+
+        with self.assertRaises(AuthSessionError) as raised:
+            service.refresh(issued["refreshToken"])
+
+        self.assertEqual(raised.exception.code, "invalid_or_expired_refresh_token")
 
     def test_legacy_session_refresh_requires_reauthentication(self):
         now = datetime(2026, 7, 17, tzinfo=timezone.utc)

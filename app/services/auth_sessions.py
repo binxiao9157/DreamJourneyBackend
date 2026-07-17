@@ -292,9 +292,10 @@ class AuthSessionService:
         )
 
     def _public_session(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        return {
+        public = {
             "sessionId": str(record["sessionId"]),
             "userId": str(record["userId"]),
+            "subjectId": str(record["userId"]),
             "tokenFamilyId": str(record["tokenFamilyId"]),
             "sessionVersion": int(record["sessionVersion"]),
             "tokenType": "Bearer",
@@ -304,6 +305,10 @@ class AuthSessionService:
             "refreshExpiresAt": str(record["refreshExpiresAt"]),
             "contractVersion": AUTH_SESSION_CONTRACT_VERSION,
         }
+        parent_session_id = str(record.get("parentSessionId") or "").strip()
+        if parent_session_id:
+            public["parentSessionId"] = parent_session_id
+        return public
 
     @staticmethod
     def _session_event(
