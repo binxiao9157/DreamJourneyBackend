@@ -371,10 +371,9 @@ iOS 真机或测试包需要配置：
 
 ```text
 DreamJourneyBackendBaseURL=https://dreamjourney-api.liftora.cn
-DreamJourneyBackendAPIToken=<BACKEND_API_TOKEN>
 ```
 
-iOS 不再需要配置火山声音复刻训练/查询/合成 API Key。声音复刻训练、查询和复刻音色 TTS 合成统一走后端。
+iOS 不配置服务器 `BACKEND_API_TOKEN`，业务请求使用登录会话的用户 access token。iOS 也不再需要配置火山声音复刻训练/查询/合成 API Key；声音复刻训练、查询和复刻音色 TTS 合成统一走后端。
 
 ## 12. 回滚方案
 

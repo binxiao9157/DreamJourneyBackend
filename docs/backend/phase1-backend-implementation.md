@@ -5,7 +5,7 @@
 ## 已覆盖能力
 
 - 服务端运行配置：`GET /config/runtime` 只暴露能力状态，不泄露密钥。
-- 火山实时对话配置：`POST /voice/realtime-token` 返回 iOS `SpeechEngineToB` 可直接启动的实时连接配置；该接口必须通过 `BACKEND_API_TOKEN` / `DreamJourneyBackendAPIToken` 保护，避免把火山运行凭证作为公开接口暴露。
+- 火山实时对话配置：`POST /voice/realtime-token` 返回 iOS `SpeechEngineToB` 可直接启动的实时连接配置；该接口必须使用用户 access token，服务器 `BACKEND_API_TOKEN` 仅用于 machine 路由，避免把共享系统凭据或火山运行凭证暴露给客户端。
 - 火山 TTS 代理：`POST /tts` 默认转发到火山 TTS，`dryRun=true` 可查看脱敏请求。
 - 火山声音复刻 V3 后端代理：`POST /voice/profiles` 在服务器配置 `VOLCENGINE_VOICE_CLONE_API_KEY` 后提交音色训练，`POST /voice/profiles/{user_id}/{voice_profile_id}/refresh` 查询训练状态，`POST /voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance` 在用户试听确认后解除质量验收闸门，`POST /voice/synthesis` 使用已训练且已确认的 `voiceProfileId` 合成复刻音色 TTS；iOS 不再直连火山复刻训练、查询或合成 API。
 - 高德行政区代理：`GET /maps/district` 默认转发高德 WebService，`dryRun=true` 可查看脱敏 URL。

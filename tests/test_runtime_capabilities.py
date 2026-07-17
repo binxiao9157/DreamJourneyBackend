@@ -86,6 +86,22 @@ class RuntimeCapabilityComposerTests(unittest.TestCase):
 
 
 class RuntimeCapabilityConfigTests(unittest.TestCase):
+    def test_runtime_config_exposes_complete_route_authentication_inventory(self):
+        development = RuntimeConfigService(Settings()).public_config()["auth"]["routeAuthentication"]
+        production = RuntimeConfigService(
+            Settings(environment="production", auth_route_mode="auto")
+        ).public_config()["auth"]["routeAuthentication"]
+
+        self.assertEqual(development["mode"], "shadow")
+        self.assertEqual(production["mode"], "enforce")
+        self.assertEqual(production["routeCount"], 64)
+        self.assertEqual(production["unclassifiedCount"], 0)
+        self.assertEqual(
+            production["authModeCounts"],
+            {"machine": 5, "public": 10, "user": 49},
+        )
+        self.assertTrue(production["productionEnforceReady"])
+
     def test_runtime_config_exposes_complete_five_axis_snapshots(self):
         settings = Settings(
             deepseek_api_key="fixture-deepseek-key",

@@ -82,6 +82,17 @@ from app.services.safety_policy import (
     evaluate_subject_eligibility,
 )
 from app.services.recovery_access import RecoveryAccessPolicy
+from app.services.route_authentication import (
+    MACHINE_API_AUDIENCE,
+    MACHINE_SYSTEM_SCOPES,
+    PrincipalKind,
+    RequestPrincipal,
+    RouteAuthenticationDecision,
+    RouteAuthenticationDecisionRecorder,
+    RouteAuthenticationPolicy,
+    resolve_route_authentication_mode,
+    validate_route_authentication_startup,
+)
 from app.services.readiness import ReadinessService, liveness_payload
 from app.services.release_policy import (
     ReleasePolicyCommandGate,
@@ -120,11 +131,17 @@ BACKEND_API_TOKEN = settings.backend_api_token or ""
 AUTH_ACCESS_TTL_SECONDS = max(60, settings.auth_access_ttl_seconds)
 AUTH_REFRESH_TTL_SECONDS = max(AUTH_ACCESS_TTL_SECONDS + 60, settings.auth_refresh_ttl_seconds)
 AUTH_LEGACY_PHONE_LOGIN_ENABLED = legacy_phone_login_enabled(settings)
+AUTH_ROUTE_MODE = resolve_route_authentication_mode(
+    settings.environment,
+    settings.auth_route_mode,
+)
 AUTH_OWNERSHIP_MODE = (
     settings.auth_ownership_mode
     if settings.auth_ownership_mode in {"shadow", "enforce"}
     else "shadow"
 )
+ROUTE_AUTHENTICATION_POLICY = RouteAuthenticationPolicy()
+ROUTE_AUTHENTICATION_DECISION_RECORDER = RouteAuthenticationDecisionRecorder()
 RECOVERY_ACCESS_POLICY = RecoveryAccessPolicy(
     mode=settings.recovery_access_mode,
     authority_epoch=settings.authority_epoch,
@@ -338,6 +355,14 @@ def _configured_backend_api_token() -> str:
     return BACKEND_API_TOKEN or str(settings.backend_api_token or "")
 
 
+def _configured_machine_principal() -> RequestPrincipal:
+    return RequestPrincipal.machine(
+        principal_id="backend-service-v1",
+        audience=MACHINE_API_AUDIENCE,
+        scopes=MACHINE_SYSTEM_SCOPES,
+    )
+
+
 def _ownership_path_user_id(path: str) -> str:
     patterns = (
         r"^/profile/([^/]+)$",
@@ -387,10 +412,10 @@ def _ownership_log_hash(value: str) -> str:
 
 
 def _request_user_principal_id(request: Request) -> Optional[str]:
-    principal = getattr(request.state, "auth_principal", {})
-    if principal.get("kind") != "user":
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, RequestPrincipal) or principal.kind != PrincipalKind.USER:
         return None
-    user_id = str(principal.get("userId") or "").strip()
+    user_id = str(principal.principal_id or "").strip()
     return user_id or None
 
 
@@ -426,8 +451,13 @@ def _set_auth_diagnostic_headers(
     principal_kind: str,
     ownership_decision: str,
     authorization_headers: Dict[str, str],
+    route_authentication_headers: Dict[str, str],
 ) -> Any:
     response.headers["X-DreamJourney-Auth-Principal"] = principal_kind
+    response.headers["X-DreamJourney-Route-Auth-Mode"] = AUTH_ROUTE_MODE
+    response.headers["X-DreamJourney-Route-Auth-Policy"] = route_authentication_headers["policy"]
+    response.headers["X-DreamJourney-Route-Auth-Decision"] = route_authentication_headers["decision"]
+    response.headers["X-DreamJourney-Route-Auth-Reason"] = route_authentication_headers["reason"]
     response.headers["X-DreamJourney-Ownership-Mode"] = AUTH_OWNERSHIP_MODE
     response.headers["X-DreamJourney-Ownership-Decision"] = ownership_decision
     response.headers["X-DreamJourney-Authorization-Policy"] = authorization_headers["policy"]
@@ -455,7 +485,7 @@ def _release_policy_bool_header(request: Request, name: str) -> Optional[bool]:
     return None
 
 
-def _release_policy_audience(request: Request, principal: Dict[str, Any]) -> str:
+def _release_policy_audience(request: Request, principal: RequestPrincipal) -> str:
     value = str(request.headers.get("x-dreamjourney-policy-audience") or "owner")
     return normalize_release_policy_audience(
         value,
@@ -515,9 +545,9 @@ def _release_policy_denied_response(error: ReleasePolicyFeatureAccessDenied) -> 
     )
 
 
-def _release_policy_account_generation(principal: Dict[str, Any]) -> str:
-    if principal.get("kind") == "system":
-        return "system"
+def _release_policy_account_generation(principal: RequestPrincipal) -> str:
+    if principal.kind == PrincipalKind.MACHINE:
+        return "machine"
     source = str(
         principal.get("sessionId")
         or principal.get("userId")
@@ -529,7 +559,7 @@ def _release_policy_account_generation(principal: Dict[str, Any]) -> str:
 def _evaluate_release_policy_command(
     request: Request,
     payload: Dict[str, Any],
-    principal: Dict[str, Any],
+    principal: RequestPrincipal,
 ) -> Tuple[Optional[JSONResponse], Dict[str, str]]:
     feature = RELEASE_POLICY_COMMAND_GATE.feature_for_request(
         request.method,
@@ -540,7 +570,7 @@ def _evaluate_release_policy_command(
         return None, {}
     release_stage = RELEASE_POLICY_SERVICE.release_stage_for(feature)
     system_default_closed_bypass = (
-        principal.get("kind") == "system"
+        principal.kind == PrincipalKind.MACHINE
         and release_stage in {"M1", "M2", "M3", "M4"}
     )
     mode = (
@@ -592,7 +622,7 @@ def _evaluate_release_policy_command(
                 request.headers.get("x-dreamjourney-feature") or ""
             ).strip() or None,
             expected_account_generation=_release_policy_account_generation(principal),
-            require_client_capture=principal.get("kind") != "system",
+            require_client_capture=principal.kind != PrincipalKind.MACHINE,
         )
         RELEASE_POLICY_COMMAND_GATE.revalidate_effect(captured)
         RELEASE_POLICY_DECISION_RECORDER.record(
@@ -716,45 +746,112 @@ async def require_backend_api_token(request: Request, call_next):
     if recovery_response is not None:
         return recovery_response
 
-    if request.url.path in INFRASTRUCTURE_PATHS:
-        return await call_next(request)
-
     bearer_token = _request_bearer_token(request)
     backend_header_token = _request_backend_api_token(request)
     configured_backend_token = _configured_backend_api_token()
-    principal: Dict[str, Any] = {"kind": "anonymous"}
+    principal = RequestPrincipal.anonymous()
 
     if bearer_token and _tokens_match(bearer_token, configured_backend_token):
-        principal = {"kind": "system"}
+        principal = _configured_machine_principal()
     elif bearer_token:
         session = _auth_session_service().resolve_access_token(bearer_token)
         if session is None:
             return JSONResponse(status_code=401, content={"detail": "invalid or expired access token"})
-        principal = {
-            "kind": "user",
-            "userId": str(session.get("userId") or ""),
-            "sessionId": str(session.get("sessionId") or ""),
-            "tokenFamilyId": str(session.get("tokenFamilyId") or ""),
-            "sessionVersion": int(session.get("sessionVersion") or 0),
-        }
+        try:
+            principal = RequestPrincipal.user(
+                principal_id=str(session.get("userId") or ""),
+                session_id=str(session.get("sessionId") or ""),
+                token_family_id=str(session.get("tokenFamilyId") or ""),
+                session_version=int(session.get("sessionVersion") or 0),
+            )
+        except (TypeError, ValueError):
+            logger.error("auth_session_principal_contract_invalid")
+            return JSONResponse(status_code=401, content={"detail": "invalid access token session"})
     elif backend_header_token:
         if not _tokens_match(backend_header_token, configured_backend_token):
             return JSONResponse(status_code=401, content={"detail": "invalid backend api token"})
-        principal = {"kind": "system"}
-    elif configured_backend_token and not _allows_anonymous_auth(request.url.path):
-        return JSONResponse(status_code=401, content={"detail": "invalid backend api token"})
+        principal = _configured_machine_principal()
 
     request.state.auth_principal = principal
-    ownership_decision = "system" if principal["kind"] == "system" else principal["kind"]
+    try:
+        route_authentication_decision = ROUTE_AUTHENTICATION_POLICY.evaluate(
+            method=request.method,
+            path=request.url.path,
+            principal=principal,
+        )
+    except Exception:
+        logger.exception("route_authentication_policy_evaluation_failed method=%s", request.method)
+        route_authentication_decision = RouteAuthenticationDecision(
+            policy_id="routeAuthentication",
+            decision="deny",
+            reason="policyEvaluationFailed",
+            allowed=False,
+            route_label=f"{request.method.upper()} {request.url.path}",
+            principal_kind=principal.kind,
+        )
+    ROUTE_AUTHENTICATION_DECISION_RECORDER.record(route_authentication_decision)
+    route_authentication_headers = route_authentication_decision.header_values()
+    route_deny_is_terminal = (
+        route_authentication_decision.reason == "policyEvaluationFailed"
+        or route_authentication_decision.reason == "machinePrincipalRequired"
+        or (
+            principal.kind == PrincipalKind.ANONYMOUS
+            and bool(configured_backend_token)
+        )
+    )
+    if (
+        not route_authentication_decision.allowed
+        and AUTH_ROUTE_MODE != "enforce"
+        and not route_deny_is_terminal
+    ):
+        route_authentication_headers["decision"] = "observeDeny"
+    if (
+        not route_authentication_decision.allowed
+        and (AUTH_ROUTE_MODE == "enforce" or route_deny_is_terminal)
+    ):
+        if route_authentication_decision.reason == "policyEvaluationFailed":
+            status_code = 503
+        elif principal.kind == PrincipalKind.ANONYMOUS:
+            status_code = 401
+        elif route_authentication_decision.reason == "routeNotClassified":
+            status_code = 503
+        else:
+            status_code = 403
+        compatibility_reason = (
+            "systemPrincipalRequired"
+            if route_authentication_decision.reason == "machinePrincipalRequired"
+            else route_authentication_decision.reason
+        )
+        return _set_auth_diagnostic_headers(
+            JSONResponse(
+                status_code=status_code,
+                content={
+                    "detail": {
+                        "code": "route_authentication_denied",
+                        "reason": route_authentication_decision.reason,
+                    }
+                },
+            ),
+            principal_kind=principal.kind.value,
+            ownership_decision="notEvaluated",
+            authorization_headers={
+                "policy": route_authentication_decision.policy_id,
+                "decision": "deny",
+                "reason": compatibility_reason,
+            },
+            route_authentication_headers=route_authentication_headers,
+        )
+
+    ownership_decision = principal.kind.value
     authorization_headers = {
-        "policy": str(principal["kind"]),
-        "decision": "allowSystem" if principal["kind"] == "system" else "observeAnonymous",
-        "reason": "systemPrincipal" if principal["kind"] == "system" else "noCredential",
+        "policy": principal.kind.value,
+        "decision": "allowMachine" if principal.kind == PrincipalKind.MACHINE else "observeAnonymous",
+        "reason": "machinePrincipal" if principal.kind == PrincipalKind.MACHINE else "noCredential",
     }
     payload_context: Dict[str, Any] = {}
-    if principal["kind"] == "user":
+    if principal.kind == PrincipalKind.USER:
         claims, inspection_decision, payload_context = await _ownership_claim_user_ids(request)
-        principal_user_id = str(principal.get("userId") or "")
+        principal_user_id = str(principal.principal_id or "")
         if inspection_decision != "inspected":
             ownership_decision = inspection_decision
         else:
@@ -802,9 +899,10 @@ async def require_backend_api_token(request: Request, call_next):
                 principal_kind="user",
                 ownership_decision=ownership_decision,
                 authorization_headers=authorization_headers,
+                route_authentication_headers=route_authentication_headers,
             )
 
-    if principal["kind"] != "user":
+    if principal.kind != PrincipalKind.USER:
         payload_context = await _request_json_payload(request)
 
     if request.url.path == "/config/runtime":
@@ -827,18 +925,20 @@ async def require_backend_api_token(request: Request, call_next):
     if release_policy_response is not None:
         return _set_auth_diagnostic_headers(
             release_policy_response,
-            principal_kind=str(principal["kind"]),
+            principal_kind=principal.kind.value,
             ownership_decision=ownership_decision,
             authorization_headers=authorization_headers,
+            route_authentication_headers=route_authentication_headers,
         )
 
     response = await call_next(request)
     response = _set_release_policy_diagnostic_headers(response, release_policy_diagnostic)
     return _set_auth_diagnostic_headers(
         response,
-        principal_kind=str(principal["kind"]),
+        principal_kind=principal.kind.value,
         ownership_decision=ownership_decision,
         authorization_headers=authorization_headers,
+        route_authentication_headers=route_authentication_headers,
     )
 
 
@@ -898,6 +998,13 @@ async def database_request_unit_of_work(request: Request, call_next):
 
 @app.on_event("startup")
 def startup() -> None:
+    validate_route_authentication_startup(
+        app,
+        registry=ROUTE_AUTHENTICATION_POLICY.registry,
+        environment=settings.environment,
+        enforcement_mode=AUTH_ROUTE_MODE,
+        machine_credential_configured=bool(_configured_backend_api_token()),
+    )
     init_store(store)
 
 
@@ -964,10 +1071,11 @@ def release_policy(
 
 @app.get("/ops/release-policy/observations")
 def release_policy_observations(request: Request) -> Dict[str, Any]:
-    principal = getattr(request.state, "auth_principal", {})
-    if principal.get("kind") != "system":
-        raise HTTPException(status_code=403, detail="system principal required")
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, RequestPrincipal) or principal.kind != PrincipalKind.MACHINE:
+        raise HTTPException(status_code=403, detail="machine principal required")
     summary = RELEASE_POLICY_DECISION_RECORDER.summary()
+    summary["routeAuthentication"] = ROUTE_AUTHENTICATION_DECISION_RECORDER.summary()
     unit_of_work_metrics = getattr(store, "uow_metrics", None)
     if callable(unit_of_work_metrics):
         summary["databaseUnitOfWork"] = unit_of_work_metrics()
@@ -1215,8 +1323,8 @@ def refresh_auth_session(request: Request, payload: Dict[str, Any]) -> Dict[str,
 
 @app.post("/auth/logout")
 def logout_auth_session(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
-    principal = getattr(request.state, "auth_principal", {})
-    if principal.get("kind") != "user":
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, RequestPrincipal) or principal.kind != PrincipalKind.USER:
         raise HTTPException(status_code=401, detail="user access token is required")
     scope = str(payload.get("scope") or "session").strip()
     try:

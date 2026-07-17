@@ -50,10 +50,12 @@
 
 `/kb/sync` 会过滤 KBLite 图谱里的 `localOnly` 实体，并清理事件、事实中的无效引用。
 
-## 登录会话与 ownership shadow
+## 登录会话、路由认证与 ownership
 
 - `/auth/login` 返回短期 opaque access token 和可轮换 refresh token；数据库只保存 SHA-256 hash，不保存原始 token。
-- iOS 业务请求使用用户 access token；`BACKEND_API_TOKEN` 通过独立 header 保留部署兼容和系统级 smoke。
+- iOS 业务请求只使用用户 access token；不得把 `BACKEND_API_TOKEN` 打进客户端包。
+- `BACKEND_API_TOKEN` 仅代表服务端 machine principal，只能调用声明了对应 machine scope 的系统任务和运维路由，不能调用普通用户业务路由。
+- `AUTH_ROUTE_MODE=auto` 在 production 自动解析为 `enforce`、在非生产环境解析为 `shadow`；非法值会阻止启动，生产环境缺少 machine credential 也会阻止启动。
 - `/auth/refresh` 每次成功同时轮换 access/refresh token，旧 refresh token 重放返回 `401`。
 - `/auth/logout` 撤销当前会话，账号清理时同时删除该用户的 auth sessions。
 - `AUTH_OWNERSHIP_MODE=shadow` 只记录 authenticated user 与 payload/path actor 的 `match/mismatch/unclaimed`，不会拦截现有请求。
@@ -99,7 +101,7 @@ curl http://127.0.0.1:3100/ready
 ## 真机配置建议
 
 - `DreamJourneyBackendBaseURL`：指向 `https://dreamjourney-api.liftora.cn`
-- `DreamJourneyBackendAPIToken`：如果服务器启用了 `BACKEND_API_TOKEN`，iOS 必须配置同值 token，才能拉取实时语音运行配置。
+- iOS 不配置 `DreamJourneyBackendAPIToken`；登录后的业务接口使用用户 access token，公开 runtime/login/challenge 接口使用显式 public 合同。
 - `OpenAvatarChatBaseURL`：仅保留为旧 OpenAvatarChat 开源工程兼容配置，不作为本后端入口。
 - `SafetyGuardBaseURL`：后续如果把 safety guard 挂到本后端，也指向同域名
 - `AMapWebServiceKey`、`DeepSeekAPIKey`、`VolcEngineAPIKey`、`VolcEngineAppID`、`VolcEngineAppToken`：逐步从 iOS LocalConfig 迁移到后端 `.env`；实时语音会通过 `POST /voice/realtime-token` 下发运行配置。

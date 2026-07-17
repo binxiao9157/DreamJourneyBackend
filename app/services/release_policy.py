@@ -34,7 +34,7 @@ def normalize_release_policy_audience(
     normalized = requested.strip()
     if normalized == "qa":
         is_production = environment.strip().lower() in {"production", "prod"}
-        if not is_production and principal_kind == "system":
+        if not is_production and principal_kind in {"machine", "system"}:
             return "qa"
         return "owner"
     if normalized in {"owner", "family", "visitor"}:

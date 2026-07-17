@@ -4,6 +4,7 @@ from app.core.config import Settings
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.identity_bindings import identity_challenge_runtime_descriptor
+from app.services.route_authentication import resolve_route_authentication_mode
 from app.services.route_ownership import RouteOwnershipRegistry
 from app.services.release_policy import ReleasePolicyService, parse_release_policy_feature_set
 from app.services.recovery_access import RecoveryAccessPolicy
@@ -29,6 +30,10 @@ class RuntimeConfigService:
         digital_human_asset_mode = self._digital_human_asset_mode()
         digital_human_access = DigitalHumanAccessPolicy().blocked_mobile_contract()
         route_ownership_audit = RouteOwnershipRegistry().audit_summary()
+        route_authentication_mode = resolve_route_authentication_mode(
+            self.settings.environment,
+            self.settings.auth_route_mode,
+        )
         realtime_voice = TokenService(self.settings).realtime_config(user_id="runtime-capability")
         identity_challenge = identity_challenge_runtime_descriptor(self.settings)
         release_policy = ReleasePolicyService(
@@ -100,6 +105,22 @@ class RuntimeConfigService:
                 "refreshReuseRevokesFamily": True,
                 "legacyRefreshPolicy": "reauthRequired",
                 "logoutScopes": ["session", "family", "allDevices"],
+                "routeAuthentication": {
+                    "mode": route_authentication_mode,
+                    "routeCount": route_ownership_audit["routeCount"],
+                    "authModeCounts": route_ownership_audit["authModeCounts"],
+                    "unclassifiedCount": route_ownership_audit["unclassifiedCount"],
+                    "productionEnforceReady": route_authentication_mode == "enforce",
+                    "userAudience": "dreamjourney-user",
+                    "machineAudience": "dreamjourney-backend",
+                    "diagnosticHeaders": [
+                        "X-DreamJourney-Route-Auth-Mode",
+                        "X-DreamJourney-Route-Auth-Policy",
+                        "X-DreamJourney-Route-Auth-Decision",
+                        "X-DreamJourney-Route-Auth-Reason",
+                    ],
+                    "contractVersion": 1,
+                },
                 "ownershipMode": (
                     self.settings.auth_ownership_mode
                     if self.settings.auth_ownership_mode in {"shadow", "enforce"}

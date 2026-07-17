@@ -23,8 +23,8 @@
 本次更新完成后：
 
 - `/voice/realtime-token` 返回 iOS `SpeechEngineToB` 可直接使用的实时语音运行配置。
-- 如果服务器启用了 `BACKEND_API_TOKEN`，iOS 必须配置同值 `DreamJourneyBackendAPIToken`。
-- 新电脑/新真机不再需要把火山实时语音三件套重复配置到本地，只要能访问后端并带对 token。
+- `BACKEND_API_TOKEN` 仅供服务器 machine principal 和运维 smoke 使用，禁止配置到 iOS。
+- 新电脑/新真机不再需要把火山实时语音三件套重复配置到本地；登录后由用户 access token 调用受保护接口。
 
 ## 2. 登录服务器
 
@@ -148,7 +148,7 @@ AMAP_WEB_SERVICE_KEY=<高德 WebService Key>
 openssl rand -hex 32
 ```
 
-把生成值写入服务器 `.env` 的 `BACKEND_API_TOKEN`。同一个值需要配置到 iOS 的 `DreamJourneyBackendAPIToken`；`/live`、`/ready`、兼容 `/health` 和显式匿名合同不需要该 token，业务接口仍按认证策略校验。
+把生成值只写入服务器 `.env` 的 `BACKEND_API_TOKEN`，不要复制到 iOS。该值解析为 machine principal，只能调用声明了 machine scope 的系统任务；`/live`、`/ready`、兼容 `/health` 和显式 public 合同不需要凭据，普通业务接口使用用户 access token。
 
 确保 `.env` 权限正确：
 
@@ -563,7 +563,6 @@ https://www.mmdd10.tech/dreamjourney-api
 
 ```text
 DreamJourneyBackendBaseURL=https://www.mmdd10.tech/dreamjourney-api
-DreamJourneyBackendAPIToken=<服务器 BACKEND_API_TOKEN 同值>
 AMapAPIKey=<iOS 高德 SDK Key>
 ```
 
@@ -584,28 +583,23 @@ AMapWebServiceKey
 如果 App 仍提示“语音服务暂不可用”，优先检查：
 
 1. iOS 的 `DreamJourneyBackendBaseURL` 是否是 `https://www.mmdd10.tech/dreamjourney-api`，不要写成 `localhost`。
-2. iOS 的 `DreamJourneyBackendAPIToken` 是否与服务器 `BACKEND_API_TOKEN` 完全一致。
+2. iOS 是否已登录并持有有效用户 access token。
 3. 服务器 `/voice/realtime-token` 是否返回 `authMode=legacy` 且 `hasAppToken=True`。
 4. 后端容器是否在 `.env` 修改后重新创建，而不是只 restart。
 
 ## 13. 常见问题排查
 
-### 13.1 `/config/runtime` 或其他接口返回 401
+### 13.1 业务接口返回 401
 
-原因：服务器启用了 `BACKEND_API_TOKEN`，请求没带 token 或 token 不一致。
+原因：用户 access token 缺失、过期或已撤销。`/config/runtime` 是 public 路由，不应因缺少用户会话返回 401。
 
 处理：
 
 ```bash
-curl -i "$DJ_API/config/runtime" \
-  -H "Authorization: Bearer ${BACKEND_API_TOKEN}"
+curl -i "$DJ_API/config/runtime"
 ```
 
-iOS 侧同步配置：
-
-```text
-DreamJourneyBackendAPIToken=<服务器 BACKEND_API_TOKEN 同值>
-```
+iOS 侧应重新登录或完成 refresh token 轮换；不得用 `BACKEND_API_TOKEN` 代替用户身份。
 
 ### 13.2 `/voice/realtime-token` 返回 503
 

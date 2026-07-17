@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List
 
 from app.db.pool import ConnectionPoolExhausted
 from app.db.readiness import DatabaseReadinessError, SchemaReadinessError
+from app.services.route_authentication import resolve_route_authentication_mode
 
 
 PRODUCTION_ENVIRONMENTS = {"prod", "production"}
@@ -109,6 +110,10 @@ class ReadinessService:
         ownership_mode = str(
             getattr(self.settings, "auth_ownership_mode", "") or ""
         ).lower()
+        route_mode = resolve_route_authentication_mode(
+            environment,
+            str(getattr(self.settings, "auth_route_mode", "") or ""),
+        )
         access_ttl = int(getattr(self.settings, "auth_access_ttl_seconds", 0) or 0)
         refresh_ttl = int(getattr(self.settings, "auth_refresh_ttl_seconds", 0) or 0)
         if ownership_mode not in {"shadow", "enforce"} or access_ttl < 60 or refresh_ttl <= access_ttl:
@@ -117,6 +122,8 @@ class ReadinessService:
             getattr(self.settings, "backend_api_token", "") or ""
         ).strip():
             return self._component("auth", "notReady", "requiredAuthConfigMissing", timestamp)
+        if environment in PRODUCTION_ENVIRONMENTS and route_mode != "enforce":
+            return self._component("auth", "notReady", "routeAuthenticationNotEnforced", timestamp)
         return self._component("auth", "ready", "requiredAuthConfigPresent", timestamp)
 
     @staticmethod

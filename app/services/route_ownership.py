@@ -17,6 +17,12 @@ class RouteOwnershipCategory(str, Enum):
     SYSTEM_ONLY = "systemOnly"
 
 
+class RouteAuthenticationMode(str, Enum):
+    PUBLIC = "public"
+    USER = "user"
+    MACHINE = "machine"
+
+
 @dataclass(frozen=True)
 class RouteOwnershipRule:
     method: str
@@ -25,6 +31,9 @@ class RouteOwnershipRule:
     policy_id: str
     owner_body_field: Optional[str] = None
     owner_path_parameter: Optional[str] = None
+    auth_mode: RouteAuthenticationMode = RouteAuthenticationMode.USER
+    required_audience: Optional[str] = "dreamjourney-user"
+    required_scopes: tuple[str, ...] = ("user:api",)
 
 
 @dataclass(frozen=True)
@@ -51,7 +60,28 @@ def _rule(
     *,
     owner_body_field: Optional[str] = None,
     owner_path_parameter: Optional[str] = None,
+    auth_mode: Optional[RouteAuthenticationMode] = None,
+    required_audience: Optional[str] = None,
+    required_scopes: Iterable[str] = (),
 ) -> RouteOwnershipRule:
+    resolved_auth_mode = auth_mode
+    if resolved_auth_mode is None:
+        if category == RouteOwnershipCategory.PUBLIC:
+            resolved_auth_mode = RouteAuthenticationMode.PUBLIC
+        elif category == RouteOwnershipCategory.SYSTEM_ONLY:
+            resolved_auth_mode = RouteAuthenticationMode.MACHINE
+        else:
+            resolved_auth_mode = RouteAuthenticationMode.USER
+    resolved_audience = required_audience
+    resolved_scopes = tuple(sorted(set(required_scopes)))
+    if resolved_auth_mode == RouteAuthenticationMode.USER:
+        resolved_audience = resolved_audience or "dreamjourney-user"
+        resolved_scopes = resolved_scopes or ("user:api",)
+    elif resolved_auth_mode == RouteAuthenticationMode.MACHINE:
+        resolved_audience = resolved_audience or "dreamjourney-backend"
+    else:
+        resolved_audience = None
+        resolved_scopes = ()
     return RouteOwnershipRule(
         method=method.upper(),
         path_template=path_template,
@@ -59,6 +89,9 @@ def _rule(
         policy_id=policy_id,
         owner_body_field=owner_body_field,
         owner_path_parameter=owner_path_parameter,
+        auth_mode=resolved_auth_mode,
+        required_audience=resolved_audience,
+        required_scopes=resolved_scopes,
     )
 
 
@@ -121,17 +154,30 @@ class RouteOwnershipRegistry:
             _rule("POST", "/auth/logout", session, "userSession"),
             _owner_body("POST", "/auth/delete", "accountOwner"),
             _rule("POST", "/auth/restore", public, "publicAccountRestore"),
-            _rule("POST", "/auth/purge-expired-deletions", system, "systemAccountPurge"),
+            _rule(
+                "POST",
+                "/auth/purge-expired-deletions",
+                system,
+                "systemAccountPurge",
+                required_scopes=("account:purge",),
+            ),
             _owner_body("POST", "/auth/password", "accountOwner"),
             _owner_body("POST", "/profile", "profileOwner"),
             _owner_path("GET", "/profile/{user_id}", "profileOwner"),
-            _rule("GET", "/config/runtime", service, "authenticatedRuntimeConfig"),
+            _rule(
+                "GET",
+                "/config/runtime",
+                service,
+                "publicRuntimeConfig",
+                auth_mode=RouteAuthenticationMode.PUBLIC,
+            ),
             _rule("GET", "/v2/release-policy", public, "publicReleasePolicy"),
             _rule(
                 "GET",
                 "/ops/release-policy/observations",
                 system,
                 "systemReleasePolicyObservations",
+                required_scopes=("releasePolicy:observe",),
             ),
             _owner_body("POST", "/context/build", "contextOwner"),
             _owner_body("POST", "/voice/realtime-token", "voiceOwner"),
@@ -147,7 +193,13 @@ class RouteOwnershipRegistry:
             _owner_body("POST", "/voice/synthesis", "voiceOwner"),
             _owner_path("DELETE", "/voice/profiles/{user_id}/{voice_profile_id}", "voiceOwner"),
             _owner_body("POST", "/tts", "voiceOwner"),
-            _rule("GET", "/maps/district", service, "authenticatedDistrictMap"),
+            _rule(
+                "GET",
+                "/maps/district",
+                service,
+                "authenticatedDistrictMap",
+                auth_mode=RouteAuthenticationMode.USER,
+            ),
             _owner_body("POST", "/kb/sync", "knowledgeOwner"),
             _owner_body("POST", "/kb/mutations", "knowledgeOwner"),
             _owner_body("POST", "/kb/governance/actions", "knowledgeOwner"),
@@ -169,14 +221,32 @@ class RouteOwnershipRegistry:
             ),
             _owner_path("DELETE", "/archive/items/{user_id}/{item_id}", "archiveOwner"),
             _owner_body("POST", "/archive/image-analysis", "archiveOwner"),
-            _rule("POST", "/mailbox/letters", system, "systemMailboxDelivery"),
+            _rule(
+                "POST",
+                "/mailbox/letters",
+                system,
+                "systemMailboxDelivery",
+                required_scopes=("mailbox:deliver",),
+            ),
             _owner_path("GET", "/mailbox/letters/{user_id}", "mailboxOwner"),
             _owner_path("POST", "/mailbox/letters/{user_id}/{letter_id}/read", "mailboxOwner"),
             _owner_path("POST", "/mailbox/letters/{user_id}/{letter_id}/archive", "mailboxOwner"),
             _owner_body("POST", "/devices/push-token", "deviceOwner"),
             _owner_body("POST", "/echo/delayed-replies", "echoOwner"),
-            _rule("POST", "/echo/delayed-replies/dispatch-due", system, "systemEchoDispatch"),
-            _rule("POST", "/archive/time-letters/dispatch-due", system, "systemTimeLetterDispatch"),
+            _rule(
+                "POST",
+                "/echo/delayed-replies/dispatch-due",
+                system,
+                "systemEchoDispatch",
+                required_scopes=("echo:dispatch",),
+            ),
+            _rule(
+                "POST",
+                "/archive/time-letters/dispatch-due",
+                system,
+                "systemTimeLetterDispatch",
+                required_scopes=("timeLetter:dispatch",),
+            ),
             _owner_path("GET", "/echo/delayed-replies/{user_id}", "echoOwner"),
             _owner_body("POST", "/family/invite", "familyOwner"),
             _owner_path("GET", "/family/members/{user_id}", "familyOwner"),
@@ -229,9 +299,11 @@ class RouteOwnershipRegistry:
 
     def audit_summary(self) -> Dict[str, Any]:
         category_counts = Counter(rule.category.value for rule in self.rules)
+        auth_mode_counts = Counter(rule.auth_mode.value for rule in self.rules)
         return {
             "routeCount": len(self.rules),
             "categoryCounts": dict(sorted(category_counts.items())),
+            "authModeCounts": dict(sorted(auth_mode_counts.items())),
             "unclassifiedCount": 0,
             "routes": [
                 {
@@ -239,6 +311,9 @@ class RouteOwnershipRegistry:
                     "pathTemplate": rule.path_template,
                     "category": rule.category.value,
                     "policy": rule.policy_id,
+                    "authMode": rule.auth_mode.value,
+                    "requiredAudience": rule.required_audience,
+                    "requiredScopes": list(rule.required_scopes),
                 }
                 for rule in self.rules
             ],

@@ -699,7 +699,7 @@ class AuthSessionAPITests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers["x-dreamjourney-auth-principal"], "system")
+        self.assertEqual(response.headers["x-dreamjourney-auth-principal"], "machine")
 
         dispatch = client.post(
             "/archive/time-letters/dispatch-due",
@@ -707,7 +707,7 @@ class AuthSessionAPITests(unittest.TestCase):
             json={"now": "2026-07-10T00:00:00Z", "limit": 1},
         )
         self.assertEqual(dispatch.status_code, 200)
-        self.assertEqual(dispatch.headers["x-dreamjourney-auth-principal"], "system")
+        self.assertEqual(dispatch.headers["x-dreamjourney-auth-principal"], "machine")
 
 
 class AuthSessionServiceTests(unittest.TestCase):

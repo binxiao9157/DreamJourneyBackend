@@ -90,6 +90,17 @@ class ReadinessServiceTests(unittest.TestCase):
         self.assertEqual(auth["status"], "notReady")
         self.assertEqual(auth["reason"], "requiredAuthConfigMissing")
 
+    def test_production_route_authentication_must_be_enforced(self):
+        payload = self.service(
+            FakeReadinessStore(),
+            auth_route_mode="shadow",
+        ).evaluate()
+
+        self.assertEqual(payload["status"], "notReady")
+        auth = next(item for item in payload["components"] if item["component"] == "auth")
+        self.assertEqual(auth["status"], "notReady")
+        self.assertEqual(auth["reason"], "routeAuthenticationNotEnforced")
+
     def test_pool_and_schema_failures_are_machine_safe_and_fail_closed(self):
         pool_payload = self.service(
             FakeReadinessStore(error=ConnectionPoolExhausted("secret pool detail"))

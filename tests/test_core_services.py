@@ -52,6 +52,14 @@ def verified_self_eligibility(capability: str = "clonedVoice") -> dict:
     }
 
 
+def machine_request(client: TestClient, method: str, path: str, **kwargs):
+    token = "test-machine-route-token"
+    headers = dict(kwargs.pop("headers", {}) or {})
+    headers["Authorization"] = f"Bearer {token}"
+    with patch.object(main_module, "BACKEND_API_TOKEN", token):
+        return client.request(method, path, headers=headers, **kwargs)
+
+
 class HiddenStageContractTestCase(unittest.TestCase):
     """Isolate provider/hidden-domain contracts from the public release gate."""
 
@@ -3037,7 +3045,9 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
                     "rawTranscript": "FUTURE_DELAYED_REPLY_SENTINEL should not persist",
                 },
             )
-            dispatched = client.post(
+            dispatched = machine_request(
+                client,
+                "POST",
                 "/echo/delayed-replies/dispatch-due",
                 json={"now": "2026-06-18T12:06:00Z", "limit": 10},
             )
@@ -5237,11 +5247,15 @@ class ArchiveAPITests(unittest.TestCase):
             },
         )
 
-        dispatched = client.post(
+        dispatched = machine_request(
+            client,
+            "POST",
             "/archive/time-letters/dispatch-due",
             json={"now": "2026-07-02T09:00:00Z", "limit": 10},
         )
-        repeated = client.post(
+        repeated = machine_request(
+            client,
+            "POST",
             "/archive/time-letters/dispatch-due",
             json={"now": "2026-07-02T09:00:00Z", "limit": 10},
         )
@@ -5705,7 +5719,9 @@ class MailboxAPITests(unittest.TestCase):
     def test_mailbox_letters_api_saves_sanitized_metadata_and_lists_by_user(self):
         client = TestClient(app)
 
-        response = client.post(
+        response = machine_request(
+            client,
+            "POST",
             "/mailbox/letters",
             json={
                 "userId": "mailbox_user",
@@ -5749,7 +5765,9 @@ class MailboxAPITests(unittest.TestCase):
         client = TestClient(app)
 
         for letter_id, title in [("letter_read_1", "第一封"), ("letter_read_2", "第二封")]:
-            response = client.post(
+            response = machine_request(
+                client,
+                "POST",
                 "/mailbox/letters",
                 json={
                     "userId": "mailbox_read_user",
@@ -5790,7 +5808,9 @@ class MailboxAPITests(unittest.TestCase):
         client = TestClient(app)
 
         for letter_id, title in [("letter_archive_1", "第一封"), ("letter_archive_2", "第二封")]:
-            response = client.post(
+            response = machine_request(
+                client,
+                "POST",
                 "/mailbox/letters",
                 json={
                     "userId": "mailbox_archive_user",
@@ -5831,7 +5851,9 @@ class MailboxAPITests(unittest.TestCase):
         client = TestClient(app)
 
         for scope in ["localOnly", "privateOnly"]:
-            response = client.post(
+            response = machine_request(
+                client,
+                "POST",
                 "/mailbox/letters",
                 json={
                     "userId": "mailbox_private_user",

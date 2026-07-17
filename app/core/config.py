@@ -65,6 +65,7 @@ class Settings:
     auth_legacy_phone_login_enabled: bool = False
     auth_access_ttl_seconds: int = 900
     auth_refresh_ttl_seconds: int = 30 * 24 * 60 * 60
+    auth_route_mode: str = "auto"
     auth_ownership_mode: str = "shadow"
     recovery_access_mode: str = "normal"
     authority_epoch: str = "epoch-0"
@@ -171,6 +172,10 @@ class Settings:
                 "AUTH_REFRESH_TTL_SECONDS",
                 cls.auth_refresh_ttl_seconds,
             ),
+            auth_route_mode=_env(
+                "AUTH_ROUTE_MODE",
+                cls.auth_route_mode,
+            ) or cls.auth_route_mode,
             auth_ownership_mode=_env(
                 "AUTH_OWNERSHIP_MODE",
                 cls.auth_ownership_mode,
