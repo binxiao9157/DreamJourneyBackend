@@ -58,10 +58,15 @@ def request_json(method, path, *, payload=None, token=None, expected=200):
 
 def issue_initial_session(suffix):
     if DIRECT_ISSUE:
-        from app.main import _auth_session_service
+        from app.main import _auth_session_service, store
+        from app.services.store_factory import close_store, init_store
 
         user_id = f"auth-refresh-smoke-{suffix}"
-        return user_id, _auth_session_service().issue(user_id)
+        init_store(store)
+        try:
+            return user_id, _auth_session_service().issue(user_id)
+        finally:
+            close_store(store)
 
     phone_suffix = f"{secrets.randbelow(10**8):08d}"
     login = request_json(
