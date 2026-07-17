@@ -1,6 +1,7 @@
 import hashlib
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -360,6 +361,7 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
 
+    @patch.object(main_module, "AUTH_LEGACY_PHONE_LOGIN_ENABLED", True)
     def test_enforced_authenticated_profile_command_accepts_matching_captured_decision(self):
         login = self.client.post(
             "/auth/login",

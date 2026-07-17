@@ -21,6 +21,14 @@ from app.services.auth_sessions import AuthSessionError, AuthSessionService
 from app.services.authorization_policy import CrossAccountAuthorizationPolicy
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.digital_human_access import DigitalHumanAccessPolicy
+from app.services.identity_bindings import (
+    IdentityChallengeConfigurationError,
+    IdentityChallengeRateLimited,
+    IdentityChallengeValidationError,
+    IdentityChallengeVerificationFailed,
+    legacy_phone_login_enabled,
+    make_identity_binding_service,
+)
 from app.services.privacy import (
     filter_syncable_graph,
     sanitize_archive_item_payload,
@@ -111,6 +119,7 @@ logger = logging.getLogger(__name__)
 BACKEND_API_TOKEN = settings.backend_api_token or ""
 AUTH_ACCESS_TTL_SECONDS = max(60, settings.auth_access_ttl_seconds)
 AUTH_REFRESH_TTL_SECONDS = max(AUTH_ACCESS_TTL_SECONDS + 60, settings.auth_refresh_ttl_seconds)
+AUTH_LEGACY_PHONE_LOGIN_ENABLED = legacy_phone_login_enabled(settings)
 AUTH_OWNERSHIP_MODE = (
     settings.auth_ownership_mode
     if settings.auth_ownership_mode in {"shadow", "enforce"}
@@ -310,6 +319,14 @@ def _auth_session_service() -> AuthSessionService:
         store,
         access_ttl_seconds=AUTH_ACCESS_TTL_SECONDS,
         refresh_ttl_seconds=AUTH_REFRESH_TTL_SECONDS,
+    )
+
+
+def _identity_binding_service():
+    return make_identity_binding_service(
+        store,
+        settings,
+        auth_session_service=_auth_session_service(),
     )
 
 
@@ -626,6 +643,7 @@ def _evaluate_release_policy_command(
 
 NO_STORE_PATH_PREFIXES = (
     "/auth/",
+    "/v2/auth/",
     "/voice/",
     "/digital-human/",
 )
@@ -644,13 +662,24 @@ DATABASE_TRANSACTION_BYPASS_PATHS = INFRASTRUCTURE_PATHS | frozenset({"/config/r
 ANONYMOUS_AUTH_PATHS = {
     "/auth/login",
     "/auth/refresh",
+    "/v2/auth/challenges",
     "/config/runtime",
     "/v2/release-policy",
 }
+ANONYMOUS_AUTH_PATH_PATTERNS = (
+    re.compile(r"^/v2/auth/challenges/[^/]+/verify$"),
+)
 
 
 def _requires_no_store(path: str) -> bool:
     return path in NO_STORE_EXACT_PATHS or path.startswith(NO_STORE_PATH_PREFIXES)
+
+
+def _allows_anonymous_auth(path: str) -> bool:
+    return path in ANONYMOUS_AUTH_PATHS or any(
+        pattern.fullmatch(path) is not None
+        for pattern in ANONYMOUS_AUTH_PATH_PATTERNS
+    )
 
 
 def _set_no_store_headers(response: Any) -> Any:
@@ -710,7 +739,7 @@ async def require_backend_api_token(request: Request, call_next):
         if not _tokens_match(backend_header_token, configured_backend_token):
             return JSONResponse(status_code=401, content={"detail": "invalid backend api token"})
         principal = {"kind": "system"}
-    elif configured_backend_token and request.url.path not in ANONYMOUS_AUTH_PATHS:
+    elif configured_backend_token and not _allows_anonymous_auth(request.url.path):
         return JSONResponse(status_code=401, content={"detail": "invalid backend api token"})
 
     request.state.auth_principal = principal
@@ -836,7 +865,14 @@ async def database_request_unit_of_work(request: Request, call_next):
             command_id=command_id,
         ) as unit_of_work:
             response = await call_next(request)
-            if int(getattr(response, "status_code", 500)) >= 400:
+            request_state = getattr(request, "state", None)
+            commit_security_attempt = bool(
+                getattr(request_state, "commit_security_attempt", False)
+            )
+            if (
+                int(getattr(response, "status_code", 500)) >= 400
+                and not commit_security_attempt
+            ):
                 unit_of_work.mark_rollback("httpErrorResponse")
     except ConnectionPoolExhausted:
         logger.error("database_pool_exhausted correlation=%s", correlation_id)
@@ -1026,8 +1062,91 @@ def release_digital_human_session(session_id: str, payload: Dict[str, Any]) -> D
     }
 
 
+@app.post("/v2/auth/challenges", status_code=202)
+def create_identity_challenge(
+    request: Request,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        service = _identity_binding_service()
+        return service.create_challenge(
+            identity_type=str(payload.get("identityType") or "phone"),
+            target=str(payload.get("target") or ""),
+            purpose=str(payload.get("purpose") or "login"),
+        )
+    except IdentityChallengeValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "identity_challenge_invalid_request",
+                "message": str(exc),
+            },
+        ) from exc
+    except IdentityChallengeRateLimited as exc:
+        request.state.commit_security_attempt = True
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "identity_challenge_rate_limited",
+                "message": "identity challenge is temporarily unavailable",
+                "retryAfterSeconds": exc.retry_after_seconds,
+            },
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+    except IdentityChallengeConfigurationError as exc:
+        logger.error("identity_challenge_configuration_unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "identity_challenge_unavailable",
+                "message": "identity challenge is unavailable",
+            },
+        ) from exc
+
+
+@app.post("/v2/auth/challenges/{challenge_id}/verify")
+def verify_identity_challenge(
+    request: Request,
+    challenge_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        service = _identity_binding_service()
+        return service.verify_challenge(
+            challenge_id,
+            str(payload.get("code") or ""),
+            nickname=str(payload.get("nickname") or ""),
+        )
+    except IdentityChallengeVerificationFailed as exc:
+        request.state.commit_security_attempt = True
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "challenge_verification_failed",
+                "message": "challenge could not be verified",
+            },
+        ) from exc
+    except IdentityChallengeConfigurationError as exc:
+        logger.error("identity_challenge_configuration_unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "identity_challenge_unavailable",
+                "message": "identity challenge is unavailable",
+            },
+        ) from exc
+
+
 @app.post("/auth/login")
 def login(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not AUTH_LEGACY_PHONE_LOGIN_ENABLED:
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "legacy_identity_flow_retired",
+                "message": "verified identity challenge is required",
+            },
+        )
     phone = str(payload.get("phone") or "").strip()
     nickname = str(payload.get("nickname") or "").strip()
     password = _optional_password(payload, "password")
@@ -1161,6 +1280,14 @@ def soft_delete_account(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.post("/auth/restore")
 def restore_account(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not AUTH_LEGACY_PHONE_LOGIN_ENABLED:
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "legacy_identity_flow_retired",
+                "message": "verified identity challenge is required",
+            },
+        )
     phone = str(payload.get("phone") or "").strip()
     nickname = str(payload.get("nickname") or "").strip()
     if not phone:

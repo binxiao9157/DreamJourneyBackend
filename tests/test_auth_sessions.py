@@ -18,11 +18,13 @@ class AuthSessionAPITests(unittest.TestCase):
         self.previous_store = main_module.store
         self.previous_backend_token = main_module.BACKEND_API_TOKEN
         self.previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
+        self.previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
         self.previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
         self.previous_release_policy_gate = main_module.RELEASE_POLICY_COMMAND_GATE
         main_module.store = InMemoryStore()
         main_module.BACKEND_API_TOKEN = ""
         main_module.AUTH_OWNERSHIP_MODE = "shadow"
+        main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         service = ReleasePolicyService(
             shadow_mode=True,
             enforce_default_closed_stages=False,
@@ -34,6 +36,7 @@ class AuthSessionAPITests(unittest.TestCase):
         main_module.store = self.previous_store
         main_module.BACKEND_API_TOKEN = self.previous_backend_token
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
+        main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = self.previous_legacy_phone_login
         main_module.RELEASE_POLICY_SERVICE = self.previous_release_policy_service
         main_module.RELEASE_POLICY_COMMAND_GATE = self.previous_release_policy_gate
 
@@ -103,7 +106,7 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertIn("careSnapshotRead", policy["coveredPolicies"])
         self.assertIn("timeLetterDetail", policy["coveredPolicies"])
         self.assertTrue(policy["principalBoundRouteEnforcement"])
-        self.assertEqual(policy["routeOwnershipAudit"]["routeCount"], 62)
+        self.assertEqual(policy["routeOwnershipAudit"]["routeCount"], 64)
         self.assertEqual(policy["routeOwnershipAudit"]["unclassifiedCount"], 0)
         self.assertEqual(
             policy["diagnosticHeaders"],

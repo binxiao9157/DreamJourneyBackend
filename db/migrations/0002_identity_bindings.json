@@ -1,0 +1,6 @@
+{
+  "version": "0002",
+  "name": "identity_bindings",
+  "phase": "expand",
+  "compatibility": "additive"
+}

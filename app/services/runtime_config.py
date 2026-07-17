@@ -3,6 +3,7 @@ from typing import Any, Dict
 from app.core.config import Settings
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.digital_human_access import DigitalHumanAccessPolicy
+from app.services.identity_bindings import identity_challenge_runtime_descriptor
 from app.services.route_ownership import RouteOwnershipRegistry
 from app.services.release_policy import ReleasePolicyService, parse_release_policy_feature_set
 from app.services.recovery_access import RecoveryAccessPolicy
@@ -29,6 +30,7 @@ class RuntimeConfigService:
         digital_human_access = DigitalHumanAccessPolicy().blocked_mobile_contract()
         route_ownership_audit = RouteOwnershipRegistry().audit_summary()
         realtime_voice = TokenService(self.settings).realtime_config(user_id="runtime-capability")
+        identity_challenge = identity_challenge_runtime_descriptor(self.settings)
         release_policy = ReleasePolicyService(
             policy_revision=self.settings.release_policy_revision,
             min_client_build=self.settings.release_policy_min_client_build,
@@ -72,13 +74,19 @@ class RuntimeConfigService:
                 "digitalHumanSession": False,
                 "digitalHumanSessionLease": False,
                 "authSession": True,
+                "identityChallenge": identity_challenge["enabled"],
                 "releasePolicy": True,
             },
             "auth": {
                 "mode": "opaqueAccessRefresh",
-                "loginEndpoint": "/auth/login",
+                "loginEndpoint": "/v2/auth/challenges",
+                "legacyLoginEndpoint": "/auth/login",
+                "legacyLoginEnabled": identity_challenge[
+                    "legacyPhoneLoginEnabled"
+                ],
                 "refreshEndpoint": "/auth/refresh",
                 "logoutEndpoint": "/auth/logout",
+                "identityChallenge": identity_challenge,
                 "tokenType": "Bearer",
                 "accessTTLSeconds": max(60, self.settings.auth_access_ttl_seconds),
                 "refreshTTLSeconds": max(

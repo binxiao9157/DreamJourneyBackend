@@ -31,6 +31,18 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = _env(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = "DreamJourney Backend"
@@ -43,6 +55,14 @@ class Settings:
     database_pool_timeout_seconds: float = 5.0
     redis_url: str = "redis://redis:6379/0"
     backend_api_token: Optional[str] = None
+    identity_binding_hmac_key: Optional[str] = None
+    identity_binding_hmac_key_version: str = "v1"
+    identity_challenge_adapter: str = "disabled"
+    identity_challenge_synthetic_code: Optional[str] = None
+    identity_challenge_ttl_seconds: int = 300
+    identity_challenge_max_attempts: int = 5
+    identity_challenge_retry_after_seconds: int = 30
+    auth_legacy_phone_login_enabled: bool = False
     auth_access_ttl_seconds: int = 900
     auth_refresh_ttl_seconds: int = 30 * 24 * 60 * 60
     auth_ownership_mode: str = "shadow"
@@ -115,6 +135,34 @@ class Settings:
             ),
             redis_url=_env("REDIS_URL", cls.redis_url) or cls.redis_url,
             backend_api_token=_env("BACKEND_API_TOKEN"),
+            identity_binding_hmac_key=_env("IDENTITY_BINDING_HMAC_KEY"),
+            identity_binding_hmac_key_version=_env(
+                "IDENTITY_BINDING_HMAC_KEY_VERSION",
+                cls.identity_binding_hmac_key_version,
+            ) or cls.identity_binding_hmac_key_version,
+            identity_challenge_adapter=_env(
+                "IDENTITY_CHALLENGE_ADAPTER",
+                cls.identity_challenge_adapter,
+            ) or cls.identity_challenge_adapter,
+            identity_challenge_synthetic_code=_env(
+                "IDENTITY_CHALLENGE_SYNTHETIC_CODE"
+            ),
+            identity_challenge_ttl_seconds=_env_int(
+                "IDENTITY_CHALLENGE_TTL_SECONDS",
+                cls.identity_challenge_ttl_seconds,
+            ),
+            identity_challenge_max_attempts=_env_int(
+                "IDENTITY_CHALLENGE_MAX_ATTEMPTS",
+                cls.identity_challenge_max_attempts,
+            ),
+            identity_challenge_retry_after_seconds=_env_int(
+                "IDENTITY_CHALLENGE_RETRY_AFTER_SECONDS",
+                cls.identity_challenge_retry_after_seconds,
+            ),
+            auth_legacy_phone_login_enabled=_env_bool(
+                "AUTH_LEGACY_PHONE_LOGIN_ENABLED",
+                cls.auth_legacy_phone_login_enabled,
+            ),
             auth_access_ttl_seconds=_env_int(
                 "AUTH_ACCESS_TTL_SECONDS",
                 cls.auth_access_ttl_seconds,

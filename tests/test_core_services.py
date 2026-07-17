@@ -2410,6 +2410,7 @@ class ProfileAPITests(unittest.TestCase):
 
 
 class PasswordAPITests(unittest.TestCase):
+    @patch.object(main_module, "AUTH_LEGACY_PHONE_LOGIN_ENABLED", True)
     def test_password_login_sets_credential_and_change_requires_old_password(self):
         client = TestClient(app)
         phone = "13900007777"
@@ -2471,6 +2472,7 @@ class PasswordAPITests(unittest.TestCase):
 
 
 class AccountDeletionAPITests(unittest.TestCase):
+    @patch.object(main_module, "AUTH_LEGACY_PHONE_LOGIN_ENABLED", True)
     def test_account_delete_soft_deletes_and_login_restores_once_by_phone(self):
         client = TestClient(app)
         phone = "13900008881"
@@ -2516,6 +2518,7 @@ class AccountDeletionAPITests(unittest.TestCase):
         self.assertEqual(second_restore.status_code, 410)
         self.assertEqual(second_restore.json()["detail"], "account restore chance already used")
 
+    @patch.object(main_module, "AUTH_LEGACY_PHONE_LOGIN_ENABLED", True)
     def test_account_delete_requires_two_confirmations_and_restore_rejects_expired_window(self):
         client = TestClient(app)
         phone = "13900008882"
@@ -2880,6 +2883,7 @@ class BackendAuthTests(unittest.TestCase):
 
 
 class BackendUserIdentityTests(unittest.TestCase):
+    @patch.object(main_module, "AUTH_LEGACY_PHONE_LOGIN_ENABLED", True)
     def test_auth_login_uses_stable_full_phone_hash_not_last_four_digits(self):
         previous_store = main_module.store
         main_module.store = InMemoryStore()

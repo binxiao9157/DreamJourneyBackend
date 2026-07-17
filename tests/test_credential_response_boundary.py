@@ -17,7 +17,9 @@ client = TestClient(app)
 class CredentialResponseBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.previous_store = main_module.store
+        self.previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
         main_module.store = InMemoryStore()
+        main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         self.setting_names = (
             "backend_api_token",
             "tencent_digital_human_app_key",
@@ -47,6 +49,7 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
 
     def tearDown(self):
         main_module.store = self.previous_store
+        main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = self.previous_legacy_phone_login
         for name, value in self.previous_settings.items():
             object.__setattr__(settings, name, value)
         main_module.BACKEND_API_TOKEN = str(settings.backend_api_token or "")

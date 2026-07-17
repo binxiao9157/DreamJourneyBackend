@@ -104,6 +104,18 @@ class RouteOwnershipRegistry:
             _owner_body("POST", "/digital-human/sessions", "digitalHumanOwner"),
             _owner_body("POST", "/digital-human/sessions/{session_id}/heartbeat", "digitalHumanOwner"),
             _owner_body("POST", "/digital-human/sessions/{session_id}/release", "digitalHumanOwner"),
+            _rule(
+                "POST",
+                "/v2/auth/challenges",
+                public,
+                "publicIdentityChallenge",
+            ),
+            _rule(
+                "POST",
+                "/v2/auth/challenges/{challenge_id}/verify",
+                public,
+                "publicIdentityChallengeVerify",
+            ),
             _rule("POST", "/auth/login", public, "publicLogin"),
             _rule("POST", "/auth/refresh", public, "publicRefresh"),
             _rule("POST", "/auth/logout", session, "userSession"),

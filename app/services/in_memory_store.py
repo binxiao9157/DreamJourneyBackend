@@ -2,8 +2,9 @@ from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
 from math import ceil
+import secrets
 from threading import RLock
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
 from app.services.knowledge_store import (
@@ -58,6 +59,13 @@ class InMemoryStore:
         self._voice_clone_slots: Dict[str, Dict[str, Any]] = {}
         self._digital_human_sessions: Dict[str, Dict[str, Any]] = {}
         self._auth_sessions: Dict[str, Dict[str, Any]] = {}
+        self._auth_challenges: Dict[str, Dict[str, Any]] = {}
+        self._identity_hash_key_versions: Dict[str, str] = {}
+        self._subjects: Dict[str, Dict[str, Any]] = {}
+        self._identity_bindings: Dict[str, Dict[str, Any]] = {}
+        self._identity_binding_ids_by_target: Dict[Tuple[str, str, str], str] = {}
+        self._identity_proofs: Dict[str, Dict[str, Any]] = {}
+        self._identity_lock = RLock()
         self._evidence_events: Dict[str, Dict[str, Any]] = {}
 
     def append_evidence_event(
@@ -246,6 +254,177 @@ class InMemoryStore:
         revoked["revokeReason"] = reason
         self._auth_sessions[session_id] = revoked
         return deepcopy(revoked)
+
+    def ensure_identity_hash_key_version(
+        self,
+        version: str,
+        fingerprint: str,
+    ) -> Dict[str, Any]:
+        with self._identity_lock:
+            existing = self._identity_hash_key_versions.get(version)
+            if existing is not None:
+                return {
+                    "outcome": "ready" if existing == fingerprint else "conflict",
+                    "version": version,
+                }
+            if self._identity_hash_key_versions:
+                return {"outcome": "conflict", "version": version}
+            self._identity_hash_key_versions[version] = fingerprint
+            return {"outcome": "ready", "version": version}
+
+    def save_auth_challenge(self, challenge: Dict[str, Any]) -> Dict[str, Any]:
+        persisted_fields = (
+            "challengeId",
+            "identityType",
+            "targetHashKeyVersion",
+            "targetHash",
+            "codeHash",
+            "providerMode",
+            "purpose",
+            "status",
+            "attempts",
+            "maxAttempts",
+            "internalVerificationEnabled",
+            "createdAt",
+            "expiresAt",
+        )
+        item = {
+            field: deepcopy(challenge[field])
+            for field in persisted_fields
+        }
+        challenge_id = str(item["challengeId"])
+        with self._identity_lock:
+            if challenge_id in self._auth_challenges:
+                raise ValueError("identity challenge already exists")
+            self._auth_challenges[challenge_id] = item
+        return deepcopy(item)
+
+    def get_auth_challenge(self, challenge_id: str) -> Optional[Dict[str, Any]]:
+        with self._identity_lock:
+            challenge = self._auth_challenges.get(challenge_id)
+            return None if challenge is None else deepcopy(challenge)
+
+    def get_latest_auth_challenge(
+        self,
+        *,
+        identity_type: str,
+        target_hash_key_version: str,
+        target_hash: str,
+        purpose: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._identity_lock:
+            matches = [
+                challenge
+                for challenge in self._auth_challenges.values()
+                if challenge.get("identityType") == identity_type
+                and challenge.get("targetHashKeyVersion") == target_hash_key_version
+                and challenge.get("targetHash") == target_hash
+                and challenge.get("purpose") == purpose
+            ]
+            if not matches:
+                return None
+            latest = max(
+                matches,
+                key=lambda item: self._parse_iso_datetime(str(item["createdAt"])),
+            )
+            return deepcopy(latest)
+
+    def verify_auth_challenge(
+        self,
+        challenge_id: str,
+        *,
+        code_hash: str,
+        attempted_at_iso: str,
+        subject_id: str,
+        binding_id: str,
+        proof_id: str,
+    ) -> Dict[str, Any]:
+        attempted_at = self._parse_iso_datetime(attempted_at_iso)
+        with self._identity_lock:
+            challenge = self._auth_challenges.get(challenge_id)
+            if challenge is None:
+                return {"outcome": "missing"}
+            if challenge.get("status") != "active":
+                return {"outcome": "inactive"}
+            if self._parse_iso_datetime(str(challenge["expiresAt"])) <= attempted_at:
+                challenge["status"] = "expired"
+                challenge["updatedAt"] = attempted_at.isoformat()
+                return {"outcome": "expired"}
+
+            attempts = int(challenge.get("attempts") or 0) + 1
+            challenge["attempts"] = attempts
+            challenge["updatedAt"] = attempted_at.isoformat()
+            code_matches = bool(
+                challenge.get("internalVerificationEnabled")
+                and secrets.compare_digest(
+                    str(challenge.get("codeHash") or ""),
+                    code_hash,
+                )
+            )
+            if not code_matches:
+                if attempts >= int(challenge.get("maxAttempts") or 1):
+                    challenge["status"] = "locked"
+                return {"outcome": "invalid"}
+
+            target_key = (
+                str(challenge["identityType"]),
+                str(challenge["targetHashKeyVersion"]),
+                str(challenge["targetHash"]),
+            )
+            existing_binding_id = self._identity_binding_ids_by_target.get(target_key)
+            if existing_binding_id is None:
+                subject = {
+                    "subjectId": subject_id,
+                    "status": "active",
+                    "createdAt": attempted_at.isoformat(),
+                }
+                binding = {
+                    "bindingId": binding_id,
+                    "subjectId": subject_id,
+                    "identityType": challenge["identityType"],
+                    "targetHashKeyVersion": challenge["targetHashKeyVersion"],
+                    "targetHash": challenge["targetHash"],
+                    "providerMode": challenge["providerMode"],
+                    "status": "active",
+                    "verifiedAt": attempted_at.isoformat(),
+                    "createdAt": attempted_at.isoformat(),
+                }
+                self._subjects[subject_id] = subject
+                self._identity_bindings[binding_id] = binding
+                self._identity_binding_ids_by_target[target_key] = binding_id
+            else:
+                binding_id = existing_binding_id
+                binding = self._identity_bindings[binding_id]
+                subject_id = str(binding["subjectId"])
+                subject = self._subjects.get(subject_id)
+                if (
+                    binding.get("status") != "active"
+                    or subject is None
+                    or subject.get("status") != "active"
+                ):
+                    return {"outcome": "identityDisabled"}
+                binding["providerMode"] = challenge["providerMode"]
+                binding["verifiedAt"] = attempted_at.isoformat()
+
+            proof = {
+                "proofReceiptId": proof_id,
+                "challengeId": challenge_id,
+                "bindingId": binding_id,
+                "subjectId": subject_id,
+                "providerMode": challenge["providerMode"],
+                "verifiedAt": attempted_at.isoformat(),
+                "contractVersion": 1,
+            }
+            self._identity_proofs[proof_id] = proof
+            challenge["status"] = "consumed"
+            challenge["consumedAt"] = attempted_at.isoformat()
+            return {
+                "outcome": "verified",
+                "subjectId": subject_id,
+                "bindingId": binding_id,
+                "proofReceiptId": proof_id,
+                "verifiedAt": attempted_at.isoformat(),
+            }
 
     def acquire_digital_human_session_lease(
         self,

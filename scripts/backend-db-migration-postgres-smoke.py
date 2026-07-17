@@ -69,6 +69,8 @@ def main():
         prefix + uuid.uuid4().hex[:10],
     ]
     require(parameters.get("user"), "database user is required")
+    migrations = load_migrations(default_migrations_dir())
+    expected_versions = [migration.version for migration in migrations]
 
     try:
         first_name, concurrent_name = database_names
@@ -81,9 +83,9 @@ def main():
         applied = first_migrator.apply()
         verified = first_migrator.verify()
         repeated = first_migrator.apply()
-        require(applied["appliedVersions"] == ["0001"], "fresh migration apply")
+        require(applied["appliedVersions"] == expected_versions, "fresh migration apply")
         require(verified["status"] == "ready", "fresh migration verify")
-        require(repeated["skippedVersions"] == ["0001"], "repeat no-op")
+        require(repeated["skippedVersions"] == expected_versions, "repeat no-op")
 
         baseline = load_migrations(default_migrations_dir())[0]
         with psycopg.connect(first_dsn) as connection:
@@ -120,11 +122,13 @@ def main():
                 )
             )
         require(
-            sum(len(result["appliedVersions"]) for result in results) == 1,
+            sum(len(result["appliedVersions"]) for result in results)
+            == len(expected_versions),
             "concurrent migrators must apply once",
         )
         require(
-            sum(len(result["skippedVersions"]) for result in results) == 1,
+            sum(len(result["skippedVersions"]) for result in results)
+            == len(expected_versions),
             "second concurrent migrator must observe applied head",
         )
 
@@ -137,8 +141,8 @@ def main():
                     "freshTableCount": table_count,
                     "repeatNoop": True,
                     "verifyHead": verified["expectedHead"],
-                    "concurrentApplyCount": 1,
-                    "concurrentSkipCount": 1,
+                    "concurrentApplyCount": len(expected_versions),
+                    "concurrentSkipCount": len(expected_versions),
                 },
                 sort_keys=True,
             )

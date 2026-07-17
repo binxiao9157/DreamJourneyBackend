@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 from math import ceil
+import secrets
 from typing import Any, Callable, Dict, List, Optional
 import uuid
 
@@ -411,6 +412,348 @@ class PostgresStore:
             commit=True,
         )
         return None if row is None else deepcopy(row["payload"])
+
+    def ensure_identity_hash_key_version(
+        self,
+        version: str,
+        fingerprint: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"identity-key-{uuid.uuid4().hex}",
+                command_id="ensureIdentityHashKeyVersion",
+            ):
+                return self.ensure_identity_hash_key_version(version, fingerprint)
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("identity key registration requires a unit of work")
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                ("dreamjourney-identity-hash-key-version:v1",),
+            )
+            cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT version, key_fingerprint, status
+                FROM identity_hash_key_versions
+                ORDER BY created_at ASC
+                FOR UPDATE
+                """
+            )
+            rows = cursor.fetchall()
+            if rows:
+                matching = next(
+                    (
+                        row
+                        for row in rows
+                        if str(row.get("version") or "") == version
+                    ),
+                    None,
+                )
+                if (
+                    matching is not None
+                    and matching.get("status") == "active"
+                    and secrets.compare_digest(
+                        str(matching.get("key_fingerprint") or ""),
+                        fingerprint,
+                    )
+                    and len(rows) == 1
+                ):
+                    return {"outcome": "ready", "version": version}
+                return {"outcome": "conflict", "version": version}
+            cursor.execute(
+                """
+                INSERT INTO identity_hash_key_versions (
+                    version, key_fingerprint, status, created_at, updated_at
+                )
+                VALUES (%s, %s, 'active', NOW(), NOW())
+                """,
+                (version, fingerprint),
+            )
+        return {"outcome": "ready", "version": version}
+
+    def save_auth_challenge(self, challenge: Dict[str, Any]) -> Dict[str, Any]:
+        row = self._fetchone(
+            """
+            INSERT INTO auth_challenges (
+                id, identity_type, target_hash_key_version, target_hash,
+                code_hash, provider_mode,
+                purpose, status, attempts, max_attempts,
+                internal_verification_enabled, expires_at, created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, identity_type, target_hash_key_version, target_hash,
+                      code_hash, provider_mode,
+                      purpose, status, attempts, max_attempts,
+                      internal_verification_enabled, expires_at, created_at,
+                      consumed_at, updated_at
+            """,
+            (
+                challenge["challengeId"],
+                challenge["identityType"],
+                challenge["targetHashKeyVersion"],
+                challenge["targetHash"],
+                challenge["codeHash"],
+                challenge["providerMode"],
+                challenge["purpose"],
+                challenge["status"],
+                challenge["attempts"],
+                challenge["maxAttempts"],
+                challenge["internalVerificationEnabled"],
+                challenge["expiresAt"],
+                challenge["createdAt"],
+                challenge["createdAt"],
+            ),
+            commit=True,
+        )
+        if row is None:
+            raise RuntimeError("identity challenge insert returned no row")
+        return self._auth_challenge_record(row)
+
+    def get_auth_challenge(self, challenge_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT id, identity_type, target_hash_key_version, target_hash,
+                   code_hash, provider_mode,
+                   purpose, status, attempts, max_attempts,
+                   internal_verification_enabled, expires_at, created_at,
+                   consumed_at, updated_at
+            FROM auth_challenges
+            WHERE id = %s
+            """,
+            (challenge_id,),
+        )
+        return None if row is None else self._auth_challenge_record(row)
+
+    def get_latest_auth_challenge(
+        self,
+        *,
+        identity_type: str,
+        target_hash_key_version: str,
+        target_hash: str,
+        purpose: str,
+    ) -> Optional[Dict[str, Any]]:
+        query = """
+            SELECT id, identity_type, target_hash_key_version, target_hash,
+                   code_hash, provider_mode,
+                   purpose, status, attempts, max_attempts,
+                   internal_verification_enabled, expires_at, created_at,
+                   consumed_at, updated_at
+            FROM auth_challenges
+            WHERE identity_type = %s
+              AND target_hash_key_version = %s
+              AND target_hash = %s
+              AND purpose = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        params = (identity_type, target_hash_key_version, target_hash, purpose)
+        active = self._current_uow.get()
+        if active is None:
+            row = self._fetchone(query, params)
+        else:
+            with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                    (
+                        f"identity-challenge:{identity_type}:"
+                        f"{target_hash_key_version}:{target_hash}:{purpose}",
+                    ),
+                )
+                cursor.fetchone()
+                cursor.execute(query, params)
+                row = cursor.fetchone()
+        return None if row is None else self._auth_challenge_record(row)
+
+    def verify_auth_challenge(
+        self,
+        challenge_id: str,
+        *,
+        code_hash: str,
+        attempted_at_iso: str,
+        subject_id: str,
+        binding_id: str,
+        proof_id: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"identity-verify-{uuid.uuid4().hex}",
+                command_id="verifyIdentityChallenge",
+            ):
+                return self.verify_auth_challenge(
+                    challenge_id,
+                    code_hash=code_hash,
+                    attempted_at_iso=attempted_at_iso,
+                    subject_id=subject_id,
+                    binding_id=binding_id,
+                    proof_id=proof_id,
+                )
+
+        attempted_at = self._parse_iso_datetime(attempted_at_iso)
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded by the unit of work above
+            raise RuntimeError("identity verification requires a unit of work")
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                """
+                SELECT id, identity_type, target_hash_key_version, target_hash,
+                       code_hash, provider_mode,
+                       purpose, status, attempts, max_attempts,
+                       internal_verification_enabled, expires_at
+                FROM auth_challenges
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (challenge_id,),
+            )
+            challenge = cursor.fetchone()
+            if challenge is None:
+                return {"outcome": "missing"}
+            if challenge.get("status") != "active":
+                return {"outcome": "inactive"}
+
+            expires_at = self._parse_iso_datetime(
+                self._iso_value(challenge.get("expires_at"))
+            )
+            if expires_at <= attempted_at:
+                cursor.execute(
+                    """
+                    UPDATE auth_challenges
+                    SET status = 'expired', updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (attempted_at_iso, challenge_id),
+                )
+                return {"outcome": "expired"}
+
+            attempts = int(challenge.get("attempts") or 0) + 1
+            code_matches = bool(
+                challenge.get("internal_verification_enabled")
+                and secrets.compare_digest(
+                    str(challenge.get("code_hash") or ""),
+                    code_hash,
+                )
+            )
+            if not code_matches:
+                status = (
+                    "locked"
+                    if attempts >= int(challenge.get("max_attempts") or 1)
+                    else "active"
+                )
+                cursor.execute(
+                    """
+                    UPDATE auth_challenges
+                    SET attempts = %s, status = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (attempts, status, attempted_at_iso, challenge_id),
+                )
+                return {"outcome": "invalid"}
+
+            identity_type = str(challenge["identity_type"])
+            target_hash_key_version = str(challenge["target_hash_key_version"])
+            target_hash = str(challenge["target_hash"])
+            provider_mode = str(challenge["provider_mode"])
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                (f"identity:{identity_type}:{target_hash_key_version}:{target_hash}",),
+            )
+            cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT b.id, b.subject_id, b.status AS binding_status,
+                       s.status AS subject_status
+                FROM identity_bindings AS b
+                JOIN subjects AS s ON s.id = b.subject_id
+                WHERE b.identity_type = %s
+                  AND b.target_hash_key_version = %s
+                  AND b.target_hash = %s
+                FOR UPDATE OF b, s
+                """,
+                (identity_type, target_hash_key_version, target_hash),
+            )
+            binding = cursor.fetchone()
+            if binding is None:
+                cursor.execute(
+                    """
+                    INSERT INTO subjects (id, status, created_at, updated_at)
+                    VALUES (%s, 'active', %s, %s)
+                    """,
+                    (subject_id, attempted_at_iso, attempted_at_iso),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO identity_bindings (
+                        id, subject_id, identity_type, target_hash_key_version,
+                        target_hash,
+                        provider_mode, status, verified_at, created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
+                    """,
+                    (
+                        binding_id,
+                        subject_id,
+                        identity_type,
+                        target_hash_key_version,
+                        target_hash,
+                        provider_mode,
+                        attempted_at_iso,
+                        attempted_at_iso,
+                        attempted_at_iso,
+                    ),
+                )
+            else:
+                if (
+                    binding.get("binding_status") != "active"
+                    or binding.get("subject_status") != "active"
+                ):
+                    return {"outcome": "identityDisabled"}
+                binding_id = str(binding["id"])
+                subject_id = str(binding["subject_id"])
+                cursor.execute(
+                    """
+                    UPDATE identity_bindings
+                    SET provider_mode = %s, verified_at = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (provider_mode, attempted_at_iso, attempted_at_iso, binding_id),
+                )
+
+            cursor.execute(
+                """
+                INSERT INTO identity_proofs (
+                    id, challenge_id, binding_id, subject_id, provider_mode,
+                    verified_at, contract_version, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, 1, %s)
+                """,
+                (
+                    proof_id,
+                    challenge_id,
+                    binding_id,
+                    subject_id,
+                    provider_mode,
+                    attempted_at_iso,
+                    attempted_at_iso,
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE auth_challenges
+                SET attempts = %s, status = 'consumed', consumed_at = %s,
+                    updated_at = %s
+                WHERE id = %s
+                """,
+                (attempts, attempted_at_iso, attempted_at_iso, challenge_id),
+            )
+        return {
+            "outcome": "verified",
+            "subjectId": subject_id,
+            "bindingId": binding_id,
+            "proofReceiptId": proof_id,
+            "verifiedAt": attempted_at_iso,
+        }
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
@@ -3456,6 +3799,32 @@ class PostgresStore:
             return PostgresStore._now()
         isoformat = getattr(value, "isoformat", None)
         return isoformat() if callable(isoformat) else str(value)
+
+    @classmethod
+    def _auth_challenge_record(cls, row: Dict[str, Any]) -> Dict[str, Any]:
+        record = {
+            "challengeId": str(row.get("id") or ""),
+            "identityType": str(row.get("identity_type") or ""),
+            "targetHashKeyVersion": str(
+                row.get("target_hash_key_version") or ""
+            ),
+            "targetHash": str(row.get("target_hash") or ""),
+            "codeHash": str(row.get("code_hash") or ""),
+            "providerMode": str(row.get("provider_mode") or ""),
+            "purpose": str(row.get("purpose") or ""),
+            "status": str(row.get("status") or ""),
+            "attempts": int(row.get("attempts") or 0),
+            "maxAttempts": int(row.get("max_attempts") or 0),
+            "internalVerificationEnabled": bool(
+                row.get("internal_verification_enabled")
+            ),
+            "expiresAt": cls._iso_value(row.get("expires_at")),
+            "createdAt": cls._iso_value(row.get("created_at")),
+            "updatedAt": cls._iso_value(row.get("updated_at")),
+        }
+        if row.get("consumed_at") is not None:
+            record["consumedAt"] = cls._iso_value(row.get("consumed_at"))
+        return record
 
     @staticmethod
     def _with_identity(payload: Dict[str, Any], prefix: str, user_id: str) -> Dict[str, Any]:

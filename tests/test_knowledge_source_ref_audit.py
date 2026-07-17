@@ -101,15 +101,18 @@ class KnowledgeSourceRefAuditEndpointTests(unittest.TestCase):
         self.previous_store = main_module.store
         self.previous_backend_token = main_module.BACKEND_API_TOKEN
         self.previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
+        self.previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
         main_module.store = InMemoryStore()
         main_module.BACKEND_API_TOKEN = ""
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
+        main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         self.client = TestClient(app)
 
     def tearDown(self):
         main_module.store = self.previous_store
         main_module.BACKEND_API_TOKEN = self.previous_backend_token
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
+        main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = self.previous_legacy_phone_login
 
     def _login(self, phone: str):
         response = self.client.post(

@@ -12,12 +12,16 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.db.backup import verify_backup_manifest
+from app.db.migrator import default_migrations_dir, load_migrations
 
 
 BACKUP_ROOT = Path(
     os.environ.get("BACKUP_ROOT", "/var/backups/dreamjourney/postgres")
 )
-EXPECTED_SCHEMA_HEAD = os.environ.get("EXPECTED_SCHEMA_HEAD", "0001")
+EXPECTED_SCHEMA_HEAD = os.environ.get(
+    "EXPECTED_SCHEMA_HEAD",
+    load_migrations(default_migrations_dir())[-1].version,
+)
 MAX_AGE_HOURS = float(os.environ.get("BACKUP_MAX_AGE_HOURS", "36"))
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "").strip()
 
