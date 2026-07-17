@@ -63,6 +63,7 @@ from app.services.archive_store import (
     ArchiveItemOwnershipConflict,
 )
 from app.services.runtime_config import RuntimeConfigService
+from app.services.recovery_access import RecoveryAccessPolicy
 from app.services.readiness import ReadinessService, liveness_payload
 from app.services.release_policy import (
     ReleasePolicyCommandGate,
@@ -104,6 +105,10 @@ AUTH_OWNERSHIP_MODE = (
     settings.auth_ownership_mode
     if settings.auth_ownership_mode in {"shadow", "enforce"}
     else "shadow"
+)
+RECOVERY_ACCESS_POLICY = RecoveryAccessPolicy(
+    mode=settings.recovery_access_mode,
+    authority_epoch=settings.authority_epoch,
 )
 RELEASE_POLICY_COMMAND_MODE = (
     settings.release_policy_command_mode
@@ -546,6 +551,7 @@ NO_STORE_EXACT_PATHS = {
     "/archive/image-analysis",
 }
 INFRASTRUCTURE_PATHS = frozenset({"/health", "/live", "/ready"})
+DATABASE_TRANSACTION_BYPASS_PATHS = INFRASTRUCTURE_PATHS | frozenset({"/config/runtime"})
 ANONYMOUS_AUTH_PATHS = {
     "/auth/login",
     "/auth/refresh",
@@ -566,8 +572,32 @@ def _set_no_store_headers(response: Any) -> Any:
     return response
 
 
+def _recovery_access_denied_response(request: Request) -> Optional[JSONResponse]:
+    decision = RECOVERY_ACCESS_POLICY.evaluate(
+        method=str(getattr(request, "method", "GET")),
+        path=request.url.path,
+    )
+    if decision.allowed:
+        return None
+    response = JSONResponse(
+        status_code=503,
+        content={
+            "detail": "service recovery maintenance",
+            "code": decision.code,
+            "recovery": RECOVERY_ACCESS_POLICY.public_descriptor(),
+        },
+    )
+    response.headers["X-DreamJourney-Recovery-Mode"] = RECOVERY_ACCESS_POLICY.mode
+    response.headers["X-DreamJourney-Authority-Epoch"] = RECOVERY_ACCESS_POLICY.authority_epoch
+    return _set_no_store_headers(response)
+
+
 @app.middleware("http")
 async def require_backend_api_token(request: Request, call_next):
+    recovery_response = _recovery_access_denied_response(request)
+    if recovery_response is not None:
+        return recovery_response
+
     if request.url.path in INFRASTRUCTURE_PATHS:
         return await call_next(request)
 
@@ -702,8 +732,11 @@ async def prevent_sensitive_response_caching(request: Request, call_next):
 
 @app.middleware("http")
 async def database_request_unit_of_work(request: Request, call_next):
+    recovery_response = _recovery_access_denied_response(request)
+    if recovery_response is not None:
+        return recovery_response
     unit_of_work_factory = getattr(store, "request_unit_of_work", None)
-    if request.url.path in INFRASTRUCTURE_PATHS or not callable(unit_of_work_factory):
+    if request.url.path in DATABASE_TRANSACTION_BYPASS_PATHS or not callable(unit_of_work_factory):
         return await call_next(request)
 
     correlation_id = secrets.token_hex(16)

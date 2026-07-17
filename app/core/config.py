@@ -46,6 +46,8 @@ class Settings:
     auth_access_ttl_seconds: int = 900
     auth_refresh_ttl_seconds: int = 30 * 24 * 60 * 60
     auth_ownership_mode: str = "shadow"
+    recovery_access_mode: str = "normal"
+    authority_epoch: str = "epoch-0"
     release_policy_command_mode: str = "observe"
     release_policy_revision: int = 1
     release_policy_min_client_build: int = 1
@@ -125,6 +127,14 @@ class Settings:
                 "AUTH_OWNERSHIP_MODE",
                 cls.auth_ownership_mode,
             ) or cls.auth_ownership_mode,
+            recovery_access_mode=_env(
+                "RECOVERY_ACCESS_MODE",
+                cls.recovery_access_mode,
+            ) or cls.recovery_access_mode,
+            authority_epoch=_env(
+                "AUTHORITY_EPOCH",
+                cls.authority_epoch,
+            ) or cls.authority_epoch,
             release_policy_command_mode=_env(
                 "RELEASE_POLICY_COMMAND_MODE",
                 cls.release_policy_command_mode,

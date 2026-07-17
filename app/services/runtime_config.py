@@ -5,6 +5,7 @@ from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.route_ownership import RouteOwnershipRegistry
 from app.services.release_policy import ReleasePolicyService, parse_release_policy_feature_set
+from app.services.recovery_access import RecoveryAccessPolicy
 from app.services.tokens import TokenService
 from app.services.tts import VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice_clone_speaker_ids
@@ -39,6 +40,10 @@ class RuntimeConfigService:
                 self.settings.release_policy_enforced_features
             ),
             shadow_mode=self.settings.release_policy_command_mode != "enforce",
+        )
+        recovery_access = RecoveryAccessPolicy(
+            mode=self.settings.recovery_access_mode,
+            authority_epoch=self.settings.authority_epoch,
         )
         capability_snapshots = self._capability_snapshots(
             archive_image_analysis=archive_image_analysis,
@@ -120,6 +125,7 @@ class RuntimeConfigService:
                 "contractVersion": 2,
             },
             "releasePolicy": release_policy.public_descriptor(),
+            "recovery": recovery_access.public_descriptor(),
             "archive": {
                 "uploadIntentEndpoint": "/archive/media/upload-intent",
                 "storageProvider": "mockObjectStorage",
