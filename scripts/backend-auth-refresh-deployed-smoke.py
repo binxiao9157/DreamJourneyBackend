@@ -2,14 +2,17 @@
 import json
 import os
 import secrets
+import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 
 BASE_URL = os.environ.get(
     "BACKEND_BASE_URL",
     os.environ.get("DREAMJOURNEY_BACKEND_BASE_URL", ""),
 ).strip().rstrip("/")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 DIRECT_ISSUE = os.environ.get(
     "BACKEND_AUTH_REFRESH_SMOKE_DIRECT_ISSUE",
     "",
