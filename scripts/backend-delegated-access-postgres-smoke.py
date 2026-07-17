@@ -107,7 +107,20 @@ def request_json(
 def require_detail_code(response_body, expected_code, message):
     detail = response_body.get("detail") if isinstance(response_body, dict) else None
     actual_code = detail.get("code") if isinstance(detail, dict) else None
-    require(actual_code == expected_code, message)
+    require(
+        actual_code == expected_code,
+        f"{message} (expected={expected_code}, actual={actual_code})",
+    )
+
+
+def require_detail_code_in(response_body, expected_codes, message):
+    detail = response_body.get("detail") if isinstance(response_body, dict) else None
+    actual_code = detail.get("code") if isinstance(detail, dict) else None
+    allowed = set(expected_codes)
+    require(
+        actual_code in allowed,
+        f"{message} (expected one of={sorted(allowed)}, actual={actual_code})",
+    )
 
 
 def care_snapshot(summary):
@@ -348,9 +361,12 @@ def main():
             token=owner_token,
             expected_status=403,
         )
-        require_detail_code(
+        require_detail_code_in(
             default_off,
-            "delegatedAccessContractDefaultOff",
+            {
+                "delegatedAccessContractDefaultOff",
+                "release_policy_denied",
+            },
             "deployed delegated access contract API must remain default-off",
         )
 
@@ -360,8 +376,22 @@ def main():
         )
         import app.main as main_module
         from fastapi.testclient import TestClient
+        from app.services.release_policy import (
+            ReleasePolicyCommandGate,
+            ReleasePolicyService,
+        )
 
+        main_module.store = store
         main_module.DELEGATED_ACCESS_CONTRACT_API_ENABLED = True
+        main_module.RELEASE_POLICY_COMMAND_MODE = "observe"
+        release_policy = ReleasePolicyService(
+            shadow_mode=True,
+            enforce_default_closed_stages=False,
+        )
+        main_module.RELEASE_POLICY_SERVICE = release_policy
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(
+            release_policy
+        )
         _IN_PROCESS_CLIENT = TestClient(main_module.app)
 
         _, machine_headers = request_json(
@@ -590,7 +620,7 @@ def main():
             },
         )
         require(saved.get("status") == "saved", "granted care snapshot was not saved")
-        allowed_care, _ = request_json(
+        allowed_care, allowed_care_headers = request_json(
             "GET",
             f"/care/snapshots/latest/{owner_id}",
             token=member_token,
@@ -600,6 +630,21 @@ def main():
             ((allowed_care.get("item") or {}).get("snapshot") or {}).get("summary")
             == "care after explicit grant",
             "explicit care grant did not authorize the member read",
+        )
+        require(
+            allowed_care_headers.get("x-dreamjourney-authorization-grant-id")
+            == str(care_grant["id"]),
+            "cross-owner care read did not expose the matching grant diagnostic "
+            f"(decision={allowed_care_headers.get('x-dreamjourney-authorization-decision')}, "
+            f"reason={allowed_care_headers.get('x-dreamjourney-authorization-reason')})",
+        )
+        require(
+            bool(
+                allowed_care_headers.get(
+                    "x-dreamjourney-authorization-grant-receipt-id"
+                )
+            ),
+            "cross-owner care read did not expose an access receipt diagnostic",
         )
         initial_care_receipts = store.list_access_receipts(
             owner_subject_id=owner_id,

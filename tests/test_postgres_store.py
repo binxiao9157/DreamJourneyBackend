@@ -1,3 +1,4 @@
+import inspect
 import unittest
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
@@ -1344,6 +1345,12 @@ class TransactionalFailingConnection(FakeConnection):
 
 
 class PostgresStoreTests(unittest.TestCase):
+    def test_relationship_upsert_escapes_literal_like_wildcards_for_psycopg(self):
+        source = inspect.getsource(PostgresStore.upsert_family_relationship)
+
+        self.assertEqual(source.count("LIKE 'legacy-unverified:%%'"), 2)
+        self.assertNotIn("LIKE 'legacy-unverified:%'", source.replace("%%", ""))
+
     def test_store_has_no_schema_ddl_entrypoint(self):
         store = PostgresStore(connection_factory=lambda: FakeConnection())
 

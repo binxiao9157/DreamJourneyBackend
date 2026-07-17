@@ -323,6 +323,25 @@ class DelegatedAccessSecurityServiceTests(unittest.TestCase):
             resource_type=ResourceScopeType.CARE_SNAPSHOT,
         )
 
+        validation_only = self.service.authorize(
+            owner_subject_id=self.owner_id,
+            grantee_subject_id=self.grantee_id,
+            family_member_id=self.member_id,
+            purpose=AccessGrantPurpose.CARE_SNAPSHOT,
+            operation=GrantOperation.READ,
+            resource_type=ResourceScopeType.CARE_SNAPSHOT,
+            record_receipt=False,
+        )
+        self.assertTrue(validation_only.allowed)
+        self.assertIsNone(validation_only.receipt_id)
+        self.assertEqual(
+            self.store.list_access_receipts(
+                owner_subject_id=self.owner_id,
+                grant_id=grant["id"],
+            ),
+            [],
+        )
+
         decisions = [
             self.service.authorize(
                 owner_subject_id=self.owner_id,

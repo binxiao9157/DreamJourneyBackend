@@ -2937,6 +2937,7 @@ def get_time_letter_detail(
             item_id=item_id,
             viewer_user_id=viewerUserId,
             now_iso=now_iso,
+            record_access_receipt=False,
         )
     except TimeLetterAccessError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
@@ -3562,6 +3563,7 @@ def _ensure_active_family_viewer(
                 purpose=AccessGrantPurpose.CARE_SNAPSHOT,
                 operation=GrantOperation.READ,
                 resource_type=ResourceScopeType.CARE_SNAPSHOT,
+                record_receipt=False,
             )
             if access.allowed:
                 return

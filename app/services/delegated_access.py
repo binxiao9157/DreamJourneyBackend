@@ -378,6 +378,7 @@ class DelegatedAccessService:
         operation: GrantOperation,
         resource_type: ResourceScopeType,
         resource_id: Optional[str] = None,
+        record_receipt: bool = True,
     ) -> DelegatedAccessDecision:
         relationship = self.store.get_family_relationship_by_member(
             owner_subject_id,
@@ -410,18 +411,18 @@ class DelegatedAccessService:
                 resource_type=resource_type,
                 resource_id=resource_id,
             ):
-                record_receipt = getattr(
+                receipt_recorder = getattr(
                     self.store,
                     "record_access_grant_receipt",
                     None,
                 )
                 receipt = (
-                    record_receipt(
+                    receipt_recorder(
                         grant,
                         actor_subject_id=grantee_subject_id,
                         operation=operation.value,
                     )
-                    if callable(record_receipt)
+                    if record_receipt and callable(receipt_recorder)
                     else None
                 )
                 return DelegatedAccessDecision(

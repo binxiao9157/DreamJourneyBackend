@@ -4093,7 +4093,7 @@ class PostgresStore:
                     WHEN EXCLUDED.status = 'accepted'
                      AND (
                         family_relationships.status = 'pending'
-                        OR family_relationships.member_subject_id LIKE 'legacy-unverified:%'
+                        OR family_relationships.member_subject_id LIKE 'legacy-unverified:%%'
                      )
                     THEN EXCLUDED.member_subject_id
                     ELSE family_relationships.member_subject_id
@@ -4121,7 +4121,7 @@ class PostgresStore:
                         WHEN EXCLUDED.status = 'accepted'
                          AND (
                             family_relationships.status = 'pending'
-                            OR family_relationships.member_subject_id LIKE 'legacy-unverified:%'
+                            OR family_relationships.member_subject_id LIKE 'legacy-unverified:%%'
                          )
                         THEN EXCLUDED.member_subject_id
                         ELSE family_relationships.member_subject_id

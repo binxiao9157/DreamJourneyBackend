@@ -139,6 +139,7 @@ def active_family_member_for_recipient(
                 operation=GrantOperation.READ,
                 resource_type=ResourceScopeType.TIME_LETTER,
                 resource_id=time_letter_id,
+                record_receipt=False,
             )
             if access.allowed:
                 return member
@@ -267,6 +268,8 @@ def time_letter_detail_for_viewer(
     item_id: str,
     viewer_user_id: str,
     now_iso: str,
+    *,
+    record_access_receipt: bool = True,
 ) -> Dict[str, Any]:
     owner_user_id = str(owner_user_id or "").strip()
     item_id = str(item_id or "").strip()
@@ -308,6 +311,7 @@ def time_letter_detail_for_viewer(
                 operation=GrantOperation.READ,
                 resource_type=ResourceScopeType.TIME_LETTER,
                 resource_id=item_id,
+                record_receipt=record_access_receipt,
             )
             if not access.allowed:
                 raise TimeLetterAccessError(403, "active timeLetter grant is required")
