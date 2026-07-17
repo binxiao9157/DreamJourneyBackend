@@ -1567,7 +1567,10 @@ class PostgresStore:
                 "voice_profiles",
                 "digital_human_sessions",
             ):
-                self._fetchall(f"DELETE FROM {table} WHERE user_id = %s RETURNING payload", (user_id,))
+                self._fetchall(
+                    f"DELETE FROM {table} WHERE user_id = %s RETURNING user_id",
+                    (user_id,),
+                )
             tombstone = {
                 "id": user_id,
                 "phone": user.get("phone", ""),

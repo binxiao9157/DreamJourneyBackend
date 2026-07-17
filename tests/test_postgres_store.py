@@ -2928,6 +2928,32 @@ class PostgresStoreTests(unittest.TestCase):
             if statement.startswith("DELETE FROM kb_changes")
         )
         self.assertLess(user_lock_index, change_delete_index)
+        payloadless_purge_tables = {
+            "profiles",
+            "password_credentials",
+            "kb_snapshots",
+            "memories",
+            "archive_items",
+            "mailbox_letters",
+            "family_members",
+            "care_snapshots",
+            "echo_delayed_replies",
+            "push_device_tokens",
+            "voice_profiles",
+            "digital_human_sessions",
+        }
+        account_table_deletes = [
+            statement
+            for statement, _ in connection.executed
+            if any(
+                statement.startswith(f"DELETE FROM {table} ")
+                for table in payloadless_purge_tables
+            )
+        ]
+        self.assertEqual(len(account_table_deletes), len(payloadless_purge_tables))
+        self.assertTrue(
+            all("RETURNING payload" not in statement for statement in account_table_deletes)
+        )
 
     def test_store_persists_echo_delayed_replies_by_user(self):
         connection = FakeConnection()
