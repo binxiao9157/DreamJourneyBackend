@@ -128,6 +128,7 @@ class FakeCursor:
     def __init__(self, connection):
         self.connection = connection
         self.result = None
+        self.rowcount = 0
 
     def __enter__(self):
         return self
@@ -139,6 +140,7 @@ class FakeCursor:
         normalized = " ".join(sql.split())
         self.connection.executed.append((normalized, params))
         params = params or ()
+        self.rowcount = 0
 
         def matching_evidence(operation, now_iso):
             now = datetime.fromisoformat(str(now_iso).replace("Z", "+00:00"))
@@ -498,6 +500,149 @@ class FakeCursor:
                     if item.get("viewerFamilyMemberID") is None
                 ]
             self.result = {"payload": snapshots[0]} if snapshots else None
+        elif normalized.startswith("INSERT INTO token_families"):
+            family_id, user_id, status, version, contract_version, created_at, updated_at = params
+            self.connection.auth_token_families[family_id] = {
+                "id": family_id,
+                "user_id": user_id,
+                "status": status,
+                "current_session_version": version,
+                "contract_version": contract_version,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
+            self.rowcount = 1
+            self.result = None
+        elif normalized.startswith("SELECT user_id, family_id, payload FROM auth_sessions"):
+            token_hash = params[0]
+            session = next(
+                (
+                    item
+                    for item in self.connection.auth_sessions.values()
+                    if item.get("refreshTokenHash") == token_hash
+                ),
+                None,
+            )
+            self.result = (
+                None
+                if session is None
+                else {
+                    "user_id": session["userId"],
+                    "family_id": session.get("tokenFamilyId"),
+                    "payload": dict(session),
+                }
+            )
+        elif normalized.startswith("SELECT a.payload, a.status, a.access_expires_at"):
+            token_hash = params[0]
+            session = next(
+                (
+                    item
+                    for item in self.connection.auth_sessions.values()
+                    if item.get("accessTokenHash") == token_hash
+                ),
+                None,
+            )
+            if session is None:
+                self.result = None
+            else:
+                family_id = session.get("tokenFamilyId")
+                family = self.connection.auth_token_families.get(family_id, {})
+                self.result = {
+                    "payload": dict(session),
+                    "status": session.get("status"),
+                    "access_expires_at": session.get("accessExpiresAt"),
+                    "family_id": family_id,
+                    "session_version": session.get("sessionVersion"),
+                    "family_status": family.get("status", "legacy"),
+                }
+        elif normalized.startswith(
+            "SELECT id, user_id, family_id, session_version FROM auth_sessions"
+        ):
+            token_hash = params[0]
+            session = next(
+                (
+                    item
+                    for item in self.connection.auth_sessions.values()
+                    if item.get("accessTokenHash") == token_hash
+                ),
+                None,
+            )
+            self.result = (
+                None
+                if session is None
+                else {
+                    "id": session["sessionId"],
+                    "user_id": session["userId"],
+                    "family_id": session.get("tokenFamilyId"),
+                    "session_version": session.get("sessionVersion"),
+                }
+            )
+        elif normalized.startswith("SELECT id, user_id, family_id, session_version, status, refresh_expires_at"):
+            token_hash = params[0]
+            session = next(
+                (
+                    item
+                    for item in self.connection.auth_sessions.values()
+                    if item.get("refreshTokenHash") == token_hash
+                ),
+                None,
+            )
+            self.result = (
+                None
+                if session is None
+                else {
+                    "id": session["sessionId"],
+                    "user_id": session["userId"],
+                    "family_id": session.get("tokenFamilyId"),
+                    "session_version": session.get("sessionVersion"),
+                    "status": session.get("status"),
+                    "refresh_expires_at": session.get("refreshExpiresAt"),
+                    "payload": dict(session),
+                }
+            )
+        elif normalized.startswith("SELECT id, user_id, status, current_session_version FROM token_families"):
+            family = self.connection.auth_token_families.get(params[0])
+            self.result = None if family is None else dict(family)
+        elif normalized.startswith("SELECT id FROM token_families WHERE id = %s"):
+            family = self.connection.auth_token_families.get(params[0])
+            self.result = None if family is None else {"id": family["id"]}
+        elif normalized.startswith("UPDATE token_families SET current_session_version"):
+            version, updated_at, family_id = params
+            family = self.connection.auth_token_families.get(family_id)
+            if family is not None and family.get("status") == "active":
+                family["current_session_version"] = version
+                family["updated_at"] = updated_at
+                self.rowcount = 1
+            self.result = None
+        elif normalized.startswith("UPDATE token_families SET status = 'revoked'"):
+            revoked_at, reason, updated_at, family_id = params
+            family = self.connection.auth_token_families.get(family_id)
+            if family is not None and family.get("status") == "active":
+                family.update(
+                    {
+                        "status": "revoked",
+                        "revoked_at": revoked_at,
+                        "revoke_reason": reason,
+                        "updated_at": updated_at,
+                    }
+                )
+                self.rowcount = 1
+            self.result = None
+        elif normalized.startswith("INSERT INTO session_events"):
+            event_id, family_id, session_id, user_id, event_type, reason, version, contract, occurred_at = params
+            self.connection.auth_session_events[event_id] = {
+                "id": event_id,
+                "family_id": family_id,
+                "session_id": session_id,
+                "user_id": user_id,
+                "event_type": event_type,
+                "reason": reason,
+                "session_version": version,
+                "contract_version": contract,
+                "occurred_at": occurred_at,
+            }
+            self.rowcount = 1
+            self.result = None
         elif normalized.startswith("SELECT payload FROM auth_sessions WHERE access_token_hash"):
             token_hash = params[0]
             session = next(
@@ -524,7 +669,61 @@ class FakeCursor:
             session_id = params[0]
             payload = unwrap_jsonb(params[5])
             self.connection.auth_sessions[session_id] = dict(payload)
+            self.rowcount = 1
             self.result = {"payload": payload}
+        elif normalized.startswith("UPDATE auth_sessions SET status = 'rotated'") and "WHERE id = %s" in normalized:
+            patch, successor_id, rotated_at, session_id = params
+            patch = unwrap_jsonb(patch)
+            session = self.connection.auth_sessions.get(session_id)
+            if session is not None and session.get("status") == "active":
+                session.update(patch)
+                session["successorSessionId"] = successor_id
+                session["rotatedAt"] = rotated_at
+                self.rowcount = 1
+            self.result = None
+        elif normalized.startswith("UPDATE auth_sessions SET status = 'revoked'") and "WHERE family_id = %s" in normalized:
+            patch, _, _, family_id = params
+            patch = unwrap_jsonb(patch)
+            for session in self.connection.auth_sessions.values():
+                if session.get("tokenFamilyId") == family_id and session.get("status") == "active":
+                    session.update(patch)
+                    self.rowcount += 1
+            self.result = None
+        elif (
+            normalized.startswith("UPDATE auth_sessions SET status = 'revoked'")
+            and "access_token_hash = %s" in normalized
+        ):
+            patch, _, _, access_token_hash, user_id = params
+            patch = unwrap_jsonb(patch)
+            match = next(
+                (
+                    item
+                    for item in self.connection.auth_sessions.values()
+                    if item.get("accessTokenHash") == access_token_hash
+                    and item.get("userId") == user_id
+                    and item.get("status") == "active"
+                ),
+                None,
+            )
+            if match is None:
+                self.result = None
+            else:
+                match.update(patch)
+                self.rowcount = 1
+                self.result = {
+                    "id": match["sessionId"],
+                    "user_id": match["userId"],
+                    "family_id": match.get("tokenFamilyId"),
+                    "session_version": match.get("sessionVersion"),
+                    "payload": dict(match),
+                }
+        elif normalized.startswith("UPDATE auth_sessions SET reuse_detected_at"):
+            reuse_at, session_id = params
+            session = self.connection.auth_sessions.get(session_id)
+            if session is not None:
+                session["reuseDetectedAt"] = reuse_at
+                self.rowcount = 1
+            self.result = None
         elif normalized.startswith("UPDATE auth_sessions"):
             patch = unwrap_jsonb(params[0])
             if "WHERE refresh_token_hash = %s" in normalized:
@@ -963,6 +1162,8 @@ class FakeConnection:
         self.voice_clone_slots = {}
         self.digital_human_sessions = {}
         self.auth_sessions = {}
+        self.auth_token_families = {}
+        self.auth_session_events = {}
         self.evidence_events = {}
         self.profiles = {}
         self.password_credentials = {}
@@ -1134,8 +1335,49 @@ class PostgresStoreTests(unittest.TestCase):
             service.refresh(issued["refreshToken"], now=now)
         auth_sql = "\n".join(statement for statement, _ in connection.executed)
         self.assertIn("UPDATE auth_sessions", auth_sql)
-        self.assertIn("WHERE refresh_token_hash = %s AND status = 'active'", auth_sql)
+        self.assertIn("WHERE refresh_token_hash = %s FOR UPDATE", auth_sql)
+        self.assertIn("UPDATE token_families", auth_sql)
+        self.assertIn("INSERT INTO session_events", auth_sql)
         self.assertNotIn("SELECT payload FROM auth_sessions WHERE refresh_token_hash", auth_sql)
+
+    def test_postgres_session_revoke_uses_user_family_session_lock_order(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        service = AuthSessionService(
+            store,
+            access_ttl_seconds=900,
+            refresh_ttl_seconds=3600,
+        )
+        issued = service.issue("user-revoke-lock-order")
+        connection.executed.clear()
+
+        revoked = service.revoke_access_token(
+            issued["accessToken"],
+            scope="session",
+            reason="logout",
+        )
+
+        statements = [" ".join(statement.split()) for statement, _ in connection.executed]
+        advisory_index = next(
+            index
+            for index, statement in enumerate(statements)
+            if "pg_advisory_xact_lock" in statement
+        )
+        family_index = next(
+            index
+            for index, statement in enumerate(statements)
+            if statement.startswith("SELECT id FROM token_families")
+            and "FOR UPDATE" in statement
+        )
+        session_index = next(
+            index
+            for index, statement in enumerate(statements)
+            if statement.startswith("UPDATE auth_sessions")
+            and "access_token_hash" in statement
+        )
+        self.assertEqual(revoked["scope"], "session")
+        self.assertLess(advisory_index, family_index)
+        self.assertLess(family_index, session_index)
 
     def test_in_memory_store_arbitrates_digital_human_session_leases(self):
         store = InMemoryStore()

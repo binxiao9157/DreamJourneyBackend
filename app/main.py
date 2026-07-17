@@ -734,6 +734,8 @@ async def require_backend_api_token(request: Request, call_next):
             "kind": "user",
             "userId": str(session.get("userId") or ""),
             "sessionId": str(session.get("sessionId") or ""),
+            "tokenFamilyId": str(session.get("tokenFamilyId") or ""),
+            "sessionVersion": int(session.get("sessionVersion") or 0),
         }
     elif backend_header_token:
         if not _tokens_match(backend_header_token, configured_backend_token):
@@ -1126,6 +1128,11 @@ def verify_identity_challenge(
                 "message": "challenge could not be verified",
             },
         ) from exc
+    except AuthSessionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     except IdentityChallengeConfigurationError as exc:
         logger.error("identity_challenge_configuration_unavailable")
         raise HTTPException(
@@ -1153,43 +1160,56 @@ def login(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not phone:
         raise HTTPException(status_code=400, detail="phone is required")
     user_id = stable_user_id(phone)
-    credential = store.get_password_credential(user_id)
-    if credential is not None and not password:
-        raise HTTPException(status_code=401, detail="password is required")
-    if credential is not None and password and not verify_password(password, credential):
-        raise HTTPException(status_code=401, detail="invalid password")
+    with store.auth_user_operation(user_id):
+        credential = store.get_password_credential(user_id)
+        if credential is not None and not password:
+            raise HTTPException(status_code=401, detail="password is required")
+        if credential is not None and password and not verify_password(password, credential):
+            raise HTTPException(status_code=401, detail="invalid password")
 
-    existing_user = _store_get_user(user_id)
-    if existing_user is not None and existing_user.get("deletionState") == "softDeleted":
-        user = _restore_soft_deleted_account_or_raise(
-            user_id=user_id,
-            phone=phone,
-            nickname=nickname,
-        )
+        existing_user = _store_get_user(user_id)
+        deletion_state = str((existing_user or {}).get("deletionState") or "active")
+        if deletion_state == "purged":
+            raise HTTPException(status_code=410, detail="account was permanently deleted")
+        if deletion_state == "softDeleted":
+            user = _restore_soft_deleted_account_or_raise(
+                user_id=user_id,
+                phone=phone,
+                nickname=nickname,
+            )
+            user["passwordConfigured"] = credential is not None
+            return {
+                "status": "restored",
+                "user": user,
+                "auth": _auth_session_service().issue(user_id),
+            }
+
+        user = store.upsert_user(phone=phone, nickname=nickname)
+        if password and credential is None:
+            credential = store.save_password_credential(user_id, make_password_credential(password))
         user["passwordConfigured"] = credential is not None
         return {
-            "status": "restored",
             "user": user,
             "auth": _auth_session_service().issue(user_id),
         }
 
-    user = store.upsert_user(phone=phone, nickname=nickname)
-    if password and credential is None:
-        credential = store.save_password_credential(user_id, make_password_credential(password))
-    user["passwordConfigured"] = credential is not None
-    return {
-        "user": user,
-        "auth": _auth_session_service().issue(user_id),
-    }
-
 
 @app.post("/auth/refresh")
-def refresh_auth_session(payload: Dict[str, Any]) -> Dict[str, Any]:
+def refresh_auth_session(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     refresh_token = str(payload.get("refreshToken") or "").strip()
     try:
         auth = _auth_session_service().refresh(refresh_token)
     except AuthSessionError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        if exc.commit_state_change:
+            request.state.commit_security_attempt = True
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                "reauthenticationRequired": True,
+            },
+        ) from exc
     return {"status": "refreshed", "auth": auth}
 
 
@@ -1198,13 +1218,29 @@ def logout_auth_session(request: Request, payload: Dict[str, Any]) -> Dict[str, 
     principal = getattr(request.state, "auth_principal", {})
     if principal.get("kind") != "user":
         raise HTTPException(status_code=401, detail="user access token is required")
-    revoked = _auth_session_service().revoke_access_token(_request_bearer_token(request))
+    scope = str(payload.get("scope") or "session").strip()
+    try:
+        revoked = _auth_session_service().revoke_access_token(
+            _request_bearer_token(request),
+            scope=scope,
+            reason="logout",
+        )
+    except AuthSessionError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     if revoked is None:
         raise HTTPException(status_code=401, detail="invalid access token")
     return {
         "status": "revoked",
         "sessionId": revoked.get("sessionId"),
-        "contractVersion": revoked.get("contractVersion", 1),
+        "scope": revoked.get("scope", scope),
+        "tokenFamilyId": revoked.get("tokenFamilyId"),
+        "revocationReceiptId": revoked.get("revocationReceiptId"),
+        "revokedSessionCount": int(revoked.get("revokedSessionCount") or 0),
+        "revokedFamilyCount": int(revoked.get("revokedFamilyCount") or 0),
+        "contractVersion": 2,
     }
 
 
@@ -1236,6 +1272,8 @@ def _restore_soft_deleted_account_or_raise(
     user = _store_get_user(user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="account not found")
+    if user.get("deletionState") == "purged":
+        raise HTTPException(status_code=410, detail="account was permanently deleted")
     if user.get("deletionState") != "softDeleted":
         return user
     if int(user.get("restoreCount") or 0) >= ACCOUNT_RESTORE_LIMIT:
@@ -1262,9 +1300,17 @@ def soft_delete_account(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not phone:
         raise HTTPException(status_code=400, detail="phone is required")
     _require_account_deletion_confirmations(payload)
-    deletion = store.soft_delete_user(user_id, phone=phone)
-    if deletion is None:
-        raise HTTPException(status_code=404, detail="account not found")
+    with store.auth_user_operation(user_id):
+        existing_user = _store_get_user(user_id)
+        if existing_user is not None and existing_user.get("deletionState") == "purged":
+            raise HTTPException(status_code=410, detail="account was permanently deleted")
+        deletion = store.soft_delete_user(user_id, phone=phone)
+        if deletion is None:
+            raise HTTPException(status_code=404, detail="account not found")
+        session_revocation = _auth_session_service().revoke_all_for_user(
+            user_id,
+            reason="accountSoftDeleted",
+        )
     return {
         "status": "softDeleted",
         "contractVersion": ACCOUNT_DELETION_CONTRACT_VERSION,
@@ -1275,6 +1321,7 @@ def soft_delete_account(payload: Dict[str, Any]) -> Dict[str, Any]:
             "restoreLimit": ACCOUNT_RESTORE_LIMIT,
             "restoreBySamePhone": True,
         },
+        "sessionRevocation": session_revocation,
     }
 
 
@@ -1293,11 +1340,12 @@ def restore_account(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not phone:
         raise HTTPException(status_code=400, detail="phone is required")
     user_id = stable_user_id(phone)
-    user = _restore_soft_deleted_account_or_raise(
-        user_id=user_id,
-        phone=phone,
-        nickname=nickname,
-    )
+    with store.auth_user_operation(user_id):
+        user = _restore_soft_deleted_account_or_raise(
+            user_id=user_id,
+            phone=phone,
+            nickname=nickname,
+        )
     return {"status": "restored", "user": user}
 
 
@@ -1338,14 +1386,23 @@ def change_password(payload: Dict[str, Any]) -> Dict[str, Any]:
     old_password = _required_password(payload, "oldPassword")
     new_password = _required_password(payload, "newPassword", min_length=8)
 
-    credential = store.get_password_credential(user_id)
-    if credential is None:
-        raise HTTPException(status_code=409, detail="password credential not configured")
-    if not verify_password(old_password, credential):
-        raise HTTPException(status_code=401, detail="invalid password")
+    with store.auth_user_operation(user_id):
+        credential = store.get_password_credential(user_id)
+        if credential is None:
+            raise HTTPException(status_code=409, detail="password credential not configured")
+        if not verify_password(old_password, credential):
+            raise HTTPException(status_code=401, detail="invalid password")
 
-    store.save_password_credential(user_id, make_password_credential(new_password))
-    return {"status": "changed", "userId": user_id}
+        store.save_password_credential(user_id, make_password_credential(new_password))
+        session_revocation = _auth_session_service().revoke_all_for_user(
+            user_id,
+            reason="passwordChanged",
+        )
+    return {
+        "status": "changed",
+        "userId": user_id,
+        "sessionRevocation": session_revocation,
+    }
 
 
 _ALLOWED_PROFILE_GENDERS = {"男", "女", "不便透露"}

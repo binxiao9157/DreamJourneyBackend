@@ -1,4 +1,5 @@
 from collections import Counter
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from math import ceil
@@ -59,6 +60,9 @@ class InMemoryStore:
         self._voice_clone_slots: Dict[str, Dict[str, Any]] = {}
         self._digital_human_sessions: Dict[str, Dict[str, Any]] = {}
         self._auth_sessions: Dict[str, Dict[str, Any]] = {}
+        self._auth_token_families: Dict[str, Dict[str, Any]] = {}
+        self._auth_session_events: Dict[str, Dict[str, Any]] = {}
+        self._auth_lock = RLock()
         self._auth_challenges: Dict[str, Dict[str, Any]] = {}
         self._identity_hash_key_versions: Dict[str, str] = {}
         self._subjects: Dict[str, Dict[str, Any]] = {}
@@ -67,6 +71,13 @@ class InMemoryStore:
         self._identity_proofs: Dict[str, Dict[str, Any]] = {}
         self._identity_lock = RLock()
         self._evidence_events: Dict[str, Dict[str, Any]] = {}
+
+    @contextmanager
+    def auth_user_operation(self, user_id: str):
+        if not str(user_id or "").strip():
+            raise ValueError("auth user id is required")
+        with self._auth_lock:
+            yield
 
     def append_evidence_event(
         self,
@@ -190,70 +201,395 @@ class InMemoryStore:
 
     def save_auth_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(session)
-        self._auth_sessions[str(item["sessionId"])] = item
+        with self._auth_lock:
+            self._auth_sessions[str(item["sessionId"])] = item
         return deepcopy(item)
 
-    def get_auth_session_by_access_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
-        session = next(
-            (
-                item
-                for item in self._auth_sessions.values()
-                if item.get("accessTokenHash") == token_hash
-            ),
-            None,
-        )
-        return None if session is None else deepcopy(session)
+    def create_auth_token_family(
+        self,
+        family: Dict[str, Any],
+        session: Dict[str, Any],
+        event: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        family_item = deepcopy(family)
+        session_item = deepcopy(session)
+        event_item = deepcopy(event)
+        family_id = str(family_item["tokenFamilyId"])
+        session_id = str(session_item["sessionId"])
+        event_id = str(event_item["eventId"])
+        with self._auth_lock:
+            if family_id in self._auth_token_families:
+                raise ValueError("auth token family already exists")
+            if session_id in self._auth_sessions:
+                raise ValueError("auth session already exists")
+            self._auth_token_families[family_id] = family_item
+            self._auth_sessions[session_id] = session_item
+            self._auth_session_events[event_id] = event_item
+        return deepcopy(session_item)
 
-    def consume_auth_session_refresh(
+    def get_auth_session_by_access_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        with self._auth_lock:
+            session = next(
+                (
+                    item
+                    for item in self._auth_sessions.values()
+                    if item.get("accessTokenHash") == token_hash
+                ),
+                None,
+            )
+            if session is None:
+                return None
+            result = deepcopy(session)
+            family_id = str(result.get("tokenFamilyId") or "")
+            if family_id:
+                family = self._auth_token_families.get(family_id)
+                result["familyStatus"] = (
+                    str(family.get("status") or "missing")
+                    if family is not None
+                    else "missing"
+                )
+            return result
+
+    def rotate_auth_session_refresh(
         self,
         refresh_token_hash: str,
-        consumed_at_iso: str,
-    ) -> Optional[Dict[str, Any]]:
-        session_id, session = next(
-            (
-                (key, item)
-                for key, item in self._auth_sessions.items()
-                if item.get("refreshTokenHash") == refresh_token_hash
-            ),
-            (None, None),
-        )
-        if session_id is None or session is None or session.get("status") != "active":
-            return None
-        if self._parse_iso_datetime(str(session.get("refreshExpiresAt") or "")) <= self._parse_iso_datetime(consumed_at_iso):
-            expired = deepcopy(session)
-            expired["status"] = "expired"
-            expired["expiredAt"] = consumed_at_iso
-            self._auth_sessions[session_id] = expired
-            return None
+        *,
+        successor: Dict[str, Any],
+        rotated_at_iso: str,
+        rotation_receipt_id: str,
+        reuse_receipt_id: str,
+    ) -> Dict[str, Any]:
+        rotated_at = self._parse_iso_datetime(rotated_at_iso)
+        with self._auth_lock:
+            session_id, session = self._auth_session_by_refresh_hash(refresh_token_hash)
+            if session_id is None or session is None:
+                return {"outcome": "invalid"}
+            family_id = str(session.get("tokenFamilyId") or "")
+            if not family_id or int(session.get("contractVersion") or 1) < 2:
+                return {"outcome": "legacyReauthRequired"}
+            family = self._auth_token_families.get(family_id)
+            if family is None:
+                return {"outcome": "invalid"}
+            if session.get("status") == "rotated":
+                self._revoke_family_locked(
+                    family_id,
+                    revoked_at_iso=rotated_at_iso,
+                    reason="refreshTokenReuse",
+                    receipt_id=reuse_receipt_id,
+                    event_type="refreshReuseDetected",
+                    source_session=session,
+                )
+                return {"outcome": "reuseDetected"}
+            if session.get("status") != "active" or family.get("status") != "active":
+                return {"outcome": "invalid"}
+            try:
+                refresh_expires_at = self._parse_iso_datetime(
+                    str(session.get("refreshExpiresAt") or "")
+                )
+            except (TypeError, ValueError):
+                return {"outcome": "invalid"}
+            if refresh_expires_at <= rotated_at:
+                expired = deepcopy(session)
+                expired["status"] = "expired"
+                expired["expiredAt"] = rotated_at_iso
+                self._auth_sessions[session_id] = expired
+                return {"outcome": "expired"}
 
-        consumed = deepcopy(session)
-        consumed["status"] = "rotated"
-        consumed["rotatedAt"] = consumed_at_iso
-        self._auth_sessions[session_id] = consumed
-        return deepcopy(consumed)
+            version = int(session.get("sessionVersion") or 0) + 1
+            successor_item = deepcopy(successor)
+            successor_item.update(
+                {
+                    "userId": session["userId"],
+                    "tokenFamilyId": family_id,
+                    "parentSessionId": session_id,
+                    "sessionVersion": version,
+                }
+            )
+            successor_id = str(successor_item["sessionId"])
+            if successor_id in self._auth_sessions:
+                raise ValueError("auth successor session already exists")
+
+            consumed = deepcopy(session)
+            consumed.update(
+                {
+                    "status": "rotated",
+                    "rotatedAt": rotated_at_iso,
+                    "successorSessionId": successor_id,
+                }
+            )
+            updated_family = deepcopy(family)
+            updated_family["currentSessionVersion"] = version
+            updated_family["updatedAt"] = rotated_at_iso
+            self._auth_sessions[session_id] = consumed
+            self._auth_sessions[successor_id] = successor_item
+            self._auth_token_families[family_id] = updated_family
+            self._auth_session_events[rotation_receipt_id] = {
+                "eventId": rotation_receipt_id,
+                "tokenFamilyId": family_id,
+                "sessionId": successor_id,
+                "userId": session["userId"],
+                "eventType": "sessionRotated",
+                "reason": "refreshConsumed",
+                "sessionVersion": version,
+                "occurredAt": rotated_at_iso,
+                "contractVersion": 1,
+            }
+            return {"outcome": "rotated", "session": deepcopy(successor_item)}
 
     def revoke_auth_session_by_access_token_hash(
         self,
         access_token_hash: str,
         revoked_at_iso: str,
         reason: str,
+        *,
+        receipt_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        session_id, session = next(
+        with self._auth_lock:
+            session_id, session = self._auth_session_by_access_hash(access_token_hash)
+            if session_id is None or session is None:
+                return None
+            revoked = deepcopy(session)
+            revoked["status"] = "revoked"
+            revoked["revokedAt"] = revoked_at_iso
+            revoked["revokeReason"] = reason
+            self._auth_sessions[session_id] = revoked
+            if receipt_id:
+                self._auth_session_events[receipt_id] = self._auth_revoke_event(
+                    receipt_id,
+                    revoked,
+                    event_type="sessionRevoked",
+                    reason=reason,
+                    occurred_at_iso=revoked_at_iso,
+                )
+            return {
+                **deepcopy(revoked),
+                "scope": "session",
+                "revocationReceiptId": receipt_id,
+                "revokedSessionCount": 1,
+                "revokedFamilyCount": 0,
+            }
+
+    def revoke_auth_token_family_by_access_token_hash(
+        self,
+        access_token_hash: str,
+        revoked_at_iso: str,
+        reason: str,
+        *,
+        receipt_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._auth_lock:
+            _, session = self._auth_session_by_access_hash(access_token_hash)
+            if session is None:
+                return None
+            family_id = str(session.get("tokenFamilyId") or "")
+            if not family_id:
+                return self.revoke_auth_session_by_access_token_hash(
+                    access_token_hash,
+                    revoked_at_iso,
+                    reason,
+                    receipt_id=receipt_id,
+                )
+            return self._revoke_family_locked(
+                family_id,
+                revoked_at_iso=revoked_at_iso,
+                reason=reason,
+                receipt_id=receipt_id,
+                event_type="familyRevoked",
+                source_session=session,
+            )
+
+    def revoke_all_auth_token_families(
+        self,
+        user_id: str,
+        revoked_at_iso: str,
+        reason: str,
+        *,
+        receipt_id: str,
+    ) -> Dict[str, Any]:
+        with self._auth_lock:
+            family_ids = sorted(
+                family_id
+                for family_id, family in self._auth_token_families.items()
+                if family.get("userId") == user_id and family.get("status") == "active"
+            )
+            revoked_session_count = 0
+            for index, family_id in enumerate(family_ids):
+                result = self._revoke_family_locked(
+                    family_id,
+                    revoked_at_iso=revoked_at_iso,
+                    reason=reason,
+                    receipt_id=f"{receipt_id}_{index + 1}",
+                    event_type="allDevicesRevoked",
+                    source_session=None,
+                )
+                revoked_session_count += int(result["revokedSessionCount"])
+
+            legacy_session_ids = [
+                session_id
+                for session_id, session in self._auth_sessions.items()
+                if session.get("userId") == user_id
+                and not session.get("tokenFamilyId")
+                and session.get("status") == "active"
+            ]
+            for session_id in legacy_session_ids:
+                legacy = deepcopy(self._auth_sessions[session_id])
+                legacy.update(
+                    {
+                        "status": "revoked",
+                        "revokedAt": revoked_at_iso,
+                        "revokeReason": reason,
+                    }
+                )
+                self._auth_sessions[session_id] = legacy
+            revoked_session_count += len(legacy_session_ids)
+            self._auth_session_events[receipt_id] = {
+                "eventId": receipt_id,
+                "tokenFamilyId": None,
+                "sessionId": None,
+                "userId": user_id,
+                "eventType": "allDevicesRevoked",
+                "reason": reason,
+                "sessionVersion": 0,
+                "occurredAt": revoked_at_iso,
+                "contractVersion": 1,
+            }
+            return {
+                "scope": "allDevices",
+                "userId": user_id,
+                "revocationReceiptId": receipt_id,
+                "revokedFamilyCount": len(family_ids),
+                "revokedSessionCount": revoked_session_count,
+                "revokedAt": revoked_at_iso,
+                "reason": reason,
+                "contractVersion": 1,
+            }
+
+    def list_auth_session_events(self, token_family_id: str) -> List[Dict[str, Any]]:
+        with self._auth_lock:
+            events = [
+                deepcopy(event)
+                for event in self._auth_session_events.values()
+                if event.get("tokenFamilyId") == token_family_id
+            ]
+        events.sort(key=lambda event: (str(event.get("occurredAt") or ""), str(event.get("eventId") or "")))
+        return events
+
+    def _auth_session_by_refresh_hash(
+        self,
+        token_hash: str,
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        return next(
             (
                 (key, item)
                 for key, item in self._auth_sessions.items()
-                if item.get("accessTokenHash") == access_token_hash
+                if item.get("refreshTokenHash") == token_hash
             ),
             (None, None),
         )
-        if session_id is None or session is None:
-            return None
-        revoked = deepcopy(session)
-        revoked["status"] = "revoked"
-        revoked["revokedAt"] = revoked_at_iso
-        revoked["revokeReason"] = reason
-        self._auth_sessions[session_id] = revoked
-        return deepcopy(revoked)
+
+    def _auth_session_by_access_hash(
+        self,
+        token_hash: str,
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        return next(
+            (
+                (key, item)
+                for key, item in self._auth_sessions.items()
+                if item.get("accessTokenHash") == token_hash
+            ),
+            (None, None),
+        )
+
+    def _revoke_family_locked(
+        self,
+        family_id: str,
+        *,
+        revoked_at_iso: str,
+        reason: str,
+        receipt_id: str,
+        event_type: str,
+        source_session: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        family = self._auth_token_families.get(family_id)
+        if family is None:
+            return {
+                "scope": "family",
+                "tokenFamilyId": family_id,
+                "revocationReceiptId": receipt_id,
+                "revokedFamilyCount": 0,
+                "revokedSessionCount": 0,
+            }
+        updated_family = deepcopy(family)
+        updated_family.update(
+            {
+                "status": "revoked",
+                "revokedAt": revoked_at_iso,
+                "revokeReason": reason,
+                "updatedAt": revoked_at_iso,
+            }
+        )
+        self._auth_token_families[family_id] = updated_family
+        revoked_count = 0
+        for session_id, session in list(self._auth_sessions.items()):
+            if session.get("tokenFamilyId") != family_id or session.get("status") != "active":
+                continue
+            revoked = deepcopy(session)
+            revoked.update(
+                {
+                    "status": "revoked",
+                    "revokedAt": revoked_at_iso,
+                    "revokeReason": reason,
+                }
+            )
+            self._auth_sessions[session_id] = revoked
+            revoked_count += 1
+        event_session = source_session or next(
+            (
+                session
+                for session in self._auth_sessions.values()
+                if session.get("tokenFamilyId") == family_id
+            ),
+            {"userId": family.get("userId"), "sessionVersion": 0, "sessionId": None},
+        )
+        self._auth_session_events[receipt_id] = self._auth_revoke_event(
+            receipt_id,
+            event_session,
+            event_type=event_type,
+            reason=reason,
+            occurred_at_iso=revoked_at_iso,
+        )
+        return {
+            "scope": "family",
+            "tokenFamilyId": family_id,
+            "userId": family.get("userId"),
+            "revocationReceiptId": receipt_id,
+            "revokedFamilyCount": 1,
+            "revokedSessionCount": revoked_count,
+            "revokedAt": revoked_at_iso,
+            "reason": reason,
+            "contractVersion": 1,
+        }
+
+    @staticmethod
+    def _auth_revoke_event(
+        event_id: str,
+        session: Dict[str, Any],
+        *,
+        event_type: str,
+        reason: str,
+        occurred_at_iso: str,
+    ) -> Dict[str, Any]:
+        return {
+            "eventId": event_id,
+            "tokenFamilyId": session.get("tokenFamilyId"),
+            "sessionId": session.get("sessionId"),
+            "userId": session.get("userId"),
+            "eventType": event_type,
+            "reason": reason,
+            "sessionVersion": int(session.get("sessionVersion") or 0),
+            "occurredAt": occurred_at_iso,
+            "contractVersion": 1,
+        }
 
     def ensure_identity_hash_key_version(
         self,
@@ -624,6 +960,8 @@ class InMemoryStore:
         user = self._users.get(user_id)
         if user is None:
             return None
+        if user.get("deletionState") == "purged":
+            return None
         if self._normalized_phone(user.get("phone", "")) != self._normalized_phone(phone):
             return None
 
@@ -654,6 +992,8 @@ class InMemoryStore:
         user = self._users.get(user_id)
         if user is None:
             return None
+        if user.get("deletionState") != "softDeleted":
+            return None
         if self._normalized_phone(user.get("phone", "")) != self._normalized_phone(phone):
             return None
 
@@ -670,6 +1010,10 @@ class InMemoryStore:
         return deepcopy(item)
 
     def purge_expired_deleted_users(self, cutoff_iso: str) -> List[Dict[str, Any]]:
+        with self._auth_lock:
+            return self._purge_expired_deleted_users_locked(cutoff_iso)
+
+    def _purge_expired_deleted_users_locked(self, cutoff_iso: str) -> List[Dict[str, Any]]:
         cutoff = self._parse_iso_datetime(cutoff_iso)
         purged: List[Dict[str, Any]] = []
         for user_id, user in list(self._users.items()):
@@ -709,6 +1053,21 @@ class InMemoryStore:
                 session_id: session
                 for session_id, session in self._auth_sessions.items()
                 if session.get("userId") != user_id
+            }
+            purged_family_ids = {
+                family_id
+                for family_id, family in self._auth_token_families.items()
+                if family.get("userId") == user_id
+            }
+            self._auth_token_families = {
+                family_id: family
+                for family_id, family in self._auth_token_families.items()
+                if family_id not in purged_family_ids
+            }
+            self._auth_session_events = {
+                event_id: event
+                for event_id, event in self._auth_session_events.items()
+                if event.get("userId") != user_id
             }
             for slot in self._voice_clone_slots.values():
                 if slot.get("userId") != user_id:

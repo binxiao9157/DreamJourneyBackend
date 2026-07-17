@@ -1,0 +1,8 @@
+{
+  "version": "0003",
+  "name": "auth_token_families",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "singleVersionCutover",
+  "requiresOldWorkerDrain": true
+}

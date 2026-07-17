@@ -94,6 +94,12 @@ class RuntimeConfigService:
                     self.settings.auth_refresh_ttl_seconds,
                 ),
                 "refreshRotation": True,
+                "sessionContractVersion": 2,
+                "tokenFamilyContractVersion": 1,
+                "sessionLineageFields": ["tokenFamilyId", "sessionVersion"],
+                "refreshReuseRevokesFamily": True,
+                "legacyRefreshPolicy": "reauthRequired",
+                "logoutScopes": ["session", "family", "allDevices"],
                 "ownershipMode": (
                     self.settings.auth_ownership_mode
                     if self.settings.auth_ownership_mode in {"shadow", "enforce"}

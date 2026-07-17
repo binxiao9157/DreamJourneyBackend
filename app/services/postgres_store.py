@@ -356,62 +356,672 @@ class PostgresStore:
         )
         return deepcopy(row["payload"])
 
+    @contextmanager
+    def auth_user_operation(self, user_id: str):
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("auth user id is required")
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"auth-user-operation-{uuid.uuid4().hex}",
+                command_id="authUserOperation",
+            ):
+                with self.auth_user_operation(normalized_user_id):
+                    yield
+            return
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("auth user operation requires a unit of work")
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                (f"auth-user:{normalized_user_id}",),
+            )
+            cursor.fetchone()
+        yield
+
+    def create_auth_token_family(
+        self,
+        family: Dict[str, Any],
+        session: Dict[str, Any],
+        event: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"auth-issue-{uuid.uuid4().hex}",
+                command_id="createAuthTokenFamily",
+            ):
+                return self.create_auth_token_family(family, session, event)
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("auth token family creation requires a unit of work")
+        family_item = deepcopy(family)
+        session_item = deepcopy(session)
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                (f"auth-user:{family_item['userId']}",),
+            )
+            cursor.fetchone()
+            cursor.execute(
+                """
+                INSERT INTO token_families (
+                    id, user_id, status, current_session_version, contract_version,
+                    created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    family_item["tokenFamilyId"],
+                    family_item["userId"],
+                    family_item["status"],
+                    family_item["currentSessionVersion"],
+                    family_item.get("contractVersion", 1),
+                    family_item["createdAt"],
+                    family_item["updatedAt"],
+                ),
+            )
+            self._insert_auth_session_cursor(cursor, session_item)
+            self._insert_auth_session_event_cursor(cursor, event)
+        return deepcopy(session_item)
+
     def get_auth_session_by_access_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
         row = self._fetchone(
-            "SELECT payload FROM auth_sessions WHERE access_token_hash = %s",
+            """
+            SELECT a.payload, a.status, a.access_expires_at,
+                   a.family_id, a.session_version,
+                   COALESCE(f.status, 'legacy') AS family_status
+            FROM auth_sessions AS a
+            LEFT JOIN token_families AS f ON f.id = a.family_id
+            WHERE a.access_token_hash = %s
+            """,
             (token_hash,),
         )
-        return None if row is None else deepcopy(row["payload"])
+        if row is None:
+            return None
+        item = deepcopy(row["payload"])
+        item["status"] = str(row.get("status") or item.get("status") or "invalid")
+        item["accessExpiresAt"] = self._iso_value(row.get("access_expires_at"))
+        if row.get("family_id") is not None:
+            item["tokenFamilyId"] = str(row["family_id"])
+            item["sessionVersion"] = int(row.get("session_version") or 0)
+            item["familyStatus"] = str(row.get("family_status") or "missing")
+        return item
 
-    def consume_auth_session_refresh(
+    def rotate_auth_session_refresh(
         self,
         refresh_token_hash: str,
-        consumed_at_iso: str,
-    ) -> Optional[Dict[str, Any]]:
-        patch = {"status": "rotated", "rotatedAt": consumed_at_iso}
-        row = self._fetchone(
-            """
-            UPDATE auth_sessions
-            SET status = 'rotated',
-                payload = payload || %s,
-                revoked_at = %s,
-                updated_at = NOW()
-            WHERE refresh_token_hash = %s
-              AND status = 'active'
-              AND refresh_expires_at > %s
-            RETURNING payload
-            """,
-            (patch, consumed_at_iso, refresh_token_hash, consumed_at_iso),
-            commit=True,
-        )
-        return None if row is None else deepcopy(row["payload"])
+        *,
+        successor: Dict[str, Any],
+        rotated_at_iso: str,
+        rotation_receipt_id: str,
+        reuse_receipt_id: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"auth-rotate-{uuid.uuid4().hex}",
+                command_id="rotateAuthSessionRefresh",
+            ):
+                return self.rotate_auth_session_refresh(
+                    refresh_token_hash,
+                    successor=successor,
+                    rotated_at_iso=rotated_at_iso,
+                    rotation_receipt_id=rotation_receipt_id,
+                    reuse_receipt_id=reuse_receipt_id,
+                )
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("auth refresh rotation requires a unit of work")
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                """
+                SELECT user_id, family_id, payload
+                FROM auth_sessions
+                WHERE refresh_token_hash = %s
+                """,
+                (refresh_token_hash,),
+            )
+            candidate = cursor.fetchone()
+            if candidate is None:
+                return {"outcome": "invalid"}
+            family_id = str(candidate.get("family_id") or "")
+            payload = deepcopy(candidate.get("payload") or {})
+            if not family_id or int(payload.get("contractVersion") or 1) < 2:
+                return {"outcome": "legacyReauthRequired"}
+            user_id = str(candidate["user_id"])
+
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                (f"auth-user:{user_id}",),
+            )
+            cursor.fetchone()
+
+            cursor.execute(
+                """
+                SELECT id, user_id, status, current_session_version
+                FROM token_families
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (family_id,),
+            )
+            family = cursor.fetchone()
+            if family is None:
+                return {"outcome": "invalid"}
+            cursor.execute(
+                """
+                SELECT id, user_id, family_id, session_version, status,
+                       refresh_expires_at, payload
+                FROM auth_sessions
+                WHERE refresh_token_hash = %s
+                FOR UPDATE
+                """,
+                (refresh_token_hash,),
+            )
+            row = cursor.fetchone()
+            if row is None or str(row.get("family_id") or "") != family_id:
+                return {"outcome": "invalid"}
+            if str(row.get("status") or "") == "rotated":
+                self._revoke_auth_family_cursor(
+                    cursor,
+                    family_id=family_id,
+                    user_id=str(row["user_id"]),
+                    revoked_at_iso=rotated_at_iso,
+                    reason="refreshTokenReuse",
+                    receipt_id=reuse_receipt_id,
+                    event_type="refreshReuseDetected",
+                    source_session_id=str(row["id"]),
+                    source_session_version=int(row.get("session_version") or 0),
+                )
+                cursor.execute(
+                    """
+                    UPDATE auth_sessions
+                    SET reuse_detected_at = %s, updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (rotated_at_iso, row["id"]),
+                )
+                return {"outcome": "reuseDetected"}
+            if (
+                str(row.get("status") or "") != "active"
+                or str(family.get("status") or "") != "active"
+            ):
+                return {"outcome": "invalid"}
+            try:
+                refresh_expires_at = self._parse_iso_datetime(
+                    self._iso_value(row.get("refresh_expires_at"))
+                )
+                rotated_at = self._parse_iso_datetime(rotated_at_iso)
+            except (TypeError, ValueError):
+                return {"outcome": "invalid"}
+            if refresh_expires_at <= rotated_at:
+                cursor.execute(
+                    """
+                    UPDATE auth_sessions
+                    SET status = 'expired',
+                        payload = payload || %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    self._adapt_params(
+                        ({"status": "expired", "expiredAt": rotated_at_iso}, row["id"])
+                    ),
+                )
+                return {"outcome": "expired"}
+
+            version = int(row.get("session_version") or 0) + 1
+            successor_item = deepcopy(successor)
+            successor_item.update(
+                {
+                    "userId": str(row["user_id"]),
+                    "tokenFamilyId": family_id,
+                    "parentSessionId": str(row["id"]),
+                    "sessionVersion": version,
+                }
+            )
+            consumed_patch = {
+                "status": "rotated",
+                "rotatedAt": rotated_at_iso,
+                "successorSessionId": successor_item["sessionId"],
+            }
+            cursor.execute(
+                """
+                UPDATE auth_sessions
+                SET status = 'rotated', payload = payload || %s,
+                    successor_session_id = %s, rotated_at = %s,
+                    revoked_at = NULL, updated_at = NOW()
+                WHERE id = %s AND status = 'active'
+                """,
+                self._adapt_params(
+                    (
+                        consumed_patch,
+                        successor_item["sessionId"],
+                        rotated_at_iso,
+                        row["id"],
+                    )
+                ),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                raise RuntimeError("auth refresh rotation lost its session lock")
+            self._insert_auth_session_cursor(cursor, successor_item)
+            cursor.execute(
+                """
+                UPDATE token_families
+                SET current_session_version = %s, updated_at = %s
+                WHERE id = %s AND status = 'active'
+                """,
+                (version, rotated_at_iso, family_id),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                raise RuntimeError("auth token family changed during rotation")
+            self._insert_auth_session_event_cursor(
+                cursor,
+                {
+                    "eventId": rotation_receipt_id,
+                    "tokenFamilyId": family_id,
+                    "sessionId": successor_item["sessionId"],
+                    "userId": successor_item["userId"],
+                    "eventType": "sessionRotated",
+                    "reason": "refreshConsumed",
+                    "sessionVersion": version,
+                    "occurredAt": rotated_at_iso,
+                    "contractVersion": 1,
+                },
+            )
+            return {"outcome": "rotated", "session": deepcopy(successor_item)}
 
     def revoke_auth_session_by_access_token_hash(
         self,
         access_token_hash: str,
         revoked_at_iso: str,
         reason: str,
+        *,
+        receipt_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         patch = {
             "status": "revoked",
             "revokedAt": revoked_at_iso,
             "revokeReason": reason,
         }
-        row = self._fetchone(
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"auth-revoke-{uuid.uuid4().hex}",
+                command_id="revokeAuthSession",
+            ):
+                return self.revoke_auth_session_by_access_token_hash(
+                    access_token_hash,
+                    revoked_at_iso,
+                    reason,
+                    receipt_id=receipt_id,
+                )
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("auth session revoke requires a unit of work")
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                """
+                SELECT id, user_id, family_id, session_version
+                FROM auth_sessions
+                WHERE access_token_hash = %s
+                """,
+                (access_token_hash,),
+            )
+            candidate = cursor.fetchone()
+            if candidate is None:
+                return None
+            user_id = str(candidate["user_id"])
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                (f"auth-user:{user_id}",),
+            )
+            cursor.fetchone()
+            family_id = str(candidate.get("family_id") or "")
+            if family_id:
+                cursor.execute(
+                    "SELECT id FROM token_families WHERE id = %s FOR UPDATE",
+                    (family_id,),
+                )
+                if cursor.fetchone() is None:
+                    return None
+            cursor.execute(
+                """
+                UPDATE auth_sessions
+                SET status = 'revoked', payload = payload || %s,
+                    revoked_at = %s, revoke_reason = %s, updated_at = NOW()
+                WHERE access_token_hash = %s AND user_id = %s AND status = 'active'
+                RETURNING id, user_id, family_id, session_version, payload
+                """,
+                self._adapt_params(
+                    (patch, revoked_at_iso, reason, access_token_hash, user_id)
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            item = deepcopy(row["payload"])
+            if receipt_id:
+                self._insert_auth_session_event_cursor(
+                    cursor,
+                    {
+                        "eventId": receipt_id,
+                        "tokenFamilyId": row.get("family_id"),
+                        "sessionId": row["id"],
+                        "userId": row["user_id"],
+                        "eventType": "sessionRevoked",
+                        "reason": reason,
+                        "sessionVersion": int(row.get("session_version") or 0),
+                        "occurredAt": revoked_at_iso,
+                        "contractVersion": 1,
+                    },
+                )
+            return {
+                **item,
+                "scope": "session",
+                "revocationReceiptId": receipt_id,
+                "revokedSessionCount": 1,
+                "revokedFamilyCount": 0,
+            }
+
+    def revoke_auth_token_family_by_access_token_hash(
+        self,
+        access_token_hash: str,
+        revoked_at_iso: str,
+        reason: str,
+        *,
+        receipt_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"auth-family-revoke-{uuid.uuid4().hex}",
+                command_id="revokeAuthTokenFamily",
+            ):
+                return self.revoke_auth_token_family_by_access_token_hash(
+                    access_token_hash,
+                    revoked_at_iso,
+                    reason,
+                    receipt_id=receipt_id,
+                )
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("auth family revoke requires a unit of work")
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                """
+                SELECT id, user_id, family_id, session_version
+                FROM auth_sessions
+                WHERE access_token_hash = %s
+                """,
+                (access_token_hash,),
+            )
+            session = cursor.fetchone()
+            if session is None:
+                return None
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                (f"auth-user:{session['user_id']}",),
+            )
+            cursor.fetchone()
+            family_id = str(session.get("family_id") or "")
+            if not family_id:
+                return self.revoke_auth_session_by_access_token_hash(
+                    access_token_hash,
+                    revoked_at_iso,
+                    reason,
+                    receipt_id=receipt_id,
+                )
+            cursor.execute(
+                "SELECT id FROM token_families WHERE id = %s FOR UPDATE",
+                (family_id,),
+            )
+            if cursor.fetchone() is None:
+                return None
+            return self._revoke_auth_family_cursor(
+                cursor,
+                family_id=family_id,
+                user_id=str(session["user_id"]),
+                revoked_at_iso=revoked_at_iso,
+                reason=reason,
+                receipt_id=receipt_id,
+                event_type="familyRevoked",
+                source_session_id=str(session["id"]),
+                source_session_version=int(session.get("session_version") or 0),
+            )
+
+    def revoke_all_auth_token_families(
+        self,
+        user_id: str,
+        revoked_at_iso: str,
+        reason: str,
+        *,
+        receipt_id: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"auth-all-revoke-{uuid.uuid4().hex}",
+                command_id="revokeAllAuthTokenFamilies",
+            ):
+                return self.revoke_all_auth_token_families(
+                    user_id,
+                    revoked_at_iso,
+                    reason,
+                    receipt_id=receipt_id,
+                )
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("all-device auth revoke requires a unit of work")
+        revoked_family_count = 0
+        revoked_session_count = 0
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                (f"auth-user:{user_id}",),
+            )
+            cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT id, current_session_version
+                FROM token_families
+                WHERE user_id = %s AND status = 'active'
+                ORDER BY id
+                FOR UPDATE
+                """,
+                (user_id,),
+            )
+            families = cursor.fetchall()
+            for index, family in enumerate(families):
+                result = self._revoke_auth_family_cursor(
+                    cursor,
+                    family_id=str(family["id"]),
+                    user_id=user_id,
+                    revoked_at_iso=revoked_at_iso,
+                    reason=reason,
+                    receipt_id=f"{receipt_id}_{index + 1}",
+                    event_type="allDevicesRevoked",
+                    source_session_id=None,
+                    source_session_version=int(family.get("current_session_version") or 0),
+                )
+                revoked_family_count += int(result["revokedFamilyCount"])
+                revoked_session_count += int(result["revokedSessionCount"])
+            legacy_patch = {
+                "status": "revoked",
+                "revokedAt": revoked_at_iso,
+                "revokeReason": reason,
+            }
+            cursor.execute(
+                """
+                UPDATE auth_sessions
+                SET status = 'revoked', payload = payload || %s,
+                    revoked_at = %s, revoke_reason = %s, updated_at = NOW()
+                WHERE user_id = %s AND family_id IS NULL AND status = 'active'
+                """,
+                self._adapt_params((legacy_patch, revoked_at_iso, reason, user_id)),
+            )
+            revoked_session_count += int(cursor.rowcount or 0)
+            self._insert_auth_session_event_cursor(
+                cursor,
+                {
+                    "eventId": receipt_id,
+                    "tokenFamilyId": None,
+                    "sessionId": None,
+                    "userId": user_id,
+                    "eventType": "allDevicesRevoked",
+                    "reason": reason,
+                    "sessionVersion": 0,
+                    "occurredAt": revoked_at_iso,
+                    "contractVersion": 1,
+                },
+            )
+        return {
+            "scope": "allDevices",
+            "userId": user_id,
+            "revocationReceiptId": receipt_id,
+            "revokedFamilyCount": revoked_family_count,
+            "revokedSessionCount": revoked_session_count,
+            "revokedAt": revoked_at_iso,
+            "reason": reason,
+            "contractVersion": 1,
+        }
+
+    def list_auth_session_events(self, token_family_id: str) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT id, family_id, session_id, user_id, event_type, reason,
+                   session_version, contract_version, occurred_at
+            FROM session_events
+            WHERE family_id = %s
+            ORDER BY occurred_at, id
+            """,
+            (token_family_id,),
+        )
+        return [
+            {
+                "eventId": str(row["id"]),
+                "tokenFamilyId": str(row.get("family_id") or ""),
+                "sessionId": row.get("session_id"),
+                "userId": str(row["user_id"]),
+                "eventType": str(row["event_type"]),
+                "reason": str(row["reason"]),
+                "sessionVersion": int(row.get("session_version") or 0),
+                "contractVersion": int(row.get("contract_version") or 1),
+                "occurredAt": self._iso_value(row.get("occurred_at")),
+            }
+            for row in rows
+        ]
+
+    def _insert_auth_session_cursor(self, cursor: Any, item: Dict[str, Any]) -> None:
+        cursor.execute(
+            """
+            INSERT INTO auth_sessions (
+                id, user_id, access_token_hash, refresh_token_hash, status, payload,
+                access_expires_at, refresh_expires_at, family_id, parent_session_id,
+                session_version, created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            """,
+            self._adapt_params(
+                (
+                    item["sessionId"],
+                    item["userId"],
+                    item["accessTokenHash"],
+                    item["refreshTokenHash"],
+                    item["status"],
+                    item,
+                    item["accessExpiresAt"],
+                    item["refreshExpiresAt"],
+                    item["tokenFamilyId"],
+                    item.get("parentSessionId"),
+                    item["sessionVersion"],
+                    item["createdAt"],
+                )
+            ),
+        )
+
+    def _insert_auth_session_event_cursor(self, cursor: Any, event: Dict[str, Any]) -> None:
+        cursor.execute(
+            """
+            INSERT INTO session_events (
+                id, family_id, session_id, user_id, event_type, reason,
+                session_version, contract_version, occurred_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                event["eventId"],
+                event.get("tokenFamilyId"),
+                event.get("sessionId"),
+                event["userId"],
+                event["eventType"],
+                event["reason"],
+                int(event.get("sessionVersion") or 0),
+                int(event.get("contractVersion") or 1),
+                event["occurredAt"],
+            ),
+        )
+
+    def _revoke_auth_family_cursor(
+        self,
+        cursor: Any,
+        *,
+        family_id: str,
+        user_id: str,
+        revoked_at_iso: str,
+        reason: str,
+        receipt_id: str,
+        event_type: str,
+        source_session_id: Optional[str],
+        source_session_version: int,
+    ) -> Dict[str, Any]:
+        cursor.execute(
+            """
+            UPDATE token_families
+            SET status = 'revoked', revoked_at = %s, revoke_reason = %s,
+                updated_at = %s
+            WHERE id = %s AND status = 'active'
+            """,
+            (revoked_at_iso, reason, revoked_at_iso, family_id),
+        )
+        revoked_family_count = int(cursor.rowcount or 0)
+        patch = {
+            "status": "revoked",
+            "revokedAt": revoked_at_iso,
+            "revokeReason": reason,
+        }
+        cursor.execute(
             """
             UPDATE auth_sessions
-            SET status = 'revoked',
-                payload = payload || %s,
-                revoked_at = %s,
-                updated_at = NOW()
-            WHERE access_token_hash = %s
-              AND status = 'active'
-            RETURNING payload
+            SET status = 'revoked', payload = payload || %s,
+                revoked_at = %s, revoke_reason = %s, updated_at = NOW()
+            WHERE family_id = %s AND status = 'active'
             """,
-            (patch, revoked_at_iso, access_token_hash),
-            commit=True,
+            self._adapt_params((patch, revoked_at_iso, reason, family_id)),
         )
-        return None if row is None else deepcopy(row["payload"])
+        revoked_session_count = int(cursor.rowcount or 0)
+        if revoked_family_count:
+            self._insert_auth_session_event_cursor(
+                cursor,
+                {
+                    "eventId": receipt_id,
+                    "tokenFamilyId": family_id,
+                    "sessionId": source_session_id,
+                    "userId": user_id,
+                    "eventType": event_type,
+                    "reason": reason,
+                    "sessionVersion": source_session_version,
+                    "occurredAt": revoked_at_iso,
+                    "contractVersion": 1,
+                },
+            )
+        return {
+            "scope": "family",
+            "tokenFamilyId": family_id,
+            "userId": user_id,
+            "revocationReceiptId": receipt_id,
+            "revokedFamilyCount": revoked_family_count,
+            "revokedSessionCount": revoked_session_count,
+            "revokedAt": revoked_at_iso,
+            "reason": reason,
+            "contractVersion": 1,
+        }
 
     def ensure_identity_hash_key_version(
         self,
@@ -799,6 +1409,8 @@ class PostgresStore:
         user = self.get_user(user_id)
         if user is None:
             return None
+        if user.get("deletionState") == "purged":
+            return None
         if self._normalized_phone(str(user.get("phone") or "")) != self._normalized_phone(phone):
             return None
 
@@ -820,6 +1432,7 @@ class PostgresStore:
             UPDATE users
             SET payload = %s, updated_at = NOW()
             WHERE id = %s
+              AND COALESCE(payload->>'deletionState', 'active') <> 'purged'
             RETURNING payload
             """,
             (item, user_id),
@@ -838,6 +1451,8 @@ class PostgresStore:
         user = self.get_user(user_id)
         if user is None:
             return None
+        if user.get("deletionState") != "softDeleted":
+            return None
         if self._normalized_phone(str(user.get("phone") or "")) != self._normalized_phone(phone):
             return None
 
@@ -855,7 +1470,7 @@ class PostgresStore:
             """
             UPDATE users
             SET phone = %s, nickname = %s, payload = %s, updated_at = NOW()
-            WHERE id = %s
+            WHERE id = %s AND payload->>'deletionState' = 'softDeleted'
             RETURNING payload
             """,
             (phone, item["nickname"], item, user_id),
@@ -875,6 +1490,7 @@ class PostgresStore:
             """
             SELECT id, payload FROM users
             WHERE payload->>'deletionState' = 'softDeleted'
+            ORDER BY id
             """,
         )
         purged: List[Dict[str, Any]] = []
@@ -884,6 +1500,10 @@ class PostgresStore:
             deadline = self._parse_iso_datetime(str(user.get("restoreDeadline") or user.get("purgeAfter") or ""))
             if not user_id or deadline > cutoff:
                 continue
+            self._fetchone(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                (f"auth-user:{user_id}",),
+            )
             self._fetchone(
                 "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
                 (f"knowledge:{user_id}",),
@@ -921,6 +1541,18 @@ class PostgresStore:
                 "DELETE FROM kb_change_feed_state WHERE user_id = %s RETURNING user_id",
                 (user_id,),
             )
+            self._fetchall(
+                "DELETE FROM session_events WHERE user_id = %s RETURNING id",
+                (user_id,),
+            )
+            self._fetchall(
+                "DELETE FROM token_families WHERE user_id = %s RETURNING id",
+                (user_id,),
+            )
+            self._fetchall(
+                "DELETE FROM auth_sessions WHERE user_id = %s RETURNING payload",
+                (user_id,),
+            )
             for table in (
                 "profiles",
                 "password_credentials",
@@ -934,7 +1566,6 @@ class PostgresStore:
                 "push_device_tokens",
                 "voice_profiles",
                 "digital_human_sessions",
-                "auth_sessions",
             ):
                 self._fetchall(f"DELETE FROM {table} WHERE user_id = %s RETURNING payload", (user_id,))
             tombstone = {

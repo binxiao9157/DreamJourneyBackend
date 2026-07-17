@@ -1,11 +1,13 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
 from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.main import app
-from app.services.auth_sessions import AuthSessionService, auth_token_hash
+from app.services.auth_sessions import AuthSessionError, AuthSessionService, auth_token_hash
 from app.services.in_memory_store import InMemoryStore
 from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 
@@ -83,6 +85,9 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertTrue(auth["accessToken"].startswith("dja_"))
         self.assertTrue(auth["refreshToken"].startswith("djr_"))
         self.assertEqual(auth["userId"], body["user"]["id"])
+        self.assertTrue(auth["tokenFamilyId"].startswith("tf_"))
+        self.assertEqual(auth["sessionVersion"], 1)
+        self.assertEqual(auth["contractVersion"], 2)
         self.assertGreater(auth["accessExpiresInSeconds"], 0)
         self.assertGreater(auth["refreshExpiresInSeconds"], auth["accessExpiresInSeconds"])
 
@@ -99,7 +104,14 @@ class AuthSessionAPITests(unittest.TestCase):
         runtime = client.get("/config/runtime")
 
         self.assertEqual(runtime.status_code, 200)
-        policy = runtime.json()["auth"]["crossAccountPolicy"]
+        auth_runtime = runtime.json()["auth"]
+        self.assertEqual(auth_runtime["sessionContractVersion"], 2)
+        self.assertEqual(auth_runtime["tokenFamilyContractVersion"], 1)
+        self.assertEqual(auth_runtime["sessionLineageFields"], ["tokenFamilyId", "sessionVersion"])
+        self.assertTrue(auth_runtime["refreshReuseRevokesFamily"])
+        self.assertEqual(auth_runtime["legacyRefreshPolicy"], "reauthRequired")
+        self.assertEqual(auth_runtime["logoutScopes"], ["session", "family", "allDevices"])
+        policy = auth_runtime["crossAccountPolicy"]
         self.assertEqual(policy["contractVersion"], 1)
         self.assertEqual(policy["mode"], "shadow")
         self.assertFalse(policy["productionEnforceReady"])
@@ -123,15 +135,20 @@ class AuthSessionAPITests(unittest.TestCase):
             "/auth/refresh",
             json={"refreshToken": auth["refreshToken"]},
         )
+        refreshed_auth = refreshed.json()["auth"]
+        new_access_before_replay = client.get(
+            "/config/runtime",
+            headers={"Authorization": f"Bearer {refreshed_auth['accessToken']}"},
+        )
         replay = client.post(
             "/auth/refresh",
             json={"refreshToken": auth["refreshToken"]},
         )
 
         self.assertEqual(refreshed.status_code, 200)
-        refreshed_auth = refreshed.json()["auth"]
         self.assertNotEqual(refreshed_auth["accessToken"], auth["accessToken"])
         self.assertNotEqual(refreshed_auth["refreshToken"], auth["refreshToken"])
+        self.assertEqual(new_access_before_replay.status_code, 200)
         self.assertEqual(replay.status_code, 401)
 
         old_access = client.get(
@@ -143,8 +160,235 @@ class AuthSessionAPITests(unittest.TestCase):
             headers={"Authorization": f"Bearer {refreshed_auth['accessToken']}"},
         )
         self.assertEqual(old_access.status_code, 401)
-        self.assertEqual(new_access.status_code, 200)
-        self.assertEqual(new_access.headers["x-dreamjourney-auth-principal"], "user")
+        self.assertEqual(new_access.status_code, 401)
+
+    def test_refresh_reuse_revokes_the_entire_token_family(self):
+        auth = self.login("13800138201")["auth"]
+        first_refresh = client.post(
+            "/auth/refresh",
+            json={"refreshToken": auth["refreshToken"]},
+        )
+        self.assertEqual(first_refresh.status_code, 200)
+        successor = first_refresh.json()["auth"]
+
+        second_refresh = client.post(
+            "/auth/refresh",
+            json={"refreshToken": successor["refreshToken"]},
+        )
+        self.assertEqual(second_refresh.status_code, 200)
+        descendant = second_refresh.json()["auth"]
+
+        replay = client.post(
+            "/auth/refresh",
+            json={"refreshToken": auth["refreshToken"]},
+        )
+        descendant_access = client.get(
+            "/config/runtime",
+            headers={"Authorization": f"Bearer {descendant['accessToken']}"},
+        )
+
+        self.assertEqual(replay.status_code, 401)
+        self.assertEqual(replay.json()["detail"]["code"], "refresh_token_reuse_detected")
+        self.assertEqual(descendant_access.status_code, 401)
+        self.assertEqual(successor["tokenFamilyId"], auth["tokenFamilyId"])
+        self.assertEqual(descendant["tokenFamilyId"], auth["tokenFamilyId"])
+        self.assertEqual(auth["sessionVersion"], 1)
+        self.assertEqual(successor["sessionVersion"], 2)
+        self.assertEqual(descendant["sessionVersion"], 3)
+
+    def test_concurrent_refresh_creates_at_most_one_successor_and_revokes_it_on_reuse(self):
+        store = InMemoryStore()
+        service = AuthSessionService(
+            store,
+            access_ttl_seconds=900,
+            refresh_ttl_seconds=3600,
+        )
+        issued = service.issue("sub_concurrent")
+
+        def refresh_once():
+            try:
+                return ("success", service.refresh(issued["refreshToken"]))
+            except AuthSessionError as exc:
+                return (exc.code, None)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: refresh_once(), range(2)))
+
+        successes = [payload for outcome, payload in results if outcome == "success"]
+        failures = [outcome for outcome, _ in results if outcome != "success"]
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(failures, ["refresh_token_reuse_detected"])
+        self.assertIsNone(service.resolve_access_token(successes[0]["accessToken"]))
+        family_events = store.list_auth_session_events(issued["tokenFamilyId"])
+        self.assertEqual(
+            [event["eventType"] for event in family_events].count("refreshReuseDetected"),
+            1,
+        )
+
+    def test_legacy_session_refresh_requires_reauthentication(self):
+        now = datetime(2026, 7, 17, tzinfo=timezone.utc)
+        store = InMemoryStore()
+        store.save_auth_session(
+            {
+                "sessionId": "auth_legacy",
+                "userId": "legacy_user",
+                "accessTokenHash": auth_token_hash("dja_legacy"),
+                "refreshTokenHash": auth_token_hash("djr_legacy"),
+                "status": "active",
+                "createdAt": now.isoformat(),
+                "accessExpiresAt": (now + timedelta(minutes=15)).isoformat(),
+                "refreshExpiresAt": (now + timedelta(days=1)).isoformat(),
+                "contractVersion": 1,
+            }
+        )
+        service = AuthSessionService(
+            store,
+            access_ttl_seconds=900,
+            refresh_ttl_seconds=3600,
+        )
+
+        with self.assertRaises(AuthSessionError) as raised:
+            service.refresh("djr_legacy", now=now)
+
+        self.assertEqual(raised.exception.code, "legacy_session_reauth_required")
+
+    def test_all_device_revoke_invalidates_every_family_for_only_that_user(self):
+        store = InMemoryStore()
+        service = AuthSessionService(
+            store,
+            access_ttl_seconds=900,
+            refresh_ttl_seconds=3600,
+        )
+        first = service.issue("sub_owner")
+        second = service.issue("sub_owner")
+        other = service.issue("sub_other")
+
+        receipt = service.revoke_all_for_user("sub_owner", reason="riskEvent")
+
+        self.assertEqual(receipt["scope"], "allDevices")
+        self.assertEqual(receipt["revokedFamilyCount"], 2)
+        self.assertIn(receipt["revocationReceiptId"], store._auth_session_events)
+        aggregate_event = store._auth_session_events[receipt["revocationReceiptId"]]
+        self.assertEqual(aggregate_event["eventType"], "allDevicesRevoked")
+        self.assertIsNone(aggregate_event["tokenFamilyId"])
+        self.assertIsNone(service.resolve_access_token(first["accessToken"]))
+        self.assertIsNone(service.resolve_access_token(second["accessToken"]))
+        self.assertIsNotNone(service.resolve_access_token(other["accessToken"]))
+
+    def test_account_deletion_lock_blocks_a_late_session_issue(self):
+        store = InMemoryStore()
+        phone = "13800138221"
+        user = store.upsert_user(phone=phone, nickname="并发删除用户")
+        user_id = user["id"]
+        service = AuthSessionService(
+            store,
+            access_ttl_seconds=900,
+            refresh_ttl_seconds=3600,
+        )
+        existing = service.issue(user_id)
+        started = Event()
+
+        def issue_after_delete_starts():
+            started.set()
+            try:
+                service.issue(user_id)
+            except AuthSessionError as exc:
+                return exc.code
+            return "unexpected_success"
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with store.auth_user_operation(user_id):
+                future = executor.submit(issue_after_delete_starts)
+                self.assertTrue(started.wait(timeout=1))
+                deleted = store.soft_delete_user(user_id, phone=phone)
+                revocation = service.revoke_all_for_user(
+                    user_id,
+                    reason="accountSoftDeleted",
+                )
+            outcome = future.result(timeout=1)
+
+        self.assertEqual(deleted["deletionState"], "softDeleted")
+        self.assertEqual(revocation["revokedFamilyCount"], 1)
+        self.assertEqual(outcome, "account_session_issuance_blocked")
+        self.assertIsNone(service.resolve_access_token(existing["accessToken"]))
+
+    def test_purged_account_is_terminal_for_delete_and_restore(self):
+        phone = "13800138222"
+        user = main_module.store.upsert_user(phone=phone, nickname="永久删除用户")
+        user_id = user["id"]
+        main_module.store.soft_delete_user(
+            user_id,
+            phone=phone,
+            requested_at_iso="2026-01-01T00:00:00+00:00",
+        )
+        purged = main_module.store.purge_expired_deleted_users(
+            "2026-02-01T00:00:00+00:00"
+        )
+
+        repeated_delete = main_module.store.soft_delete_user(user_id, phone=phone)
+        repeated_restore = main_module.store.restore_user(user_id, phone=phone)
+        restore_response = client.post("/auth/restore", json={"phone": phone})
+
+        self.assertEqual(len(purged), 1)
+        self.assertIsNone(repeated_delete)
+        self.assertIsNone(repeated_restore)
+        self.assertEqual(main_module.store.get_user(user_id)["deletionState"], "purged")
+        self.assertEqual(restore_response.status_code, 410)
+        self.assertEqual(
+            restore_response.json()["detail"],
+            "account was permanently deleted",
+        )
+
+    def test_password_change_and_soft_delete_revoke_all_user_sessions(self):
+        main_module.RELEASE_POLICY_SERVICE._CLOSED_PILOT_OWNER_VISIBLE = {
+            *main_module.RELEASE_POLICY_SERVICE._CLOSED_PILOT_OWNER_VISIBLE,
+            "accountPasswordChange",
+        }
+        login = self.login("13800138202")
+        auth = login["auth"]
+        headers = self.access_headers(login)
+
+        changed = client.post(
+            "/auth/password",
+            headers=headers,
+            json={
+                "userId": login["user"]["id"],
+                "oldPassword": "password123",
+                "newPassword": "password456",
+            },
+        )
+        after_password_change = client.get("/config/runtime", headers=headers)
+
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(changed.json()["sessionRevocation"]["scope"], "allDevices")
+        self.assertEqual(after_password_change.status_code, 401)
+
+        second_login_response = client.post(
+            "/auth/login",
+            json={
+                "phone": "13800138202",
+                "nickname": "测试用户",
+                "password": "password456",
+            },
+        )
+        self.assertEqual(second_login_response.status_code, 200)
+        second_login = second_login_response.json()
+        delete_headers = self.access_headers(second_login)
+        deleted = client.post(
+            "/auth/delete",
+            headers=delete_headers,
+            json={
+                "userId": second_login["user"]["id"],
+                "phone": "13800138202",
+                "firstConfirmation": True,
+                "secondConfirmation": True,
+            },
+        )
+        after_delete = client.get("/config/runtime", headers=delete_headers)
+
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["sessionRevocation"]["scope"], "allDevices")
+        self.assertEqual(after_delete.status_code, 401)
 
     def test_logout_revokes_access_token(self):
         auth = self.login()["auth"]
@@ -158,7 +402,51 @@ class AuthSessionAPITests(unittest.TestCase):
 
         self.assertEqual(logout.status_code, 200)
         self.assertEqual(logout.json()["status"], "revoked")
+        self.assertEqual(logout.json()["scope"], "session")
+        self.assertTrue(logout.json()["revocationReceiptId"].startswith("ase_"))
         self.assertEqual(after_logout.status_code, 401)
+
+    def test_logout_family_and_all_devices_scopes_do_not_cross_users(self):
+        first = self.login("13800138211")
+        second = self.login("13800138211")
+        other = self.login("13800138212")
+
+        family_logout = client.post(
+            "/auth/logout",
+            headers=self.access_headers(first),
+            json={"scope": "family"},
+        )
+        first_after = client.get("/config/runtime", headers=self.access_headers(first))
+        second_after_family = client.get("/config/runtime", headers=self.access_headers(second))
+        self.assertEqual(family_logout.status_code, 200)
+        self.assertEqual(family_logout.json()["scope"], "family")
+        self.assertEqual(first_after.status_code, 401)
+        self.assertEqual(second_after_family.status_code, 200)
+
+        all_devices_logout = client.post(
+            "/auth/logout",
+            headers=self.access_headers(second),
+            json={"scope": "allDevices"},
+        )
+        second_after_all = client.get("/config/runtime", headers=self.access_headers(second))
+        other_after = client.get("/config/runtime", headers=self.access_headers(other))
+        self.assertEqual(all_devices_logout.status_code, 200)
+        self.assertEqual(all_devices_logout.json()["scope"], "allDevices")
+        self.assertEqual(second_after_all.status_code, 401)
+        self.assertEqual(other_after.status_code, 200)
+
+    def test_logout_rejects_unknown_revocation_scope_without_revoking_session(self):
+        login = self.login("13800138213")
+        rejected = client.post(
+            "/auth/logout",
+            headers=self.access_headers(login),
+            json={"scope": "everything"},
+        )
+        still_active = client.get("/config/runtime", headers=self.access_headers(login))
+
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.json()["detail"]["code"], "unsupported_revocation_scope")
+        self.assertEqual(still_active.status_code, 200)
 
     def test_principal_bound_owner_mismatch_is_blocked_while_global_mode_stays_shadow(self):
         login = self.login()
@@ -434,6 +722,66 @@ class AuthSessionServiceTests(unittest.TestCase):
         issued = service.issue("user_expired", now=now - timedelta(seconds=2))
 
         self.assertIsNone(service.resolve_access_token(issued["accessToken"], now=now))
+
+    def test_expired_refresh_requests_commit_of_terminal_session_state(self):
+        store = InMemoryStore()
+        now = datetime.now(timezone.utc)
+        store.upsert_user(phone="13800138223", nickname="过期刷新用户")
+        user_id = next(iter(store._users))
+        service = AuthSessionService(
+            store,
+            access_ttl_seconds=1,
+            refresh_ttl_seconds=2,
+        )
+        issued = service.issue(user_id, now=now)
+
+        with self.assertRaises(AuthSessionError) as raised:
+            service.refresh(issued["refreshToken"], now=now + timedelta(seconds=3))
+
+        persisted = next(
+            item
+            for item in store._auth_sessions.values()
+            if item.get("refreshTokenHash") == auth_token_hash(issued["refreshToken"])
+        )
+        self.assertEqual(raised.exception.code, "invalid_or_expired_refresh_token")
+        self.assertTrue(raised.exception.commit_state_change)
+        self.assertEqual(persisted["status"], "expired")
+
+    def test_all_device_logout_rechecks_token_after_acquiring_user_lock(self):
+        class PurgingOnSecondAccessLookupStore(InMemoryStore):
+            def __init__(self):
+                super().__init__()
+                self.access_lookup_count = 0
+
+            def get_auth_session_by_access_token_hash(self, token_hash):
+                self.access_lookup_count += 1
+                if self.access_lookup_count == 2:
+                    self._auth_sessions.clear()
+                    self._auth_token_families.clear()
+                    self._auth_session_events.clear()
+                    for user_id, user in list(self._users.items()):
+                        purged = dict(user)
+                        purged["deletionState"] = "purged"
+                        self._users[user_id] = purged
+                return super().get_auth_session_by_access_token_hash(token_hash)
+
+        store = PurgingOnSecondAccessLookupStore()
+        user = store.upsert_user(phone="13800138224", nickname="并发清除用户")
+        service = AuthSessionService(
+            store,
+            access_ttl_seconds=900,
+            refresh_ttl_seconds=3600,
+        )
+        issued = service.issue(user["id"])
+
+        result = service.revoke_access_token(
+            issued["accessToken"],
+            scope="allDevices",
+            reason="logout",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(store._auth_session_events, {})
 
 
 if __name__ == "__main__":
