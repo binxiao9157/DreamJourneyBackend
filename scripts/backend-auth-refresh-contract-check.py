@@ -43,6 +43,8 @@ def main():
         require(snippet in auth, f"public refresh lineage field missing: {snippet}")
 
     for assertion in (
+        'BACKEND_AUTH_REFRESH_SMOKE_DIRECT_ISSUE',
+        '_auth_session_service().issue(user_id)',
         'second["subjectId"] == first["userId"]',
         'second["parentSessionId"] == first["sessionId"]',
         'second["sessionVersion"] == first["sessionVersion"] + 1',

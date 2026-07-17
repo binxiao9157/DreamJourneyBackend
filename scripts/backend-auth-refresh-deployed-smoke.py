@@ -10,6 +10,10 @@ BASE_URL = os.environ.get(
     "BACKEND_BASE_URL",
     os.environ.get("DREAMJOURNEY_BACKEND_BASE_URL", ""),
 ).strip().rstrip("/")
+DIRECT_ISSUE = os.environ.get(
+    "BACKEND_AUTH_REFRESH_SMOKE_DIRECT_ISSUE",
+    "",
+).strip().lower() in {"1", "true", "yes"}
 
 
 def require(condition, message):
@@ -49,9 +53,13 @@ def request_json(method, path, *, payload=None, token=None, expected=200):
     return json.loads(raw) if raw else {}
 
 
-def main():
-    require(BASE_URL, "BACKEND_BASE_URL is required")
-    suffix = secrets.token_hex(6)
+def issue_initial_session(suffix):
+    if DIRECT_ISSUE:
+        from app.main import _auth_session_service
+
+        user_id = f"auth-refresh-smoke-{suffix}"
+        return user_id, _auth_session_service().issue(user_id)
+
     phone_suffix = f"{secrets.randbelow(10**8):08d}"
     login = request_json(
         "POST",
@@ -62,8 +70,13 @@ def main():
             "password": f"refresh-cas-{suffix}",
         },
     )
-    first = login["auth"]
-    user_id = str(login["user"]["id"])
+    return str(login["user"]["id"]), login["auth"]
+
+
+def main():
+    require(BASE_URL, "BACKEND_BASE_URL is required")
+    suffix = secrets.token_hex(6)
+    user_id, first = issue_initial_session(suffix)
     require(first["contractVersion"] == 2, "login must issue typed session v2")
     require(first["subjectId"] == user_id, "login subject must match canonical user")
 
