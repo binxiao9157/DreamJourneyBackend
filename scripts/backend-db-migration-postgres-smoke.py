@@ -171,6 +171,24 @@ def main():
                         ),
                     ),
                 )
+                cursor.execute(
+                    """
+                    INSERT INTO mailbox_letters (id, user_id, payload)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (
+                        "legacy-mailbox-recipient",
+                        "recipient-a",
+                        Jsonb(
+                            {
+                                "id": "legacy-mailbox-recipient",
+                                "userId": "recipient-a",
+                                "ownerUserId": "source-owner-a",
+                                "kind": "timeLetterReminder",
+                            }
+                        ),
+                    ),
+                )
         legacy_upgrade = migrator(legacy_dsn, "g2-legacy-upgrade").apply()
         require(
             legacy_upgrade["appliedVersions"] == [expected_versions[-1]],
@@ -193,6 +211,21 @@ def main():
                     """
                 )
                 incident = cursor.fetchone()
+                cursor.execute(
+                    """
+                    SELECT vault_id, owner_subject_id, row_version, authority_state
+                    FROM mailbox_letters WHERE id = 'legacy-mailbox-recipient'
+                    """
+                )
+                mailbox_recipient = cursor.fetchone()
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) FROM resource_authority_incidents
+                    WHERE resource_type = 'mailboxLetter'
+                      AND resource_id = 'legacy-mailbox-recipient'
+                    """
+                )
+                mailbox_incident_count = int(cursor.fetchone()[0])
         require(
             quarantined == ("owner-a", "owner-a", 1, "quarantined"),
             "legacy owner mismatch must be quarantined under the database owner",
@@ -203,6 +236,14 @@ def main():
         require(
             incident[2:] == ("legacyOwnerClaimMismatch", "quarantined"),
             "incident classification",
+        )
+        require(
+            mailbox_recipient == ("recipient-a", "recipient-a", 1, "active"),
+            "mailbox source owner metadata must not replace the recipient resource owner",
+        )
+        require(
+            mailbox_incident_count == 0,
+            "mailbox source owner metadata must not create an authority incident",
         )
 
         owner_mutation_rejected = False
@@ -229,6 +270,7 @@ def main():
                     "concurrentSkipCount": len(expected_versions),
                     "legacyConflictQuarantined": True,
                     "legacyIncidentPersisted": True,
+                    "legacyMailboxSourceOwnerAccepted": True,
                     "ownerMutationRejected": True,
                 },
                 sort_keys=True,

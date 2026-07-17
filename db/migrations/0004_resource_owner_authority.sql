@@ -1,4 +1,4 @@
-CREATE OR REPLACE FUNCTION resource_owner_claims(candidate JSONB)
+CREATE OR REPLACE FUNCTION resource_owner_claims(candidate JSONB, resource_kind TEXT)
 RETURNS TEXT[] AS $$
     WITH RECURSIVE nodes(node) AS (
         SELECT COALESCE(candidate, '{}'::JSONB)
@@ -22,9 +22,15 @@ RETURNS TEXT[] AS $$
         CROSS JOIN LATERAL jsonb_each(
             CASE WHEN jsonb_typeof(nodes.node) = 'object' THEN nodes.node ELSE '{}'::JSONB END
         ) AS pair
-        WHERE pair.key IN (
-            'authenticatedUserId', 'ownerId', 'ownerUserId', 'requesterUserId',
-            'uploadedByUserId', 'uploaderUserId', 'userId', 'viewerUserId'
+        WHERE (
+            (resource_kind = 'mailbox_letters' AND pair.key IN ('userId', 'recipientUserId'))
+            OR (
+                resource_kind <> 'mailbox_letters'
+                AND pair.key IN (
+                    'authenticatedUserId', 'ownerId', 'ownerUserId', 'requesterUserId',
+                    'uploadedByUserId', 'uploaderUserId', 'userId'
+                )
+            )
         )
           AND jsonb_typeof(pair.value) IN ('string', 'number')
     )
@@ -60,7 +66,7 @@ BEGIN
     NEW.vault_id := NEW.user_id;
     NEW.owner_subject_id := NEW.user_id;
     SELECT claim INTO conflicting_claim
-    FROM unnest(resource_owner_claims(NEW.payload)) AS claim
+    FROM unnest(resource_owner_claims(NEW.payload, TG_TABLE_NAME)) AS claim
     WHERE claim <> NEW.user_id
     LIMIT 1;
     IF conflicting_claim IS NOT NULL THEN
@@ -142,24 +148,27 @@ BEGIN
             resource_type, resource_id, canonical_user_id, observed_owner_claims,
             incident_code, status
         )
-        SELECT %L, id, user_id, to_jsonb(resource_owner_claims(payload)),
+        SELECT %L, id, user_id, to_jsonb(resource_owner_claims(payload, %L)),
                ''legacyOwnerClaimMismatch'', ''quarantined''
         FROM %s
         WHERE EXISTS (
-            SELECT 1 FROM unnest(resource_owner_claims(payload)) AS claim
+            SELECT 1 FROM unnest(resource_owner_claims(payload, %L)) AS claim
             WHERE claim <> user_id
         )
         ON CONFLICT (resource_type, resource_id, incident_code) DO NOTHING',
         target_resource_type,
-        target_table
+        target_table::TEXT,
+        target_table,
+        target_table::TEXT
     );
     EXECUTE format(
         'UPDATE %s SET authority_state = ''quarantined''
          WHERE EXISTS (
-             SELECT 1 FROM unnest(resource_owner_claims(payload)) AS claim
+             SELECT 1 FROM unnest(resource_owner_claims(payload, %L)) AS claim
              WHERE claim <> user_id
          )',
-        target_table
+        target_table,
+        target_table::TEXT
     );
 END;
 $$ LANGUAGE PLPGSQL;
