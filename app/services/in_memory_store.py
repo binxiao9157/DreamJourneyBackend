@@ -54,6 +54,10 @@ class InMemoryStore:
         self._profiles: Dict[str, Dict[str, Any]] = {}
         self._password_credentials: Dict[str, Dict[str, Any]] = {}
         self._family_members: Dict[str, List[Dict[str, Any]]] = {}
+        self._family_relationships: Dict[str, Dict[str, Any]] = {}
+        self._access_grants: Dict[str, Dict[str, Any]] = {}
+        self._grant_events: Dict[str, List[Dict[str, Any]]] = {}
+        self._delegated_access_lock = RLock()
         self._care_snapshots: Dict[str, List[Dict[str, Any]]] = {}
         self._echo_delayed_replies: Dict[str, List[Dict[str, Any]]] = {}
         self._push_device_tokens: Dict[str, List[Dict[str, Any]]] = {}
@@ -1042,6 +1046,28 @@ class InMemoryStore:
             self._archive_items.pop(user_id, None)
             self._mailbox_letters.pop(user_id, None)
             self._family_members.pop(user_id, None)
+            purged_relationship_ids = {
+                relationship_id
+                for relationship_id, relationship in self._family_relationships.items()
+                if user_id in {
+                    relationship.get("ownerSubjectId"),
+                    relationship.get("memberSubjectId"),
+                }
+            }
+            purged_grant_ids = {
+                grant_id
+                for grant_id, grant in self._access_grants.items()
+                if grant.get("relationshipId") in purged_relationship_ids
+                or user_id in {
+                    grant.get("grantorSubjectId"),
+                    grant.get("granteeSubjectId"),
+                }
+            }
+            for grant_id in purged_grant_ids:
+                self._access_grants.pop(grant_id, None)
+                self._grant_events.pop(grant_id, None)
+            for relationship_id in purged_relationship_ids:
+                self._family_relationships.pop(relationship_id, None)
             self._care_snapshots.pop(user_id, None)
             self._echo_delayed_replies.pop(user_id, None)
             self._push_device_tokens.pop(user_id, None)
@@ -1976,6 +2002,334 @@ class InMemoryStore:
 
     def list_family_members(self, user_id: str) -> List[Dict[str, Any]]:
         return deepcopy(self._family_members.get(user_id, []))
+
+    @contextmanager
+    def delegated_access_relationship_scope(
+        self,
+        *,
+        owner_subject_id: str,
+        relationship_id: str,
+    ):
+        _ = owner_subject_id, relationship_id
+        with self._delegated_access_lock:
+            yield
+
+    def upsert_family_relationship(self, relationship: Dict[str, Any]) -> Dict[str, Any]:
+        candidate = deepcopy(relationship)
+        relationship_id = str(candidate.get("id") or "").strip()
+        owner_subject_id = str(candidate.get("ownerSubjectId") or "").strip()
+        family_member_id = str(candidate.get("familyMemberId") or "").strip()
+        member_subject_id = str(candidate.get("memberSubjectId") or "").strip()
+        if not all((relationship_id, owner_subject_id, family_member_id, member_subject_id)):
+            raise ValueError("family relationship authority is incomplete")
+        with self._delegated_access_lock:
+            existing = self._family_relationships.get(relationship_id)
+            if existing is None:
+                now = self._now()
+                candidate.setdefault("vaultId", owner_subject_id)
+                candidate["relationshipEpoch"] = 1
+                candidate["grantEpoch"] = 0
+                candidate["createdAt"] = now
+                candidate["updatedAt"] = now
+                self._family_relationships[relationship_id] = candidate
+                return deepcopy(candidate)
+            if (
+                existing.get("ownerSubjectId") != owner_subject_id
+                or existing.get("familyMemberId") != family_member_id
+            ):
+                raise ValueError("family relationship authority conflict")
+            current_status = str(existing.get("status") or "pending")
+            requested_status = str(candidate.get("status") or current_status)
+            if current_status in {"paused", "revoked"} and requested_status == "accepted":
+                requested_status = current_status
+            elif current_status == "accepted" and requested_status == "pending":
+                requested_status = current_status
+            current_member_subject = str(existing.get("memberSubjectId") or "")
+            if requested_status == "accepted" and (
+                current_status == "pending"
+                or current_member_subject.startswith("legacy-unverified:")
+            ):
+                current_member_subject = member_subject_id
+            changed = (
+                requested_status != current_status
+                or current_member_subject != existing.get("memberSubjectId")
+            )
+            if changed:
+                existing["status"] = requested_status
+                existing["memberSubjectId"] = current_member_subject
+                existing["relationshipEpoch"] = int(existing.get("relationshipEpoch") or 1) + 1
+                existing["updatedAt"] = self._now()
+            return deepcopy(existing)
+
+    def get_family_relationship(
+        self,
+        owner_subject_id: str,
+        relationship_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            relationship = self._family_relationships.get(relationship_id)
+            if relationship is None or relationship.get("ownerSubjectId") != owner_subject_id:
+                return None
+            return deepcopy(relationship)
+
+    def get_family_relationship_by_member(
+        self,
+        owner_subject_id: str,
+        family_member_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            for relationship in self._family_relationships.values():
+                if (
+                    relationship.get("ownerSubjectId") == owner_subject_id
+                    and relationship.get("familyMemberId") == family_member_id
+                ):
+                    return deepcopy(relationship)
+        return None
+
+    def list_family_relationships(self, owner_subject_id: str) -> List[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            values = [
+                deepcopy(item)
+                for item in self._family_relationships.values()
+                if item.get("ownerSubjectId") == owner_subject_id
+            ]
+        return sorted(values, key=lambda item: (str(item.get("createdAt") or ""), str(item.get("id") or "")))
+
+    def update_family_relationship_status(
+        self,
+        owner_subject_id: str,
+        relationship_id: str,
+        *,
+        status: str,
+        expected_epoch: int,
+    ) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            relationship = self._family_relationships.get(relationship_id)
+            if (
+                relationship is None
+                or relationship.get("ownerSubjectId") != owner_subject_id
+                or int(relationship.get("relationshipEpoch") or 1) != expected_epoch
+            ):
+                return None
+            relationship["status"] = status
+            relationship["relationshipEpoch"] = expected_epoch + 1
+            relationship["updatedAt"] = self._now()
+            return deepcopy(relationship)
+
+    def create_access_grant(self, grant: Dict[str, Any]) -> Dict[str, Any]:
+        candidate = deepcopy(grant)
+        grant_id = str(candidate.get("id") or "").strip()
+        relationship_id = str(candidate.get("relationshipId") or "").strip()
+        with self._delegated_access_lock:
+            if not grant_id or grant_id in self._access_grants:
+                raise ValueError("access grant id conflict")
+            relationship = self._family_relationships.get(relationship_id)
+            if relationship is None:
+                raise ValueError("family relationship not found")
+            self._access_grants[grant_id] = candidate
+            self._append_grant_event_locked(candidate, "granted", reason="ownerGranted")
+            self._bump_relationship_grant_epoch_locked(relationship)
+            return deepcopy(candidate)
+
+    def get_access_grant(self, grant_id: str) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            grant = self._access_grants.get(grant_id)
+            return None if grant is None else deepcopy(grant)
+
+    def list_access_grants(
+        self,
+        *,
+        owner_subject_id: str,
+        relationship_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            values = [
+                deepcopy(item)
+                for item in self._access_grants.values()
+                if item.get("grantorSubjectId") == owner_subject_id
+                and (relationship_id is None or item.get("relationshipId") == relationship_id)
+            ]
+        return sorted(values, key=lambda item: (str(item.get("createdAt") or ""), str(item.get("id") or "")))
+
+    def revoke_access_grant(
+        self,
+        owner_subject_id: str,
+        grant_id: str,
+        *,
+        expected_version: int,
+        revoked_at_iso: str,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            grant = self._access_grants.get(grant_id)
+            if grant is None or grant.get("grantorSubjectId") != owner_subject_id:
+                return None
+            if int(grant.get("rowVersion") or 1) != expected_version:
+                return None
+            if grant.get("status") != "revoked":
+                grant["status"] = "revoked"
+                grant["revokedAt"] = revoked_at_iso
+                grant["updatedAt"] = revoked_at_iso
+                grant["rowVersion"] = expected_version + 1
+                self._append_grant_event_locked(grant, "revoked", reason=reason)
+                relationship = self._family_relationships.get(str(grant.get("relationshipId") or ""))
+                if relationship is not None:
+                    self._bump_relationship_grant_epoch_locked(relationship)
+            return deepcopy(grant)
+
+    def revoke_all_access_grants_for_subject(
+        self,
+        subject_id: str,
+        *,
+        revoked_at_iso: str,
+        reason: str,
+    ) -> int:
+        revoked_count = 0
+        with self._delegated_access_lock:
+            for grant in self._access_grants.values():
+                if grant.get("status") != "active":
+                    continue
+                if subject_id not in {
+                    grant.get("grantorSubjectId"),
+                    grant.get("granteeSubjectId"),
+                }:
+                    continue
+                grant["status"] = "revoked"
+                grant["revokedAt"] = revoked_at_iso
+                grant["updatedAt"] = revoked_at_iso
+                grant["rowVersion"] = int(grant.get("rowVersion") or 1) + 1
+                self._append_grant_event_locked(grant, "revoked", reason=reason)
+                relationship = self._family_relationships.get(str(grant.get("relationshipId") or ""))
+                if relationship is not None:
+                    self._bump_relationship_grant_epoch_locked(relationship)
+                revoked_count += 1
+        return revoked_count
+
+    def revoke_all_access_grants_for_relationship(
+        self,
+        owner_subject_id: str,
+        relationship_id: str,
+        *,
+        revoked_at_iso: str,
+        reason: str,
+    ) -> int:
+        revoked_count = 0
+        with self._delegated_access_lock:
+            for grant in self._access_grants.values():
+                if grant.get("status") != "active":
+                    continue
+                if grant.get("grantorSubjectId") != owner_subject_id:
+                    continue
+                if grant.get("relationshipId") != relationship_id:
+                    continue
+                grant["status"] = "revoked"
+                grant["revokedAt"] = revoked_at_iso
+                grant["updatedAt"] = revoked_at_iso
+                grant["rowVersion"] = int(grant.get("rowVersion") or 1) + 1
+                self._append_grant_event_locked(
+                    grant,
+                    "revoked",
+                    reason=reason,
+                    actor_subject_id=owner_subject_id,
+                )
+                revoked_count += 1
+            relationship = self._family_relationships.get(relationship_id)
+            if revoked_count and relationship is not None:
+                self._bump_relationship_grant_epoch_locked(relationship)
+        return revoked_count
+
+    def record_access_grant_receipt(
+        self,
+        grant: Dict[str, Any],
+        *,
+        actor_subject_id: str,
+        operation: str,
+    ) -> Dict[str, Any]:
+        with self._delegated_access_lock:
+            stored = self._access_grants.get(str(grant.get("id") or ""))
+            if stored is None or stored.get("status") != "active":
+                raise ValueError("active access grant is required for receipt")
+            event = self._append_grant_event_locked(
+                stored,
+                "accessed",
+                reason=f"authorized:{operation}",
+                actor_subject_id=actor_subject_id,
+            )
+            return deepcopy(event)
+
+    def list_grant_events(self, grant_id: str) -> List[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            return deepcopy(self._grant_events.get(grant_id, []))
+
+    def list_access_receipts(
+        self,
+        *,
+        owner_subject_id: str,
+        grant_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            receipts: List[Dict[str, Any]] = []
+            for stored_grant_id, events in self._grant_events.items():
+                if grant_id is not None and stored_grant_id != grant_id:
+                    continue
+                grant = self._access_grants.get(stored_grant_id)
+                if grant is None or grant.get("grantorSubjectId") != owner_subject_id:
+                    continue
+                for event in events:
+                    if event.get("eventType") != "accessed":
+                        continue
+                    receipts.append(self._access_receipt_payload(grant, event))
+            return sorted(
+                deepcopy(receipts),
+                key=lambda item: (str(item.get("occurredAt") or ""), str(item["id"])),
+            )
+
+    def _append_grant_event_locked(
+        self,
+        grant: Dict[str, Any],
+        event_type: str,
+        *,
+        reason: str,
+        actor_subject_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        event = {
+            "id": f"grant_event_{uuid.uuid4().hex}",
+            "grantId": grant["id"],
+            "relationshipId": grant["relationshipId"],
+            "eventType": event_type,
+            "actorSubjectId": actor_subject_id or grant["grantorSubjectId"],
+            "grantVersion": int(grant.get("rowVersion") or 1),
+            "reason": reason,
+            "occurredAt": self._now(),
+        }
+        self._grant_events.setdefault(str(grant["id"]), []).append(event)
+        return event
+
+    @staticmethod
+    def _access_receipt_payload(
+        grant: Dict[str, Any],
+        event: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        reason = str(event.get("reason") or "")
+        operation = reason.split(":", 1)[1] if reason.startswith("authorized:") else ""
+        return {
+            "id": event["id"],
+            "decision": "allow",
+            "grantId": grant["id"],
+            "relationshipId": grant["relationshipId"],
+            "ownerSubjectId": grant["grantorSubjectId"],
+            "granteeSubjectId": event["actorSubjectId"],
+            "purpose": grant["purpose"],
+            "operation": operation,
+            "resourceType": grant["resourceType"],
+            "resourceId": grant.get("resourceId"),
+            "grantVersion": event["grantVersion"],
+            "occurredAt": event["occurredAt"],
+        }
+
+    def _bump_relationship_grant_epoch_locked(self, relationship: Dict[str, Any]) -> None:
+        relationship["grantEpoch"] = int(relationship.get("grantEpoch") or 0) + 1
+        relationship["updatedAt"] = self._now()
 
     def accept_family_member(self, user_id: str, member_id: str, phone: str) -> Optional[Dict[str, Any]]:
         members = self._family_members.get(user_id, [])

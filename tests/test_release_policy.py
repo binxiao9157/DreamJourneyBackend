@@ -610,6 +610,30 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
         self.assertEqual(gate.feature_for_request("POST", "/voice/synthesis", {}), "voiceCloneShell")
         self.assertEqual(gate.feature_for_request("POST", "/digital-human/sessions", {}), "digitalHumanLivePanel")
         self.assertEqual(gate.feature_for_request("POST", "/family/invite", {}), "familyManagement")
+        self.assertEqual(
+            gate.feature_for_request(
+                "POST",
+                "/family/relationships/user-a/relationship-a/lifecycle",
+                {},
+            ),
+            "familyManagement",
+        )
+        self.assertEqual(
+            gate.feature_for_request("POST", "/family/access-grants", {}),
+            "familyManagement",
+        )
+        self.assertEqual(
+            gate.feature_for_request("GET", "/family/access-grants/user-a", {}),
+            "familyManagement",
+        )
+        self.assertEqual(
+            gate.feature_for_request(
+                "POST",
+                "/family/access-grants/user-a/grant-a/revoke",
+                {},
+            ),
+            "familyManagement",
+        )
         self.assertEqual(gate.feature_for_request("GET", "/care/snapshots/latest/user-a", {}), "careDashboard")
         self.assertEqual(gate.feature_for_request("POST", "/profile", {}), "profileSettings")
         self.assertEqual(gate.feature_for_request("POST", "/context/build", {}), "echoTextInput")

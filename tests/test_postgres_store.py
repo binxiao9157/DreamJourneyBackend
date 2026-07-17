@@ -3046,6 +3046,12 @@ class PostgresStoreTests(unittest.TestCase):
             if statement.startswith("DELETE FROM kb_changes")
         )
         self.assertLess(user_lock_index, change_delete_index)
+        delegated_access_purge_sql = next(
+            statement
+            for statement in sql
+            if "purge_delegated_access_for_subject" in statement
+        )
+        self.assertIn("SELECT deleted_grant_events", delegated_access_purge_sql)
         payloadless_purge_tables = {
             "profiles",
             "password_credentials",

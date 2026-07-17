@@ -2,7 +2,12 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from app.services.user_identity import stable_user_id
+from app.services.delegated_access import (
+    AccessGrantPurpose,
+    DelegatedAccessService,
+    GrantOperation,
+    ResourceScopeType,
+)
 
 
 class TimeLetterAccessError(ValueError):
@@ -42,6 +47,17 @@ def _is_open(open_at: str, now_iso: str) -> bool:
     if open_datetime is not None and now_datetime is not None:
         return open_datetime <= now_datetime
     return bool(open_at and now_iso and open_at <= now_iso)
+
+
+def is_time_letter_open(
+    item: Dict[str, Any],
+    *,
+    now: Optional[datetime] = None,
+) -> bool:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    open_at = str(item.get("openAt") or metadata.get("openAt") or "").strip()
+    effective_now = now or datetime.now(timezone.utc)
+    return _is_open(open_at, effective_now.astimezone(timezone.utc).isoformat())
 
 
 def time_letter_recipient_records(item: Dict[str, Any]) -> list[Dict[str, str]]:
@@ -105,11 +121,27 @@ def active_family_member_for_recipient(
     store: Any,
     owner_user_id: str,
     recipient_id: str,
+    *,
+    time_letter_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     member = family_member_for_recipient(store, owner_user_id, recipient_id)
     if member is not None:
         if member.get("accessStatus") == "active" and member.get("invitationStatus") == "accepted":
-            return member
+            relationship = store.get_family_relationship_by_member(owner_user_id, recipient_id)
+            if relationship is None:
+                return None
+            member_subject_id = str(relationship.get("memberSubjectId") or "").strip()
+            access = DelegatedAccessService(store).authorize(
+                owner_subject_id=owner_user_id,
+                grantee_subject_id=member_subject_id,
+                family_member_id=recipient_id,
+                purpose=AccessGrantPurpose.TIME_LETTER_READ,
+                operation=GrantOperation.READ,
+                resource_type=ResourceScopeType.TIME_LETTER,
+                resource_id=time_letter_id,
+            )
+            if access.allowed:
+                return member
         return None
     return None
 
@@ -163,11 +195,18 @@ def time_letter_in_app_reminder_payloads(
         recipient_id = recipient["id"]
         if recipient_id == "self":
             continue
-        member = active_family_member_for_recipient(store, owner_user_id, recipient_id)
+        member = active_family_member_for_recipient(
+            store,
+            owner_user_id,
+            recipient_id,
+            time_letter_id=item_id,
+        )
         if member is None:
             continue
-        phone = str(member.get("phone") or "").strip()
-        target_user_id = stable_user_id(phone) if phone else recipient_id
+        relationship = store.get_family_relationship_by_member(owner_user_id, recipient_id)
+        target_user_id = str((relationship or {}).get("memberSubjectId") or "").strip()
+        if not target_user_id:
+            continue
         append_reminder(
             target_user_id,
             recipient_id,
@@ -256,12 +295,22 @@ def time_letter_detail_for_viewer(
         member = family_member_for_recipient(store, owner_user_id, recipient_id)
         if member is None:
             continue
-        phone = str(member.get("phone") or "").strip()
-        recipient_user_id = stable_user_id(phone) if phone else recipient_id
-        accepted_viewer_ids = {recipient_id, recipient_user_id, str(member.get("userId") or "").strip()}
-        if viewer_user_id in {value for value in accepted_viewer_ids if value}:
+        relationship = store.get_family_relationship_by_member(owner_user_id, recipient_id)
+        recipient_user_id = str((relationship or {}).get("memberSubjectId") or "").strip()
+        if viewer_user_id == recipient_user_id:
             if not _family_member_is_active(member):
                 raise TimeLetterAccessError(403, "family recipient is not active")
+            access = DelegatedAccessService(store).authorize(
+                owner_subject_id=owner_user_id,
+                grantee_subject_id=viewer_user_id,
+                family_member_id=recipient_id,
+                purpose=AccessGrantPurpose.TIME_LETTER_READ,
+                operation=GrantOperation.READ,
+                resource_type=ResourceScopeType.TIME_LETTER,
+                resource_id=item_id,
+            )
+            if not access.allowed:
+                raise TimeLetterAccessError(403, "active timeLetter grant is required")
             return {
                 "status": "available",
                 "access": {

@@ -23,10 +23,14 @@ class AuthSessionAPITests(unittest.TestCase):
         self.previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
         self.previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
         self.previous_release_policy_gate = main_module.RELEASE_POLICY_COMMAND_GATE
+        self.previous_delegated_access_api_enabled = (
+            main_module.DELEGATED_ACCESS_CONTRACT_API_ENABLED
+        )
         main_module.store = InMemoryStore()
         main_module.BACKEND_API_TOKEN = ""
         main_module.AUTH_OWNERSHIP_MODE = "shadow"
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
+        main_module.DELEGATED_ACCESS_CONTRACT_API_ENABLED = True
         service = ReleasePolicyService(
             shadow_mode=True,
             enforce_default_closed_stages=False,
@@ -41,6 +45,9 @@ class AuthSessionAPITests(unittest.TestCase):
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = self.previous_legacy_phone_login
         main_module.RELEASE_POLICY_SERVICE = self.previous_release_policy_service
         main_module.RELEASE_POLICY_COMMAND_GATE = self.previous_release_policy_gate
+        main_module.DELEGATED_ACCESS_CONTRACT_API_ENABLED = (
+            self.previous_delegated_access_api_enabled
+        )
 
     def login(self, phone: str = "13800138000"):
         response = client.post(
@@ -76,6 +83,33 @@ class AuthSessionAPITests(unittest.TestCase):
         )
         self.assertEqual(accepted.status_code, 200)
         return owner, family, accepted.json()["member"]
+
+    def grant_family_access(
+        self,
+        owner,
+        family,
+        member,
+        *,
+        purpose: str,
+        resource_type: str,
+        resource_id=None,
+    ):
+        response = client.post(
+            "/family/access-grants",
+            headers=self.access_headers(owner),
+            json={
+                "userId": owner["user"]["id"],
+                "relationshipId": member["relationshipId"],
+                "granteeSubjectId": family["user"]["id"],
+                "purpose": purpose,
+                "resourceType": resource_type,
+                "resourceId": resource_id,
+                "operations": ["read"],
+                "expiresAt": "2099-01-01T00:00:00Z",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()["grant"]
 
     def test_login_issues_opaque_tokens_without_persisting_raw_values(self):
         body = self.login()
@@ -118,7 +152,7 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertIn("careSnapshotRead", policy["coveredPolicies"])
         self.assertIn("timeLetterDetail", policy["coveredPolicies"])
         self.assertTrue(policy["principalBoundRouteEnforcement"])
-        self.assertEqual(policy["routeOwnershipAudit"]["routeCount"], 64)
+        self.assertEqual(policy["routeOwnershipAudit"]["routeCount"], 68)
         self.assertEqual(policy["routeOwnershipAudit"]["unclassifiedCount"], 0)
         self.assertEqual(
             policy["diagnosticHeaders"],
@@ -570,6 +604,13 @@ class AuthSessionAPITests(unittest.TestCase):
             "13900138101",
         )
         owner_user_id = owner["user"]["id"]
+        self.grant_family_access(
+            owner,
+            family,
+            member,
+            purpose="care.snapshot",
+            resource_type="careSnapshot",
+        )
         main_module.store.save_care_snapshot(
             owner_user_id,
             {"summary": "仅家庭成员可见的关怀摘要"},
@@ -653,6 +694,14 @@ class AuthSessionAPITests(unittest.TestCase):
                 ],
                 "note": "到期后仅收件人可读",
             },
+        )
+        self.grant_family_access(
+            owner,
+            family,
+            member,
+            purpose="timeLetter.read",
+            resource_type="timeLetter",
+            resource_id="letter_auth_policy",
         )
         params = {
             "viewerUserId": family_user_id,

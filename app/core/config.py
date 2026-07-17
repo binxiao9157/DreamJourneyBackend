@@ -76,6 +76,7 @@ class Settings:
     release_policy_emergency_revision: int = 0
     release_policy_enforced_features: Optional[str] = None
     release_policy_emergency_disabled_features: Optional[str] = None
+    delegated_access_contract_api_enabled: bool = False
     evidence_rollout_retention_days: int = 30
 
     deepseek_api_key: Optional[str] = None
@@ -211,6 +212,10 @@ class Settings:
             release_policy_enforced_features=_env("RELEASE_POLICY_ENFORCED_FEATURES"),
             release_policy_emergency_disabled_features=_env(
                 "RELEASE_POLICY_EMERGENCY_DISABLED_FEATURES"
+            ),
+            delegated_access_contract_api_enabled=_env_bool(
+                "DELEGATED_ACCESS_CONTRACT_API_ENABLED",
+                cls.delegated_access_contract_api_enabled,
             ),
             evidence_rollout_retention_days=_env_int(
                 "EVIDENCE_ROLLOUT_RETENTION_DAYS",

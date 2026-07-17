@@ -375,6 +375,18 @@ class RouteOwnershipRegistry:
             _owner_path("GET", "/echo/delayed-replies/{user_id}", "echoOwner"),
             _owner_body("POST", "/family/invite", "familyOwner"),
             _owner_path("GET", "/family/members/{user_id}", "familyOwner"),
+            _owner_body("POST", "/family/access-grants", "familyGrantOwner"),
+            _owner_path("GET", "/family/access-grants/{user_id}", "familyGrantOwner"),
+            _owner_path(
+                "POST",
+                "/family/access-grants/{user_id}/{grant_id}/revoke",
+                "familyGrantOwner",
+            ),
+            _owner_path(
+                "POST",
+                "/family/relationships/{user_id}/{relationship_id}/lifecycle",
+                "familyRelationshipOwner",
+            ),
             _rule(
                 "POST",
                 "/family/members/{user_id}/{member_id}/accept",

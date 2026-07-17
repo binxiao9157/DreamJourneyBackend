@@ -1,0 +1,8 @@
+{
+  "version": "0005",
+  "name": "delegated_access_grants",
+  "phase": "expand",
+  "compatibility": "backwardCompatible",
+  "runtimeCompatibility": "relationshipWithoutImplicitGrant",
+  "requiresOldWorkerDrain": false
+}

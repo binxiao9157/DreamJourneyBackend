@@ -368,7 +368,10 @@ class PostgresMigratorTests(unittest.TestCase):
             self.assertNotIn(destructive, sql_upper)
 
     def test_resource_authority_migration_adds_immutable_owner_guards(self):
-        migration = load_migrations(default_migrations_dir())[-1]
+        migration = next(
+            item for item in load_migrations(default_migrations_dir())
+            if item.version == "0004"
+        )
 
         self.assertEqual(migration.version, "0004")
         self.assertEqual(migration.name, "resource_owner_authority")
@@ -398,6 +401,25 @@ class PostgresMigratorTests(unittest.TestCase):
             with self.subTest(table=table):
                 self.assertIn(f"CREATE TRIGGER {table}_owner_authority", migration.sql)
                 self.assertIn(f"ON {table}(vault_id, id)", migration.sql)
+
+    def test_delegated_access_migration_separates_relationships_from_grants(self):
+        migration = load_migrations(default_migrations_dir())[-1]
+
+        self.assertEqual(migration.version, "0005")
+        self.assertEqual(migration.name, "delegated_access_grants")
+        self.assertIn("CREATE TABLE family_relationships", migration.sql)
+        self.assertIn("CREATE TABLE access_grants", migration.sql)
+        self.assertIn("CREATE TABLE grant_events", migration.sql)
+        self.assertIn("grant_events_no_update", migration.sql)
+        self.assertIn("dreamjourney.grant_event_purge_scope", migration.sql)
+        self.assertIn("purge_delegated_access_for_subject", migration.sql)
+        self.assertIn("SECURITY DEFINER", migration.sql)
+        self.assertIn("'granted', 'revoked', 'accessed'", migration.sql)
+        self.assertIn("grantor_subject_id <> grantee_subject_id", migration.sql)
+        self.assertIn("TG_OP = 'DELETE'", migration.sql)
+        self.assertIn("INSERT INTO family_relationships", migration.sql)
+        self.assertIn("legacy-unverified:", migration.sql)
+        self.assertNotIn("INSERT INTO access_grants", migration.sql.split("-- Existing family records", 1)[1])
 
 
 if __name__ == "__main__":

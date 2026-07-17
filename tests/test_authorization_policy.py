@@ -1,8 +1,16 @@
 import unittest
+from datetime import datetime, timezone
 
 from app.services.authorization_policy import (
     CrossAccountAuthorizationPolicy,
     owner_authority_claims,
+)
+from app.services.delegated_access import (
+    AccessGrantCommand,
+    AccessGrantPurpose,
+    DelegatedAccessService,
+    GrantOperation,
+    ResourceScopeType,
 )
 from app.services.in_memory_store import InMemoryStore
 from app.services.user_identity import stable_user_id
@@ -12,6 +20,7 @@ class CrossAccountAuthorizationPolicyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = InMemoryStore()
         self.policy = CrossAccountAuthorizationPolicy(self.store)
+        self.delegated_access = DelegatedAccessService(self.store)
         self.owner_user_id = "user_owner"
         self.family_phone = "13900001111"
         self.family_user_id = stable_user_id(self.family_phone)
@@ -33,7 +42,37 @@ class CrossAccountAuthorizationPolicyTests(unittest.TestCase):
                 member["id"],
                 phone=self.family_phone,
             )
+        self.delegated_access.ensure_relationship_for_member(
+            owner_subject_id=self.owner_user_id,
+            member=member,
+            accepted_subject_id=self.family_user_id if accepted else None,
+        )
         return member
+
+    def grant(
+        self,
+        member,
+        *,
+        purpose: AccessGrantPurpose,
+        resource_type: ResourceScopeType,
+        resource_id=None,
+    ):
+        relationship = self.store.get_family_relationship_by_member(
+            self.owner_user_id,
+            member["id"],
+        )
+        return self.delegated_access.grant_access(
+            AccessGrantCommand(
+                grantorSubjectId=self.owner_user_id,
+                relationshipId=relationship["id"],
+                granteeSubjectId=self.family_user_id,
+                purpose=purpose,
+                resourceType=resource_type,
+                resourceId=resource_id,
+                operations=[GrantOperation.READ],
+                expiresAt=datetime(2099, 1, 1, tzinfo=timezone.utc),
+            )
+        )
 
     def evaluate(self, *, method: str, path: str, principal: str, query=None, payload=None):
         return self.policy.evaluate(
@@ -59,6 +98,11 @@ class CrossAccountAuthorizationPolicyTests(unittest.TestCase):
 
     def test_only_active_family_principal_can_read_member_care_snapshot(self):
         member = self.add_family_member(accepted=True)
+        self.grant(
+            member,
+            purpose=AccessGrantPurpose.CARE_SNAPSHOT,
+            resource_type=ResourceScopeType.CARE_SNAPSHOT,
+        )
 
         allowed = self.evaluate(
             method="GET",
@@ -79,6 +123,19 @@ class CrossAccountAuthorizationPolicyTests(unittest.TestCase):
         self.assertEqual(denied.decision, "deny")
         self.assertFalse(denied.allowed)
         self.assertEqual(denied.reason, "familyPrincipalMismatch")
+
+    def test_accepted_relationship_without_grant_cannot_read_care_snapshot(self):
+        member = self.add_family_member(accepted=True)
+
+        decision = self.evaluate(
+            method="GET",
+            path=f"/care/snapshots/latest/{self.owner_user_id}",
+            principal=self.family_user_id,
+            query={"viewerFamilyMemberID": member["id"]},
+        )
+
+        self.assertEqual(decision.decision, "deny")
+        self.assertEqual(decision.reason, "activeGrantRequired")
 
     def test_pending_family_member_is_denied(self):
         member = self.add_family_member(accepted=False)
@@ -106,6 +163,12 @@ class CrossAccountAuthorizationPolicyTests(unittest.TestCase):
                     {"id": member["id"], "name": member["name"], "type": "family"},
                 ],
             },
+        )
+        self.grant(
+            member,
+            purpose=AccessGrantPurpose.TIME_LETTER_READ,
+            resource_type=ResourceScopeType.TIME_LETTER,
+            resource_id="letter_1",
         )
 
         allowed = self.evaluate(

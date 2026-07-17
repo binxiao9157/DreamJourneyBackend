@@ -1562,6 +1562,13 @@ class PostgresStore:
                 "DELETE FROM auth_sessions WHERE user_id = %s RETURNING payload",
                 (user_id,),
             )
+            self._fetchone(
+                """
+                SELECT deleted_grant_events, deleted_access_grants, deleted_relationships
+                FROM purge_delegated_access_for_subject(%s)
+                """,
+                (user_id,),
+            )
             for table in (
                 "profiles",
                 "password_credentials",
@@ -4054,6 +4061,508 @@ class PostgresStore:
     def list_family_members(self, user_id: str) -> List[Dict[str, Any]]:
         return self._list_payloads("family_members", user_id)
 
+    @contextmanager
+    def delegated_access_relationship_scope(
+        self,
+        *,
+        owner_subject_id: str,
+        relationship_id: str,
+    ):
+        lock_key = f"delegated-access:{owner_subject_id}:{relationship_id}"
+        with self.request_unit_of_work(
+            correlation_id=f"delegated-access-{uuid.uuid4().hex}",
+            command_id="delegatedAccessRelationshipScope",
+        ):
+            self._fetchone(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS acquired",
+                (lock_key,),
+            )
+            yield
+
+    def upsert_family_relationship(self, relationship: Dict[str, Any]) -> Dict[str, Any]:
+        row = self._fetchone(
+            """
+            INSERT INTO family_relationships (
+                id, vault_id, owner_subject_id, family_member_id,
+                member_subject_id, status, relationship_epoch, grant_epoch,
+                created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, 1, 0, NOW(), NOW())
+            ON CONFLICT (vault_id, family_member_id) DO UPDATE SET
+                member_subject_id = CASE
+                    WHEN EXCLUDED.status = 'accepted'
+                     AND (
+                        family_relationships.status = 'pending'
+                        OR family_relationships.member_subject_id LIKE 'legacy-unverified:%'
+                     )
+                    THEN EXCLUDED.member_subject_id
+                    ELSE family_relationships.member_subject_id
+                END,
+                status = CASE
+                    WHEN family_relationships.status IN ('paused', 'revoked')
+                     AND EXCLUDED.status = 'accepted'
+                    THEN family_relationships.status
+                    WHEN family_relationships.status = 'accepted'
+                     AND EXCLUDED.status = 'pending'
+                    THEN family_relationships.status
+                    ELSE EXCLUDED.status
+                END,
+                relationship_epoch = family_relationships.relationship_epoch + CASE
+                    WHEN family_relationships.status IS DISTINCT FROM CASE
+                        WHEN family_relationships.status IN ('paused', 'revoked')
+                         AND EXCLUDED.status = 'accepted'
+                        THEN family_relationships.status
+                        WHEN family_relationships.status = 'accepted'
+                         AND EXCLUDED.status = 'pending'
+                        THEN family_relationships.status
+                        ELSE EXCLUDED.status
+                    END
+                    OR family_relationships.member_subject_id IS DISTINCT FROM CASE
+                        WHEN EXCLUDED.status = 'accepted'
+                         AND (
+                            family_relationships.status = 'pending'
+                            OR family_relationships.member_subject_id LIKE 'legacy-unverified:%'
+                         )
+                        THEN EXCLUDED.member_subject_id
+                        ELSE family_relationships.member_subject_id
+                    END
+                    THEN 1 ELSE 0
+                END,
+                updated_at = NOW()
+            RETURNING id, vault_id, owner_subject_id, family_member_id,
+                member_subject_id, status, relationship_epoch, grant_epoch,
+                created_at, updated_at
+            """,
+            (
+                relationship["id"],
+                relationship.get("vaultId") or relationship["ownerSubjectId"],
+                relationship["ownerSubjectId"],
+                relationship["familyMemberId"],
+                relationship["memberSubjectId"],
+                relationship["status"],
+            ),
+            commit=True,
+        )
+        if row is None:
+            raise ValueError("family relationship upsert failed")
+        return self._family_relationship_payload(row)
+
+    def get_family_relationship(
+        self,
+        owner_subject_id: str,
+        relationship_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT id, vault_id, owner_subject_id, family_member_id,
+                member_subject_id, status, relationship_epoch, grant_epoch,
+                created_at, updated_at
+            FROM family_relationships
+            WHERE vault_id = %s AND id = %s
+            """,
+            (owner_subject_id, relationship_id),
+        )
+        return None if row is None else self._family_relationship_payload(row)
+
+    def get_family_relationship_by_member(
+        self,
+        owner_subject_id: str,
+        family_member_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT id, vault_id, owner_subject_id, family_member_id,
+                member_subject_id, status, relationship_epoch, grant_epoch,
+                created_at, updated_at
+            FROM family_relationships
+            WHERE vault_id = %s AND family_member_id = %s
+            """,
+            (owner_subject_id, family_member_id),
+        )
+        return None if row is None else self._family_relationship_payload(row)
+
+    def list_family_relationships(self, owner_subject_id: str) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT id, vault_id, owner_subject_id, family_member_id,
+                member_subject_id, status, relationship_epoch, grant_epoch,
+                created_at, updated_at
+            FROM family_relationships
+            WHERE vault_id = %s
+            ORDER BY created_at ASC, id ASC
+            """,
+            (owner_subject_id,),
+        )
+        return [self._family_relationship_payload(row) for row in rows]
+
+    def update_family_relationship_status(
+        self,
+        owner_subject_id: str,
+        relationship_id: str,
+        *,
+        status: str,
+        expected_epoch: int,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            UPDATE family_relationships
+            SET status = %s,
+                relationship_epoch = relationship_epoch + 1,
+                updated_at = NOW()
+            WHERE vault_id = %s AND id = %s AND relationship_epoch = %s
+            RETURNING id, vault_id, owner_subject_id, family_member_id,
+                member_subject_id, status, relationship_epoch, grant_epoch,
+                created_at, updated_at
+            """,
+            (status, owner_subject_id, relationship_id, expected_epoch),
+            commit=True,
+        )
+        return None if row is None else self._family_relationship_payload(row)
+
+    def create_access_grant(self, grant: Dict[str, Any]) -> Dict[str, Any]:
+        row = self._fetchone(
+            """
+            WITH inserted AS (
+                INSERT INTO access_grants (
+                    id, vault_id, grantor_subject_id, grantee_subject_id,
+                    relationship_id, purpose, resource_type, resource_id,
+                    operations, status, expires_at, revoked_at, row_version,
+                    created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, NULL, 1, %s, %s)
+                RETURNING *
+            ), event AS (
+                INSERT INTO grant_events (
+                    id, grant_id, relationship_id, event_type,
+                    actor_subject_id, grant_version, reason, occurred_at
+                )
+                SELECT %s, id, relationship_id, 'granted', grantor_subject_id,
+                    row_version, 'ownerGranted', created_at
+                FROM inserted
+            ), bumped AS (
+                UPDATE family_relationships
+                SET grant_epoch = grant_epoch + 1, updated_at = NOW()
+                WHERE id = (SELECT relationship_id FROM inserted)
+                RETURNING grant_epoch
+            )
+            SELECT inserted.*, bumped.grant_epoch
+            FROM inserted CROSS JOIN bumped
+            """,
+            (
+                grant["id"],
+                grant.get("vaultId") or grant["grantorSubjectId"],
+                grant["grantorSubjectId"],
+                grant["granteeSubjectId"],
+                grant["relationshipId"],
+                grant["purpose"],
+                grant["resourceType"],
+                grant.get("resourceId"),
+                Jsonb(grant.get("operations") or []),
+                grant.get("expiresAt"),
+                grant["createdAt"],
+                grant["updatedAt"],
+                f"grant_event_{uuid.uuid4().hex}",
+            ),
+            commit=True,
+        )
+        if row is None:
+            raise ValueError("access grant creation failed")
+        return self._access_grant_payload(row)
+
+    def get_access_grant(self, grant_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT id, vault_id, grantor_subject_id, grantee_subject_id,
+                relationship_id, purpose, resource_type, resource_id,
+                operations, status, expires_at, revoked_at, row_version,
+                created_at, updated_at
+            FROM access_grants
+            WHERE id = %s
+            """,
+            (grant_id,),
+        )
+        return None if row is None else self._access_grant_payload(row)
+
+    def list_access_grants(
+        self,
+        *,
+        owner_subject_id: str,
+        relationship_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["vault_id = %s"]
+        params: List[Any] = [owner_subject_id]
+        if relationship_id is not None:
+            clauses.append("relationship_id = %s")
+            params.append(relationship_id)
+        rows = self._fetchall(
+            f"""
+            SELECT id, vault_id, grantor_subject_id, grantee_subject_id,
+                relationship_id, purpose, resource_type, resource_id,
+                operations, status, expires_at, revoked_at, row_version,
+                created_at, updated_at
+            FROM access_grants
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at ASC, id ASC
+            """,
+            tuple(params),
+        )
+        return [self._access_grant_payload(row) for row in rows]
+
+    def revoke_access_grant(
+        self,
+        owner_subject_id: str,
+        grant_id: str,
+        *,
+        expected_version: int,
+        revoked_at_iso: str,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            WITH revoked AS (
+                UPDATE access_grants
+                SET status = 'revoked', revoked_at = %s,
+                    updated_at = %s, row_version = row_version + 1
+                WHERE vault_id = %s AND id = %s
+                  AND status = 'active' AND row_version = %s
+                RETURNING *
+            ), event AS (
+                INSERT INTO grant_events (
+                    id, grant_id, relationship_id, event_type,
+                    actor_subject_id, grant_version, reason, occurred_at
+                )
+                SELECT %s, id, relationship_id, 'revoked', grantor_subject_id,
+                    row_version, %s, revoked_at
+                FROM revoked
+            ), bumped AS (
+                UPDATE family_relationships
+                SET grant_epoch = grant_epoch + 1, updated_at = NOW()
+                WHERE id = (SELECT relationship_id FROM revoked)
+                RETURNING grant_epoch
+            )
+            SELECT revoked.*, bumped.grant_epoch
+            FROM revoked CROSS JOIN bumped
+            """,
+            (
+                revoked_at_iso,
+                revoked_at_iso,
+                owner_subject_id,
+                grant_id,
+                expected_version,
+                f"grant_event_{uuid.uuid4().hex}",
+                reason,
+            ),
+            commit=True,
+        )
+        return None if row is None else self._access_grant_payload(row)
+
+    def revoke_all_access_grants_for_subject(
+        self,
+        subject_id: str,
+        *,
+        revoked_at_iso: str,
+        reason: str,
+    ) -> int:
+        row = self._fetchone(
+            """
+            WITH revoked AS (
+                UPDATE access_grants
+                SET status = 'revoked', revoked_at = %s,
+                    updated_at = %s, row_version = row_version + 1
+                WHERE status = 'active'
+                  AND (grantor_subject_id = %s OR grantee_subject_id = %s)
+                RETURNING *
+            ), events AS (
+                INSERT INTO grant_events (
+                    id, grant_id, relationship_id, event_type,
+                    actor_subject_id, grant_version, reason, occurred_at
+                )
+                SELECT 'grant_event_' || md5(random()::text || clock_timestamp()::text || id),
+                    id, relationship_id, 'revoked', %s,
+                    row_version, %s, revoked_at
+                FROM revoked
+                RETURNING grant_id
+            ), bumped AS (
+                UPDATE family_relationships
+                SET grant_epoch = grant_epoch + 1, updated_at = NOW()
+                WHERE id IN (SELECT DISTINCT relationship_id FROM revoked)
+                RETURNING id
+            )
+            SELECT COUNT(*)::BIGINT AS revoked_count FROM revoked
+            """,
+            (
+                revoked_at_iso,
+                revoked_at_iso,
+                subject_id,
+                subject_id,
+                subject_id,
+                reason,
+            ),
+            commit=True,
+        )
+        return int((row or {}).get("revoked_count") or 0)
+
+    def revoke_all_access_grants_for_relationship(
+        self,
+        owner_subject_id: str,
+        relationship_id: str,
+        *,
+        revoked_at_iso: str,
+        reason: str,
+    ) -> int:
+        row = self._fetchone(
+            """
+            WITH revoked AS (
+                UPDATE access_grants
+                SET status = 'revoked', revoked_at = %s,
+                    updated_at = %s, row_version = row_version + 1
+                WHERE status = 'active'
+                  AND grantor_subject_id = %s
+                  AND relationship_id = %s
+                RETURNING *
+            ), events AS (
+                INSERT INTO grant_events (
+                    id, grant_id, relationship_id, event_type,
+                    actor_subject_id, grant_version, reason, occurred_at
+                )
+                SELECT 'grant_event_' || md5(random()::text || clock_timestamp()::text || id),
+                    id, relationship_id, 'revoked', %s,
+                    row_version, %s, revoked_at
+                FROM revoked
+                RETURNING grant_id
+            ), bumped AS (
+                UPDATE family_relationships
+                SET grant_epoch = grant_epoch + 1, updated_at = NOW()
+                WHERE id = %s AND EXISTS (SELECT 1 FROM revoked)
+                RETURNING id
+            )
+            SELECT COUNT(*)::BIGINT AS revoked_count FROM revoked
+            """,
+            (
+                revoked_at_iso,
+                revoked_at_iso,
+                owner_subject_id,
+                relationship_id,
+                owner_subject_id,
+                reason,
+                relationship_id,
+            ),
+            commit=True,
+        )
+        return int((row or {}).get("revoked_count") or 0)
+
+    def record_access_grant_receipt(
+        self,
+        grant: Dict[str, Any],
+        *,
+        actor_subject_id: str,
+        operation: str,
+    ) -> Dict[str, Any]:
+        row = self._fetchone(
+            """
+            INSERT INTO grant_events (
+                id, grant_id, relationship_id, event_type,
+                actor_subject_id, grant_version, reason, occurred_at
+            )
+            SELECT %s, id, relationship_id, 'accessed', %s,
+                row_version, %s, NOW()
+            FROM access_grants
+            WHERE id = %s AND status = 'active'
+              AND (expires_at IS NULL OR expires_at > NOW())
+            RETURNING id, grant_id, relationship_id, event_type,
+                actor_subject_id, grant_version, reason, occurred_at
+            """,
+            (
+                f"grant_event_{uuid.uuid4().hex}",
+                actor_subject_id,
+                f"authorized:{operation}",
+                grant["id"],
+            ),
+            commit=True,
+        )
+        if row is None:
+            raise ValueError("active access grant is required for receipt")
+        return {
+            "id": str(row["id"]),
+            "grantId": str(row["grant_id"]),
+            "relationshipId": str(row["relationship_id"]),
+            "eventType": str(row["event_type"]),
+            "actorSubjectId": str(row["actor_subject_id"]),
+            "grantVersion": int(row["grant_version"]),
+            "reason": str(row["reason"]),
+            "occurredAt": self._iso_value(row.get("occurred_at")),
+        }
+
+    def list_grant_events(self, grant_id: str) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT id, grant_id, relationship_id, event_type,
+                actor_subject_id, grant_version, reason, occurred_at
+            FROM grant_events
+            WHERE grant_id = %s
+            ORDER BY occurred_at ASC, id ASC
+            """,
+            (grant_id,),
+        )
+        return [
+            {
+                "id": str(row["id"]),
+                "grantId": str(row["grant_id"]),
+                "relationshipId": str(row["relationship_id"]),
+                "eventType": str(row["event_type"]),
+                "actorSubjectId": str(row["actor_subject_id"]),
+                "grantVersion": int(row["grant_version"]),
+                "reason": str(row["reason"]),
+                "occurredAt": self._iso_value(row.get("occurred_at")),
+            }
+            for row in rows
+        ]
+
+    def list_access_receipts(
+        self,
+        *,
+        owner_subject_id: str,
+        grant_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["g.grantor_subject_id = %s", "e.event_type = 'accessed'"]
+        params: List[Any] = [owner_subject_id]
+        if grant_id is not None:
+            clauses.append("g.id = %s")
+            params.append(grant_id)
+        rows = self._fetchall(
+            f"""
+            SELECT e.id, e.grant_id, e.relationship_id, e.actor_subject_id,
+                e.grant_version, e.reason, e.occurred_at,
+                g.grantor_subject_id, g.purpose, g.resource_type, g.resource_id
+            FROM grant_events e
+            JOIN access_grants g ON g.id = e.grant_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY e.occurred_at ASC, e.id ASC
+            """,
+            tuple(params),
+        )
+        receipts: List[Dict[str, Any]] = []
+        for row in rows:
+            reason = str(row.get("reason") or "")
+            operation = reason.split(":", 1)[1] if reason.startswith("authorized:") else ""
+            receipts.append(
+                {
+                    "id": str(row["id"]),
+                    "decision": "allow",
+                    "grantId": str(row["grant_id"]),
+                    "relationshipId": str(row["relationship_id"]),
+                    "ownerSubjectId": str(row["grantor_subject_id"]),
+                    "granteeSubjectId": str(row["actor_subject_id"]),
+                    "purpose": str(row["purpose"]),
+                    "operation": operation,
+                    "resourceType": str(row["resource_type"]),
+                    "resourceId": row.get("resource_id"),
+                    "grantVersion": int(row["grant_version"]),
+                    "occurredAt": self._iso_value(row.get("occurred_at")),
+                }
+            )
+        return receipts
+
     def accept_family_member(self, user_id: str, member_id: str, phone: str) -> Optional[Dict[str, Any]]:
         row = self._fetchone(
             """
@@ -4379,6 +4888,47 @@ class PostgresStore:
         if row is None:
             raise ResourceOwnershipConflict("resource id belongs to another owner")
         return deepcopy(row["payload"])
+
+    @classmethod
+    def _family_relationship_payload(cls, row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "vaultId": str(row["vault_id"]),
+            "ownerSubjectId": str(row["owner_subject_id"]),
+            "familyMemberId": str(row["family_member_id"]),
+            "memberSubjectId": str(row["member_subject_id"]),
+            "status": str(row["status"]),
+            "relationshipEpoch": int(row.get("relationship_epoch") or 1),
+            "grantEpoch": int(row.get("grant_epoch") or 0),
+            "createdAt": cls._iso_value(row.get("created_at")),
+            "updatedAt": cls._iso_value(row.get("updated_at")),
+        }
+
+    @classmethod
+    def _access_grant_payload(cls, row: Dict[str, Any]) -> Dict[str, Any]:
+        operations = row.get("operations") or []
+        if isinstance(operations, str):
+            try:
+                operations = json.loads(operations)
+            except json.JSONDecodeError:
+                operations = []
+        return {
+            "id": str(row["id"]),
+            "vaultId": str(row["vault_id"]),
+            "grantorSubjectId": str(row["grantor_subject_id"]),
+            "granteeSubjectId": str(row["grantee_subject_id"]),
+            "relationshipId": str(row["relationship_id"]),
+            "purpose": str(row["purpose"]),
+            "resourceType": str(row["resource_type"]),
+            "resourceId": row.get("resource_id"),
+            "operations": list(operations) if isinstance(operations, (list, tuple)) else [],
+            "status": str(row["status"]),
+            "expiresAt": cls._iso_value(row.get("expires_at")),
+            "revokedAt": cls._iso_value(row.get("revoked_at")),
+            "rowVersion": int(row.get("row_version") or 1),
+            "createdAt": cls._iso_value(row.get("created_at")),
+            "updatedAt": cls._iso_value(row.get("updated_at")),
+        }
 
     def _list_payloads(self, table: str, user_id: str) -> List[Dict[str, Any]]:
         rows = self._fetchall(

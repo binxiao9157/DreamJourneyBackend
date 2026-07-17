@@ -24,6 +24,16 @@ from app.services.authorization_policy import (
 )
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.digital_human_access import DigitalHumanAccessPolicy
+from app.services.delegated_access import (
+    AccessGrantCommand,
+    AccessGrantPurpose,
+    DelegatedAccessError,
+    DelegatedAccessService,
+    GrantOperation,
+    RelationshipLifecycleCommand,
+    ResourceScopeType,
+    RevokeAccessGrantCommand,
+)
 from app.services.identity_bindings import (
     IdentityChallengeConfigurationError,
     IdentityChallengeRateLimited,
@@ -133,6 +143,28 @@ store = make_store(settings)
 logger = logging.getLogger(__name__)
 
 
+def _delegated_access_service() -> DelegatedAccessService:
+    return DelegatedAccessService(store)
+
+
+def _delegated_access_http_error(error: DelegatedAccessError) -> HTTPException:
+    status_code = 404 if error.code in {"relationshipNotFound", "grantNotFound"} else 409
+    if error.code in {"relationshipOwnerMismatch", "grantOwnerMismatch", "relationshipSubjectMismatch"}:
+        status_code = 403
+    return HTTPException(status_code=status_code, detail={"code": error.code})
+
+
+def _require_delegated_access_contract_api() -> None:
+    if not DELEGATED_ACCESS_CONTRACT_API_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "delegatedAccessContractDefaultOff",
+                "retryable": False,
+            },
+        )
+
+
 @app.exception_handler(ResourceOwnershipConflict)
 async def resource_ownership_conflict_handler(
     _request: Request,
@@ -144,6 +176,9 @@ async def resource_ownership_conflict_handler(
     )
 
 BACKEND_API_TOKEN = settings.backend_api_token or ""
+DELEGATED_ACCESS_CONTRACT_API_ENABLED = bool(
+    settings.delegated_access_contract_api_enabled
+)
 AUTH_ACCESS_TTL_SECONDS = max(60, settings.auth_access_ttl_seconds)
 AUTH_REFRESH_TTL_SECONDS = max(AUTH_ACCESS_TTL_SECONDS + 60, settings.auth_refresh_ttl_seconds)
 AUTH_LEGACY_PHONE_LOGIN_ENABLED = legacy_phone_login_enabled(settings)
@@ -512,6 +547,12 @@ def _set_auth_diagnostic_headers(
     response.headers["X-DreamJourney-Authorization-Policy"] = authorization_headers["policy"]
     response.headers["X-DreamJourney-Authorization-Decision"] = authorization_headers["decision"]
     response.headers["X-DreamJourney-Authorization-Reason"] = authorization_headers["reason"]
+    if authorization_headers.get("grantId"):
+        response.headers["X-DreamJourney-Authorization-Grant-Id"] = authorization_headers["grantId"]
+    if authorization_headers.get("grantReceiptId"):
+        response.headers["X-DreamJourney-Authorization-Grant-Receipt-Id"] = authorization_headers[
+            "grantReceiptId"
+        ]
     return response
 
 
@@ -1460,6 +1501,10 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
         deletion = store.soft_delete_user(user_id, phone=phone)
         if deletion is None:
             raise HTTPException(status_code=404, detail="account not found")
+        delegated_grant_revocation = _delegated_access_service().revoke_subject_access(
+            user_id,
+            reason="accountSoftDeleted",
+        )
         session_revocation = _auth_session_service().revoke_all_for_user(
             user_id,
             reason="accountSoftDeleted",
@@ -1475,6 +1520,7 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
             "restoreBySamePhone": True,
         },
         "sessionRevocation": session_revocation,
+        "delegatedGrantRevocation": delegated_grant_revocation,
     }
 
 
@@ -2880,7 +2926,10 @@ def get_time_letter_detail(
         viewerUserId,
         "authenticated user does not match timeLetter viewer",
     )
-    now_iso = str(now or datetime.now(timezone.utc).isoformat()).strip()
+    # `now` remains a tolerated compatibility query only; client clocks never
+    # participate in the server-authoritative opening decision.
+    _ = now
+    now_iso = datetime.now(timezone.utc).isoformat()
     try:
         return time_letter_detail_for_viewer(
             store=store,
@@ -3291,13 +3340,20 @@ def invite_family(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     invite_payload["invitationCode"] = invitation_code
     invite_payload["invitationURL"] = f"dreamjourney://family/invite?code={invitation_code}"
     member = store.add_family_member(user_id, invite_payload)
+    member = _delegated_access_service().decorate_family_member(
+        owner_subject_id=user_id,
+        member=member,
+    )
     return {"status": "created", "member": member}
 
 
 @app.get("/family/members/{user_id}")
 def family_members(request: Request, user_id: str) -> Dict[str, Any]:
     user_id = _principal_path_owner(request, user_id)
-    return {"userId": user_id, "members": store.list_family_members(user_id)}
+    return {
+        "userId": user_id,
+        "members": _delegated_access_service().list_decorated_family_members(user_id),
+    }
 
 
 @app.post("/family/members/{user_id}/{member_id}/accept")
@@ -3306,12 +3362,22 @@ def accept_family_member(request: Request, user_id: str, member_id: str, payload
     if not phone:
         raise HTTPException(status_code=400, detail="phone is required")
     principal_user_id = _request_user_principal_id(request)
-    if principal_user_id is not None and principal_user_id not in {user_id, stable_user_id(phone)}:
+    if principal_user_id is not None and principal_user_id != stable_user_id(phone):
         raise HTTPException(status_code=403, detail="authenticated user does not match family invitation")
     member = store.accept_family_member(user_id, member_id, phone=phone)
     if member is None:
         raise HTTPException(status_code=404, detail="family member not found or phone mismatch")
-    return {"status": "accepted", "member": member}
+    accepted_subject_id = stable_user_id(phone)
+    service = _delegated_access_service()
+    service.ensure_relationship_for_member(
+        owner_subject_id=user_id,
+        member=member,
+        accepted_subject_id=accepted_subject_id,
+    )
+    return {
+        "status": "accepted",
+        "member": service.decorate_family_member(owner_subject_id=user_id, member=member),
+    }
 
 
 @app.post("/family/invitations/{invitation_code}/accept")
@@ -3327,13 +3393,122 @@ def accept_family_invitation_code(request: Request, invitation_code: str, payloa
     member = store.accept_family_invitation_code(invitation_code, phone=phone)
     if member is None:
         raise HTTPException(status_code=404, detail="invitation not found or phone mismatch")
-    return {"status": "accepted", "member": member}
+    owner_user_id = str(member.get("ownerUserId") or member.get("userId") or "").strip()
+    service = _delegated_access_service()
+    service.ensure_relationship_for_member(
+        owner_subject_id=owner_user_id,
+        member=member,
+        accepted_subject_id=_request_user_principal_id(request) or stable_user_id(phone),
+    )
+    return {
+        "status": "accepted",
+        "member": service.decorate_family_member(owner_subject_id=owner_user_id, member=member),
+    }
 
 
 @app.post("/family/members/{user_id}/{member_id}/revoke")
 def revoke_family_member(request: Request, user_id: str, member_id: str) -> Dict[str, Any]:
     _principal_path_owner(request, user_id)
     raise HTTPException(status_code=409, detail="family member removal is not supported")
+
+
+@app.post("/family/relationships/{user_id}/{relationship_id}/lifecycle")
+def change_family_relationship_lifecycle(
+    request: Request,
+    user_id: str,
+    relationship_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    _require_delegated_access_contract_api()
+    user_id = _principal_path_owner(request, user_id)
+    try:
+        command = RelationshipLifecycleCommand.model_validate(
+            {
+                "ownerSubjectId": user_id,
+                "relationshipId": relationship_id,
+                "operation": payload.get("operation"),
+                "expectedEpoch": payload.get("expectedEpoch"),
+            }
+        )
+        relationship = _delegated_access_service().change_relationship(command)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail={"code": "relationshipCommandInvalid"}) from exc
+    except DelegatedAccessError as exc:
+        raise _delegated_access_http_error(exc) from exc
+    return {"status": relationship["status"], "relationship": relationship}
+
+
+@app.post("/family/access-grants")
+def grant_family_access(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _require_delegated_access_contract_api()
+    user_id, payload = _principal_owned_payload(request, payload)
+    try:
+        command = AccessGrantCommand.model_validate(
+            {
+                "grantorSubjectId": user_id,
+                "relationshipId": payload.get("relationshipId"),
+                "granteeSubjectId": payload.get("granteeSubjectId"),
+                "purpose": payload.get("purpose"),
+                "resourceType": payload.get("resourceType"),
+                "resourceId": payload.get("resourceId"),
+                "operations": payload.get("operations"),
+                "expiresAt": payload.get("expiresAt"),
+            }
+        )
+        grant = _delegated_access_service().grant_access(command)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail={"code": "accessGrantCommandInvalid"}) from exc
+    except DelegatedAccessError as exc:
+        raise _delegated_access_http_error(exc) from exc
+    return {"status": "granted", "grant": grant}
+
+
+@app.get("/family/access-grants/{user_id}")
+def family_access_grants(
+    request: Request,
+    user_id: str,
+    relationshipId: str = None,
+) -> Dict[str, Any]:
+    _require_delegated_access_contract_api()
+    user_id = _principal_path_owner(request, user_id)
+    grants = _delegated_access_service().list_relationship_grants(
+        owner_subject_id=user_id,
+        relationship_id=str(relationshipId or "").strip(),
+    ) if relationshipId else [
+        grant
+        for relationship in store.list_family_relationships(user_id)
+        for grant in _delegated_access_service().list_relationship_grants(
+            owner_subject_id=user_id,
+            relationship_id=str(relationship["id"]),
+        )
+    ]
+    return {"userId": user_id, "grants": grants}
+
+
+@app.post("/family/access-grants/{user_id}/{grant_id}/revoke")
+def revoke_family_access(
+    request: Request,
+    user_id: str,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    _require_delegated_access_contract_api()
+    user_id = _principal_path_owner(request, user_id)
+    try:
+        command = RevokeAccessGrantCommand.model_validate(
+            {
+                "grantorSubjectId": user_id,
+                "grantId": grant_id,
+                "expectedVersion": payload.get("expectedVersion"),
+                "reason": payload.get("reason") or "ownerRequested",
+            }
+        )
+        grant = _delegated_access_service().revoke_access(command)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail={"code": "revokeGrantCommandInvalid"}) from exc
+    except DelegatedAccessError as exc:
+        raise _delegated_access_http_error(exc) from exc
+    return {"status": "revoked", "grant": grant}
 
 
 def _normalize_viewer_family_member_id(value: Any) -> Optional[str]:
@@ -3362,29 +3537,35 @@ def _ensure_active_family_viewer(
         if str(member.get("id") or "") != viewer_family_member_id:
             continue
         if member.get("accessStatus") == "active" and member.get("invitationStatus") == "accepted":
+            relationship = store.get_family_relationship_by_member(user_id, viewer_family_member_id)
+            if relationship is None or relationship.get("status") != "accepted":
+                raise HTTPException(status_code=403, detail="family relationship is not active")
+            grantee_subject_id = str(relationship.get("memberSubjectId") or "").strip()
             if require_requester_identity:
-                if requester_user_id is not None:
-                    member_phone = str(member.get("phone") or "").strip()
-                    expected_user_id = stable_user_id(member_phone) if member_phone else ""
-                    explicit_member_user_ids = {
-                        str(member.get("memberUserId") or "").strip(),
-                        str(member.get("acceptedUserId") or "").strip(),
-                        str(member.get("recipientUserId") or "").strip(),
-                    }
-                    allowed_user_ids = {
-                        value for value in {expected_user_id, *explicit_member_user_ids} if value
-                    }
-                    if requester_user_id in allowed_user_ids:
-                        return
+                effective_requester_id = str(requester_user_id or "").strip()
+                if (
+                    not effective_requester_id
+                    and AUTH_ROUTE_MODE != "enforce"
+                    and not bool(_configured_backend_api_token())
+                ):
+                    normalized_requester_phone = _normalized_phone(requester_phone)
+                    if normalized_requester_phone:
+                        effective_requester_id = stable_user_id(normalized_requester_phone)
+                if not effective_requester_id:
+                    raise HTTPException(status_code=403, detail="verified requester identity is required")
+                if effective_requester_id != grantee_subject_id:
                     raise HTTPException(status_code=403, detail="authenticated user is not authorized for this care snapshot")
-                normalized_requester_phone = _normalized_phone(requester_phone)
-                if not normalized_requester_phone:
-                    raise HTTPException(status_code=403, detail="requester identity is required")
-                normalized_member_phone = _normalized_phone(member.get("phone"))
-                if normalized_member_phone and normalized_requester_phone == normalized_member_phone:
-                    return
-                raise HTTPException(status_code=403, detail="requester is not authorized for this care snapshot")
-            return
+            access = _delegated_access_service().authorize(
+                owner_subject_id=user_id,
+                grantee_subject_id=grantee_subject_id,
+                family_member_id=viewer_family_member_id,
+                purpose=AccessGrantPurpose.CARE_SNAPSHOT,
+                operation=GrantOperation.READ,
+                resource_type=ResourceScopeType.CARE_SNAPSHOT,
+            )
+            if access.allowed:
+                return
+            raise HTTPException(status_code=403, detail="active care grant is required")
         raise HTTPException(status_code=403, detail="family member access is not active")
     raise HTTPException(status_code=403, detail="family member is not authorized")
 

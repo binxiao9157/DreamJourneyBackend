@@ -5,7 +5,13 @@ from typing import Any, Dict, Mapping, Optional, Set
 
 from app.services.route_ownership import RouteOwnershipCategory, RouteOwnershipRegistry
 from app.services.resource_authorization import ResourceAuthorityResolver, ResourceType
-from app.services.time_letters import time_letter_recipient_records
+from app.services.delegated_access import (
+    AccessGrantPurpose,
+    DelegatedAccessService,
+    GrantOperation,
+    ResourceScopeType,
+)
+from app.services.time_letters import is_time_letter_open, time_letter_recipient_records
 from app.services.user_identity import stable_user_id
 
 
@@ -53,13 +59,20 @@ class AuthorizationPolicyDecision:
     delegated: bool = False
     terminal: bool = True
     principal_bound: bool = False
+    grant_id: Optional[str] = None
+    grant_receipt_id: Optional[str] = None
 
     def header_values(self) -> Dict[str, str]:
-        return {
+        values = {
             "policy": self.policy_id,
             "decision": self.decision,
             "reason": self.reason,
         }
+        if self.grant_id:
+            values["grantId"] = self.grant_id
+        if self.grant_receipt_id:
+            values["grantReceiptId"] = self.grant_receipt_id
+        return values
 
 
 class CrossAccountAuthorizationPolicy:
@@ -250,6 +263,16 @@ class CrossAccountAuthorizationPolicy:
             return self._deny("careSnapshotRead", "familyAccessInactive")
         if principal_user_id not in self._family_member_principal_ids(member):
             return self._deny("careSnapshotRead", "familyPrincipalMismatch")
+        access = DelegatedAccessService(self.store).authorize(
+            owner_subject_id=owner_user_id,
+            grantee_subject_id=principal_user_id,
+            family_member_id=member_id,
+            purpose=AccessGrantPurpose.CARE_SNAPSHOT,
+            operation=GrantOperation.READ,
+            resource_type=ResourceScopeType.CARE_SNAPSHOT,
+        )
+        if not access.allowed:
+            return self._deny("careSnapshotRead", access.reason)
         return AuthorizationPolicyDecision(
             policy_id="careSnapshotRead",
             decision="allowFamily",
@@ -257,6 +280,8 @@ class CrossAccountAuthorizationPolicy:
             allowed=True,
             delegated=True,
             principal_bound=True,
+            grant_id=access.grant_id,
+            grant_receipt_id=access.receipt_id,
         )
 
     def _evaluate_time_letter_detail(
@@ -278,6 +303,8 @@ class CrossAccountAuthorizationPolicy:
         item = self._time_letter(owner_user_id, item_id)
         if item is None:
             return self._defer("timeLetterDetail", "resourceValidationPending")
+        if not is_time_letter_open(item):
+            return self._deny("timeLetterDetail", "timeLetterNotOpen")
         for recipient in time_letter_recipient_records(item):
             recipient_id = str(recipient.get("id") or "").strip()
             if not recipient_id or recipient_id == "self":
@@ -287,7 +314,18 @@ class CrossAccountAuthorizationPolicy:
                 continue
             if not self._is_active_family_member(member):
                 continue
-            if principal_user_id in self._family_member_principal_ids(member):
+            if principal_user_id not in self._family_member_principal_ids(member):
+                continue
+            access = DelegatedAccessService(self.store).authorize(
+                owner_subject_id=owner_user_id,
+                grantee_subject_id=principal_user_id,
+                family_member_id=recipient_id,
+                purpose=AccessGrantPurpose.TIME_LETTER_READ,
+                operation=GrantOperation.READ,
+                resource_type=ResourceScopeType.TIME_LETTER,
+                resource_id=item_id,
+            )
+            if access.allowed:
                 return AuthorizationPolicyDecision(
                     policy_id="timeLetterDetail",
                     decision="allowRecipient",
@@ -295,8 +333,10 @@ class CrossAccountAuthorizationPolicy:
                     allowed=True,
                     delegated=True,
                     principal_bound=True,
+                    grant_id=access.grant_id,
+                    grant_receipt_id=access.receipt_id,
                 )
-        return self._deny("timeLetterDetail", "viewerNotRecipient")
+        return self._deny("timeLetterDetail", "activeGrantRequired")
 
     def _evaluate_invitation_accept(
         self,
@@ -325,20 +365,18 @@ class CrossAccountAuthorizationPolicy:
         member_id: str,
         principal_user_id: str,
     ) -> AuthorizationPolicyDecision:
-        if owner_user_id == principal_user_id:
-            return self._allow_owner("familyMemberAccept")
         member = self._family_member(owner_user_id, member_id)
         if member is None:
             return self._defer("familyMemberAccept", "resourceValidationPending")
         if principal_user_id in self._family_member_principal_ids(member):
-            return AuthorizationPolicyDecision(
+                return AuthorizationPolicyDecision(
                 policy_id="familyMemberAccept",
                 decision="allowRecipient",
                 reason="invitationPhonePrincipal",
                 allowed=True,
                 delegated=True,
                 principal_bound=True,
-            )
+                )
         return self._deny("familyMemberAccept", "invitationPrincipalMismatch")
 
     def _family_member(self, owner_user_id: str, member_id: str) -> Optional[Dict[str, Any]]:

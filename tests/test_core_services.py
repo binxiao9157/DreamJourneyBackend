@@ -36,6 +36,13 @@ from app.services.user_identity import stable_user_id
 from app.services.voice_clone import VolcEngineVoiceCloneV3Provider, VoiceCloneProviderFactory
 from app.services.amap import AMapDistrictProxy
 from app.services.deepseek import DeepSeekImageAnalysisProxy, DeepSeekKnowledgeExtractionProxy
+from app.services.delegated_access import (
+    AccessGrantCommand,
+    AccessGrantPurpose,
+    DelegatedAccessService,
+    GrantOperation,
+    ResourceScopeType,
+)
 
 
 def verified_self_eligibility(capability: str = "clonedVoice") -> dict:
@@ -58,6 +65,38 @@ def machine_request(client: TestClient, method: str, path: str, **kwargs):
     headers["Authorization"] = f"Bearer {token}"
     with patch.object(main_module, "BACKEND_API_TOKEN", token):
         return client.request(method, path, headers=headers, **kwargs)
+
+
+def grant_family_read_access(
+    *,
+    owner_user_id: str,
+    family_member_id: str,
+    purpose: AccessGrantPurpose,
+    resource_type: ResourceScopeType,
+    resource_id: str = "",
+) -> dict:
+    service = DelegatedAccessService(main_module.store)
+    member = next(
+        item
+        for item in main_module.store.list_family_members(owner_user_id)
+        if str(item.get("id") or "") == family_member_id
+    )
+    relationship = service.ensure_relationship_for_member(
+        owner_subject_id=owner_user_id,
+        member=member,
+    )
+    return service.grant_access(
+        AccessGrantCommand(
+            grantorSubjectId=owner_user_id,
+            relationshipId=str(relationship["id"]),
+            granteeSubjectId=str(relationship["memberSubjectId"]),
+            purpose=purpose,
+            resourceType=resource_type,
+            resourceId=resource_id or None,
+            operations=[GrantOperation.READ],
+            expiresAt="2099-01-01T00:00:00Z",
+        )
+    )
 
 
 class HiddenStageContractTestCase(unittest.TestCase):
@@ -2618,6 +2657,12 @@ class CareSnapshotAPITests(HiddenStageContractTestCase):
             json={"phone": phone},
         )
         self.assertEqual(accepted.status_code, 200)
+        grant_family_read_access(
+            owner_user_id=user_id,
+            family_member_id=member_id,
+            purpose=AccessGrantPurpose.CARE_SNAPSHOT,
+            resource_type=ResourceScopeType.CARE_SNAPSHOT,
+        )
         return member_id
 
     def test_care_snapshot_api_saves_and_returns_latest_by_viewer(self):
@@ -2736,6 +2781,20 @@ class CareSnapshotAPITests(HiddenStageContractTestCase):
             f"/family/members/{user_id}/{member_id}/accept",
             json={"phone": "13900001111"},
         )
+        accepted_without_grant = client.post(
+            "/care/snapshots",
+            json={
+                "userId": user_id,
+                "viewerFamilyMemberID": member_id,
+                "snapshot": self._care_snapshot(summary="关系已接受但尚未授权"),
+            },
+        )
+        grant_family_read_access(
+            owner_user_id=user_id,
+            family_member_id=member_id,
+            purpose=AccessGrantPurpose.CARE_SNAPSHOT,
+            resource_type=ResourceScopeType.CARE_SNAPSHOT,
+        )
         active_write = client.post(
             "/care/snapshots",
             json={
@@ -2750,6 +2809,7 @@ class CareSnapshotAPITests(HiddenStageContractTestCase):
         )
 
         self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted_without_grant.status_code, 403)
         self.assertEqual(active_write.status_code, 200)
         self.assertEqual(active_read.status_code, 200)
 
@@ -4699,6 +4759,34 @@ class ArchiveAPITests(unittest.TestCase):
             json={"phone": "13900001111"},
         )
         self.assertEqual(accepted.status_code, 200)
+        accepted_without_grant = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "personaScope": "family",
+                "digitalHumanId": "family_context_elder",
+                "viewerFamilyMemberID": "family_pending_context",
+            },
+        )
+        self.assertEqual(accepted_without_grant.status_code, 200)
+        accepted_without_grant_packet = accepted_without_grant.json()["contextPacket"]
+        self.assertEqual(accepted_without_grant_packet["memory"]["archiveItems"], [])
+        self.assertIsNone(accepted_without_grant_packet["care"]["latest"])
+        self.assertIn("family_persona_grant_required", accepted_without_grant_packet["fallbacks"])
+        grant_family_read_access(
+            owner_user_id=user_id,
+            family_member_id="family_pending_context",
+            purpose=AccessGrantPurpose.FAMILY_PERSONA,
+            resource_type=ResourceScopeType.FAMILY_MEMBER,
+            resource_id="family_pending_context",
+        )
+        grant_family_read_access(
+            owner_user_id=user_id,
+            family_member_id="family_pending_context",
+            purpose=AccessGrantPurpose.CARE_SNAPSHOT,
+            resource_type=ResourceScopeType.CARE_SNAPSHOT,
+        )
         active_response = client.post(
             "/context/build",
             json={
@@ -4727,6 +4815,97 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertIn("家庭成员未接受前不应可用。", active_packet["generationContext"]["text"])
         self.assertIn("家庭关怀摘要", active_packet["generationContext"]["text"])
         self.assertNotIn("当前查看者的个人事实不可注入家庭角色。", active_packet["generationContext"]["text"])
+
+    def test_context_build_requires_resource_grant_for_open_time_letter_recipient(self):
+        client = TestClient(app)
+        user_id = "context_user_open_time_letter_grant"
+        member_id = "family_open_time_recipient"
+        invited = client.post(
+            "/family/invite",
+            json={
+                "userId": user_id,
+                "id": member_id,
+                "name": "林静文",
+                "relation": "女儿",
+                "phone": "13900004444",
+            },
+        )
+        self.assertEqual(invited.status_code, 200)
+        accepted = client.post(
+            f"/family/members/{user_id}/{member_id}/accept",
+            json={"phone": "13900004444"},
+        )
+        self.assertEqual(accepted.status_code, 200)
+        created = client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "archive_time_letter_open_grant",
+                "kind": "timeLetter",
+                "title": "已经到期的信",
+                "note": "只有明确授权的收件人可以进入回响上下文。",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "deliveryState": "sealed",
+                "deliveryStatus": "delivered",
+                "openAt": "2020-01-01T00:00:00Z",
+                "recipients": [{"id": member_id, "name": "林静文", "type": "family"}],
+                "metadata": {
+                    "timeLetterStatus": "sealed",
+                    "deliveryStatus": "delivered",
+                    "openAt": "2020-01-01T00:00:00Z",
+                    "recipientIds": member_id,
+                },
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        self.assertEqual(created.status_code, 200)
+
+        denied = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "viewerFamilyMemberID": member_id,
+            },
+        )
+        self.assertEqual(denied.status_code, 200)
+        denied_packet = denied.json()["contextPacket"]
+        denied_reasons = {item["refId"]: item["reason"] for item in denied_packet["filteredContext"]}
+        self.assertEqual(
+            denied_reasons["archive_time_letter_open_grant"],
+            "time_letter_grant_required",
+        )
+
+        grant_family_read_access(
+            owner_user_id=user_id,
+            family_member_id=member_id,
+            purpose=AccessGrantPurpose.TIME_LETTER_READ,
+            resource_type=ResourceScopeType.TIME_LETTER,
+            resource_id="archive_time_letter_open_grant",
+        )
+        allowed = client.post(
+            "/context/build",
+            json={
+                "userId": user_id,
+                "intent": "echo_chat",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "viewerFamilyMemberID": member_id,
+            },
+        )
+        self.assertEqual(allowed.status_code, 200)
+        allowed_packet = allowed.json()["contextPacket"]
+        self.assertEqual(
+            [item["id"] for item in allowed_packet["memory"]["archiveItems"]],
+            ["archive_time_letter_open_grant"],
+        )
+        self.assertIn(
+            "只有明确授权的收件人可以进入回响上下文。",
+            allowed_packet["generationContext"]["text"],
+        )
 
     def test_context_build_does_not_substitute_owner_care_for_family_viewer(self):
         client = TestClient(app)
@@ -5194,6 +5373,13 @@ class ArchiveAPITests(unittest.TestCase):
         accepted = client.post(
             f"/family/members/{user_id}/family-recipient-1/accept",
             json={"phone": recipient_phone},
+        )
+        grant_family_read_access(
+            owner_user_id=user_id,
+            family_member_id="family-recipient-1",
+            purpose=AccessGrantPurpose.TIME_LETTER_READ,
+            resource_type=ResourceScopeType.TIME_LETTER,
+            resource_id="archive-time-letter-due",
         )
         pending_invited = client.post(
             "/family/invite",

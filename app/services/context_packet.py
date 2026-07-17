@@ -6,6 +6,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.core.config import Settings
+from app.services.delegated_access import (
+    AccessGrantPurpose,
+    DelegatedAccessService,
+    GrantOperation,
+    ResourceScopeType,
+)
 from app.services.privacy import AI_PROCESSABLE_SCOPES
 from app.services.runtime_config import RuntimeConfigService
 from app.services.safety_policy import SafetyDecision, SafetyPolicy
@@ -42,7 +48,21 @@ class ContextPacketBuilder:
                 viewer_family_member_id=viewer_family_member_id,
                 safety_decision=safety_decision,
             )
-        family_viewer_active = self._family_viewer_active(user_id, viewer_family_member_id)
+        family_relationship_active = self._family_relationship_active(user_id, viewer_family_member_id)
+        family_persona_grant_active = self._family_access_allowed(
+            user_id=user_id,
+            viewer_family_member_id=viewer_family_member_id,
+            purpose=AccessGrantPurpose.FAMILY_PERSONA,
+            resource_type=ResourceScopeType.FAMILY_MEMBER,
+            resource_id=viewer_family_member_id,
+        )
+        care_grant_active = self._family_access_allowed(
+            user_id=user_id,
+            viewer_family_member_id=viewer_family_member_id,
+            purpose=AccessGrantPurpose.CARE_SNAPSHOT,
+            resource_type=ResourceScopeType.CARE_SNAPSHOT,
+        )
+        family_viewer_active = family_relationship_active and family_persona_grant_active
 
         all_archive_items = self.store.list_archive_items(user_id)
         archive_context = self._build_archive_context(
@@ -51,7 +71,8 @@ class ContextPacketBuilder:
             persona_scope=persona_scope,
             digital_human_id=digital_human_id,
             viewer_family_member_id=viewer_family_member_id,
-            family_viewer_active=family_viewer_active,
+            family_relationship_active=family_relationship_active,
+            family_persona_grant_active=family_persona_grant_active,
             query=query,
         )
         included_archive_items = archive_context["archiveItems"]
@@ -64,7 +85,7 @@ class ContextPacketBuilder:
             persona_scope=persona_scope,
             digital_human_id=digital_human_id,
             viewer_family_member_id=viewer_family_member_id,
-            family_viewer_active=family_viewer_active,
+            care_grant_active=care_grant_active,
         )
         if care_viewer_authorized:
             care_snapshot = self._summarized_care_snapshot(
@@ -105,8 +126,10 @@ class ContextPacketBuilder:
         fallbacks: List[str] = []
         if not included_archive_items:
             fallbacks.append("no_archive_context")
-        if viewer_family_member_id and not family_viewer_active:
+        if viewer_family_member_id and not family_relationship_active:
             fallbacks.append("family_viewer_not_active")
+        elif viewer_family_member_id and persona_scope == "family" and not family_persona_grant_active:
+            fallbacks.append("family_persona_grant_required")
         if not clone_ready:
             fallbacks.append("voice_clone_not_ready")
         if not digital_human_ready:
@@ -190,7 +213,9 @@ class ContextPacketBuilder:
             "policy": {
                 "privacyMode": "standard",
                 "canUseFamilyData": persona_scope == "family" and family_viewer_active,
-                "familyViewerActive": family_viewer_active,
+                "familyViewerActive": family_relationship_active,
+                "familyPersonaGrantActive": family_persona_grant_active,
+                "careGrantActive": care_grant_active,
                 "canUseVoiceClone": clone_ready,
                 "crossScopeArchiveIncluded": privacy_scope["crossScopeArchiveIncluded"],
                 "privacyScope": privacy_scope,
@@ -393,10 +418,10 @@ class ContextPacketBuilder:
         persona_scope: str,
         digital_human_id: str,
         viewer_family_member_id: Optional[str],
-        family_viewer_active: bool,
+        care_grant_active: bool,
     ) -> bool:
         if viewer_family_member_id:
-            return family_viewer_active
+            return care_grant_active
         return persona_scope == "personal" and digital_human_id == user_id
 
     @staticmethod
@@ -446,7 +471,8 @@ class ContextPacketBuilder:
         persona_scope: str,
         digital_human_id: str,
         viewer_family_member_id: Optional[str],
-        family_viewer_active: bool,
+        family_relationship_active: bool,
+        family_persona_grant_active: bool,
         query: str,
     ) -> Dict[str, Any]:
         candidates: List[Dict[str, Any]] = []
@@ -459,7 +485,8 @@ class ContextPacketBuilder:
                 persona_scope=persona_scope,
                 digital_human_id=digital_human_id,
                 viewer_family_member_id=viewer_family_member_id,
-                family_viewer_active=family_viewer_active,
+                family_relationship_active=family_relationship_active,
+                family_persona_grant_active=family_persona_grant_active,
             )
             if reason:
                 filtered_context.append(self._filtered_archive_context(item, reason))
@@ -488,18 +515,11 @@ class ContextPacketBuilder:
         persona_scope: str,
         digital_human_id: str,
         viewer_family_member_id: Optional[str],
-        family_viewer_active: bool,
+        family_relationship_active: bool,
+        family_persona_grant_active: bool,
     ) -> Optional[str]:
-        if viewer_family_member_id and not family_viewer_active:
+        if viewer_family_member_id and not family_relationship_active:
             return "family_viewer_not_active"
-
-        if not self._archive_matches_scope(
-            item,
-            user_id=user_id,
-            persona_scope=persona_scope,
-            digital_human_id=digital_human_id,
-        ):
-            return "scope_mismatch"
 
         if str(item.get("kind") or "").strip() == "timeLetter":
             delivery_state = self._time_letter_delivery_state(item)
@@ -513,6 +533,24 @@ class ContextPacketBuilder:
                 return "time_letter_not_open_for_recipient"
             if self._time_letter_opens_in_future(item):
                 return "time_letter_not_due"
+            if viewer_family_member_id and not self._family_access_allowed(
+                user_id=user_id,
+                viewer_family_member_id=viewer_family_member_id,
+                purpose=AccessGrantPurpose.TIME_LETTER_READ,
+                resource_type=ResourceScopeType.TIME_LETTER,
+                resource_id=str(item.get("id") or ""),
+            ):
+                return "time_letter_grant_required"
+        elif viewer_family_member_id and not family_persona_grant_active:
+            return "family_persona_grant_required"
+
+        if not self._archive_matches_scope(
+            item,
+            user_id=user_id,
+            persona_scope=persona_scope,
+            digital_human_id=digital_human_id,
+        ):
+            return "scope_mismatch"
 
         analysis_status = str(item.get("analysisStatus") or "").strip()
         if analysis_status == "failed" and not self._archive_has_usable_context(item):
@@ -1207,17 +1245,45 @@ class ContextPacketBuilder:
             open_at = open_at.replace(tzinfo=timezone.utc)
         return open_at > datetime.now(timezone.utc)
 
-    def _family_viewer_active(self, user_id: str, viewer_family_member_id: Optional[str]) -> bool:
+    def _family_relationship_active(self, user_id: str, viewer_family_member_id: Optional[str]) -> bool:
         if viewer_family_member_id is None:
             return True
         viewer_id = str(viewer_family_member_id or "").strip()
         if not viewer_id:
             return True
-        for member in self.store.list_family_members(user_id):
-            if str(member.get("id") or "").strip() != viewer_id:
-                continue
-            return member.get("accessStatus") == "active" and member.get("invitationStatus") == "accepted"
-        return False
+        relationship = self.store.get_family_relationship_by_member(user_id, viewer_id)
+        return bool(relationship and relationship.get("status") == "accepted")
+
+    def _family_access_allowed(
+        self,
+        *,
+        user_id: str,
+        viewer_family_member_id: Optional[str],
+        purpose: AccessGrantPurpose,
+        resource_type: ResourceScopeType,
+        resource_id: Optional[str] = None,
+    ) -> bool:
+        if viewer_family_member_id is None:
+            return True
+        viewer_id = str(viewer_family_member_id or "").strip()
+        if not viewer_id:
+            return True
+        relationship = self.store.get_family_relationship_by_member(user_id, viewer_id)
+        if not relationship:
+            return False
+        grantee_subject_id = str(relationship.get("memberSubjectId") or "").strip()
+        if not grantee_subject_id:
+            return False
+        decision = DelegatedAccessService(self.store).authorize(
+            owner_subject_id=user_id,
+            grantee_subject_id=grantee_subject_id,
+            family_member_id=viewer_id,
+            purpose=purpose,
+            operation=GrantOperation.READ,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
+        return decision.allowed
 
     def _has_cross_scope_archive(
         self,
