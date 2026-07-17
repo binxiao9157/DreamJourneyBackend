@@ -1,6 +1,7 @@
 import json
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app.db.recovery import (
     RecoveryContractError,
@@ -62,6 +63,24 @@ class RecoveryRecordTests(unittest.TestCase):
         for target in ("dreamjourney", "postgres", "dj_restore", "bad-name"):
             with self.assertRaises(RecoveryContractError):
                 validate_recovery_target(target, "dreamjourney")
+
+    def test_deployed_integrity_check_runs_inside_compose_network(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "db"
+            / "run-recovery-deployed-smoke.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"$DOCKER_BIN" compose run --rm -T', script)
+        self.assertIn("python scripts/db/verify_recovery_integrity.py", script)
+        self.assertIn('--dsn "$DATABASE_URL"', script)
+        self.assertIn("cat /tmp/integrity-evidence.json", script)
+        self.assertNotIn('-e "DATABASE_URL=', script)
+        self.assertNotIn(
+            '"$PYTHON_BIN" scripts/db/verify_recovery_integrity.py',
+            script,
+        )
 
     def test_integrity_requires_head_owner_hash_and_purged_owner_invariants(self):
         report = self.verified_integrity()

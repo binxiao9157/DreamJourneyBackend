@@ -5,6 +5,7 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 [[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="python3"
+DOCKER_BIN="${DOCKER_BIN:-docker}"
 
 RECOVERY_MANIFEST_PATH="${RECOVERY_MANIFEST_PATH:?RECOVERY_MANIFEST_PATH is required}"
 RECOVERY_TARGET_DB="${RECOVERY_TARGET_DB:?RECOVERY_TARGET_DB is required}"
@@ -23,14 +24,35 @@ backup_id="$($PYTHON_BIN -c 'import json,sys; print(json.load(open(sys.argv[1]))
 cutoff_lsn="$($PYTHON_BIN -c 'import json,sys; print(json.load(open(sys.argv[1]))["lsn"])' "$RECOVERY_MANIFEST_PATH")"
 schema_head="$($PYTHON_BIN -c 'import json,sys; print(json.load(open(sys.argv[1]))["schemaHead"])' "$RECOVERY_MANIFEST_PATH")"
 
-"$PYTHON_BIN" scripts/db/verify_recovery_integrity.py \
-  --dsn "$RECOVERY_DATABASE_URL" \
-  --backup-id "$backup_id" \
-  --cutoff-lsn "$cutoff_lsn" \
-  --target-database "$RECOVERY_TARGET_DB" \
-  --production-database "$RECOVERY_PRODUCTION_DB" \
-  --expected-schema-head "$schema_head" \
-  --output "$RECOVERY_OUTPUT_DIR/integrity-evidence.json" >/dev/null
+integrity_evidence="$RECOVERY_OUTPUT_DIR/integrity-evidence.json"
+integrity_evidence_tmp="$integrity_evidence.tmp"
+rm -f "$integrity_evidence_tmp"
+DATABASE_URL="$RECOVERY_DATABASE_URL" \
+RECOVERY_BACKUP_ID="$backup_id" \
+RECOVERY_CUTOFF_LSN="$cutoff_lsn" \
+RECOVERY_TARGET_DB="$RECOVERY_TARGET_DB" \
+RECOVERY_PRODUCTION_DB="$RECOVERY_PRODUCTION_DB" \
+RECOVERY_EXPECTED_SCHEMA_HEAD="$schema_head" \
+"$DOCKER_BIN" compose run --rm -T \
+  -e DATABASE_URL \
+  -e RECOVERY_BACKUP_ID \
+  -e RECOVERY_CUTOFF_LSN \
+  -e RECOVERY_TARGET_DB \
+  -e RECOVERY_PRODUCTION_DB \
+  -e RECOVERY_EXPECTED_SCHEMA_HEAD \
+  api sh -ec '
+    python scripts/db/verify_recovery_integrity.py \
+      --dsn "$DATABASE_URL" \
+      --backup-id "$RECOVERY_BACKUP_ID" \
+      --cutoff-lsn "$RECOVERY_CUTOFF_LSN" \
+      --target-database "$RECOVERY_TARGET_DB" \
+      --production-database "$RECOVERY_PRODUCTION_DB" \
+      --expected-schema-head "$RECOVERY_EXPECTED_SCHEMA_HEAD" \
+      --output /tmp/integrity-evidence.json >/dev/null
+    cat /tmp/integrity-evidence.json
+  ' > "$integrity_evidence_tmp"
+mv "$integrity_evidence_tmp" "$integrity_evidence"
+chmod 600 "$integrity_evidence"
 
 replay_args=(
   --backup-id "$backup_id"
@@ -49,7 +71,7 @@ recovery_id="recovery-$(date -u +%Y%m%dT%H%M%SZ)-$($PYTHON_BIN -c 'import secret
 "$PYTHON_BIN" scripts/db/recovery-deployed-smoke.py \
   --manifest "$RECOVERY_MANIFEST_PATH" \
   --restore-evidence "$RECOVERY_OUTPUT_DIR/restore-evidence.json" \
-  --integrity-evidence "$RECOVERY_OUTPUT_DIR/integrity-evidence.json" \
+  --integrity-evidence "$integrity_evidence" \
   --replay-evidence "$RECOVERY_OUTPUT_DIR/replay-evidence.json" \
   --target-database "$RECOVERY_TARGET_DB" \
   --production-database "$RECOVERY_PRODUCTION_DB" \
