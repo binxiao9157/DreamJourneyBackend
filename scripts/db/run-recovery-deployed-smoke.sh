@@ -41,6 +41,7 @@ RECOVERY_EXPECTED_SCHEMA_HEAD="$schema_head" \
   -e RECOVERY_PRODUCTION_DB \
   -e RECOVERY_EXPECTED_SCHEMA_HEAD \
   api sh -ec '
+    integrity_status=0
     python scripts/db/verify_recovery_integrity.py \
       --dsn "$DATABASE_URL" \
       --backup-id "$RECOVERY_BACKUP_ID" \
@@ -48,8 +49,15 @@ RECOVERY_EXPECTED_SCHEMA_HEAD="$schema_head" \
       --target-database "$RECOVERY_TARGET_DB" \
       --production-database "$RECOVERY_PRODUCTION_DB" \
       --expected-schema-head "$RECOVERY_EXPECTED_SCHEMA_HEAD" \
-      --output /tmp/integrity-evidence.json >/dev/null
+      --output /tmp/integrity-evidence.json >/dev/null || integrity_status=$?
+    if [ ! -s /tmp/integrity-evidence.json ]; then
+      exit "$integrity_status"
+    fi
     cat /tmp/integrity-evidence.json
+    case "$integrity_status" in
+      0|2) exit 0 ;;
+      *) exit "$integrity_status" ;;
+    esac
   ' > "$integrity_evidence_tmp"
 mv "$integrity_evidence_tmp" "$integrity_evidence"
 chmod 600 "$integrity_evidence"

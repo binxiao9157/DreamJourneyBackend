@@ -76,6 +76,8 @@ class RecoveryRecordTests(unittest.TestCase):
         self.assertIn("python scripts/db/verify_recovery_integrity.py", script)
         self.assertIn('--dsn "$DATABASE_URL"', script)
         self.assertIn("cat /tmp/integrity-evidence.json", script)
+        self.assertIn('0|2) exit 0', script)
+        self.assertIn('[ ! -s /tmp/integrity-evidence.json ]', script)
         self.assertNotIn('-e "DATABASE_URL=', script)
         self.assertNotIn(
             '"$PYTHON_BIN" scripts/db/verify_recovery_integrity.py',
