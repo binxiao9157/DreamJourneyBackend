@@ -4,8 +4,44 @@ from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Set
 
 from app.services.route_ownership import RouteOwnershipCategory, RouteOwnershipRegistry
+from app.services.resource_authorization import ResourceAuthorityResolver, ResourceType
 from app.services.time_letters import time_letter_recipient_records
 from app.services.user_identity import stable_user_id
+
+
+OWNER_AUTHORITY_CLAIM_KEYS = frozenset(
+    {
+        "authenticatedUserId",
+        "ownerId",
+        "ownerUserId",
+        "requesterUserId",
+        "uploadedByUserId",
+        "uploaderUserId",
+        "userId",
+        "viewerUserId",
+    }
+)
+
+
+def owner_authority_claims(value: Any) -> Set[str]:
+    """Collect actor/owner claims recursively without treating recipients as owners."""
+    claims: Set[str] = set()
+
+    def visit(candidate: Any) -> None:
+        if isinstance(candidate, Mapping):
+            for key, nested in candidate.items():
+                if str(key) in OWNER_AUTHORITY_CLAIM_KEYS:
+                    normalized = str(nested or "").strip()
+                    if normalized:
+                        claims.add(normalized)
+                if isinstance(nested, (Mapping, list, tuple)):
+                    visit(nested)
+        elif isinstance(candidate, (list, tuple)):
+            for nested in candidate:
+                visit(nested)
+
+    visit(value)
+    return claims
 
 
 @dataclass(frozen=True)
@@ -72,6 +108,7 @@ class CrossAccountAuthorizationPolicy:
                 policy_id="careSnapshotWrite",
                 owner_user_id=str(payload.get("userId") or "").strip(),
                 principal_user_id=principal_user_id,
+                payload=payload,
             )
 
         if rule.policy_id == "timeLetterViewer":
@@ -96,11 +133,23 @@ class CrossAccountAuthorizationPolicy:
             )
 
         if rule.category in {RouteOwnershipCategory.OWNER_BODY, RouteOwnershipCategory.OWNER_PATH}:
-            return self._evaluate_owner_write(
+            owner_decision = self._evaluate_owner_write(
                 policy_id=rule.policy_id,
                 owner_user_id=route_match.owner_user_id(dict(payload)),
                 principal_user_id=principal_user_id,
+                payload=payload,
             )
+            if owner_decision.allowed is not True:
+                return owner_decision
+            if rule.requires_existing_resource:
+                return self._evaluate_resource(
+                    policy_id=rule.policy_id,
+                    resource_type=rule.resource_type,
+                    resource_id=route_match.resource_id(dict(payload)),
+                    principal_user_id=principal_user_id,
+                    expected_version=payload.get("expectedVersion", query.get("expectedVersion")),
+                )
+            return owner_decision
         if rule.category == RouteOwnershipCategory.SYSTEM_ONLY:
             return self._deny(rule.policy_id, "systemPrincipalRequired")
         if rule.category == RouteOwnershipCategory.DELEGATED:
@@ -133,12 +182,53 @@ class CrossAccountAuthorizationPolicy:
         policy_id: str,
         owner_user_id: Optional[str],
         principal_user_id: str,
+        payload: Mapping[str, Any],
     ) -> AuthorizationPolicyDecision:
-        if not owner_user_id:
-            return self._defer(policy_id, "routeValidationPending")
-        if owner_user_id == principal_user_id:
-            return self._allow_owner(policy_id)
-        return self._deny(policy_id, "ownerPrincipalMismatch")
+        if owner_user_id and owner_user_id != principal_user_id:
+            return self._deny(policy_id, "ownerPrincipalMismatch")
+        if owner_authority_claims(payload) - {principal_user_id}:
+            return self._deny(policy_id, "ownerClaimMismatch")
+        return self._allow_owner(
+            policy_id,
+            reason="ownerPrincipal" if owner_user_id else "ownerDerivedFromPrincipal",
+        )
+
+    def _evaluate_resource(
+        self,
+        *,
+        policy_id: str,
+        resource_type: Optional[str],
+        resource_id: Optional[str],
+        principal_user_id: str,
+        expected_version: Any,
+    ) -> AuthorizationPolicyDecision:
+        if not resource_type or not resource_id:
+            return self._deny(policy_id, "resourceIdRequired")
+        try:
+            resolved_type = ResourceType(resource_type)
+            authority = ResourceAuthorityResolver(self.store).resolve(
+                resolved_type,
+                resource_id,
+            )
+        except Exception:
+            return self._deny(policy_id, "resourceResolverFailure")
+        if authority is None:
+            return self._deny(policy_id, "resourceNotFound")
+        if authority.authority_state != "active":
+            return self._deny(policy_id, "resourceQuarantined")
+        if expected_version is not None:
+            try:
+                normalized_expected_version = int(expected_version)
+            except (TypeError, ValueError):
+                return self._deny(policy_id, "resourceVersionInvalid")
+            if normalized_expected_version < 1 or normalized_expected_version != authority.row_version:
+                return self._deny(policy_id, "resourceVersionMismatch")
+        if (
+            authority.vault_id != principal_user_id
+            or authority.owner_subject_id != principal_user_id
+        ):
+            return self._deny(policy_id, "resourceOwnerMismatch")
+        return self._allow_owner(policy_id, reason="resourceOwner")
 
     def _evaluate_care_read(
         self,
@@ -285,11 +375,15 @@ class CrossAccountAuthorizationPolicy:
         return {candidate for candidate in candidates if candidate}
 
     @staticmethod
-    def _allow_owner(policy_id: str) -> AuthorizationPolicyDecision:
+    def _allow_owner(
+        policy_id: str,
+        *,
+        reason: str = "ownerPrincipal",
+    ) -> AuthorizationPolicyDecision:
         return AuthorizationPolicyDecision(
             policy_id=policy_id,
             decision="allowOwner",
-            reason="ownerPrincipal",
+            reason=reason,
             allowed=True,
             principal_bound=True,
         )

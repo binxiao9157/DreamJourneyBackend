@@ -2411,7 +2411,7 @@ class ProfileAPITests(unittest.TestCase):
         )
         missing_profile = client.get("/profile/missing_user")
 
-        self.assertEqual(missing_user.status_code, 400)
+        self.assertEqual(missing_user.status_code, 401)
         self.assertEqual(empty_nickname.status_code, 400)
         self.assertEqual(invalid_gender.status_code, 400)
         self.assertEqual(missing_profile.status_code, 404)
@@ -2474,7 +2474,7 @@ class PasswordAPITests(unittest.TestCase):
             json={"userId": "password_unconfigured_user", "oldPassword": "old-password-1", "newPassword": "new-password-1"},
         )
 
-        self.assertEqual(missing_user.status_code, 400)
+        self.assertEqual(missing_user.status_code, 401)
         self.assertEqual(short_password.status_code, 400)
         self.assertEqual(unconfigured.status_code, 409)
 
@@ -2866,7 +2866,13 @@ class CareSnapshotAPITests(HiddenStageContractTestCase):
 class BackendAuthTests(unittest.TestCase):
     def test_backend_api_token_required_when_configured(self):
         previous_settings = main_module.settings
+        previous_store = main_module.store
+        previous_backend_token = main_module.BACKEND_API_TOKEN
+        previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
         main_module.settings = Settings(store_backend="memory", backend_api_token="server-secret")
+        main_module.BACKEND_API_TOKEN = "server-secret"
+        main_module.store = InMemoryStore()
+        main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         client = TestClient(app)
         try:
             health = client.get("/health")
@@ -2876,17 +2882,32 @@ class BackendAuthTests(unittest.TestCase):
                 headers={"Authorization": "Bearer wrong-secret"},
                 json={"userId": "u1", "graph": {}},
             )
-            valid = client.post(
+            machine_only = client.post(
                 "/kb/sync",
                 headers={"Authorization": "Bearer server-secret"},
                 json={"userId": "u1", "graph": {}},
             )
+            login = client.post(
+                "/auth/login",
+                json={"phone": "13800138001", "nickname": "授权测试", "password": "password123"},
+            )
+            login_body = login.json()
+            valid = client.post(
+                "/kb/sync",
+                headers={"Authorization": f"Bearer {login_body['auth']['accessToken']}"},
+                json={"userId": login_body["user"]["id"], "graph": {}},
+            )
         finally:
             main_module.settings = previous_settings
+            main_module.store = previous_store
+            main_module.BACKEND_API_TOKEN = previous_backend_token
+            main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = previous_legacy_phone_login
 
         self.assertEqual(health.status_code, 200)
         self.assertEqual(missing.status_code, 401)
         self.assertEqual(invalid.status_code, 401)
+        self.assertEqual(machine_only.status_code, 401)
+        self.assertEqual(login.status_code, 200)
         self.assertEqual(valid.status_code, 200)
 
 
@@ -2972,8 +2993,13 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
     def test_push_device_token_api_rejects_invalid_payloads(self):
         client = TestClient(app)
 
+        missing_owner = client.post(
+            "/devices/push-token",
+            json={"deviceToken": "0123456789abcdef", "platform": "ios", "environment": "sandbox"},
+        )
+        self.assertEqual(missing_owner.status_code, 401)
+
         for payload in [
-            {"deviceToken": "0123456789abcdef", "platform": "ios", "environment": "sandbox"},
             {"userId": "echo_user_1", "platform": "ios", "environment": "sandbox"},
             {"userId": "echo_user_1", "deviceToken": "not hex", "platform": "ios", "environment": "sandbox"},
             {"userId": "echo_user_1", "deviceToken": "0123456789abcdef", "platform": "android", "environment": "sandbox"},
@@ -3077,8 +3103,13 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
     def test_echo_delayed_reply_api_rejects_missing_required_fields(self):
         client = TestClient(app)
 
+        missing_owner = client.post(
+            "/echo/delayed-replies",
+            json={"delayedReplyId": "reply_missing_user", "deliverAt": "2026-06-18T12:05:00Z", "minutes": 7, "trigger": "tenRoundBaseline"},
+        )
+        self.assertEqual(missing_owner.status_code, 401)
+
         for payload in [
-            {"delayedReplyId": "reply_missing_user", "deliverAt": "2026-06-18T12:05:00Z", "minutes": 7, "trigger": "tenRoundBaseline"},
             {"userId": "echo_user_2", "deliverAt": "2026-06-18T12:05:00Z", "minutes": 7, "trigger": "tenRoundBaseline"},
             {"userId": "echo_user_2", "delayedReplyId": "reply_missing_deliver", "minutes": 7, "trigger": "tenRoundBaseline"},
             {"userId": "echo_user_2", "delayedReplyId": "reply_missing_minutes", "deliverAt": "2026-06-18T12:05:00Z", "trigger": "tenRoundBaseline"},
@@ -4829,9 +4860,9 @@ class ArchiveAPITests(unittest.TestCase):
         self.assertEqual(created.status_code, 200)
         item = created.json()["item"]
         self.assertEqual(item["kind"], "audio")
-        self.assertEqual(item["ownerUserId"], "viewer_audio_1")
-        self.assertEqual(item["uploadedByUserId"], "viewer_audio_1")
-        self.assertEqual(item["uploaderUserId"], "viewer_audio_1")
+        self.assertEqual(item["ownerUserId"], "archive_audio_user")
+        self.assertEqual(item["uploadedByUserId"], "archive_audio_user")
+        self.assertEqual(item["uploaderUserId"], "archive_audio_user")
         self.assertEqual(item["personaScope"], "family")
         self.assertEqual(item["digitalHumanId"], "family_default")
         self.assertEqual(item["analysisStatus"], "pending")
@@ -5642,7 +5673,10 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
     def test_archive_image_analysis_requires_image_base64(self):
         client = TestClient(app)
 
-        response = client.post("/archive/image-analysis", json={})
+        response = client.post(
+            "/archive/image-analysis",
+            json={"userId": "archive_image_user"},
+        )
 
         self.assertEqual(response.status_code, 400)
 
@@ -5662,7 +5696,7 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
             json={**base_payload, "userId": "archive_image_user"},
         )
 
-        self.assertEqual(missing_user.status_code, 400)
+        self.assertEqual(missing_user.status_code, 401)
         self.assertEqual(missing_item.status_code, 400)
 
     def test_archive_image_analysis_rejects_non_generation_allowed_privacy(self):

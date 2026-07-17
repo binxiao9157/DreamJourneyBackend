@@ -1,6 +1,9 @@
 import unittest
 
-from app.services.authorization_policy import CrossAccountAuthorizationPolicy
+from app.services.authorization_policy import (
+    CrossAccountAuthorizationPolicy,
+    owner_authority_claims,
+)
 from app.services.in_memory_store import InMemoryStore
 from app.services.user_identity import stable_user_id
 
@@ -175,6 +178,150 @@ class CrossAccountAuthorizationPolicyTests(unittest.TestCase):
         self.assertEqual(denied.decision, "deny")
         self.assertEqual(denied.reason, "ownerPrincipalMismatch")
         self.assertTrue(denied.principal_bound)
+
+    def test_owner_route_derives_authority_from_principal_when_body_omits_user_id(self):
+        decision = self.evaluate(
+            method="POST",
+            path="/profile",
+            principal=self.owner_user_id,
+            payload={"nickname": "本人资料"},
+        )
+
+        self.assertEqual(decision.decision, "allowOwner")
+        self.assertEqual(decision.reason, "ownerDerivedFromPrincipal")
+        self.assertTrue(decision.allowed)
+        self.assertTrue(decision.principal_bound)
+
+    def test_nested_owner_and_uploader_claims_cannot_override_principal(self):
+        decision = self.evaluate(
+            method="POST",
+            path="/archive/items",
+            principal=self.owner_user_id,
+            payload={
+                "userId": self.owner_user_id,
+                "metadata": {
+                    "ownerUserId": "user_other",
+                    "uploaderUserId": self.owner_user_id,
+                },
+            },
+        )
+
+        self.assertEqual(decision.decision, "deny")
+        self.assertEqual(decision.reason, "ownerClaimMismatch")
+        self.assertFalse(decision.allowed)
+
+    def test_recipient_identity_is_not_misclassified_as_resource_owner(self):
+        claims = owner_authority_claims(
+            {
+                "userId": self.owner_user_id,
+                "recipients": [
+                    {"recipientUserId": "user_recipient"},
+                    {"ownerUserId": self.owner_user_id},
+                ],
+            }
+        )
+
+        self.assertEqual(claims, {self.owner_user_id})
+
+    def test_child_resource_is_resolved_from_store_owner_not_request_path(self):
+        self.store.add_archive_item(
+            self.owner_user_id,
+            {"id": "archive-owned", "kind": "photo"},
+        )
+
+        allowed = self.evaluate(
+            method="DELETE",
+            path=f"/archive/items/{self.owner_user_id}/archive-owned",
+            principal=self.owner_user_id,
+        )
+        forged_vault = self.evaluate(
+            method="DELETE",
+            path="/archive/items/user_other/archive-owned",
+            principal="user_other",
+        )
+        missing = self.evaluate(
+            method="DELETE",
+            path=f"/archive/items/{self.owner_user_id}/archive-missing",
+            principal=self.owner_user_id,
+        )
+
+        self.assertEqual(allowed.reason, "resourceOwner")
+        self.assertTrue(allowed.allowed)
+        self.assertEqual(forged_vault.reason, "resourceOwnerMismatch")
+        self.assertFalse(forged_vault.allowed)
+        self.assertEqual(missing.reason, "resourceNotFound")
+        self.assertFalse(missing.allowed)
+
+    def test_archive_side_effect_requires_an_existing_owned_item(self):
+        self.store.add_archive_item(
+            self.owner_user_id,
+            {"id": "archive-analysis", "kind": "photo"},
+        )
+
+        allowed = self.evaluate(
+            method="POST",
+            path="/archive/image-analysis",
+            principal=self.owner_user_id,
+            payload={"archiveItemId": "archive-analysis"},
+        )
+        denied = self.evaluate(
+            method="POST",
+            path="/archive/image-analysis",
+            principal=self.owner_user_id,
+            payload={"archiveItemId": "missing"},
+        )
+
+        self.assertEqual(allowed.reason, "resourceOwner")
+        self.assertTrue(allowed.allowed)
+        self.assertEqual(denied.reason, "resourceNotFound")
+        self.assertFalse(denied.allowed)
+
+    def test_quarantined_resource_fails_closed(self):
+        self.store.add_archive_item(
+            self.owner_user_id,
+            {
+                "id": "archive-quarantined",
+                "kind": "photo",
+                "authorityState": "quarantined",
+            },
+        )
+
+        decision = self.evaluate(
+            method="POST",
+            path="/archive/image-analysis",
+            principal=self.owner_user_id,
+            payload={"archiveItemId": "archive-quarantined"},
+        )
+
+        self.assertEqual(decision.reason, "resourceQuarantined")
+        self.assertFalse(decision.allowed)
+
+    def test_stale_expected_version_is_denied_before_resource_side_effect(self):
+        self.store.add_archive_item(
+            self.owner_user_id,
+            {
+                "id": "archive-versioned",
+                "kind": "photo",
+                "resourceVersion": 3,
+            },
+        )
+
+        current = self.evaluate(
+            method="POST",
+            path="/archive/image-analysis",
+            principal=self.owner_user_id,
+            payload={"archiveItemId": "archive-versioned", "expectedVersion": 3},
+        )
+        stale = self.evaluate(
+            method="POST",
+            path="/archive/image-analysis",
+            principal=self.owner_user_id,
+            payload={"archiveItemId": "archive-versioned", "expectedVersion": 2},
+        )
+
+        self.assertTrue(current.allowed)
+        self.assertEqual(stale.reason, "resourceVersionMismatch")
+        self.assertFalse(stale.allowed)
 
     def test_unknown_route_defers_to_ownership_fallback(self):
         decision = self.evaluate(

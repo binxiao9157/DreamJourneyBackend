@@ -1,0 +1,8 @@
+{
+  "version": "0004",
+  "name": "resource_owner_authority",
+  "phase": "expand",
+  "compatibility": "backwardCompatible",
+  "runtimeCompatibility": "dualReadCanonicalOwner",
+  "requiresOldWorkerDrain": false
+}

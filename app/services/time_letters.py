@@ -119,7 +119,7 @@ def time_letter_in_app_reminder_payloads(
     item: Dict[str, Any],
     delivered_at_iso: str,
 ) -> list[tuple[str, Dict[str, Any]]]:
-    owner_user_id = str(item.get("ownerUserId") or item.get("userId") or "").strip()
+    owner_user_id = str(item.get("userId") or "").strip()
     item_id = str(item.get("id") or "").strip()
     title = str(item.get("title") or "时间信件").strip() or "时间信件"
     open_at = str(item.get("openAt") or (item.get("metadata") or {}).get("openAt") or "").strip()

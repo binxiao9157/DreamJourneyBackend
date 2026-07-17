@@ -527,6 +527,43 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertEqual(fetched.json()["profile"]["nickname"], "本人资料")
         self.assertEqual(saved.headers["x-dreamjourney-authorization-decision"], "allowOwner")
 
+    def test_owner_body_route_derives_user_id_from_authenticated_principal(self):
+        owner = self.login("13800138113")
+        user_id = owner["user"]["id"]
+
+        saved = client.post(
+            "/profile",
+            headers=self.access_headers(owner),
+            json={"nickname": "服务端派生本人"},
+        )
+        fetched = client.get(f"/profile/{user_id}", headers=self.access_headers(owner))
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.json()["profile"]["userId"], user_id)
+        self.assertEqual(saved.headers["x-dreamjourney-authorization-reason"], "ownerDerivedFromPrincipal")
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.json()["profile"]["nickname"], "服务端派生本人")
+
+    def test_nested_owner_claim_cannot_transfer_archive_authority(self):
+        owner = self.login("13800138114")
+        user_id = owner["user"]["id"]
+        response = client.post(
+            "/archive/items",
+            headers=self.access_headers(owner),
+            json={
+                "id": "nested_owner_conflict",
+                "userId": user_id,
+                "kind": "photo",
+                "privacyMetadata": {"scope": "generationAllowed"},
+                "metadata": {"ownerUserId": "user_other"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.headers["x-dreamjourney-authorization-decision"], "deny")
+        self.assertEqual(response.headers["x-dreamjourney-authorization-reason"], "ownerClaimMismatch")
+        self.assertEqual(main_module.store.list_archive_items(user_id), [])
+
     def test_family_care_read_is_classified_as_delegated_and_enforce_safe(self):
         owner, family, member = self.accepted_family_fixture(
             "13800138101",

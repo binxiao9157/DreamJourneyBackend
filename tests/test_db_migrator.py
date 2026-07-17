@@ -367,6 +367,35 @@ class PostgresMigratorTests(unittest.TestCase):
         for destructive in ("DROP TABLE", "TRUNCATE ", "ALTER TABLE", "DELETE FROM"):
             self.assertNotIn(destructive, sql_upper)
 
+    def test_resource_authority_migration_adds_immutable_owner_guards(self):
+        migration = load_migrations(default_migrations_dir())[-1]
+
+        self.assertEqual(migration.version, "0004")
+        self.assertEqual(migration.name, "resource_owner_authority")
+        self.assertEqual(migration.phase, "expand")
+        self.assertIn("NEW.user_id IS DISTINCT FROM OLD.user_id", migration.sql)
+        self.assertIn("NEW.vault_id := NEW.user_id", migration.sql)
+        self.assertIn("NEW.owner_subject_id := NEW.user_id", migration.sql)
+        self.assertIn("NEW.row_version := OLD.row_version + 1", migration.sql)
+        self.assertIn("resource_owner_claims", migration.sql)
+        self.assertIn("resource_authority_incidents", migration.sql)
+        self.assertIn("SET authority_state = ''quarantined''", migration.sql)
+        self.assertIn("resource payload owner claim conflicts with canonical owner", migration.sql)
+        for table in (
+            "memories",
+            "archive_items",
+            "mailbox_letters",
+            "echo_delayed_replies",
+            "push_device_tokens",
+            "voice_profiles",
+            "family_members",
+            "care_snapshots",
+            "digital_human_sessions",
+        ):
+            with self.subTest(table=table):
+                self.assertIn(f"CREATE TRIGGER {table}_owner_authority", migration.sql)
+                self.assertIn(f"ON {table}(vault_id, id)", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
     ArchiveItemOwnershipConflict,
+    ResourceOwnershipConflict,
 )
 from app.services.in_memory_store import InMemoryStore
 from app.services.knowledge_store import (
@@ -158,6 +159,13 @@ class FakeCursor:
                     > now
                 )
             ]
+
+        def has_resource_conflict(collections, user_id, item_id):
+            return any(
+                existing_user_id != user_id
+                and any(str(item.get("id") or "") == item_id for item in items)
+                for existing_user_id, items in collections.items()
+            )
 
         if normalized.startswith("INSERT INTO evidence_events"):
             (
@@ -372,6 +380,22 @@ class FakeCursor:
                 for user_id, item in matches
             ]
         elif normalized.startswith(
+            "SELECT payload, row_version FROM archive_items WHERE user_id = %s AND id = %s"
+        ):
+            user_id, item_id = params
+            item = next(
+                (
+                    item
+                    for item in self.connection.archive_items.get(user_id, [])
+                    if item.get("id") == item_id
+                ),
+                None,
+            )
+            self.result = None if item is None else {
+                "payload": item,
+                "row_version": int(item.get("resourceVersion") or 1),
+            }
+        elif normalized.startswith(
             "SELECT payload FROM archive_items WHERE user_id = %s AND id = %s"
         ):
             user_id, item_id = params
@@ -387,6 +411,40 @@ class FakeCursor:
         elif normalized.startswith("SELECT payload FROM archive_items"):
             user_id = params[0]
             self.result = [{"payload": item} for item in self.connection.archive_items.get(user_id, [])]
+        elif normalized.startswith("SELECT id, vault_id, owner_subject_id, row_version, authority_state FROM"):
+            item_id = params[0]
+            table_collections = {
+                "archive_items": self.connection.archive_items,
+                "digital_human_sessions": {
+                    str(item.get("userId") or ""): [item]
+                    for item in self.connection.digital_human_sessions.values()
+                },
+                "family_members": self.connection.family_members,
+                "mailbox_letters": self.connection.mailbox_letters,
+                "voice_profiles": self.connection.voice_profiles,
+            }
+            table = next((name for name in table_collections if f"FROM {name}" in normalized), None)
+            self.result = None
+            if table is not None:
+                for user_id, items in table_collections[table].items():
+                    for item in items:
+                        candidate_id = str(
+                            item.get("id")
+                            or item.get("sessionId")
+                            or item.get("voiceProfileId")
+                            or ""
+                        )
+                        if candidate_id == item_id:
+                            self.result = {
+                                "id": item_id,
+                                "vault_id": user_id,
+                                "owner_subject_id": user_id,
+                                "row_version": int(item.get("resourceVersion") or 1),
+                                "authority_state": str(item.get("authorityState") or "active"),
+                            }
+                            break
+                    if self.result is not None:
+                        break
         elif normalized.startswith("SELECT payload FROM mailbox_letters"):
             user_id = params[0]
             if len(params) > 1:
@@ -858,6 +916,9 @@ class FakeCursor:
         elif normalized.startswith("INSERT INTO memories"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
+            if has_resource_conflict(self.connection.memories, user_id, item_id):
+                self.result = None
+                return
             self.connection.memories.setdefault(user_id, []).insert(0, dict(payload))
             self.result = {"payload": payload}
         elif normalized.startswith("INSERT INTO archive_items"):
@@ -955,6 +1016,9 @@ class FakeCursor:
         elif normalized.startswith("INSERT INTO mailbox_letters"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
+            if has_resource_conflict(self.connection.mailbox_letters, user_id, item_id):
+                self.result = None
+                return
             letters = self.connection.mailbox_letters.setdefault(user_id, [])
             letters[:] = [item for item in letters if item.get("id") != item_id]
             letters.insert(0, dict(payload))
@@ -962,6 +1026,9 @@ class FakeCursor:
         elif normalized.startswith("INSERT INTO echo_delayed_replies"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
+            if has_resource_conflict(self.connection.echo_delayed_replies, user_id, item_id):
+                self.result = None
+                return
             replies = self.connection.echo_delayed_replies.setdefault(user_id, [])
             replies[:] = [item for item in replies if item.get("id") != item_id]
             replies.insert(0, dict(payload))
@@ -991,6 +1058,9 @@ class FakeCursor:
         elif normalized.startswith("INSERT INTO push_device_tokens"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
+            if has_resource_conflict(self.connection.push_device_tokens, user_id, item_id):
+                self.result = None
+                return
             tokens = self.connection.push_device_tokens.setdefault(user_id, [])
             tokens[:] = [item for item in tokens if item.get("id") != item_id]
             tokens.insert(0, dict(payload))
@@ -1112,6 +1182,9 @@ class FakeCursor:
         elif normalized.startswith("INSERT INTO family_members"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
+            if has_resource_conflict(self.connection.family_members, user_id, item_id):
+                self.result = None
+                return
             self.connection.family_members.setdefault(user_id, []).append(dict(payload))
             self.result = {"payload": payload}
         elif normalized.startswith("UPDATE family_members"):
@@ -2341,6 +2414,51 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(store.list_archive_items("u1")[0]["digitalHumanId"], "family_default")
         self.assertEqual(store.list_mailbox_letters("u1")[0]["title"], "想说的话")
         self.assertEqual(store.list_family_members("u1")[0]["name"], "林桂芳")
+
+    def test_generic_resource_upserts_never_transfer_owner_on_id_collision(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        writers = (
+            (store.add_memory, {"id": "shared-memory", "title": "owner memory"}),
+            (store.add_family_member, {"id": "shared-family", "name": "owner family"}),
+            (store.add_mailbox_letter, {"id": "shared-mailbox", "title": "owner mailbox"}),
+            (
+                store.add_echo_delayed_reply,
+                {"id": "shared-echo", "delayedReplyId": "shared-echo", "deliveryState": "scheduled"},
+            ),
+            (
+                store.save_push_device_token,
+                {"id": "shared-push", "deviceTokenId": "shared-push"},
+            ),
+        )
+
+        for writer, payload in writers:
+            with self.subTest(resource_id=payload["id"]):
+                owner_item = writer("u1", payload)
+                with self.assertRaisesRegex(ResourceOwnershipConflict, "another owner"):
+                    writer("u2", {**payload, "title": "takeover"})
+                self.assertEqual(owner_item["userId"], "u1")
+
+    def test_resource_authority_resolver_returns_canonical_database_owner(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        store.add_archive_item("u1", {"id": "archive-authority", "kind": "photo"})
+
+        authority = store.resolve_resource_authority("archiveItem", "archive-authority")
+        missing = store.resolve_resource_authority("archiveItem", "missing")
+
+        self.assertEqual(
+            authority,
+            {
+                "resourceType": "archiveItem",
+                "resourceId": "archive-authority",
+                "vaultId": "u1",
+                "ownerSubjectId": "u1",
+                "rowVersion": 1,
+                "authorityState": "active",
+            },
+        )
+        self.assertIsNone(missing)
 
     def test_store_marks_mailbox_letters_read_and_archived(self):
         connection = FakeConnection()

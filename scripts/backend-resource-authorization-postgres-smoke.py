@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+import base64
+import json
+import os
+import secrets
+import urllib.error
+import urllib.request
+
+from app.core.config import settings
+from app.services.auth_sessions import AuthSessionService
+from app.services.postgres_store import PostgresStore
+
+
+BASE_URL = os.environ.get("BACKEND_BASE_URL", "").strip().rstrip("/")
+MACHINE_TOKEN = os.environ.get(
+    "BACKEND_API_TOKEN",
+    os.environ.get("DREAMJOURNEY_BACKEND_API_TOKEN", ""),
+).strip()
+
+
+def require(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
+def request_json(method, path, *, token=None, payload=None, expected_status=200):
+    headers = {"Accept": "application/json"}
+    body = None
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        f"{BASE_URL}{path}",
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            status = response.status
+            response_headers = {key.lower(): value for key, value in response.headers.items()}
+            raw_body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        status = error.code
+        response_headers = {key.lower(): value for key, value in error.headers.items()}
+        raw_body = error.read().decode("utf-8")
+    response_body = json.loads(raw_body) if raw_body else {}
+    require(status == expected_status, f"{method} {path} expected {expected_status}, got {status}")
+    return response_body, response_headers
+
+
+def cleanup(store, user_ids):
+    with store.request_unit_of_work(
+        correlation_id="resource-auth-smoke-cleanup",
+        command_id="cleanupResourceAuthorizationSmoke",
+    ) as unit_of_work:
+        with unit_of_work.connection.cursor() as cursor:
+            for table in (
+                "care_snapshots",
+                "family_members",
+                "voice_profiles",
+                "push_device_tokens",
+                "echo_delayed_replies",
+                "mailbox_letters",
+                "archive_items",
+                "memories",
+                "session_events",
+                "auth_sessions",
+                "token_families",
+            ):
+                cursor.execute(f"DELETE FROM {table} WHERE user_id = ANY(%s)", (list(user_ids),))
+            cursor.execute("DELETE FROM users WHERE id = ANY(%s)", (list(user_ids),))
+
+
+def main():
+    require(BASE_URL, "BACKEND_BASE_URL is required")
+    require(MACHINE_TOKEN, "BACKEND_API_TOKEN is required")
+    dsn = os.environ.get("DATABASE_URL", settings.database_url).strip()
+    require(dsn, "DATABASE_URL is required")
+
+    suffix = secrets.token_hex(8)
+    store = PostgresStore(
+        dsn=dsn,
+        pool_min_size=1,
+        pool_max_size=3,
+        pool_timeout_seconds=2.0,
+    )
+    store.open_pool(wait=True)
+    user_ids = set()
+    try:
+        owner = store.upsert_user(phone=f"196{suffix[:8]}", nickname="resource owner smoke")
+        attacker = store.upsert_user(phone=f"195{suffix[:8]}", nickname="resource attacker smoke")
+        owner_id = str(owner["id"])
+        attacker_id = str(attacker["id"])
+        user_ids.update({owner_id, attacker_id})
+        auth_service = AuthSessionService(
+            store,
+            access_ttl_seconds=300,
+            refresh_ttl_seconds=900,
+        )
+        owner_token = auth_service.issue(owner_id)["accessToken"]
+        attacker_token = auth_service.issue(attacker_id)["accessToken"]
+
+        memory_id = f"resource-memory-{suffix}"
+        memory, _ = request_json(
+            "POST",
+            "/memories",
+            token=owner_token,
+            payload={"id": memory_id, "title": "owner memory"},
+        )
+        require(memory["memory"]["userId"] == owner_id, "omitted owner must derive from principal")
+
+        _, nested_headers = request_json(
+            "POST",
+            "/memories",
+            token=owner_token,
+            payload={
+                "title": "forged nested owner",
+                "metadata": {"ownerUserId": attacker_id},
+            },
+            expected_status=403,
+        )
+        require(
+            nested_headers.get("x-dreamjourney-authorization-reason") == "ownerClaimMismatch",
+            "nested owner mismatch must be denied by the typed policy",
+        )
+
+        collision, _ = request_json(
+            "POST",
+            "/memories",
+            token=attacker_token,
+            payload={"id": memory_id, "title": "takeover attempt"},
+            expected_status=409,
+        )
+        require(
+            (collision.get("detail") or {}).get("code") == "resourceOwnershipConflict",
+            "same resource id must return a neutral ownership conflict",
+        )
+
+        archive_id = f"resource-archive-{suffix}"
+        archive_payload = {
+            "id": archive_id,
+            "kind": "photo",
+            "title": "owner archive",
+            "privacyMetadata": {"scope": "generationAllowed"},
+        }
+        archive, _ = request_json(
+            "POST",
+            "/archive/items",
+            token=owner_token,
+            payload=archive_payload,
+        )
+        require(archive["item"]["userId"] == owner_id, "archive owner must be canonical")
+        require(archive["item"]["ownerUserId"] == owner_id, "archive owner alias must be canonical")
+
+        archive_collision, _ = request_json(
+            "POST",
+            "/archive/items",
+            token=attacker_token,
+            payload=archive_payload,
+            expected_status=409,
+        )
+        require(
+            (archive_collision.get("detail") or {}).get("code") == "archiveItemOwnershipConflict",
+            "archive id collision must not transfer owner",
+        )
+
+        _, delete_headers = request_json(
+            "DELETE",
+            f"/archive/items/{attacker_id}/{archive_id}",
+            token=attacker_token,
+            expected_status=403,
+        )
+        require(
+            delete_headers.get("x-dreamjourney-authorization-reason") == "resourceOwnerMismatch",
+            "child resource delete must resolve the database owner",
+        )
+        _, analysis_headers = request_json(
+            "POST",
+            "/archive/image-analysis?dryRun=true",
+            token=attacker_token,
+            payload={
+                "archiveItemId": archive_id,
+                "imageBase64": base64.b64encode(b"not-an-image").decode("ascii"),
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+            expected_status=403,
+        )
+        require(
+            analysis_headers.get("x-dreamjourney-authorization-reason") == "resourceOwnerMismatch",
+            "archive analysis must resolve the database owner before provider work",
+        )
+        _, stale_headers = request_json(
+            "POST",
+            "/archive/image-analysis?dryRun=true",
+            token=owner_token,
+            payload={
+                "archiveItemId": archive_id,
+                "expectedVersion": 999,
+                "imageBase64": base64.b64encode(b"not-an-image").decode("ascii"),
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+            expected_status=403,
+        )
+        require(
+            stale_headers.get("x-dreamjourney-authorization-reason") == "resourceVersionMismatch",
+            "stale resource command must be rejected before provider work",
+        )
+
+        letter_id = f"resource-letter-{suffix}"
+        request_json(
+            "POST",
+            "/mailbox/letters",
+            token=MACHINE_TOKEN,
+            payload={
+                "id": letter_id,
+                "userId": owner_id,
+                "title": "owner letter",
+                "body": "value-free smoke fixture",
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        mailbox_collision, _ = request_json(
+            "POST",
+            "/mailbox/letters",
+            token=MACHINE_TOKEN,
+            payload={
+                "id": letter_id,
+                "userId": attacker_id,
+                "title": "mailbox takeover",
+                "body": "value-free smoke fixture",
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+            expected_status=409,
+        )
+        require(
+            (mailbox_collision.get("detail") or {}).get("code") == "resourceOwnershipConflict",
+            "machine mailbox write must not move an existing resource",
+        )
+
+        owner_mutation_rejected = False
+        try:
+            with store.request_unit_of_work(
+                correlation_id=f"resource-owner-trigger-{suffix}",
+                command_id="verifyImmutableResourceOwner",
+            ) as unit_of_work:
+                with unit_of_work.connection.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE archive_items SET user_id = %s WHERE id = %s",
+                        (attacker_id, archive_id),
+                    )
+        except Exception:
+            owner_mutation_rejected = True
+        require(owner_mutation_rejected, "database trigger must reject direct owner mutation")
+
+        with store.request_unit_of_work(
+            correlation_id=f"resource-authority-inspect-{suffix}",
+            command_id="inspectResourceAuthority",
+        ):
+            authority = store._fetchone(
+                """
+                SELECT user_id, vault_id, owner_subject_id, row_version, authority_state
+                FROM archive_items WHERE id = %s
+                """,
+                (archive_id,),
+            )
+        require(authority["user_id"] == owner_id, "database owner must remain unchanged")
+        require(authority["vault_id"] == owner_id, "canonical vault must match database owner")
+        require(authority["owner_subject_id"] == owner_id, "canonical subject must match database owner")
+        require(int(authority["row_version"]) >= 1, "resource version must be initialized")
+        require(authority["authority_state"] == "active", "new resource authority must be active")
+
+        owner_memories, _ = request_json(
+            "GET",
+            f"/memories/{owner_id}",
+            token=owner_token,
+        )
+        attacker_memories, _ = request_json(
+            "GET",
+            f"/memories/{attacker_id}",
+            token=attacker_token,
+        )
+        require(
+            any(item.get("id") == memory_id and item.get("title") == "owner memory" for item in owner_memories["memories"]),
+            "owner resource must survive collision attempt",
+        )
+        require(
+            all(item.get("id") != memory_id for item in attacker_memories["memories"]),
+            "attacker vault must not receive the collided resource",
+        )
+
+        print(
+            json.dumps(
+                {
+                    "archiveAnalysisCrossVaultDenied": True,
+                    "archiveDeleteCrossVaultDenied": True,
+                    "canonicalOwnerPersisted": True,
+                    "databaseOwnerImmutable": True,
+                    "mailboxOwnershipTransferDenied": True,
+                    "nestedOwnerClaimDenied": True,
+                    "ownerDerivedFromPrincipal": True,
+                    "resourceCollisionDenied": True,
+                    "staleResourceVersionDenied": True,
+                    "status": "passed",
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        if user_ids:
+            cleanup(store, user_ids)
+        store.close_pool()
+
+
+if __name__ == "__main__":
+    main()

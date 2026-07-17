@@ -1,3 +1,5 @@
+import ast
+import inspect
 import unittest
 
 from app.main import app
@@ -70,6 +72,70 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)
+
+    def test_child_resource_routes_declare_typed_resolvers(self):
+        expected = {
+            ("POST", "/digital-human/sessions/{session_id}/heartbeat"): "digitalHumanSession",
+            ("POST", "/voice/synthesis"): "voiceProfile",
+            ("POST", "/archive/media/upload-intent"): "archiveItem",
+            ("POST", "/archive/image-analysis"): "archiveItem",
+            ("DELETE", "/archive/items/{user_id}/{item_id}"): "archiveItem",
+            ("POST", "/mailbox/letters/{user_id}/{letter_id}/read"): "mailboxLetter",
+            ("POST", "/family/members/{user_id}/{member_id}/revoke"): "familyMember",
+        }
+
+        for key, resource_type in expected.items():
+            with self.subTest(route=key):
+                rule = self.registry.rule_for_template(*key)
+                self.assertEqual(rule.resource_type, resource_type)
+                self.assertTrue(rule.requires_existing_resource)
+                self.assertIsNotNone(rule.resource_operation)
+
+    def test_every_owner_body_endpoint_canonicalizes_payload_from_principal(self):
+        endpoints = {}
+        for route in app.routes:
+            path = str(getattr(route, "path", ""))
+            endpoint = getattr(route, "endpoint", None)
+            for method in getattr(route, "methods", set()) or set():
+                endpoints[(str(method).upper(), path)] = endpoint
+
+        for rule in self.registry.rules:
+            if rule.category != RouteOwnershipCategory.OWNER_BODY:
+                continue
+            endpoint = endpoints[(rule.method, rule.path_template)]
+            function = ast.parse(inspect.getsource(endpoint)).body[0]
+            helper_calls = [
+                node
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_principal_owned_payload"
+            ]
+            with self.subTest(route=(rule.method, rule.path_template)):
+                self.assertTrue(helper_calls)
+
+    def test_every_owner_path_endpoint_treats_path_owner_as_an_assertion(self):
+        endpoints = {}
+        for route in app.routes:
+            path = str(getattr(route, "path", ""))
+            endpoint = getattr(route, "endpoint", None)
+            for method in getattr(route, "methods", set()) or set():
+                endpoints[(str(method).upper(), path)] = endpoint
+
+        for rule in self.registry.rules:
+            if rule.category != RouteOwnershipCategory.OWNER_PATH:
+                continue
+            endpoint = endpoints[(rule.method, rule.path_template)]
+            function = ast.parse(inspect.getsource(endpoint)).body[0]
+            helper_calls = [
+                node
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_principal_path_owner"
+            ]
+            with self.subTest(route=(rule.method, rule.path_template)):
+                self.assertTrue(helper_calls)
 
 
 if __name__ == "__main__":

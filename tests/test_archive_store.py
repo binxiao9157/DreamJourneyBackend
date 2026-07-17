@@ -3,6 +3,8 @@ import unittest
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
+    ResourceOwnershipConflict,
+    ResourceVersionConflict,
 )
 from app.services.in_memory_store import InMemoryStore
 from app.services.knowledge_store import (
@@ -73,6 +75,24 @@ class InMemoryArchiveDeletionTests(unittest.TestCase):
         self.assertEqual(result["mutationSchemaVersion"], 2)
         self.assertEqual(self.store.list_archive_items("u1"), [])
         self.assertEqual(len(self.store.list_kb_changes("u1", 0)), 2)
+
+    def test_stale_resource_version_keeps_archive_and_knowledge_unchanged(self):
+        item = self.add_archive(resourceVersion=2)
+
+        with self.assertRaises(ResourceVersionConflict) as context:
+            self.store.delete_archive_item_with_kb_mutation(
+                "u1",
+                "archive-1",
+                operation_id="stale-resource-delete",
+                base_revision=1,
+                expected_version=1,
+                mutation=delete_fact_mutation(),
+            )
+
+        self.assertEqual(context.exception.expected_version, 1)
+        self.assertEqual(context.exception.current_version, 2)
+        self.assertEqual(self.store.list_archive_items("u1"), [item])
+        self.assertEqual(self.store.get_kb_snapshot_record("u1")["revision"], 1)
 
     def test_delete_without_mutation_keeps_current_revision_and_change_feed(self):
         item = self.add_archive()
@@ -178,6 +198,27 @@ class InMemoryArchiveDeletionTests(unittest.TestCase):
                 operation_id="shared-delete",
                 base_revision=1,
             )
+
+    def test_resource_ids_cannot_be_reused_to_transfer_owner(self):
+        writers = (
+            (self.store.add_memory, {"id": "shared-memory"}),
+            (self.store.add_family_member, {"id": "shared-family", "name": "家人"}),
+            (self.store.add_mailbox_letter, {"id": "shared-mailbox"}),
+            (
+                self.store.add_echo_delayed_reply,
+                {"id": "shared-echo", "delayedReplyId": "shared-echo"},
+            ),
+            (
+                self.store.save_push_device_token,
+                {"id": "shared-push", "deviceTokenId": "shared-push"},
+            ),
+        )
+
+        for writer, payload in writers:
+            with self.subTest(resource_id=payload["id"]):
+                writer("u1", payload)
+                with self.assertRaisesRegex(ResourceOwnershipConflict, "another owner"):
+                    writer("u2", payload)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,11 @@ class RouteOwnershipRule:
     policy_id: str
     owner_body_field: Optional[str] = None
     owner_path_parameter: Optional[str] = None
+    resource_type: Optional[str] = None
+    resource_id_body_field: Optional[str] = None
+    resource_id_path_parameter: Optional[str] = None
+    resource_operation: Optional[str] = None
+    requires_existing_resource: bool = False
     auth_mode: RouteAuthenticationMode = RouteAuthenticationMode.USER
     required_audience: Optional[str] = "dreamjourney-user"
     required_scopes: tuple[str, ...] = ("user:api",)
@@ -51,6 +56,16 @@ class RouteOwnershipMatch:
         normalized = str(value or "").strip()
         return normalized or None
 
+    def resource_id(self, payload: Dict[str, Any]) -> Optional[str]:
+        if self.rule.resource_id_body_field:
+            value = payload.get(self.rule.resource_id_body_field)
+        elif self.rule.resource_id_path_parameter:
+            value = self.path_parameters.get(self.rule.resource_id_path_parameter)
+        else:
+            return None
+        normalized = str(value or "").strip()
+        return normalized or None
+
 
 def _rule(
     method: str,
@@ -60,6 +75,11 @@ def _rule(
     *,
     owner_body_field: Optional[str] = None,
     owner_path_parameter: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    resource_id_body_field: Optional[str] = None,
+    resource_id_path_parameter: Optional[str] = None,
+    resource_operation: Optional[str] = None,
+    requires_existing_resource: bool = False,
     auth_mode: Optional[RouteAuthenticationMode] = None,
     required_audience: Optional[str] = None,
     required_scopes: Iterable[str] = (),
@@ -89,19 +109,30 @@ def _rule(
         policy_id=policy_id,
         owner_body_field=owner_body_field,
         owner_path_parameter=owner_path_parameter,
+        resource_type=resource_type,
+        resource_id_body_field=resource_id_body_field,
+        resource_id_path_parameter=resource_id_path_parameter,
+        resource_operation=resource_operation,
+        requires_existing_resource=requires_existing_resource,
         auth_mode=resolved_auth_mode,
         required_audience=resolved_audience,
         required_scopes=resolved_scopes,
     )
 
 
-def _owner_body(method: str, path_template: str, policy_id: str) -> RouteOwnershipRule:
+def _owner_body(
+    method: str,
+    path_template: str,
+    policy_id: str,
+    **resource: Any,
+) -> RouteOwnershipRule:
     return _rule(
         method,
         path_template,
         RouteOwnershipCategory.OWNER_BODY,
         policy_id,
         owner_body_field="userId",
+        **resource,
     )
 
 
@@ -111,6 +142,7 @@ def _owner_path(
     policy_id: str,
     *,
     parameter: str = "user_id",
+    **resource: Any,
 ) -> RouteOwnershipRule:
     return _rule(
         method,
@@ -118,6 +150,7 @@ def _owner_path(
         RouteOwnershipCategory.OWNER_PATH,
         policy_id,
         owner_path_parameter=parameter,
+        **resource,
     )
 
 
@@ -135,8 +168,24 @@ class RouteOwnershipRegistry:
             _rule("GET", "/live", public, "publicLiveness"),
             _rule("GET", "/ready", public, "publicReadiness"),
             _owner_body("POST", "/digital-human/sessions", "digitalHumanOwner"),
-            _owner_body("POST", "/digital-human/sessions/{session_id}/heartbeat", "digitalHumanOwner"),
-            _owner_body("POST", "/digital-human/sessions/{session_id}/release", "digitalHumanOwner"),
+            _owner_body(
+                "POST",
+                "/digital-human/sessions/{session_id}/heartbeat",
+                "digitalHumanOwner",
+                resource_type="digitalHumanSession",
+                resource_id_path_parameter="session_id",
+                resource_operation="update",
+                requires_existing_resource=True,
+            ),
+            _owner_body(
+                "POST",
+                "/digital-human/sessions/{session_id}/release",
+                "digitalHumanOwner",
+                resource_type="digitalHumanSession",
+                resource_id_path_parameter="session_id",
+                resource_operation="update",
+                requires_existing_resource=True,
+            ),
             _rule(
                 "POST",
                 "/v2/auth/challenges",
@@ -183,15 +232,51 @@ class RouteOwnershipRegistry:
             _owner_body("POST", "/voice/realtime-token", "voiceOwner"),
             _owner_body("POST", "/voice/profiles", "voiceOwner"),
             _owner_path("GET", "/voice/profiles/{user_id}", "voiceOwner"),
-            _owner_path("POST", "/voice/profiles/{user_id}/{voice_profile_id}/disable", "voiceOwner"),
-            _owner_path("POST", "/voice/profiles/{user_id}/{voice_profile_id}/refresh", "voiceOwner"),
+            _owner_path(
+                "POST",
+                "/voice/profiles/{user_id}/{voice_profile_id}/disable",
+                "voiceOwner",
+                resource_type="voiceProfile",
+                resource_id_path_parameter="voice_profile_id",
+                resource_operation="update",
+                requires_existing_resource=True,
+            ),
+            _owner_path(
+                "POST",
+                "/voice/profiles/{user_id}/{voice_profile_id}/refresh",
+                "voiceOwner",
+                resource_type="voiceProfile",
+                resource_id_path_parameter="voice_profile_id",
+                resource_operation="update",
+                requires_existing_resource=True,
+            ),
             _owner_path(
                 "POST",
                 "/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance",
                 "voiceOwner",
+                resource_type="voiceProfile",
+                resource_id_path_parameter="voice_profile_id",
+                resource_operation="update",
+                requires_existing_resource=True,
             ),
-            _owner_body("POST", "/voice/synthesis", "voiceOwner"),
-            _owner_path("DELETE", "/voice/profiles/{user_id}/{voice_profile_id}", "voiceOwner"),
+            _owner_body(
+                "POST",
+                "/voice/synthesis",
+                "voiceOwner",
+                resource_type="voiceProfile",
+                resource_id_body_field="voiceProfileId",
+                resource_operation="execute",
+                requires_existing_resource=True,
+            ),
+            _owner_path(
+                "DELETE",
+                "/voice/profiles/{user_id}/{voice_profile_id}",
+                "voiceOwner",
+                resource_type="voiceProfile",
+                resource_id_path_parameter="voice_profile_id",
+                resource_operation="delete",
+                requires_existing_resource=True,
+            ),
             _owner_body("POST", "/tts", "voiceOwner"),
             _rule(
                 "GET",
@@ -211,7 +296,15 @@ class RouteOwnershipRegistry:
             _owner_path("GET", "/memories/{user_id}", "memoryOwner"),
             _owner_body("POST", "/archive/photos", "archiveOwner"),
             _owner_body("POST", "/archive/items", "archiveOwner"),
-            _owner_body("POST", "/archive/media/upload-intent", "archiveOwner"),
+            _owner_body(
+                "POST",
+                "/archive/media/upload-intent",
+                "archiveOwner",
+                resource_type="archiveItem",
+                resource_id_body_field="archiveItemId",
+                resource_operation="update",
+                requires_existing_resource=True,
+            ),
             _owner_path("GET", "/archive/items/{user_id}", "archiveOwner"),
             _rule(
                 "GET",
@@ -219,8 +312,24 @@ class RouteOwnershipRegistry:
                 delegated,
                 "timeLetterViewer",
             ),
-            _owner_path("DELETE", "/archive/items/{user_id}/{item_id}", "archiveOwner"),
-            _owner_body("POST", "/archive/image-analysis", "archiveOwner"),
+            _owner_path(
+                "DELETE",
+                "/archive/items/{user_id}/{item_id}",
+                "archiveOwner",
+                resource_type="archiveItem",
+                resource_id_path_parameter="item_id",
+                resource_operation="delete",
+                requires_existing_resource=True,
+            ),
+            _owner_body(
+                "POST",
+                "/archive/image-analysis",
+                "archiveOwner",
+                resource_type="archiveItem",
+                resource_id_body_field="archiveItemId",
+                resource_operation="execute",
+                requires_existing_resource=True,
+            ),
             _rule(
                 "POST",
                 "/mailbox/letters",
@@ -229,8 +338,24 @@ class RouteOwnershipRegistry:
                 required_scopes=("mailbox:deliver",),
             ),
             _owner_path("GET", "/mailbox/letters/{user_id}", "mailboxOwner"),
-            _owner_path("POST", "/mailbox/letters/{user_id}/{letter_id}/read", "mailboxOwner"),
-            _owner_path("POST", "/mailbox/letters/{user_id}/{letter_id}/archive", "mailboxOwner"),
+            _owner_path(
+                "POST",
+                "/mailbox/letters/{user_id}/{letter_id}/read",
+                "mailboxOwner",
+                resource_type="mailboxLetter",
+                resource_id_path_parameter="letter_id",
+                resource_operation="update",
+                requires_existing_resource=True,
+            ),
+            _owner_path(
+                "POST",
+                "/mailbox/letters/{user_id}/{letter_id}/archive",
+                "mailboxOwner",
+                resource_type="mailboxLetter",
+                resource_id_path_parameter="letter_id",
+                resource_operation="update",
+                requires_existing_resource=True,
+            ),
             _owner_body("POST", "/devices/push-token", "deviceOwner"),
             _owner_body("POST", "/echo/delayed-replies", "echoOwner"),
             _rule(
@@ -262,7 +387,15 @@ class RouteOwnershipRegistry:
                 delegated,
                 "familyInvitationAcceptance",
             ),
-            _owner_path("POST", "/family/members/{user_id}/{member_id}/revoke", "familyOwner"),
+            _owner_path(
+                "POST",
+                "/family/members/{user_id}/{member_id}/revoke",
+                "familyOwner",
+                resource_type="familyMember",
+                resource_id_path_parameter="member_id",
+                resource_operation="update",
+                requires_existing_resource=True,
+            ),
             _rule("POST", "/care/snapshots", delegated, "careViewer"),
             _rule("GET", "/care/snapshots/latest/{user_id}", delegated, "careViewer"),
             _rule("GET", "/care/snapshots/{user_id}", delegated, "careViewer"),
@@ -314,6 +447,9 @@ class RouteOwnershipRegistry:
                     "authMode": rule.auth_mode.value,
                     "requiredAudience": rule.required_audience,
                     "requiredScopes": list(rule.required_scopes),
+                    "resourceType": rule.resource_type,
+                    "resourceOperation": rule.resource_operation,
+                    "requiresExistingResource": rule.requires_existing_resource,
                 }
                 for rule in self.rules
             ],

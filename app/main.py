@@ -18,7 +18,10 @@ except ImportError as exc:  # pragma: no cover - exercised only without runtime 
 from app.core.config import settings
 from app.services.amap import AMapDistrictProxy
 from app.services.auth_sessions import AuthSessionError, AuthSessionService
-from app.services.authorization_policy import CrossAccountAuthorizationPolicy
+from app.services.authorization_policy import (
+    CrossAccountAuthorizationPolicy,
+    owner_authority_claims,
+)
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.identity_bindings import (
@@ -71,6 +74,8 @@ from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
     ArchiveItemOwnershipConflict,
+    ResourceOwnershipConflict,
+    ResourceVersionConflict,
 )
 from app.services.runtime_config import RuntimeConfigService
 from app.services.safety_policy import (
@@ -126,6 +131,17 @@ from app.services.user_identity import stable_user_id
 app = FastAPI(title=settings.app_name, version="0.1.0")
 store = make_store(settings)
 logger = logging.getLogger(__name__)
+
+
+@app.exception_handler(ResourceOwnershipConflict)
+async def resource_ownership_conflict_handler(
+    _request: Request,
+    _error: ResourceOwnershipConflict,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={"detail": {"code": "resourceOwnershipConflict"}},
+    )
 
 BACKEND_API_TOKEN = settings.backend_api_token or ""
 AUTH_ACCESS_TTL_SECONDS = max(60, settings.auth_access_ttl_seconds)
@@ -391,8 +407,7 @@ async def _ownership_claim_user_ids(request: Request) -> Tuple[set[str], str, Di
         _ownership_path_user_id(request.url.path),
     }
     payload_context = await _request_json_payload(request)
-    for key in ("userId", "viewerUserId", "authenticatedUserId"):
-        claims.add(str(payload_context.get(key) or "").strip())
+    claims.update(owner_authority_claims(payload_context))
     return {claim for claim in claims if claim}, "inspected", payload_context
 
 
@@ -417,6 +432,40 @@ def _request_user_principal_id(request: Request) -> Optional[str]:
         return None
     user_id = str(principal.principal_id or "").strip()
     return user_id or None
+
+
+def _principal_owned_payload(
+    request: Request,
+    payload: Dict[str, Any],
+    *,
+    aliases: Tuple[str, ...] = (),
+) -> Tuple[str, Dict[str, Any]]:
+    principal_user_id = _request_user_principal_id(request)
+    if principal_user_id is not None:
+        conflicting_claims = owner_authority_claims(payload) - {principal_user_id}
+        if conflicting_claims:
+            raise HTTPException(status_code=403, detail="owner claim does not match authenticated user")
+    elif AUTH_ROUTE_MODE == "enforce" or bool(_configured_backend_api_token()):
+        raise HTTPException(status_code=401, detail="authenticated user is required")
+    user_id = principal_user_id or str(payload.get("userId") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="authenticated user is required")
+    canonical = dict(payload)
+    canonical["userId"] = user_id
+    for alias in aliases:
+        canonical[alias] = user_id
+    return user_id, canonical
+
+
+def _principal_path_owner(request: Request, asserted_user_id: str) -> str:
+    principal_user_id = _request_user_principal_id(request)
+    if principal_user_id is not None:
+        if asserted_user_id != principal_user_id:
+            raise HTTPException(status_code=403, detail="path owner does not match authenticated user")
+        return principal_user_id
+    if AUTH_ROUTE_MODE == "enforce" or bool(_configured_backend_api_token()):
+        raise HTTPException(status_code=401, detail="authenticated user is required")
+    return asserted_user_id
 
 
 def _require_user_principal_identity(request: Request, expected_user_id: str, detail: str) -> None:
@@ -1083,13 +1132,11 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
 
 
 @app.post("/digital-human/sessions")
-def create_digital_human_session(payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
+def create_digital_human_session(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     persona_id = str(payload.get("personaId") or "").strip()
     scene = str(payload.get("scene") or "echo").strip() or "echo"
     lifecycle_mode = str(payload.get("lifecycleMode") or "sunlight").strip() or "sunlight"
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
     if not persona_id:
         raise HTTPException(status_code=400, detail="personaId is required")
     _evaluate_subject_eligibility_payload(
@@ -1113,11 +1160,11 @@ def create_digital_human_session(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.post("/digital-human/sessions/{session_id}/heartbeat")
-def heartbeat_digital_human_session(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
+def heartbeat_digital_human_session(request: Request, session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     device_id = str(payload.get("deviceId") or "").strip()
-    if not user_id or not device_id:
-        raise HTTPException(status_code=400, detail="userId and deviceId are required")
+    if not device_id:
+        raise HTTPException(status_code=400, detail="deviceId is required")
     now = datetime.now(timezone.utc)
     result = store.heartbeat_digital_human_session_lease(
         session_id,
@@ -1145,12 +1192,12 @@ def heartbeat_digital_human_session(session_id: str, payload: Dict[str, Any]) ->
 
 
 @app.post("/digital-human/sessions/{session_id}/release")
-def release_digital_human_session(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
+def release_digital_human_session(request: Request, session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     device_id = str(payload.get("deviceId") or "").strip()
     reason = str(payload.get("reason") or "clientRelease").strip()[:80] or "clientRelease"
-    if not user_id or not device_id:
-        raise HTTPException(status_code=400, detail="userId and deviceId are required")
+    if not device_id:
+        raise HTTPException(status_code=400, detail="deviceId is required")
     now_iso = datetime.now(timezone.utc).isoformat()
     result = store.release_digital_human_session_lease(
         session_id,
@@ -1400,11 +1447,9 @@ def _require_account_deletion_confirmations(payload: Dict[str, Any]) -> None:
 
 
 @app.post("/auth/delete")
-def soft_delete_account(payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
+def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     phone = str(payload.get("phone") or "").strip()
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
     if not phone:
         raise HTTPException(status_code=400, detail="phone is required")
     _require_account_deletion_confirmations(payload)
@@ -1487,10 +1532,8 @@ def _required_password(payload: Dict[str, Any], key: str, *, min_length: int = 1
 
 
 @app.post("/auth/password")
-def change_password(payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
+def change_password(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     old_password = _required_password(payload, "oldPassword")
     new_password = _required_password(payload, "newPassword", min_length=8)
 
@@ -2035,14 +2078,16 @@ def _voice_profile_quality_acceptance_update(profile: Dict[str, Any], user_id: s
 
 
 @app.post("/profile")
-def save_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
-    profile = _sanitize_profile_payload(payload)
+def save_profile(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _, owned_payload = _principal_owned_payload(request, payload)
+    profile = _sanitize_profile_payload(owned_payload)
     saved = store.save_profile(profile["userId"], profile)
     return {"status": "saved", "profile": saved}
 
 
 @app.get("/profile/{user_id}")
-def get_profile(user_id: str) -> Dict[str, Any]:
+def get_profile(request: Request, user_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     profile = store.get_profile(user_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="profile not found")
@@ -2055,7 +2100,8 @@ def runtime_config() -> Dict[str, Any]:
 
 
 @app.post("/context/build")
-def build_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+def build_context(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _, payload = _principal_owned_payload(request, payload)
     try:
         packet = ContextPacketBuilder(store, settings).build(payload)
     except ValueError as exc:
@@ -2064,10 +2110,8 @@ def build_context(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.post("/voice/realtime-token")
-def realtime_token(payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
+def realtime_token(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     try:
         return TokenService(settings).realtime_config(user_id=user_id)
     except ValueError as exc:
@@ -2075,7 +2119,8 @@ def realtime_token(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.post("/voice/profiles")
-def save_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
+def save_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _, payload = _principal_owned_payload(request, payload)
     profile = _sanitize_voice_profile_payload(payload)
     try:
         saved = store.save_voice_profile(profile["userId"], profile)
@@ -2085,7 +2130,8 @@ def save_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/voice/profiles/{user_id}")
-def list_voice_profiles(user_id: str) -> Dict[str, Any]:
+def list_voice_profiles(request: Request, user_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     return {
         "userId": user_id,
         "profiles": [_voice_clone_public_profile(profile) for profile in store.list_voice_profiles(user_id)],
@@ -2093,7 +2139,8 @@ def list_voice_profiles(user_id: str) -> Dict[str, Any]:
 
 
 @app.post("/voice/profiles/{user_id}/{voice_profile_id}/disable")
-def disable_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+def disable_voice_profile(request: Request, user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     profile = store.get_voice_profile(user_id, voice_profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="voice profile not found")
@@ -2106,7 +2153,8 @@ def disable_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]
 
 
 @app.post("/voice/profiles/{user_id}/{voice_profile_id}/refresh")
-def refresh_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+def refresh_voice_profile(request: Request, user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     profile = store.get_voice_profile(user_id, voice_profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="voice profile not found")
@@ -2116,7 +2164,8 @@ def refresh_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]
 
 
 @app.post("/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance")
-def accept_voice_profile_quality(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+def accept_voice_profile_quality(request: Request, user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     profile = store.get_voice_profile(user_id, voice_profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="voice profile not found")
@@ -2127,8 +2176,8 @@ def accept_voice_profile_quality(user_id: str, voice_profile_id: str) -> Dict[st
 
 
 @app.post("/voice/synthesis")
-def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = _required_text(payload, "userId", 96)
+def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     voice_profile_id = _required_text(payload, "voiceProfileId", 96)
     _evaluate_subject_eligibility_payload(
         payload,
@@ -2209,7 +2258,8 @@ def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.delete("/voice/profiles/{user_id}/{voice_profile_id}")
-def delete_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+def delete_voice_profile(request: Request, user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     profile = store.get_voice_profile(user_id, voice_profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="voice profile not found")
@@ -2222,9 +2272,9 @@ def delete_voice_profile(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
 
 
 @app.post("/tts")
-def tts(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
+def tts(request: Request, payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     text = str(payload.get("text") or "").strip()
-    user_id = str(payload.get("userId") or "anonymous").strip()
     voice_type = payload.get("voiceType")
     encoding = str(payload.get("encoding") or "wav")
     speed_ratio = float(payload.get("speedRatio") or 1.0)
@@ -2285,15 +2335,13 @@ def amap_district(keyword: str, dryRun: bool = False) -> Dict[str, Any]:
 
 
 @app.post("/kb/sync")
-def sync_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
+def sync_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     graph = payload.get("graph") or {}
     has_base_revision = payload.get("baseRevision") is not None
     base_revision = payload.get("baseRevision")
     operation_id = str(payload.get("operationId") or "").strip()
     has_client_operation_id = bool(operation_id)
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
     if not isinstance(graph, dict):
         raise HTTPException(status_code=400, detail="graph must be an object")
     if has_base_revision and (
@@ -2372,7 +2420,8 @@ def sync_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/kb/snapshot/{user_id}")
-def kb_snapshot(user_id: str) -> Dict[str, Any]:
+def kb_snapshot(request: Request, user_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     snapshot = store.get_kb_snapshot_record(user_id)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="snapshot not found")
@@ -2385,13 +2434,11 @@ def kb_snapshot(user_id: str) -> Dict[str, Any]:
 
 
 @app.post("/kb/mutations")
-def mutate_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
+def mutate_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     operation_id = str(payload.get("operationId") or "").strip()
     base_revision = payload.get("baseRevision")
     mutation_schema_version = payload.get("mutationSchemaVersion", 1)
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
     if not operation_id:
         raise HTTPException(status_code=400, detail="operationId is required")
     if (
@@ -2475,8 +2522,8 @@ def mutate_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.post("/kb/governance/actions")
 def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     governance_schema_version = payload.get("governanceSchemaVersion")
-    user_id = str(payload.get("userId") or "").strip()
     operation_id = str(payload.get("operationId") or "").strip()
     base_revision = payload.get("baseRevision")
     if (
@@ -2485,8 +2532,6 @@ def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
         or governance_schema_version != GOVERNANCE_SCHEMA_VERSION
     ):
         raise HTTPException(status_code=400, detail="governanceSchemaVersion must be 1")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
     if not operation_id:
         raise HTTPException(status_code=400, detail="operationId is required")
     if isinstance(base_revision, bool) or not isinstance(base_revision, int) or base_revision < 0:
@@ -2494,11 +2539,6 @@ def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
             status_code=400,
             detail="baseRevision is required and must be a non-negative integer",
         )
-    _require_user_principal_identity(
-        request,
-        user_id,
-        "authenticated user is not the knowledge owner",
-    )
 
     try:
         normalized_action = normalize_knowledge_governance_action(payload.get("action"))
@@ -2585,11 +2625,13 @@ def govern_kb(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/kb/changes/{user_id}")
 def kb_changes(
+    request: Request,
     user_id: str,
     sinceRevision: int = 0,
     targetRevision: Optional[int] = None,
     limit: Optional[int] = None,
 ) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     if sinceRevision < 0:
         raise HTTPException(status_code=400, detail="sinceRevision must be non-negative")
     if limit is not None and (limit < 1 or limit > 100):
@@ -2667,7 +2709,8 @@ def kb_changes(
 
 
 @app.get("/kb/source-ref-audit/{user_id}")
-def kb_source_ref_audit(user_id: str) -> Dict[str, Any]:
+def kb_source_ref_audit(request: Request, user_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     return {
         "userId": user_id,
         **audit_knowledge_source_refs(store.get_kb_snapshot_record(user_id)),
@@ -2675,10 +2718,8 @@ def kb_source_ref_audit(user_id: str) -> Dict[str, Any]:
 
 
 @app.post("/kb/extract")
-def extract_kb(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
+def extract_kb(request: Request, payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     try:
         extraction_input = normalize_knowledge_extraction_input(payload)
     except KnowledgeExtractionValidationError as exc:
@@ -2754,23 +2795,24 @@ def extract_kb(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
 
 
 @app.post("/memories")
-def create_memory(payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
+def create_memory(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(request, payload)
     return {"memory": store.add_memory(user_id, payload)}
 
 
 @app.get("/memories/{user_id}")
-def list_memories(user_id: str) -> Dict[str, Any]:
+def list_memories(request: Request, user_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     return {"userId": user_id, "memories": store.list_memories(user_id)}
 
 
 @app.post("/archive/photos")
-def create_archive_photo(payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
+def create_archive_photo(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(
+        request,
+        payload,
+        aliases=("ownerId", "ownerUserId", "uploadedByUserId", "uploaderUserId"),
+    )
     try:
         safe_payload = sanitize_archive_item_payload(payload)
     except ValueError as exc:
@@ -2786,10 +2828,12 @@ def create_archive_photo(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.post("/archive/items")
-def create_archive_item(payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
+def create_archive_item(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(
+        request,
+        payload,
+        aliases=("ownerId", "ownerUserId", "uploadedByUserId", "uploaderUserId"),
+    )
     try:
         safe_payload = sanitize_archive_item_payload(payload)
     except ValueError as exc:
@@ -2805,7 +2849,12 @@ def create_archive_item(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.post("/archive/media/upload-intent")
-def archive_media_upload_intent(payload: Dict[str, Any]) -> Dict[str, Any]:
+def archive_media_upload_intent(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _, payload = _principal_owned_payload(
+        request,
+        payload,
+        aliases=("ownerId", "ownerUserId", "uploadedByUserId", "uploaderUserId"),
+    )
     return {
         "status": "mock_ready",
         "uploadIntent": _archive_media_upload_intent_payload(payload),
@@ -2813,7 +2862,8 @@ def archive_media_upload_intent(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/archive/items/{user_id}")
-def list_archive_items(user_id: str) -> Dict[str, Any]:
+def list_archive_items(request: Request, user_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     return {"userId": user_id, "items": store.list_archive_items(user_id)}
 
 
@@ -2845,10 +2895,13 @@ def get_time_letter_detail(
 
 @app.delete("/archive/items/{user_id}/{item_id}")
 def delete_archive_item(
+    request: Request,
     user_id: str,
     item_id: str,
     operationId: Optional[str] = None,
+    expectedVersion: Optional[int] = None,
 ) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     operation_id = str(operationId or "").strip() or f"archive-delete-{secrets.token_hex(16)}"
     snapshot = store.get_kb_snapshot_record(user_id)
     base_revision = int((snapshot or {}).get("revision") or 0)
@@ -2885,11 +2938,21 @@ def delete_archive_item(
             base_revision=base_revision,
             mutation=mutation,
             governance_summary=None if governance is None else governance["summary"],
+            expected_version=expectedVersion,
         )
     except ArchiveItemNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ArchiveItemDeletionForbidden as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except ResourceVersionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "resourceVersionConflict",
+                "expectedVersion": exc.expected_version,
+                "currentVersion": exc.current_version,
+            },
+        )
     except KnowledgeRevisionConflict as exc:
         raise HTTPException(
             status_code=409,
@@ -2946,13 +3009,15 @@ def delete_archive_item(
 
 
 @app.post("/archive/image-analysis")
-def archive_image_analysis(payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
+def archive_image_analysis(request: Request, payload: Dict[str, Any], dryRun: bool = False) -> Dict[str, Any]:
+    user_id, payload = _principal_owned_payload(
+        request,
+        payload,
+        aliases=("ownerId", "ownerUserId", "uploadedByUserId", "uploaderUserId"),
+    )
     image_base64 = str(payload.get("imageBase64") or "").strip()
     if not image_base64:
         raise HTTPException(status_code=400, detail="imageBase64 is required")
-    user_id = str(payload.get("userId") or "").strip()
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
     archive_item_id = str(payload.get("archiveItemId") or "").strip()
     if not archive_item_id:
         raise HTTPException(status_code=400, detail="archiveItemId is required")
@@ -3004,12 +3069,19 @@ def create_mailbox_letter(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/mailbox/letters/{user_id}")
-def list_mailbox_letters(user_id: str) -> Dict[str, Any]:
+def list_mailbox_letters(request: Request, user_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     return {"userId": user_id, "items": store.list_mailbox_letters(user_id)}
 
 
 @app.post("/mailbox/letters/{user_id}/{letter_id}/read")
-def mark_mailbox_letter_read(user_id: str, letter_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def mark_mailbox_letter_read(
+    request: Request,
+    user_id: str,
+    letter_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     read_at = str(payload.get("readAt") or datetime.now(timezone.utc).isoformat()).strip()
     _parse_iso_datetime(read_at, "readAt")
     item = store.mark_mailbox_letter_read(user_id, letter_id, read_at)
@@ -3019,7 +3091,13 @@ def mark_mailbox_letter_read(user_id: str, letter_id: str, payload: Dict[str, An
 
 
 @app.post("/mailbox/letters/{user_id}/{letter_id}/archive")
-def archive_mailbox_letter(user_id: str, letter_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def archive_mailbox_letter(
+    request: Request,
+    user_id: str,
+    letter_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     archived_at = str(payload.get("archivedAt") or datetime.now(timezone.utc).isoformat()).strip()
     _parse_iso_datetime(archived_at, "archivedAt")
     item = store.archive_mailbox_letter(user_id, letter_id, archived_at)
@@ -3155,14 +3233,16 @@ def _sanitize_echo_dispatch_due_payload(payload: Dict[str, Any]) -> Dict[str, An
 
 
 @app.post("/devices/push-token")
-def register_push_device_token(payload: Dict[str, Any]) -> Dict[str, Any]:
+def register_push_device_token(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _, payload = _principal_owned_payload(request, payload)
     item = _sanitize_push_device_token_payload(payload)
     saved = store.save_push_device_token(item["userId"], item)
     return {"status": "registered", "item": saved}
 
 
 @app.post("/echo/delayed-replies")
-def schedule_echo_delayed_reply(payload: Dict[str, Any]) -> Dict[str, Any]:
+def schedule_echo_delayed_reply(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _, payload = _principal_owned_payload(request, payload)
     _enforce_echo_delayed_reply_safety(payload)
     item = _sanitize_echo_delayed_reply_payload(payload)
     saved = store.add_echo_delayed_reply(item["userId"], item)
@@ -3193,12 +3273,14 @@ def dispatch_due_time_letters(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/echo/delayed-replies/{user_id}")
-def list_echo_delayed_replies(user_id: str) -> Dict[str, Any]:
+def list_echo_delayed_replies(request: Request, user_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     return {"userId": user_id, "items": store.list_echo_delayed_replies(user_id)}
 
 
 @app.post("/family/invite")
-def invite_family(payload: Dict[str, Any]) -> Dict[str, Any]:
+def invite_family(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _, payload = _principal_owned_payload(request, payload)
     invite_payload = _sanitize_family_member_payload(payload)
     user_id = str(invite_payload["userId"])
     invite_payload.setdefault("accessStatus", "pending")
@@ -3213,7 +3295,8 @@ def invite_family(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/family/members/{user_id}")
-def family_members(user_id: str) -> Dict[str, Any]:
+def family_members(request: Request, user_id: str) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
     return {"userId": user_id, "members": store.list_family_members(user_id)}
 
 
@@ -3248,7 +3331,8 @@ def accept_family_invitation_code(request: Request, invitation_code: str, payloa
 
 
 @app.post("/family/members/{user_id}/{member_id}/revoke")
-def revoke_family_member(user_id: str, member_id: str) -> Dict[str, Any]:
+def revoke_family_member(request: Request, user_id: str, member_id: str) -> Dict[str, Any]:
+    _principal_path_owner(request, user_id)
     raise HTTPException(status_code=409, detail="family member removal is not supported")
 
 
@@ -3307,18 +3391,11 @@ def _ensure_active_family_viewer(
 
 @app.post("/care/snapshots")
 def save_care_snapshot(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(payload.get("userId") or "").strip()
+    user_id, payload = _principal_owned_payload(request, payload)
     snapshot = payload.get("snapshot")
     viewer_family_member_id = _normalize_viewer_family_member_id(payload.get("viewerFamilyMemberID"))
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId is required")
     if not isinstance(snapshot, dict):
         raise HTTPException(status_code=400, detail="snapshot must be an object")
-    _require_user_principal_identity(
-        request,
-        user_id,
-        "authenticated user is not the care snapshot owner",
-    )
     _ensure_active_family_viewer(user_id, viewer_family_member_id)
     try:
         sanitized_snapshot = sanitize_care_snapshot_payload(snapshot)

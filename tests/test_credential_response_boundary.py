@@ -8,6 +8,7 @@ import app.main as main_module
 from app.core.config import settings
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
+from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 from app.services.tokens import TokenService
 
 
@@ -18,8 +19,16 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.previous_store = main_module.store
         self.previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
+        self.previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
+        self.previous_release_policy_gate = main_module.RELEASE_POLICY_COMMAND_GATE
         main_module.store = InMemoryStore()
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
+        release_policy = ReleasePolicyService(
+            shadow_mode=True,
+            enforce_default_closed_stages=False,
+        )
+        main_module.RELEASE_POLICY_SERVICE = release_policy
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(release_policy)
         self.setting_names = (
             "backend_api_token",
             "tencent_digital_human_app_key",
@@ -50,6 +59,8 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
     def tearDown(self):
         main_module.store = self.previous_store
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = self.previous_legacy_phone_login
+        main_module.RELEASE_POLICY_SERVICE = self.previous_release_policy_service
+        main_module.RELEASE_POLICY_COMMAND_GATE = self.previous_release_policy_gate
         for name, value in self.previous_settings.items():
             object.__setattr__(settings, name, value)
         main_module.BACKEND_API_TOKEN = str(settings.backend_api_token or "")
@@ -70,6 +81,14 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
             "secretkey",
         ):
             self.assertNotIn(forbidden_field, serialized)
+
+    def user_headers(self, phone: str = "13800139902"):
+        login = client.post(
+            "/auth/login",
+            json={"phone": phone, "nickname": "Boundary User", "password": "password123"},
+        )
+        self.assertEqual(login.status_code, 200)
+        return {"Authorization": f"Bearer {login.json()['auth']['accessToken']}"}, login.json()["user"]["id"]
 
     def test_auth_and_runtime_responses_are_no_store(self):
         login = client.post(
@@ -98,11 +117,12 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
         self.assert_value_free(body)
 
     def test_digital_human_session_is_blocked_without_true_broker(self):
+        headers, user_id = self.user_headers("13800139903")
         response = client.post(
             "/digital-human/sessions",
-            headers={"X-DreamJourney-Api-Token": self.sentinels["backend_api_token"]},
+            headers=headers,
             json={
-                "userId": "user_boundary",
+                "userId": user_id,
                 "personaId": "persona_boundary",
                 "scene": "echo",
                 "deviceId": "ios-boundary",
@@ -132,10 +152,11 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
         self.assert_value_free(response.json())
 
     def test_realtime_voice_returns_blocked_value_free_capability(self):
+        headers, user_id = self.user_headers("13800139904")
         response = client.post(
             "/voice/realtime-token",
-            headers={"X-DreamJourney-Api-Token": self.sentinels["backend_api_token"]},
-            json={"userId": "user_boundary"},
+            headers=headers,
+            json={"userId": user_id},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -162,10 +183,11 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
         self.assertNotIn("expiresInSeconds", body)
         self.assert_value_free(body)
 
-        service_payload = TokenService(settings).realtime_config(user_id="user_boundary")
+        service_payload = TokenService(settings).realtime_config(user_id=user_id)
         self.assertEqual(service_payload, body)
 
     def test_legacy_tts_response_is_no_store_and_redacts_provider_references(self):
+        headers, user_id = self.user_headers("13800139905")
         with patch("app.main.VolcTTSProxy.request_tts") as request_tts:
             request_tts.return_value = {
                 "code": 3000,
@@ -177,8 +199,8 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
             }
             response = client.post(
                 "/tts",
-                json={"text": "边界测试", "userId": "user_boundary"},
-                headers={"X-DreamJourney-Api-Token": self.sentinels["backend_api_token"]},
+                json={"text": "边界测试", "userId": user_id},
+                headers=headers,
             )
 
         self.assertEqual(response.status_code, 200)

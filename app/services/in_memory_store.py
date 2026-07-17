@@ -24,6 +24,7 @@ from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
     ArchiveItemOwnershipConflict,
+    ResourceOwnershipConflict,
     is_sealed_time_letter,
 )
 from app.services.user_identity import stable_user_id
@@ -1437,18 +1438,61 @@ class InMemoryStore:
 
     def add_memory(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
-        item.setdefault("id", f"memory_{len(self._memories.get(user_id, [])) + 1}")
+        item.setdefault("id", self._new_resource_id("memory"))
         item["userId"] = user_id
         item["createdAt"] = self._now()
+        self._assert_resource_owner(self._memories, user_id, str(item["id"]))
         self._memories.setdefault(user_id, []).insert(0, item)
         return deepcopy(item)
 
     def list_memories(self, user_id: str) -> List[Dict[str, Any]]:
         return deepcopy(self._memories.get(user_id, []))
 
+    def resolve_resource_authority(
+        self,
+        resource_type: str,
+        resource_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        if resource_type == "digitalHumanSession":
+            item = self._digital_human_sessions.get(resource_id)
+            if item is None:
+                return None
+            user_id = str(item.get("userId") or "")
+            return {
+                "resourceType": resource_type,
+                "resourceId": resource_id,
+                "vaultId": user_id,
+                "ownerSubjectId": user_id,
+                "rowVersion": int(item.get("resourceVersion") or 1),
+                "authorityState": str(item.get("authorityState") or "active"),
+            }
+        collections = {
+            "archiveItem": self._archive_items,
+            "familyMember": self._family_members,
+            "mailboxLetter": self._mailbox_letters,
+            "voiceProfile": self._voice_profiles,
+        }
+        resources = collections.get(resource_type)
+        if resources is None:
+            raise ValueError(f"unsupported resource type: {resource_type}")
+        for user_id, items in resources.items():
+            for item in items:
+                item_id = str(item.get("id") or item.get("sessionId") or item.get("voiceProfileId") or "")
+                if item_id != resource_id:
+                    continue
+                return {
+                    "resourceType": resource_type,
+                    "resourceId": resource_id,
+                    "vaultId": user_id,
+                    "ownerSubjectId": user_id,
+                    "rowVersion": int(item.get("resourceVersion") or 1),
+                    "authorityState": str(item.get("authorityState") or "active"),
+                }
+        return None
+
     def add_archive_item(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
-        item.setdefault("id", f"archive_{len(self._archive_items.get(user_id, [])) + 1}")
+        item.setdefault("id", self._new_resource_id("archive"))
         item["userId"] = user_id
         with self._archive_lock:
             conflicting_owner = next(
@@ -1494,6 +1538,7 @@ class InMemoryStore:
         base_revision: int,
         mutation: Optional[Dict[str, Any]] = None,
         governance_summary: Optional[Dict[str, Any]] = None,
+        expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         operation_kind = KB_OPERATION_ARCHIVE_DELETE
         schema_version = 1
@@ -1549,6 +1594,13 @@ class InMemoryStore:
             if item_index is None:
                 raise ArchiveItemNotFound("archive item not found")
             item = items[item_index]
+            current_resource_version = int(item.get("resourceVersion") or 1)
+            if expected_version is not None and expected_version != current_resource_version:
+                from app.services.archive_store import ResourceVersionConflict
+                raise ResourceVersionConflict(
+                    expected_version=expected_version,
+                    current_version=current_resource_version,
+                )
             if is_sealed_time_letter(item):
                 raise ArchiveItemDeletionForbidden("sealed timeLetter cannot be deleted")
 
@@ -1629,11 +1681,12 @@ class InMemoryStore:
 
     def add_mailbox_letter(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
-        item.setdefault("id", f"mailbox_{len(self._mailbox_letters.get(user_id, [])) + 1}")
+        item.setdefault("id", self._new_resource_id("mailbox"))
         item["userId"] = user_id
         item["updatedAt"] = self._now()
         item.setdefault("createdAt", item["updatedAt"])
 
+        self._assert_resource_owner(self._mailbox_letters, user_id, str(item["id"]))
         letters = self._mailbox_letters.setdefault(user_id, [])
         letters[:] = [letter for letter in letters if letter.get("id") != item["id"]]
         letters.insert(0, item)
@@ -1680,10 +1733,11 @@ class InMemoryStore:
 
     def add_echo_delayed_reply(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
-        item.setdefault("id", item.get("delayedReplyId") or f"echo_delayed_{len(self._echo_delayed_replies.get(user_id, [])) + 1}")
+        item.setdefault("id", item.get("delayedReplyId") or self._new_resource_id("echo_delayed"))
         item["userId"] = user_id
         item["createdAt"] = self._now()
 
+        self._assert_resource_owner(self._echo_delayed_replies, user_id, str(item["id"]))
         replies = self._echo_delayed_replies.setdefault(user_id, [])
         replies[:] = [reply for reply in replies if reply.get("id") != item["id"]]
         replies.insert(0, item)
@@ -1749,6 +1803,7 @@ class InMemoryStore:
         updated = deepcopy(item)
         metadata = deepcopy(updated.get("metadata") if isinstance(updated.get("metadata"), dict) else {})
         updated["userId"] = user_id
+        updated["ownerUserId"] = user_id
         updated["deliveryStatus"] = "delivered"
         updated["deliveryExecutionState"] = "delivered"
         updated["deliveryScheduleState"] = "dispatched"
@@ -1762,17 +1817,19 @@ class InMemoryStore:
         metadata["deliveryProviderState"] = "local_notification_and_in_app"
         metadata["deliveredAt"] = delivered_at_iso
         metadata["dispatchAttemptedAt"] = delivered_at_iso
+        metadata["ownerUserId"] = user_id
         updated["metadata"] = metadata
         updated["updatedAt"] = delivered_at_iso
         return updated
 
     def save_push_device_token(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
-        item.setdefault("id", item.get("deviceTokenId") or f"push_token_{len(self._push_device_tokens.get(user_id, [])) + 1}")
+        item.setdefault("id", item.get("deviceTokenId") or self._new_resource_id("push_token"))
         item.setdefault("deviceTokenId", item["id"])
         item["userId"] = user_id
         item["updatedAt"] = self._now()
 
+        self._assert_resource_owner(self._push_device_tokens, user_id, str(item["id"]))
         tokens = self._push_device_tokens.setdefault(user_id, [])
         tokens[:] = [token for token in tokens if token.get("id") != item["id"]]
         tokens.insert(0, item)
@@ -1784,7 +1841,7 @@ class InMemoryStore:
     def save_voice_profile(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
         item["userId"] = user_id
-        item.setdefault("id", item.get("voiceProfileId") or f"voice_profile_{len(self._voice_profiles.get(user_id, [])) + 1}")
+        item.setdefault("id", item.get("voiceProfileId") or self._new_resource_id("voice_profile"))
         item.setdefault("voiceProfileId", item["id"])
         item["updatedAt"] = self._now()
 
@@ -1907,12 +1964,13 @@ class InMemoryStore:
 
     def add_family_member(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
-        item.setdefault("id", f"family_{len(self._family_members.get(user_id, [])) + 1}")
+        item.setdefault("id", self._new_resource_id("family"))
         item.setdefault("invitationCode", "")
         item.setdefault("invitationURL", "")
         item["userId"] = user_id
         item["ownerUserId"] = user_id
         item["createdAt"] = self._now()
+        self._assert_resource_owner(self._family_members, user_id, str(item["id"]))
         self._family_members.setdefault(user_id, []).append(item)
         return deepcopy(item)
 
@@ -1996,7 +2054,7 @@ class InMemoryStore:
         viewer_family_member_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         item = {
-            "id": f"care_{len(self._care_snapshots.get(user_id, [])) + 1}",
+            "id": self._new_resource_id("care"),
             "userId": user_id,
             "viewerFamilyMemberID": viewer_family_member_id,
             "snapshot": deepcopy(snapshot),
@@ -2028,6 +2086,22 @@ class InMemoryStore:
             if item.get("viewerFamilyMemberID") == viewer_family_member_id
         ]
         return deepcopy(filtered[:max(1, min(limit, 30))])
+
+    @staticmethod
+    def _assert_resource_owner(
+        resources: Dict[str, List[Dict[str, Any]]],
+        user_id: str,
+        resource_id: str,
+    ) -> None:
+        for existing_user_id, items in resources.items():
+            if existing_user_id == user_id:
+                continue
+            if any(str(item.get("id") or "") == resource_id for item in items):
+                raise ResourceOwnershipConflict("resource id belongs to another owner")
+
+    @staticmethod
+    def _new_resource_id(prefix: str) -> str:
+        return f"{prefix}_{uuid.uuid4().hex}"
 
     @staticmethod
     def _now() -> str:

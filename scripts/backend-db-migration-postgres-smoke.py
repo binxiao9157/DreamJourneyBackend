@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import json
+import shutil
 import sys
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -12,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
 import psycopg
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.types.json import Jsonb
 
 from app.core.config import settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir, load_migrations
@@ -49,10 +52,10 @@ def drop_database(admin_dsn, database_name):
             )
 
 
-def migrator(dsn, build_id):
+def migrator(dsn, build_id, migrations_dir=None):
     return PostgresMigrator(
         dsn=dsn,
-        migrations_dir=default_migrations_dir(),
+        migrations_dir=migrations_dir or default_migrations_dir(),
         build_id=build_id,
         lock_timeout_ms=1000,
         statement_timeout_ms=15000,
@@ -67,13 +70,14 @@ def main():
     database_names = [
         prefix + uuid.uuid4().hex[:10],
         prefix + uuid.uuid4().hex[:10],
+        prefix + uuid.uuid4().hex[:10],
     ]
     require(parameters.get("user"), "database user is required")
     migrations = load_migrations(default_migrations_dir())
     expected_versions = [migration.version for migration in migrations]
 
     try:
-        first_name, concurrent_name = database_names
+        first_name, concurrent_name, legacy_name = database_names
         create_database(admin_dsn, first_name)
         first_dsn = database_dsn(base_dsn, first_name)
         first_migrator = migrator(first_dsn, "g2-fresh")
@@ -132,6 +136,86 @@ def main():
             "second concurrent migrator must observe applied head",
         )
 
+        create_database(admin_dsn, legacy_name)
+        legacy_dsn = database_dsn(base_dsn, legacy_name)
+        with tempfile.TemporaryDirectory() as legacy_migrations_dir:
+            legacy_migrations_path = Path(legacy_migrations_dir)
+            for migration_path in default_migrations_dir().iterdir():
+                if migration_path.name.startswith(("0001_", "0002_", "0003_")):
+                    shutil.copy2(migration_path, legacy_migrations_path / migration_path.name)
+            legacy_applied = migrator(
+                legacy_dsn,
+                "g2-legacy-head",
+                migrations_dir=legacy_migrations_path,
+            ).apply()
+        require(
+            legacy_applied["appliedVersions"] == expected_versions[:3],
+            "legacy fixture must stop before owner authority migration",
+        )
+        with psycopg.connect(legacy_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO archive_items (id, user_id, payload)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (
+                        "legacy-owner-conflict",
+                        "owner-a",
+                        Jsonb(
+                            {
+                                "id": "legacy-owner-conflict",
+                                "userId": "owner-a",
+                                "metadata": {"ownerUserId": "owner-b"},
+                            }
+                        ),
+                    ),
+                )
+        legacy_upgrade = migrator(legacy_dsn, "g2-legacy-upgrade").apply()
+        require(
+            legacy_upgrade["appliedVersions"] == [expected_versions[-1]],
+            "legacy upgrade must apply only owner authority migration",
+        )
+        with psycopg.connect(legacy_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT vault_id, owner_subject_id, row_version, authority_state
+                    FROM archive_items WHERE id = 'legacy-owner-conflict'
+                    """
+                )
+                quarantined = cursor.fetchone()
+                cursor.execute(
+                    """
+                    SELECT canonical_user_id, observed_owner_claims, incident_code, status
+                    FROM resource_authority_incidents
+                    WHERE resource_type = 'archiveItem' AND resource_id = 'legacy-owner-conflict'
+                    """
+                )
+                incident = cursor.fetchone()
+        require(
+            quarantined == ("owner-a", "owner-a", 1, "quarantined"),
+            "legacy owner mismatch must be quarantined under the database owner",
+        )
+        require(incident is not None, "legacy owner mismatch incident must be persisted")
+        require(incident[0] == "owner-a", "incident canonical owner")
+        require(set(incident[1]) == {"owner-a", "owner-b"}, "incident observed claims")
+        require(
+            incident[2:] == ("legacyOwnerClaimMismatch", "quarantined"),
+            "incident classification",
+        )
+
+        owner_mutation_rejected = False
+        try:
+            with psycopg.connect(legacy_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE archive_items SET user_id = 'owner-b' WHERE id = 'legacy-owner-conflict'"
+                    )
+        except Exception:
+            owner_mutation_rejected = True
+        require(owner_mutation_rejected, "database trigger must reject owner mutation")
+
         print(
             json.dumps(
                 {
@@ -143,6 +227,9 @@ def main():
                     "verifyHead": verified["expectedHead"],
                     "concurrentApplyCount": len(expected_versions),
                     "concurrentSkipCount": len(expected_versions),
+                    "legacyConflictQuarantined": True,
+                    "legacyIncidentPersisted": True,
+                    "ownerMutationRejected": True,
                 },
                 sort_keys=True,
             )

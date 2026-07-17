@@ -1,7 +1,11 @@
 from typing import Any, Dict
 
 
-class ArchiveItemOwnershipConflict(Exception):
+class ResourceOwnershipConflict(Exception):
+    """A resource ID is already bound to a different owner/vault."""
+
+
+class ArchiveItemOwnershipConflict(ResourceOwnershipConflict):
     """An archive ID is already bound to a different owner."""
 
 
@@ -11,6 +15,15 @@ class ArchiveItemNotFound(Exception):
 
 class ArchiveItemDeletionForbidden(Exception):
     """The archive item cannot be deleted in its current state."""
+
+
+class ResourceVersionConflict(Exception):
+    """A command expected an older or unknown canonical resource version."""
+
+    def __init__(self, *, expected_version: int, current_version: int):
+        self.expected_version = expected_version
+        self.current_version = current_version
+        super().__init__("resource version does not match expectedVersion")
 
 
 def is_sealed_time_letter(item: Dict[str, Any]) -> bool:

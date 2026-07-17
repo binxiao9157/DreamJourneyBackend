@@ -49,11 +49,20 @@ from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
     ArchiveItemOwnershipConflict,
+    ResourceOwnershipConflict,
+    ResourceVersionConflict,
     is_sealed_time_letter,
 )
 
 
 class PostgresStore:
+    _RESOURCE_AUTHORITY_TABLES = {
+        "archiveItem": "archive_items",
+        "digitalHumanSession": "digital_human_sessions",
+        "familyMember": "family_members",
+        "mailboxLetter": "mailbox_letters",
+        "voiceProfile": "voice_profiles",
+    }
     def __init__(
         self,
         dsn: str = None,
@@ -3369,6 +3378,33 @@ class PostgresStore:
         item = self._with_identity(payload, "memory", user_id)
         return self._insert_payload("memories", user_id, item)
 
+    def resolve_resource_authority(
+        self,
+        resource_type: str,
+        resource_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        table = self._RESOURCE_AUTHORITY_TABLES.get(resource_type)
+        if table is None:
+            raise ValueError(f"unsupported resource type: {resource_type}")
+        row = self._fetchone(
+            f"""
+            SELECT id, vault_id, owner_subject_id, row_version, authority_state
+            FROM {table}
+            WHERE id = %s
+            """,
+            (resource_id,),
+        )
+        if row is None:
+            return None
+        return {
+            "resourceType": resource_type,
+            "resourceId": str(row["id"]),
+            "vaultId": str(row["vault_id"]),
+            "ownerSubjectId": str(row["owner_subject_id"]),
+            "rowVersion": int(row["row_version"]),
+            "authorityState": str(row["authority_state"]),
+        }
+
     def list_memories(self, user_id: str) -> List[Dict[str, Any]]:
         return self._list_payloads("memories", user_id)
 
@@ -3415,6 +3451,7 @@ class PostgresStore:
         base_revision: int,
         mutation: Optional[Dict[str, Any]] = None,
         governance_summary: Optional[Dict[str, Any]] = None,
+        expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         operation_kind = KB_OPERATION_ARCHIVE_DELETE
         schema_version = 1
@@ -3473,7 +3510,7 @@ class PostgresStore:
 
                 cursor.execute(
                     """
-                    SELECT payload
+                    SELECT payload, row_version
                     FROM archive_items
                     WHERE user_id = %s AND id = %s
                     FOR UPDATE
@@ -3483,6 +3520,12 @@ class PostgresStore:
                 archive_row = cursor.fetchone()
                 if archive_row is None:
                     raise ArchiveItemNotFound("archive item not found")
+                current_resource_version = int(archive_row.get("row_version") or 1)
+                if expected_version is not None and expected_version != current_resource_version:
+                    raise ResourceVersionConflict(
+                        expected_version=expected_version,
+                        current_version=current_resource_version,
+                    )
                 item = deepcopy(archive_row["payload"])
                 if is_sealed_time_letter(item):
                     raise ArchiveItemDeletionForbidden("sealed timeLetter cannot be deleted")
@@ -3606,6 +3649,7 @@ class PostgresStore:
             item = deepcopy(row["payload"])
             metadata = deepcopy(item.get("metadata") if isinstance(item.get("metadata"), dict) else {})
             item["userId"] = row["user_id"]
+            item["ownerUserId"] = row["user_id"]
             item["deliveryStatus"] = "delivered"
             item["deliveryExecutionState"] = "delivered"
             item["deliveryScheduleState"] = "dispatched"
@@ -3619,6 +3663,7 @@ class PostgresStore:
             metadata["deliveryProviderState"] = "local_notification_and_in_app"
             metadata["deliveredAt"] = delivered_at_iso
             metadata["dispatchAttemptedAt"] = delivered_at_iso
+            metadata["ownerUserId"] = row["user_id"]
             item["metadata"] = metadata
             item["updatedAt"] = delivered_at_iso
             updated = self._fetchone(
@@ -3650,14 +3695,16 @@ class PostgresStore:
             INSERT INTO mailbox_letters (user_id, id, payload, created_at)
             VALUES (%s, %s, %s, NOW())
             ON CONFLICT (id) DO UPDATE SET
-                user_id = EXCLUDED.user_id,
                 payload = EXCLUDED.payload,
                 created_at = NOW()
+            WHERE mailbox_letters.user_id = EXCLUDED.user_id
             RETURNING payload
             """,
             (user_id, item["id"], item),
             commit=True,
         )
+        if row is None:
+            raise ResourceOwnershipConflict("resource id belongs to another owner")
         return deepcopy(row["payload"])
 
     def list_mailbox_letters(self, user_id: str) -> List[Dict[str, Any]]:
@@ -3732,14 +3779,16 @@ class PostgresStore:
             INSERT INTO echo_delayed_replies (user_id, id, payload, created_at)
             VALUES (%s, %s, %s, NOW())
             ON CONFLICT (id) DO UPDATE SET
-                user_id = EXCLUDED.user_id,
                 payload = EXCLUDED.payload,
                 created_at = NOW()
+            WHERE echo_delayed_replies.user_id = EXCLUDED.user_id
             RETURNING payload
             """,
             (user_id, item["id"], item),
             commit=True,
         )
+        if row is None:
+            raise ResourceOwnershipConflict("resource id belongs to another owner")
         return deepcopy(row["payload"])
 
     def list_echo_delayed_replies(self, user_id: str) -> List[Dict[str, Any]]:
@@ -3795,14 +3844,16 @@ class PostgresStore:
             INSERT INTO push_device_tokens (user_id, id, payload, updated_at)
             VALUES (%s, %s, %s, NOW())
             ON CONFLICT (id) DO UPDATE SET
-                user_id = EXCLUDED.user_id,
                 payload = EXCLUDED.payload,
                 updated_at = NOW()
+            WHERE push_device_tokens.user_id = EXCLUDED.user_id
             RETURNING payload
             """,
             (user_id, item["id"], item),
             commit=True,
         )
+        if row is None:
+            raise ResourceOwnershipConflict("resource id belongs to another owner")
         return deepcopy(row["payload"])
 
     def list_push_device_tokens(self, user_id: str) -> List[Dict[str, Any]]:
@@ -4317,14 +4368,16 @@ class PostgresStore:
             INSERT INTO {table} (user_id, id, payload, created_at)
             VALUES (%s, %s, %s, NOW())
             ON CONFLICT (id) DO UPDATE SET
-                user_id = EXCLUDED.user_id,
                 payload = EXCLUDED.payload,
                 created_at = NOW()
+            WHERE {table}.user_id = EXCLUDED.user_id
             RETURNING payload
             """,
             (user_id, item["id"], item),
             commit=True,
         )
+        if row is None:
+            raise ResourceOwnershipConflict("resource id belongs to another owner")
         return deepcopy(row["payload"])
 
     def _list_payloads(self, table: str, user_id: str) -> List[Dict[str, Any]]:
