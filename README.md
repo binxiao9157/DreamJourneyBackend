@@ -56,6 +56,7 @@
 - iOS 业务请求只使用用户 access token；不得把 `BACKEND_API_TOKEN` 打进客户端包。
 - `BACKEND_API_TOKEN` 仅代表服务端 machine principal，只能调用声明了对应 machine scope 的系统任务和运维路由，不能调用普通用户业务路由。
 - `AUTH_ROUTE_MODE=auto` 在 production 自动解析为 `enforce`、在非生产环境解析为 `shadow`；非法值会阻止启动，生产环境缺少 machine credential 也会阻止启动。
+- `CLIENT_COMPATIBILITY_MODE=observe|enforce` 独立于 feature mapper，对 route registry 中的 USER mutation 按 `RELEASE_POLICY_MIN_CLIENT_BUILD` 观测或返回稳定 `426 upgrade_required`；GET/HEAD 与 `/auth/logout` 不受写围栏影响。
 - `/auth/refresh` 每次成功同时轮换 access/refresh token，旧 refresh token 重放返回 `401`。
 - `/auth/logout` 撤销当前会话，账号清理时同时删除该用户的 auth sessions。
 - `AUTH_OWNERSHIP_MODE=shadow` 只记录 authenticated user 与 payload/path actor 的 `match/mismatch/unclaimed`，不会拦截现有请求。
@@ -64,6 +65,8 @@
 - `RELEASE_POLICY_COMMAND_MODE=enforce` 会在受控 command 缺少有效 captured decision、账号代际不匹配或服务端策略拒绝时返回 `403 release_policy_denied`。只能在 observe mismatch 与旧客户端覆盖完成后按 cohort 切换。
 - `DELEGATED_ACCESS_CONTRACT_API_ENABLED=false` 默认关闭 Family/Care/TimeLetter 的 Grant/Relationship 管理接口；安全合同和数据库迁移可以先部署，但在 G4 产品政策通过前不得在常驻服务进程中开启。部署 smoke 仅在独立进程内临时开启该合同。
 - ReleasePolicy rollout shadow 事件写入严格白名单的 append-only evidence sink；`EVIDENCE_ROLLOUT_RETENTION_DAYS` 只控制临时 rollout 观察保留期，legal hold 不受普通 TTL 或账号 purge 删除。
+
+部署环境可设置 `BACKEND_BASE_URL`、`COMPAT_EXPECTED_MODE`、`COMPAT_MIN_CLIENT_BUILD`、`COMPAT_USER_ACCESS_TOKEN`、`COMPAT_USER_ID` 和 `BACKEND_API_TOKEN` 后运行 `scripts/backend-client-compatibility-deployed-smoke.py`。脚本只执行读取和必然在字段校验前失败的 mutation probe，不切换或持久化生产策略；observe 与 enforce 应分别在对应配置的实例上执行。
 
 ## Runtime capability 五轴合同
 

@@ -22,6 +22,12 @@ from app.services.authorization_policy import (
     CrossAccountAuthorizationPolicy,
     owner_authority_claims,
 )
+from app.services.client_compatibility import (
+    ClientCompatibilityDecision,
+    ClientCompatibilityDecisionRecorder,
+    ClientCompatibilityPolicy,
+    resolve_client_compatibility_mode,
+)
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.delegated_access import (
@@ -193,6 +199,15 @@ AUTH_OWNERSHIP_MODE = (
 )
 ROUTE_AUTHENTICATION_POLICY = RouteAuthenticationPolicy()
 ROUTE_AUTHENTICATION_DECISION_RECORDER = RouteAuthenticationDecisionRecorder()
+CLIENT_COMPATIBILITY_MODE = resolve_client_compatibility_mode(
+    settings.client_compatibility_mode
+)
+CLIENT_COMPATIBILITY_POLICY = ClientCompatibilityPolicy(
+    registry=ROUTE_AUTHENTICATION_POLICY.registry,
+    minimum_client_build=settings.release_policy_min_client_build,
+    mode=CLIENT_COMPATIBILITY_MODE,
+)
+CLIENT_COMPATIBILITY_DECISION_RECORDER = ClientCompatibilityDecisionRecorder()
 RECOVERY_ACCESS_POLICY = RecoveryAccessPolicy(
     mode=settings.recovery_access_mode,
     authority_epoch=settings.authority_epoch,
@@ -556,6 +571,72 @@ def _set_auth_diagnostic_headers(
     return response
 
 
+def _request_client_build_header(request: Request) -> Optional[str]:
+    value = request.headers.get("x-dreamjourney-client-build")
+    return None if value is None else str(value)
+
+
+def _set_client_compatibility_diagnostic_headers(
+    response: Any,
+    decision: ClientCompatibilityDecision,
+) -> Any:
+    values = decision.header_values()
+    response.headers["X-DreamJourney-Client-Compatibility-Mode"] = values["mode"]
+    response.headers["X-DreamJourney-Client-Compatibility-Decision"] = values[
+        "decision"
+    ]
+    response.headers["X-DreamJourney-Client-Compatibility-Reason"] = values[
+        "reason"
+    ]
+    response.headers["X-DreamJourney-Minimum-Client-Build"] = values[
+        "minimumClientBuild"
+    ]
+    return response
+
+
+def _upgrade_required_response(
+    *,
+    reason: str,
+    minimum_client_build: int,
+    extra_detail: Optional[Dict[str, Any]] = None,
+) -> JSONResponse:
+    detail: Dict[str, Any] = {
+        "code": "upgrade_required",
+        "reason": reason,
+        "retryable": False,
+        "reauthenticationRequired": False,
+        "minimumClientBuild": max(1, int(minimum_client_build)),
+        "accessMode": "readOnly",
+    }
+    detail.update(extra_detail or {})
+    CLIENT_COMPATIBILITY_DECISION_RECORDER.record_upgrade_required_response()
+    return JSONResponse(
+        status_code=426,
+        content={"detail": detail},
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+def _legacy_identity_upgrade_response(request: Request) -> JSONResponse:
+    decision = CLIENT_COMPATIBILITY_POLICY.evaluate_legacy_identity_retirement(
+        method=request.method,
+        path=request.url.path,
+        client_build_header=_request_client_build_header(request),
+    )
+    CLIENT_COMPATIBILITY_DECISION_RECORDER.record(decision)
+    return _set_client_compatibility_diagnostic_headers(
+        _upgrade_required_response(
+            reason=decision.reason,
+            minimum_client_build=decision.minimum_client_build,
+        ),
+        decision,
+    )
+
+
 def _release_policy_int_header(request: Request, name: str) -> Optional[int]:
     value = str(request.headers.get(name) or "").strip()
     if not value:
@@ -604,26 +685,32 @@ def _set_release_policy_diagnostic_headers(response: Any, diagnostic: Dict[str, 
 
 def _release_policy_denied_response(error: ReleasePolicyFeatureAccessDenied) -> JSONResponse:
     client_upgrade_required = error.reason == "clientBelowMinimum"
-    response = JSONResponse(
-        status_code=426 if client_upgrade_required else 403,
-        content={
-            "detail": {
-                "code": (
-                    "client_upgrade_required"
-                    if client_upgrade_required
-                    else "release_policy_denied"
-                ),
+    if client_upgrade_required:
+        response = _upgrade_required_response(
+            reason=error.reason,
+            minimum_client_build=RELEASE_POLICY_SERVICE.min_client_build,
+            extra_detail={
                 "feature": error.feature,
-                "reason": error.reason,
                 "policyRevision": error.policy_revision,
-                "minimumClientBuild": RELEASE_POLICY_SERVICE.min_client_build,
-                "accessMode": RELEASE_POLICY_SERVICE.minimum_client_access_mode(
-                    error.feature
-                ),
-                "retryable": False,
-            }
-        },
-    )
+            },
+        )
+    else:
+        response = JSONResponse(
+            status_code=403,
+            content={
+                "detail": {
+                    "code": "release_policy_denied",
+                    "feature": error.feature,
+                    "reason": error.reason,
+                    "policyRevision": error.policy_revision,
+                    "minimumClientBuild": RELEASE_POLICY_SERVICE.min_client_build,
+                    "accessMode": RELEASE_POLICY_SERVICE.minimum_client_access_mode(
+                        error.feature
+                    ),
+                    "retryable": False,
+                }
+            },
+        )
     return _set_release_policy_diagnostic_headers(
         response,
         {
@@ -672,10 +759,16 @@ def _evaluate_release_policy_command(
             else RELEASE_POLICY_SERVICE.command_mode_for(feature)
         )
     )
-    client_build = _release_policy_int_header(
+    observed_client_build = _release_policy_int_header(
         request,
         "x-dreamjourney-client-build",
     ) or 1
+    read_only_request = request.method.upper() in {"GET", "HEAD"}
+    evaluation_client_build = (
+        max(RELEASE_POLICY_SERVICE.min_client_build, observed_client_build)
+        if read_only_request
+        else observed_client_build
+    )
     route_label = RELEASE_POLICY_COMMAND_GATE.route_label_for_request(
         request.method,
         request.url.path,
@@ -690,7 +783,7 @@ def _evaluate_release_policy_command(
                 request.headers.get("x-dreamjourney-policy-cohort")
                 or "closedPilotAdultSelf"
             ).strip(),
-            client_build=client_build,
+            client_build=evaluation_client_build,
             client_policy_version=str(
                 request.headers.get("x-dreamjourney-policy-version") or ""
             ).strip() or None,
@@ -712,13 +805,15 @@ def _evaluate_release_policy_command(
                 request.headers.get("x-dreamjourney-feature") or ""
             ).strip() or None,
             expected_account_generation=_release_policy_account_generation(principal),
-            require_client_capture=principal.kind != PrincipalKind.MACHINE,
+            require_client_capture=(
+                principal.kind != PrincipalKind.MACHINE and not read_only_request
+            ),
         )
         RELEASE_POLICY_COMMAND_GATE.revalidate_effect(captured)
         RELEASE_POLICY_DECISION_RECORDER.record(
             feature=feature,
             policy_version=captured.policy_version,
-            client_build=client_build,
+            client_build=observed_client_build,
             decision="allow",
             reason=captured.server_reason,
             route=route_label,
@@ -743,7 +838,7 @@ def _evaluate_release_policy_command(
         RELEASE_POLICY_DECISION_RECORDER.record(
             feature=error.feature,
             policy_version=RELEASE_POLICY_SERVICE.POLICY_VERSION,
-            client_build=client_build,
+            client_build=observed_client_build,
             decision=decision,
             reason=error.reason,
             route=route_label,
@@ -885,6 +980,10 @@ async def require_backend_api_token(request: Request, call_next):
         route_authentication_decision.reason == "policyEvaluationFailed"
         or route_authentication_decision.reason == "machinePrincipalRequired"
         or (
+            principal.kind == PrincipalKind.MACHINE
+            and route_authentication_decision.reason == "userPrincipalRequired"
+        )
+        or (
             principal.kind == PrincipalKind.ANONYMOUS
             and bool(configured_backend_token)
         )
@@ -930,6 +1029,66 @@ async def require_backend_api_token(request: Request, call_next):
                 "reason": compatibility_reason,
             },
             route_authentication_headers=route_authentication_headers,
+        )
+
+    if (
+        not AUTH_LEGACY_PHONE_LOGIN_ENABLED
+        and request.method.upper() == "POST"
+        and request.url.path in {"/auth/login", "/auth/restore"}
+    ):
+        legacy_decision = (
+            CLIENT_COMPATIBILITY_POLICY.evaluate_legacy_identity_retirement(
+                method=request.method,
+                path=request.url.path,
+                client_build_header=_request_client_build_header(request),
+            )
+        )
+        CLIENT_COMPATIBILITY_DECISION_RECORDER.record(legacy_decision)
+        response = _set_auth_diagnostic_headers(
+            _upgrade_required_response(
+                reason=legacy_decision.reason,
+                minimum_client_build=legacy_decision.minimum_client_build,
+            ),
+            principal_kind=principal.kind.value,
+            ownership_decision="notEvaluated",
+            authorization_headers={
+                "policy": "clientCompatibility",
+                "decision": "deny",
+                "reason": legacy_decision.reason,
+            },
+            route_authentication_headers=route_authentication_headers,
+        )
+        return _set_client_compatibility_diagnostic_headers(
+            response,
+            legacy_decision,
+        )
+
+    client_compatibility_decision = CLIENT_COMPATIBILITY_POLICY.evaluate(
+        method=request.method,
+        path=request.url.path,
+        client_build_header=_request_client_build_header(request),
+    )
+    CLIENT_COMPATIBILITY_DECISION_RECORDER.record(client_compatibility_decision)
+    if client_compatibility_decision.blocked:
+        response = _set_auth_diagnostic_headers(
+            _upgrade_required_response(
+                reason=client_compatibility_decision.reason,
+                minimum_client_build=(
+                    client_compatibility_decision.minimum_client_build
+                ),
+            ),
+            principal_kind=principal.kind.value,
+            ownership_decision="notEvaluated",
+            authorization_headers={
+                "policy": "clientCompatibility",
+                "decision": "deny",
+                "reason": client_compatibility_decision.reason,
+            },
+            route_authentication_headers=route_authentication_headers,
+        )
+        return _set_client_compatibility_diagnostic_headers(
+            response,
+            client_compatibility_decision,
         )
 
     ownership_decision = principal.kind.value
@@ -984,12 +1143,18 @@ async def require_backend_api_token(request: Request, call_next):
             )
         principal_bound = bool(policy_decision is not None and policy_decision.principal_bound)
         if should_block and (principal_bound or AUTH_OWNERSHIP_MODE == "enforce"):
-            return _set_auth_diagnostic_headers(
-                JSONResponse(status_code=403, content={"detail": "authorization denied"}),
-                principal_kind="user",
-                ownership_decision=ownership_decision,
-                authorization_headers=authorization_headers,
-                route_authentication_headers=route_authentication_headers,
+            return _set_client_compatibility_diagnostic_headers(
+                _set_auth_diagnostic_headers(
+                    JSONResponse(
+                        status_code=403,
+                        content={"detail": "authorization denied"},
+                    ),
+                    principal_kind="user",
+                    ownership_decision=ownership_decision,
+                    authorization_headers=authorization_headers,
+                    route_authentication_headers=route_authentication_headers,
+                ),
+                client_compatibility_decision,
             )
 
     if principal.kind != PrincipalKind.USER:
@@ -1013,22 +1178,28 @@ async def require_backend_api_token(request: Request, call_next):
         principal,
     )
     if release_policy_response is not None:
-        return _set_auth_diagnostic_headers(
-            release_policy_response,
-            principal_kind=principal.kind.value,
-            ownership_decision=ownership_decision,
-            authorization_headers=authorization_headers,
-            route_authentication_headers=route_authentication_headers,
+        return _set_client_compatibility_diagnostic_headers(
+            _set_auth_diagnostic_headers(
+                release_policy_response,
+                principal_kind=principal.kind.value,
+                ownership_decision=ownership_decision,
+                authorization_headers=authorization_headers,
+                route_authentication_headers=route_authentication_headers,
+            ),
+            client_compatibility_decision,
         )
 
     response = await call_next(request)
     response = _set_release_policy_diagnostic_headers(response, release_policy_diagnostic)
-    return _set_auth_diagnostic_headers(
-        response,
-        principal_kind=principal.kind.value,
-        ownership_decision=ownership_decision,
-        authorization_headers=authorization_headers,
-        route_authentication_headers=route_authentication_headers,
+    return _set_client_compatibility_diagnostic_headers(
+        _set_auth_diagnostic_headers(
+            response,
+            principal_kind=principal.kind.value,
+            ownership_decision=ownership_decision,
+            authorization_headers=authorization_headers,
+            route_authentication_headers=route_authentication_headers,
+        ),
+        client_compatibility_decision,
     )
 
 
@@ -1084,6 +1255,13 @@ async def database_request_unit_of_work(request: Request, call_next):
         )
     response.headers["X-DreamJourney-Correlation-Id"] = correlation_id
     return response
+
+
+@app.middleware("http")
+async def serve_head_as_read_only_get(request: Request, call_next):
+    if request.method.upper() == "HEAD":
+        request.scope["method"] = "GET"
+    return await call_next(request)
 
 
 @app.on_event("startup")
@@ -1166,6 +1344,14 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail="machine principal required")
     summary = RELEASE_POLICY_DECISION_RECORDER.summary()
     summary["routeAuthentication"] = ROUTE_AUTHENTICATION_DECISION_RECORDER.summary()
+    summary["clientCompatibility"] = (
+        CLIENT_COMPATIBILITY_DECISION_RECORDER.summary(
+            mode=CLIENT_COMPATIBILITY_POLICY.mode,
+            minimum_client_build=(
+                CLIENT_COMPATIBILITY_POLICY.minimum_client_build
+            ),
+        )
+    )
     unit_of_work_metrics = getattr(store, "uow_metrics", None)
     if callable(unit_of_work_metrics):
         summary["databaseUnitOfWork"] = unit_of_work_metrics()
@@ -1341,15 +1527,9 @@ def verify_identity_challenge(
 
 
 @app.post("/auth/login")
-def login(payload: Dict[str, Any]) -> Dict[str, Any]:
+def login(request: Request, payload: Dict[str, Any]) -> Any:
     if not AUTH_LEGACY_PHONE_LOGIN_ENABLED:
-        raise HTTPException(
-            status_code=410,
-            detail={
-                "code": "legacy_identity_flow_retired",
-                "message": "verified identity challenge is required",
-            },
-        )
+        return _legacy_identity_upgrade_response(request)
     phone = str(payload.get("phone") or "").strip()
     nickname = str(payload.get("nickname") or "").strip()
     password = _optional_password(payload, "password")
@@ -1525,15 +1705,9 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
 
 
 @app.post("/auth/restore")
-def restore_account(payload: Dict[str, Any]) -> Dict[str, Any]:
+def restore_account(request: Request, payload: Dict[str, Any]) -> Any:
     if not AUTH_LEGACY_PHONE_LOGIN_ENABLED:
-        raise HTTPException(
-            status_code=410,
-            detail={
-                "code": "legacy_identity_flow_retired",
-                "message": "verified identity challenge is required",
-            },
-        )
+        return _legacy_identity_upgrade_response(request)
     phone = str(payload.get("phone") or "").strip()
     nickname = str(payload.get("nickname") or "").strip()
     if not phone:

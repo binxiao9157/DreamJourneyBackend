@@ -102,11 +102,19 @@ def main():
         method="POST",
         payload={"phone": TEST_TARGET, "password": "not-a-real-password"},
     )
-    require(legacy_status == 410, f"legacy login expected 410, got {legacy_status}")
+    require(legacy_status == 426, f"legacy login expected 426, got {legacy_status}")
+    legacy_detail = legacy.get("detail") or {}
+    require(legacy_detail.get("code") == "upgrade_required", "legacy upgrade code drift")
     require(
-        (legacy.get("detail") or {}).get("code") == "legacy_identity_flow_retired",
-        "legacy login retirement contract drift",
+        legacy_detail.get("reason") == "legacyIdentityFlowRetired",
+        "legacy login retirement reason drift",
     )
+    require(legacy_detail.get("retryable") is False, "legacy retryability drift")
+    require(
+        legacy_detail.get("reauthenticationRequired") is False,
+        "legacy reauthentication contract drift",
+    )
+    require(legacy_detail.get("accessMode") == "readOnly", "legacy access mode drift")
     require(TEST_TARGET not in json.dumps(legacy), "legacy response exposed identity target")
 
     print("Backend identity challenge deployed smoke passed: production remains fail-closed")

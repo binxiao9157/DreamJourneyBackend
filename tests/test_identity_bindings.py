@@ -701,10 +701,15 @@ class IdentityBindingEndpointTests(unittest.TestCase):
             )
             restore = client.post("/auth/restore", json={"phone": TARGET})
 
-        self.assertEqual(login.status_code, 410)
-        self.assertEqual(restore.status_code, 410)
+        self.assertEqual(login.status_code, 426)
+        self.assertEqual(restore.status_code, 426)
         self.assertEqual(login.json(), restore.json())
-        self.assertEqual(login.json()["detail"]["code"], "legacy_identity_flow_retired")
+        detail = login.json()["detail"]
+        self.assertEqual(detail["code"], "upgrade_required")
+        self.assertEqual(detail["reason"], "legacyIdentityFlowRetired")
+        self.assertFalse(detail["retryable"])
+        self.assertFalse(detail["reauthenticationRequired"])
+        self.assertEqual(detail["accessMode"], "readOnly")
         self.assertEqual(store._users, {})
         self.assertNotIn(TARGET, login.text)
 

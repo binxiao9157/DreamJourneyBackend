@@ -111,6 +111,45 @@ class RouteAuthenticationAPITests(unittest.TestCase):
         self.assertEqual(business.status_code, 403)
         self.assertEqual(business.headers["x-dreamjourney-route-auth-reason"], "userPrincipalRequired")
 
+    def test_machine_principal_user_route_deny_is_terminal_in_every_route_mode(self):
+        for route_mode in ("shadow", "enforce"):
+            for headers in (
+                self.machine_headers(),
+                {"X-DreamJourney-Api-Token": "route-auth-machine-token"},
+            ):
+                with self.subTest(route_mode=route_mode, header=next(iter(headers))):
+                    main_module.AUTH_ROUTE_MODE = route_mode
+                    response = client.post(
+                        "/profile",
+                        headers=headers,
+                        json={"userId": "machine-crossing", "nickname": "blocked"},
+                    )
+
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(
+                        response.headers["x-dreamjourney-route-auth-reason"],
+                        "userPrincipalRequired",
+                    )
+                    self.assertEqual(
+                        response.headers["x-dreamjourney-route-auth-decision"],
+                        "deny",
+                    )
+
+    def test_anonymous_development_shadow_behavior_is_not_made_terminal(self):
+        main_module.AUTH_ROUTE_MODE = "shadow"
+        main_module.BACKEND_API_TOKEN = ""
+
+        response = client.post(
+            "/profile",
+            json={"userId": "anonymous-shadow-user", "nickname": "shadow"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.headers["x-dreamjourney-route-auth-decision"],
+            "observeDeny",
+        )
+
     def test_policy_exception_fails_closed_in_enforce_mode(self):
         with patch.object(
             main_module.ROUTE_AUTHENTICATION_POLICY,

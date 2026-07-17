@@ -67,6 +67,7 @@ class Settings:
     auth_refresh_ttl_seconds: int = 30 * 24 * 60 * 60
     auth_route_mode: str = "auto"
     auth_ownership_mode: str = "shadow"
+    client_compatibility_mode: str = "observe"
     recovery_access_mode: str = "normal"
     authority_epoch: str = "epoch-0"
     release_policy_command_mode: str = "observe"
@@ -181,6 +182,10 @@ class Settings:
                 "AUTH_OWNERSHIP_MODE",
                 cls.auth_ownership_mode,
             ) or cls.auth_ownership_mode,
+            client_compatibility_mode=_env(
+                "CLIENT_COMPATIBILITY_MODE",
+                cls.client_compatibility_mode,
+            ) or cls.client_compatibility_mode,
             recovery_access_mode=_env(
                 "RECOVERY_ACCESS_MODE",
                 cls.recovery_access_mode,

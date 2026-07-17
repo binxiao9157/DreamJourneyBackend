@@ -2966,7 +2966,11 @@ class BackendAuthTests(unittest.TestCase):
         self.assertEqual(health.status_code, 200)
         self.assertEqual(missing.status_code, 401)
         self.assertEqual(invalid.status_code, 401)
-        self.assertEqual(machine_only.status_code, 401)
+        self.assertEqual(machine_only.status_code, 403)
+        self.assertEqual(
+            machine_only.headers["x-dreamjourney-route-auth-reason"],
+            "userPrincipalRequired",
+        )
         self.assertEqual(login.status_code, 200)
         self.assertEqual(valid.status_code, 200)
 

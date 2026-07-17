@@ -508,9 +508,12 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 426)
         detail = response.json()["detail"]
-        self.assertEqual(detail["code"], "client_upgrade_required")
+        self.assertEqual(detail["code"], "upgrade_required")
+        self.assertEqual(detail["reason"], "clientBelowMinimum")
         self.assertEqual(detail["minimumClientBuild"], 10)
         self.assertEqual(detail["accessMode"], "readOnly")
+        self.assertFalse(detail["retryable"])
+        self.assertFalse(detail["reauthenticationRequired"])
 
 
 class ReleasePolicyDecisionRecorderTests(unittest.TestCase):
