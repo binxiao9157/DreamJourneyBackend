@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from app.core.config import Settings
 from app.services.privacy import AI_PROCESSABLE_SCOPES
 from app.services.runtime_config import RuntimeConfigService
+from app.services.safety_policy import SafetyDecision, SafetyPolicy
 
 
 class ContextPacketBuilder:
@@ -29,6 +30,18 @@ class ContextPacketBuilder:
         digital_human_id = self._text(payload.get("digitalHumanId"), user_id)
         lifecycle_mode = self._text(payload.get("lifecycleMode"), "sunlight")
         viewer_family_member_id = self._optional_text(payload.get("viewerFamilyMemberID"))
+        safety_decision = SafetyPolicy().evaluate(query)
+        if not safety_decision.effects.personaAllowed:
+            return self._neutral_safety_packet(
+                started=started,
+                user_id=user_id,
+                intent=intent,
+                persona_scope=persona_scope,
+                digital_human_id=digital_human_id,
+                lifecycle_mode=lifecycle_mode,
+                viewer_family_member_id=viewer_family_member_id,
+                safety_decision=safety_decision,
+            )
         family_viewer_active = self._family_viewer_active(user_id, viewer_family_member_id)
 
         all_archive_items = self.store.list_archive_items(user_id)
@@ -134,6 +147,8 @@ class ContextPacketBuilder:
             "intent": intent,
             "userId": user_id,
             "query": query,
+            "aiDisclosure": safety_decision.disclosure.model_dump(mode="json"),
+            "safetyPolicy": safety_decision.model_dump(mode="json"),
             "persona": {
                 "personaScope": persona_scope,
                 "digitalHumanId": digital_human_id,
@@ -202,6 +217,141 @@ class ContextPacketBuilder:
                 },
                 "latencyMs": latency_ms,
             },
+        }
+
+    def _neutral_safety_packet(
+        self,
+        *,
+        started: float,
+        user_id: str,
+        intent: str,
+        persona_scope: str,
+        digital_human_id: str,
+        lifecycle_mode: str,
+        viewer_family_member_id: Optional[str],
+        safety_decision: SafetyDecision,
+    ) -> Dict[str, Any]:
+        """Return a value-free packet before any memory or provider authority is read."""
+
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        family_viewer_active = False
+        privacy_scope = self._neutral_safety_privacy_scope()
+        fallbacks = ["neutral_safety_mode"]
+        generation_context = self._build_generation_context(
+            selected_context=[],
+            archive_candidates=[],
+            kb_graph={"facts": []},
+            care_snapshot=None,
+        )
+        trace = self._trace_summary(
+            archive_items=[],
+            kb_graph={"facts": []},
+            usable_voice_profile=None,
+            clone_ready=False,
+            digital_human_ready=False,
+            digital_human_provider_mode="blockedBySafetyPolicy",
+            privacy_scope=privacy_scope,
+            fallbacks=fallbacks,
+            latency_ms=latency_ms,
+            selected_context=[],
+            filtered_context=[],
+            ranking_trace=[],
+        )
+        return {
+            "schemaVersion": self.schema_version,
+            "contextVersion": "echo-context-v2",
+            "traceId": "ctx_" + uuid.uuid4().hex[:24],
+            "intent": intent,
+            "userId": user_id,
+            "query": "",
+            "containsRawExpression": False,
+            "aiDisclosure": safety_decision.disclosure.model_dump(mode="json"),
+            "safetyPolicy": safety_decision.model_dump(mode="json"),
+            "persona": {
+                "personaScope": "neutralSafety",
+                "digitalHumanId": None,
+                "lifecycleMode": "neutralSafety",
+                "viewerFamilyMemberID": None,
+                "authority": "deniedBySafetyPolicy",
+            },
+            "memory": {
+                "archiveItems": [],
+                "kbPeople": [],
+                "kbPlaces": [],
+                "kbEvents": [],
+                "kbFacts": [],
+            },
+            "selectedContext": [],
+            "filteredContext": [],
+            "rankingTrace": [],
+            "generationContext": generation_context,
+            "care": {
+                "latest": None,
+                "viewerFamilyMemberID": viewer_family_member_id,
+            },
+            "voice": {
+                "cloneReady": False,
+                "voiceProfileId": None,
+                "sampleStatus": "blockedBySafetyPolicy",
+                "qualityAcceptanceRequired": False,
+                "synthesisProviderReady": False,
+                "outputMode": "textOnly",
+            },
+            "digitalHuman": {
+                "sessionReady": False,
+                "provider": "none",
+                "providerMode": "blockedBySafetyPolicy",
+                "driveModes": [],
+                "fallbackMode": "neutralSafetyText",
+            },
+            "policy": {
+                "privacyMode": "standard",
+                "safetyMode": "neutralSafetyText",
+                "canUsePersona": False,
+                "canUseFamilyData": False,
+                "familyViewerActive": family_viewer_active,
+                "canUseVoiceClone": False,
+                "crossScopeArchiveIncluded": False,
+                "privacyScope": privacy_scope,
+            },
+            "trace": trace,
+            "fallbacks": fallbacks,
+            "debug": {
+                "sourceCounts": {
+                    "archiveItemsAvailable": 0,
+                    "archiveItemsIncluded": 0,
+                    "archiveItemsFiltered": 0,
+                    "rankingTraceItems": 0,
+                    "selectedContextTotal": 0,
+                    "selectedContextArchive": 0,
+                    "selectedContextKbFacts": 0,
+                    "selectedContextPersona": 0,
+                    "selectedContextCare": 0,
+                    "kbPeople": 0,
+                    "kbPlaces": 0,
+                    "kbEvents": 0,
+                    "kbFacts": 0,
+                    "voiceProfiles": 0,
+                    "careSnapshotAvailable": 0,
+                },
+                "latencyMs": latency_ms,
+            },
+        }
+
+    @staticmethod
+    def _neutral_safety_privacy_scope() -> Dict[str, Any]:
+        return {
+            "scope": "neutralSafety",
+            "scopeLabel": "neutralSafety",
+            "viewerUserId": None,
+            "ownerUserId": None,
+            "digitalHumanId": None,
+            "viewerFamilyMemberID": None,
+            "allowedArchiveScopes": [],
+            "allowedDigitalHumanIds": [],
+            "canUseFamilyData": False,
+            "familyViewerActive": False,
+            "crossScopeArchiveIncluded": False,
         }
 
     @staticmethod

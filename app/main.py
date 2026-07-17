@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Any, Dict, Optional, Tuple
 
+from pydantic import ValidationError
+
 try:
     from fastapi import FastAPI, HTTPException, Query, Request
     from fastapi.responses import JSONResponse
@@ -63,6 +65,14 @@ from app.services.archive_store import (
     ArchiveItemOwnershipConflict,
 )
 from app.services.runtime_config import RuntimeConfigService
+from app.services.safety_policy import (
+    HighRiskCapability,
+    SafetyPolicy,
+    SubjectEligibilityDecision,
+    SubjectEligibilityEvidence,
+    SubjectEligibilityReason,
+    evaluate_subject_eligibility,
+)
 from app.services.recovery_access import RecoveryAccessPolicy
 from app.services.readiness import ReadinessService, liveness_payload
 from app.services.release_policy import (
@@ -197,6 +207,7 @@ DIGITAL_HUMAN_SESSION_HEARTBEAT_INTERVAL_SECONDS = max(
     min(settings.tencent_digital_human_heartbeat_interval_seconds, DIGITAL_HUMAN_SESSION_TTL_SECONDS // 2),
 )
 DIGITAL_HUMAN_MAX_CONCURRENT_SESSIONS = max(1, settings.tencent_digital_human_max_concurrent_sessions)
+SAFETY_POLICY = SafetyPolicy()
 
 
 def _digital_human_session_lease_response(lease: Dict[str, Any], *, reused: bool) -> Dict[str, Any]:
@@ -212,6 +223,75 @@ def _digital_human_session_lease_response(lease: Dict[str, Any], *, reused: bool
         "releaseEndpoint": f"/digital-human/sessions/{session_id}/release",
         "contractVersion": DIGITAL_HUMAN_SESSION_LEASE_CONTRACT_VERSION,
     }
+
+
+def _subject_eligibility_hard_deny(
+    capability: HighRiskCapability,
+    reason: SubjectEligibilityReason,
+) -> None:
+    decision = SubjectEligibilityDecision(
+        capability=capability,
+        allowed=False,
+        decision="hardDeny",
+        reason=reason,
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": "subject_eligibility_hard_denied",
+            "message": "subject is not eligible for the requested high-risk capability",
+            "eligibilityDecision": decision.model_dump(mode="json"),
+            "retryable": False,
+        },
+    )
+
+
+def _evaluate_subject_eligibility_payload(
+    payload: Dict[str, Any],
+    capability: HighRiskCapability,
+    *,
+    required: bool = False,
+) -> Optional[SubjectEligibilityDecision]:
+    raw_evidence = payload.get("subjectEligibility")
+    if raw_evidence is None:
+        if required:
+            _subject_eligibility_hard_deny(
+                capability,
+                SubjectEligibilityReason.AGE_VERIFICATION_MISSING,
+            )
+        return None
+    if not isinstance(raw_evidence, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "subject_eligibility_evidence_invalid",
+                "message": "subjectEligibility must be an object",
+            },
+        )
+    try:
+        evidence = SubjectEligibilityEvidence.model_validate(
+            {**raw_evidence, "capability": capability.value}
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "subject_eligibility_evidence_invalid",
+                "message": "subject eligibility evidence is incomplete",
+            },
+        ) from exc
+    decision = evaluate_subject_eligibility(evidence)
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "subject_eligibility_hard_denied",
+                "message": "subject is not eligible for the requested high-risk capability",
+                "eligibilityDecision": decision.model_dump(mode="json"),
+                "retryable": False,
+            },
+        )
+    return decision
 
 
 def _request_bearer_token(request: Request) -> str:
@@ -441,10 +521,19 @@ def _evaluate_release_policy_command(
     )
     if feature is None:
         return None, {}
+    release_stage = RELEASE_POLICY_SERVICE.release_stage_for(feature)
+    system_default_closed_bypass = (
+        principal.get("kind") == "system"
+        and release_stage in {"M1", "M2", "M3", "M4"}
+    )
     mode = (
-        "enforce"
-        if RELEASE_POLICY_COMMAND_MODE == "enforce"
-        else RELEASE_POLICY_SERVICE.command_mode_for(feature)
+        "observe"
+        if system_default_closed_bypass
+        else (
+            "enforce"
+            if RELEASE_POLICY_COMMAND_MODE == "enforce"
+            else RELEASE_POLICY_SERVICE.command_mode_for(feature)
+        )
     )
     client_build = _release_policy_int_header(
         request,
@@ -857,6 +946,11 @@ def create_digital_human_session(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="userId is required")
     if not persona_id:
         raise HTTPException(status_code=400, detail="personaId is required")
+    _evaluate_subject_eligibility_payload(
+        payload,
+        HighRiskCapability.DIGITAL_HUMAN,
+        required=True,
+    )
     if lifecycle_mode not in DIGITAL_HUMAN_MODE_LABELS:
         raise HTTPException(status_code=400, detail=f"unsupported lifecycleMode: {lifecycle_mode}")
     if lifecycle_mode == "silent":
@@ -1378,6 +1472,21 @@ def _validate_voice_profile_for_synthesis(user_id: str, voice_profile_id: str) -
         raise HTTPException(status_code=409, detail="voice profile is disabled")
     if not bool(profile.get("realCloneProviderReady")):
         raise HTTPException(status_code=409, detail="voice profile provider is not ready")
+    persona_scope = str(profile.get("personaScope") or "personal").strip()
+    digital_human_id = str(profile.get("digitalHumanId") or user_id).strip()
+    if persona_scope != "personal" or digital_human_id != user_id:
+        _subject_eligibility_hard_deny(
+            HighRiskCapability.CLONED_VOICE,
+            SubjectEligibilityReason.FAMILY_SUBJECT,
+        )
+    stored_eligibility = profile.get("subjectEligibilityDecision")
+    if isinstance(stored_eligibility, dict) and stored_eligibility.get("allowed") is not True:
+        reason_value = str(stored_eligibility.get("reason") or "")
+        try:
+            reason = SubjectEligibilityReason(reason_value)
+        except ValueError:
+            reason = SubjectEligibilityReason.SUBJECT_MISMATCH
+        _subject_eligibility_hard_deny(HighRiskCapability.CLONED_VOICE, reason)
     if bool(profile.get("qualityAcceptanceRequired", True)):
         raise HTTPException(status_code=409, detail="voice profile quality acceptance is required")
     provider_speaker_id = _voice_clone_provider_speaker_id(profile)
@@ -1405,7 +1514,11 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if persona_scope not in {"personal", "family"}:
         raise HTTPException(status_code=400, detail="unsupported personaScope")
     digital_human_id = str(payload.get("digitalHumanId") or user_id).strip() or user_id
-
+    if persona_scope != "personal" or digital_human_id != user_id:
+        _subject_eligibility_hard_deny(
+            HighRiskCapability.CLONED_VOICE,
+            SubjectEligibilityReason.FAMILY_SUBJECT,
+        )
     try:
         sample_count = int(payload.get("sampleCount") or 0)
     except (TypeError, ValueError):
@@ -1417,6 +1530,11 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     provider_mode = provider.provider_mode
     provider_result: Dict[str, Any] = {}
     audio_base64 = str(payload.get("audioBase64") or "").strip()
+    eligibility_decision = _evaluate_subject_eligibility_payload(
+        payload,
+        HighRiskCapability.CLONED_VOICE,
+        required=provider.is_configured and bool(audio_base64),
+    )
     existing_profile = store.get_voice_profile(user_id, voice_profile_id) or {}
     provider_speaker_id = _voice_clone_provider_speaker_id(existing_profile)
     provider_binding_mode = str(existing_profile.get("providerBindingMode") or "unassigned")
@@ -1503,6 +1621,8 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             "scope": privacy_metadata.get("scope"),
         },
     }
+    if eligibility_decision is not None:
+        profile["subjectEligibilityDecision"] = eligibility_decision.model_dump(mode="json")
     if provider_speaker_id:
         profile["providerSpeakerId"] = provider_speaker_id
     provider_request_id = str(provider_result.get("providerRequestId") or "").strip()
@@ -1718,6 +1838,11 @@ def accept_voice_profile_quality(user_id: str, voice_profile_id: str) -> Dict[st
 def synthesize_voice_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id = _required_text(payload, "userId", 96)
     voice_profile_id = _required_text(payload, "voiceProfileId", 96)
+    _evaluate_subject_eligibility_payload(
+        payload,
+        HighRiskCapability.CLONED_VOICE,
+        required=True,
+    )
     profile = _validate_voice_profile_for_synthesis(user_id, voice_profile_id)
     provider_speaker_id = _voice_clone_provider_speaker_id(profile)
     text = _required_text(payload, "text", 4000)
@@ -2690,6 +2815,31 @@ def _sanitize_echo_delayed_reply_payload(payload: Dict[str, Any]) -> Dict[str, A
     }
 
 
+def _enforce_echo_delayed_reply_safety(payload: Dict[str, Any]) -> None:
+    raw_transcript = str(payload.get("rawTranscript") or "").strip()
+    if not raw_transcript:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "echo_delayed_reply_safety_input_required",
+                "message": "rawTranscript is required for transient safety classification",
+                "persisted": False,
+            },
+        )
+    decision = SAFETY_POLICY.evaluate(raw_transcript)
+    if not decision.effects.delayedReplyAllowed:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "echo_delayed_reply_blocked_by_safety_policy",
+                "message": "high-risk expression must use the immediate neutral safety path",
+                "safetyDecision": decision.model_dump(mode="json"),
+                "retryable": False,
+                "persisted": False,
+            },
+        )
+
+
 def _parse_iso_datetime(value: str, field_name: str) -> None:
     try:
         datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -2721,6 +2871,7 @@ def register_push_device_token(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.post("/echo/delayed-replies")
 def schedule_echo_delayed_reply(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _enforce_echo_delayed_reply_safety(payload)
     item = _sanitize_echo_delayed_reply_payload(payload)
     saved = store.add_echo_delayed_reply(item["userId"], item)
     return {"status": "scheduled", "item": saved}

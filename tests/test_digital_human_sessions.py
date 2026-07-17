@@ -7,18 +7,43 @@ import app.main as main_module
 from app.core.config import settings
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
+from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 
 
 client = TestClient(app)
 
 
+def verified_digital_human_eligibility() -> dict:
+    return {
+        "capability": "digitalHuman",
+        "subjectKind": "self",
+        "ageStatus": "adult",
+        "livingStatus": "living",
+        "ageVerified": True,
+        "livenessVerified": True,
+        "subjectMatchesActor": True,
+        "consentVerified": True,
+        "consentPurpose": "digitalHuman",
+    }
+
+
 class DigitalHumanSessionAPITests(unittest.TestCase):
     def setUp(self):
         self.previous_store = main_module.store
+        self.previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
+        self.previous_release_policy_gate = main_module.RELEASE_POLICY_COMMAND_GATE
         main_module.store = InMemoryStore()
+        service = ReleasePolicyService(
+            shadow_mode=True,
+            enforce_default_closed_stages=False,
+        )
+        main_module.RELEASE_POLICY_SERVICE = service
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(service)
 
     def tearDown(self):
         main_module.store = self.previous_store
+        main_module.RELEASE_POLICY_SERVICE = self.previous_release_policy_service
+        main_module.RELEASE_POLICY_COMMAND_GATE = self.previous_release_policy_gate
 
     def test_create_digital_human_session_is_blocked_without_scoped_broker(self):
         response = client.post(
@@ -29,6 +54,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
                 "scene": "echo",
                 "deviceId": "ios-simulator",
                 "lifecycleMode": "star",
+                "subjectEligibility": verified_digital_human_eligibility(),
             },
         )
 
@@ -62,6 +88,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
             "scene": "echo",
             "deviceId": "ios-device-1",
             "lifecycleMode": "star",
+            "subjectEligibility": verified_digital_human_eligibility(),
         }
         first = client.post("/digital-human/sessions", json=payload)
         repeated = client.post("/digital-human/sessions", json=payload)
@@ -134,6 +161,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
                 "scene": "echo",
                 "deviceId": "ios-device-2",
                 "lifecycleMode": "star",
+                "subjectEligibility": verified_digital_human_eligibility(),
             },
         )
         self.assertEqual(next_device.status_code, 503)
@@ -147,6 +175,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
                 "scene": "echo",
                 "deviceId": "ios-simulator",
                 "lifecycleMode": "silent",
+                "subjectEligibility": verified_digital_human_eligibility(),
             },
         )
 
@@ -237,6 +266,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
                     "scene": "echo",
                     "deviceId": "ios-simulator",
                     "lifecycleMode": "sunlight",
+                    "subjectEligibility": verified_digital_human_eligibility(),
                 },
             )
 

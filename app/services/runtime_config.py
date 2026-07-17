@@ -6,6 +6,7 @@ from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.route_ownership import RouteOwnershipRegistry
 from app.services.release_policy import ReleasePolicyService, parse_release_policy_feature_set
 from app.services.recovery_access import RecoveryAccessPolicy
+from app.services.safety_policy import SafetyPolicy
 from app.services.tokens import TokenService
 from app.services.tts import VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice_clone_speaker_ids
@@ -45,6 +46,7 @@ class RuntimeConfigService:
             mode=self.settings.recovery_access_mode,
             authority_epoch=self.settings.authority_epoch,
         )
+        safety_policy = SafetyPolicy().evaluate("")
         capability_snapshots = self._capability_snapshots(
             archive_image_analysis=archive_image_analysis,
             voice_clone_provider=voice_clone_provider,
@@ -126,6 +128,15 @@ class RuntimeConfigService:
             },
             "releasePolicy": release_policy.public_descriptor(),
             "recovery": recovery_access.public_descriptor(),
+            "safety": {
+                "policyVersion": SafetyPolicy.POLICY_VERSION,
+                "aiDisclosure": safety_policy.disclosure.model_dump(mode="json"),
+                "neutralSafetyMode": "textOnly",
+                "personaOnCrisis": "deny",
+                "delayedReplyOnCrisis": "deny",
+                "providerEffectsOnCrisis": "deny",
+                "contractVersion": 1,
+            },
             "archive": {
                 "uploadIntentEndpoint": "/archive/media/upload-intent",
                 "storageProvider": "mockObjectStorage",

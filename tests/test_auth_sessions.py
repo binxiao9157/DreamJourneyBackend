@@ -7,6 +7,7 @@ import app.main as main_module
 from app.main import app
 from app.services.auth_sessions import AuthSessionService, auth_token_hash
 from app.services.in_memory_store import InMemoryStore
+from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 
 
 client = TestClient(app)
@@ -17,14 +18,24 @@ class AuthSessionAPITests(unittest.TestCase):
         self.previous_store = main_module.store
         self.previous_backend_token = main_module.BACKEND_API_TOKEN
         self.previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
+        self.previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
+        self.previous_release_policy_gate = main_module.RELEASE_POLICY_COMMAND_GATE
         main_module.store = InMemoryStore()
         main_module.BACKEND_API_TOKEN = ""
         main_module.AUTH_OWNERSHIP_MODE = "shadow"
+        service = ReleasePolicyService(
+            shadow_mode=True,
+            enforce_default_closed_stages=False,
+        )
+        main_module.RELEASE_POLICY_SERVICE = service
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(service)
 
     def tearDown(self):
         main_module.store = self.previous_store
         main_module.BACKEND_API_TOKEN = self.previous_backend_token
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
+        main_module.RELEASE_POLICY_SERVICE = self.previous_release_policy_service
+        main_module.RELEASE_POLICY_COMMAND_GATE = self.previous_release_policy_gate
 
     def login(self, phone: str = "13800138000"):
         response = client.post(

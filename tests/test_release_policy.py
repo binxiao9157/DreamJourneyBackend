@@ -99,6 +99,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
 
         decisions = {item.feature: item for item in snapshot.features}
         self.assertTrue(decisions["echoTextInput"].releaseVisible)
+        self.assertEqual(decisions["echoTextInput"].releaseStage, "M0")
         self.assertTrue(decisions["profileSettings"].releaseVisible)
         self.assertTrue(decisions["accountDeletion"].releaseVisible)
         for feature in [
@@ -112,6 +113,39 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         ]:
             self.assertFalse(decisions[feature].releaseVisible, feature)
             self.assertEqual(decisions[feature].reason, "notApprovedForClosedPilot")
+
+        self.assertEqual(decisions["voiceCloneShell"].releaseStage, "M1")
+        self.assertEqual(decisions["digitalHumanLivePanel"].releaseStage, "M2")
+        self.assertEqual(decisions["careDashboard"].releaseStage, "M3")
+        self.assertEqual(decisions["digitalInheritance"].releaseStage, "M4")
+
+    def test_m1_through_m4_are_explicit_default_closed_stages_during_shadow_rollout(self):
+        service = ReleasePolicyService(shadow_mode=True)
+
+        self.assertEqual(service.command_mode_for("echoTextInput"), "observe")
+        for feature in [
+            "voiceCloneShell",
+            "digitalHumanLivePanel",
+            "careDashboard",
+            "digitalInheritance",
+        ]:
+            decision = service.build_snapshot(
+                audience="owner",
+                cohort="closedPilotAdultSelf",
+                client_build=1,
+                requested_feature=feature,
+            ).features[0]
+            self.assertFalse(decision.enabled, feature)
+            self.assertFalse(decision.releaseVisible, feature)
+            self.assertIn(decision.releaseStage, {"M1", "M2", "M3", "M4"})
+            self.assertEqual(service.command_mode_for(feature), "enforce")
+        self.assertEqual(
+            service.public_descriptor()["defaultClosedStages"],
+            ["M1", "M2", "M3", "M4"],
+        )
+        self.assertTrue(
+            service.public_descriptor()["defaultClosedStageEffectsEnforced"]
+        )
 
     def test_unknown_feature_is_returned_as_explicit_fail_closed_decision(self):
         snapshot = ReleasePolicyService().build_snapshot(
@@ -227,6 +261,20 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"]["code"], "release_policy_version_downgrade")
+
+    def test_default_closed_voice_effect_is_enforced_while_global_mode_observes(self):
+        response = self.client.post(
+            "/voice/realtime-token",
+            json={"userId": "default-closed-user"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"]["code"], "release_policy_denied")
+        self.assertEqual(response.json()["detail"]["feature"], "voiceCloneShell")
+        self.assertEqual(
+            response.headers["X-DreamJourney-Release-Policy-Mode"],
+            "enforce",
+        )
 
     def test_runtime_contract_observation_is_system_only_and_value_free(self):
         main_module.BACKEND_API_TOKEN = "release-policy-system-token"

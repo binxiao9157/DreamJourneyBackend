@@ -104,6 +104,17 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
                 "scene": "echo",
                 "deviceId": "ios-boundary",
                 "lifecycleMode": "sunlight",
+                "subjectEligibility": {
+                    "capability": "digitalHuman",
+                    "subjectKind": "self",
+                    "ageStatus": "adult",
+                    "livingStatus": "living",
+                    "ageVerified": True,
+                    "livenessVerified": True,
+                    "subjectMatchesActor": True,
+                    "consentVerified": True,
+                    "consentPurpose": "digitalHuman",
+                },
             },
         )
 

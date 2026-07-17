@@ -28,6 +28,7 @@ from app.services.knowledge_store import (
 from app.services.postgres_store import PostgresStore
 from app.services.privacy import filter_syncable_graph, sanitize_care_snapshot_payload
 from app.services.runtime_config import RuntimeConfigService
+from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 from app.services.store_factory import make_store
 from app.services.tokens import TokenService
 from app.services.tts import VolcTTSProxy, VolcVoiceCloneTTSProxy
@@ -35,6 +36,40 @@ from app.services.user_identity import stable_user_id
 from app.services.voice_clone import VolcEngineVoiceCloneV3Provider, VoiceCloneProviderFactory
 from app.services.amap import AMapDistrictProxy
 from app.services.deepseek import DeepSeekImageAnalysisProxy, DeepSeekKnowledgeExtractionProxy
+
+
+def verified_self_eligibility(capability: str = "clonedVoice") -> dict:
+    return {
+        "capability": capability,
+        "subjectKind": "self",
+        "ageStatus": "adult",
+        "livingStatus": "living",
+        "ageVerified": True,
+        "livenessVerified": True,
+        "subjectMatchesActor": True,
+        "consentVerified": True,
+        "consentPurpose": capability,
+    }
+
+
+class HiddenStageContractTestCase(unittest.TestCase):
+    """Isolate provider/hidden-domain contracts from the public release gate."""
+
+    def setUp(self):
+        super().setUp()
+        self._previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
+        self._previous_release_policy_gate = main_module.RELEASE_POLICY_COMMAND_GATE
+        service = ReleasePolicyService(
+            shadow_mode=True,
+            enforce_default_closed_stages=False,
+        )
+        main_module.RELEASE_POLICY_SERVICE = service
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(service)
+
+    def tearDown(self):
+        main_module.RELEASE_POLICY_SERVICE = self._previous_release_policy_service
+        main_module.RELEASE_POLICY_COMMAND_GATE = self._previous_release_policy_gate
+        super().tearDown()
 
 
 class PrivacyFilteringTests(unittest.TestCase):
@@ -327,7 +362,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(capability["fallbackMode"], "retryableFailure")
 
 
-class TokenAndProxyTests(unittest.TestCase):
+class TokenAndProxyTests(HiddenStageContractTestCase):
     def test_realtime_token_blocks_static_credentials_without_fake_expiry(self):
         settings = Settings(
             volcengine_app_id="test-app-id",
@@ -536,6 +571,7 @@ class TokenAndProxyTests(unittest.TestCase):
                     "sampleRate": 24000,
                     "speechRate": -10,
                     "loudnessRate": 10,
+                    "subjectEligibility": verified_self_eligibility(),
                 },
             )
 
@@ -604,6 +640,7 @@ class TokenAndProxyTests(unittest.TestCase):
                     "format": "mp3",
                     "sampleRate": 24000,
                     "outputMode": "tencentAudioDrive",
+                    "subjectEligibility": verified_self_eligibility(),
                 },
             )
 
@@ -2503,7 +2540,7 @@ class AccountDeletionAPITests(unittest.TestCase):
         self.assertEqual(restore.json()["detail"], "account restore deadline expired")
 
 
-class CareSnapshotAPITests(unittest.TestCase):
+class CareSnapshotAPITests(HiddenStageContractTestCase):
     def _care_snapshot(
         self,
         *,
@@ -2893,6 +2930,7 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
                     "deliverAt": "2026-06-18T12:05:00Z",
                     "minutes": 7,
                     "trigger": "tenRoundBaseline",
+                    "rawTranscript": "DEVICE_TOKEN_DELAYED_REPLY_SENTINEL should not persist",
                     "deviceTokenId": registered.json()["item"]["deviceTokenId"],
                 },
             )
@@ -2992,6 +3030,7 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
                     "deliverAt": "2026-06-18T12:20:00Z",
                     "minutes": 7,
                     "trigger": "contentSignal",
+                    "rawTranscript": "FUTURE_DELAYED_REPLY_SENTINEL should not persist",
                 },
             )
             dispatched = client.post(
@@ -3062,7 +3101,7 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
         self.assertEqual(invalid_trigger.status_code, 400)
 
 
-class VoiceCloneProfileAPITests(unittest.TestCase):
+class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
     def test_runtime_config_exposes_volcengine_voice_clone_v3_capability(self):
         configured = Settings(
             volcengine_voice_clone_api_key="test-voice-clone-key",
@@ -3237,6 +3276,7 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
                         "audioBase64": "RAW_SAMPLE_BASE64",
                         "audioFormat": "wav",
                         "privacyMetadata": {"scope": "generationAllowed"},
+                        "subjectEligibility": verified_self_eligibility(),
                     },
                 )
                 for index in range(1, 5)
@@ -3294,9 +3334,33 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
 
         with patch("app.main.store", profile_store), patch("app.main.VoiceCloneTTSProviderFactory") as factory:
             factory.return_value.make.return_value = FakeVoiceCloneTTSProvider()
-            ready = client.post("/voice/synthesis", json={"userId": "owner", "voiceProfileId": "vp_ready", "text": "你好"})
-            cross_user = client.post("/voice/synthesis", json={"userId": "other", "voiceProfileId": "vp_ready", "text": "你好"})
-            pending = client.post("/voice/synthesis", json={"userId": "owner", "voiceProfileId": "vp_pending", "text": "你好"})
+            ready = client.post(
+                "/voice/synthesis",
+                json={
+                    "userId": "owner",
+                    "voiceProfileId": "vp_ready",
+                    "text": "你好",
+                    "subjectEligibility": verified_self_eligibility(),
+                },
+            )
+            cross_user = client.post(
+                "/voice/synthesis",
+                json={
+                    "userId": "other",
+                    "voiceProfileId": "vp_ready",
+                    "text": "你好",
+                    "subjectEligibility": verified_self_eligibility(),
+                },
+            )
+            pending = client.post(
+                "/voice/synthesis",
+                json={
+                    "userId": "owner",
+                    "voiceProfileId": "vp_pending",
+                    "text": "你好",
+                    "subjectEligibility": verified_self_eligibility(),
+                },
+            )
 
         self.assertEqual(ready.status_code, 200)
         self.assertEqual(ready.json()["voiceProfileId"], "vp_ready")
@@ -3510,11 +3574,12 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
                     "sampleStatus": "pending",
                     "sampleCount": 1,
                     "authorizationConfirmed": True,
-                    "personaScope": "family",
-                    "digitalHumanId": "family_default",
+                    "personaScope": "personal",
+                    "digitalHumanId": user_id,
                     "audioBase64": "RAW_SAMPLE_BASE64",
                     "audioFormat": "wav",
                     "privacyMetadata": {"scope": "generationAllowed"},
+                    "subjectEligibility": verified_self_eligibility(),
                 },
             )
 
@@ -3558,6 +3623,7 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
                     "audioBase64": "RAW_SAMPLE_BASE64",
                     "audioFormat": "wav",
                     "privacyMetadata": {"scope": "generationAllowed"},
+                    "subjectEligibility": verified_self_eligibility(),
                 },
             )
 
@@ -3602,6 +3668,7 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
                     "audioBase64": "RAW_SAMPLE_BASE64",
                     "audioFormat": "wav",
                     "privacyMetadata": {"scope": "generationAllowed"},
+                    "subjectEligibility": verified_self_eligibility(),
                 },
             )
 
@@ -3638,9 +3705,9 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
                 "sampleCount": 2,
                 "authorizationConfirmed": True,
                 "authorizationVersion": "voice-clone-consent-v1",
-                "authorizationText": "用户确认提交声音样本，仅用于家庭数字人声音壳层合同。",
-                "personaScope": "family",
-                "digitalHumanId": "family_default",
+                "authorizationText": "用户确认提交本人声音样本，仅用于本人私有声音能力。",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
                 "rawSampleURL": "file:///private/var/mobile/voice/raw.m4a",
                 "sampleLocalPath": "/private/var/mobile/voice/raw.m4a",
                 "audioBase64": "RAW_SAMPLE_BASE64",
@@ -3662,8 +3729,8 @@ class VoiceCloneProfileAPITests(unittest.TestCase):
         self.assertEqual(profile["sampleCount"], 2)
         self.assertTrue(profile["authorizationConfirmed"])
         self.assertEqual(profile["authorizationVersion"], "voice-clone-consent-v1")
-        self.assertEqual(profile["personaScope"], "family")
-        self.assertEqual(profile["digitalHumanId"], "family_default")
+        self.assertEqual(profile["personaScope"], "personal")
+        self.assertEqual(profile["digitalHumanId"], user_id)
         self.assertFalse(profile["isEnabled"])
         self.assertFalse(profile["realCloneProviderReady"])
         self.assertEqual(profile["providerMode"], "mockContract")

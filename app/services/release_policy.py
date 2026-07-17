@@ -14,6 +14,7 @@ from app.observability.events import map_release_policy_operation_event
 ReleaseAudience = Literal["owner", "family", "visitor", "qa"]
 Gate = Literal["G0", "G1", "G2", "G3", "G4"]
 ReleasePolicyCommandMode = Literal["observe", "enforce"]
+ReleaseStage = Literal["M0", "M1", "M2", "M3", "M4", "unknown"]
 
 
 def parse_release_policy_feature_set(value: Optional[str]) -> Set[str]:
@@ -294,6 +295,7 @@ class ReleasePolicyFeatureDecision(BaseModel):
     audience: ReleaseAudience
     cohort: str
     requiredGates: tuple[Gate, ...]
+    releaseStage: ReleaseStage
     reason: str
 
 
@@ -355,6 +357,21 @@ class ReleasePolicyService:
         "careDoctorContact": ("G0", "G1", "G2", "G4"),
         "voiceCloneShell": ("G0", "G1", "G2", "G3", "G4"),
         "digitalHumanLivePanel": ("G0", "G1", "G2", "G3", "G4"),
+        "digitalInheritance": ("G0", "G1", "G2", "G3", "G4"),
+        "knowledgeLicensing": ("G0", "G1", "G2", "G3", "G4"),
+        "beneficiarySettlement": ("G0", "G1", "G2", "G3", "G4"),
+    }
+    _FEATURE_STAGES: dict[str, ReleaseStage] = {
+        **{feature: "M0" for feature in _FEATURE_GATES},
+        "voiceCloneShell": "M1",
+        "personaSettings": "M2",
+        "digitalHumanLivePanel": "M2",
+        "familySpace": "M2",
+        "careDashboard": "M3",
+        "careDoctorContact": "M3",
+        "digitalInheritance": "M4",
+        "knowledgeLicensing": "M4",
+        "beneficiarySettlement": "M4",
     }
     _CLOSED_PILOT_OWNER_VISIBLE = {
         "echoTextInput",
@@ -373,6 +390,7 @@ class ReleasePolicyService:
         emergency_disabled_features: Optional[Iterable[str]] = None,
         enforced_features: Optional[Iterable[str]] = None,
         shadow_mode: bool = True,
+        enforce_default_closed_stages: bool = True,
     ) -> None:
         self.policy_revision = max(1, policy_revision)
         self.min_client_build = max(1, min_client_build)
@@ -389,13 +407,23 @@ class ReleasePolicyService:
                 + ", ".join(sorted(unknown_rollout_features))
             )
         self.shadow_mode = shadow_mode
+        self.enforce_default_closed_stages = enforce_default_closed_stages
 
     def command_mode_for(self, feature: str) -> ReleasePolicyCommandMode:
         if feature in self.emergency_disabled_features:
             return "enforce"
+        if (
+            self.enforce_default_closed_stages
+            and self.release_stage_for(feature) in {"M1", "M2", "M3", "M4"}
+        ):
+            return "enforce"
         if not self.shadow_mode or feature in self.enforced_features:
             return "enforce"
         return "observe"
+
+    @classmethod
+    def release_stage_for(cls, feature: str) -> ReleaseStage:
+        return cls._FEATURE_STAGES.get(feature, "unknown")
 
     def minimum_client_access_mode(self, feature: str) -> str:
         return "readOnly" if feature in self._CLOSED_PILOT_OWNER_VISIBLE else "deny"
@@ -416,6 +444,8 @@ class ReleasePolicyService:
             "runtimeContractVersion": ReleasePolicyDecisionRecorder.RUNTIME_CONTRACT_VERSION,
             "canaryFeatures": sorted(self.enforced_features),
             "killSwitchFeatures": sorted(self.emergency_disabled_features),
+            "defaultClosedStages": ["M1", "M2", "M3", "M4"],
+            "defaultClosedStageEffectsEnforced": self.enforce_default_closed_stages,
         }
 
     def _descriptor_command_mode(self) -> str:
@@ -497,6 +527,7 @@ class ReleasePolicyService:
                 audience=audience,
                 cohort=cohort,
                 requiredGates=("G0",),
+                releaseStage="unknown",
                 reason="unknownFeature",
             )
         if feature in self.emergency_disabled_features:
@@ -522,6 +553,7 @@ class ReleasePolicyService:
             audience=audience,
             cohort=cohort,
             requiredGates=required_gates,
+            releaseStage=self.release_stage_for(feature),
             reason=reason,
         )
 
