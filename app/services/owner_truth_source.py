@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from typing import Any, ContextManager, Mapping, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
+from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget, EffectReceiptSummary
 from app.domain.owner_truth.source_commands import (
     CreateTextSourceCommand,
     OwnerTruthCommandContext,
@@ -23,6 +24,24 @@ class OwnerTruthSourceCommandStore(Protocol):
         ...
 
 
+class AsyncEffectReceiptWriter(Protocol):
+    def accept(self, intent: AsyncEffectIntent) -> EffectReceiptSummary:
+        ...
+
+
+class OwnerTruthSourceEffectCommandStore(OwnerTruthSourceCommandStore, Protocol):
+    def request_unit_of_work(
+        self,
+        *,
+        correlation_id: str,
+        command_id: str,
+    ) -> ContextManager[Any]:
+        ...
+
+    def effect_kernel_repository(self) -> AsyncEffectReceiptWriter:
+        ...
+
+
 class OwnerTruthSourceCommandService:
     def __init__(self, store: OwnerTruthSourceCommandStore):
         self._store = store
@@ -34,6 +53,69 @@ class OwnerTruthSourceCommandService:
         context: OwnerTruthCommandContext,
     ) -> OwnerTruthSourceCommandResult:
         return self._store.create_owner_truth_source(command.write_record(context=context))
+
+
+@dataclass(frozen=True)
+class OwnerTruthSourceAsyncEffectResult:
+    """A CreateSource receipt and its durable, still-disabled effect request."""
+
+    source: OwnerTruthSourceCommandResult
+    effect: EffectReceiptSummary
+
+    def public_receipt(self) -> dict[str, Any]:
+        return {
+            "effect": self.effect.public_contract(),
+            "source": self.source.public_receipt(),
+        }
+
+
+def build_source_created_effect_intent(
+    *,
+    record: OwnerTruthSourceWriteRecord,
+    source: OwnerTruthSourceCommandResult,
+) -> AsyncEffectIntent:
+    """Create the value-free extraction request owned by a committed Source."""
+    return AsyncEffectIntent(
+        operation_type="ownerTruth.source.created",
+        target=AsyncEffectTarget(
+            owner_subject_id=record.owner_subject_id,
+            vault_id=record.vault_id,
+            resource_type="source",
+            resource_id=source.source_id,
+            resource_version=source.source_version,
+            purpose="candidateExtraction",
+            authority_epoch=source.authority_epoch,
+        ),
+        payload_hash=record.payload_hash,
+    )
+
+
+class OwnerTruthSourceAsyncEffectCommandService:
+    """Writes a shadow CreateSource and its effect records in the same UoW.
+
+    The service is intentionally not attached to a public route yet. It proves
+    the atomic producer boundary while the async-effect worker remains disabled.
+    """
+
+    def __init__(self, store: OwnerTruthSourceEffectCommandStore):
+        self._store = store
+
+    def create_text_source(
+        self,
+        *,
+        command: CreateTextSourceCommand,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthSourceAsyncEffectResult:
+        record = command.write_record(context=context)
+        with self._store.request_unit_of_work(
+            correlation_id=f"owner-truth-source-effect-{record.receipt_id}",
+            command_id=record.command_id_hash,
+        ):
+            source = self._store.create_owner_truth_source(record)
+            effect = self._store.effect_kernel_repository().accept(
+                build_source_created_effect_intent(record=record, source=source)
+            )
+        return OwnerTruthSourceAsyncEffectResult(source=source, effect=effect)
 
 
 @dataclass(frozen=True)
@@ -126,6 +208,9 @@ class ArchiveOwnerTruthCompatibilityFacade:
 
 __all__ = [
     "ArchiveOwnerTruthCompatibilityFacade",
+    "OwnerTruthSourceAsyncEffectCommandService",
+    "OwnerTruthSourceAsyncEffectResult",
     "OwnerTruthArchiveShadowResult",
     "OwnerTruthSourceCommandService",
+    "build_source_created_effect_intent",
 ]

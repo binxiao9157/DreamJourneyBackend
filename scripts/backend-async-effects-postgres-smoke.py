@@ -26,6 +26,8 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from app.async_effects.contracts import AsyncEffectConflict, AsyncEffectIntent, AsyncEffectTarget
 from app.core.config import settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
+from app.domain.owner_truth.source_commands import CreateTextSourceCommand, OwnerTruthCommandContext
+from app.services.owner_truth_source import OwnerTruthSourceAsyncEffectCommandService
 from app.services.postgres_store import PostgresStore
 
 
@@ -96,6 +98,30 @@ def count_rows(dsn: str, relation: str, *, operation_id: str) -> int:
             return int(cursor.fetchone()[0])
 
 
+def count_source_rows(dsn: str, *, vault_id: str, source_id: str) -> int:
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM owner_truth.sources WHERE vault_id = %s AND id = %s",
+                (vault_id, source_id),
+            )
+            return int(cursor.fetchone()[0])
+
+
+def count_effect_resource_rows(dsn: str, *, vault_id: str, resource_id: str) -> int:
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM async_effects.operations
+                WHERE vault_id = %s AND resource_id = %s
+                """,
+                (vault_id, resource_id),
+            )
+            return int(cursor.fetchone()[0])
+
+
 def main() -> None:
     base_dsn = os.environ.get("DATABASE_URL", settings.database_url).strip()
     require(base_dsn, "DATABASE_URL is required")
@@ -153,6 +179,88 @@ def main() -> None:
                 count_rows(test_dsn, relation, operation_id=intent.operation_id) == 1,
                 f"{relation} must contain one coordination record",
             )
+
+        source_context = OwnerTruthCommandContext(
+            vault_id="vault-source-effect-smoke",
+            owner_subject_id="owner-source-effect-smoke",
+            actor_subject_id="owner-source-effect-smoke",
+        )
+        source_command = CreateTextSourceCommand(
+            command_id="source-effect-smoke-command",
+            source_id=str(uuid.uuid4()),
+            expected_version=0,
+            text="Synthetic source for atomic outbox verification.",
+            metadata={"origin": "asyncEffectPostgresSmoke"},
+        )
+        source_effect_service = OwnerTruthSourceAsyncEffectCommandService(store)
+        source_created = source_effect_service.create_text_source(
+            command=source_command,
+            context=source_context,
+        )
+        source_replayed = source_effect_service.create_text_source(
+            command=source_command,
+            context=source_context,
+        )
+        require(source_created.source.outcome == "created", "source effect command must create once")
+        require(source_replayed.source.outcome == "deduplicated", "source command replay must dedupe")
+        require(source_created.effect.outcome == "accepted", "source effect must accept once")
+        require(source_replayed.effect.outcome == "deduplicated", "source effect replay must dedupe")
+        require(
+            count_source_rows(
+                test_dsn,
+                vault_id=source_context.vault_id,
+                source_id=source_command.source_id,
+            )
+            == 1,
+            "source must persist exactly once with its effect",
+        )
+        require(
+            count_rows(
+                test_dsn,
+                "outbox_events",
+                operation_id=source_created.effect.operation_id,
+            )
+            == 1,
+            "source effect must create exactly one outbox event",
+        )
+
+        rollback_source_command = CreateTextSourceCommand(
+            command_id="source-effect-rollback-command",
+            source_id=str(uuid.uuid4()),
+            expected_version=0,
+            text="Synthetic source that must roll back with its effect.",
+            metadata={"origin": "asyncEffectPostgresSmoke"},
+        )
+        try:
+            with store.request_unit_of_work(
+                correlation_id="async-effect-source-rollback",
+                command_id="asyncEffectSourceRollback",
+            ):
+                source_effect_service.create_text_source(
+                    command=rollback_source_command,
+                    context=source_context,
+                )
+                raise RuntimeError("force source effect rollback")
+        except RuntimeError:
+            pass
+        require(
+            count_source_rows(
+                test_dsn,
+                vault_id=source_context.vault_id,
+                source_id=rollback_source_command.source_id,
+            )
+            == 0,
+            "source must roll back when its effect request cannot commit",
+        )
+        require(
+            count_effect_resource_rows(
+                test_dsn,
+                vault_id=source_context.vault_id,
+                resource_id=rollback_source_command.source_id,
+            )
+            == 0,
+            "outbox operation must roll back with its source",
+        )
 
         try:
             with store.request_unit_of_work(
@@ -228,7 +336,7 @@ def main() -> None:
         print(
             "Async effect Postgres smoke passed: "
             f"schemaHead={verified['expectedHead']} outcomes={sorted(outcomes)} "
-            "rollback=true terminalGuard=true receiptsAppendOnly=true"
+            "sourceOutbox=true rollback=true terminalGuard=true receiptsAppendOnly=true"
         )
     finally:
         if store is not None:
