@@ -88,3 +88,8 @@ DATABASE_URL='<可创建临时数据库的 Postgres DSN>' \
 
 此部署仍是 QA-only、默认关闭的 inventory 观察能力；没有对 Archive、KBLite、
 `/memories`、公开 Echo 或 iOS UI 执行 backfill、promotion 或 authority cutover。
+
+后续 `3d2f54b` 增加了独立的 shadow parity observer；此处的 `routeCount=89` 是
+inventory 首次部署时的历史证据。后续部署后的当前 registry 为 `routeCount=90`，
+具体的 parity 边界与新证据见
+`2026-07-19-owner-truth-legacy-shadow-parity.md`。
