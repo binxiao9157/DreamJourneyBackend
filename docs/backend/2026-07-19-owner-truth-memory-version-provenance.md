@@ -47,3 +47,19 @@ After deployment, verify migration head `0021`, run the disposable Owner Truth
 Postgres smoke and confirm `/ready` remains fully ready. The next slice can
 then add the dedicated correction resolver without writing a second authority
 or losing version-level provenance.
+
+## Deployment G2
+
+Completed on the deployed backend at revision `97ca8d6`.
+
+- `scripts/migrate_db.py --apply --build-id 97ca8d6` applied only `0021` and
+  reported `appliedHead=0021`, `expectedHead=0021`, `status=ready`.
+- A subsequent migration verify reported no pending versions.
+- `scripts/backend-owner-truth-postgres-smoke.py` passed from the deployed API
+  image with `schemaHead=0021`, including Answer/Citation, correction request,
+  projection, KBLite and legacy-isolation assertions.
+- `/ready` reported database, schema, auth and incident components as ready;
+  the API container completed its health check.
+- The server's existing untracked private `.env.backup*` files were left
+  untouched. The pre-deploy disposable database smoke ran from a temporary
+  worktree copied into the API container and removed afterward.
