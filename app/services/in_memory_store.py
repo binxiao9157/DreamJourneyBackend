@@ -44,6 +44,12 @@ from app.services.archive_store import (
     ResourceOwnershipConflict,
     is_sealed_time_letter,
 )
+from app.domain.owner_truth.source_commands import (
+    OwnerTruthSourceCommandConflict,
+    OwnerTruthSourceCommandResult,
+    OwnerTruthSourceVersionConflict,
+    OwnerTruthSourceWriteRecord,
+)
 from app.services.user_identity import stable_user_id
 from app.observability.events import (
     EvidenceEventConflict,
@@ -65,9 +71,13 @@ class InMemoryStore:
         self._kb_operation_receipts: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._kb_lock = RLock()
         self._archive_lock = RLock()
+        self._owner_truth_lock = RLock()
         self._evidence_lock = RLock()
         self._memories: Dict[str, List[Dict[str, Any]]] = {}
         self._archive_items: Dict[str, List[Dict[str, Any]]] = {}
+        self._owner_truth_vaults: Dict[str, Dict[str, Any]] = {}
+        self._owner_truth_sources: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._owner_truth_source_receipts: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
         self._profiles: Dict[str, Dict[str, Any]] = {}
         self._password_credentials: Dict[str, Dict[str, Any]] = {}
@@ -2015,6 +2025,97 @@ class InMemoryStore:
             items[:] = [entry for entry in items if entry.get("id") != item["id"]]
             items.insert(0, item)
             return deepcopy(item)
+
+    def create_owner_truth_source(
+        self,
+        record: OwnerTruthSourceWriteRecord,
+    ) -> OwnerTruthSourceCommandResult:
+        if not isinstance(record, OwnerTruthSourceWriteRecord):
+            raise TypeError("owner truth source write record is required")
+        receipt_key = (record.vault_id, record.command_id_hash)
+        source_key = (record.vault_id, record.source_id)
+        with self._owner_truth_lock:
+            vault = self._owner_truth_vaults.get(record.vault_id)
+            if vault is None:
+                vault = {
+                    "vaultId": record.vault_id,
+                    "ownerSubjectId": record.owner_subject_id,
+                    "authorityEpoch": 0,
+                }
+                self._owner_truth_vaults[record.vault_id] = vault
+            elif vault["ownerSubjectId"] != record.owner_subject_id:
+                raise OwnerTruthSourceCommandConflict("vault owner does not match command owner")
+
+            existing_receipt = self._owner_truth_source_receipts.get(receipt_key)
+            if existing_receipt is not None:
+                if any(
+                    existing_receipt[key] != expected
+                    for key, expected in (
+                        ("payloadHash", record.payload_hash),
+                        ("sourceId", record.source_id),
+                        ("expectedVersion", record.expected_version),
+                        ("actorSubjectId", record.actor_subject_id),
+                    )
+                ):
+                    raise OwnerTruthSourceCommandConflict(
+                        "commandId cannot be reused with a different source payload"
+                    )
+                source = self._owner_truth_sources[source_key]
+                return OwnerTruthSourceCommandResult(
+                    outcome="deduplicated",
+                    receipt_id=existing_receipt["id"],
+                    source_id=record.source_id,
+                    source_version=int(source["sourceVersion"]),
+                    authority_epoch=int(source["authorityEpoch"]),
+                    content_hash=str(source["contentHash"]),
+                )
+
+            if record.expected_version != 0:
+                raise OwnerTruthSourceVersionConflict(
+                    expected_version=record.expected_version,
+                    current_version=0,
+                )
+            if source_key in self._owner_truth_sources:
+                raise OwnerTruthSourceCommandConflict("sourceId already exists without this command receipt")
+
+            source = {
+                "id": record.source_id,
+                "vaultId": record.vault_id,
+                "ownerSubjectId": record.owner_subject_id,
+                "sourceKind": "text",
+                "state": "active",
+                "sourceVersion": 1,
+                "contentHash": record.content_hash,
+                "contentPayload": deepcopy(dict(record.content_payload)),
+                "metadata": deepcopy(dict(record.metadata)),
+                "policyVersion": record.policy_version,
+                "authorityEpoch": int(vault["authorityEpoch"]),
+            }
+            receipt = {
+                "id": record.receipt_id,
+                "vaultId": record.vault_id,
+                "commandIdHash": record.command_id_hash,
+                "payloadHash": record.payload_hash,
+                "sourceId": record.source_id,
+                "expectedVersion": record.expected_version,
+                "actorSubjectId": record.actor_subject_id,
+                "authorityEpoch": int(vault["authorityEpoch"]),
+                "policyVersion": record.policy_version,
+            }
+            self._owner_truth_sources[source_key] = source
+            self._owner_truth_source_receipts[receipt_key] = receipt
+            return OwnerTruthSourceCommandResult(
+                outcome="created",
+                receipt_id=record.receipt_id,
+                source_id=record.source_id,
+                source_version=1,
+                authority_epoch=int(vault["authorityEpoch"]),
+                content_hash=record.content_hash,
+            )
+
+    def owner_truth_source_count(self, vault_id: str) -> int:
+        with self._owner_truth_lock:
+            return sum(1 for key in self._owner_truth_sources if key[0] == vault_id)
 
     def list_archive_items(self, user_id: str) -> List[Dict[str, Any]]:
         with self._archive_lock:

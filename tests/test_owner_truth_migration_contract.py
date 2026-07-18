@@ -55,6 +55,23 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("ON DELETE RESTRICT", sql)
         self.assertIn("owner truth record authority epoch is stale", sql)
 
+    def test_create_source_migration_preserves_immutable_payload_and_receipts(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0012"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_source_commands")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(metadata["runtimeCompatibility"], "ownerTruthV1ShadowSourceWrite")
+        self.assertIn("ADD COLUMN IF NOT EXISTS content_payload", migration.sql)
+        self.assertIn("CREATE TABLE owner_truth.source_command_receipts", migration.sql)
+        self.assertIn("owner_truth_source_command_receipts_no_update", migration.sql)
+        self.assertIn("owner_truth_source_command_receipts_no_delete", migration.sql)
+        self.assertIn("owner_truth_sources_payload_immutable", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

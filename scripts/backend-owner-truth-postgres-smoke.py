@@ -24,6 +24,17 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.core.config import settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
+from app.domain.owner_truth.source_commands import (
+    CreateTextSourceCommand,
+    OwnerTruthCommandContext,
+    OwnerTruthSourceCommandConflict,
+    OwnerTruthSourceVersionConflict,
+)
+from app.services.owner_truth_source import (
+    ArchiveOwnerTruthCompatibilityFacade,
+    OwnerTruthSourceCommandService,
+)
+from app.services.postgres_store import PostgresStore
 
 
 def require(condition: bool, message: str) -> None:
@@ -89,7 +100,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(applied["appliedVersions"][-1] == "0011", "owner truth migration must apply")
+        require(applied["appliedVersions"][-1] == "0012", "owner truth CreateSource migration must apply")
 
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:
@@ -252,11 +263,124 @@ def main() -> None:
             "referenced sources must not be deleted",
         )
 
+        store = PostgresStore(
+            dsn=test_dsn,
+            pool_min_size=1,
+            pool_max_size=1,
+            pool_timeout_seconds=1.0,
+        )
+        store.open_pool(wait=True)
+        try:
+            source_context = OwnerTruthCommandContext(
+                vault_id="source-command-vault",
+                owner_subject_id="source-command-owner",
+                actor_subject_id="source-command-owner",
+                policy_version="owner-truth-v1",
+            )
+            command_id = "owner-truth-create-source-smoke"
+            source_command = CreateTextSourceCommand(
+                command_id=command_id,
+                source_id=str(uuid.uuid4()),
+                expected_version=0,
+                text="一段只用于 Owner Truth CreateSource 验证的文字记录。",
+                metadata={"origin": "postgresSmoke"},
+            )
+            source_service = OwnerTruthSourceCommandService(store)
+            created_source = source_service.create_text_source(
+                command=source_command,
+                context=source_context,
+            )
+            replayed_source = source_service.create_text_source(
+                command=source_command,
+                context=source_context,
+            )
+            require(created_source.outcome == "created", "CreateSource must create once")
+            require(replayed_source.outcome == "deduplicated", "CreateSource replay must deduplicate")
+            require(
+                replayed_source.receipt_id == created_source.receipt_id,
+                "CreateSource replay must preserve the receipt",
+            )
+
+            try:
+                source_service.create_text_source(
+                    command=CreateTextSourceCommand(
+                        command_id=command_id,
+                        source_id=source_command.source_id,
+                        expected_version=0,
+                        text="同一 commandId 不能覆盖已经写入的源文本。",
+                        metadata={"origin": "postgresSmoke"},
+                    ),
+                    context=source_context,
+                )
+            except OwnerTruthSourceCommandConflict:
+                pass
+            else:
+                raise AssertionError("CreateSource must reject a changed replay payload")
+
+            try:
+                source_service.create_text_source(
+                    command=CreateTextSourceCommand(
+                        command_id="owner-truth-create-source-version-conflict",
+                        source_id=str(uuid.uuid4()),
+                        expected_version=1,
+                        text="不允许以非零 expectedVersion 创建新 Source。",
+                        metadata={"origin": "postgresSmoke"},
+                    ),
+                    context=source_context,
+                )
+            except OwnerTruthSourceVersionConflict:
+                pass
+            else:
+                raise AssertionError("CreateSource must reject a nonzero expectedVersion")
+
+            facade = ArchiveOwnerTruthCompatibilityFacade(store)
+            shadow = facade.shadow_archive_item(
+                owner_subject_id="archive-shadow-owner",
+                item={
+                    "id": "archive-shadow-text-smoke",
+                    "kind": "text",
+                    "title": "Archive shadow",
+                    "note": "旧档案文字继续保留原有 authority。",
+                },
+            )
+            media_shadow = facade.shadow_archive_item(
+                owner_subject_id="archive-shadow-owner",
+                item={"id": "archive-shadow-photo-smoke", "kind": "photo", "title": "设备照片"},
+            )
+            require(shadow.status == "created", "eligible Archive text must create a shadow Source")
+            require(
+                media_shadow.public_contract() == {"status": "skipped", "reason": "localOnlyMedia"},
+                "Archive media must remain explicitly local-only in V1",
+            )
+        finally:
+            store.close_pool()
+
+        expect_rejected(
+            test_dsn,
+            lambda cursor: cursor.execute(
+                "UPDATE owner_truth.sources SET content_payload = '{\"text\": \"mutated\"}'::jsonb WHERE id = %s",
+                (created_source.source_id,),
+            ),
+            "Owner Truth Source payloads must be immutable",
+        )
+        expect_rejected(
+            test_dsn,
+            lambda cursor: cursor.execute(
+                "UPDATE owner_truth.source_command_receipts SET payload_hash = 'mutated' WHERE id = %s",
+                (created_source.receipt_id,),
+            ),
+            "CreateSource command receipts must be append-only",
+        )
+
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT to_regclass('public.memories'), to_regclass('owner_truth.memories')")
-                legacy_relation, owner_truth_relation = cursor.fetchone()
+                cursor.execute(
+                    "SELECT to_regclass('public.memories'), to_regclass('public.archive_items'), "
+                    "to_regclass('owner_truth.memories')"
+                )
+                legacy_relation, archive_relation, owner_truth_relation = cursor.fetchone()
         require(legacy_relation == "memories", "legacy public memories table must remain present")
+        require(archive_relation == "archive_items", "legacy public Archive table must remain present")
         require(owner_truth_relation == "owner_truth.memories", "owner truth table must be namespaced")
 
         print(
@@ -270,7 +394,13 @@ def main() -> None:
                     "terminalDecisionImmutable": True,
                     "decisionReceiptAppendOnly": True,
                     "sourceDeleteRestricted": True,
+                    "createSourceIdempotent": True,
+                    "createSourcePayloadImmutable": True,
+                    "createSourceReceiptAppendOnly": True,
+                    "archiveTextShadowed": True,
+                    "archiveMediaLocalOnly": True,
                     "legacyMemoriesUnchanged": True,
+                    "legacyArchiveUnchanged": True,
                 },
                 sort_keys=True,
             )

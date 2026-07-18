@@ -68,6 +68,7 @@ from app.services.privacy import (
     sanitize_knowledge_extraction_payload,
     sanitize_mailbox_letter_payload,
 )
+from app.services.owner_truth_source import ArchiveOwnerTruthCompatibilityFacade
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
     KB_OPERATION_GOVERNANCE,
@@ -4039,7 +4040,15 @@ def create_archive_item(request: Request, payload: Dict[str, Any]) -> Dict[str, 
             status_code=409,
             detail={"code": "archiveItemOwnershipConflict"},
         )
-    return {"status": "saved", "item": item}
+    shadow = ArchiveOwnerTruthCompatibilityFacade(store).shadow_archive_item(
+        owner_subject_id=user_id,
+        item=item,
+    )
+    return {
+        "status": "saved",
+        "item": item,
+        "ownerTruthShadow": shadow.public_contract(),
+    }
 
 
 @app.post("/archive/media/upload-intent")

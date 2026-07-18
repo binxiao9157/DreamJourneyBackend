@@ -71,6 +71,12 @@ from app.services.archive_store import (
     ResourceVersionConflict,
     is_sealed_time_letter,
 )
+from app.domain.owner_truth.source_commands import (
+    OwnerTruthSourceCommandConflict,
+    OwnerTruthSourceCommandResult,
+    OwnerTruthSourceVersionConflict,
+    OwnerTruthSourceWriteRecord,
+)
 
 
 class PostgresStore:
@@ -4280,6 +4286,170 @@ class PostgresStore:
         if row is None:
             raise ArchiveItemOwnershipConflict("archive item id belongs to another owner")
         return deepcopy(row["payload"])
+
+    def create_owner_truth_source(
+        self,
+        record: OwnerTruthSourceWriteRecord,
+    ) -> OwnerTruthSourceCommandResult:
+        """Persist an idempotent V1 text Source plus append-only command receipt.
+
+        The method is deliberately independent of legacy ``archive_items``.
+        When called by the Archive facade inside an existing request UoW, its
+        nested transaction acts as a savepoint so a shadow-only failure cannot
+        leave the legacy transaction in an aborted PostgreSQL state.
+        """
+
+        if not isinstance(record, OwnerTruthSourceWriteRecord):
+            raise TypeError("owner truth source write record is required")
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"owner-truth-source-{record.receipt_id}",
+                command_id=record.command_id_hash,
+            ):
+                return self.create_owner_truth_source(record)
+
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("owner truth source requires a unit of work")
+        connection = active.connection
+        with connection.transaction():
+            with connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS locked",
+                    (f"owner-truth-source:{record.vault_id}:{record.command_id_hash}",),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.vaults (vault_id, owner_subject_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (vault_id) DO UPDATE
+                    SET updated_at = NOW()
+                    WHERE owner_truth.vaults.owner_subject_id = EXCLUDED.owner_subject_id
+                    RETURNING vault_id, owner_subject_id, authority_epoch
+                    """,
+                    (record.vault_id, record.owner_subject_id),
+                )
+                vault = cursor.fetchone()
+                if vault is None:
+                    raise OwnerTruthSourceCommandConflict("vault owner does not match command owner")
+                authority_epoch = int(vault["authority_epoch"])
+
+                cursor.execute(
+                    """
+                    SELECT id, payload_hash, source_id, expected_version,
+                        actor_subject_id, authority_epoch, policy_version
+                    FROM owner_truth.source_command_receipts
+                    WHERE vault_id = %s AND command_id_hash = %s
+                    FOR UPDATE
+                    """,
+                    (record.vault_id, record.command_id_hash),
+                )
+                existing_receipt = cursor.fetchone()
+                if existing_receipt is not None:
+                    if any(
+                        (
+                            str(existing_receipt[key]) != str(expected)
+                            for key, expected in (
+                                ("payload_hash", record.payload_hash),
+                                ("source_id", record.source_id),
+                                ("expected_version", record.expected_version),
+                                ("actor_subject_id", record.actor_subject_id),
+                            )
+                        )
+                    ):
+                        raise OwnerTruthSourceCommandConflict(
+                            "commandId cannot be reused with a different source payload"
+                        )
+                    cursor.execute(
+                        """
+                        SELECT source_version, authority_epoch, content_hash
+                        FROM owner_truth.sources
+                        WHERE vault_id = %s AND id = %s
+                        """,
+                        (record.vault_id, record.source_id),
+                    )
+                    source = cursor.fetchone()
+                    if source is None:
+                        raise RuntimeError("owner truth command receipt points to a missing source")
+                    return OwnerTruthSourceCommandResult(
+                        outcome="deduplicated",
+                        receipt_id=str(existing_receipt["id"]),
+                        source_id=record.source_id,
+                        source_version=int(source["source_version"]),
+                        authority_epoch=int(source["authority_epoch"]),
+                        content_hash=str(source["content_hash"]),
+                    )
+
+                if record.expected_version != 0:
+                    raise OwnerTruthSourceVersionConflict(
+                        expected_version=record.expected_version,
+                        current_version=0,
+                    )
+
+                cursor.execute(
+                    """
+                    SELECT id FROM owner_truth.sources
+                    WHERE vault_id = %s AND id = %s
+                    FOR UPDATE
+                    """,
+                    (record.vault_id, record.source_id),
+                )
+                if cursor.fetchone() is not None:
+                    raise OwnerTruthSourceCommandConflict(
+                        "sourceId already exists without this command receipt"
+                    )
+
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.sources (
+                        id, vault_id, owner_subject_id, source_kind, state,
+                        source_version, content_hash, content_payload,
+                        policy_version, authority_epoch, metadata
+                    ) VALUES (%s, %s, %s, 'text', 'active', 1, %s, %s, %s, %s, %s)
+                    RETURNING source_version, authority_epoch, content_hash
+                    """,
+                    self._adapt_params(
+                        (
+                            record.source_id,
+                            record.vault_id,
+                            record.owner_subject_id,
+                            record.content_hash,
+                            dict(record.content_payload),
+                            record.policy_version,
+                            authority_epoch,
+                            dict(record.metadata),
+                        )
+                    ),
+                )
+                source = cursor.fetchone()
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.source_command_receipts (
+                        id, vault_id, command_id_hash, payload_hash, source_id,
+                        expected_version, actor_subject_id, authority_epoch, policy_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        record.receipt_id,
+                        record.vault_id,
+                        record.command_id_hash,
+                        record.payload_hash,
+                        record.source_id,
+                        record.expected_version,
+                        record.actor_subject_id,
+                        authority_epoch,
+                        record.policy_version,
+                    ),
+                )
+
+        return OwnerTruthSourceCommandResult(
+            outcome="created",
+            receipt_id=record.receipt_id,
+            source_id=record.source_id,
+            source_version=int(source["source_version"]),
+            authority_epoch=int(source["authority_epoch"]),
+            content_hash=str(source["content_hash"]),
+        )
 
     def list_archive_items(self, user_id: str) -> List[Dict[str, Any]]:
         rows = self._fetchall(

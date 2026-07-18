@@ -1,0 +1,13 @@
+{
+  "version": "0012",
+  "name": "owner_truth_source_commands",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthV1ShadowSourceWrite",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthV1Read": false,
+    "ownerTruthV1Write": false,
+    "ownerTruthArchiveShadow": true
+  }
+}
