@@ -1,0 +1,8 @@
+{
+  "version": "0006",
+  "name": "rights_requests",
+  "phase": "expand",
+  "compatibility": "backwardCompatible",
+  "runtimeCompatibility": "rightsContractStorageOnly",
+  "requiresOldWorkerDrain": false
+}

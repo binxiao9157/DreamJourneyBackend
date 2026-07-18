@@ -13,7 +13,7 @@ class DataRightsContractTests(unittest.TestCase):
     def setUp(self):
         self.authority = DataRightsRequestAuthority()
         self.payload = {
-            "action": "deleteAccount",
+            "action": "account.delete",
             "scope": ["archive", "voice", "knowledge"],
             "phone": "13800000000",
             "body": "private account deletion explanation",
@@ -40,6 +40,12 @@ class DataRightsContractTests(unittest.TestCase):
                 identity_proof=None,
             )
 
+    def test_new_request_starts_in_requested_state(self):
+        request = self.create().request
+
+        self.assertEqual(request.status, "requested")
+        self.assertEqual(request.public_receipt()["status"], "requested")
+
     def test_same_command_and_payload_is_idempotent_but_payload_conflict_is_explicit(self):
         first = self.create()
         duplicate = self.authority.create_request(
@@ -48,7 +54,7 @@ class DataRightsContractTests(unittest.TestCase):
                 "body": "private account deletion explanation",
                 "scope": ["archive", "voice", "knowledge"],
                 "phone": "13800000000",
-                "action": "deleteAccount",
+                "action": "account.delete",
             },
             subject_id="user-1",
             identity_proof="a different proof is allowed for a retry",

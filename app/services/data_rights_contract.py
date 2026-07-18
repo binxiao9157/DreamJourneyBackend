@@ -19,6 +19,9 @@ DATA_RIGHTS_SCHEMA_VERSION = 1
 EXECUTION_OUTCOMES = frozenset(
     {"pending", "completed", "partial", "unsupported", "failed"}
 )
+SUPPORTED_ACTIONS = frozenset(
+    {"account.delete", "account.restore", "account.purge"}
+)
 _MODULE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
 
 
@@ -105,6 +108,8 @@ def _normalize_payload(payload: Any) -> Dict[str, Any]:
     _canonical_json(normalized, field="payload")
 
     action = _required_text(normalized.get("action"), field="payload.action")
+    if action not in SUPPORTED_ACTIONS:
+        raise DataRightsValidationError("payload.action is unsupported")
     scope = normalized.get("scope")
     if not isinstance(scope, list) or not scope:
         raise DataRightsValidationError("payload.scope must be a non-empty list")
@@ -118,7 +123,7 @@ def _normalize_payload(payload: Any) -> Dict[str, Any]:
 
 def _aggregate_status(executions: Tuple["DataRightsExecution", ...]) -> str:
     if not executions:
-        return "pending"
+        return "requested"
     outcomes = {execution.outcome for execution in executions}
     if "pending" in outcomes:
         return "pending"
@@ -332,6 +337,7 @@ class DataRightsRequestAuthority:
 __all__ = [
     "DATA_RIGHTS_SCHEMA_VERSION",
     "EXECUTION_OUTCOMES",
+    "SUPPORTED_ACTIONS",
     "DataRightsCommandConflict",
     "DataRightsContractError",
     "DataRightsExecution",

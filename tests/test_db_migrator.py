@@ -403,7 +403,11 @@ class PostgresMigratorTests(unittest.TestCase):
                 self.assertIn(f"ON {table}(vault_id, id)", migration.sql)
 
     def test_delegated_access_migration_separates_relationships_from_grants(self):
-        migration = load_migrations(default_migrations_dir())[-1]
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.name == "delegated_access_grants"
+        )
 
         self.assertEqual(migration.version, "0005")
         self.assertEqual(migration.name, "delegated_access_grants")
@@ -420,6 +424,21 @@ class PostgresMigratorTests(unittest.TestCase):
         self.assertIn("INSERT INTO family_relationships", migration.sql)
         self.assertIn("legacy-unverified:", migration.sql)
         self.assertNotIn("INSERT INTO access_grants", migration.sql.split("-- Existing family records", 1)[1])
+
+    def test_rights_request_migration_adds_append_only_receipts(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.name == "rights_requests"
+        )
+        self.assertEqual(migration.version, "0006")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(migration.compatibility, "backwardCompatible")
+        self.assertIn("CREATE TABLE rights_requests", migration.sql)
+        self.assertIn("CREATE TABLE rights_executions", migration.sql)
+        self.assertIn("CREATE TABLE resource_deletion_receipts", migration.sql)
+        self.assertIn("UNIQUE (subject_id, command_id)", migration.sql)
+        self.assertIn("resource_deletion_receipts are append-only", migration.sql)
 
 
 if __name__ == "__main__":
