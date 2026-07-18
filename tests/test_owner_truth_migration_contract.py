@@ -199,6 +199,29 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("owner_truth_correction_requests_no_delete", migration.sql)
         self.assertNotIn("UPDATE owner_truth.memory_versions", migration.sql)
 
+    def test_memory_version_provenance_migration_keeps_lineage_on_each_version(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0021"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_memory_version_provenance")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(migration.compatibility, "additive")
+        self.assertEqual(
+            metadata["runtimeCompatibility"],
+            "ownerTruthV1MemoryVersionProvenanceShadow",
+        )
+        self.assertFalse(metadata["releaseFlags"]["correctionResolverV1"])
+        self.assertIn("ADD COLUMN IF NOT EXISTS source_id UUID", migration.sql)
+        self.assertIn("supersedes_version_id UUID", migration.sql)
+        self.assertIn("owner_truth_memory_versions_validate_provenance", migration.sql)
+        self.assertIn("owner_truth_memory_versions_provenance_immutable", migration.sql)
+        self.assertIn("version.source_id", migration.sql)
+        self.assertIn("version.source_version", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -816,8 +816,9 @@ class PostgresOwnerTruthCandidateReviewRepository:
                 """
                 INSERT INTO owner_truth.memory_versions (
                     id, vault_id, memory_id, version_number, is_current,
-                    schema_version, content_hash, payload
-                ) VALUES (%s, %s, %s, 1, TRUE, %s, %s, %s)
+                    schema_version, content_hash, payload, source_id,
+                    source_version, decision_receipt_id
+                ) VALUES (%s, %s, %s, 1, TRUE, %s, %s, %s, %s, %s, %s)
                 """,
                 self._adapt_params(
                     (
@@ -827,6 +828,9 @@ class PostgresOwnerTruthCandidateReviewRepository:
                         plan.content_schema_version,
                         plan.content_hash,
                         dict(plan.payload),
+                        plan.source_id,
+                        plan.source_version,
+                        plan.receipt_id,
                     )
                 ),
             )

@@ -149,8 +149,8 @@ def main() -> None:
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         require(
-            applied["appliedVersions"][-1] == "0020",
-            "owner truth correction request migration must apply",
+            applied["appliedVersions"][-1] == "0021",
+            "owner truth MemoryVersion provenance migration must apply",
         )
 
         with psycopg.connect(test_dsn) as connection:
@@ -216,10 +216,20 @@ def main() -> None:
                     """
                     INSERT INTO owner_truth.memory_versions (
                         id, vault_id, memory_id, version_number, is_current,
-                        schema_version, content_hash
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        schema_version, content_hash, source_id, source_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (version_a, "vault-a", memory_a, 1, True, "owner-truth-v1", "memory-a-hash"),
+                    (
+                        version_a,
+                        "vault-a",
+                        memory_a,
+                        1,
+                        True,
+                        "owner-truth-v1",
+                        "memory-a-hash",
+                        source_id,
+                        1,
+                    ),
                 )
                 cursor.execute(
                     """
@@ -268,12 +278,24 @@ def main() -> None:
             test_dsn,
             lambda cursor: cursor.execute(
                 """
-                INSERT INTO owner_truth.memory_versions (
-                    id, vault_id, memory_id, version_number, is_current,
-                    schema_version, content_hash
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (str(uuid.UUID(int=21)), "vault-a", memory_a, 2, True, "owner-truth-v1", "memory-a-hash-2"),
+                    INSERT INTO owner_truth.memory_versions (
+                        id, vault_id, memory_id, version_number, is_current,
+                        schema_version, content_hash, source_id, source_version,
+                        supersedes_version_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                (
+                    str(uuid.UUID(int=21)),
+                    "vault-a",
+                    memory_a,
+                    2,
+                    True,
+                    "owner-truth-v1",
+                    "memory-a-hash-2",
+                    source_id,
+                    1,
+                    version_a,
+                ),
             ),
             "a memory may have only one current version",
         )

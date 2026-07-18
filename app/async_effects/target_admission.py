@@ -448,8 +448,8 @@ class PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository:
                     memory.owner_subject_id AS memory_owner_subject_id,
                     memory.authority_epoch AS memory_authority_epoch,
                     memory.status AS memory_status,
-                    memory.source_id AS memory_source_id,
-                    memory.source_version AS memory_source_version,
+                    version.source_id AS version_source_id,
+                    version.source_version AS version_source_version,
                     version.version_number AS version_number,
                     version.is_current AS is_current,
                     version.content_hash AS content_hash
@@ -464,7 +464,7 @@ class PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository:
             )
             memory_row = cursor.fetchone()
             source_row = None
-            if memory_row is not None and memory_row["memory_source_id"] is not None:
+            if memory_row is not None and memory_row["version_source_id"] is not None:
                 cursor.execute(
                     """
                     SELECT owner_subject_id, authority_epoch, state, source_version
@@ -472,7 +472,7 @@ class PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository:
                     WHERE vault_id = %s AND id = %s
                     FOR SHARE
                     """,
-                    (intent.target.vault_id, memory_row["memory_source_id"]),
+                    (intent.target.vault_id, memory_row["version_source_id"]),
                 )
                 source_row = cursor.fetchone()
         vault = None
@@ -488,7 +488,7 @@ class PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository:
                 owner_subject_id=str(memory_row["memory_owner_subject_id"]),
                 authority_epoch=int(memory_row["memory_authority_epoch"]),
                 state=str(memory_row["memory_status"]),
-                source_version=int(memory_row["memory_source_version"]),
+                source_version=int(memory_row["version_source_version"]),
                 version_number=int(memory_row["version_number"]),
                 is_current=bool(memory_row["is_current"]),
                 content_hash=str(memory_row["content_hash"]),

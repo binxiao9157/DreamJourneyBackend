@@ -651,12 +651,13 @@ class PostgresOwnerTruthCorrectionRequestRepository:
         cursor.execute(
             """
             SELECT memory.id AS memory_id, memory.owner_subject_id,
-                memory.source_id AS memory_source_id,
-                memory.source_version AS memory_source_version, memory.memory_kind,
+                memory.memory_kind,
                 memory.perspective_type, memory.epistemic_status, memory.sensitivity,
                 memory.status AS memory_status, memory.authority_epoch AS memory_authority_epoch,
                 version.id AS memory_version_id, version.version_number,
                 version.is_current, version.schema_version, version.content_hash,
+                version.source_id AS version_source_id,
+                version.source_version AS version_source_version,
                 version.payload,
                 source.owner_subject_id AS source_owner_subject_id,
                 source.source_version AS source_row_version, source.state AS source_state,
@@ -665,7 +666,7 @@ class PostgresOwnerTruthCorrectionRequestRepository:
             JOIN owner_truth.memory_versions AS version
               ON version.vault_id = memory.vault_id AND version.memory_id = memory.id
             JOIN owner_truth.sources AS source
-              ON source.vault_id = memory.vault_id AND source.id = memory.source_id
+              ON source.vault_id = version.vault_id AND source.id = version.source_id
             WHERE memory.vault_id = %s
               AND memory.id = %s
               AND version.id = %s
@@ -685,12 +686,12 @@ class PostgresOwnerTruthCorrectionRequestRepository:
             or str(row["source_owner_subject_id"]) != context.owner_subject_id
             or str(row["source_state"]) != "active"
             or int(row["source_authority_epoch"]) != authority_epoch
-            or int(row["memory_source_version"]) != int(row["source_row_version"])
+            or int(row["version_source_version"]) != int(row["source_row_version"])
             or bool(row["is_current"]) is not True
             or int(row["version_number"]) != int(citation["memory_version"])
             or str(row["content_hash"]) != str(citation["cited_content_hash"])
-            or str(row["memory_source_id"]) != str(citation["cited_source_id"])
-            or int(row["memory_source_version"]) != int(citation["cited_source_version"])
+            or str(row["version_source_id"]) != str(citation["cited_source_id"])
+            or int(row["version_source_version"]) != int(citation["cited_source_version"])
         ):
             raise OwnerTruthCorrectionRequestStaleCitation(
                 "cited MemoryVersion is no longer current and active"
@@ -707,8 +708,8 @@ class PostgresOwnerTruthCorrectionRequestRepository:
             owner_subject_id=context.owner_subject_id,
             authority_epoch=authority_epoch,
             version_number=int(row["version_number"]),
-            source_id=str(row["memory_source_id"]),
-            source_version=int(row["memory_source_version"]),
+            source_id=str(row["version_source_id"]),
+            source_version=int(row["version_source_version"]),
             memory_kind=str(row["memory_kind"]),
             perspective_type=str(row["perspective_type"]),
             epistemic_status=str(row["epistemic_status"]),

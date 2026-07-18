@@ -352,8 +352,8 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                 memory.id AS memory_id,
                 version.id AS memory_version_id,
                 version.version_number,
-                memory.source_id,
-                memory.source_version,
+                version.source_id,
+                version.source_version,
                 memory.memory_kind,
                 memory.perspective_type,
                 memory.epistemic_status,
@@ -367,8 +367,8 @@ class PostgresOwnerTruthMemoryProjectionRepository:
              AND version.memory_id = memory.id
              AND version.is_current = TRUE
             JOIN owner_truth.sources AS source
-              ON source.vault_id = memory.vault_id
-             AND source.id = memory.source_id
+              ON source.vault_id = version.vault_id
+             AND source.id = version.source_id
             WHERE memory.vault_id = %s
               AND memory.owner_subject_id = %s
               AND memory.status = 'active'
@@ -376,7 +376,7 @@ class PostgresOwnerTruthMemoryProjectionRepository:
               AND source.owner_subject_id = %s
               AND source.state = 'active'
               AND source.authority_epoch = %s
-              AND source.source_version = memory.source_version
+              AND source.source_version = version.source_version
             ORDER BY memory.id ASC, version.version_number ASC, version.id ASC
             """,
             (
