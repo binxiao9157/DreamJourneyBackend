@@ -545,7 +545,12 @@ def main() -> None:
                     command=OwnerTruthCandidateReviewCommand(
                         command_id="owner-truth-candidate-stale-evidence-smoke",
                         candidate_id=review_stale_evidence_candidate_id,
-                        expected_candidate_version=1,
+                        # The test changes evidenceRefs to an unavailable source version
+                        # immediately before this command.  That mutable Candidate update
+                        # advances its optimistic row version from 1 to 2; the command must
+                        # therefore pass the fresh version so activation reaches the source
+                        # validation and proves the whole UoW rolls back.
+                        expected_candidate_version=2,
                         action=CandidateReviewAction.ACCEPT,
                         corrected_value=None,
                         corrected_value_schema_version="owner-truth-v1",
