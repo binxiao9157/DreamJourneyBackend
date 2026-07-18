@@ -776,6 +776,7 @@ def main() -> None:
                         FROM async_effects.consumer_inbox AS inbox
                         JOIN async_effects.business_receipts AS receipt
                           ON receipt.operation_id = inbox.operation_id
+                         AND receipt.receipt_type = 'consumer.ownerTruth.memoryProjection.rebuild.completion'
                         WHERE inbox.consumer_name = 'ownerTruth.memoryProjection.rebuild'
                           AND inbox.vault_id = %s
                         ORDER BY inbox.operation_id ASC
