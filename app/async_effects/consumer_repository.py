@@ -250,7 +250,10 @@ class PostgresAsyncEffectConsumerRepository:
                     resource_type, resource_id, resource_version, purpose,
                     authority_epoch, stable_key, consumer_name, payload_hash, state, attempt
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'processing', 1)
-                ON CONFLICT (consumer_name, event_id) DO NOTHING
+                -- inbox_id is deterministic for the same consumer event. A concurrent
+                -- replay can therefore conflict on either the primary key or the
+                -- consumer/event uniqueness constraint; both must enter replay.
+                ON CONFLICT DO NOTHING
                 RETURNING inbox_id, operation_id, event_id, consumer_name, payload_hash, state
                 """,
                 (
@@ -281,7 +284,9 @@ class PostgresAsyncEffectConsumerRepository:
                     receipt_type, business_target_key, payload_hash, state, outcome,
                     reason_code, result_ref_hash, attempt
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
-                ON CONFLICT (operation_id, receipt_type, business_target_key) DO NOTHING
+                -- receipt_id is deterministic too, so accept either equivalent
+                -- immutable uniqueness conflict and reconcile through the inbox.
+                ON CONFLICT DO NOTHING
                 RETURNING receipt_id, operation_id, receipt_type, business_target_key,
                     payload_hash, state, outcome, reason_code, result_ref_hash
                 """,
