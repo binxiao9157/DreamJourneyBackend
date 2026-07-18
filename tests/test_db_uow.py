@@ -107,6 +107,7 @@ class DatabaseUnitOfWorkTests(unittest.TestCase):
         ) as uow:
             self.assertIs(uow.connection, connection)
             self.assertEqual(connection.commits, 0)
+            self.assertEqual(connection.executed, [("BEGIN", None)])
 
         self.assertEqual(connection.commits, 1)
         self.assertEqual(connection.rollbacks, 0)
@@ -162,13 +163,13 @@ class DatabaseUnitOfWorkTests(unittest.TestCase):
         connection = FakeConnection("reused")
         pool = RecordingPool([connection])
         store = PostgresStore(pool=pool)
-        connection.fail_next = True
 
         with self.assertRaisesRegex(RuntimeError, "statement failed"):
             with store.request_unit_of_work(
                 correlation_id="corr-failed",
                 command_id="cmd-failed",
             ):
+                connection.fail_next = True
                 store._fetchone("SELECT broken")
 
         with store.request_unit_of_work(

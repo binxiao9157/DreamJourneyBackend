@@ -50,6 +50,8 @@ class IdentityPostgresCursor:
         normalized = " ".join(sql.split())
         self.connection.statements.append((normalized, params))
         self.result = None
+        if normalized == "BEGIN":
+            return
         if normalized.startswith("SELECT version, key_fingerprint, status"):
             self.result = list(self.connection.hash_key_versions.values())
         elif normalized.startswith("INSERT INTO identity_hash_key_versions"):

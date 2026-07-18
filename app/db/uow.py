@@ -87,6 +87,28 @@ class DatabaseUnitOfWork:
             self.metrics.pool_exhausted()
             raise
         self.metrics.checkout()
+        try:
+            # Establish the root transaction before repository code can open a
+            # nested psycopg transaction. Nested ``connection.transaction()``
+            # blocks then become savepoints instead of independently committing
+            # an aggregate before the request/job UoW has finished.
+            with self.connection.cursor() as cursor:
+                cursor.execute("BEGIN")
+        except Exception:
+            self.metrics.failed()
+            try:
+                self.connection.rollback()
+                self.metrics.rolled_back()
+            finally:
+                try:
+                    self.pool.putconn(self.connection)
+                except Exception:
+                    self.metrics.return_failed()
+                    raise
+                finally:
+                    self.metrics.release()
+                    self.connection = None
+            raise
         return self
 
     def mark_rollback(self, reason: str) -> None:
