@@ -172,12 +172,17 @@ def main() -> None:
             ("GET", "/maps/district?dryRun=true&keyword=MAP_QUERY_CANARY", None),
         )
 
-        outcomes = [
-            assert_value_free_response(
-                *request_json(method, path, payload=payload, access_token=access_token)
+        outcomes = []
+        for method, path, payload in surfaces:
+            status, body = request_json(
+                method,
+                path,
+                payload=payload,
+                access_token=access_token,
             )
-            for method, path, payload in surfaces
-        ]
+            outcomes.append(
+                assert_value_free_response(status, body, surface=f"{method} {path}")
+            )
         print(
             json.dumps(
                 {
@@ -195,7 +200,7 @@ def main() -> None:
         cleanup_smoke_user(store, user_id)
 
 
-def assert_value_free_response(status: int, body: dict) -> str:
+def assert_value_free_response(status: int, body: dict, *, surface: str) -> str:
     serialized = json.dumps(body, ensure_ascii=False, sort_keys=True)
     require(not any(canary in serialized for canary in CANARIES), "private dry-run value leaked")
     if status == 200:
@@ -210,7 +215,10 @@ def assert_value_free_response(status: int, body: dict) -> str:
         require((report.get("transport") or {}).get("payloadIncluded") is False, "payloadIncluded must be false")
         return "report"
 
-    require(status in {400, 502, 503}, f"unexpected dry-run status {status}")
+    require(
+        status in {400, 502, 503},
+        f"{surface} returned unexpected dry-run status {status}",
+    )
     detail = body.get("detail") or {}
     require(isinstance(detail, dict), "provider error detail must be structured")
     require(
