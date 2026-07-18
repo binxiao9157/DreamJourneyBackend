@@ -248,6 +248,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/kblite-compatibility",
+                session,
+                "ownerTruthKBLiteCompatibilityRead",
+            ),
+            _rule(
+                "GET",
                 "/ops/release-policy/observations",
                 system,
                 "systemReleasePolicyObservations",

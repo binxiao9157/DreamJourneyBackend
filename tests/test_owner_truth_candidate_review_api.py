@@ -115,6 +115,10 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             "/v2/vaults/vault-hidden/memory-projection",
             headers=headers,
         )
+        compatibility = client.get(
+            "/v2/vaults/vault-hidden/kblite-compatibility",
+            headers=headers,
+        )
 
         self.assertEqual(owner_id.startswith("user_"), True)
         self.assertEqual(response.status_code, 404)
@@ -123,6 +127,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(
             projection.json()["detail"]["code"],
             "ownerTruthMemoryProjectionUnavailable",
+        )
+        self.assertEqual(compatibility.status_code, 404)
+        self.assertEqual(
+            compatibility.json()["detail"]["code"],
+            "ownerTruthKBLiteCompatibilityUnavailable",
         )
 
     def test_owner_can_list_decide_activate_memory_and_replay(self) -> None:
@@ -268,6 +277,20 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         )
         self.assertEqual(replay.status_code, 200)
         self.assertEqual(replay.json()["outcome"], "unchanged")
+
+        compatibility = client.get(
+            f"/v2/vaults/{vault_id}/kblite-compatibility",
+            headers=headers,
+        )
+        self.assertEqual(compatibility.status_code, 200)
+        self.assertEqual(
+            compatibility.json()["schemaVersion"],
+            "owner-truth-kblite-compatibility-read-v1",
+        )
+        self.assertEqual(compatibility.json()["compatibility"]["state"], "ready")
+        self.assertEqual(compatibility.json()["compatibility"]["factCount"], 0)
+        self.assertEqual(compatibility.json()["compatibility"]["filteredEntries"][0]["reason"], "memory_kind_not_compatibility_fact")
+        self.assertNotIn(candidate.content["summary"], str(compatibility.json()))
 
 
 if __name__ == "__main__":

@@ -44,6 +44,10 @@ from app.services.owner_truth_source import (
     OwnerTruthSourceCommandService,
 )
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
+from app.services.owner_truth_kblite_compatibility import (
+    OwnerTruthKBLiteCompatibilityReadService,
+    compatibility_summary,
+)
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
@@ -385,6 +389,7 @@ def main() -> None:
             review_unbacked_corrected_candidate_id = str(uuid.uuid4())
             review_concurrent_candidate_id = str(uuid.uuid4())
             review_content = {"summary": "小时候在院子里听雨。"}
+            review_knowledge_content = {"claim": "父亲总会先修好自行车，再带我去公园。"}
             review_payload = {
                 "schemaVersion": "owner-truth-candidate-proposal-v1",
                 "content": review_content,
@@ -445,6 +450,23 @@ def main() -> None:
                                 json.dumps(review_payload),
                             ),
                         )
+                    review_knowledge_payload = {
+                        **review_payload,
+                        "content": review_knowledge_content,
+                    }
+                    cursor.execute(
+                        """
+                        UPDATE owner_truth.memory_candidates
+                        SET candidate_kind = 'knowledge', content_hash = %s, payload = %s
+                        WHERE vault_id = %s AND id = %s
+                        """,
+                        (
+                            canonical_hash(review_knowledge_content),
+                            json.dumps(review_knowledge_payload),
+                            review_vault_id,
+                            review_corrected_candidate_id,
+                        ),
+                    )
                     stale_evidence_payload = {
                         **review_payload,
                         "evidenceRefs": [
@@ -505,7 +527,7 @@ def main() -> None:
                     candidate_id=review_corrected_candidate_id,
                     expected_candidate_version=1,
                     action=CandidateReviewAction.CORRECT,
-                    corrected_value={"summary": "小时候在院子里听雨，后来常常想起。"},
+                    corrected_value={"claim": "父亲总会先修好自行车，再带我去公园。"},
                     corrected_value_schema_version="owner-truth-v1",
                     reason_code="ownerCorrected",
                 ),
@@ -698,13 +720,37 @@ def main() -> None:
             )
             require(
                 corrected_projection["content"]
-                == {"summary": "小时候在院子里听雨，后来常常想起。"},
+                == {"claim": "父亲总会先修好自行车，再带我去公园。"},
                 "projection must use the immutable corrected MemoryVersion content",
             )
             require(
                 "decisionReceiptId" not in str(projection_ready["entries"])
                 and "rationale" not in str(projection_ready["entries"]),
                 "projection must not duplicate DecisionReceipt rationale",
+            )
+            compatibility = OwnerTruthKBLiteCompatibilityReadService(
+                store,
+                enabled=True,
+            ).read(context=review_context)
+            compatibility_qa_summary = compatibility_summary(compatibility)
+            require(
+                compatibility["state"] == "ready"
+                and compatibility["factCount"] == 1
+                and len(compatibility["graph"]["facts"]) == 1
+                and compatibility["graph"]["facts"][0]["statement"]
+                == "父亲总会先修好自行车，再带我去公园。"
+                and compatibility["graph"]["people"] == []
+                and compatibility["graph"]["places"] == []
+                and compatibility["graph"]["events"] == [],
+                "KBLite compatibility must map only the confirmed knowledge claim",
+            )
+            require(
+                compatibility["filteredEntries"]
+                and compatibility["filteredEntries"][0]["reason"]
+                == "memory_kind_not_compatibility_fact"
+                and review_content["summary"] not in str(compatibility["filteredEntries"])
+                and review_knowledge_content["claim"] not in str(compatibility_qa_summary),
+                "KBLite compatibility summaries must retain filtering reasons without content leakage",
             )
 
             expect_rejected(
@@ -985,6 +1031,15 @@ def main() -> None:
                 and projection_changed["entries"] == [],
                 "a new MemoryVersion must invalidate an older checkpoint",
             )
+            compatibility_changed = OwnerTruthKBLiteCompatibilityReadService(
+                store,
+                enabled=True,
+            ).read(context=review_context)
+            require(
+                compatibility_changed["state"] == "rebuilding"
+                and compatibility_changed["graph"]["facts"] == [],
+                "KBLite compatibility must fail closed with an invalidated projection checkpoint",
+            )
             projection_after_concurrent = projection_service.rebuild(context=review_context)
             require(
                 projection_after_concurrent.snapshot["entryCount"] == 3,
@@ -1068,6 +1123,9 @@ def main() -> None:
                     "memoryProjectionStaleEpochRejected": True,
                     "memoryProjectionInvalidatesOnMemoryChange": True,
                     "memoryProjectionFailsClosedOnSourceRevocation": True,
+                    "kbliteCompatibilityKnowledgeOnly": True,
+                    "kbliteCompatibilityFailsClosed": True,
+                    "kbliteCompatibilitySummaryValueFree": True,
                     "legacyMemoriesUnchanged": True,
                     "legacyArchiveUnchanged": True,
                 },
