@@ -79,6 +79,7 @@ from app.domain.owner_truth.source_commands import (
 )
 from app.async_effects.lease_repository import PostgresAsyncEffectLeaseRepository
 from app.async_effects.repository import PostgresEffectKernelRepository
+from app.async_effects.scheduler_repository import PostgresAsyncEffectSchedulerLeaseRepository
 
 
 class PostgresStore:
@@ -178,6 +179,14 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("async effect worker lease requires an active unit of work")
         return PostgresAsyncEffectLeaseRepository(active.connection)
+
+    def async_effect_scheduler_repository(self) -> PostgresAsyncEffectSchedulerLeaseRepository:
+        """Return scheduler lease coordination bound to the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("async effect scheduler lease requires an active unit of work")
+        return PostgresAsyncEffectSchedulerLeaseRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(

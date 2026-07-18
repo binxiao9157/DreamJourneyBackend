@@ -32,6 +32,20 @@ services:
       redis:
         condition: service_started
 
+  async-effect-scheduler:
+    build: .
+    profiles:
+      - async-effect-scheduler
+    restart: "no"
+    command: ["python", "-m", "app.scheduler", "--shadow-once"]
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
   postgres:
     image: mirror.ccs.tencentyun.com/library/postgres:16-alpine
     restart: unless-stopped

@@ -25,6 +25,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.async_effects.contracts import AsyncEffectConflict, AsyncEffectIntent, AsyncEffectTarget
 from app.async_effects.lease_repository import AsyncEffectLeaseCancelled, AsyncEffectLeaseLost
+from app.async_effects.scheduler_repository import AsyncEffectSchedulerLeaseLost
 from app.core.config import settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.domain.owner_truth.source_commands import CreateTextSourceCommand, OwnerTruthCommandContext
@@ -359,6 +360,95 @@ def main() -> None:
             except AsyncEffectLeaseCancelled:
                 pass
 
+        scheduler_intent = AsyncEffectIntent(
+            operation_type="asyncEffect.synthetic.scheduler",
+            target=AsyncEffectTarget(
+                owner_subject_id="owner-scheduler-smoke",
+                vault_id="vault-scheduler-smoke",
+                resource_type="syntheticEffect",
+                resource_id="scheduler-lease-smoke",
+                resource_version=1,
+                purpose="schedulerFoundation",
+                authority_epoch=0,
+            ),
+            payload_hash=payload_hash("scheduler-lease-metadata-only"),
+        )
+        scheduler_key = "scheduler.synthetic.tick"
+        with store.request_unit_of_work(
+            correlation_id="async-effect-scheduler-seed",
+            command_id="asyncEffectSchedulerSeed",
+        ):
+            store.effect_kernel_repository().accept(scheduler_intent)
+            scheduler_registration = store.async_effect_scheduler_repository().register(
+                scheduler_intent,
+                scheduler_key=scheduler_key,
+            )
+        require(scheduler_registration.outcome == "accepted", "scheduler lease must register once")
+
+        def claim_scheduler_lease(scheduler_id: str):
+            with store.request_unit_of_work(
+                correlation_id=f"async-effect-scheduler-claim-{scheduler_id}",
+                command_id="asyncEffectSchedulerClaim",
+            ):
+                return store.async_effect_scheduler_repository().claim_next(
+                    scheduler_id=scheduler_id,
+                    lease_seconds=30,
+                    supported_scheduler_keys=[scheduler_key],
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            scheduler_claims = list(executor.map(claim_scheduler_lease, ("scheduler-a", "scheduler-b")))
+        active_scheduler_claims = [claim for claim in scheduler_claims if claim is not None]
+        require(
+            len(active_scheduler_claims) == 1,
+            "only one scheduler may claim the same scheduler lease",
+        )
+        first_scheduler_claim = active_scheduler_claims[0]
+        with store.request_unit_of_work(
+            correlation_id="async-effect-scheduler-heartbeat",
+            command_id="asyncEffectSchedulerHeartbeat",
+        ):
+            renewed_scheduler_claim = store.async_effect_scheduler_repository().heartbeat(
+                first_scheduler_claim,
+                lease_seconds=30,
+            )
+        require(
+            renewed_scheduler_claim.attempt == 1,
+            "scheduler heartbeat must retain the active attempt",
+        )
+        with psycopg.connect(test_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE async_effects.scheduler_leases "
+                    "SET lease_until = NOW() - INTERVAL '1 second' WHERE lease_id = %s",
+                    (first_scheduler_claim.lease_id,),
+                )
+        second_scheduler_claim = claim_scheduler_lease("scheduler-c")
+        require(
+            second_scheduler_claim is not None and second_scheduler_claim.attempt == 2,
+            "expired scheduler lease must be reclaimed",
+        )
+        with store.request_unit_of_work(
+            correlation_id="async-effect-scheduler-stale",
+            command_id="asyncEffectSchedulerStale",
+        ):
+            try:
+                store.async_effect_scheduler_repository().heartbeat(first_scheduler_claim, lease_seconds=30)
+                raise AssertionError("stale scheduler heartbeat must be rejected")
+            except AsyncEffectSchedulerLeaseLost:
+                pass
+        with store.request_unit_of_work(
+            correlation_id="async-effect-scheduler-release",
+            command_id="asyncEffectSchedulerRelease",
+        ):
+            released_scheduler_lease = store.async_effect_scheduler_repository().release(
+                second_scheduler_claim
+            )
+        require(
+            released_scheduler_lease.state == "released",
+            "current scheduler lease must release without scheduling business work",
+        )
+
         try:
             with store.request_unit_of_work(
                 correlation_id="async-effect-conflict",
@@ -433,7 +523,8 @@ def main() -> None:
         print(
             "Async effect Postgres smoke passed: "
             f"schemaHead={verified['expectedHead']} outcomes={sorted(outcomes)} "
-            "sourceOutbox=true workerLease=true rollback=true terminalGuard=true receiptsAppendOnly=true"
+            "sourceOutbox=true workerLease=true schedulerLease=true rollback=true "
+            "terminalGuard=true receiptsAppendOnly=true"
         )
     finally:
         if store is not None:

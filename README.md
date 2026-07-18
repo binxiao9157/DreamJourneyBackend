@@ -64,7 +64,7 @@
 - `RELEASE_POLICY_COMMAND_MODE=observe` 会为受控 command 重新计算服务端发布策略并输出诊断响应头，但暂不拦截旧客户端；这是默认迁移模式。
 - `RELEASE_POLICY_COMMAND_MODE=enforce` 会在受控 command 缺少有效 captured decision、账号代际不匹配或服务端策略拒绝时返回 `403 release_policy_denied`。只能在 observe mismatch 与旧客户端覆盖完成后按 cohort 切换。
 - `DELEGATED_ACCESS_CONTRACT_API_ENABLED=false` 默认关闭 Family/Care/TimeLetter 的 Grant/Relationship 管理接口；安全合同和数据库迁移可以先部署，但在 G4 产品政策通过前不得在常驻服务进程中开启。部署 smoke 仅在独立进程内临时开启该合同。
-- `ASYNC_EFFECT_V1_ENABLED=false` 和 `ASYNC_EFFECT_WORKER_ENABLED=false` 默认关闭 V4 异步副作用执行。`0013_async_effects_kernel` 只部署可重建的协调 schema；在独立 worker、readiness 和各业务 aggregate 的同一 UoW 接入完成前，API 不得把本地 timer、notification 或 schema 存在解释为服务端完成。`async-effect-worker` 是 Docker Compose opt-in profile，当前只允许值无关的 shadow observation；未注册业务 handler 时不会 claim 或执行产品任务。
+- `ASYNC_EFFECT_V1_ENABLED=false` 和 `ASYNC_EFFECT_WORKER_ENABLED=false` 默认关闭 V4 异步副作用执行。`0013_async_effects_kernel` 只部署可重建的协调 schema；在独立 worker、scheduler、readiness 和各业务 aggregate 的同一 UoW 接入完成前，API 不得把本地 timer、notification 或 schema 存在解释为服务端完成。`async-effect-worker` 与 `async-effect-scheduler` 都是 Docker Compose opt-in profile，当前只允许值无关的 shadow observation；未注册业务 handler 或 scheduler cohort 时不会 claim、调度或执行产品任务。
 - ReleasePolicy rollout shadow 事件写入严格白名单的 append-only evidence sink；`EVIDENCE_ROLLOUT_RETENTION_DAYS` 只控制临时 rollout 观察保留期，legal hold 不受普通 TTL 或账号 purge 删除。
 
 部署环境可设置 `BACKEND_BASE_URL`、`COMPAT_EXPECTED_MODE`、`COMPAT_MIN_CLIENT_BUILD`、`COMPAT_USER_ACCESS_TOKEN`、`COMPAT_USER_ID` 和 `BACKEND_API_TOKEN` 后运行 `scripts/backend-client-compatibility-deployed-smoke.py`。脚本只执行读取和必然在字段校验前失败的 mutation probe，不切换或持久化生产策略；observe 与 enforce 应分别在对应配置的实例上执行。

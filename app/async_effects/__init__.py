@@ -28,6 +28,15 @@ from .lease_repository import (
     InMemoryAsyncEffectLeaseRepository,
     PostgresAsyncEffectLeaseRepository,
 )
+from .scheduler_repository import (
+    AsyncEffectSchedulerLease,
+    AsyncEffectSchedulerLeaseError,
+    AsyncEffectSchedulerLeaseLost,
+    AsyncEffectSchedulerLeaseRegistration,
+    AsyncEffectSchedulerPreview,
+    InMemoryAsyncEffectSchedulerLeaseRepository,
+    PostgresAsyncEffectSchedulerLeaseRepository,
+)
 
 __all__ = [
     "ASYNC_EFFECT_SCHEMA_VERSION",
@@ -41,11 +50,18 @@ __all__ = [
     "AsyncEffectLeaseError",
     "AsyncEffectLeaseLost",
     "AsyncEffectRuntimeStatus",
+    "AsyncEffectSchedulerLease",
+    "AsyncEffectSchedulerLeaseError",
+    "AsyncEffectSchedulerLeaseLost",
+    "AsyncEffectSchedulerLeaseRegistration",
+    "AsyncEffectSchedulerPreview",
     "AsyncEffectTarget",
     "EffectReceiptSummary",
     "InMemoryEffectKernelRepository",
     "InMemoryAsyncEffectLeaseRepository",
+    "InMemoryAsyncEffectSchedulerLeaseRepository",
     "PostgresEffectKernelRepository",
     "PostgresAsyncEffectLeaseRepository",
+    "PostgresAsyncEffectSchedulerLeaseRepository",
     "resolve_async_effect_runtime_status",
 ]
