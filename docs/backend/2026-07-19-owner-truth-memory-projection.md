@@ -195,14 +195,14 @@ rewrite of an already-recorded migration.
 - Focused projection/review/effect/compatibility/API suite passed, including
   default-hidden QA access, knowledge-only mapping, stale-checkpoint
   fail-closed behavior, typed Context citations and value-free QA summaries.
-- `./scripts/verify_backend.sh` passed with 690 unit tests, credential
+- `./scripts/verify_backend.sh` passed with 706 unit tests, credential
   boundary tests, FastAPI smoke, knowledge checks, deployment-file checks and
   backup contract smoke.
 - Python compilation, shell syntax checks and `git diff --check` passed.
 
 ### G2 deployed Postgres
 
-Deployed backend head: `930c9e3`.
+Deployed backend head: `b5155ee`.
 
 - `migrate_db.py --apply --build-id 18ce3bd` reported no pending migrations;
   expected and applied schema heads are both `0017`.
@@ -217,6 +217,12 @@ Deployed backend head: `930c9e3`.
   additionally verifies that the Context shadow selects typed citations,
   returns no MemoryVersion content in its QA summary and fails closed after an
   invalidated projection checkpoint.
+- The same isolated smoke now enables the typed projection worker only inside
+  its disposable database. It verifies two rebuild jobs terminalize as
+  `completed/dispatched/succeeded`, write only their matching value-free
+  consumer receipts, report deterministic `rebuilt` then `unchanged` outcomes,
+  and block a stale Source target without rebuilding. The normal deployed
+  process still leaves all worker flags `false`.
 - `scripts/run-backend-route-authentication-postgres-smoke.sh` passed with
   `routeCount=84`; all four QA-only routes remain user-session-only and do
   not change anonymous or machine access.
@@ -226,9 +232,10 @@ Deployed backend head: `930c9e3`.
 ## Gate Disposition
 
 This establishes scoped `G0/G2` evidence for the Projection foundation, the
-first read-only KBLite compatibility adapter and a default-off Citation Context
-shadow only. The typed worker code is also default-off and still requires its
-own current G0/G2 evidence before it can be described as internally ready.
+first read-only KBLite compatibility adapter, a default-off Citation Context
+shadow and the default-off typed projection worker. The worker has current
+scoped G0/G2 evidence but is not enabled in the normal deployment and is not a
+public product capability.
 `WI-S1-01-06` remains `PLANNED/STOP` in the Registry because its full scope
 still requires a production-ranked typed Citation Context reader,
 correction-flow integration, iOS cache-envelope/authority-epoch handling and
