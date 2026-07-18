@@ -28,6 +28,10 @@ HIDDEN_PROVIDER_SURFACE_PREFIXES = (
     "POST /archive/image-analysis?",
     "POST /tts?",
 )
+HIDDEN_PROVIDER_FEATURE_BY_PREFIX = {
+    "POST /archive/image-analysis?": "archiveLocalAnalysis",
+    "POST /tts?": "voiceCloneShell",
+}
 CANARIES = (
     "KB_TRANSCRIPT_CANARY",
     "KB_SUMMARY_CANARY",
@@ -241,10 +245,20 @@ def assert_value_free_response(
             f"{surface} returned an unexpected hidden-provider denial",
         )
         if isinstance(detail, dict):
+            matching_prefix = next(
+                prefix
+                for prefix in HIDDEN_PROVIDER_SURFACE_PREFIXES
+                if surface.startswith(prefix)
+            )
             require(
-                detail.get("code") == "release_policy_command_denied",
+                detail.get("code") == "release_policy_denied",
                 f"{surface} returned an unexpected denial contract",
             )
+            require(
+                detail.get("feature") == HIDDEN_PROVIDER_FEATURE_BY_PREFIX[matching_prefix],
+                f"{surface} returned an unexpected denied feature",
+            )
+            require(detail.get("retryable") is False, "hidden provider denial must not be retryable")
         else:
             require(isinstance(detail, str), "policy denial detail must be string or object")
         return "policyDenied"
