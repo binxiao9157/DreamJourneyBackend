@@ -14,6 +14,10 @@ import secrets
 import urllib.error
 import urllib.request
 
+from app.core.config import settings
+from app.services.auth_sessions import AuthSessionService
+from app.services.postgres_store import PostgresStore
+
 
 BASE_URL = os.environ.get(
     "BACKEND_BASE_URL",
@@ -71,28 +75,124 @@ def request_json(
     return status, body
 
 
-def issue_smoke_access_token() -> str:
+def issue_smoke_access_token() -> tuple[PostgresStore, str, str]:
     """Use a typed user principal for user-owned provider routes.
 
     A machine service token must not be able to call `/kb/extract`,
     `/archive/image-analysis`, or `/tts` in production enforcement mode.
-    The temporary smoke account is intentionally not printed or exported.
+    The temporary smoke account is intentionally not printed or exported, and
+    is removed after the smoke completes. Issuing an opaque session directly
+    keeps this operational smoke independent from the separately configured
+    phone-identity provider.
     """
 
-    phone_suffix = f"{secrets.randbelow(10**8):08d}"
-    status, body = request_json(
-        "POST",
-        "/auth/login",
-        payload={
-            "phone": f"196{phone_suffix}",
-            "nickname": "provider redaction smoke",
-            "password": f"provider-redaction-{secrets.token_hex(6)}",
-        },
+    database_url = os.environ.get("DATABASE_URL", settings.database_url).strip()
+    require(database_url, "DATABASE_URL is required for user-route smoke")
+    store = PostgresStore(
+        dsn=database_url,
+        pool_min_size=1,
+        pool_max_size=2,
+        pool_timeout_seconds=2.0,
     )
-    require(status == 200, "smoke user login failed")
-    access_token = str((body.get("auth") or {}).get("accessToken") or "").strip()
+    store.open_pool(wait=True)
+    phone_suffix = f"{secrets.randbelow(10**8):08d}"
+    user = store.upsert_user(
+        phone=f"196{phone_suffix}",
+        nickname="provider redaction smoke",
+    )
+    user_id = str(user.get("id") or "").strip()
+    require(user_id, "smoke user id missing")
+    auth = AuthSessionService(
+        store,
+        access_ttl_seconds=300,
+        refresh_ttl_seconds=900,
+    ).issue(user_id)
+    access_token = str(auth.get("accessToken") or "").strip()
     require(access_token.startswith("dja_"), "smoke user access token missing")
-    return access_token
+    return store, user_id, access_token
+
+
+def cleanup_smoke_user(store: PostgresStore | None, user_id: str) -> None:
+    if store is None:
+        return
+    try:
+        if user_id:
+            with store.request_unit_of_work(
+                correlation_id="provider-redaction-smoke-cleanup",
+                command_id="cleanupProviderRedactionSmoke",
+            ) as unit_of_work:
+                with unit_of_work.connection.cursor() as cursor:
+                    cursor.execute("DELETE FROM session_events WHERE user_id = %s", (user_id,))
+                    cursor.execute("DELETE FROM token_families WHERE user_id = %s", (user_id,))
+                    cursor.execute("DELETE FROM auth_sessions WHERE user_id = %s", (user_id,))
+                    cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+    finally:
+        store.close_pool()
+
+
+def main() -> None:
+    require(BASE_URL, "BACKEND_BASE_URL is required")
+
+    ready_status, ready = request_json("GET", "/ready")
+    require(ready_status == 200 and ready.get("status") == "ready", "deployed service is not ready")
+    store: PostgresStore | None = None
+    user_id = ""
+    try:
+        store, user_id, access_token = issue_smoke_access_token()
+        surfaces = (
+            (
+                "POST",
+                "/kb/extract?dryRun=true",
+                {
+                    "userId": user_id,
+                    "transcript": "KB_TRANSCRIPT_CANARY",
+                    "existingSummary": "KB_SUMMARY_CANARY",
+                    "privacyMetadata": {"scope": "generationAllowed"},
+                },
+            ),
+            (
+                "POST",
+                "/archive/image-analysis?dryRun=true",
+                {
+                    "userId": user_id,
+                    "archiveItemId": "qa-provider-redaction-archive",
+                    "imageBase64": "IMAGE_BASE64_CANARY",
+                    "privacyMetadata": {"scope": "generationAllowed"},
+                },
+            ),
+            (
+                "POST",
+                "/tts?dryRun=true",
+                {
+                    "userId": user_id,
+                    "text": "TTS_TEXT_CANARY",
+                    "voiceType": "QA_VOICE_TYPE",
+                },
+            ),
+            ("GET", "/maps/district?dryRun=true&keyword=MAP_QUERY_CANARY", None),
+        )
+
+        outcomes = [
+            assert_value_free_response(
+                *request_json(method, path, payload=payload, access_token=access_token)
+            )
+            for method, path, payload in surfaces
+        ]
+        print(
+            json.dumps(
+                {
+                    "policyVersion": POLICY_VERSION,
+                    "providerDryRunReports": outcomes.count("report"),
+                    "safeProviderErrors": outcomes.count("safeError"),
+                    "status": "passed",
+                    "surfaces": len(surfaces),
+                    "userRouteAuthentication": "opaqueAccessToken",
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        cleanup_smoke_user(store, user_id)
 
 
 def assert_value_free_response(status: int, body: dict) -> str:
@@ -118,66 +218,6 @@ def assert_value_free_response(status: int, body: dict) -> str:
         "provider error redaction policy version missing",
     )
     return "safeError"
-
-
-def main() -> None:
-    require(BASE_URL, "BACKEND_BASE_URL is required")
-
-    ready_status, ready = request_json("GET", "/ready")
-    require(ready_status == 200 and ready.get("status") == "ready", "deployed service is not ready")
-    access_token = issue_smoke_access_token()
-
-    surfaces = (
-        (
-            "POST",
-            "/kb/extract?dryRun=true",
-            {
-                "userId": "qa-provider-redaction-user",
-                "transcript": "KB_TRANSCRIPT_CANARY",
-                "existingSummary": "KB_SUMMARY_CANARY",
-                "privacyMetadata": {"scope": "generationAllowed"},
-            },
-        ),
-        (
-            "POST",
-            "/archive/image-analysis?dryRun=true",
-            {
-                "userId": "qa-provider-redaction-user",
-                "archiveItemId": "qa-provider-redaction-archive",
-                "imageBase64": "IMAGE_BASE64_CANARY",
-                "privacyMetadata": {"scope": "generationAllowed"},
-            },
-        ),
-        (
-            "POST",
-            "/tts?dryRun=true",
-            {
-                "userId": "qa-provider-redaction-user",
-                "text": "TTS_TEXT_CANARY",
-                "voiceType": "QA_VOICE_TYPE",
-            },
-        ),
-        ("GET", "/maps/district?dryRun=true&keyword=MAP_QUERY_CANARY", None),
-    )
-
-    outcomes = [
-        assert_value_free_response(
-            *request_json(method, path, payload=payload, access_token=access_token)
-        )
-        for method, path, payload in surfaces
-    ]
-    print(
-        json.dumps(
-            {
-                "policyVersion": POLICY_VERSION,
-                "providerDryRunReports": outcomes.count("report"),
-                "safeProviderErrors": outcomes.count("safeError"),
-                "status": "passed",
-                "surfaces": len(surfaces),
-            },
-            sort_keys=True,
-        )
-    )
 
 
 if __name__ == "__main__":
