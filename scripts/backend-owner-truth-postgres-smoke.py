@@ -729,7 +729,9 @@ def main() -> None:
                 and first_projection_worker_result["consumerInboxState"] == "completed"
                 and second_projection_worker_result["status"] == "completed"
                 and second_projection_worker_result["projectionOutcome"] == "unchanged",
-                "enabled projection worker must terminalize each current rebuild intent",
+                "enabled projection worker must terminalize each current rebuild intent: "
+                f"first={json.dumps(first_projection_worker_result, sort_keys=True)} "
+                f"second={json.dumps(second_projection_worker_result, sort_keys=True)}",
             )
             require(
                 review_content["summary"] not in str(first_projection_worker_result)
