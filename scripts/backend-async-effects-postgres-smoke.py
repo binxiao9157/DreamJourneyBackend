@@ -24,7 +24,10 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.async_effects.contracts import AsyncEffectConflict, AsyncEffectIntent, AsyncEffectTarget
-from app.async_effects.consumer_repository import AsyncEffectSyntheticConsumerCommand
+from app.async_effects.consumer_repository import (
+    AsyncEffectSyntheticConsumerCommand,
+    OwnerTruthSourceBlockedConsumerCommand,
+)
 from app.async_effects.lease_repository import AsyncEffectLeaseCancelled, AsyncEffectLeaseLost
 from app.async_effects.scheduler_repository import AsyncEffectSchedulerLeaseLost
 from app.core.config import settings
@@ -291,6 +294,39 @@ def main() -> None:
             not stale_source_admission.allowed
             and stale_source_admission.reason_code == "authorityEpochChanged",
             "stale source authority epoch must block target admission",
+        )
+        with store.request_unit_of_work(
+            correlation_id="async-effect-source-target-blocked-completion",
+            command_id="asyncEffectSourceTargetBlockedCompletion",
+        ):
+            live_blocked_admission = store.owner_truth_source_target_admission_repository().admit_owner_truth_source(
+                source_effect_intent
+            )
+            source_blocked_command = OwnerTruthSourceBlockedConsumerCommand(
+                intent=source_effect_intent,
+                consumer_name="ownerTruth.source.blocked",
+                business_target_key=source_effect_intent.business_target_key,
+                outcome="blocked",
+                reason_code=live_blocked_admission.reason_code,
+                result_ref_hash=payload_hash("source-target-blocked-result"),
+                admission=live_blocked_admission,
+            )
+            source_blocked_completion = store.async_effect_consumer_repository().consume(
+                source_blocked_command
+            )
+        require(
+            source_blocked_completion.business_outcome == "blocked"
+            and source_blocked_completion.inbox_state == "skipped",
+            "stale target admission must write a typed blocked completion in the same UoW",
+        )
+        require(
+            count_consumer_receipts(
+                test_dsn,
+                operation_id=source_effect_intent.operation_id,
+                receipt_type=source_blocked_command.receipt_type,
+            )
+            == 1,
+            "typed blocked completion must retain one immutable business receipt",
         )
 
         rollback_source_command = CreateTextSourceCommand(
@@ -696,8 +732,8 @@ def main() -> None:
         print(
             "Async effect Postgres smoke passed: "
             f"schemaHead={verified['expectedHead']} outcomes={sorted(outcomes)} "
-            "sourceOutbox=true sourceTargetAdmission=true workerLease=true schedulerLease=true "
-            "consumerInbox=true rollback=true "
+            "sourceOutbox=true sourceTargetAdmission=true sourceBlockedCompletion=true "
+            "workerLease=true schedulerLease=true consumerInbox=true rollback=true "
             "terminalGuard=true receiptsAppendOnly=true"
         )
     finally:

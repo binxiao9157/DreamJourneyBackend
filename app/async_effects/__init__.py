@@ -39,11 +39,13 @@ from .scheduler_repository import (
 )
 from .consumer_repository import (
     AsyncEffectConsumerAdmissionDenied,
+    AsyncEffectConsumerCompletionCommand,
     AsyncEffectConsumerError,
     AsyncEffectConsumerIncomplete,
     AsyncEffectConsumerReceipt,
     AsyncEffectSyntheticConsumerCommand,
     InMemoryAsyncEffectConsumerRepository,
+    OwnerTruthSourceBlockedConsumerCommand,
     PostgresAsyncEffectConsumerRepository,
 )
 from .target_admission import (
@@ -58,6 +60,7 @@ __all__ = [
     "AsyncEffectContractError",
     "AsyncEffectCancelResult",
     "AsyncEffectConsumerAdmissionDenied",
+    "AsyncEffectConsumerCompletionCommand",
     "AsyncEffectConsumerError",
     "AsyncEffectConsumerIncomplete",
     "AsyncEffectConsumerReceipt",
@@ -82,6 +85,7 @@ __all__ = [
     "InMemoryEffectKernelRepository",
     "InMemoryAsyncEffectLeaseRepository",
     "InMemoryAsyncEffectConsumerRepository",
+    "OwnerTruthSourceBlockedConsumerCommand",
     "InMemoryOwnerTruthSourceTargetAdmissionRepository",
     "InMemoryAsyncEffectSchedulerLeaseRepository",
     "PostgresEffectKernelRepository",

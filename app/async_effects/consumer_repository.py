@@ -16,6 +16,7 @@ from typing import Any, Mapping, Optional
 from uuid import UUID, uuid5
 
 from app.async_effects.contracts import AsyncEffectConflict, AsyncEffectIntent
+from app.async_effects.target_admission import AsyncEffectTargetAdmission
 
 
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
@@ -23,6 +24,7 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _CONSUMER_NAMESPACE = UUID("e767a5e0-01b2-49ea-a61b-75516b4f2dc8")
 _SYNTHETIC_OPERATION_PREFIX = "asyncEffect.synthetic."
 _TERMINAL_OUTCOMES = {"completed", "skipped", "blocked", "failed", "unknown"}
+_OWNER_TRUTH_SOURCE_BLOCKED_CONSUMER = "ownerTruth.source.blocked"
 
 
 class AsyncEffectConsumerError(RuntimeError):
@@ -73,8 +75,8 @@ def _receipt_id(intent: AsyncEffectIntent, consumer_name: str, business_target_k
 
 
 @dataclass(frozen=True)
-class AsyncEffectSyntheticConsumerCommand:
-    """A value-free completion command used only by the synthetic foundation."""
+class AsyncEffectConsumerCompletionCommand:
+    """Immutable consumer completion coordinates, without a product payload body."""
 
     intent: AsyncEffectIntent
     consumer_name: str
@@ -86,10 +88,6 @@ class AsyncEffectSyntheticConsumerCommand:
     def __post_init__(self) -> None:
         if not isinstance(self.intent, AsyncEffectIntent):
             raise AsyncEffectConsumerError("intent is required")
-        if not self.intent.operation_type.startswith(_SYNTHETIC_OPERATION_PREFIX):
-            raise AsyncEffectConsumerAdmissionDenied(
-                "only asyncEffect.synthetic.* operations are admitted in this foundation"
-            )
         object.__setattr__(self, "consumer_name", _identifier(self.consumer_name, field="consumer_name", max_length=64))
         object.__setattr__(self, "business_target_key", _sha256(self.business_target_key, field="business_target_key"))
         normalized_outcome = str(self.outcome or "").strip()
@@ -113,6 +111,48 @@ class AsyncEffectSyntheticConsumerCommand:
 
 
 @dataclass(frozen=True)
+class AsyncEffectSyntheticConsumerCommand(AsyncEffectConsumerCompletionCommand):
+    """A value-free completion command used only by the synthetic foundation."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not self.intent.operation_type.startswith(_SYNTHETIC_OPERATION_PREFIX):
+            raise AsyncEffectConsumerAdmissionDenied(
+                "only asyncEffect.synthetic.* operations are admitted in this foundation"
+            )
+
+
+@dataclass(frozen=True)
+class OwnerTruthSourceBlockedConsumerCommand(AsyncEffectConsumerCompletionCommand):
+    """Record a terminal block only after a live Source target recheck fails."""
+
+    admission: AsyncEffectTargetAdmission
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.intent.operation_type != "ownerTruth.source.created":
+            raise AsyncEffectConsumerAdmissionDenied("owner truth Source completion requires its typed operation")
+        if self.consumer_name != _OWNER_TRUTH_SOURCE_BLOCKED_CONSUMER:
+            raise AsyncEffectConsumerAdmissionDenied("owner truth Source completion has one fixed consumer")
+        if self.business_target_key != self.intent.business_target_key:
+            raise AsyncEffectConsumerAdmissionDenied("owner truth Source completion has one fixed business target")
+        target = self.intent.target
+        if target.resource_type != "source" or target.purpose != "candidateExtraction":
+            raise AsyncEffectConsumerAdmissionDenied("owner truth Source completion requires its typed target")
+        if not isinstance(self.admission, AsyncEffectTargetAdmission):
+            raise AsyncEffectConsumerError("live target admission is required")
+        if (
+            self.admission.operation_id != self.intent.operation_id
+            or self.admission.target_stable_key != self.intent.stable_key
+        ):
+            raise AsyncEffectConsumerError("target admission does not belong to this immutable effect")
+        if self.admission.allowed or self.admission.outcome != "blocked":
+            raise AsyncEffectConsumerError("current Source target cannot be recorded as blocked")
+        if self.outcome != "blocked" or self.reason_code != self.admission.reason_code:
+            raise AsyncEffectConsumerError("blocked completion must preserve the live admission result")
+
+
+@dataclass(frozen=True)
 class AsyncEffectConsumerReceipt:
     outcome: str
     inbox_id: str
@@ -132,9 +172,9 @@ class InMemoryAsyncEffectConsumerRepository:
         self._inbox: dict[tuple[str, str], dict[str, str]] = {}
         self._receipts: dict[tuple[str, str, str], dict[str, str]] = {}
 
-    def consume(self, command: AsyncEffectSyntheticConsumerCommand) -> AsyncEffectConsumerReceipt:
-        if not isinstance(command, AsyncEffectSyntheticConsumerCommand):
-            raise TypeError("synthetic consumer command is required")
+    def consume(self, command: AsyncEffectConsumerCompletionCommand) -> AsyncEffectConsumerReceipt:
+        if not isinstance(command, AsyncEffectConsumerCompletionCommand):
+            raise TypeError("consumer completion command is required")
         inbox_key = (command.consumer_name, command.intent.outbox_event_id)
         receipt_key = (command.intent.operation_id, command.receipt_type, command.business_target_key)
         with self._lock:
@@ -173,7 +213,7 @@ class InMemoryAsyncEffectConsumerRepository:
             inbox["state"] = _inbox_state(command.outcome)
             return self._summary(inbox, receipt, outcome="accepted")
 
-    def _has_other_target(self, command: AsyncEffectSyntheticConsumerCommand) -> bool:
+    def _has_other_target(self, command: AsyncEffectConsumerCompletionCommand) -> bool:
         return any(
             operation_id == command.intent.operation_id and receipt_type == command.receipt_type
             for operation_id, receipt_type, _target_key in self._receipts
@@ -182,7 +222,7 @@ class InMemoryAsyncEffectConsumerRepository:
     @staticmethod
     def _assert_inbox_matches(
         inbox: Mapping[str, str],
-        command: AsyncEffectSyntheticConsumerCommand,
+        command: AsyncEffectConsumerCompletionCommand,
     ) -> None:
         if (
             inbox["operationId"] != command.intent.operation_id
@@ -195,7 +235,7 @@ class InMemoryAsyncEffectConsumerRepository:
     @staticmethod
     def _assert_receipt_matches(
         receipt: Mapping[str, str],
-        command: AsyncEffectSyntheticConsumerCommand,
+        command: AsyncEffectConsumerCompletionCommand,
     ) -> None:
         expected = {
             "operationId": command.intent.operation_id,
@@ -237,9 +277,9 @@ class PostgresAsyncEffectConsumerRepository:
             raise ValueError("an active database connection is required")
         self._connection = connection
 
-    def consume(self, command: AsyncEffectSyntheticConsumerCommand) -> AsyncEffectConsumerReceipt:
-        if not isinstance(command, AsyncEffectSyntheticConsumerCommand):
-            raise TypeError("synthetic consumer command is required")
+    def consume(self, command: AsyncEffectConsumerCompletionCommand) -> AsyncEffectConsumerReceipt:
+        if not isinstance(command, AsyncEffectConsumerCompletionCommand):
+            raise TypeError("consumer completion command is required")
         intent = command.intent
         target = intent.target
         with self._cursor() as cursor:
@@ -329,7 +369,7 @@ class PostgresAsyncEffectConsumerRepository:
                 raise AsyncEffectConsumerIncomplete("consumer inbox failed to transition to a terminal state")
             return self._summary(completed_inbox, receipt, outcome="accepted")
 
-    def _replay_existing(self, cursor: Any, command: AsyncEffectSyntheticConsumerCommand) -> AsyncEffectConsumerReceipt:
+    def _replay_existing(self, cursor: Any, command: AsyncEffectConsumerCompletionCommand) -> AsyncEffectConsumerReceipt:
         cursor.execute(
             """
             SELECT inbox_id, operation_id, event_id, consumer_name, payload_hash, state
@@ -381,7 +421,7 @@ class PostgresAsyncEffectConsumerRepository:
     @staticmethod
     def _assert_receipt_matches(
         receipt: Mapping[str, Any],
-        command: AsyncEffectSyntheticConsumerCommand,
+        command: AsyncEffectConsumerCompletionCommand,
     ) -> None:
         expected = {
             "operation_id": command.intent.operation_id,
@@ -424,10 +464,12 @@ class PostgresAsyncEffectConsumerRepository:
 
 __all__ = [
     "AsyncEffectConsumerAdmissionDenied",
+    "AsyncEffectConsumerCompletionCommand",
     "AsyncEffectConsumerError",
     "AsyncEffectConsumerIncomplete",
     "AsyncEffectConsumerReceipt",
     "AsyncEffectSyntheticConsumerCommand",
     "InMemoryAsyncEffectConsumerRepository",
+    "OwnerTruthSourceBlockedConsumerCommand",
     "PostgresAsyncEffectConsumerRepository",
 ]

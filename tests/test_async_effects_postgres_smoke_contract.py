@@ -24,6 +24,8 @@ class AsyncEffectsPostgresSmokeContractTests(unittest.TestCase):
         self.assertIn("source must roll back when its effect request cannot commit", source)
         self.assertIn("current owner truth source target must be admitted", source)
         self.assertIn("stale source authority epoch must block target admission", source)
+        self.assertIn("stale target admission must write a typed blocked completion in the same UoW", source)
+        self.assertIn("typed blocked completion must retain one immutable business receipt", source)
         self.assertIn("FOR UPDATE SKIP LOCKED", lease_source)
         self.assertIn("FOR UPDATE SKIP LOCKED", scheduler_source)
         self.assertIn("RETURNING lease.lease_id", scheduler_source)

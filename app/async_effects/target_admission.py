@@ -33,6 +33,7 @@ class AsyncEffectTargetAdmission:
     outcome: str
     reason_code: str
     operation_id: str
+    target_stable_key: str
     authority_epoch: int | None = None
     resource_version: int | None = None
 
@@ -61,6 +62,7 @@ def _blocked(intent: AsyncEffectIntent, reason_code: str) -> AsyncEffectTargetAd
         outcome="blocked",
         reason_code=reason_code,
         operation_id=intent.operation_id,
+        target_stable_key=intent.stable_key,
     )
 
 
@@ -74,6 +76,7 @@ def _admitted(
         outcome="admitted",
         reason_code="targetAuthorized",
         operation_id=intent.operation_id,
+        target_stable_key=intent.stable_key,
         authority_epoch=authority_epoch,
         resource_version=resource_version,
     )
