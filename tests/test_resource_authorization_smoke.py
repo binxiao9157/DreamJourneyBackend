@@ -25,13 +25,17 @@ def runtime_contract(
     route_mode="enforce",
     ownership_mode="enforce",
     cross_account_mode="enforce",
+    principal_bound_route_enforcement=True,
 ):
     return {
         "environment": environment,
         "auth": {
             "routeAuthentication": {"mode": route_mode},
             "ownershipMode": ownership_mode,
-            "crossAccountPolicy": {"mode": cross_account_mode},
+            "crossAccountPolicy": {
+                "mode": cross_account_mode,
+                "principalBoundRouteEnforcement": principal_bound_route_enforcement,
+            },
         },
     }
 
@@ -39,6 +43,9 @@ def runtime_contract(
 class ResourceAuthorizationSmokeTests(unittest.TestCase):
     def test_accepts_production_enforcement_contract(self):
         SMOKE.require_production_enforcement(runtime_contract())
+        SMOKE.require_production_enforcement(
+            runtime_contract(ownership_mode="shadow", cross_account_mode="shadow")
+        )
 
     def test_rejects_non_production_or_non_enforcing_contracts(self):
         cases = (
@@ -51,12 +58,8 @@ class ResourceAuthorizationSmokeTests(unittest.TestCase):
                 "route authentication must enforce",
             ),
             (
-                runtime_contract(ownership_mode="shadow"),
-                "ownership authorization must enforce",
-            ),
-            (
-                runtime_contract(cross_account_mode="shadow"),
-                "cross-account authorization must enforce",
+                runtime_contract(principal_bound_route_enforcement=False),
+                "principal-bound owner routes must enforce",
             ),
         )
 

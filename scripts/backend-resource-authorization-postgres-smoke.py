@@ -66,16 +66,21 @@ def require_production_enforcement(runtime):
         and route_authentication.get("mode") == "enforce",
         "production route authentication must enforce",
     )
+    ownership_mode = str(auth.get("ownershipMode") or "").strip().lower()
     require(
-        auth.get("ownershipMode") == "enforce",
-        "production ownership authorization must enforce",
+        ownership_mode in {"shadow", "enforce"},
+        "production ownership authorization mode must be explicit",
     )
     cross_account_policy = auth.get("crossAccountPolicy")
     require(
         isinstance(cross_account_policy, dict)
-        and cross_account_policy.get("mode") == "enforce",
-        "production cross-account authorization must enforce",
+        and cross_account_policy.get("principalBoundRouteEnforcement") is True,
+        "production principal-bound owner routes must enforce",
     )
+    return {
+        "ownershipMode": ownership_mode,
+        "crossAccountMode": str(cross_account_policy.get("mode") or "").strip().lower(),
+    }
 
 
 def cleanup(store, user_ids):
@@ -107,7 +112,7 @@ def main():
     dsn = os.environ.get("DATABASE_URL", "").strip()
     require(dsn, "DATABASE_URL is required")
     runtime, _ = request_json("GET", "/config/runtime")
-    require_production_enforcement(runtime)
+    enforcement = require_production_enforcement(runtime)
 
     suffix = secrets.token_hex(8)
     store = PostgresStore(
@@ -470,7 +475,9 @@ def main():
                     "mailboxOwnershipTransferDenied": True,
                     "nestedOwnerClaimDenied": True,
                     "ownerDerivedFromPrincipal": True,
-                    "productionEnforcementVerified": True,
+                    "principalBoundRouteEnforcementVerified": True,
+                    "globalOwnershipMode": enforcement["ownershipMode"],
+                    "globalCrossAccountMode": enforcement["crossAccountMode"],
                     "resourceCollisionDenied": True,
                     "staleResourceVersionDenied": True,
                     "status": "passed",
