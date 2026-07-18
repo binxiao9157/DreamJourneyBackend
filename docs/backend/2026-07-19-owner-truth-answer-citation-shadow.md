@@ -83,10 +83,25 @@ the first isolated Postgres smoke found an ambiguous PL/pgSQL
 
 ### G2 deployment
 
-Pending: deploy migration `0019` and run
-`scripts/run-backend-owner-truth-postgres-smoke.sh` against a disposable
-Postgres database on the deployment host. The normal runtime must continue to
-keep Owner Truth QA switches and projection workers disabled.
+Deployed backend runtime head: `15574b0`.
+
+1. Migration `0018` was applied first; its first disposable-Postgres smoke
+   exposed the trigger ambiguity without writing product data. Migration `0019`
+   then applied cleanly, and `migrate_db.py --verify` reports
+   `expectedHead=0019`, `appliedHead=0019` and `status=ready`.
+2. `scripts/run-backend-owner-truth-postgres-smoke.sh` passed against a
+   disposable database. It reports `answerCitationTyped`,
+   `answerCitationIdempotent`, `answerCitationValueFree` and
+   `answerCitationImmutable` all true, alongside the existing projection and
+   Context shadow checks.
+3. `scripts/run-backend-route-authentication-postgres-smoke.sh` passed with
+   `routeCount=86`, no anonymous user-route access, no machine business-route
+   access and a valid user-session route decision.
+4. `https://dreamjourney-api.liftora.cn/ready` reported database, schema,
+   auth and incident components ready after the migration.
+
+The normal runtime still keeps Owner Truth QA switches and projection workers
+disabled.
 
 ## Gate Disposition
 
