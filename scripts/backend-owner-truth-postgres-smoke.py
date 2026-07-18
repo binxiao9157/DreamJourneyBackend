@@ -45,6 +45,11 @@ from app.services.owner_truth_source import (
 )
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
+from app.services.owner_truth_memory_projection_effects import (
+    MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
+    MEMORY_PROJECTION_REBUILD_JOB_TYPE,
+    MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+)
 from app.services.postgres_store import PostgresStore
 
 
@@ -539,6 +544,131 @@ def main() -> None:
                 and rejected.memory_activation.memory_id is None,
                 "rejected Candidate must not activate a MemoryVersion",
             )
+            require(
+                accepted.projection_effect is not None
+                and accepted.projection_effect.outcome == "accepted",
+                "accepted MemoryVersion must atomically request a compatibility projection rebuild",
+            )
+            require(
+                accepted_replay.projection_effect is not None
+                and accepted_replay.projection_effect.outcome == "deduplicated"
+                and accepted_replay.projection_effect.operation_id
+                == accepted.projection_effect.operation_id,
+                "MemoryVersion projection rebuild intent must deduplicate with decision replay",
+            )
+            require(
+                corrected.projection_effect is not None
+                and corrected.projection_effect.outcome == "accepted",
+                "corrected MemoryVersion must request its own compatibility projection rebuild",
+            )
+            require(
+                rejected.projection_effect is None,
+                "rejected Candidate must not enqueue a compatibility projection rebuild",
+            )
+
+            expected_effects = {
+                accepted.memory_activation.memory_version_id: {
+                    "operationId": accepted.projection_effect.operation_id,
+                    "payloadHash": accepted.memory_activation.content_hash,
+                },
+                corrected.memory_activation.memory_version_id: {
+                    "operationId": corrected.projection_effect.operation_id,
+                    "payloadHash": corrected.memory_activation.content_hash,
+                },
+            }
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT operation_id::text, operation_type, resource_type, resource_id,
+                            resource_version, purpose, authority_epoch, payload_hash, state, attempt
+                        FROM async_effects.operations
+                        WHERE vault_id = %s AND operation_type = %s
+                        ORDER BY resource_id ASC
+                        """,
+                        (review_vault_id, MEMORY_PROJECTION_REBUILD_OPERATION_TYPE),
+                    )
+                    effect_operations = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT operation_id::text, event_type, payload_hash, state, attempt
+                        FROM async_effects.outbox_events
+                        WHERE vault_id = %s AND event_type = %s
+                        ORDER BY operation_id ASC
+                        """,
+                        (review_vault_id, MEMORY_PROJECTION_REBUILD_EVENT_TYPE),
+                    )
+                    effect_outbox = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT operation_id::text, job_type, payload_hash, state, attempt
+                        FROM async_effects.jobs
+                        WHERE vault_id = %s AND job_type = %s
+                        ORDER BY operation_id ASC
+                        """,
+                        (review_vault_id, MEMORY_PROJECTION_REBUILD_JOB_TYPE),
+                    )
+                    effect_jobs = cursor.fetchall()
+
+            require(
+                len(effect_operations) == len(expected_effects) == 2,
+                "only activated MemoryVersions may create compatibility projection operations",
+            )
+            operation_ids = set()
+            for (
+                operation_id,
+                operation_type,
+                resource_type,
+                resource_id,
+                resource_version,
+                purpose,
+                authority_epoch,
+                payload_hash,
+                state,
+                attempt,
+            ) in effect_operations:
+                expected = expected_effects.get(resource_id)
+                require(expected is not None, "projection operation must target an activated MemoryVersion")
+                require(
+                    operation_id == expected["operationId"]
+                    and operation_type == MEMORY_PROJECTION_REBUILD_OPERATION_TYPE
+                    and resource_type == "memoryVersion"
+                    and resource_version == 1
+                    and purpose == "compatibilityProjection"
+                    and authority_epoch == 0
+                    and payload_hash == expected["payloadHash"]
+                    and state == "accepted"
+                    and attempt == 0,
+                    "projection operation must be an opaque accepted MemoryVersion intent",
+                )
+                operation_ids.add(operation_id)
+            require(
+                len(effect_outbox) == len(operation_ids)
+                and len(effect_jobs) == len(operation_ids),
+                "each compatibility projection operation must have one outbox event and one job",
+            )
+            require(
+                all(
+                    operation_id in operation_ids
+                    and event_type == MEMORY_PROJECTION_REBUILD_EVENT_TYPE
+                    and state == "pending"
+                    and attempt == 0
+                    for operation_id, event_type, _payload_hash, state, attempt in effect_outbox
+                )
+                and all(
+                    operation_id in operation_ids
+                    and job_type == MEMORY_PROJECTION_REBUILD_JOB_TYPE
+                    and state == "pending"
+                    and attempt == 0
+                    for operation_id, job_type, _payload_hash, state, attempt in effect_jobs
+                ),
+                "projection worker must remain pending until a later explicit rollout",
+            )
+            require(
+                review_content["summary"] not in str(effect_operations)
+                and accepted.review.receipt_id not in str(effect_operations),
+                "projection effect records must remain value-free and receipt-free",
+            )
 
             projection_service = OwnerTruthMemoryProjectionService(store)
             projection_missing = projection_service.read(context=review_context)
@@ -928,6 +1058,10 @@ def main() -> None:
                     "rejectedDecisionNoMemory": True,
                     "candidateMemoryActivationConcurrentSingleWriter": True,
                     "decisionMemoryActivationRollback": True,
+                    "memoryProjectionEffectAtomic": True,
+                    "memoryProjectionEffectIdempotent": True,
+                    "memoryProjectionEffectValueFree": True,
+                    "memoryProjectionEffectWorkerPending": True,
                     "memoryProjectionDeterministicRebuild": True,
                     "memoryProjectionCorrectedContent": True,
                     "memoryProjectionRejectsDecisionPayloadLeakage": True,

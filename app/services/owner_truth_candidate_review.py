@@ -10,6 +10,7 @@ import json
 from threading import RLock
 from typing import Any, ContextManager, Mapping, Protocol
 
+from app.async_effects.contracts import EffectReceiptSummary
 from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateDecisionWriteRecord,
     OwnerTruthCandidateReviewAccessDenied,
@@ -30,6 +31,9 @@ from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionInput,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.owner_truth_memory_projection_effects import (
+    build_memory_projection_rebuild_effect_intent,
+)
 
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
@@ -75,6 +79,7 @@ class OwnerTruthCandidateDecisionActivationResult:
 
     review: OwnerTruthCandidateReviewResult
     memory_activation: OwnerTruthMemoryActivationResult
+    projection_effect: EffectReceiptSummary | None = None
 
 
 class OwnerTruthCandidateReviewStore(Protocol):
@@ -281,6 +286,8 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                     decision=decision,
                     memory_id=None,
                     memory_version_id=None,
+                    memory_version=None,
+                    authority_epoch=None,
                     content_hash=None,
                 )
 
@@ -324,13 +331,17 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                     decision=decision,
                     memory_id=plan.memory_id,
                     memory_version_id=plan.memory_version_id,
+                    memory_version=int(existing["memoryVersion"]),
+                    authority_epoch=int(existing["authorityEpoch"]),
                     content_hash=plan.content_hash,
                 )
             self._memory_activations[plan.receipt_id] = {
+                "authorityEpoch": plan.authority_epoch,
                 "candidateId": plan.candidate_id,
                 "contentHash": plan.content_hash,
                 "memoryId": plan.memory_id,
                 "memoryVersionId": plan.memory_version_id,
+                "memoryVersion": 1,
                 "payload": deepcopy(dict(plan.payload)),
             }
             return OwnerTruthMemoryActivationResult(
@@ -340,6 +351,8 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 decision=decision,
                 memory_id=plan.memory_id,
                 memory_version_id=plan.memory_version_id,
+                memory_version=1,
+                authority_epoch=plan.authority_epoch,
                 content_hash=plan.content_hash,
             )
 
@@ -685,6 +698,8 @@ class PostgresOwnerTruthCandidateReviewRepository:
                     decision=decision,
                     memory_id=None,
                     memory_version_id=None,
+                    memory_version=None,
+                    authority_epoch=None,
                     content_hash=None,
                 )
 
@@ -738,6 +753,7 @@ class PostgresOwnerTruthCandidateReviewRepository:
                     or current_version is None
                     or str(current_version["id"]) != plan.memory_version_id
                     or str(current_version["content_hash"]) != plan.content_hash
+                    or int(current_version["version_number"]) != 1
                 ):
                     raise OwnerTruthCandidateReviewConflict(
                         "DecisionReceipt already activates a different MemoryVersion"
@@ -749,6 +765,8 @@ class PostgresOwnerTruthCandidateReviewRepository:
                     decision=decision,
                     memory_id=plan.memory_id,
                     memory_version_id=plan.memory_version_id,
+                    memory_version=int(current_version["version_number"]),
+                    authority_epoch=int(vault["authority_epoch"]),
                     content_hash=plan.content_hash,
                 )
 
@@ -802,6 +820,8 @@ class PostgresOwnerTruthCandidateReviewRepository:
             decision=decision,
             memory_id=plan.memory_id,
             memory_version_id=plan.memory_version_id,
+            memory_version=1,
+            authority_epoch=plan.authority_epoch,
             content_hash=plan.content_hash,
         )
 
@@ -1049,7 +1069,7 @@ class PostgresOwnerTruthCandidateReviewRepository:
     ) -> Mapping[str, Any] | None:
         cursor.execute(
             """
-            SELECT id, content_hash
+            SELECT id, version_number, content_hash
             FROM owner_truth.memory_versions
             WHERE vault_id = %s AND memory_id = %s AND is_current = TRUE
             FOR UPDATE
@@ -1130,10 +1150,41 @@ class OwnerTruthCandidateReviewService:
                     receipt_id=review.receipt_id,
                     context=context,
                 )
+                projection_effect = self._write_projection_rebuild_effect(
+                    context=context,
+                    activation=activation,
+                )
             return OwnerTruthCandidateDecisionActivationResult(
                 review=review,
                 memory_activation=activation,
+                projection_effect=projection_effect,
             )
+
+    def _write_projection_rebuild_effect(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        activation: OwnerTruthMemoryActivationResult,
+    ) -> EffectReceiptSummary | None:
+        """Persist a disabled compatibility-rebuild intent when the kernel exists.
+
+        Production ``PostgresStore`` exposes this writer only while the same
+        request UoW is active, so a failed intent write rolls the DecisionReceipt
+        and MemoryVersion back. Lightweight legacy test doubles may omit the
+        kernel until their own migration path opts into it.
+        """
+
+        if activation.memory_version_id is None:
+            return None
+        factory = getattr(self._store, "effect_kernel_repository", None)
+        if not callable(factory):
+            return None
+        return factory().accept(
+            build_memory_projection_rebuild_effect_intent(
+                context=context,
+                activation=activation,
+            )
+        )
 
     def _request_unit_of_work(
         self,

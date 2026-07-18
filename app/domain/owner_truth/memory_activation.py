@@ -79,6 +79,8 @@ class OwnerTruthMemoryActivationResult:
     decision: CandidateDecision
     memory_id: str | None
     memory_version_id: str | None
+    memory_version: int | None
+    authority_epoch: int | None
     content_hash: str | None
 
 
