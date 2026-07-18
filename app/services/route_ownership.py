@@ -236,6 +236,18 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/memory-projection",
+                session,
+                "ownerTruthMemoryProjectionRead",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/memory-projection/rebuild",
+                session,
+                "ownerTruthMemoryProjectionRebuild",
+            ),
+            _rule(
+                "GET",
                 "/ops/release-policy/observations",
                 system,
                 "systemReleasePolicyObservations",

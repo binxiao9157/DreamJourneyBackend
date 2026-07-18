@@ -1,0 +1,13 @@
+{
+  "version": "0016",
+  "name": "owner_truth_memory_projection",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthV1MemoryProjectionShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthV1Read": false,
+    "ownerTruthV1Write": false,
+    "memoryProjectionV1": false
+  }
+}

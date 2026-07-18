@@ -110,6 +110,24 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("owner_truth_memories_validate_decision_receipt", migration.sql)
         self.assertIn("owner_truth_memories_decision_receipt_immutable", migration.sql)
 
+    def test_memory_projection_migration_is_additive_and_default_off(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0016"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_memory_projection")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(metadata["runtimeCompatibility"], "ownerTruthV1MemoryProjectionShadow")
+        self.assertFalse(metadata["releaseFlags"]["memoryProjectionV1"])
+        self.assertIn("memory_projection_checkpoints", migration.sql)
+        self.assertIn("memory_projection_entries", migration.sql)
+        self.assertIn("projection_source", migration.sql)
+        self.assertIn("authority_epoch", migration.sql)
+        self.assertIn("NEW.payload - ARRAY['content', 'evidenceRefs']", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

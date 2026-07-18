@@ -111,10 +111,19 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = False
 
         response = client.get(f"/v2/vaults/vault-hidden/candidates", headers=headers)
+        projection = client.get(
+            "/v2/vaults/vault-hidden/memory-projection",
+            headers=headers,
+        )
 
         self.assertEqual(owner_id.startswith("user_"), True)
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"]["code"], "ownerTruthCandidateReviewUnavailable")
+        self.assertEqual(projection.status_code, 404)
+        self.assertEqual(
+            projection.json()["detail"]["code"],
+            "ownerTruthMemoryProjectionUnavailable",
+        )
 
     def test_owner_can_list_decide_activate_memory_and_replay(self) -> None:
         owner_id, headers = self._login("13800139102")
@@ -210,6 +219,55 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertIsNotNone(body["receipt"]["correctedValueId"])
         self.assertNotIn("correctedValue", body["receipt"])
         self.assertNotIn(corrected_value["summary"], str(body))
+
+    def test_owner_can_rebuild_and_read_projection_without_raw_content_echo(self) -> None:
+        owner_id, headers = self._login("13800139104")
+        vault_id = "vault-api-memory-projection"
+        candidate = self._candidate(vault_id=vault_id, owner_subject_id=owner_id)
+        self._seed(candidate)
+
+        decision = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
+            headers=headers,
+            json={
+                "commandId": "candidate-api-projection-001",
+                "expectedCandidateVersion": 1,
+                "action": "accept",
+                "reasonCode": "ownerReviewed",
+            },
+        )
+        self.assertEqual(decision.status_code, 201)
+
+        before = client.get(
+            f"/v2/vaults/{vault_id}/memory-projection",
+            headers=headers,
+        )
+        self.assertEqual(before.status_code, 200)
+        self.assertEqual(before.json()["projection"]["state"], "rebuilding")
+
+        rebuilt = client.post(
+            f"/v2/vaults/{vault_id}/memory-projection/rebuild",
+            headers=headers,
+        )
+        self.assertEqual(rebuilt.status_code, 200)
+        self.assertEqual(
+            rebuilt.json()["schemaVersion"],
+            "owner-truth-memory-projection-rebuild-v1",
+        )
+        self.assertEqual(rebuilt.json()["outcome"], "rebuilt")
+        self.assertEqual(rebuilt.json()["projection"]["state"], "ready")
+        self.assertEqual(rebuilt.json()["projection"]["entryCount"], 1)
+        self.assertNotIn(
+            candidate.content["summary"],
+            str(rebuilt.json()["projection"]),
+        )
+
+        replay = client.post(
+            f"/v2/vaults/{vault_id}/memory-projection/rebuild",
+            headers=headers,
+        )
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay.json()["outcome"], "unchanged")
 
 
 if __name__ == "__main__":

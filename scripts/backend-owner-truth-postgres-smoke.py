@@ -44,6 +44,7 @@ from app.services.owner_truth_source import (
     OwnerTruthSourceCommandService,
 )
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
+from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.postgres_store import PostgresStore
 
 
@@ -116,7 +117,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(applied["appliedVersions"][-1] == "0015", "owner truth Memory activation migration must apply")
+        require(applied["appliedVersions"][-1] == "0016", "owner truth Memory projection migration must apply")
 
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:
@@ -539,6 +540,91 @@ def main() -> None:
                 "rejected Candidate must not activate a MemoryVersion",
             )
 
+            projection_service = OwnerTruthMemoryProjectionService(store)
+            projection_missing = projection_service.read(context=review_context)
+            require(
+                projection_missing["state"] == "rebuilding"
+                and projection_missing["entries"] == [],
+                "missing MemoryVersion checkpoint must fail closed",
+            )
+            projection_rebuilt = projection_service.rebuild(context=review_context)
+            projection_replayed = projection_service.rebuild(context=review_context)
+            projection_ready = projection_service.read(context=review_context)
+            require(
+                projection_rebuilt.outcome == "rebuilt"
+                and projection_replayed.outcome == "unchanged",
+                "MemoryVersion projection rebuild must be deterministic",
+            )
+            require(
+                projection_ready["state"] == "ready"
+                and projection_ready["entryCount"] == 2
+                and projection_ready["checkpoint"] == projection_rebuilt.snapshot["checkpoint"],
+                "accepted and corrected MemoryVersions must be projection-visible",
+            )
+            corrected_projection = next(
+                item
+                for item in projection_ready["entries"]
+                if item["memoryId"] == corrected.memory_activation.memory_id
+            )
+            require(
+                corrected_projection["content"]
+                == {"summary": "小时候在院子里听雨，后来常常想起。"},
+                "projection must use the immutable corrected MemoryVersion content",
+            )
+            require(
+                "decisionReceiptId" not in str(projection_ready["entries"])
+                and "rationale" not in str(projection_ready["entries"]),
+                "projection must not duplicate DecisionReceipt rationale",
+            )
+
+            expect_rejected(
+                test_dsn,
+                lambda cursor: cursor.execute(
+                    """
+                    UPDATE owner_truth.memory_projection_entries
+                    SET payload = payload || '{"decisionReceiptId":"forbidden"}'::JSONB
+                    WHERE vault_id = %s
+                      AND authority_epoch = %s
+                      AND memory_id = %s
+                    """,
+                    (
+                        review_vault_id,
+                        projection_ready["authorityEpoch"],
+                        accepted.memory_activation.memory_id,
+                    ),
+                ),
+                "projection entries must reject DecisionReceipt payload leakage",
+            )
+
+            expect_rejected(
+                test_dsn,
+                lambda cursor: cursor.execute(
+                    """
+                    INSERT INTO owner_truth.memory_projection_entries (
+                        vault_id, authority_epoch, memory_id, memory_version_id,
+                        version_number, source_id, source_version, memory_kind,
+                        perspective_type, epistemic_status, sensitivity, visibility,
+                        content_schema_version, content_hash, payload
+                    ) VALUES (%s, 1, %s, %s, 1, %s, 1, 'experience', 'firstPerson',
+                        'recalled', 'standard', 'owner', 'owner-truth-v1', %s, %s)
+                    """,
+                    (
+                        review_vault_id,
+                        accepted.memory_activation.memory_id,
+                        accepted.memory_activation.memory_version_id,
+                        review_source_id,
+                        accepted.memory_activation.content_hash,
+                        json.dumps(
+                            {
+                                "content": review_content,
+                                "evidenceRefs": review_payload["evidenceRefs"],
+                            }
+                        ),
+                    ),
+                ),
+                "projection entries must reject stale authority epochs",
+            )
+
             activation_rolled_back = False
             try:
                 review_service.decide_and_activate(
@@ -763,6 +849,29 @@ def main() -> None:
                         int(cursor.fetchone()[0]) == 1,
                         "concurrent Candidate activation must persist exactly one MemoryRecord",
                     )
+            projection_changed = projection_service.read(context=review_context)
+            require(
+                projection_changed["state"] == "rebuilding"
+                and projection_changed["entries"] == [],
+                "a new MemoryVersion must invalidate an older checkpoint",
+            )
+            projection_after_concurrent = projection_service.rebuild(context=review_context)
+            require(
+                projection_after_concurrent.snapshot["entryCount"] == 3,
+                "rebuild must include each current accepted MemoryVersion exactly once",
+            )
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE owner_truth.sources SET state = 'redacted' WHERE vault_id = %s AND id = %s",
+                        (review_vault_id, review_source_id),
+                    )
+            projection_revoked = projection_service.read(context=review_context)
+            require(
+                projection_revoked["state"] == "rebuilding"
+                and projection_revoked["entries"] == [],
+                "Source revocation must fail closed instead of serving a stale projection",
+            )
         finally:
             store.close_pool()
 
@@ -819,6 +928,12 @@ def main() -> None:
                     "rejectedDecisionNoMemory": True,
                     "candidateMemoryActivationConcurrentSingleWriter": True,
                     "decisionMemoryActivationRollback": True,
+                    "memoryProjectionDeterministicRebuild": True,
+                    "memoryProjectionCorrectedContent": True,
+                    "memoryProjectionRejectsDecisionPayloadLeakage": True,
+                    "memoryProjectionStaleEpochRejected": True,
+                    "memoryProjectionInvalidatesOnMemoryChange": True,
+                    "memoryProjectionFailsClosedOnSourceRevocation": True,
                     "legacyMemoriesUnchanged": True,
                     "legacyArchiveUnchanged": True,
                 },

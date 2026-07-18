@@ -25,6 +25,10 @@ from app.domain.owner_truth.memory_activation import (
     OwnerTruthMemoryActivationResult,
     build_memory_activation_plan,
 )
+from app.domain.owner_truth.memory_projection import (
+    OwnerTruthMemoryProjectionError,
+    OwnerTruthMemoryProjectionInput,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 
 
@@ -338,6 +342,94 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 memory_version_id=plan.memory_version_id,
                 content_hash=plan.content_hash,
             )
+
+    def list_memory_projection_inputs(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[int, tuple[OwnerTruthMemoryProjectionInput, ...]]:
+        """Expose only current, accepted/corrected MemoryVersions to a projection.
+
+        This is an in-memory semantic-double port.  It mirrors the Postgres
+        projector query without exposing Candidate proposals, decision receipts,
+        or review rationale as projection input.
+        """
+
+        _assert_owner_context(context)
+        with self._lock:
+            vault = self._vault_states.get(context.vault_id)
+            if (
+                vault is None
+                or vault[0] != context.owner_subject_id
+                or vault[1] != "active"
+            ):
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "Vault is not active for this Owner"
+                )
+            authority_epoch = int(vault[2])
+            inputs: list[OwnerTruthMemoryProjectionInput] = []
+            for activation in self._memory_activations.values():
+                candidate = self._candidates.get(str(activation.get("candidateId") or ""))
+                if (
+                    candidate is None
+                    or candidate.vault_id != context.vault_id
+                    or candidate.owner_subject_id != context.owner_subject_id
+                    or candidate.authority_epoch != authority_epoch
+                    or candidate.decision
+                    not in {CandidateDecision.ACCEPTED, CandidateDecision.CORRECTED}
+                    or self._source_states.get((candidate.vault_id, candidate.source_id))
+                    != "active"
+                ):
+                    continue
+                payload = activation.get("payload")
+                if not isinstance(payload, Mapping):
+                    raise OwnerTruthMemoryProjectionError(
+                        "activated MemoryVersion payload is unavailable"
+                    )
+                evidence_refs = payload.get("evidenceRefs")
+                if not isinstance(evidence_refs, list) or not evidence_refs:
+                    raise OwnerTruthMemoryProjectionError(
+                        "activated MemoryVersion evidence references are unavailable"
+                    )
+                source_versions = {
+                    int(item.get("sourceVersion") or 0)
+                    for item in evidence_refs
+                    if isinstance(item, Mapping)
+                    and str(item.get("sourceId") or "") == candidate.source_id
+                }
+                if len(source_versions) != 1 or min(source_versions) < 1:
+                    raise OwnerTruthMemoryProjectionError(
+                        "activated MemoryVersion source version is unavailable"
+                    )
+                inputs.append(
+                    OwnerTruthMemoryProjectionInput(
+                        memory_id=str(activation.get("memoryId") or ""),
+                        memory_version_id=str(activation.get("memoryVersionId") or ""),
+                        vault_id=context.vault_id,
+                        owner_subject_id=context.owner_subject_id,
+                        authority_epoch=authority_epoch,
+                        version_number=1,
+                        source_id=candidate.source_id,
+                        source_version=next(iter(source_versions)),
+                        memory_kind=candidate.memory_kind.value,
+                        perspective_type=candidate.perspective_type.value,
+                        epistemic_status=candidate.epistemic_status.value,
+                        sensitivity=candidate.sensitivity.value,
+                        content_schema_version=str(
+                            payload.get("contentSchemaVersion") or ""
+                        ),
+                        content_hash=str(activation.get("contentHash") or ""),
+                        content=payload.get("content"),
+                        evidence_refs=tuple(
+                            dict(item)
+                            for item in evidence_refs
+                            if isinstance(item, Mapping)
+                        ),
+                    )
+                )
+        return authority_epoch, tuple(
+            sorted(inputs, key=lambda item: (item.memory_id, item.version_number, item.memory_version_id))
+        )
 
     def _assert_live_target(
         self,

@@ -76,9 +76,12 @@ test -f db/migrations/0013_async_effects_kernel.sql
 test -f db/migrations/0013_async_effects_kernel.json
 test -f scripts/backend-async-effects-postgres-smoke.py
 test -f scripts/run-backend-async-effects-postgres-smoke.sh
-test -f db/migrations/0014_owner_truth_candidate_decisions.sql
-test -f db/migrations/0014_owner_truth_candidate_decisions.json
-grep -q "COPY db ./db" Dockerfile
+	test -f db/migrations/0014_owner_truth_candidate_decisions.sql
+	test -f db/migrations/0014_owner_truth_candidate_decisions.json
+	test -f db/migrations/0016_owner_truth_memory_projection.sql
+	test -f db/migrations/0016_owner_truth_memory_projection.json
+	test -f app/services/owner_truth_memory_projection.py
+	grep -q "COPY db ./db" Dockerfile
 grep -q "psycopg" requirements.txt
 
 echo "== Backend FastAPI smoke =="

@@ -53,6 +53,9 @@ from app.domain.owner_truth.source_commands import (
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
 )
+from app.services.owner_truth_memory_projection import (
+    InMemoryOwnerTruthMemoryProjectionRepository,
+)
 from app.services.user_identity import stable_user_id
 from app.observability.events import (
     EvidenceEventConflict,
@@ -83,6 +86,11 @@ class InMemoryStore:
         self._owner_truth_source_receipts: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._owner_truth_candidate_review_repository = (
             InMemoryOwnerTruthCandidateReviewRepository()
+        )
+        self._owner_truth_memory_projection_repository = (
+            InMemoryOwnerTruthMemoryProjectionRepository(
+                self._owner_truth_candidate_review_repository
+            )
         )
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
         self._profiles: Dict[str, Dict[str, Any]] = {}
@@ -129,6 +137,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthCandidateReviewRepository:
         return self._owner_truth_candidate_review_repository
+
+    def owner_truth_memory_projection_repository(
+        self,
+    ) -> InMemoryOwnerTruthMemoryProjectionRepository:
+        return self._owner_truth_memory_projection_repository
 
     def append_evidence_event(
         self,

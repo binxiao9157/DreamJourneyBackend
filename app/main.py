@@ -78,9 +78,15 @@ from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateVersionConflict,
 )
 from app.domain.owner_truth.contracts import OwnerTruthContractError
+from app.domain.owner_truth.memory_projection import (
+    OwnerTruthMemoryProjectionAccessDenied,
+    OwnerTruthMemoryProjectionError,
+    projection_summary,
+)
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
+from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
     KB_OPERATION_GOVERNANCE,
@@ -266,12 +272,45 @@ def _require_owner_truth_candidate_review_qa(request: Request) -> str:
     return user_id
 
 
+def _require_owner_truth_memory_projection_qa(request: Request) -> str:
+    """Keep the derived V4 Projection surface unavailable outside QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthMemoryProjectionUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthMemoryProjectionUserSessionRequired"},
+        )
+    return user_id
+
+
 def _owner_truth_candidate_review_context(
     request: Request,
     *,
     vault_id: str,
 ) -> OwnerTruthCommandContext:
     owner_subject_id = _require_owner_truth_candidate_review_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
+def _owner_truth_memory_projection_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_memory_projection_qa(request)
     return OwnerTruthCommandContext(
         vault_id=vault_id,
         owner_subject_id=owner_subject_id,
@@ -306,6 +345,20 @@ def _owner_truth_candidate_review_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthCandidateReviewInvalid"},
+    )
+
+
+def _owner_truth_memory_projection_http_error(
+    error: OwnerTruthMemoryProjectionError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthMemoryProjectionAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthMemoryProjectionDenied"},
+        )
+    return HTTPException(
+        status_code=409,
+        detail={"code": "ownerTruthMemoryProjectionUnavailable"},
     )
 
 
@@ -1886,6 +1939,49 @@ def review_owner_truth_candidate(
         status_code=201 if result.review.outcome == "created" else 200,
         content=_owner_truth_candidate_decision_response(result),
     )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/memory-projection",
+    include_in_schema=False,
+)
+def read_owner_truth_memory_projection(
+    request: Request,
+    vault_id: str,
+) -> Dict[str, Any]:
+    """QA-only read of the default-off MemoryVersion compatibility projection."""
+
+    try:
+        context = _owner_truth_memory_projection_context(request, vault_id=vault_id)
+        snapshot = OwnerTruthMemoryProjectionService(store).read(context=context)
+    except OwnerTruthMemoryProjectionError as error:
+        raise _owner_truth_memory_projection_http_error(error) from error
+    return {
+        "schemaVersion": "owner-truth-memory-projection-read-v1",
+        "projection": projection_summary(snapshot),
+    }
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memory-projection/rebuild",
+    include_in_schema=False,
+)
+def rebuild_owner_truth_memory_projection(
+    request: Request,
+    vault_id: str,
+) -> Dict[str, Any]:
+    """QA-only deterministic rebuild; no public KBLite or Context read switch."""
+
+    try:
+        context = _owner_truth_memory_projection_context(request, vault_id=vault_id)
+        result = OwnerTruthMemoryProjectionService(store).rebuild(context=context)
+    except OwnerTruthMemoryProjectionError as error:
+        raise _owner_truth_memory_projection_http_error(error) from error
+    return {
+        "schemaVersion": "owner-truth-memory-projection-rebuild-v1",
+        "outcome": result.outcome,
+        "projection": projection_summary(result.snapshot),
+    }
 
 
 @app.get("/ops/release-policy/observations")
