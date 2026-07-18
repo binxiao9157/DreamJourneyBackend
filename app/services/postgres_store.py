@@ -85,6 +85,9 @@ from app.async_effects.target_admission import PostgresOwnerTruthSourceTargetAdm
 from app.services.owner_truth_candidate_extraction import (
     PostgresOwnerTruthCandidateExtractionRepository,
 )
+from app.services.owner_truth_candidate_review import (
+    PostgresOwnerTruthCandidateReviewRepository,
+)
 
 
 class PostgresStore:
@@ -220,6 +223,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth candidate extraction requires an active unit of work")
         return PostgresOwnerTruthCandidateExtractionRepository(active.connection)
+
+    def owner_truth_candidate_review_repository(
+        self,
+    ) -> PostgresOwnerTruthCandidateReviewRepository:
+        """Return the Owner-only Candidate decision port bound to the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth candidate review requires an active unit of work")
+        return PostgresOwnerTruthCandidateReviewRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(

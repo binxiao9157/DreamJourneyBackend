@@ -1,0 +1,13 @@
+{
+  "version": "0014",
+  "name": "owner_truth_candidate_decisions",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthV1CandidateReviewShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthV1Read": false,
+    "ownerTruthV1Write": false,
+    "candidateReviewV1": false
+  }
+}

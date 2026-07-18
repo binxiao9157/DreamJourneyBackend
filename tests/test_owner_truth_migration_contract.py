@@ -72,6 +72,27 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("owner_truth_source_command_receipts_no_delete", migration.sql)
         self.assertIn("owner_truth_sources_payload_immutable", migration.sql)
 
+    def test_candidate_decision_migration_keeps_terminal_review_append_only(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0014"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_candidate_decisions")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(metadata["runtimeCompatibility"], "ownerTruthV1CandidateReviewShadow")
+        self.assertFalse(metadata["releaseFlags"]["candidateReviewV1"])
+        self.assertIn("command_id_hash", migration.sql)
+        self.assertIn("expected_candidate_version", migration.sql)
+        self.assertIn("candidate_before_hash", migration.sql)
+        self.assertIn("candidate_after_hash", migration.sql)
+        self.assertIn("candidate_decision_values", migration.sql)
+        self.assertIn("owner_truth_corrected_decision_requires_value", migration.sql)
+        self.assertIn("owner_truth_candidate_decision_values_no_update", migration.sql)
+        self.assertIn("owner_truth_decision_receipts_vault_command_id_hash_unique", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

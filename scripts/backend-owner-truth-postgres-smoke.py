@@ -8,6 +8,7 @@ writes test records to the configured application database.
 
 from __future__ import annotations
 
+from hashlib import sha256
 import json
 import os
 import sys
@@ -30,10 +31,15 @@ from app.domain.owner_truth.source_commands import (
     OwnerTruthSourceCommandConflict,
     OwnerTruthSourceVersionConflict,
 )
+from app.domain.owner_truth.candidate_decisions import (
+    CandidateReviewAction,
+    OwnerTruthCandidateReviewCommand,
+)
 from app.services.owner_truth_source import (
     ArchiveOwnerTruthCompatibilityFacade,
     OwnerTruthSourceCommandService,
 )
+from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.postgres_store import PostgresStore
 
 
@@ -76,6 +82,12 @@ def expect_rejected(dsn: str, operation, message: str) -> None:
     require(rejected, message)
 
 
+def canonical_hash(value: object) -> str:
+    return sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def main() -> None:
     base_dsn = os.environ.get("DATABASE_URL", settings.database_url).strip()
     require(base_dsn, "DATABASE_URL is required")
@@ -100,7 +112,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(applied["appliedVersions"][-1] == "0012", "owner truth CreateSource migration must apply")
+        require(applied["appliedVersions"][-1] == "0014", "owner truth Candidate decision migration must apply")
 
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:
@@ -352,6 +364,163 @@ def main() -> None:
                 media_shadow.public_contract() == {"status": "skipped", "reason": "localOnlyMedia"},
                 "Archive media must remain explicitly local-only in V1",
             )
+
+            review_vault_id = "candidate-review-vault"
+            review_owner_id = "candidate-review-owner"
+            review_source_id = str(uuid.uuid4())
+            review_candidate_id = str(uuid.uuid4())
+            review_corrected_candidate_id = str(uuid.uuid4())
+            review_unbacked_corrected_candidate_id = str(uuid.uuid4())
+            review_content = {"summary": "小时候在院子里听雨。"}
+            review_payload = {
+                "schemaVersion": "owner-truth-candidate-proposal-v1",
+                "content": review_content,
+                "contentSchemaVersion": "owner-truth-v1",
+                "evidenceRefs": [
+                    {
+                        "sourceId": review_source_id,
+                        "sourceVersion": 1,
+                        "span": {"start": 0, "end": 10},
+                    }
+                ],
+                "reviewMode": "single",
+            }
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO owner_truth.vaults (vault_id, owner_subject_id) VALUES (%s, %s)",
+                        (review_vault_id, review_owner_id),
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO owner_truth.sources (
+                            id, vault_id, owner_subject_id, source_kind, content_hash,
+                            content_payload, policy_version, authority_epoch
+                        ) VALUES (%s, %s, %s, 'text', %s, %s, 'owner-truth-v1', 0)
+                        """,
+                        (
+                            review_source_id,
+                            review_vault_id,
+                            review_owner_id,
+                            canonical_hash({"text": "小时候在院子里听雨。"}),
+                            json.dumps({"text": "小时候在院子里听雨。"}),
+                        ),
+                    )
+                    for candidate in (
+                        review_candidate_id,
+                        review_corrected_candidate_id,
+                        review_unbacked_corrected_candidate_id,
+                    ):
+                        cursor.execute(
+                            """
+                            INSERT INTO owner_truth.memory_candidates (
+                                id, vault_id, owner_subject_id, source_id, candidate_kind,
+                                perspective_type, epistemic_status, sensitivity, policy_version,
+                                authority_epoch, content_hash, payload_schema_version, payload
+                            ) VALUES (%s, %s, %s, %s, 'experience', 'firstPerson', 'recalled',
+                                'standard', 'owner-truth-v1', 0, %s, 'owner-truth-v1', %s)
+                            """,
+                            (
+                                candidate,
+                                review_vault_id,
+                                review_owner_id,
+                                review_source_id,
+                                canonical_hash(review_content),
+                                json.dumps(review_payload),
+                            ),
+                        )
+
+            review_context = OwnerTruthCommandContext(
+                vault_id=review_vault_id,
+                owner_subject_id=review_owner_id,
+                actor_subject_id=review_owner_id,
+                policy_version="owner-truth-v1",
+            )
+            review_service = OwnerTruthCandidateReviewService(store)
+            accepted = review_service.decide(
+                command=OwnerTruthCandidateReviewCommand(
+                    command_id="owner-truth-candidate-accept-smoke",
+                    candidate_id=review_candidate_id,
+                    expected_candidate_version=1,
+                    action=CandidateReviewAction.ACCEPT,
+                    corrected_value=None,
+                    corrected_value_schema_version="owner-truth-v1",
+                    reason_code="ownerReviewed",
+                ),
+                context=review_context,
+            )
+            accepted_replay = review_service.decide(
+                command=OwnerTruthCandidateReviewCommand(
+                    command_id="owner-truth-candidate-accept-smoke",
+                    candidate_id=review_candidate_id,
+                    expected_candidate_version=1,
+                    action=CandidateReviewAction.ACCEPT,
+                    corrected_value=None,
+                    corrected_value_schema_version="owner-truth-v1",
+                    reason_code="ownerReviewed",
+                ),
+                context=review_context,
+            )
+            corrected = review_service.decide(
+                command=OwnerTruthCandidateReviewCommand(
+                    command_id="owner-truth-candidate-correct-smoke",
+                    candidate_id=review_corrected_candidate_id,
+                    expected_candidate_version=1,
+                    action=CandidateReviewAction.CORRECT,
+                    corrected_value={"summary": "小时候在院子里听雨，后来常常想起。"},
+                    corrected_value_schema_version="owner-truth-v1",
+                    reason_code="ownerCorrected",
+                ),
+                context=review_context,
+            )
+            require(accepted.outcome == "created", "Owner Candidate accept must persist once")
+            require(accepted_replay.outcome == "deduplicated", "Owner Candidate replay must deduplicate")
+            require(accepted.receipt_id == accepted_replay.receipt_id, "Owner Candidate replay must preserve receipt")
+            require(corrected.corrected_value_id is not None, "corrected Candidate must retain separate Owner value")
+            require(
+                not review_service.list_pending(context=review_context),
+                "terminal Candidates must leave the Owner inbox",
+            )
+
+            def insert_unbacked_corrected_decision(cursor):
+                cursor.execute(
+                    "UPDATE owner_truth.memory_candidates SET decision_status = 'corrected' WHERE id = %s",
+                    (review_unbacked_corrected_candidate_id,),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.decision_receipts (
+                        id, vault_id, candidate_id, decision, actor_subject_id,
+                        authority_epoch, policy_version, command_id_hash, payload_hash,
+                        expected_candidate_version, candidate_before_hash, candidate_after_hash,
+                        decision_basis
+                    ) VALUES (%s, %s, %s, 'corrected', %s, 0, 'owner-truth-v1', %s, %s,
+                        1, %s, %s, %s)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        review_vault_id,
+                        review_unbacked_corrected_candidate_id,
+                        review_owner_id,
+                        canonical_hash("unbacked-command"),
+                        canonical_hash("unbacked-payload"),
+                        canonical_hash(review_content),
+                        canonical_hash({"summary": "缺少纠正值。"}),
+                        json.dumps(
+                            {
+                                "schemaVersion": "owner-truth-decision-basis-v1",
+                                "reasonCode": "ownerCorrected",
+                                "sourceRefs": review_payload["evidenceRefs"],
+                            }
+                        ),
+                    ),
+                )
+
+            expect_rejected(
+                test_dsn,
+                insert_unbacked_corrected_decision,
+                "a corrected Candidate must retain exactly one corrected Owner value",
+            )
         finally:
             store.close_pool()
 
@@ -399,6 +568,9 @@ def main() -> None:
                     "createSourceReceiptAppendOnly": True,
                     "archiveTextShadowed": True,
                     "archiveMediaLocalOnly": True,
+                    "candidateReviewIdempotent": True,
+                    "candidateCorrectionSeparate": True,
+                    "correctedDecisionRequiresValue": True,
                     "legacyMemoriesUnchanged": True,
                     "legacyArchiveUnchanged": True,
                 },
