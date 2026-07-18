@@ -26,6 +26,13 @@ from app.domain.owner_truth.memory_activation import (
     OwnerTruthMemoryActivationResult,
     build_memory_activation_plan,
 )
+from app.domain.owner_truth.memory_correction import (
+    OwnerTruthMemoryCorrectionActivationResult,
+    OwnerTruthMemoryCorrectionError,
+    OwnerTruthMemoryCorrectionPlan,
+    OwnerTruthMemoryVersionSnapshot,
+    build_memory_correction_plan,
+)
 from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionError,
     OwnerTruthMemoryProjectionInput,
@@ -193,6 +200,7 @@ class InMemoryOwnerTruthCandidateReviewRepository:
         *,
         command: OwnerTruthCandidateReviewCommand,
         context: OwnerTruthCommandContext,
+        allow_correction: bool = False,
     ) -> OwnerTruthCandidateReviewResult:
         _assert_owner_context(context)
         with self._lock:
@@ -219,7 +227,8 @@ class InMemoryOwnerTruthCandidateReviewRepository:
             if candidate is None:
                 raise OwnerTruthCandidateReviewAccessDenied("Candidate does not exist in this Vault")
             self._assert_live_target(candidate=candidate, context=context)
-            _assert_generic_activation_allowed(candidate)
+            if not allow_correction:
+                _assert_generic_activation_allowed(candidate)
             record = command.write_record(candidate=candidate, context=context)
             existing_receipt_id = self._candidate_receipts.get(candidate.candidate_id)
             if existing_receipt_id is not None or candidate.decision is not CandidateDecision.PENDING:
@@ -355,10 +364,13 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 "authorityEpoch": plan.authority_epoch,
                 "candidateId": plan.candidate_id,
                 "contentHash": plan.content_hash,
+                "isCurrent": True,
                 "memoryId": plan.memory_id,
                 "memoryVersionId": plan.memory_version_id,
                 "memoryVersion": 1,
                 "payload": deepcopy(dict(plan.payload)),
+                "sourceId": plan.source_id,
+                "sourceVersion": plan.source_version,
             }
             return OwnerTruthMemoryActivationResult(
                 outcome="created",
@@ -368,6 +380,154 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 memory_id=plan.memory_id,
                 memory_version_id=plan.memory_version_id,
                 memory_version=1,
+                authority_epoch=plan.authority_epoch,
+                content_hash=plan.content_hash,
+            )
+
+    def activate_correction_memory_version(
+        self,
+        *,
+        receipt_id: str,
+        correction_request_id: str,
+        memory_id: str,
+        expected_memory_version_id: str,
+        reason_code_hash: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthMemoryCorrectionActivationResult:
+        """Supersede one current in-memory version after a correction decision.
+
+        This is a semantic-double implementation of the Postgres operation
+        below.  It keeps the original version immutable, changes only its
+        current pointer, and makes the correction-source version the sole
+        projection input.
+        """
+
+        _assert_owner_context(context)
+        with self._lock:
+            receipt = next(
+                (item for item in self._receipts.values() if item["id"] == receipt_id),
+                None,
+            )
+            if receipt is None:
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "DecisionReceipt does not exist in this Owner Vault"
+                )
+            candidate = self._candidates.get(str(receipt["candidateId"]))
+            if candidate is None or candidate.vault_id != context.vault_id:
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "DecisionReceipt does not belong to this Owner Vault"
+                )
+            if candidate.decision is not CandidateDecision.CORRECTED:
+                raise OwnerTruthMemoryCorrectionError(
+                    "correction resolver requires a corrected Candidate"
+                )
+            self._assert_live_target(candidate=candidate, context=context)
+            corrected_value_id = receipt.get("correctedValueId")
+            corrected_value = self._corrected_values.get(str(corrected_value_id or ""))
+            if corrected_value is None:
+                raise OwnerTruthCandidateReviewConflict(
+                    "corrected DecisionReceipt is missing its immutable value"
+                )
+            predecessor_record = next(
+                (
+                    record
+                    for record in self._memory_activations.values()
+                    if str(record.get("memoryId") or "") == memory_id
+                    and str(record.get("memoryVersionId") or "") == expected_memory_version_id
+                    and record.get("isCurrent", True) is True
+                ),
+                None,
+            )
+            if predecessor_record is None:
+                raise OwnerTruthMemoryCorrectionError(
+                    "cited MemoryVersion is no longer current and cannot be corrected"
+                )
+            predecessor_payload = predecessor_record.get("payload")
+            if not isinstance(predecessor_payload, Mapping):
+                raise OwnerTruthMemoryCorrectionError(
+                    "cited MemoryVersion payload is unavailable"
+                )
+            predecessor = OwnerTruthMemoryVersionSnapshot(
+                vault_id=context.vault_id,
+                memory_id=memory_id,
+                memory_version_id=expected_memory_version_id,
+                version_number=int(predecessor_record.get("memoryVersion") or 0),
+                is_current=True,
+                # Epoch zero is the valid initial Owner Truth epoch.  Do not
+                # use ``or`` here: it would turn that valid value into the
+                # sentinel for a missing epoch and reject the first correction.
+                authority_epoch=(
+                    -1
+                    if predecessor_record.get("authorityEpoch") is None
+                    else int(predecessor_record["authorityEpoch"])
+                ),
+                source_id=str(predecessor_record.get("sourceId") or ""),
+                source_version=int(predecessor_record.get("sourceVersion") or 0),
+                content_schema_version=str(
+                    predecessor_payload.get("contentSchemaVersion") or ""
+                ),
+                content_hash=str(predecessor_record.get("contentHash") or ""),
+                payload=predecessor_payload,
+            )
+            plan = build_memory_correction_plan(
+                candidate=candidate,
+                receipt_id=receipt_id,
+                receipt_after_hash=str(receipt["candidateAfterHash"]),
+                corrected_value=corrected_value["content"],
+                corrected_value_schema_version=str(corrected_value["contentSchemaVersion"]),
+                correction_request_id=correction_request_id,
+                reason_code_hash=reason_code_hash,
+                predecessor=predecessor,
+            )
+            existing = self._memory_activations.get(plan.receipt_id)
+            if existing is not None:
+                if (
+                    existing.get("memoryId") != plan.memory_id
+                    or existing.get("memoryVersionId") != plan.replacement_memory_version_id
+                    or existing.get("contentHash") != plan.content_hash
+                    or existing.get("isCurrent") is not True
+                ):
+                    raise OwnerTruthCandidateReviewConflict(
+                        "DecisionReceipt already supersedes a different MemoryVersion"
+                    )
+                return OwnerTruthMemoryCorrectionActivationResult(
+                    outcome="deduplicated",
+                    receipt_id=plan.receipt_id,
+                    candidate_id=plan.candidate_id,
+                    correction_request_id=plan.correction_request_id,
+                    memory_id=plan.memory_id,
+                    superseded_memory_version_id=plan.superseded_memory_version_id,
+                    superseded_memory_version=plan.superseded_memory_version,
+                    replacement_memory_version_id=plan.replacement_memory_version_id,
+                    replacement_memory_version=plan.replacement_memory_version,
+                    authority_epoch=plan.authority_epoch,
+                    content_hash=plan.content_hash,
+                )
+            predecessor_record["isCurrent"] = False
+            self._memory_activations[plan.receipt_id] = {
+                "authorityEpoch": plan.authority_epoch,
+                "candidateId": plan.candidate_id,
+                "contentHash": plan.content_hash,
+                "correctionRequestId": plan.correction_request_id,
+                "isCurrent": True,
+                "memoryId": plan.memory_id,
+                "memoryVersionId": plan.replacement_memory_version_id,
+                "memoryVersion": plan.replacement_memory_version,
+                "payload": deepcopy(dict(plan.payload)),
+                "sourceId": plan.source_id,
+                "sourceVersion": plan.source_version,
+                "supersedesVersionId": plan.superseded_memory_version_id,
+            }
+            return OwnerTruthMemoryCorrectionActivationResult(
+                outcome="created",
+                receipt_id=plan.receipt_id,
+                candidate_id=plan.candidate_id,
+                correction_request_id=plan.correction_request_id,
+                memory_id=plan.memory_id,
+                superseded_memory_version_id=plan.superseded_memory_version_id,
+                superseded_memory_version=plan.superseded_memory_version,
+                replacement_memory_version_id=plan.replacement_memory_version_id,
+                replacement_memory_version=plan.replacement_memory_version,
                 authority_epoch=plan.authority_epoch,
                 content_hash=plan.content_hash,
             )
@@ -398,6 +558,8 @@ class InMemoryOwnerTruthCandidateReviewRepository:
             authority_epoch = int(vault[2])
             inputs: list[OwnerTruthMemoryProjectionInput] = []
             for activation in self._memory_activations.values():
+                if activation.get("isCurrent", True) is not True:
+                    continue
                 candidate = self._candidates.get(str(activation.get("candidateId") or ""))
                 if (
                     candidate is None
@@ -420,13 +582,16 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                     raise OwnerTruthMemoryProjectionError(
                         "activated MemoryVersion evidence references are unavailable"
                     )
-                source_versions = {
-                    int(item.get("sourceVersion") or 0)
-                    for item in evidence_refs
-                    if isinstance(item, Mapping)
-                    and str(item.get("sourceId") or "") == candidate.source_id
-                }
-                if len(source_versions) != 1 or min(source_versions) < 1:
+                source_id = str(activation.get("sourceId") or candidate.source_id)
+                try:
+                    source_version = int(
+                        activation.get("sourceVersion")
+                        if activation.get("sourceVersion") is not None
+                        else 0
+                    )
+                except (TypeError, ValueError):
+                    source_version = 0
+                if source_id != candidate.source_id or source_version < 1:
                     raise OwnerTruthMemoryProjectionError(
                         "activated MemoryVersion source version is unavailable"
                     )
@@ -437,9 +602,9 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                         vault_id=context.vault_id,
                         owner_subject_id=context.owner_subject_id,
                         authority_epoch=authority_epoch,
-                        version_number=1,
-                        source_id=candidate.source_id,
-                        source_version=next(iter(source_versions)),
+                        version_number=int(activation.get("memoryVersion") or 0),
+                        source_id=source_id,
+                        source_version=source_version,
                         memory_kind=candidate.memory_kind.value,
                         perspective_type=candidate.perspective_type.value,
                         epistemic_status=candidate.epistemic_status.value,
@@ -568,6 +733,7 @@ class PostgresOwnerTruthCandidateReviewRepository:
         *,
         command: OwnerTruthCandidateReviewCommand,
         context: OwnerTruthCommandContext,
+        allow_correction: bool = False,
     ) -> OwnerTruthCandidateReviewResult:
         _assert_owner_context(context)
         with self._cursor() as cursor:
@@ -586,7 +752,8 @@ class PostgresOwnerTruthCandidateReviewRepository:
             vault = self._active_vault(cursor, context=context, lock=True)
             candidate = self._locked_candidate(cursor, candidate_id=command.candidate_id, context=context)
             self._assert_candidate_live(cursor, candidate=candidate, context=context, vault=vault)
-            _assert_generic_activation_allowed(candidate)
+            if not allow_correction:
+                _assert_generic_activation_allowed(candidate)
             record = command.write_record(candidate=candidate, context=context)
             self._assert_candidate_has_no_receipt(cursor, candidate=candidate)
 
@@ -842,6 +1009,222 @@ class PostgresOwnerTruthCandidateReviewRepository:
             memory_id=plan.memory_id,
             memory_version_id=plan.memory_version_id,
             memory_version=1,
+            authority_epoch=plan.authority_epoch,
+            content_hash=plan.content_hash,
+        )
+
+    def activate_correction_memory_version(
+        self,
+        *,
+        receipt_id: str,
+        correction_request_id: str,
+        memory_id: str,
+        expected_memory_version_id: str,
+        reason_code_hash: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthMemoryCorrectionActivationResult:
+        """Atomically replace one current MemoryVersion after Owner correction.
+
+        Unlike ``activate_memory_version`` this never inserts another
+        ``MemoryRecord``.  It locks the cited version, flips only its current
+        pointer, and writes its successor with correction-source provenance.
+        The surrounding caller keeps the correction request, resolution ledger
+        and async projection intent in the same Unit of Work.
+        """
+
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS locked",
+                (
+                    "owner-truth-memory-correction:"
+                    f"{context.vault_id}:{memory_id}:{expected_memory_version_id}",
+                ),
+            )
+            receipt = self._receipt_by_id(
+                cursor,
+                vault_id=context.vault_id,
+                receipt_id=receipt_id,
+            )
+            if receipt is None:
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "DecisionReceipt does not exist in this Owner Vault"
+                )
+            vault = self._active_vault(cursor, context=context, lock=True)
+            candidate = self._locked_candidate(
+                cursor,
+                candidate_id=str(receipt["candidate_id"]),
+                context=context,
+            )
+            if candidate.decision is not CandidateDecision.CORRECTED:
+                raise OwnerTruthMemoryCorrectionError(
+                    "correction resolver requires a corrected Candidate"
+                )
+            if candidate.decision.value != str(receipt["decision"]):
+                raise OwnerTruthCandidateReviewConflict(
+                    "DecisionReceipt does not match its terminal Candidate"
+                )
+            candidate_source_versions = {
+                int(reference["sourceVersion"])
+                for reference in candidate.source_refs
+                if str(reference.get("sourceId") or "") == candidate.source_id
+            }
+            if len(candidate_source_versions) != 1:
+                raise OwnerTruthMemoryCorrectionError(
+                    "correction Candidate source version is ambiguous"
+                )
+            self._assert_candidate_live(
+                cursor,
+                candidate=candidate,
+                context=context,
+                vault=vault,
+                expected_source_version=next(iter(candidate_source_versions)),
+            )
+            corrected_value = self._corrected_value_by_receipt(
+                cursor,
+                vault_id=context.vault_id,
+                receipt_id=str(receipt["id"]),
+            )
+            if corrected_value is None:
+                raise OwnerTruthCandidateReviewConflict(
+                    "corrected DecisionReceipt is missing its immutable value"
+                )
+            cursor.execute(
+                """
+                SELECT memory.owner_subject_id, memory.status AS memory_status,
+                    memory.authority_epoch AS memory_authority_epoch,
+                    version.id AS memory_version_id, version.version_number,
+                    version.is_current, version.schema_version, version.content_hash,
+                    version.payload, version.source_id, version.source_version
+                FROM owner_truth.memories AS memory
+                JOIN owner_truth.memory_versions AS version
+                  ON version.vault_id = memory.vault_id
+                 AND version.memory_id = memory.id
+                WHERE memory.vault_id = %s
+                  AND memory.id = %s
+                  AND version.id = %s
+                FOR UPDATE OF memory, version
+                """,
+                (context.vault_id, memory_id, expected_memory_version_id),
+            )
+            row = cursor.fetchone()
+            if (
+                row is None
+                or str(row["owner_subject_id"]) != context.owner_subject_id
+                or str(row["memory_status"]) != "active"
+                or int(row["memory_authority_epoch"]) != int(vault["authority_epoch"])
+                or bool(row["is_current"]) is not True
+            ):
+                raise OwnerTruthMemoryCorrectionError(
+                    "cited MemoryVersion is no longer current and cannot be corrected"
+                )
+            payload = row["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            predecessor = OwnerTruthMemoryVersionSnapshot(
+                vault_id=context.vault_id,
+                memory_id=memory_id,
+                memory_version_id=str(row["memory_version_id"]),
+                version_number=int(row["version_number"]),
+                is_current=bool(row["is_current"]),
+                authority_epoch=int(vault["authority_epoch"]),
+                source_id=str(row["source_id"]),
+                source_version=int(row["source_version"]),
+                content_schema_version=str(row["schema_version"]),
+                content_hash=str(row["content_hash"]),
+                payload=payload or {},
+            )
+            plan = build_memory_correction_plan(
+                candidate=candidate,
+                receipt_id=str(receipt["id"]),
+                receipt_after_hash=str(receipt["candidate_after_hash"]),
+                corrected_value=corrected_value["content"],
+                corrected_value_schema_version=str(corrected_value["content_schema_version"]),
+                correction_request_id=correction_request_id,
+                reason_code_hash=reason_code_hash,
+                predecessor=predecessor,
+            )
+            cursor.execute(
+                """
+                SELECT id, memory_id, version_number, content_hash, is_current
+                FROM owner_truth.memory_versions
+                WHERE vault_id = %s AND decision_receipt_id = %s
+                FOR UPDATE
+                """,
+                (context.vault_id, plan.receipt_id),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                if (
+                    str(existing["memory_id"]) != plan.memory_id
+                    or int(existing["version_number"]) != plan.replacement_memory_version
+                    or str(existing["id"]) != plan.replacement_memory_version_id
+                    or str(existing["content_hash"]) != plan.content_hash
+                    or bool(existing["is_current"]) is not True
+                ):
+                    raise OwnerTruthCandidateReviewConflict(
+                        "DecisionReceipt already supersedes a different MemoryVersion"
+                    )
+                return OwnerTruthMemoryCorrectionActivationResult(
+                    outcome="deduplicated",
+                    receipt_id=plan.receipt_id,
+                    candidate_id=plan.candidate_id,
+                    correction_request_id=plan.correction_request_id,
+                    memory_id=plan.memory_id,
+                    superseded_memory_version_id=plan.superseded_memory_version_id,
+                    superseded_memory_version=plan.superseded_memory_version,
+                    replacement_memory_version_id=plan.replacement_memory_version_id,
+                    replacement_memory_version=plan.replacement_memory_version,
+                    authority_epoch=plan.authority_epoch,
+                    content_hash=plan.content_hash,
+                )
+            cursor.execute(
+                """
+                UPDATE owner_truth.memory_versions
+                SET is_current = FALSE
+                WHERE vault_id = %s AND id = %s AND is_current = TRUE
+                RETURNING id
+                """,
+                (context.vault_id, plan.superseded_memory_version_id),
+            )
+            if cursor.fetchone() is None:
+                raise OwnerTruthMemoryCorrectionError(
+                    "cited MemoryVersion lost its current pointer before replacement"
+                )
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.memory_versions (
+                    id, vault_id, memory_id, version_number, is_current,
+                    schema_version, content_hash, payload, source_id,
+                    source_version, decision_receipt_id, supersedes_version_id
+                ) VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                self._adapt_params(
+                    (
+                        plan.replacement_memory_version_id,
+                        plan.vault_id,
+                        plan.memory_id,
+                        plan.replacement_memory_version,
+                        plan.content_schema_version,
+                        plan.content_hash,
+                        dict(plan.payload),
+                        plan.source_id,
+                        plan.source_version,
+                        plan.receipt_id,
+                        plan.superseded_memory_version_id,
+                    )
+                ),
+            )
+        return OwnerTruthMemoryCorrectionActivationResult(
+            outcome="created",
+            receipt_id=plan.receipt_id,
+            candidate_id=plan.candidate_id,
+            correction_request_id=plan.correction_request_id,
+            memory_id=plan.memory_id,
+            superseded_memory_version_id=plan.superseded_memory_version_id,
+            superseded_memory_version=plan.superseded_memory_version,
+            replacement_memory_version_id=plan.replacement_memory_version_id,
+            replacement_memory_version=plan.replacement_memory_version,
             authority_epoch=plan.authority_epoch,
             content_hash=plan.content_hash,
         )

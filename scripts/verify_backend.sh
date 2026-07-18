@@ -88,6 +88,9 @@ test -f scripts/run-backend-async-effects-postgres-smoke.sh
 	test -f db/migrations/0019_owner_truth_answer_citation_trigger_fix.sql
 	test -f db/migrations/0019_owner_truth_answer_citation_trigger_fix.json
 	test -f app/services/owner_truth_answer_citation.py
+	test -f db/migrations/0022_owner_truth_correction_resolver.sql
+	test -f db/migrations/0022_owner_truth_correction_resolver.json
+	test -f app/domain/owner_truth/memory_correction.py
 	grep -q "COPY db ./db" Dockerfile
 grep -q "psycopg" requirements.txt
 

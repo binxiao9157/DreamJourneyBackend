@@ -222,6 +222,32 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("version.source_id", migration.sql)
         self.assertIn("version.source_version", migration.sql)
 
+    def test_correction_resolver_migration_keeps_same_record_lineage_default_off(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0022"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_correction_resolver")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(migration.compatibility, "additive")
+        self.assertEqual(
+            metadata["runtimeCompatibility"],
+            "ownerTruthV1CorrectionResolverShadow",
+        )
+        self.assertFalse(metadata["releaseFlags"]["correctionResolverV1"])
+        self.assertIn("CREATE TABLE owner_truth.correction_resolutions", migration.sql)
+        self.assertIn("CREATE TABLE owner_truth.answer_outdated_events", migration.sql)
+        self.assertIn("owner_truth.validate_correction_resolution", migration.sql)
+        self.assertIn("owner_truth.validate_answer_outdated_event", migration.sql)
+        self.assertIn("owner_truth.validate_correction_request_status_transition", migration.sql)
+        self.assertIn("replacement_memory_version_id", migration.sql)
+        self.assertIn("supersedes_version_id", migration.sql)
+        self.assertIn("owner_truth_correction_resolutions_no_update", migration.sql)
+        self.assertIn("owner_truth_answer_outdated_events_no_delete", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

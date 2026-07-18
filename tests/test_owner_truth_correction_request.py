@@ -30,8 +30,11 @@ from app.services.owner_truth_correction_request import (
     OwnerTruthCorrectionRequestCommand,
     OwnerTruthCorrectionRequestService,
     OwnerTruthCorrectionRequestStaleCitation,
+    OwnerTruthCorrectionResolutionCommand,
+    OwnerTruthCorrectionResolutionStale,
     _authority_epoch_matches,
     correction_request_summary,
+    correction_resolution_summary,
 )
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 
@@ -133,6 +136,28 @@ class OwnerTruthCorrectionRequestTests(unittest.TestCase):
             reason_code="ownerReportedCorrection",
         )
 
+    @staticmethod
+    def _resolution_command(
+        *,
+        command_id: str,
+        expected_memory_version_id: str,
+        action: CandidateReviewAction = CandidateReviewAction.CORRECT,
+        corrected_value: dict[str, str] | None = None,
+    ) -> OwnerTruthCorrectionResolutionCommand:
+        return OwnerTruthCorrectionResolutionCommand(
+            command_id=command_id,
+            expected_candidate_version=1,
+            expected_memory_version_id=expected_memory_version_id,
+            action=action,
+            corrected_value=(
+                {"summary": "小时候在院子里听外祖父讲故事"}
+                if action is CandidateReviewAction.CORRECT and corrected_value is None
+                else corrected_value
+            ),
+            corrected_value_schema_version=OWNER_TRUTH_SCHEMA_VERSION,
+            reason_code="ownerConfirmedCorrection",
+        )
+
     def test_creates_pending_candidate_from_exact_answer_citation_and_replays(self) -> None:
         command = self._command(command_id="correction-request-001")
         created = self.service.request(context=self.context, command=command)
@@ -215,6 +240,126 @@ class OwnerTruthCorrectionRequestTests(unittest.TestCase):
         with self.assertRaises(Exception) as error:
             self.service.request(context=self.context, command=conflicting)
         self.assertIn("commandId", str(error.exception))
+
+    def test_corrected_resolution_supersedes_same_memory_and_replays(self) -> None:
+        request = self.service.request(
+            context=self.context,
+            command=self._command(command_id="correction-resolution-request-001"),
+        )
+        command = self._resolution_command(
+            command_id="correction-resolution-correct-001",
+            expected_memory_version_id=request.expected_memory_version_id,
+        )
+
+        created = self.service.resolve(
+            context=self.context,
+            correction_request_id=request.correction_request_id,
+            command=command,
+        )
+        replayed = self.service.resolve(
+            context=self.context,
+            correction_request_id=request.correction_request_id,
+            command=command,
+        )
+        summary = correction_resolution_summary(created)
+
+        self.assertEqual(created.outcome, "created")
+        self.assertEqual(replayed.outcome, "deduplicated")
+        self.assertEqual(created.receipt_id, replayed.receipt_id)
+        self.assertEqual(created.decision, CandidateDecision.CORRECTED)
+        self.assertEqual(
+            created.superseded_memory_version_id,
+            request.expected_memory_version_id,
+        )
+        self.assertTrue(created.replacement_memory_version_id)
+        self.assertNotEqual(
+            created.replacement_memory_version_id,
+            request.expected_memory_version_id,
+        )
+        self.assertEqual(created.replacement_memory_version, 2)
+        self.assertTrue(created.answer_outdated_event_id)
+        self.assertEqual(created.authority_epoch, 0)
+        self.assertNotIn("外祖父", str(summary))
+        self.assertNotIn(self.memory_candidate.content["summary"], str(summary))
+
+        _epoch, inputs = self.store.owner_truth_candidate_review_repository().list_memory_projection_inputs(
+            context=self.context
+        )
+        self.assertEqual(len(inputs), 1)
+        current = inputs[0]
+        self.assertEqual(current.memory_id, request.memory_id)
+        self.assertEqual(current.memory_version_id, created.replacement_memory_version_id)
+        self.assertEqual(current.version_number, 2)
+        self.assertEqual(current.source_id, request.correction_source_id)
+        self.assertEqual(current.content["summary"], "小时候在院子里听外祖父讲故事")
+        self.assertEqual(len(current.evidence_refs), 2)
+
+        rebuilt = self.projection_service.rebuild(context=self.context)
+        self.assertEqual(rebuilt.snapshot["entryCount"], 1)
+        self.assertEqual(
+            rebuilt.snapshot["entries"][0]["memoryVersionId"],
+            created.replacement_memory_version_id,
+        )
+
+    def test_rejected_resolution_keeps_current_memory_version_unchanged(self) -> None:
+        request = self.service.request(
+            context=self.context,
+            command=self._command(command_id="correction-resolution-reject-request-001"),
+        )
+        result = self.service.resolve(
+            context=self.context,
+            correction_request_id=request.correction_request_id,
+            command=self._resolution_command(
+                command_id="correction-resolution-reject-001",
+                expected_memory_version_id=request.expected_memory_version_id,
+                action=CandidateReviewAction.REJECT,
+                corrected_value=None,
+            ),
+        )
+
+        self.assertEqual(result.decision, CandidateDecision.REJECTED)
+        self.assertIsNone(result.replacement_memory_version_id)
+        self.assertIsNone(result.answer_outdated_event_id)
+        _epoch, inputs = self.store.owner_truth_candidate_review_repository().list_memory_projection_inputs(
+            context=self.context
+        )
+        self.assertEqual(len(inputs), 1)
+        self.assertEqual(inputs[0].memory_version_id, request.expected_memory_version_id)
+        self.assertEqual(inputs[0].version_number, 1)
+        self.assertEqual(inputs[0].source_id, self.memory_candidate.source_id)
+
+    def test_stale_resolution_does_not_consume_second_correction_candidate(self) -> None:
+        first = self.service.request(
+            context=self.context,
+            command=self._command(command_id="correction-resolution-stale-request-001"),
+        )
+        second = self.service.request(
+            context=self.context,
+            command=self._command(command_id="correction-resolution-stale-request-002"),
+        )
+        self.service.resolve(
+            context=self.context,
+            correction_request_id=first.correction_request_id,
+            command=self._resolution_command(
+                command_id="correction-resolution-stale-first-001",
+                expected_memory_version_id=first.expected_memory_version_id,
+            ),
+        )
+
+        with self.assertRaises(OwnerTruthCorrectionResolutionStale):
+            self.service.resolve(
+                context=self.context,
+                correction_request_id=second.correction_request_id,
+                command=self._resolution_command(
+                    command_id="correction-resolution-stale-second-001",
+                    expected_memory_version_id=second.expected_memory_version_id,
+                ),
+            )
+
+        pending_ids = {
+            item.candidate_id for item in self.review_service.list_pending(context=self.context)
+        }
+        self.assertIn(second.candidate_id, pending_ids)
 
 
 if __name__ == "__main__":

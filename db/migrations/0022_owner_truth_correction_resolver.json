@@ -1,0 +1,16 @@
+{
+  "version": "0022",
+  "name": "owner_truth_correction_resolver",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthV1CorrectionResolverShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthV1Read": false,
+    "ownerTruthV1Write": false,
+    "memoryProjectionV1": false,
+    "answerCitationV1": false,
+    "correctionRequestV1": false,
+    "correctionResolverV1": false
+  }
+}

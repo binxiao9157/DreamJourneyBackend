@@ -277,6 +277,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthCorrectionRequest",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/correction-requests/{correction_request_id}/resolve",
+                session,
+                "ownerTruthCorrectionResolution",
+            ),
+            _rule(
                 "GET",
                 "/ops/release-policy/observations",
                 system,

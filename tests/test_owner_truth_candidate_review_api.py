@@ -142,6 +142,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             headers=headers,
             json={},
         )
+        correction_resolution = client.post(
+            f"/v2/vaults/vault-hidden/correction-requests/{uuid4()}/resolve",
+            headers=headers,
+            json={},
+        )
 
         self.assertEqual(owner_id.startswith("user_"), True)
         self.assertEqual(response.status_code, 404)
@@ -174,6 +179,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(correction.status_code, 404)
         self.assertEqual(
             correction.json()["detail"]["code"],
+            "ownerTruthCorrectionRequestUnavailable",
+        )
+        self.assertEqual(correction_resolution.status_code, 404)
+        self.assertEqual(
+            correction_resolution.json()["detail"]["code"],
             "ownerTruthCorrectionRequestUnavailable",
         )
 
@@ -465,6 +475,74 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(request_summary["citationId"], citation["citationId"])
         self.assertNotIn(correction_text, str(request_summary))
         self.assertNotIn(candidate.content["summary"], str(request_summary))
+
+        corrected_value = {"summary": "小时候在院子里听外祖父讲故事"}
+        resolution = client.post(
+            f"/v2/vaults/{vault_id}/correction-requests/{request_summary['correctionRequestId']}/resolve",
+            headers=headers,
+            json={
+                "commandId": "correction-resolution-api-001",
+                "expectedCandidateVersion": request_summary["candidateVersion"],
+                "expectedMemoryVersionId": request_summary["expectedMemoryVersionId"],
+                "action": "correct",
+                "correctedValue": corrected_value,
+                "correctedValueSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION,
+                "reasonCode": "ownerConfirmedCorrection",
+            },
+        )
+        self.assertEqual(resolution.status_code, 201)
+        self.assertEqual(
+            resolution.json()["schemaVersion"],
+            "owner-truth-correction-resolution-response-v1",
+        )
+        resolved = resolution.json()["correctionResolution"]
+        self.assertEqual(resolved["decision"], "corrected")
+        self.assertEqual(
+            resolved["supersededMemoryVersionId"],
+            request_summary["expectedMemoryVersionId"],
+        )
+        self.assertEqual(resolved["replacementMemoryVersion"], 2)
+        self.assertTrue(resolved["replacementMemoryVersionId"])
+        self.assertTrue(resolved["answerOutdatedEventId"])
+        self.assertNotIn(correction_text, str(resolved))
+        self.assertNotIn(corrected_value["summary"], str(resolved))
+        self.assertNotIn(candidate.content["summary"], str(resolved))
+
+        resolution_replay = client.post(
+            f"/v2/vaults/{vault_id}/correction-requests/{request_summary['correctionRequestId']}/resolve",
+            headers=headers,
+            json={
+                "commandId": "correction-resolution-api-001",
+                "expectedCandidateVersion": request_summary["candidateVersion"],
+                "expectedMemoryVersionId": request_summary["expectedMemoryVersionId"],
+                "action": "correct",
+                "correctedValue": corrected_value,
+                "correctedValueSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION,
+                "reasonCode": "ownerConfirmedCorrection",
+            },
+        )
+        self.assertEqual(resolution_replay.status_code, 200)
+        self.assertEqual(resolution_replay.json()["status"], "deduplicated")
+        self.assertEqual(
+            resolution_replay.json()["correctionResolution"]["receiptId"],
+            resolved["receiptId"],
+        )
+
+        stale_projection = client.get(
+            f"/v2/vaults/{vault_id}/memory-projection",
+            headers=headers,
+        )
+        self.assertEqual(stale_projection.status_code, 200)
+        self.assertEqual(stale_projection.json()["projection"]["state"], "rebuilding")
+
+        rebuilt_projection = client.post(
+            f"/v2/vaults/{vault_id}/memory-projection/rebuild",
+            headers=headers,
+        )
+        self.assertEqual(rebuilt_projection.status_code, 200)
+        self.assertEqual(rebuilt_projection.json()["projection"]["entryCount"], 1)
+        self.assertNotIn(correction_text, str(rebuilt_projection.json()))
+        self.assertNotIn(corrected_value["summary"], str(rebuilt_projection.json()))
 
 
 if __name__ == "__main__":

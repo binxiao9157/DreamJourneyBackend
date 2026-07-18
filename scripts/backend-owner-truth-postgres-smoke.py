@@ -68,7 +68,10 @@ from app.services.owner_truth_answer_citation import (
 from app.services.owner_truth_correction_request import (
     OwnerTruthCorrectionRequestCommand,
     OwnerTruthCorrectionRequestService,
+    OwnerTruthCorrectionResolutionCommand,
+    OwnerTruthCorrectionResolutionStale,
     correction_request_summary,
+    correction_resolution_summary,
 )
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.owner_truth_memory_projection_effects import (
@@ -149,8 +152,8 @@ def main() -> None:
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         require(
-            applied["appliedVersions"][-1] == "0021",
-            "owner truth MemoryVersion provenance migration must apply",
+            applied["appliedVersions"][-1] == "0022",
+            "owner truth correction resolver migration must apply",
         )
 
         with psycopg.connect(test_dsn) as connection:
@@ -1008,7 +1011,11 @@ def main() -> None:
             )
 
             correction_text = "不是父亲，是外祖父在院子里讲故事。"
-            correction_citation = answer_citation.citations[0]
+            correction_citation = next(
+                item
+                for item in answer_citation.citations
+                if item["citation"]["memoryId"] == accepted.memory_activation.memory_id
+            )
             correction_fields = correction_citation["citation"]
             correction_service = OwnerTruthCorrectionRequestService(store, enabled=True)
             correction_request = correction_service.request(
@@ -1133,6 +1140,194 @@ def main() -> None:
                     ),
                 ),
                 "projection entries must reject stale authority epochs",
+            )
+
+            # A correction is not another initial MemoryRecord.  It turns the
+            # cited current version into history and creates v(N+1) on the
+            # same MemoryRecord, with the correction Source as provenance.
+            stale_correction_request = correction_service.request(
+                context=review_context,
+                command=OwnerTruthCorrectionRequestCommand(
+                    command_id="owner-truth-correction-request-smoke-stale-002",
+                    answer_id=answer_citation.answer_id,
+                    citation_id=correction_citation["citationId"],
+                    memory_id=correction_fields["memoryId"],
+                    expected_memory_version_id=correction_fields["memoryVersionId"],
+                    correction_text="不是父亲，是祖父在院子里讲故事。",
+                    reason_code="ownerReportedCorrection",
+                ),
+            )
+            correction_resolution = correction_service.resolve(
+                context=review_context,
+                correction_request_id=correction_request.correction_request_id,
+                command=OwnerTruthCorrectionResolutionCommand(
+                    command_id="owner-truth-correction-resolution-smoke-001",
+                    expected_candidate_version=correction_request.candidate_row_version,
+                    expected_memory_version_id=correction_request.expected_memory_version_id,
+                    action=CandidateReviewAction.CORRECT,
+                    corrected_value={"summary": "小时候在院子里听外祖父讲故事。"},
+                    corrected_value_schema_version=OWNER_TRUTH_SCHEMA_VERSION,
+                    reason_code="ownerConfirmedCorrection",
+                ),
+            )
+            correction_resolution_replay = correction_service.resolve(
+                context=review_context,
+                correction_request_id=correction_request.correction_request_id,
+                command=OwnerTruthCorrectionResolutionCommand(
+                    command_id="owner-truth-correction-resolution-smoke-001",
+                    expected_candidate_version=correction_request.candidate_row_version,
+                    expected_memory_version_id=correction_request.expected_memory_version_id,
+                    action=CandidateReviewAction.CORRECT,
+                    corrected_value={"summary": "小时候在院子里听外祖父讲故事。"},
+                    corrected_value_schema_version=OWNER_TRUTH_SCHEMA_VERSION,
+                    reason_code="ownerConfirmedCorrection",
+                ),
+            )
+            correction_resolution_qa_summary = correction_resolution_summary(correction_resolution)
+            require(
+                correction_resolution.outcome == "created"
+                and correction_resolution_replay.outcome == "deduplicated"
+                and correction_resolution.receipt_id == correction_resolution_replay.receipt_id
+                and correction_resolution.decision.value == "corrected"
+                and correction_resolution.superseded_memory_version_id
+                == correction_request.expected_memory_version_id
+                and correction_resolution.replacement_memory_version == 2
+                and correction_resolution.replacement_memory_version_id
+                and correction_resolution.answer_outdated_event_id
+                and correction_resolution.projection_effect is not None
+                and correction_resolution.projection_effect.outcome == "accepted",
+                "accepted correction must produce one same-record successor, outdated Answer evidence and rebuild intent",
+            )
+            require(
+                correction_text not in str(correction_resolution_qa_summary)
+                and review_content["summary"] not in str(correction_resolution_qa_summary)
+                and "外祖父" not in str(correction_resolution_qa_summary),
+                "correction resolution QA summary must remain value-free",
+            )
+            try:
+                correction_service.resolve(
+                    context=review_context,
+                    correction_request_id=stale_correction_request.correction_request_id,
+                    command=OwnerTruthCorrectionResolutionCommand(
+                        command_id="owner-truth-correction-resolution-smoke-stale-002",
+                        expected_candidate_version=stale_correction_request.candidate_row_version,
+                        expected_memory_version_id=stale_correction_request.expected_memory_version_id,
+                        action=CandidateReviewAction.CORRECT,
+                        corrected_value={"summary": "小时候在院子里听祖父讲故事。"},
+                        corrected_value_schema_version=OWNER_TRUTH_SCHEMA_VERSION,
+                        reason_code="ownerConfirmedCorrection",
+                    ),
+                )
+            except OwnerTruthCorrectionResolutionStale:
+                pass
+            else:
+                raise AssertionError("stale correction must not consume a second Candidate decision")
+
+            correction_projection_worker_result = projection_worker.run_once()
+            require(
+                correction_projection_worker_result["status"] == "completed"
+                and correction_projection_worker_result["projectionOutcome"] == "rebuilt"
+                and correction_projection_worker_result["jobState"] == "succeeded",
+                "accepted correction successor must rebuild the derived projection",
+            )
+            correction_projection = projection_service.read(context=review_context)
+            correction_projection_entry = next(
+                item
+                for item in correction_projection["entries"]
+                if item["memoryId"] == correction_request.memory_id
+            )
+            require(
+                correction_projection["state"] == "ready"
+                and correction_projection_entry["memoryVersionId"]
+                == correction_resolution.replacement_memory_version_id
+                and correction_projection_entry["versionNumber"] == 2
+                and correction_projection_entry["sourceId"]
+                == correction_request.correction_source_id,
+                "derived projection must expose only the correction successor as current",
+            )
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT id, version_number, is_current, source_id,
+                            decision_receipt_id, supersedes_version_id
+                        FROM owner_truth.memory_versions
+                        WHERE vault_id = %s AND memory_id = %s
+                        ORDER BY version_number ASC
+                        """,
+                        (review_vault_id, correction_request.memory_id),
+                    )
+                    correction_versions = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT request.status, resolution.decision,
+                            outdated.answer_id, outdated.citation_id,
+                            outdated.superseded_memory_version_id,
+                            outdated.replacement_memory_version_id
+                        FROM owner_truth.correction_requests AS request
+                        JOIN owner_truth.correction_resolutions AS resolution
+                          ON resolution.vault_id = request.vault_id
+                         AND resolution.correction_request_id = request.id
+                        JOIN owner_truth.answer_outdated_events AS outdated
+                          ON outdated.vault_id = resolution.vault_id
+                         AND outdated.correction_resolution_id = resolution.id
+                        WHERE request.vault_id = %s AND request.id = %s
+                        """,
+                        (review_vault_id, correction_request.correction_request_id),
+                    )
+                    correction_ledger = cursor.fetchone()
+                    cursor.execute(
+                        """
+                        SELECT decision_status
+                        FROM owner_truth.memory_candidates
+                        WHERE vault_id = %s AND id = %s
+                        """,
+                        (review_vault_id, stale_correction_request.candidate_id),
+                    )
+                    stale_candidate_status = cursor.fetchone()[0]
+            require(
+                len(correction_versions) == 2
+                and str(correction_versions[0][0]) == correction_request.expected_memory_version_id
+                and correction_versions[0][1] == 1
+                and correction_versions[0][2] is False
+                and str(correction_versions[1][0]) == correction_resolution.replacement_memory_version_id
+                and correction_versions[1][1] == 2
+                and correction_versions[1][2] is True
+                and str(correction_versions[1][3]) == correction_request.correction_source_id
+                and str(correction_versions[1][4]) == correction_resolution.receipt_id
+                and str(correction_versions[1][5]) == correction_request.expected_memory_version_id,
+                "correction must preserve v1 and append a v2 successor on the same MemoryRecord",
+            )
+            require(
+                correction_ledger is not None
+                and correction_ledger[0] == "accepted"
+                and correction_ledger[1] == "corrected"
+                and str(correction_ledger[2]) == answer_citation.answer_id
+                and str(correction_ledger[3]) == correction_citation["citationId"]
+                and str(correction_ledger[4]) == correction_request.expected_memory_version_id
+                and str(correction_ledger[5]) == correction_resolution.replacement_memory_version_id
+                and stale_candidate_status == "pending",
+                "correction ledger and stale-request rollback evidence must remain exact",
+            )
+            expect_rejected(
+                test_dsn,
+                lambda cursor: cursor.execute(
+                    """
+                    UPDATE owner_truth.correction_resolutions
+                    SET decision = 'rejected'
+                    WHERE vault_id = %s AND correction_request_id = %s
+                    """,
+                    (review_vault_id, correction_request.correction_request_id),
+                ),
+                "correction resolutions must remain append-only",
+            )
+            expect_rejected(
+                test_dsn,
+                lambda cursor: cursor.execute(
+                    "DELETE FROM owner_truth.answer_outdated_events WHERE id = %s",
+                    (correction_resolution.answer_outdated_event_id,),
+                ),
+                "Answer outdated events must remain append-only",
             )
 
             activation_rolled_back = False
@@ -1506,6 +1701,12 @@ def main() -> None:
                     "correctionRequestValueFree": True,
                     "correctionRequestGenericActivationBlocked": True,
                     "correctionRequestImmutable": True,
+                    "correctionResolverSameRecordVersioning": True,
+                    "correctionResolverIdempotent": True,
+                    "correctionResolverValueFree": True,
+                    "correctionResolverStaleFailsClosed": True,
+                    "correctionResolverOutdatedAnswerEvidence": True,
+                    "correctionResolverProjectionRebuild": True,
                     "legacyMemoriesUnchanged": True,
                     "legacyArchiveUnchanged": True,
                 },

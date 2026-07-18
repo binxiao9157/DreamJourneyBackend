@@ -112,6 +112,10 @@ from app.services.owner_truth_correction_request import (
     OwnerTruthCorrectionRequestError,
     OwnerTruthCorrectionRequestService,
     OwnerTruthCorrectionRequestStaleCitation,
+    OwnerTruthCorrectionResolutionCommand,
+    OwnerTruthCorrectionResolutionConflict,
+    OwnerTruthCorrectionResolutionStale,
+    correction_resolution_summary,
     correction_request_summary,
 )
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
@@ -541,6 +545,10 @@ def _owner_truth_correction_request_http_error(
         return HTTPException(status_code=409, detail={"code": "ownerTruthCorrectionRequestStaleCitation"})
     if isinstance(error, OwnerTruthCorrectionRequestConflict):
         return HTTPException(status_code=409, detail={"code": "ownerTruthCorrectionRequestConflict"})
+    if isinstance(error, OwnerTruthCorrectionResolutionStale):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthCorrectionResolutionStale"})
+    if isinstance(error, OwnerTruthCorrectionResolutionConflict):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthCorrectionResolutionConflict"})
     return HTTPException(status_code=400, detail={"code": "ownerTruthCorrectionRequestInvalid"})
 
 
@@ -2318,6 +2326,54 @@ def request_owner_truth_answer_citation_correction(
             "schemaVersion": "owner-truth-correction-request-response-v1",
             "status": result.outcome,
             "correctionRequest": correction_request_summary(result),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/correction-requests/{correction_request_id}/resolve",
+    include_in_schema=False,
+)
+def resolve_owner_truth_answer_citation_correction(
+    request: Request,
+    vault_id: str,
+    correction_request_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only terminal correction resolver for one cited Owner Truth answer.
+
+    This route is hidden by the same explicit Owner Truth QA gate as the
+    request endpoint.  It does not expose raw correction text and it never
+    creates a separate MemoryRecord for a correction.
+    """
+
+    try:
+        context = _owner_truth_correction_request_context(request, vault_id=vault_id)
+        command = OwnerTruthCorrectionResolutionCommand(
+            command_id=payload.get("commandId"),
+            expected_candidate_version=_owner_truth_candidate_expected_version(payload),
+            expected_memory_version_id=payload.get("expectedMemoryVersionId"),
+            action=payload.get("action"),
+            corrected_value=payload.get("correctedValue"),
+            corrected_value_schema_version=(
+                payload.get("correctedValueSchemaVersion") or OWNER_TRUTH_SCHEMA_VERSION
+            ),
+            reason_code=payload.get("reasonCode"),
+        )
+        result = OwnerTruthCorrectionRequestService(store, enabled=True).resolve(
+            context=context,
+            correction_request_id=correction_request_id,
+            command=command,
+        )
+    except OwnerTruthCorrectionRequestError as error:
+        raise _owner_truth_correction_request_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-correction-resolution-response-v1",
+            "status": result.outcome,
+            "correctionResolution": correction_resolution_summary(result),
         },
         headers={"Cache-Control": "no-store"},
     )

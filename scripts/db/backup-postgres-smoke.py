@@ -181,9 +181,10 @@ else:
                 break
             time.sleep(0.02)
         time.sleep(0.1)
-        # Signal the shell directly so its TERM trap writes the operational
-        # receipt before cleaning up the isolated child process group.
-        os.kill(interrupted.pid, signal.SIGTERM)
+        # Interrupt the whole backup process group.  Signalling only the
+        # parent shell leaves the foreground fake pg_dump alive for 30 seconds,
+        # so Bash cannot run its TERM trap and write the interruption receipt.
+        os.killpg(interrupted.pid, signal.SIGTERM)
         try:
             interrupted_stdout, interrupted_stderr = interrupted.communicate(timeout=5)
         finally:
