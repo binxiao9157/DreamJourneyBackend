@@ -95,8 +95,11 @@ test -f db/migrations/0023_owner_truth_legacy_migration_inventory.sql
 test -f db/migrations/0023_owner_truth_legacy_migration_inventory.json
 test -f app/domain/owner_truth/legacy_migration.py
 test -f app/services/owner_truth_legacy_migration.py
+test -f app/services/owner_truth_legacy_shadow_parity.py
 test -f scripts/backend-owner-truth-legacy-migration-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-legacy-migration-postgres-smoke.sh
+test -f scripts/backend-owner-truth-legacy-shadow-parity-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-legacy-shadow-parity-postgres-smoke.sh
 	grep -q "COPY db ./db" Dockerfile
 grep -q "psycopg" requirements.txt
 

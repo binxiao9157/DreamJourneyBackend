@@ -289,6 +289,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthLegacyMigrationInventory",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/legacy-migration/shadow-parity",
+                session,
+                "ownerTruthLegacyShadowParity",
+            ),
+            _rule(
                 "GET",
                 "/ops/release-policy/observations",
                 system,

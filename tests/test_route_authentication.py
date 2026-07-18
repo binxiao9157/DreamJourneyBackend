@@ -31,7 +31,7 @@ class RouteAuthenticationPolicyTests(unittest.TestCase):
     def test_every_route_has_one_typed_authentication_contract(self):
         rules = self.registry.rules
 
-        self.assertEqual(len(rules), 89)
+        self.assertEqual(len(rules), 90)
         self.assertEqual(
             len({(rule.method, rule.path_template) for rule in rules}),
             len(rules),
@@ -254,7 +254,7 @@ class RouteAuthenticationStartupTests(unittest.TestCase):
             enforcement_mode="enforce",
         )
 
-        self.assertEqual(summary["routeCount"], 89)
+        self.assertEqual(summary["routeCount"], 90)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertEqual(summary["enforcementMode"], "enforce")
 

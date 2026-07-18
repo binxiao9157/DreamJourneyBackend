@@ -126,6 +126,10 @@ from app.services.owner_truth_legacy_migration import (
     OwnerTruthLegacyMigrationUnavailable,
     legacy_migration_summary,
 )
+from app.services.owner_truth_legacy_shadow_parity import (
+    OwnerTruthLegacyShadowParityService,
+    legacy_shadow_parity_summary,
+)
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
@@ -2452,6 +2456,30 @@ def inventory_owner_truth_legacy_evidence(
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
         content=legacy_migration_summary(result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/legacy-migration/shadow-parity",
+    include_in_schema=False,
+)
+def observe_owner_truth_legacy_shadow_parity(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """QA-only parity readiness observation; never a backfill or cutover command."""
+
+    try:
+        context = _owner_truth_legacy_migration_context(request, vault_id=vault_id)
+        observation = OwnerTruthLegacyShadowParityService(store, enabled=True).observe(
+            context=context,
+        )
+    except OwnerTruthLegacyMigrationError as error:
+        raise _owner_truth_legacy_migration_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if observation.inventory_outcome == "created" else 200,
+        content=legacy_shadow_parity_summary(observation),
         headers={"Cache-Control": "no-store"},
     )
 
