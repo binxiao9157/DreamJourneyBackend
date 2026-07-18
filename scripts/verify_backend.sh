@@ -34,6 +34,8 @@ test -f requirements.txt
 test -f scripts/migrate_db.py
 test -f scripts/backend-readiness-postgres-smoke.py
 test -f scripts/backend-readiness-deployed-smoke.py
+test -f scripts/backend-operation-metrics-deployed-smoke.py
+test -f scripts/run-backend-operation-metrics-deployed-smoke.sh
 test -f scripts/db/backup_postgres.sh
 test -f scripts/db/audit_backup_retention.sh
 test -f scripts/db/verify_backup_manifest.py
