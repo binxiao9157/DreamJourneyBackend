@@ -85,7 +85,19 @@ projection rebuild in the same transaction.
 
 ### Deployment G2
 
-Pending the backend commit/deployment for migration `0020`. After deployment,
-run `scripts/run-backend-owner-truth-postgres-smoke.sh` against the server
-Postgres administrator connection and verify `/ready` reports the new schema
-head. The public Owner Truth QA switches remain disabled by default.
+Completed on the deployed backend at revision `fe926df`.
+
+- `scripts/migrate_db.py --verify` reported `expectedHead=0020`,
+  `appliedHead=0020` and `status=ready`.
+- `scripts/run-backend-owner-truth-postgres-smoke.sh` passed against a
+  disposable server Postgres database. Its correction assertions confirmed
+  exact Citation binding, idempotent replay, value-free output, immutable
+  evidence and generic-activation blocking.
+- `scripts/run-backend-route-authentication-postgres-smoke.sh` passed with
+  `routeCount=87`; the new QA-only user route remains covered by the route
+  authentication registry.
+- `/ready` reported database, schema, auth and incident components as `ready`.
+
+An initial-epoch defect found by the deployed smoke was fixed before this
+record: `authorityEpoch=0` is now compared explicitly rather than treated as a
+missing value. The public Owner Truth QA switches remain disabled by default.
