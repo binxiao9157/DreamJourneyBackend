@@ -62,6 +62,10 @@ from app.services.owner_truth_answer_citation import (
 from app.services.owner_truth_correction_request import (
     InMemoryOwnerTruthCorrectionRequestRepository,
 )
+from app.services.owner_truth_legacy_migration import (
+    InMemoryOwnerTruthLegacyMigrationRepository,
+    LegacyMigrationLegacyRows,
+)
 from app.services.user_identity import stable_user_id
 from app.observability.events import (
     EvidenceEventConflict,
@@ -105,6 +109,11 @@ class InMemoryStore:
             InMemoryOwnerTruthCorrectionRequestRepository(
                 answer_repository=self._owner_truth_answer_citation_repository,
                 review_repository=self._owner_truth_candidate_review_repository,
+            )
+        )
+        self._owner_truth_legacy_migration_repository = (
+            InMemoryOwnerTruthLegacyMigrationRepository(
+                row_supplier=self._owner_truth_legacy_migration_rows,
             )
         )
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
@@ -167,6 +176,76 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthCorrectionRequestRepository:
         return self._owner_truth_correction_request_repository
+
+    def owner_truth_legacy_migration_repository(
+        self,
+    ) -> InMemoryOwnerTruthLegacyMigrationRepository:
+        return self._owner_truth_legacy_migration_repository
+
+    def _owner_truth_legacy_migration_rows(self, owner_subject_id: str) -> LegacyMigrationLegacyRows:
+        """Return raw legacy rows only to the hash-only V4 inventory collector."""
+
+        with self._archive_lock, self._kb_lock:
+            archive_items = tuple(
+                {
+                    "authority_state": str(item.get("authorityState") or "active"),
+                    "id": str(item.get("id") or ""),
+                    "owner_subject_id": str(item.get("userId") or owner_subject_id),
+                    "payload": deepcopy(item),
+                    "user_id": owner_subject_id,
+                }
+                for item in self._archive_items.get(owner_subject_id, [])
+            )
+            memories = tuple(
+                {
+                    "authority_state": str(item.get("authorityState") or "active"),
+                    "id": str(item.get("id") or ""),
+                    "owner_subject_id": str(item.get("userId") or owner_subject_id),
+                    "payload": deepcopy(item),
+                    "user_id": owner_subject_id,
+                }
+                for item in self._memories.get(owner_subject_id, [])
+            )
+            snapshot = self._kb_snapshots.get(owner_subject_id)
+            kb_snapshots = ()
+            if snapshot is not None:
+                kb_snapshots = (
+                    {
+                        "graph": deepcopy(snapshot.get("graph") or {}),
+                        "revision": int(snapshot.get("revision") or 0),
+                        "updated_at": snapshot.get("updatedAt"),
+                        "user_id": owner_subject_id,
+                    },
+                )
+            kb_changes = tuple(
+                {
+                    "created_at": change.get("createdAt"),
+                    "graph": deepcopy(change.get("graph") or {}),
+                    "mutation": deepcopy(change.get("mutation")),
+                    "operation_id": str(change.get("operationId") or ""),
+                    "revision": int(change.get("revision") or 0),
+                    "user_id": owner_subject_id,
+                }
+                for change in self._kb_changes.get(owner_subject_id, [])
+            )
+            kb_receipts = tuple(
+                {
+                    "operation_id": str(operation_id),
+                    "operation_kind": str(receipt.get("operationKind") or ""),
+                    "payload_hash": str(receipt.get("payloadHash") or ""),
+                    "result": deepcopy(receipt.get("result") or {}),
+                    "schema_version": int(receipt.get("schemaVersion") or 0),
+                    "user_id": owner_subject_id,
+                }
+                for operation_id, receipt in self._kb_operation_receipts.get(owner_subject_id, {}).items()
+            )
+        return LegacyMigrationLegacyRows(
+            archive_items=archive_items,
+            memories=memories,
+            kb_snapshots=kb_snapshots,
+            kb_changes=kb_changes,
+            kb_receipts=kb_receipts,
+        )
 
     def append_evidence_event(
         self,

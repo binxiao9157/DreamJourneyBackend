@@ -283,6 +283,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthCorrectionResolution",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/legacy-migration/inventory",
+                session,
+                "ownerTruthLegacyMigrationInventory",
+            ),
+            _rule(
                 "GET",
                 "/ops/release-policy/observations",
                 system,

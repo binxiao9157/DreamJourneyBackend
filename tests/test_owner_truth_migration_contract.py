@@ -248,6 +248,33 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("owner_truth_correction_resolutions_no_update", migration.sql)
         self.assertIn("owner_truth_answer_outdated_events_no_delete", migration.sql)
 
+    def test_legacy_inventory_migration_is_hash_only_append_only_and_default_off(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0023"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_legacy_migration_inventory")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(migration.compatibility, "additive")
+        self.assertEqual(
+            metadata["runtimeCompatibility"],
+            "ownerTruthV1LegacyInventoryShadow",
+        )
+        self.assertFalse(metadata["releaseFlags"]["legacyMigrationInventoryV1"])
+        self.assertIn("CREATE TABLE owner_truth.legacy_migration_runs", migration.sql)
+        self.assertIn("CREATE TABLE owner_truth.legacy_migration_entries", migration.sql)
+        self.assertIn("CREATE TABLE owner_truth.legacy_migration_checkpoints", migration.sql)
+        self.assertIn("target_state = 'notCreated'", migration.sql)
+        self.assertIn("owner_truth_legacy_migration_runs_no_update", migration.sql)
+        self.assertIn("owner_truth_legacy_migration_entries_no_delete", migration.sql)
+        self.assertNotIn("ALTER TABLE archive_items", migration.sql)
+        self.assertNotIn("ALTER TABLE memories", migration.sql)
+        self.assertNotIn("UPDATE archive_items", migration.sql)
+        self.assertNotIn("UPDATE memories", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

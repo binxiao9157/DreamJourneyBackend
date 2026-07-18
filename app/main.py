@@ -118,6 +118,14 @@ from app.services.owner_truth_correction_request import (
     correction_resolution_summary,
     correction_request_summary,
 )
+from app.services.owner_truth_legacy_migration import (
+    OwnerTruthLegacyMigrationAccessDenied,
+    OwnerTruthLegacyMigrationConflict,
+    OwnerTruthLegacyMigrationError,
+    OwnerTruthLegacyMigrationInventoryService,
+    OwnerTruthLegacyMigrationUnavailable,
+    legacy_migration_summary,
+)
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
@@ -404,6 +412,26 @@ def _require_owner_truth_correction_request_qa(request: Request) -> str:
     return user_id
 
 
+def _require_owner_truth_legacy_migration_qa(request: Request) -> str:
+    """Keep hash-only legacy inventory unavailable outside explicit Owner QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthLegacyMigrationUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthLegacyMigrationUserSessionRequired"},
+        )
+    return user_id
+
+
 def _owner_truth_candidate_review_context(
     request: Request,
     *,
@@ -482,6 +510,19 @@ def _owner_truth_correction_request_context(
     )
 
 
+def _owner_truth_legacy_migration_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_legacy_migration_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_candidate_review_http_error(
     error: OwnerTruthContractError,
 ) -> HTTPException:
@@ -550,6 +591,18 @@ def _owner_truth_correction_request_http_error(
     if isinstance(error, OwnerTruthCorrectionResolutionConflict):
         return HTTPException(status_code=409, detail={"code": "ownerTruthCorrectionResolutionConflict"})
     return HTTPException(status_code=400, detail={"code": "ownerTruthCorrectionRequestInvalid"})
+
+
+def _owner_truth_legacy_migration_http_error(
+    error: OwnerTruthLegacyMigrationError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthLegacyMigrationAccessDenied):
+        return HTTPException(status_code=403, detail={"code": "ownerTruthLegacyMigrationDenied"})
+    if isinstance(error, OwnerTruthLegacyMigrationConflict):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthLegacyMigrationConflict"})
+    if isinstance(error, OwnerTruthLegacyMigrationUnavailable):
+        return HTTPException(status_code=404, detail={"code": "ownerTruthLegacyMigrationUnavailable"})
+    return HTTPException(status_code=400, detail={"code": "ownerTruthLegacyMigrationInvalid"})
 
 
 def _owner_truth_candidate_expected_version(payload: Dict[str, Any]) -> int:
@@ -2375,6 +2428,30 @@ def resolve_owner_truth_answer_citation_correction(
             "status": result.outcome,
             "correctionResolution": correction_resolution_summary(result),
         },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/legacy-migration/inventory",
+    include_in_schema=False,
+)
+def inventory_owner_truth_legacy_evidence(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """QA-only, hash-only legacy evidence inventory with no promotion effects."""
+
+    try:
+        context = _owner_truth_legacy_migration_context(request, vault_id=vault_id)
+        result = OwnerTruthLegacyMigrationInventoryService(store, enabled=True).inventory(
+            context=context,
+        )
+    except OwnerTruthLegacyMigrationError as error:
+        raise _owner_truth_legacy_migration_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=legacy_migration_summary(result),
         headers={"Cache-Control": "no-store"},
     )
 

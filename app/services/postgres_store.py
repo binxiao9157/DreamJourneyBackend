@@ -100,6 +100,9 @@ from app.services.owner_truth_answer_citation import (
 from app.services.owner_truth_correction_request import (
     PostgresOwnerTruthCorrectionRequestRepository,
 )
+from app.services.owner_truth_legacy_migration import (
+    PostgresOwnerTruthLegacyMigrationRepository,
+)
 
 
 class PostgresStore:
@@ -285,6 +288,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth correction request requires an active unit of work")
         return PostgresOwnerTruthCorrectionRequestRepository(active.connection)
+
+    def owner_truth_legacy_migration_repository(
+        self,
+    ) -> PostgresOwnerTruthLegacyMigrationRepository:
+        """Return the read-only legacy inventory writer in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth legacy migration requires an active unit of work")
+        return PostgresOwnerTruthLegacyMigrationRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(

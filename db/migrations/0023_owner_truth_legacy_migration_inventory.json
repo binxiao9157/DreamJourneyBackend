@@ -1,0 +1,17 @@
+{
+  "version": "0023",
+  "name": "owner_truth_legacy_migration_inventory",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthV1LegacyInventoryShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthV1Read": false,
+    "ownerTruthV1Write": false,
+    "memoryProjectionV1": false,
+    "answerCitationV1": false,
+    "correctionRequestV1": false,
+    "correctionResolverV1": false,
+    "legacyMigrationInventoryV1": false
+  }
+}
