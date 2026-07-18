@@ -1421,22 +1421,22 @@ def main() -> None:
                         for row in activated_rows
                         if str(row[0]) == accepted.review.receipt_id and row[3] == 1
                     )
+                    accepted_successor_row = next(
+                        row
+                        for row in activated_rows
+                        if str(row[0]) == accepted.review.receipt_id and row[3] == 2
+                    )
                     corrected_initial_row = next(
                         row
                         for row in activated_rows
                         if str(row[0]) == corrected.review.receipt_id and row[3] == 1
                     )
-                    corrected_successor_row = next(
-                        row
-                        for row in activated_rows
-                        if str(row[0]) == corrected.review.receipt_id and row[3] == 2
-                    )
                     require(
                         len(activated_rows) == 3
-                        and accepted_initial_row[4] is True
-                        and corrected_initial_row[4] is False
-                        and corrected_successor_row[4] is True,
-                        "accepted records retain one current v1 while corrections retain v1 and append current v2",
+                        and accepted_initial_row[4] is False
+                        and accepted_successor_row[4] is True
+                        and corrected_initial_row[4] is True,
+                        "the cited record retains v1 and appends current v2 without changing other records",
                     )
                     corrected_payload = corrected_initial_row[5]
                     if isinstance(corrected_payload, str):
