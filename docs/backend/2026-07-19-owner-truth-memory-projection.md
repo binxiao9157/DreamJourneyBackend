@@ -158,15 +158,15 @@ rewrite of an already-recorded migration.
 
 - Focused projection/review/effect/compatibility/API suite passed, including
   default-hidden QA access, knowledge-only mapping, stale-checkpoint
-  fail-closed behavior and value-free QA summaries.
-- `./scripts/verify_backend.sh` passed with 686 unit tests, credential
+  fail-closed behavior, typed Context citations and value-free QA summaries.
+- `./scripts/verify_backend.sh` passed with 690 unit tests, credential
   boundary tests, FastAPI smoke, knowledge checks, deployment-file checks and
   backup contract smoke.
 - Python compilation, shell syntax checks and `git diff --check` passed.
 
 ### G2 deployed Postgres
 
-Deployed backend head: `ddfc82e`.
+Deployed backend head: `930c9e3`.
 
 - `migrate_db.py --apply --build-id 18ce3bd` reported no pending migrations;
   expected and applied schema heads are both `0017`.
@@ -177,9 +177,12 @@ Deployed backend head: `ddfc82e`.
   atomic/idempotent, value-free pending rebuild intents for accepted and
   corrected MemoryVersions, with no intent for a rejected Candidate. It now
   also verifies that KBLite compatibility maps only confirmed knowledge claims,
-  fails closed after a stale checkpoint, and keeps QA summaries value-free.
+  fails closed after a stale checkpoint, and keeps QA summaries value-free. It
+  additionally verifies that the Context shadow selects typed citations,
+  returns no MemoryVersion content in its QA summary and fails closed after an
+  invalidated projection checkpoint.
 - `scripts/run-backend-route-authentication-postgres-smoke.sh` passed with
-  `routeCount=83`; the three QA-only routes remain user-session-only and do
+  `routeCount=84`; all four QA-only routes remain user-session-only and do
   not change anonymous or machine access.
 - `https://dreamjourney-api.liftora.cn/ready` reports database, schema, auth
   and incident components ready.
@@ -192,8 +195,7 @@ shadow only. `WI-S1-01-06` remains `PLANNED/STOP` in the Registry because its
 full scope still requires an event-driven projection rebuild consumer, a
 production-ranked typed Citation Context reader, correction-flow integration,
 iOS cache-envelope/authority-epoch handling and the remaining dependencies,
-G1 and G2 evidence. The deployed route-authentication smoke must be updated
-to `routeCount=84` when this new QA-only endpoint is deployed.
+G1 and G2 evidence.
 
 The next safe closure is the event-driven projection rebuild consumer. It must
 not restore KBLite as a fact-authority writer or make `/context/build` depend
