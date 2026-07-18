@@ -71,3 +71,20 @@ DATABASE_URL='<可创建临时数据库的 Postgres DSN>' \
    evidence，且保持默认不进入公开 Context。
 3. shadow parity、QA vault 和 Owner cohort cutover 归 `WI-S1-01-09` 后续小切片，
    不能由本 inventory 自动触发。
+
+## 部署证据
+
+2026-07-19（Asia/Shanghai）已部署到后端生产容器。
+
+- 后端实现提交：`cd739fb`；部署 smoke 输出修正：`224e56e`。
+- `migrate_db.py --apply` 已应用 `0023`，随后 `--verify` 报告
+  `expectedHead=0023`、`status=ready`、无待执行迁移。
+- `backend-owner-truth-legacy-migration-postgres-smoke.py` 在部署容器中通过：
+  `schemaHead=0023 entries=6`。它使用临时数据库验证可重复盘点、内容变化产生新
+  checkpoint、append-only 约束、无正文输出和不创建 V4 authority target。
+- 部署后的 route-authentication smoke 通过：`routeCount=89`、公开 runtime 可访问、
+  匿名用户路由拒绝、machine/user audience 边界均生效。
+- `/ready` 报告 `database`、`schema`、`auth`、`incident` 均为 `ready`。
+
+此部署仍是 QA-only、默认关闭的 inventory 观察能力；没有对 Archive、KBLite、
+`/memories`、公开 Echo 或 iOS UI 执行 backfill、promotion 或 authority cutover。
