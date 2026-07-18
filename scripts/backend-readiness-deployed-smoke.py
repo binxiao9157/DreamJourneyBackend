@@ -54,7 +54,7 @@ def main():
     require(ready.get("status") == "ready", "deployed readiness status")
     require(
         [item.get("component") for item in ready.get("components") or []]
-        == ["database", "schema", "auth"],
+        == ["database", "schema", "auth", "incident"],
         "required readiness components",
     )
     for component in ready["components"]:
@@ -80,6 +80,7 @@ def main():
         "databaseReady": True,
         "schemaReady": True,
         "authReady": True,
+        "incidentReady": True,
         "secretRedaction": True,
         "businessUowBypassed": True,
     }
@@ -87,7 +88,7 @@ def main():
         with open(OUTPUT_PATH, "w", encoding="utf-8") as handle:
             json.dump(result, handle, ensure_ascii=False, indent=2, sort_keys=True)
             handle.write("\n")
-    print("Backend deployed readiness smoke passed: database/schema/auth ready")
+    print("Backend deployed readiness smoke passed: database/schema/auth/incident ready")
 
 
 if __name__ == "__main__":
