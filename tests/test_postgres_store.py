@@ -185,7 +185,41 @@ class FakeCursor:
                 for existing_user_id, items in collections.items()
             )
 
-        if normalized.startswith("INSERT INTO evidence_events"):
+        if normalized.startswith("INSERT INTO account_purge_receipts"):
+            (
+                receipt_id,
+                subject_hash,
+                deletion_request_id_hash,
+                deleted_at,
+                purge_after,
+                purged_at,
+                restore_count,
+                receipt_hash,
+                contract_version,
+            ) = params
+            existing = self.connection.account_purge_receipts.get(subject_hash)
+            if existing is not None:
+                self.result = None
+            else:
+                item = {
+                    "id": receipt_id,
+                    "subject_hash": subject_hash,
+                    "deletion_request_id_hash": deletion_request_id_hash,
+                    "deleted_at": deleted_at,
+                    "purge_after": purge_after,
+                    "purged_at": purged_at,
+                    "restore_count": restore_count,
+                    "receipt_hash": receipt_hash,
+                    "contract_version": contract_version,
+                }
+                self.connection.account_purge_receipts[subject_hash] = item
+                self.result = dict(item)
+        elif normalized.startswith(
+            "SELECT id, subject_hash, deletion_request_id_hash, deleted_at, purge_after, purged_at, restore_count, receipt_hash, contract_version FROM account_purge_receipts"
+        ):
+            item = self.connection.account_purge_receipts.get(params[0])
+            self.result = None if item is None else dict(item)
+        elif normalized.startswith("INSERT INTO evidence_events"):
             (
                 event_id,
                 operation_id,
@@ -1287,6 +1321,7 @@ class FakeConnection:
         self.auth_token_families = {}
         self.auth_session_events = {}
         self.evidence_events = {}
+        self.account_purge_receipts = {}
         self.profiles = {}
         self.password_credentials = {}
         self.family_members = {}
@@ -3186,8 +3221,13 @@ class PostgresStoreTests(unittest.TestCase):
         store = PostgresStore(connection_factory=lambda: connection)
 
         purged = store.purge_expired_deleted_users("2026-01-02T00:00:00+00:00")
+        receipt = store.get_account_purge_receipt("u1")
 
         self.assertEqual(len(purged), 1)
+        self.assertEqual(connection.users["u1"]["phone"], "")
+        self.assertEqual(receipt["terminalState"], "purged")
+        self.assertEqual(receipt["subjectHash"], next(iter(connection.account_purge_receipts)))
+        self.assertNotIn("u1", str(receipt))
         self.assertNotIn("u1", connection.kb_operation_receipts)
         self.assertTrue(
             any(

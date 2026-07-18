@@ -472,6 +472,25 @@ class PostgresMigratorTests(unittest.TestCase):
         self.assertIn("UNIQUE (request_id, event_type)", migration.sql)
         self.assertIn("auth_epoch", migration.sql)
 
+    def test_account_purge_receipts_migration_is_append_only_and_redacted(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.name == "account_purge_receipts"
+        )
+
+        self.assertEqual(migration.version, "0009")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(migration.compatibility, "additive")
+        self.assertIn("CREATE TABLE account_purge_receipts", migration.sql)
+        self.assertIn("subject_hash TEXT NOT NULL UNIQUE", migration.sql)
+        self.assertIn("receipt_hash TEXT NOT NULL UNIQUE", migration.sql)
+        self.assertIn("account_purge_receipts are append-only", migration.sql)
+        table_definition = migration.sql[
+            migration.sql.index("CREATE TABLE account_purge_receipts") :
+        ].split(");", 1)[0].lower()
+        self.assertNotIn("phone", table_definition)
+
 
 if __name__ == "__main__":
     unittest.main()

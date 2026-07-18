@@ -27,6 +27,15 @@ from app.services.data_rights_contract import (
     EXECUTION_OUTCOMES,
     aggregate_data_rights_status,
 )
+from app.services.account_deletion_state import (
+    account_purge_block_reason,
+    account_restore_block_reason,
+    guard_account_upsert,
+)
+from app.services.account_deletion_receipts import (
+    account_purge_subject_hash,
+    build_account_purge_receipt,
+)
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -89,6 +98,7 @@ class InMemoryStore:
         self._rights_executions: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         self._rights_receipts: Dict[str, Dict[str, Any]] = {}
         self._rights_access_revocation_outbox: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._account_purge_receipts: Dict[str, Dict[str, Any]] = {}
         self._rights_lock = RLock()
 
     @contextmanager
@@ -1231,24 +1241,26 @@ class InMemoryStore:
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
-        existing = self._users.get(user_id, {})
-        user = {
-            "id": user_id,
-            "phone": phone,
-            "nickname": nickname or "寻梦环游用户",
-            "updatedAt": self._now(),
-        }
-        if existing.get("restoreCount") is not None:
-            user["restoreCount"] = int(existing.get("restoreCount") or 0)
-        user.setdefault("restoreCount", 0)
-        user["deletionState"] = "active"
-        user["accessState"] = "active"
-        user["authEpoch"] = int(existing.get("authEpoch") or 0)
-        user["providerCapabilityState"] = str(
-            existing.get("providerCapabilityState") or "enabled"
-        )
-        self._users[user_id] = user
-        return deepcopy(user)
+        with self._auth_lock:
+            existing = self._users.get(user_id, {})
+            guard_account_upsert(existing)
+            user = {
+                "id": user_id,
+                "phone": phone,
+                "nickname": nickname or "寻梦环游用户",
+                "updatedAt": self._now(),
+            }
+            if existing.get("restoreCount") is not None:
+                user["restoreCount"] = int(existing.get("restoreCount") or 0)
+            user.setdefault("restoreCount", 0)
+            user["deletionState"] = "active"
+            user["accessState"] = "active"
+            user["authEpoch"] = int(existing.get("authEpoch") or 0)
+            user["providerCapabilityState"] = str(
+                existing.get("providerCapabilityState") or "enabled"
+            )
+            self._users[user_id] = user
+            return deepcopy(user)
 
     def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
         user = self._users.get(user_id)
@@ -1260,6 +1272,7 @@ class InMemoryStore:
         *,
         phone: str,
         requested_at_iso: Optional[str] = None,
+        deletion_request_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         user = self._users.get(user_id)
         if user is None:
@@ -1290,6 +1303,9 @@ class InMemoryStore:
         item["dataExportSupported"] = False
         item["restoreLimit"] = 1
         item["restoreCount"] = int(item.get("restoreCount") or 0)
+        item.setdefault("retentionHolds", [])
+        if deletion_request_id:
+            item["deletionRequestId"] = str(deletion_request_id)
         item["updatedAt"] = self._now()
         self._users[user_id] = item
         return deepcopy(item)
@@ -1302,26 +1318,35 @@ class InMemoryStore:
         nickname: str = "",
         restored_at_iso: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        user = self._users.get(user_id)
-        if user is None:
-            return None
-        if user.get("deletionState") != "softDeleted":
-            return None
-        if self._normalized_phone(user.get("phone", "")) != self._normalized_phone(phone):
-            return None
+        with self._auth_lock:
+            user = self._users.get(user_id)
+            if user is None:
+                return None
+            if self._normalized_phone(user.get("phone", "")) != self._normalized_phone(phone):
+                return None
 
-        restored_at = restored_at_iso or self._now()
-        item = deepcopy(user)
-        item["nickname"] = nickname or item.get("nickname") or "寻梦环游用户"
-        item["deletionState"] = "active"
-        item["accessState"] = "active"
-        item["restoreCount"] = int(item.get("restoreCount") or 0) + 1
-        item["restoredAt"] = restored_at
-        item["updatedAt"] = restored_at
-        for key in ("deletedAt", "purgeAfter", "restoreDeadline", "retentionDays", "dataExportSupported", "restoreLimit"):
-            item.pop(key, None)
-        self._users[user_id] = item
-        return deepcopy(item)
+            restored_at = restored_at_iso or self._now()
+            if account_restore_block_reason(user, restored_at) is not None:
+                return None
+            item = deepcopy(user)
+            item["nickname"] = nickname or item.get("nickname") or "寻梦环游用户"
+            item["deletionState"] = "active"
+            item["accessState"] = "active"
+            item["restoreCount"] = int(item.get("restoreCount") or 0) + 1
+            item["restoredAt"] = restored_at
+            item["updatedAt"] = restored_at
+            for key in (
+                "deletedAt",
+                "purgeAfter",
+                "restoreDeadline",
+                "retentionDays",
+                "dataExportSupported",
+                "restoreLimit",
+                "deletionRequestId",
+            ):
+                item.pop(key, None)
+            self._users[user_id] = item
+            return deepcopy(item)
 
     def purge_expired_deleted_users(self, cutoff_iso: str) -> List[Dict[str, Any]]:
         with self._auth_lock:
@@ -1331,14 +1356,23 @@ class InMemoryStore:
         cutoff = self._parse_iso_datetime(cutoff_iso)
         purged: List[Dict[str, Any]] = []
         for user_id, user in list(self._users.items()):
-            if user.get("deletionState") != "softDeleted":
+            if account_purge_block_reason(user, cutoff) is not None:
                 continue
-            deadline = self._parse_iso_datetime(str(user.get("restoreDeadline") or user.get("purgeAfter") or ""))
-            if deadline > cutoff:
-                continue
+            receipt = build_account_purge_receipt(
+                user_id=user_id,
+                account=user,
+                purged_at=cutoff,
+            )
+            existing_receipt = self._account_purge_receipts.get(receipt["subjectHash"])
+            if existing_receipt is not None and existing_receipt != receipt:
+                raise ValueError("account purge receipt is append-only")
+            self._account_purge_receipts.setdefault(
+                receipt["subjectHash"],
+                deepcopy(receipt),
+            )
             tombstone = {
                 "id": user_id,
-                "phone": user.get("phone", ""),
+                "phone": "",
                 "nickname": "",
                 "deletionState": "purged",
                 "accessState": "purged",
@@ -1346,6 +1380,7 @@ class InMemoryStore:
                 "providerCapabilityState": "revoked",
                 "purgedAt": cutoff.isoformat(),
                 "restoreCount": int(user.get("restoreCount") or 0),
+                "terminalPurgeReceiptId": receipt["id"],
             }
             self._users[user_id] = tombstone
             self._profiles.pop(user_id, None)
@@ -1416,6 +1451,10 @@ class InMemoryStore:
             self._voice_profiles.pop(user_id, None)
             purged.append(deepcopy(tombstone))
         return purged
+
+    def get_account_purge_receipt(self, user_id: str) -> Optional[Dict[str, Any]]:
+        receipt = self._account_purge_receipts.get(account_purge_subject_hash(user_id))
+        return None if receipt is None else deepcopy(receipt)
 
     def save_profile(self, user_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(profile)

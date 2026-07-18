@@ -53,6 +53,15 @@ from app.services.data_rights_contract import (
     EXECUTION_OUTCOMES,
     aggregate_data_rights_status,
 )
+from app.services.account_deletion_state import (
+    account_purge_block_reason,
+    account_restore_block_reason,
+    guard_account_upsert,
+)
+from app.services.account_deletion_receipts import (
+    account_purge_subject_hash,
+    build_account_purge_receipt,
+)
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -1921,7 +1930,11 @@ class PostgresStore:
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
+        if self._current_uow.get() is None:
+            with self.auth_user_operation(user_id):
+                return self.upsert_user(phone, nickname)
         existing = self.get_user(user_id) or {}
+        guard_account_upsert(existing)
         user = {
             "id": user_id,
             "phone": phone,
@@ -1964,6 +1977,7 @@ class PostgresStore:
         *,
         phone: str,
         requested_at_iso: Optional[str] = None,
+        deletion_request_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         user = self.get_user(user_id)
         if user is None:
@@ -1993,6 +2007,9 @@ class PostgresStore:
         item["dataExportSupported"] = False
         item["restoreLimit"] = 1
         item["restoreCount"] = int(item.get("restoreCount") or 0)
+        item.setdefault("retentionHolds", [])
+        if deletion_request_id:
+            item["deletionRequestId"] = str(deletion_request_id)
         item["updatedAt"] = self._now()
 
         row = self._fetchone(
@@ -2016,15 +2033,23 @@ class PostgresStore:
         nickname: str = "",
         restored_at_iso: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
+        if self._current_uow.get() is None:
+            with self.auth_user_operation(user_id):
+                return self.restore_user(
+                    user_id,
+                    phone=phone,
+                    nickname=nickname,
+                    restored_at_iso=restored_at_iso,
+                )
         user = self.get_user(user_id)
         if user is None:
-            return None
-        if user.get("deletionState") != "softDeleted":
             return None
         if self._normalized_phone(str(user.get("phone") or "")) != self._normalized_phone(phone):
             return None
 
         restored_at = restored_at_iso or self._now()
+        if account_restore_block_reason(user, restored_at) is not None:
+            return None
         item = deepcopy(user)
         item["nickname"] = nickname or item.get("nickname") or "寻梦环游用户"
         item["deletionState"] = "active"
@@ -2032,7 +2057,15 @@ class PostgresStore:
         item["restoreCount"] = int(item.get("restoreCount") or 0) + 1
         item["restoredAt"] = restored_at
         item["updatedAt"] = restored_at
-        for key in ("deletedAt", "purgeAfter", "restoreDeadline", "retentionDays", "dataExportSupported", "restoreLimit"):
+        for key in (
+            "deletedAt",
+            "purgeAfter",
+            "restoreDeadline",
+            "retentionDays",
+            "dataExportSupported",
+            "restoreLimit",
+            "deletionRequestId",
+        ):
             item.pop(key, None)
 
         row = self._fetchone(
@@ -2066,8 +2099,7 @@ class PostgresStore:
         for row in rows:
             user_id = str(row.get("id") or row["payload"].get("id") or "")
             user = deepcopy(row["payload"])
-            deadline = self._parse_iso_datetime(str(user.get("restoreDeadline") or user.get("purgeAfter") or ""))
-            if not user_id or deadline > cutoff:
+            if not user_id or account_purge_block_reason(user, cutoff) is not None:
                 continue
             self._fetchone(
                 "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
@@ -2084,11 +2116,13 @@ class PostgresStore:
             if locked_user is None:
                 continue
             user = deepcopy(locked_user["payload"])
-            deadline = self._parse_iso_datetime(
-                str(user.get("restoreDeadline") or user.get("purgeAfter") or "")
-            )
-            if user.get("deletionState") != "softDeleted" or deadline > cutoff:
+            if account_purge_block_reason(user, cutoff) is not None:
                 continue
+            receipt = self._record_account_purge_receipt(
+                user_id=user_id,
+                account=user,
+                purged_at=cutoff.isoformat(),
+            )
             self._fetchall(
                 """
                 UPDATE voice_clone_slots
@@ -2149,7 +2183,7 @@ class PostgresStore:
                 )
             tombstone = {
                 "id": user_id,
-                "phone": user.get("phone", ""),
+                "phone": "",
                 "nickname": "",
                 "deletionState": "purged",
                 "accessState": "purged",
@@ -2157,20 +2191,113 @@ class PostgresStore:
                 "providerCapabilityState": "revoked",
                 "purgedAt": cutoff.isoformat(),
                 "restoreCount": int(user.get("restoreCount") or 0),
+                "terminalPurgeReceiptId": receipt["id"],
             }
             updated = self._fetchone(
                 """
                 UPDATE users
-                SET nickname = %s, payload = %s, updated_at = NOW()
+                SET phone = %s, nickname = %s, payload = %s, updated_at = NOW()
                 WHERE id = %s
                 RETURNING payload
                 """,
-                ("", tombstone, user_id),
+                ("", "", tombstone, user_id),
                 commit=True,
             )
             if updated is not None:
                 purged.append(deepcopy(updated["payload"]))
         return purged
+
+    def _record_account_purge_receipt(
+        self,
+        *,
+        user_id: str,
+        account: Dict[str, Any],
+        purged_at: str,
+    ) -> Dict[str, Any]:
+        receipt = build_account_purge_receipt(
+            user_id=user_id,
+            account=account,
+            purged_at=purged_at,
+        )
+        row = self._fetchone(
+            """
+            INSERT INTO account_purge_receipts (
+                id, subject_hash, deletion_request_id_hash, deleted_at,
+                purge_after, purged_at, restore_count, receipt_hash,
+                contract_version
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (subject_hash) DO NOTHING
+            RETURNING id, subject_hash, deletion_request_id_hash, deleted_at,
+                purge_after, purged_at, restore_count, receipt_hash,
+                contract_version
+            """,
+            (
+                receipt["id"],
+                receipt["subjectHash"],
+                receipt["deletionRequestIdHash"],
+                receipt["deletedAt"],
+                receipt["purgeAfter"],
+                receipt["purgedAt"],
+                receipt["restoreCount"],
+                receipt["receiptHash"],
+                receipt["schemaVersion"],
+            ),
+            commit=True,
+        )
+        if row is None:
+            row = self._fetchone(
+                """
+                SELECT id, subject_hash, deletion_request_id_hash, deleted_at,
+                    purge_after, purged_at, restore_count, receipt_hash,
+                    contract_version
+                FROM account_purge_receipts
+                WHERE subject_hash = %s
+                """,
+                (receipt["subjectHash"],),
+            )
+        if row is None:
+            raise RuntimeError("account purge receipt insert did not produce a row")
+        stored = self._account_purge_receipt_payload(row)
+        if stored["receiptHash"] != receipt["receiptHash"]:
+            raise ValueError("account purge receipt is append-only")
+        return stored
+
+    def get_account_purge_receipt(self, user_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT id, subject_hash, deletion_request_id_hash, deleted_at,
+                purge_after, purged_at, restore_count, receipt_hash,
+                contract_version
+            FROM account_purge_receipts
+            WHERE subject_hash = %s
+            """,
+            (account_purge_subject_hash(user_id),),
+        )
+        return None if row is None else self._account_purge_receipt_payload(row)
+
+    @staticmethod
+    def _account_purge_receipt_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": str(row.get("id") or ""),
+            "subjectHash": str(row.get("subject_hash") or ""),
+            "deletionRequestIdHash": row.get("deletion_request_id_hash"),
+            "deletedAt": (
+                None
+                if row.get("deleted_at") is None
+                else PostgresStore._iso_value(row.get("deleted_at"))
+            ),
+            "purgeAfter": (
+                None
+                if row.get("purge_after") is None
+                else PostgresStore._iso_value(row.get("purge_after"))
+            ),
+            "purgedAt": PostgresStore._iso_value(row.get("purged_at")),
+            "restoreCount": int(row.get("restore_count") or 0),
+            "receiptHash": str(row.get("receipt_hash") or ""),
+            "schemaVersion": int(row.get("contract_version") or 1),
+            "terminalState": "purged",
+        }
 
     def save_profile(self, user_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(profile)

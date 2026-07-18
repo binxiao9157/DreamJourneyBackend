@@ -372,6 +372,36 @@ curl -s -G "$DJ_API/maps/district" \
   | python3 -m json.tool
 ```
 
+### 9.1 账号终态清理隔离 smoke
+
+账号终态清理包含恢复期限、一次恢复上限、保留阻断、不可复活和无 PII
+回执。不要在生产业务库上手工构造过期账号来验证；使用部署容器内的
+隔离 smoke，它会创建并删除一个 `dj_terminal_purge_smoke_*` 临时数据库。
+
+```bash
+cd /opt/services/dreamjourney/DreamJourneyBackend
+export DJ_API='https://dreamjourney-api.liftora.cn'
+sudo docker compose exec -T \
+  -e BACKEND_BASE_URL="$DJ_API" \
+  -e DREAMJOURNEY_DEPLOYED_CONTAINER_SMOKE=1 \
+  api scripts/run-backend-account-terminal-purge-deployed-smoke.sh
+```
+
+该脚本只读取容器内的 `BACKEND_API_TOKEN`，不在 shell 历史或输出中暴露
+真实凭据。通过时会返回 value-free 摘要，并至少包含：
+
+```text
+migrationHead=0009
+serverClockEnforced=true
+retentionHoldBlocked=true
+terminalReceiptRedacted=true
+terminalReceiptAppendOnly=true
+purgedAccountCannotReactivate=true
+```
+
+它不是强身份核验、法定保留或备份物理删除的替代验收；这些仍由各自的
+外部审批与运行证据关闭。
+
 ## 10. 时间信件到期投递生产化
 
 本版本起，时间信件的“到达 openAt 后本人和收件人收到应用内提醒”有两条执行入口：

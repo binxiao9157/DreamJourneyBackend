@@ -38,6 +38,8 @@ test -f scripts/backend-operation-metrics-deployed-smoke.py
 test -f scripts/run-backend-operation-metrics-deployed-smoke.sh
 test -f scripts/backend-account-deletion-rights-deployed-smoke.py
 test -f scripts/run-backend-account-deletion-rights-deployed-smoke.sh
+test -f scripts/backend-account-terminal-purge-deployed-smoke.py
+test -f scripts/run-backend-account-terminal-purge-deployed-smoke.sh
 test -f scripts/db/backup_postgres.sh
 test -f scripts/db/audit_backup_retention.sh
 test -f scripts/db/verify_backup_manifest.py
@@ -46,6 +48,8 @@ test -f scripts/db/backup-deployed-smoke.py
 test -f deploy/systemd/dreamjourney-db-backup.timer
 test -f db/migrations/0001_existing_schema_baseline.sql
 test -f db/migrations/0001_existing_schema_baseline.json
+test -f db/migrations/0009_account_purge_receipts.sql
+test -f db/migrations/0009_account_purge_receipts.json
 grep -q "COPY db ./db" Dockerfile
 grep -q "psycopg" requirements.txt
 

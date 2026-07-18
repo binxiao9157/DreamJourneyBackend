@@ -1,0 +1,8 @@
+{
+  "version": "0009",
+  "name": "account_purge_receipts",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "terminalAccountPurgeReceipt",
+  "requiresOldWorkerDrain": false
+}

@@ -2031,7 +2031,11 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
             rights_result["outcome"] == "deduplicated"
             and str(rights_record.get("status") or "") == "completed"
         ):
-            deletion = store.soft_delete_user(user_id, phone=phone)
+            deletion = store.soft_delete_user(
+                user_id,
+                phone=phone,
+                deletion_request_id=str(rights_record.get("id") or ""),
+            )
             if deletion is None:
                 raise HTTPException(status_code=404, detail="account not found")
             delegated_grant_revocation = _delegated_access_service().revoke_subject_access(
@@ -2068,7 +2072,11 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
                 "accessRevocation": access_revocation,
                 "rights": rights_summary,
             }
-        deletion = store.soft_delete_user(user_id, phone=phone)
+        deletion = store.soft_delete_user(
+            user_id,
+            phone=phone,
+            deletion_request_id=str(rights_record.get("id") or ""),
+        )
         if deletion is None:
             raise HTTPException(status_code=404, detail="account not found")
         delegated_grant_revocation = _delegated_access_service().revoke_subject_access(
@@ -2126,15 +2134,23 @@ def restore_account(request: Request, payload: Dict[str, Any]) -> Any:
     return {"status": "restored", "user": user}
 
 
+def _account_purge_server_cutoff() -> str:
+    """Provide the only allowed purge clock for the machine-only endpoint."""
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 @app.post("/auth/purge-expired-deletions")
-def purge_expired_account_deletions(payload: Dict[str, Any]) -> Dict[str, Any]:
-    cutoff = str(payload.get("cutoff") or datetime.now(timezone.utc).isoformat())
+def purge_expired_account_deletions(_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    # Client-supplied cutoffs could permanently delete an otherwise restorable
+    # account. The scheduler may supply a body for tracing, but never a clock.
+    cutoff = _account_purge_server_cutoff()
     purged = store.purge_expired_deleted_users(cutoff)
     return {
-        "status": "purged",
+        "status": "purgeScanCompleted",
         "cutoff": cutoff,
+        "cutoffSource": "serverClock",
         "purgedCount": len(purged),
-        "items": purged,
         "contractVersion": ACCOUNT_DELETION_CONTRACT_VERSION,
     }
 
