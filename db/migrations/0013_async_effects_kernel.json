@@ -1,0 +1,13 @@
+{
+  "version": "0013",
+  "name": "async_effects_kernel",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "asyncEffectV1SchemaOnly",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "asyncEffectV1": false,
+    "asyncEffectWorker": false,
+    "asyncEffectScheduler": false
+  }
+}

@@ -72,6 +72,10 @@ test -f db/migrations/0012_owner_truth_source_commands.sql
 test -f db/migrations/0012_owner_truth_source_commands.json
 test -f scripts/backend-owner-truth-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-postgres-smoke.sh
+test -f db/migrations/0013_async_effects_kernel.sql
+test -f db/migrations/0013_async_effects_kernel.json
+test -f scripts/backend-async-effects-postgres-smoke.py
+test -f scripts/run-backend-async-effects-postgres-smoke.sh
 grep -q "COPY db ./db" Dockerfile
 grep -q "psycopg" requirements.txt
 

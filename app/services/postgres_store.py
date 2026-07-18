@@ -77,6 +77,7 @@ from app.domain.owner_truth.source_commands import (
     OwnerTruthSourceVersionConflict,
     OwnerTruthSourceWriteRecord,
 )
+from app.async_effects.repository import PostgresEffectKernelRepository
 
 
 class PostgresStore:
@@ -156,6 +157,18 @@ class PostgresStore:
             **self._uow_metrics.snapshot(),
             "pool": self._pool.stats(),
         }
+
+    def effect_kernel_repository(self) -> PostgresEffectKernelRepository:
+        """Return a writer bound to the active request/job Unit of Work.
+
+        The effect kernel has no independent commit path. Future aggregate
+        commands must call this only while their aggregate transaction is open.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("async effect kernel requires an active unit of work")
+        return PostgresEffectKernelRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(

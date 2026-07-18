@@ -1,6 +1,7 @@
 from typing import Any, Dict
 
 from app.core.config import Settings
+from app.async_effects.contracts import resolve_async_effect_runtime_status
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.identity_bindings import identity_challenge_runtime_descriptor
@@ -54,6 +55,14 @@ class RuntimeConfigService:
             authority_epoch=self.settings.authority_epoch,
         )
         safety_policy = SafetyPolicy().evaluate("")
+        async_effect_runtime = resolve_async_effect_runtime_status(
+            async_effect_v1_enabled=self.settings.async_effect_v1_enabled,
+            worker_enabled=self.settings.async_effect_worker_enabled,
+            # Schema-only migration is intentionally not a signal that a worker
+            # or any external effect is safe to execute. WI-S1-02-03 will wire
+            # a readiness-backed value when the worker exists.
+            schema_ready=False,
+        )
         capability_snapshots = self._capability_snapshots(
             archive_image_analysis=archive_image_analysis,
             voice_clone_provider=voice_clone_provider,
@@ -81,6 +90,7 @@ class RuntimeConfigService:
                 "authSession": True,
                 "identityChallenge": identity_challenge["enabled"],
                 "releasePolicy": True,
+                "asyncEffect": async_effect_runtime.enabled,
             },
             "auth": {
                 "mode": "opaqueAccessRefresh",
@@ -162,6 +172,14 @@ class RuntimeConfigService:
                 "contractVersion": 2,
             },
             "releasePolicy": release_policy.public_descriptor(),
+            "asyncEffect": {
+                "enabled": async_effect_runtime.enabled,
+                "workerEnabled": async_effect_runtime.worker_enabled,
+                "serverCompletionAvailable": async_effect_runtime.allowed,
+                "reason": async_effect_runtime.reason,
+                "defaultReleaseVisible": False,
+                "contractVersion": 1,
+            },
             "recovery": recovery_access.public_descriptor(),
             "safety": {
                 "policyVersion": SafetyPolicy.POLICY_VERSION,

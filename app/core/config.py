@@ -77,6 +77,8 @@ class Settings:
     release_policy_emergency_revision: int = 0
     release_policy_enforced_features: Optional[str] = None
     release_policy_emergency_disabled_features: Optional[str] = None
+    async_effect_v1_enabled: bool = False
+    async_effect_worker_enabled: bool = False
     delegated_access_contract_api_enabled: bool = False
     evidence_rollout_retention_days: int = 30
     operations_evidence_hmac_key: Optional[str] = None
@@ -219,6 +221,14 @@ class Settings:
             release_policy_enforced_features=_env("RELEASE_POLICY_ENFORCED_FEATURES"),
             release_policy_emergency_disabled_features=_env(
                 "RELEASE_POLICY_EMERGENCY_DISABLED_FEATURES"
+            ),
+            async_effect_v1_enabled=_env_bool(
+                "ASYNC_EFFECT_V1_ENABLED",
+                cls.async_effect_v1_enabled,
+            ),
+            async_effect_worker_enabled=_env_bool(
+                "ASYNC_EFFECT_WORKER_ENABLED",
+                cls.async_effect_worker_enabled,
             ),
             delegated_access_contract_api_enabled=_env_bool(
                 "DELEGATED_ACCESS_CONTRACT_API_ENABLED",
