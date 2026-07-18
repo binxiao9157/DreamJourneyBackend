@@ -56,8 +56,20 @@ G0 evidence before deployment:
 - `scripts/verify_backend.sh`
 - `git diff --check`
 
-G2 deployment evidence is recorded after the isolated Postgres smoke runs from
-the deployed API container:
+G2 deployment evidence:
+
+- Backend implementation: `89e6656`.
+- Smoke guard correction: `0be58a6`.
+- Deployed server revision: `0be58a6`.
+- Migration command reported `expectedHead=0013`, `appliedHead=0013`, and
+  `status=ready`.
+- Public `https://dreamjourney-api.liftora.cn/ready` reported database, schema,
+  auth, and incident components as ready.
+- The deployed API container completed the isolated Postgres smoke with:
+  `schemaHead=0013`, `outcomes=['accepted', 'deduplicated']`,
+  `rollback=true`, `terminalGuard=true`, and `receiptsAppendOnly=true`.
+
+The smoke runs from the deployed API container:
 
 ```bash
 scripts/run-backend-async-effects-postgres-smoke.sh
