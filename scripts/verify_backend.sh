@@ -66,6 +66,10 @@ test -f db/migrations/0009_account_purge_receipts.sql
 test -f db/migrations/0009_account_purge_receipts.json
 test -f db/migrations/0010_evidence_manifest.sql
 test -f db/migrations/0010_evidence_manifest.json
+test -f db/migrations/0011_owner_truth_core.sql
+test -f db/migrations/0011_owner_truth_core.json
+test -f scripts/backend-owner-truth-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-postgres-smoke.sh
 grep -q "COPY db ./db" Dockerfile
 grep -q "psycopg" requirements.txt
 
