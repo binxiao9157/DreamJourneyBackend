@@ -41,6 +41,9 @@ test -f scripts/run-backend-incident-lifecycle-deployed-smoke.sh
 test -f scripts/backend-provider-redaction-smoke.py
 test -f scripts/backend-provider-redaction-deployed-smoke.py
 test -f scripts/run-backend-provider-redaction-deployed-smoke.sh
+test -f scripts/backend-provider-cost-evidence-smoke.py
+test -f scripts/backend-provider-cost-evidence-deployed-smoke.py
+test -f scripts/run-backend-provider-cost-evidence-deployed-smoke.sh
 test -f scripts/backend-account-deletion-rights-deployed-smoke.py
 test -f scripts/run-backend-account-deletion-rights-deployed-smoke.sh
 test -f scripts/backend-account-terminal-purge-deployed-smoke.py
@@ -105,6 +108,9 @@ STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" scripts/backend-knowledge-eviden
 
 echo "== Backend provider redaction smoke =="
 STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" scripts/backend-provider-redaction-smoke.py
+
+echo "== Backend provider cost evidence smoke =="
+STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" scripts/backend-provider-cost-evidence-smoke.py
 
 echo "== Backend knowledge receipt maintenance smoke =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-knowledge-receipt-maintenance-smoke.sh

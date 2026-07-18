@@ -248,7 +248,21 @@ class ProviderCostEvidenceEvent(EvidenceEventBase):
     unitType: MachineCode
     units: int = Field(ge=0)
     costMicros: Optional[int] = Field(default=None, ge=0)
+    # Unknown is intentionally the default. A missing provider billing receipt
+    # or approved rate card must never be silently promoted to a known cost.
+    costSource: Literal["unknown", "providerMetered", "approvedRateCard"] = "unknown"
+    rateCardVersion: Optional[MachineCode] = None
     latencyMs: Optional[int] = Field(default=None, ge=0, le=86_400_000)
+
+    @model_validator(mode="after")
+    def require_cost_provenance(self) -> "ProviderCostEvidenceEvent":
+        if self.costSource == "approvedRateCard" and not self.rateCardVersion:
+            raise ValueError("approvedRateCard requires rateCardVersion")
+        if self.costSource != "approvedRateCard" and self.rateCardVersion is not None:
+            raise ValueError("rateCardVersion is only valid for approvedRateCard")
+        if self.costSource != "unknown" and self.costMicros is None:
+            raise ValueError("known cost source requires costMicros")
+        return self
 
 
 EvidenceEvent = Annotated[

@@ -135,6 +135,10 @@ from app.observability.operation_metrics import (
     OperationMetricRecorder,
     summarize_operation_metrics_for_observations,
 )
+from app.observability.provider_costs import (
+    ProviderCostEvidenceRecorder,
+    summarize_provider_cost_evidence_for_observations,
+)
 from app.observability.redaction import provider_error_detail
 from app.services.release_policy import (
     ReleasePolicyCommandGate,
@@ -300,6 +304,33 @@ OPERATION_METRIC_RECORDER = OperationMetricRecorder(
         if callable(_operation_metric_summary)
         else None
     ),
+    retention_days=settings.evidence_rollout_retention_days,
+    identifier_hmac_key=settings.operations_evidence_hmac_key,
+)
+
+
+def _append_provider_cost_evidence_event(
+    event: Dict[str, Any],
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    sink = getattr(store, "append_evidence_event", None)
+    if not callable(sink):
+        raise RuntimeError("provider cost evidence sink is unavailable")
+    return sink(event, **kwargs)
+
+
+def _list_provider_cost_evidence_events() -> list[Dict[str, Any]]:
+    source = getattr(store, "list_evidence_events", None)
+    if not callable(source):
+        raise RuntimeError("provider cost evidence source is unavailable")
+    return source(event_type="providerCost")
+
+
+PROVIDER_COST_EVIDENCE_RECORDER = ProviderCostEvidenceRecorder(
+    environment=settings.environment,
+    build=f"backend-{app.version}",
+    event_sink=_append_provider_cost_evidence_event,
+    event_source=_list_provider_cost_evidence_events,
     retention_days=settings.evidence_rollout_retention_days,
     identifier_hmac_key=settings.operations_evidence_hmac_key,
 )
@@ -1080,6 +1111,59 @@ def _record_operation_metric_attempt(
     )
 
 
+def _provider_cost_identifier(request: Request, header: str) -> str:
+    return (
+        _operation_metric_client_identifier(request.headers.get(header))
+        or secrets.token_hex(16)
+    )
+
+
+def _record_provider_cost_attempt(
+    request: Request,
+    *,
+    provider: str,
+    capability: str,
+    unit_type: str,
+    units: int,
+    state: str,
+    reason: str,
+    started_at: float,
+    provider_request_key: Optional[str] = None,
+) -> None:
+    """Persist only value-free usage evidence; never alter a provider response."""
+
+    principal = getattr(request.state, "auth_principal", None)
+    principal_key = (
+        str(principal.principal_id or "")
+        if isinstance(principal, RequestPrincipal) and principal.kind == PrincipalKind.USER
+        else None
+    )
+    request_key = _provider_cost_identifier(request, "x-dreamjourney-request-id")
+    operation_key = _provider_cost_identifier(request, "x-dreamjourney-operation-id")
+    correlation_value = _operation_metric_client_identifier(
+        request.headers.get("x-dreamjourney-correlation-id")
+    )
+    try:
+        PROVIDER_COST_EVIDENCE_RECORDER.record_attempt(
+            request_key=request_key,
+            operation_key=operation_key,
+            provider=provider,
+            capability=capability,
+            unit_type=unit_type,
+            units=max(0, int(units)),
+            state=state,
+            reason=reason,
+            principal_key=principal_key,
+            provider_request_key=provider_request_key,
+            correlation_key=correlation_value,
+            latency_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+        )
+    except Exception:
+        # Operational evidence is strictly best effort. A malformed or
+        # unavailable evidence sink must never change a provider response.
+        return
+
+
 def _recovery_access_denied_response(request: Request) -> Optional[JSONResponse]:
     decision = RECOVERY_ACCESS_POLICY.evaluate(
         method=str(getattr(request, "method", "GET")),
@@ -1597,6 +1681,9 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
     summary = RELEASE_POLICY_DECISION_RECORDER.summary()
     summary["operationMetrics"] = summarize_operation_metrics_for_observations(
         OPERATION_METRIC_RECORDER.summary()
+    )
+    summary["providerCostEvidence"] = summarize_provider_cost_evidence_for_observations(
+        PROVIDER_COST_EVIDENCE_RECORDER.summary()
     )
     summary["routeAuthentication"] = ROUTE_AUTHENTICATION_DECISION_RECORDER.summary()
     summary["clientCompatibility"] = (
@@ -3074,6 +3161,7 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
     provider = VoiceCloneTTSProviderFactory(settings).make()
     if not provider.is_configured:
         raise HTTPException(status_code=503, detail="voice clone TTS provider is not configured")
+    provider_call_started = time.monotonic()
     try:
         result = provider.synthesize(
             text=text,
@@ -3084,18 +3172,18 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
             speech_rate=speech_rate,
             loudness_rate=loudness_rate,
         )
-        audio_payload = {
-            "encoding": "base64",
-            "format": result["audioFormat"],
-            "data": result["audioBase64"],
-            "byteCount": result["byteCount"],
-        }
-        if output_mode == "tencentAudioDrive":
-            audio_payload = TencentAudioDrivePCMAdapter().adapt(
-                audio_base64=result["audioBase64"],
-                audio_format=result["audioFormat"],
-            )
     except ValueError as exc:
+        _record_provider_cost_attempt(
+            request,
+            provider="volcengineVoiceClone",
+            capability="voiceCloneSynthesis",
+            unit_type="character",
+            units=len(text),
+            state="failed",
+            reason="providerCallFailed",
+            started_at=provider_call_started,
+            provider_request_key=getattr(exc, "provider_request_id", None),
+        )
         detail = {
             "code": "voice_synthesis_provider_failed",
             "message": "voice synthesis provider failed",
@@ -3109,6 +3197,30 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
             detail["providerLogIdHash"] = provider_log_hash
         raise HTTPException(status_code=502, detail=detail) from exc
 
+    provider_request_id = str(result.get("providerRequestId") or "").strip()
+    _record_provider_cost_attempt(
+        request,
+        provider="volcengineVoiceClone",
+        capability="voiceCloneSynthesis",
+        unit_type="character",
+        units=len(text),
+        state="succeeded",
+        reason="providerUsageObserved",
+        started_at=provider_call_started,
+        provider_request_key=provider_request_id or None,
+    )
+    audio_payload = {
+        "encoding": "base64",
+        "format": result["audioFormat"],
+        "data": result["audioBase64"],
+        "byteCount": result["byteCount"],
+    }
+    if output_mode == "tencentAudioDrive":
+        audio_payload = TencentAudioDrivePCMAdapter().adapt(
+            audio_base64=result["audioBase64"],
+            audio_format=result["audioFormat"],
+        )
+
     response = {
         "status": "synthesized",
         "voiceProfileId": voice_profile_id,
@@ -3119,7 +3231,6 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
         "visemeTimeline": result.get("visemeTimeline"),
         "audio": audio_payload,
     }
-    provider_request_id = str(result.get("providerRequestId") or "").strip()
     provider_log_id = str(result.get("providerLogId") or "").strip()
     if provider_request_id:
         response["providerRequestIdHash"] = _provider_reference_hash(provider_request_id)
@@ -3152,25 +3263,50 @@ def tts(request: Request, payload: Dict[str, Any], dryRun: bool = False) -> Dict
     encoding = str(payload.get("encoding") or "wav")
     speed_ratio = float(payload.get("speedRatio") or 1.0)
     proxy = VolcTTSProxy(settings)
+    provider_call_started = time.monotonic()
+    provider_call_succeeded = False
     try:
         if not dryRun:
-            return _provider_public_payload(
-                proxy.request_tts(
-                    text=text,
-                    user_id=user_id,
-                    voice_type=voice_type,
-                    encoding=encoding,
-                    speed_ratio=speed_ratio,
-                )
+            result = proxy.request_tts(
+                text=text,
+                user_id=user_id,
+                voice_type=voice_type,
+                encoding=encoding,
+                speed_ratio=speed_ratio,
             )
-        dry_run_report = proxy.dry_run_report(
-            text=text,
-            user_id=user_id,
-            voice_type=voice_type,
-            encoding=encoding,
-            speed_ratio=speed_ratio,
-        )
+            provider_call_succeeded = True
+            _record_provider_cost_attempt(
+                request,
+                provider="volcengine",
+                capability="legacyTts",
+                unit_type="character",
+                units=len(text),
+                state="succeeded",
+                reason="providerUsageObserved",
+                started_at=provider_call_started,
+                provider_request_key=str(result.get("reqid") or "").strip() or None,
+            )
+            public_payload = _provider_public_payload(result)
+        else:
+            dry_run_report = proxy.dry_run_report(
+                text=text,
+                user_id=user_id,
+                voice_type=voice_type,
+                encoding=encoding,
+                speed_ratio=speed_ratio,
+            )
     except ValueError as exc:
+        if not dryRun and not provider_call_succeeded:
+            _record_provider_cost_attempt(
+                request,
+                provider="volcengine",
+                capability="legacyTts",
+                unit_type="character",
+                units=len(text),
+                state="failed",
+                reason="providerCallFailed",
+                started_at=provider_call_started,
+            )
         raise HTTPException(
             status_code=400,
             detail=provider_error_detail(
@@ -3182,6 +3318,9 @@ def tts(request: Request, payload: Dict[str, Any], dryRun: bool = False) -> Dict
             ),
         ) from exc
 
+    if not dryRun:
+        return public_payload
+
     return {
         "provider": "volcengine",
         "capability": "legacyTts",
@@ -3191,13 +3330,36 @@ def tts(request: Request, payload: Dict[str, Any], dryRun: bool = False) -> Dict
 
 
 @app.get("/maps/district")
-def amap_district(keyword: str, dryRun: bool = False) -> Dict[str, Any]:
+def amap_district(request: Request, keyword: str, dryRun: bool = False) -> Dict[str, Any]:
+    provider_call_started = time.monotonic()
     try:
         proxy = AMapDistrictProxy(settings)
         if not dryRun:
-            return proxy.request_district(keyword=keyword)
+            result = proxy.request_district(keyword=keyword)
+            _record_provider_cost_attempt(
+                request,
+                provider="amap",
+                capability="districtLookup",
+                unit_type="request",
+                units=1,
+                state="succeeded",
+                reason="providerUsageObserved",
+                started_at=provider_call_started,
+            )
+            return result
         dry_run_report = proxy.dry_run_report(keyword=keyword)
     except ValueError as exc:
+        if not dryRun:
+            _record_provider_cost_attempt(
+                request,
+                provider="amap",
+                capability="districtLookup",
+                unit_type="request",
+                units=1,
+                state="failed",
+                reason="providerCallFailed",
+                started_at=provider_call_started,
+            )
         raise HTTPException(
             status_code=400,
             detail=provider_error_detail(
@@ -3616,6 +3778,8 @@ def extract_kb(request: Request, payload: Dict[str, Any], dryRun: bool = False) 
         raise HTTPException(status_code=403, detail=str(exc))
 
     proxy = DeepSeekKnowledgeExtractionProxy(settings)
+    provider_call_started = time.monotonic()
+    provider_call_succeeded = False
     try:
         if not dryRun:
             extraction = proxy.request_extraction(
@@ -3623,6 +3787,17 @@ def extract_kb(request: Request, payload: Dict[str, Any], dryRun: bool = False) 
                 existing_summary=existing_summary,
                 turns=extraction_input.turns,
                 source_policy=extraction_input.source_policy,
+            )
+            provider_call_succeeded = True
+            _record_provider_cost_attempt(
+                request,
+                provider="deepseek",
+                capability="kbExtract",
+                unit_type="request",
+                units=1,
+                state="succeeded",
+                reason="providerUsageObserved",
+                started_at=provider_call_started,
             )
             extraction, evidence_policy = filter_extraction_by_evidence(
                 extraction,
@@ -3657,6 +3832,17 @@ def extract_kb(request: Request, payload: Dict[str, Any], dryRun: bool = False) 
             source_policy=extraction_input.source_policy,
         )
     except ValueError as exc:
+        if not dryRun and not provider_call_succeeded:
+            _record_provider_cost_attempt(
+                request,
+                provider="deepseek",
+                capability="kbExtract",
+                unit_type="request",
+                units=1,
+                state="failed",
+                reason="providerCallFailed",
+                started_at=provider_call_started,
+            )
         configured = bool(settings.deepseek_api_key)
         raise HTTPException(
             status_code=503 if not configured else 502,
@@ -3673,6 +3859,17 @@ def extract_kb(request: Request, payload: Dict[str, Any], dryRun: bool = False) 
             ),
         ) from exc
     except Exception as exc:
+        if not dryRun and not provider_call_succeeded:
+            _record_provider_cost_attempt(
+                request,
+                provider="deepseek",
+                capability="kbExtract",
+                unit_type="request",
+                units=1,
+                state="failed",
+                reason="providerCallFailed",
+                started_at=provider_call_started,
+            )
         raise HTTPException(
             status_code=502,
             detail=provider_error_detail(
@@ -3934,11 +4131,34 @@ def archive_image_analysis(request: Request, payload: Dict[str, Any], dryRun: bo
         raise HTTPException(status_code=403, detail=str(exc))
 
     provider = ArchiveImageAnalysisProviderFactory(settings).make()
+    provider_call_started = time.monotonic()
     try:
         if not dryRun:
-            return provider.request_analysis(image_base64=image_base64)
+            result = provider.request_analysis(image_base64=image_base64)
+            _record_provider_cost_attempt(
+                request,
+                provider="deepseekTextOnly",
+                capability="archiveImageAnalysis",
+                unit_type="image",
+                units=1,
+                state="succeeded",
+                reason="providerUsageObserved",
+                started_at=provider_call_started,
+            )
+            return result
         dry_run_report = provider.dry_run_report(image_base64=image_base64)
     except ValueError as exc:
+        if not dryRun:
+            _record_provider_cost_attempt(
+                request,
+                provider="deepseekTextOnly",
+                capability="archiveImageAnalysis",
+                unit_type="image",
+                units=1,
+                state="failed",
+                reason="providerCallFailed",
+                started_at=provider_call_started,
+            )
         if not dryRun:
             return provider.failure_contract(
                 provider_error_code="providerUnavailable",
@@ -3954,6 +4174,17 @@ def archive_image_analysis(request: Request, payload: Dict[str, Any], dryRun: bo
             ),
         ) from exc
     except Exception as exc:
+        if not dryRun:
+            _record_provider_cost_attempt(
+                request,
+                provider="deepseekTextOnly",
+                capability="archiveImageAnalysis",
+                unit_type="image",
+                units=1,
+                state="failed",
+                reason="providerCallFailed",
+                started_at=provider_call_started,
+            )
         if not dryRun:
             return provider.failure_contract(
                 provider_error_code="providerUnavailable",
