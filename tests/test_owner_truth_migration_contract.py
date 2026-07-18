@@ -164,6 +164,23 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("owner_truth_answer_citations_no_delete", migration.sql)
         self.assertIn("command_payload_hash", migration.sql)
 
+    def test_answer_citation_trigger_fix_preserves_applied_migration_history(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0019"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_answer_citation_trigger_fix")
+        self.assertEqual(migration.phase, "contract")
+        self.assertEqual(migration.compatibility, "backwardCompatible")
+        self.assertEqual(metadata["runtimeCompatibility"], "ownerTruthV1AnswerCitationTriggerFix")
+        self.assertFalse(metadata["releaseFlags"]["answerCitationV1"])
+        self.assertIn("CREATE OR REPLACE FUNCTION owner_truth.validate_answer_citation", migration.sql)
+        self.assertIn("memory_version.version_number", migration.sql)
+        self.assertIn("version_number_value", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

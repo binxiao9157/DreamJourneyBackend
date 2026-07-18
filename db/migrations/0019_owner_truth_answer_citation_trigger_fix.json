@@ -1,0 +1,14 @@
+{
+  "version": "0019",
+  "name": "owner_truth_answer_citation_trigger_fix",
+  "phase": "contract",
+  "compatibility": "backwardCompatible",
+  "runtimeCompatibility": "ownerTruthV1AnswerCitationTriggerFix",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthV1Read": false,
+    "ownerTruthV1Write": false,
+    "memoryProjectionV1": false,
+    "answerCitationV1": false
+  }
+}

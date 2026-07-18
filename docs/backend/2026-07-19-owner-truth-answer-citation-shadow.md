@@ -49,7 +49,11 @@ The endpoint sends `Cache-Control: no-store`.
 ## Persistence and Safety Rules
 
 Migration `0018_owner_truth_answer_citations` adds append-only
-`owner_truth.answers` and `owner_truth.answer_citations` ledgers.
+`owner_truth.answers` and `owner_truth.answer_citations` ledgers. Migration
+`0019_owner_truth_answer_citation_trigger_fix` preserves `0018`'s applied
+checksum and replaces the citation trigger with qualified table aliases after
+the first isolated Postgres smoke found an ambiguous PL/pgSQL
+`version_number` reference.
 
 - An answer row stores hashes, lengths, provenance and fallback metadata only;
   it has no raw query or answer column.
@@ -69,7 +73,7 @@ Migration `0018_owner_truth_answer_citations` adds append-only
 
 - Focused Answer/Citation, Context shadow, QA API, migration and route-registry
   suites passed.
-- `./scripts/verify_backend.sh` passed with **713** unit tests, credential
+- `./scripts/verify_backend.sh` passed with **714** unit tests, credential
   response-boundary tests, FastAPI smoke, knowledge smoke, deployment-file
   checks and backup contract smoke.
 - `git diff --check` and Python compilation passed.
@@ -79,7 +83,7 @@ Migration `0018_owner_truth_answer_citations` adds append-only
 
 ### G2 deployment
 
-Pending: deploy migration `0018` and run
+Pending: deploy migration `0019` and run
 `scripts/run-backend-owner-truth-postgres-smoke.sh` against a disposable
 Postgres database on the deployment host. The normal runtime must continue to
 keep Owner Truth QA switches and projection workers disabled.
