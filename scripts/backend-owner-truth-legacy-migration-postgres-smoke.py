@@ -292,7 +292,7 @@ def main() -> None:
 
         print(
             "owner truth legacy inventory postgres smoke passed "
-            f"schemaHead={verified['migrationVersion']} entries={len(created.inventory.entries)}"
+            f"schemaHead={verified['expectedHead']} entries={len(created.inventory.entries)}"
         )
     finally:
         if store is not None:
