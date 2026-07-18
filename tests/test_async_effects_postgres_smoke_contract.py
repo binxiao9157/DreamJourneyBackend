@@ -16,6 +16,8 @@ class AsyncEffectsPostgresSmokeContractTests(unittest.TestCase):
         self.assertIn('outcomes == {"accepted", "deduplicated"}', source)
         self.assertIn("AsyncEffectConflict", source)
         self.assertIn("force rollback", source)
+        self.assertIn("def revert_terminal_operation", source)
+        self.assertIn("revert_terminal_operation(cursor, intent.operation_id)", source)
         self.assertIn("terminal effect state must not revert", source)
         self.assertIn("business receipts must remain append-only", source)
         self.assertIn("kernel must not persist a payload body column", source)

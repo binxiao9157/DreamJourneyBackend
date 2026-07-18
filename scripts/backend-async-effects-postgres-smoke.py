@@ -72,6 +72,18 @@ def expect_rejected(dsn: str, operation, message: str) -> None:
     require(rejected, message)
 
 
+def revert_terminal_operation(cursor, operation_id: str) -> None:
+    """Attempt an illegal terminal-to-nonterminal transition in one transaction."""
+    cursor.execute(
+        "UPDATE async_effects.operations SET state = 'completed' WHERE operation_id = %s",
+        (operation_id,),
+    )
+    cursor.execute(
+        "UPDATE async_effects.operations SET state = 'accepted' WHERE operation_id = %s",
+        (operation_id,),
+    )
+
+
 def count_rows(dsn: str, relation: str, *, operation_id: str) -> int:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
@@ -187,14 +199,7 @@ def main() -> None:
 
         expect_rejected(
             test_dsn,
-            lambda cursor: cursor.execute(
-                "UPDATE async_effects.operations SET state = 'completed' WHERE operation_id = %s",
-                (intent.operation_id,),
-            )
-            or cursor.execute(
-                "UPDATE async_effects.operations SET state = 'accepted' WHERE operation_id = %s",
-                (intent.operation_id,),
-            ),
+            lambda cursor: revert_terminal_operation(cursor, intent.operation_id),
             "terminal effect state must not revert",
         )
         expect_rejected(
