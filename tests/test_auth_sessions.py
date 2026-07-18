@@ -371,6 +371,26 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertEqual(outcome, "account_session_issuance_blocked")
         self.assertIsNone(service.resolve_access_token(existing["accessToken"]))
 
+    def test_account_epoch_rejects_old_tokens_even_before_family_revoke(self):
+        store = InMemoryStore()
+        phone = "13800138223"
+        user = store.upsert_user(phone=phone, nickname="访问态用户")
+        service = AuthSessionService(
+            store,
+            access_ttl_seconds=900,
+            refresh_ttl_seconds=3600,
+        )
+        issued = service.issue(user["id"])
+
+        deleted = store.soft_delete_user(user["id"], phone=phone)
+
+        self.assertEqual(deleted["accessState"], "suspended_restorable")
+        self.assertEqual(deleted["authEpoch"], 1)
+        self.assertIsNone(service.resolve_access_token(issued["accessToken"]))
+        with self.assertRaises(AuthSessionError) as raised:
+            service.refresh(issued["refreshToken"])
+        self.assertEqual(raised.exception.code, "account_session_revoked")
+
     def test_purged_account_is_terminal_for_delete_and_restore(self):
         phone = "13800138222"
         user = main_module.store.upsert_user(phone=phone, nickname="永久删除用户")

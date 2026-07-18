@@ -1967,6 +1967,45 @@ def _record_account_delete_rights_completion(
     return _account_delete_rights_summary(request_id, outcome="recorded")
 
 
+def _record_account_access_revocation(
+    *,
+    request_id: str,
+    user_id: str,
+    deletion: Dict[str, Any],
+    session_revocation: Dict[str, Any],
+    delegated_grant_revocation: Dict[str, Any],
+) -> Dict[str, Any]:
+    auth_epoch = int(deletion.get("authEpoch") or 0)
+    event_id = "rar_" + hashlib.sha256(
+        f"{request_id}:RightsAccessRevoked".encode("utf-8")
+    ).hexdigest()[:32]
+    recorded = store.record_rights_access_revocation_outbox(
+        event_id=event_id,
+        request_id=request_id,
+        user_id=user_id,
+        auth_epoch=auth_epoch,
+        provider_capability_state=str(
+            deletion.get("providerCapabilityState") or "revoked"
+        ),
+        session_revocation=session_revocation,
+        delegated_grant_revocation=delegated_grant_revocation,
+        created_at=str(
+            deletion.get("updatedAt")
+            or deletion.get("deletedAt")
+            or datetime.now(timezone.utc).isoformat()
+        ),
+    )
+    event = recorded["event"]
+    return {
+        "eventId": event["id"],
+        "eventType": event["eventType"],
+        "status": event["status"],
+        "authEpoch": event["authEpoch"],
+        "providerCapabilityState": event["providerCapabilityState"],
+        "outcome": recorded["outcome"],
+    }
+
+
 @app.post("/auth/delete")
 def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id, payload = _principal_owned_payload(request, payload)
@@ -1992,7 +2031,9 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
             rights_result["outcome"] == "deduplicated"
             and str(rights_record.get("status") or "") == "completed"
         ):
-            deletion = existing_user
+            deletion = store.soft_delete_user(user_id, phone=phone)
+            if deletion is None:
+                raise HTTPException(status_code=404, detail="account not found")
             delegated_grant_revocation = _delegated_access_service().revoke_subject_access(
                 user_id,
                 reason="accountSoftDeleted",
@@ -2000,6 +2041,13 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
             session_revocation = _auth_session_service().revoke_all_for_user(
                 user_id,
                 reason="accountSoftDeleted",
+            )
+            access_revocation = _record_account_access_revocation(
+                request_id=str(rights_record.get("id") or ""),
+                user_id=user_id,
+                deletion=deletion,
+                session_revocation=session_revocation,
+                delegated_grant_revocation=delegated_grant_revocation,
             )
             rights_summary = _account_delete_rights_summary(
                 str(rights_record.get("id") or ""),
@@ -2017,6 +2065,7 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
                 },
                 "sessionRevocation": session_revocation,
                 "delegatedGrantRevocation": delegated_grant_revocation,
+                "accessRevocation": access_revocation,
                 "rights": rights_summary,
             }
         deletion = store.soft_delete_user(user_id, phone=phone)
@@ -2029,6 +2078,13 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
         session_revocation = _auth_session_service().revoke_all_for_user(
             user_id,
             reason="accountSoftDeleted",
+        )
+        access_revocation = _record_account_access_revocation(
+            request_id=str(rights_record.get("id") or ""),
+            user_id=user_id,
+            deletion=deletion,
+            session_revocation=session_revocation,
+            delegated_grant_revocation=delegated_grant_revocation,
         )
         rights_summary = _record_account_delete_rights_completion(
             str(rights_record.get("id") or ""),
@@ -2047,6 +2103,7 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
         },
         "sessionRevocation": session_revocation,
         "delegatedGrantRevocation": delegated_grant_revocation,
+        "accessRevocation": access_revocation,
         "rights": rights_summary,
     }
 

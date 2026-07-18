@@ -88,6 +88,7 @@ class InMemoryStore:
         self._rights_request_ids_by_command: Dict[Tuple[str, str], str] = {}
         self._rights_executions: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         self._rights_receipts: Dict[str, Dict[str, Any]] = {}
+        self._rights_access_revocation_outbox: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._rights_lock = RLock()
 
     @contextmanager
@@ -333,6 +334,13 @@ class InMemoryStore:
                 session.get("sessionVersion") or 0
             ):
                 return {"outcome": "invalid"}
+            account = self._users.get(str(session.get("userId") or ""))
+            if account is not None and (
+                str(account.get("deletionState") or "active") != "active"
+                or str(account.get("accessState") or "active") != "active"
+                or int(account.get("authEpoch") or 0) != int(session.get("authEpoch") or 0)
+            ):
+                return {"outcome": "accountSuspended"}
             try:
                 refresh_expires_at = self._parse_iso_datetime(
                     str(session.get("refreshExpiresAt") or "")
@@ -354,6 +362,7 @@ class InMemoryStore:
                     "tokenFamilyId": family_id,
                     "parentSessionId": session_id,
                     "sessionVersion": version,
+                    "authEpoch": int(session.get("authEpoch") or 0),
                 }
             )
             successor_id = str(successor_item["sessionId"])
@@ -1127,6 +1136,76 @@ class InMemoryStore:
             self._rights_receipts[str(receipt_id)] = record
             return {"outcome": "appended", "receipt": deepcopy(record)}
 
+    def record_rights_access_revocation_outbox(
+        self,
+        *,
+        event_id: str,
+        request_id: str,
+        user_id: str,
+        auth_epoch: int,
+        provider_capability_state: str,
+        session_revocation: Dict[str, Any],
+        delegated_grant_revocation: Dict[str, Any],
+        created_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_request_id = str(request_id or "").strip()
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_request_id or not normalized_user_id:
+            raise ValueError("request_id and user_id are required")
+        if int(auth_epoch) < 0:
+            raise ValueError("auth_epoch must be non-negative")
+        if provider_capability_state != "revoked":
+            raise ValueError("provider capability state must be revoked")
+        record = {
+            "id": str(event_id),
+            "requestId": normalized_request_id,
+            "userId": normalized_user_id,
+            "eventType": "RightsAccessRevoked",
+            "authEpoch": int(auth_epoch),
+            "providerCapabilityState": provider_capability_state,
+            "status": "pending",
+            "sessionRevocation": {
+                "scope": str(session_revocation.get("scope") or ""),
+                "revocationReceiptId": str(session_revocation.get("revocationReceiptId") or ""),
+                "revokedFamilyCount": int(session_revocation.get("revokedFamilyCount") or 0),
+                "revokedSessionCount": int(session_revocation.get("revokedSessionCount") or 0),
+            },
+            "delegatedGrantRevocation": {
+                "revokedGrantCount": int(delegated_grant_revocation.get("revokedGrantCount") or 0),
+            },
+            "createdAt": created_at or self._now(),
+        }
+        key = (normalized_request_id, "RightsAccessRevoked")
+        with self._rights_lock:
+            if normalized_request_id not in self._rights_requests:
+                raise KeyError("rights request not found")
+            existing = self._rights_access_revocation_outbox.get(key)
+            if existing is not None:
+                if any(
+                    existing.get(field) != record.get(field)
+                    for field in (
+                        "id",
+                        "userId",
+                        "authEpoch",
+                        "providerCapabilityState",
+                    )
+                ):
+                    raise ValueError("rights access revocation outbox is immutable")
+                return {"outcome": "deduplicated", "event": deepcopy(existing)}
+            self._rights_access_revocation_outbox[key] = record
+            return {"outcome": "recorded", "event": deepcopy(record)}
+
+    def list_rights_access_revocation_outbox(self, request_id: str) -> List[Dict[str, Any]]:
+        normalized_request_id = str(request_id or "").strip()
+        with self._rights_lock:
+            records = [
+                deepcopy(record)
+                for (candidate_request_id, _), record in self._rights_access_revocation_outbox.items()
+                if candidate_request_id == normalized_request_id
+            ]
+        records.sort(key=lambda record: (record["createdAt"], record["id"]))
+        return records
+
     def summarize_rights_request(self, request_id: str) -> Optional[Dict[str, Any]]:
         with self._rights_lock:
             request = self._rights_requests.get(str(request_id or ""))
@@ -1163,6 +1242,11 @@ class InMemoryStore:
             user["restoreCount"] = int(existing.get("restoreCount") or 0)
         user.setdefault("restoreCount", 0)
         user["deletionState"] = "active"
+        user["accessState"] = "active"
+        user["authEpoch"] = int(existing.get("authEpoch") or 0)
+        user["providerCapabilityState"] = str(
+            existing.get("providerCapabilityState") or "enabled"
+        )
         self._users[user_id] = user
         return deepcopy(user)
 
@@ -1185,11 +1269,20 @@ class InMemoryStore:
         if self._normalized_phone(user.get("phone", "")) != self._normalized_phone(phone):
             return None
 
+        if (
+            user.get("deletionState") == "softDeleted"
+            and user.get("accessState") == "suspended_restorable"
+        ):
+            return deepcopy(user)
+
         requested_at = self._parse_iso_datetime(requested_at_iso) if requested_at_iso else datetime.now(timezone.utc)
         deleted_at = requested_at.isoformat()
         purge_after = (requested_at + self._account_delete_retention_delta()).isoformat()
         item = deepcopy(user)
         item["deletionState"] = "softDeleted"
+        item["accessState"] = "suspended_restorable"
+        item["authEpoch"] = int(item.get("authEpoch") or 0) + 1
+        item["providerCapabilityState"] = "revoked"
         item["deletedAt"] = deleted_at
         item["purgeAfter"] = purge_after
         item["restoreDeadline"] = purge_after
@@ -1221,6 +1314,7 @@ class InMemoryStore:
         item = deepcopy(user)
         item["nickname"] = nickname or item.get("nickname") or "寻梦环游用户"
         item["deletionState"] = "active"
+        item["accessState"] = "active"
         item["restoreCount"] = int(item.get("restoreCount") or 0) + 1
         item["restoredAt"] = restored_at
         item["updatedAt"] = restored_at
@@ -1247,6 +1341,9 @@ class InMemoryStore:
                 "phone": user.get("phone", ""),
                 "nickname": "",
                 "deletionState": "purged",
+                "accessState": "purged",
+                "authEpoch": int(user.get("authEpoch") or 0),
+                "providerCapabilityState": "revoked",
                 "purgedAt": cutoff.isoformat(),
                 "restoreCount": int(user.get("restoreCount") or 0),
             }

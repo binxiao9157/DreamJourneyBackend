@@ -44,12 +44,12 @@ class AuthSessionService:
         with self.store.auth_user_operation(normalized_user_id):
             get_user = getattr(self.store, "get_user", None)
             account = get_user(normalized_user_id) if callable(get_user) else None
-            account_state = str((account or {}).get("deletionState") or "active")
-            if account_state != "active":
+            if not self._account_allows_sessions(account):
                 raise AuthSessionError(
                     "account cannot issue a session in its current state",
                     code="account_session_issuance_blocked",
                 )
+            auth_epoch = self._account_auth_epoch(account)
 
             issued_at = self._utc(now)
             token_family_id = self._opaque_id("tf", 18)
@@ -59,6 +59,7 @@ class AuthSessionService:
                 session_version=1,
                 parent_session_id=None,
                 issued_at=issued_at,
+                auth_epoch=auth_epoch,
             )
             family = {
                 "tokenFamilyId": token_family_id,
@@ -66,6 +67,7 @@ class AuthSessionService:
                 "status": "active",
                 "currentSessionVersion": 1,
                 "contractVersion": AUTH_TOKEN_FAMILY_CONTRACT_VERSION,
+                "authEpoch": auth_epoch,
                 "createdAt": issued_at.isoformat(),
                 "updatedAt": issued_at.isoformat(),
             }
@@ -98,6 +100,12 @@ class AuthSessionService:
         if record is None or record.get("status") != "active":
             return None
         if record.get("tokenFamilyId") and record.get("familyStatus") != "active":
+            return None
+        get_user = getattr(self.store, "get_user", None)
+        account = get_user(str(record.get("userId") or "")) if callable(get_user) else None
+        if not self._account_allows_sessions(account):
+            return None
+        if int(record.get("authEpoch") or 0) != self._account_auth_epoch(account):
             return None
         try:
             expires_at = self._parse_datetime(record.get("accessExpiresAt"))
@@ -162,6 +170,11 @@ class AuthSessionService:
                 "invalid or expired refresh token",
                 code="invalid_or_expired_refresh_token",
                 commit_state_change=True,
+            )
+        if outcome == "accountSuspended":
+            raise AuthSessionError(
+                "account session is no longer active",
+                code="account_session_revoked",
             )
         if outcome != "rotated":
             raise AuthSessionError(
@@ -259,6 +272,7 @@ class AuthSessionService:
         session_version: int,
         parent_session_id: Optional[str],
         issued_at: datetime,
+        auth_epoch: int,
     ):
         if not user_id:
             raise AuthSessionError("user id is required", code="user_id_required")
@@ -270,6 +284,7 @@ class AuthSessionService:
             "tokenFamilyId": token_family_id,
             "parentSessionId": parent_session_id,
             "sessionVersion": session_version,
+            "authEpoch": int(auth_epoch),
             "accessTokenHash": auth_token_hash(access_token),
             "refreshTokenHash": auth_token_hash(refresh_token),
             "status": "active",
@@ -331,6 +346,19 @@ class AuthSessionService:
             "occurredAt": occurred_at.isoformat(),
             "contractVersion": AUTH_TOKEN_FAMILY_CONTRACT_VERSION,
         }
+
+    @staticmethod
+    def _account_auth_epoch(account: Optional[Dict[str, Any]]) -> int:
+        return int((account or {}).get("authEpoch") or 0)
+
+    @classmethod
+    def _account_allows_sessions(cls, account: Optional[Dict[str, Any]]) -> bool:
+        if account is None:
+            return True
+        return (
+            str(account.get("deletionState") or "active") == "active"
+            and str(account.get("accessState") or "active") == "active"
+        )
 
     @staticmethod
     def _opaque_id(prefix: str, size: int) -> str:

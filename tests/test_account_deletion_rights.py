@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app import main as main_module
 from app.main import app
+from app.services.auth_sessions import AuthSessionError
 from app.services.in_memory_store import InMemoryStore
 
 
@@ -78,6 +79,59 @@ class AccountDeletionRightsAdapterAPITests(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(conflict.json()["detail"]["code"], "rightsCommandConflict")
+
+    def test_access_first_delete_suspends_account_and_revokes_all_session_access(self):
+        phone = "13900009993"
+        created = self.client.post("/auth/login", json={"phone": phone, "nickname": "suspend owner"})
+        self.assertEqual(created.status_code, 200)
+        user_id = created.json()["user"]["id"]
+        first_auth = created.json()["auth"]
+        second_auth = main_module._auth_session_service().issue(user_id)
+
+        deleted = self.client.post(
+            "/auth/delete",
+            headers={"Authorization": f"Bearer {first_auth['accessToken']}"},
+            json={
+                "userId": user_id,
+                "phone": phone,
+                "commandId": "access-first-delete-command",
+                "firstConfirmation": True,
+                "secondConfirmation": True,
+            },
+        )
+
+        self.assertEqual(deleted.status_code, 200)
+        payload = deleted.json()
+        self.assertEqual(payload["deletion"]["deletionState"], "softDeleted")
+        self.assertEqual(payload["deletion"]["accessState"], "suspended_restorable")
+        self.assertEqual(payload["deletion"]["authEpoch"], 1)
+        self.assertEqual(payload["deletion"]["providerCapabilityState"], "revoked")
+        self.assertEqual(payload["sessionRevocation"]["scope"], "allDevices")
+        self.assertEqual(payload["accessRevocation"]["eventType"], "RightsAccessRevoked")
+        self.assertEqual(payload["accessRevocation"]["authEpoch"], 1)
+        self.assertEqual(payload["accessRevocation"]["status"], "pending")
+
+        for auth in (first_auth, second_auth):
+            logout = self.client.post(
+                "/auth/logout",
+                headers={"Authorization": f"Bearer {auth['accessToken']}"},
+                json={"scope": "session"},
+            )
+            refresh = self.client.post("/auth/refresh", json={"refreshToken": auth["refreshToken"]})
+            self.assertEqual(logout.status_code, 401)
+            self.assertEqual(refresh.status_code, 401)
+
+        with self.assertRaises(AuthSessionError) as context:
+            main_module._auth_session_service().issue(user_id)
+        self.assertEqual(context.exception.code, "account_session_issuance_blocked")
+
+        outbox = main_module.store.list_rights_access_revocation_outbox(
+            payload["rights"]["requestId"]
+        )
+        self.assertEqual(len(outbox), 1)
+        self.assertEqual(outbox[0]["eventType"], "RightsAccessRevoked")
+        self.assertEqual(outbox[0]["authEpoch"], 1)
+        self.assertEqual(outbox[0]["status"], "pending")
 
 
 if __name__ == "__main__":

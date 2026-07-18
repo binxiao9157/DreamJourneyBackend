@@ -1,0 +1,8 @@
+{
+  "version": "0008",
+  "name": "access_first_suspend",
+  "phase": "expand",
+  "compatibility": "backwardCompatible",
+  "runtimeCompatibility": "accessFirstSuspendOutbox",
+  "requiresOldWorkerDrain": false
+}

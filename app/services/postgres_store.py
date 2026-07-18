@@ -539,6 +539,24 @@ class PostgresStore:
             cursor.fetchone()
 
             cursor.execute(
+                "SELECT payload FROM users WHERE id = %s FOR UPDATE",
+                (user_id,),
+            )
+            account_row = cursor.fetchone()
+            account = deepcopy(account_row.get("payload") or {}) if account_row else None
+            if account is not None:
+                account_state = str(account.get("deletionState") or "active")
+                access_state = str(account.get("accessState") or "active")
+                account_epoch = int(account.get("authEpoch") or 0)
+                session_epoch = int(payload.get("authEpoch") or 0)
+                if (
+                    account_state != "active"
+                    or access_state != "active"
+                    or session_epoch != account_epoch
+                ):
+                    return {"outcome": "accountSuspended"}
+
+            cursor.execute(
                 """
                 SELECT id, user_id, status, current_session_version
                 FROM token_families
@@ -626,6 +644,7 @@ class PostgresStore:
                     "tokenFamilyId": family_id,
                     "parentSessionId": str(row["id"]),
                     "sessionVersion": version,
+                    "authEpoch": int(payload.get("authEpoch") or 0),
                 }
             )
             consumed_patch = {
@@ -1474,6 +1493,27 @@ class PostgresStore:
             ),
         }
 
+    @staticmethod
+    def _rights_access_revocation_outbox_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+        payload = deepcopy(row.get("payload") or {})
+        return {
+            "id": str(row.get("id") or ""),
+            "requestId": str(row.get("request_id") or ""),
+            "userId": str(row.get("user_id") or ""),
+            "eventType": str(row.get("event_type") or ""),
+            "authEpoch": int(row.get("auth_epoch") or 0),
+            "providerCapabilityState": str(row.get("provider_capability_state") or ""),
+            "status": str(row.get("status") or ""),
+            "sessionRevocation": deepcopy(payload.get("sessionRevocation") or {}),
+            "delegatedGrantRevocation": deepcopy(payload.get("delegatedGrantRevocation") or {}),
+            "createdAt": PostgresStore._iso_value(row.get("created_at")),
+            "dispatchedAt": (
+                None
+                if row.get("dispatched_at") is None
+                else PostgresStore._iso_value(row.get("dispatched_at"))
+            ),
+        }
+
     def create_rights_request(self, request: DataRightsRequest) -> Dict[str, Any]:
         if not isinstance(request, DataRightsRequest):
             raise TypeError("rights request contract is required")
@@ -1739,6 +1779,115 @@ class PostgresStore:
             raise ValueError("resource deletion receipt is append-only")
         return {"outcome": result, "receipt": existing}
 
+    def record_rights_access_revocation_outbox(
+        self,
+        *,
+        event_id: str,
+        request_id: str,
+        user_id: str,
+        auth_epoch: int,
+        provider_capability_state: str,
+        session_revocation: Dict[str, Any],
+        delegated_grant_revocation: Dict[str, Any],
+        created_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_request_id = str(request_id or "").strip()
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_request_id or not normalized_user_id:
+            raise ValueError("request_id and user_id are required")
+        if int(auth_epoch) < 0:
+            raise ValueError("auth_epoch must be non-negative")
+        if provider_capability_state != "revoked":
+            raise ValueError("provider capability state must be revoked")
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"rights-access-revocation-{normalized_request_id}",
+                command_id=str(event_id),
+            ):
+                return self.record_rights_access_revocation_outbox(
+                    event_id=event_id,
+                    request_id=normalized_request_id,
+                    user_id=normalized_user_id,
+                    auth_epoch=auth_epoch,
+                    provider_capability_state=provider_capability_state,
+                    session_revocation=session_revocation,
+                    delegated_grant_revocation=delegated_grant_revocation,
+                    created_at=created_at,
+                )
+        timestamp = created_at or self._now()
+        payload = {
+            "schemaVersion": 1,
+            "sessionRevocation": {
+                "scope": str(session_revocation.get("scope") or ""),
+                "revocationReceiptId": str(session_revocation.get("revocationReceiptId") or ""),
+                "revokedFamilyCount": int(session_revocation.get("revokedFamilyCount") or 0),
+                "revokedSessionCount": int(session_revocation.get("revokedSessionCount") or 0),
+            },
+            "delegatedGrantRevocation": {
+                "revokedGrantCount": int(delegated_grant_revocation.get("revokedGrantCount") or 0),
+            },
+        }
+        row = self._fetchone(
+            """
+            INSERT INTO rights_access_revocation_outbox (
+                id, request_id, user_id, event_type, auth_epoch,
+                provider_capability_state, status, payload, created_at
+            )
+            VALUES (%s, %s, %s, 'RightsAccessRevoked', %s, %s, 'pending', %s, %s)
+            ON CONFLICT (request_id, event_type) DO NOTHING
+            RETURNING id, request_id, user_id, event_type, auth_epoch,
+                provider_capability_state, status, payload, created_at, dispatched_at
+            """,
+            (
+                str(event_id),
+                normalized_request_id,
+                normalized_user_id,
+                int(auth_epoch),
+                provider_capability_state,
+                payload,
+                timestamp,
+            ),
+            commit=True,
+        )
+        outcome = "recorded"
+        if row is None:
+            row = self._fetchone(
+                """
+                SELECT id, request_id, user_id, event_type, auth_epoch,
+                    provider_capability_state, status, payload, created_at, dispatched_at
+                FROM rights_access_revocation_outbox
+                WHERE request_id = %s AND event_type = 'RightsAccessRevoked'
+                """,
+                (normalized_request_id,),
+            )
+            outcome = "deduplicated"
+        if row is None:
+            raise RuntimeError("rights access revocation outbox insert did not produce a row")
+        record = self._rights_access_revocation_outbox_payload(row)
+        if any(
+            (
+                record["id"] != str(event_id),
+                record["userId"] != normalized_user_id,
+                record["authEpoch"] != int(auth_epoch),
+                record["providerCapabilityState"] != provider_capability_state,
+            )
+        ):
+            raise ValueError("rights access revocation outbox is immutable")
+        return {"outcome": outcome, "event": record}
+
+    def list_rights_access_revocation_outbox(self, request_id: str) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT id, request_id, user_id, event_type, auth_epoch,
+                provider_capability_state, status, payload, created_at, dispatched_at
+            FROM rights_access_revocation_outbox
+            WHERE request_id = %s
+            ORDER BY created_at ASC, id ASC
+            """,
+            (str(request_id or "").strip(),),
+        )
+        return [self._rights_access_revocation_outbox_payload(row) for row in rows]
+
     def summarize_rights_request(self, request_id: str) -> Optional[Dict[str, Any]]:
         request = self.get_rights_request(request_id)
         if request is None:
@@ -1780,6 +1929,11 @@ class PostgresStore:
             "updatedAt": self._now(),
             "restoreCount": int(existing.get("restoreCount") or 0),
             "deletionState": "active",
+            "accessState": "active",
+            "authEpoch": int(existing.get("authEpoch") or 0),
+            "providerCapabilityState": str(
+                existing.get("providerCapabilityState") or "enabled"
+            ),
         }
         row = self._fetchone(
             """
@@ -1819,10 +1973,19 @@ class PostgresStore:
         if self._normalized_phone(str(user.get("phone") or "")) != self._normalized_phone(phone):
             return None
 
+        if (
+            user.get("deletionState") == "softDeleted"
+            and user.get("accessState") == "suspended_restorable"
+        ):
+            return deepcopy(user)
+
         requested_at = self._parse_iso_datetime(requested_at_iso) if requested_at_iso else datetime.now(timezone.utc)
         purge_after = requested_at + timedelta(days=30)
         item = deepcopy(user)
         item["deletionState"] = "softDeleted"
+        item["accessState"] = "suspended_restorable"
+        item["authEpoch"] = int(item.get("authEpoch") or 0) + 1
+        item["providerCapabilityState"] = "revoked"
         item["deletedAt"] = requested_at.isoformat()
         item["purgeAfter"] = purge_after.isoformat()
         item["restoreDeadline"] = purge_after.isoformat()
@@ -1865,6 +2028,7 @@ class PostgresStore:
         item = deepcopy(user)
         item["nickname"] = nickname or item.get("nickname") or "寻梦环游用户"
         item["deletionState"] = "active"
+        item["accessState"] = "active"
         item["restoreCount"] = int(item.get("restoreCount") or 0) + 1
         item["restoredAt"] = restored_at
         item["updatedAt"] = restored_at
@@ -1988,6 +2152,9 @@ class PostgresStore:
                 "phone": user.get("phone", ""),
                 "nickname": "",
                 "deletionState": "purged",
+                "accessState": "purged",
+                "authEpoch": int(user.get("authEpoch") or 0),
+                "providerCapabilityState": "revoked",
                 "purgedAt": cutoff.isoformat(),
                 "restoreCount": int(user.get("restoreCount") or 0),
             }

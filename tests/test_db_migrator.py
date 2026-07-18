@@ -457,6 +457,21 @@ class PostgresMigratorTests(unittest.TestCase):
         )
         self.assertIn("'operationMetric'", migration.sql)
 
+    def test_access_first_suspend_migration_adds_rights_revocation_outbox(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.name == "access_first_suspend"
+        )
+
+        self.assertEqual(migration.version, "0008")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(migration.compatibility, "backwardCompatible")
+        self.assertIn("CREATE TABLE rights_access_revocation_outbox", migration.sql)
+        self.assertIn("RightsAccessRevoked", migration.sql)
+        self.assertIn("UNIQUE (request_id, event_type)", migration.sql)
+        self.assertIn("auth_epoch", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()
