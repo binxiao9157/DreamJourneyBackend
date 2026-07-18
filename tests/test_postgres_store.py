@@ -411,7 +411,14 @@ class FakeCursor:
             self.result = None if item is None else {"payload": item}
         elif normalized.startswith("SELECT payload FROM archive_items"):
             user_id = params[0]
-            self.result = [{"payload": item} for item in self.connection.archive_items.get(user_id, [])]
+            items = self.connection.archive_items.get(user_id, [])
+            if "authority_state = 'active'" in normalized:
+                items = [
+                    item
+                    for item in items
+                    if str(item.get("authorityState") or "active") == "active"
+                ]
+            self.result = [{"payload": item} for item in items]
         elif normalized.startswith("SELECT id, vault_id, owner_subject_id, row_version, authority_state FROM"):
             item_id = params[0]
             table_collections = {
@@ -2524,6 +2531,34 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(deleted["id"], "time-letter-1")
         self.assertIsNone(missing)
         self.assertEqual(store.list_archive_items("u1"), [])
+
+    def test_store_archive_list_excludes_quarantined_items_for_same_owner(self):
+        connection = FakeConnection()
+        connection.archive_items["u1"] = [
+            {
+                "id": "archive-quarantined",
+                "userId": "u1",
+                "kind": "photo",
+                "authorityState": "quarantined",
+            },
+            {
+                "id": "archive-active",
+                "userId": "u1",
+                "kind": "photo",
+                "authorityState": "active",
+            },
+        ]
+        store = PostgresStore(connection_factory=lambda: connection)
+
+        listed = store.list_archive_items("u1")
+
+        self.assertEqual([item["id"] for item in listed], ["archive-active"])
+        list_sql = next(
+            statement
+            for statement, _ in connection.executed
+            if statement.startswith("SELECT payload FROM archive_items")
+        )
+        self.assertIn("authority_state = 'active'", list_sql)
 
     def test_combined_archive_delete_applies_kb_mutation_in_one_transaction(self):
         connection = FakeConnection()

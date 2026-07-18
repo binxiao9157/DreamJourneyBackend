@@ -199,6 +199,22 @@ class InMemoryArchiveDeletionTests(unittest.TestCase):
                 base_revision=1,
             )
 
+    def test_archive_list_excludes_quarantined_items_for_same_owner(self):
+        active = self.store.add_archive_item(
+            "u1",
+            {"id": "archive-active", "kind": "photo"},
+        )
+        self.store.add_archive_item(
+            "u1",
+            {
+                "id": "archive-quarantined",
+                "kind": "photo",
+                "authorityState": "quarantined",
+            },
+        )
+
+        self.assertEqual(self.store.list_archive_items("u1"), [active])
+
     def test_resource_ids_cannot_be_reused_to_transfer_owner(self):
         writers = (
             (self.store.add_memory, {"id": "shared-memory"}),

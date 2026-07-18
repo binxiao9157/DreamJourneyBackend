@@ -1551,7 +1551,13 @@ class InMemoryStore:
 
     def list_archive_items(self, user_id: str) -> List[Dict[str, Any]]:
         with self._archive_lock:
-            return deepcopy(self._archive_items.get(user_id, []))
+            return deepcopy(
+                [
+                    item
+                    for item in self._archive_items.get(user_id, [])
+                    if str(item.get("authorityState") or "active") == "active"
+                ]
+            )
 
     def delete_archive_item(self, user_id: str, item_id: str) -> Optional[Dict[str, Any]]:
         with self._archive_lock:

@@ -18,6 +18,7 @@ from psycopg.types.json import Jsonb
 
 from app.core.config import settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir, load_migrations
+from app.services.postgres_store import PostgresStore
 
 
 def require(condition, message):
@@ -173,6 +174,23 @@ def main():
                 )
                 cursor.execute(
                     """
+                    INSERT INTO archive_items (id, user_id, payload)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (
+                        "legacy-owner-active",
+                        "owner-a",
+                        Jsonb(
+                            {
+                                "id": "legacy-owner-active",
+                                "userId": "owner-a",
+                                "kind": "photo",
+                            }
+                        ),
+                    ),
+                )
+                cursor.execute(
+                    """
                     INSERT INTO mailbox_letters (id, user_id, payload)
                     VALUES (%s, %s, %s)
                     """,
@@ -191,8 +209,8 @@ def main():
                 )
         legacy_upgrade = migrator(legacy_dsn, "g2-legacy-upgrade").apply()
         require(
-            legacy_upgrade["appliedVersions"] == [expected_versions[-1]],
-            "legacy upgrade must apply only owner authority migration",
+            legacy_upgrade["appliedVersions"] == expected_versions[3:],
+            "legacy upgrade must apply every migration after the 0003 fixture",
         )
         with psycopg.connect(legacy_dsn) as connection:
             with connection.cursor() as cursor:
@@ -246,6 +264,25 @@ def main():
             "mailbox source owner metadata must not create an authority incident",
         )
 
+        legacy_store = PostgresStore(
+            dsn=legacy_dsn,
+            pool_min_size=1,
+            pool_max_size=1,
+            pool_timeout_seconds=2.0,
+        )
+        legacy_store.open_pool(wait=True)
+        try:
+            visible_archive_ids = {
+                str(item.get("id") or "")
+                for item in legacy_store.list_archive_items("owner-a")
+            }
+        finally:
+            legacy_store.close_pool()
+        require(
+            visible_archive_ids == {"legacy-owner-active"},
+            "ordinary archive list must keep active owner rows and hide quarantine",
+        )
+
         owner_mutation_rejected = False
         try:
             with psycopg.connect(legacy_dsn) as connection:
@@ -269,6 +306,7 @@ def main():
                     "concurrentApplyCount": len(expected_versions),
                     "concurrentSkipCount": len(expected_versions),
                     "legacyConflictQuarantined": True,
+                    "legacyQuarantineHiddenFromArchiveList": True,
                     "legacyIncidentPersisted": True,
                     "legacyMailboxSourceOwnerAccepted": True,
                     "ownerMutationRejected": True,

@@ -3453,7 +3453,15 @@ class PostgresStore:
         return deepcopy(row["payload"])
 
     def list_archive_items(self, user_id: str) -> List[Dict[str, Any]]:
-        return self._list_payloads("archive_items", user_id)
+        rows = self._fetchall(
+            """
+            SELECT payload FROM archive_items
+            WHERE user_id = %s AND authority_state = 'active'
+            ORDER BY created_at DESC
+            """,
+            (user_id,),
+        )
+        return [deepcopy(row["payload"]) for row in rows]
 
     def delete_archive_item(self, user_id: str, item_id: str) -> Optional[Dict[str, Any]]:
         row = self._fetchone(

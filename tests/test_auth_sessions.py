@@ -623,6 +623,91 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertEqual(response.headers["x-dreamjourney-authorization-reason"], "ownerClaimMismatch")
         self.assertEqual(main_module.store.list_archive_items(user_id), [])
 
+    def test_archive_owner_is_principal_derived_and_cross_owner_access_is_denied(self):
+        owner = self.login("13800138115")
+        attacker = self.login("13800138116")
+        owner_id = owner["user"]["id"]
+        attacker_id = attacker["user"]["id"]
+        archive_id = "archive_owner_contract"
+        base_payload = {
+            "id": archive_id,
+            "kind": "photo",
+            "privacyMetadata": {"scope": "generationAllowed"},
+        }
+
+        created = client.post(
+            "/archive/items",
+            headers=self.access_headers(owner),
+            json={**base_payload, "title": "owner original"},
+        )
+        forged = client.post(
+            "/archive/items",
+            headers=self.access_headers(owner),
+            json={**base_payload, "userId": attacker_id, "title": "forged owner"},
+        )
+        updated = client.post(
+            "/archive/items",
+            headers=self.access_headers(owner),
+            json={**base_payload, "title": "owner updated"},
+        )
+        collision = client.post(
+            "/archive/items",
+            headers=self.access_headers(attacker),
+            json={**base_payload, "title": "attacker overwrite"},
+        )
+        owner_list = client.get(
+            f"/archive/items/{owner_id}",
+            headers=self.access_headers(owner),
+        )
+        cross_owner_get = client.get(
+            f"/archive/items/{owner_id}",
+            headers=self.access_headers(attacker),
+        )
+        cross_owner_delete = client.delete(
+            f"/archive/items/{attacker_id}/{archive_id}",
+            headers=self.access_headers(attacker),
+        )
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.json()["item"]["userId"], owner_id)
+        self.assertEqual(created.json()["item"]["ownerUserId"], owner_id)
+        self.assertEqual(created.headers["x-dreamjourney-auth-principal"], "user")
+        self.assertEqual(
+            created.headers["x-dreamjourney-authorization-reason"],
+            "ownerDerivedFromPrincipal",
+        )
+        self.assertEqual(forged.status_code, 403)
+        self.assertEqual(
+            forged.headers["x-dreamjourney-authorization-reason"],
+            "ownerPrincipalMismatch",
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["item"]["title"], "owner updated")
+        self.assertEqual(collision.status_code, 409)
+        self.assertEqual(
+            collision.json()["detail"]["code"],
+            "archiveItemOwnershipConflict",
+        )
+        self.assertEqual(owner_list.status_code, 200)
+        self.assertEqual(
+            [(item["id"], item["title"]) for item in owner_list.json()["items"]],
+            [(archive_id, "owner updated")],
+        )
+        self.assertEqual(cross_owner_get.status_code, 403)
+        self.assertEqual(
+            cross_owner_get.headers["x-dreamjourney-authorization-reason"],
+            "ownerPrincipalMismatch",
+        )
+        self.assertEqual(cross_owner_delete.status_code, 403)
+        self.assertEqual(
+            cross_owner_delete.headers["x-dreamjourney-authorization-reason"],
+            "resourceOwnerMismatch",
+        )
+        self.assertEqual(
+            main_module.store.list_archive_items(owner_id)[0]["title"],
+            "owner updated",
+        )
+
     def test_family_care_read_is_classified_as_delegated_and_enforce_safe(self):
         owner, family, member = self.accepted_family_fixture(
             "13800138101",
