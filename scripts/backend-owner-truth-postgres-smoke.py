@@ -1240,7 +1240,7 @@ def main() -> None:
                 correction_projection["state"] == "ready"
                 and correction_projection_entry["memoryVersionId"]
                 == correction_resolution.replacement_memory_version_id
-                and correction_projection_entry["versionNumber"] == 2
+                and correction_projection_entry["memoryVersion"] == 2
                 and correction_projection_entry["sourceId"]
                 == correction_request.correction_source_id,
                 "derived projection must expose only the correction successor as current",
