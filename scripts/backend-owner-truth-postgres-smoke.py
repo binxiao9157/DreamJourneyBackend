@@ -903,7 +903,7 @@ def main() -> None:
                     if isinstance(corrected_payload, str):
                         corrected_payload = json.loads(corrected_payload)
                     require(
-                        corrected_payload["content"] == {"summary": "小时候在院子里听雨，后来常常想起。"},
+                        corrected_payload["content"] == review_knowledge_content,
                         "corrected MemoryVersion must use the immutable Owner value",
                     )
                     cursor.execute(
