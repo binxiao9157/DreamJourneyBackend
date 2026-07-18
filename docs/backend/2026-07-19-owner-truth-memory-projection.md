@@ -17,6 +17,37 @@ The projection does not replace KBLite, `/context/build`, legacy archive
 reads, or public Echo. It is not a new authority and does not expose a public
 product surface.
 
+## MemoryVersion Rebuild Intent
+
+The same Owner decision transaction now also writes a value-free intent for a
+future compatibility-projection rebuild:
+
+```text
+accepted | corrected Candidate
+  -> immutable DecisionReceipt + active MemoryVersion
+  -> async_effects operation/outbox/job/receipt (pending, disabled worker)
+```
+
+- `accept` and `correct` create one idempotent intent owned by the active
+  `memoryVersion`, its version number and `authorityEpoch`.
+- `reject` and `invalidated` create no intent.
+- Command replay reuses the same effect operation; it cannot create another
+  outbox record.
+- The effect stores only the `contentHash`, opaque identifiers and state. It
+  never stores the MemoryVersion payload, Candidate proposal, DecisionReceipt
+  ID or review rationale.
+- Writing the effect shares the same Postgres Unit of Work as the terminal
+  decision and MemoryVersion activation. A failed effect write rolls all three
+  changes back.
+- The job remains `pending`. Neither the normal Compose deployment nor the
+  public API starts a worker, rebuilds KBLite, invokes a provider, or changes
+  Echo/context reads.
+
+The registered names are intentionally explicit for a later read-only
+consumer: `ownerTruth.memoryVersion.activated`,
+`ownerTruth.memoryProjection.rebuildRequested`, and
+`ownerTruth.memoryProjection.rebuild`.
+
 ## Implemented Contract
 
 - A projection reads only active, current `MemoryVersion` rows whose Vault,
@@ -63,23 +94,26 @@ rewrite of an already-recorded migration.
 
 ### G0 local
 
-- Focused projection/migration/API suite: 16 tests passed after the trigger
-  repair.
-- `./scripts/verify_backend.sh` passed with 679 unit tests, credential
+- Focused projection/review/effect/API suite: 16 tests passed, including
+  idempotent intent creation, rejected-candidate exclusion and rollback after
+  a synthetic effect-write failure.
+- `./scripts/verify_backend.sh` passed with 682 unit tests, credential
   boundary tests, FastAPI smoke, knowledge checks, deployment-file checks and
   backup contract smoke.
 - Python compilation, shell syntax checks and `git diff --check` passed.
 
 ### G2 deployed Postgres
 
-Deployed backend head: `f1f37c5`.
+Deployed backend head: `ef29248`.
 
-- `migrate_db.py --apply --build-id 9ac88e3` applied `0017`; expected and
-  applied schema heads are both `0017`.
+- `migrate_db.py --apply --build-id ef29248` reported no pending migrations;
+  expected and applied schema heads are both `0017`.
 - `scripts/run-backend-owner-truth-postgres-smoke.sh` passed in an isolated
   Postgres database with deterministic rebuild, corrected-content projection,
   source-revocation fail-closed behavior, stale-epoch rejection and
-  DecisionReceipt-payload-leakage rejection all true.
+  DecisionReceipt-payload-leakage rejection all true. It additionally verified
+  atomic/idempotent, value-free pending rebuild intents for accepted and
+  corrected MemoryVersions, with no intent for a rejected Candidate.
 - `scripts/run-backend-route-authentication-postgres-smoke.sh` passed with
   `routeCount=82`; the two QA-only routes remain user-session-only and do not
   change anonymous or machine access.
@@ -94,5 +128,5 @@ still requires the KBLite compatibility adapter, rights/event-driven rebuild,
 typed Citation/context integration and its remaining dependencies/G1 evidence.
 
 The next safe closure is a read-only KBLite compatibility adapter that consumes
-this projection behind a default-off flag. It must not restore KBLite as a
-fact-authority writer.
+the pending projection intents behind a default-off flag. It must not restore
+KBLite as a fact-authority writer.
