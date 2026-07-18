@@ -1416,16 +1416,29 @@ def main() -> None:
                         ),
                     )
                     activated_rows = cursor.fetchall()
+                    accepted_initial_row = next(
+                        row
+                        for row in activated_rows
+                        if str(row[0]) == accepted.review.receipt_id and row[3] == 1
+                    )
+                    corrected_initial_row = next(
+                        row
+                        for row in activated_rows
+                        if str(row[0]) == corrected.review.receipt_id and row[3] == 1
+                    )
+                    corrected_successor_row = next(
+                        row
+                        for row in activated_rows
+                        if str(row[0]) == corrected.review.receipt_id and row[3] == 2
+                    )
                     require(
-                        len(activated_rows) == 2
-                        and all(row[3] == 1 and row[4] for row in activated_rows),
-                        "accepted/corrected receipts must each create exactly one current initial version",
+                        len(activated_rows) == 3
+                        and accepted_initial_row[4] is True
+                        and corrected_initial_row[4] is False
+                        and corrected_successor_row[4] is True,
+                        "accepted records retain one current v1 while corrections retain v1 and append current v2",
                     )
-                    corrected_row = next(
-                        row for row in activated_rows
-                        if str(row[0]) == corrected.review.receipt_id
-                    )
-                    corrected_payload = corrected_row[5]
+                    corrected_payload = corrected_initial_row[5]
                     if isinstance(corrected_payload, str):
                         corrected_payload = json.loads(corrected_payload)
                     require(
