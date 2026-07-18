@@ -77,6 +77,7 @@ from app.domain.owner_truth.source_commands import (
     OwnerTruthSourceVersionConflict,
     OwnerTruthSourceWriteRecord,
 )
+from app.async_effects.lease_repository import PostgresAsyncEffectLeaseRepository
 from app.async_effects.repository import PostgresEffectKernelRepository
 
 
@@ -169,6 +170,14 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("async effect kernel requires an active unit of work")
         return PostgresEffectKernelRepository(active.connection)
+
+    def async_effect_lease_repository(self) -> PostgresAsyncEffectLeaseRepository:
+        """Return the worker lease writer bound to the active request/job UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("async effect worker lease requires an active unit of work")
+        return PostgresAsyncEffectLeaseRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(

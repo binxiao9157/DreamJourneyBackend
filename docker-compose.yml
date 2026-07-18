@@ -18,6 +18,20 @@ services:
       retries: 12
       start_period: 10s
 
+  async-effect-worker:
+    build: .
+    profiles:
+      - async-effect-worker
+    restart: "no"
+    command: ["python", "-m", "app.worker", "--shadow-once"]
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
   postgres:
     image: mirror.ccs.tencentyun.com/library/postgres:16-alpine
     restart: unless-stopped

@@ -4,11 +4,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/backend-async-effects-postgres-smoke.py"
+LEASE_REPOSITORY = ROOT / "app/async_effects/lease_repository.py"
 
 
 class AsyncEffectsPostgresSmokeContractTests(unittest.TestCase):
     def test_smoke_is_disposable_and_covers_required_g2_boundaries(self):
         source = SCRIPT.read_text(encoding="utf-8")
+        lease_source = LEASE_REPOSITORY.read_text(encoding="utf-8")
 
         self.assertIn('database_name = f"dj_async_effects_smoke_', source)
         self.assertIn("drop_database(admin_dsn, database_name)", source)
@@ -18,6 +20,10 @@ class AsyncEffectsPostgresSmokeContractTests(unittest.TestCase):
         self.assertIn("OwnerTruthSourceAsyncEffectCommandService", source)
         self.assertIn("source effect must create exactly one outbox event", source)
         self.assertIn("source must roll back when its effect request cannot commit", source)
+        self.assertIn("FOR UPDATE SKIP LOCKED", lease_source)
+        self.assertIn("only one worker may claim the same job", source)
+        self.assertIn("expired lease must be reclaimed", source)
+        self.assertIn("cancelled worker heartbeat must be rejected", source)
         self.assertIn("force rollback", source)
         self.assertIn("def revert_terminal_operation", source)
         self.assertIn("revert_terminal_operation(cursor, intent.operation_id)", source)

@@ -18,16 +18,34 @@ from .repository import (
     InMemoryEffectKernelRepository,
     PostgresEffectKernelRepository,
 )
+from .lease_repository import (
+    AsyncEffectCancelResult,
+    AsyncEffectJobLease,
+    AsyncEffectJobPreview,
+    AsyncEffectLeaseCancelled,
+    AsyncEffectLeaseError,
+    AsyncEffectLeaseLost,
+    InMemoryAsyncEffectLeaseRepository,
+    PostgresAsyncEffectLeaseRepository,
+)
 
 __all__ = [
     "ASYNC_EFFECT_SCHEMA_VERSION",
     "AsyncEffectContractError",
+    "AsyncEffectCancelResult",
     "AsyncEffectConflict",
     "AsyncEffectIntent",
+    "AsyncEffectJobLease",
+    "AsyncEffectJobPreview",
+    "AsyncEffectLeaseCancelled",
+    "AsyncEffectLeaseError",
+    "AsyncEffectLeaseLost",
     "AsyncEffectRuntimeStatus",
     "AsyncEffectTarget",
     "EffectReceiptSummary",
     "InMemoryEffectKernelRepository",
+    "InMemoryAsyncEffectLeaseRepository",
     "PostgresEffectKernelRepository",
+    "PostgresAsyncEffectLeaseRepository",
     "resolve_async_effect_runtime_status",
 ]

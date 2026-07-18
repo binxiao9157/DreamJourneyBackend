@@ -24,6 +24,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.async_effects.contracts import AsyncEffectConflict, AsyncEffectIntent, AsyncEffectTarget
+from app.async_effects.lease_repository import AsyncEffectLeaseCancelled, AsyncEffectLeaseLost
 from app.core.config import settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.domain.owner_truth.source_commands import CreateTextSourceCommand, OwnerTruthCommandContext
@@ -120,6 +121,21 @@ def count_effect_resource_rows(dsn: str, *, vault_id: str, resource_id: str) -> 
                 (vault_id, resource_id),
             )
             return int(cursor.fetchone()[0])
+
+
+def job_attempt_states(dsn: str, *, job_id: str) -> dict[int, str]:
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT attempt, state
+                FROM async_effects.job_attempts
+                WHERE job_id = %s
+                ORDER BY attempt ASC
+                """,
+                (job_id,),
+            )
+            return {int(attempt): str(state) for attempt, state in cursor.fetchall()}
 
 
 def main() -> None:
@@ -262,6 +278,87 @@ def main() -> None:
             "outbox operation must roll back with its source",
         )
 
+        worker_intent = AsyncEffectIntent(
+            operation_type="asyncEffect.synthetic.noop",
+            target=AsyncEffectTarget(
+                owner_subject_id="owner-worker-smoke",
+                vault_id="vault-worker-smoke",
+                resource_type="syntheticEffect",
+                resource_id="worker-lease-smoke",
+                resource_version=1,
+                purpose="workerFoundation",
+                authority_epoch=0,
+            ),
+            payload_hash=payload_hash("worker-lease-metadata-only"),
+        )
+        with store.request_unit_of_work(
+            correlation_id="async-effect-worker-seed",
+            command_id="asyncEffectWorkerSeed",
+        ):
+            store.effect_kernel_repository().accept(worker_intent)
+
+        def claim_worker_job(worker_id: str):
+            with store.request_unit_of_work(
+                correlation_id=f"async-effect-worker-claim-{worker_id}",
+                command_id="asyncEffectWorkerClaim",
+            ):
+                return store.async_effect_lease_repository().claim_next(
+                    worker_id=worker_id,
+                    lease_seconds=30,
+                    supported_job_types=[worker_intent.job_type],
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            worker_claims = list(executor.map(claim_worker_job, ("worker-a", "worker-b")))
+        active_claims = [claim for claim in worker_claims if claim is not None]
+        require(len(active_claims) == 1, "only one worker may claim the same job")
+        first_claim = active_claims[0]
+        with store.request_unit_of_work(
+            correlation_id="async-effect-worker-heartbeat",
+            command_id="asyncEffectWorkerHeartbeat",
+        ):
+            renewed_claim = store.async_effect_lease_repository().heartbeat(
+                first_claim,
+                lease_seconds=30,
+            )
+        require(renewed_claim.attempt == 1, "worker heartbeat must retain the active attempt")
+        with psycopg.connect(test_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE async_effects.jobs SET lease_until = NOW() - INTERVAL '1 second' WHERE job_id = %s",
+                    (first_claim.job_id,),
+                )
+        second_claim = claim_worker_job("worker-c")
+        require(second_claim is not None and second_claim.attempt == 2, "expired lease must be reclaimed")
+        require(
+            job_attempt_states(test_dsn, job_id=first_claim.job_id) == {1: "unknown", 2: "started"},
+            "expired claim must become unknown before the replacement attempt starts",
+        )
+        with store.request_unit_of_work(
+            correlation_id="async-effect-worker-stale",
+            command_id="asyncEffectWorkerStale",
+        ):
+            try:
+                store.async_effect_lease_repository().heartbeat(first_claim, lease_seconds=30)
+                raise AssertionError("stale worker heartbeat must be rejected")
+            except AsyncEffectLeaseLost:
+                pass
+        with store.request_unit_of_work(
+            correlation_id="async-effect-worker-cancel",
+            command_id="asyncEffectWorkerCancel",
+        ):
+            cancellation = store.async_effect_lease_repository().request_cancel(second_claim.job_id)
+        require(cancellation.outcome == "cancellationRequested", "leased job cancellation must be durable")
+        with store.request_unit_of_work(
+            correlation_id="async-effect-worker-cancelled-heartbeat",
+            command_id="asyncEffectWorkerCancelledHeartbeat",
+        ):
+            try:
+                store.async_effect_lease_repository().heartbeat(second_claim, lease_seconds=30)
+                raise AssertionError("cancelled worker heartbeat must be rejected")
+            except AsyncEffectLeaseCancelled:
+                pass
+
         try:
             with store.request_unit_of_work(
                 correlation_id="async-effect-conflict",
@@ -336,7 +433,7 @@ def main() -> None:
         print(
             "Async effect Postgres smoke passed: "
             f"schemaHead={verified['expectedHead']} outcomes={sorted(outcomes)} "
-            "sourceOutbox=true rollback=true terminalGuard=true receiptsAppendOnly=true"
+            "sourceOutbox=true workerLease=true rollback=true terminalGuard=true receiptsAppendOnly=true"
         )
     finally:
         if store is not None:
