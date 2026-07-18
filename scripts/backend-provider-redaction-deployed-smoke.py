@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import urllib.error
 import urllib.request
 
@@ -18,10 +19,6 @@ BASE_URL = os.environ.get(
     "BACKEND_BASE_URL",
     os.environ.get("DREAMJOURNEY_BACKEND_BASE_URL", ""),
 ).strip().rstrip("/")
-API_TOKEN = os.environ.get(
-    "BACKEND_API_TOKEN",
-    os.environ.get("DREAMJOURNEY_BACKEND_API_TOKEN", ""),
-).strip()
 POLICY_VERSION = "providerDryRun-v2"
 CANARIES = (
     "KB_TRANSCRIPT_CANARY",
@@ -40,8 +37,16 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def request_json(method: str, path: str, *, payload: dict | None = None) -> tuple[int, dict]:
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {API_TOKEN}"}
+def request_json(
+    method: str,
+    path: str,
+    *,
+    payload: dict | None = None,
+    access_token: str | None = None,
+) -> tuple[int, dict]:
+    headers = {"Accept": "application/json"}
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
     data = None
     if payload is not None:
         headers["Content-Type"] = "application/json"
@@ -64,6 +69,30 @@ def request_json(method: str, path: str, *, payload: dict | None = None) -> tupl
     except json.JSONDecodeError as error:
         raise AssertionError(f"{method} {path} returned non-JSON") from error
     return status, body
+
+
+def issue_smoke_access_token() -> str:
+    """Use a typed user principal for user-owned provider routes.
+
+    A machine service token must not be able to call `/kb/extract`,
+    `/archive/image-analysis`, or `/tts` in production enforcement mode.
+    The temporary smoke account is intentionally not printed or exported.
+    """
+
+    phone_suffix = f"{secrets.randbelow(10**8):08d}"
+    status, body = request_json(
+        "POST",
+        "/auth/login",
+        payload={
+            "phone": f"196{phone_suffix}",
+            "nickname": "provider redaction smoke",
+            "password": f"provider-redaction-{secrets.token_hex(6)}",
+        },
+    )
+    require(status == 200, "smoke user login failed")
+    access_token = str((body.get("auth") or {}).get("accessToken") or "").strip()
+    require(access_token.startswith("dja_"), "smoke user access token missing")
+    return access_token
 
 
 def assert_value_free_response(status: int, body: dict) -> str:
@@ -93,10 +122,10 @@ def assert_value_free_response(status: int, body: dict) -> str:
 
 def main() -> None:
     require(BASE_URL, "BACKEND_BASE_URL is required")
-    require(API_TOKEN, "BACKEND_API_TOKEN is required")
 
     ready_status, ready = request_json("GET", "/ready")
     require(ready_status == 200 and ready.get("status") == "ready", "deployed service is not ready")
+    access_token = issue_smoke_access_token()
 
     surfaces = (
         (
@@ -132,7 +161,9 @@ def main() -> None:
     )
 
     outcomes = [
-        assert_value_free_response(*request_json(method, path, payload=payload))
+        assert_value_free_response(
+            *request_json(method, path, payload=payload, access_token=access_token)
+        )
         for method, path, payload in surfaces
     ]
     print(
