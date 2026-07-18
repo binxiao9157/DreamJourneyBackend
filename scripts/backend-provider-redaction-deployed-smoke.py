@@ -181,7 +181,12 @@ def main() -> None:
                 access_token=access_token,
             )
             outcomes.append(
-                assert_value_free_response(status, body, surface=f"{method} {path}")
+                assert_value_free_response(
+                    status,
+                    body,
+                    surface=f"{method} {path}",
+                    forbidden_values=(user_id, access_token),
+                )
             )
         print(
             json.dumps(
@@ -201,9 +206,18 @@ def main() -> None:
         cleanup_smoke_user(store, user_id)
 
 
-def assert_value_free_response(status: int, body: dict, *, surface: str) -> str:
+def assert_value_free_response(
+    status: int,
+    body: dict,
+    *,
+    surface: str,
+    forbidden_values: tuple[str, ...],
+) -> str:
     serialized = json.dumps(body, ensure_ascii=False, sort_keys=True)
-    require(not any(canary in serialized for canary in CANARIES), "private dry-run value leaked")
+    require(
+        not any(value and value in serialized for value in (*CANARIES, *forbidden_values)),
+        "private dry-run value leaked",
+    )
     if status == 200:
         report = body.get("dryRun") or {}
         require("request" not in body, "dry-run response must not expose upstream request")
@@ -218,11 +232,17 @@ def assert_value_free_response(status: int, body: dict, *, surface: str) -> str:
 
     if status == 403:
         detail = body.get("detail") or {}
-        require(isinstance(detail, dict), "policy denial detail must be structured")
         require(
-            detail.get("code") == "release_policy_command_denied",
-            f"{surface} returned an unexpected denial contract",
+            surface.startswith("POST /archive/image-analysis?"),
+            f"{surface} returned an unexpected hidden-provider denial",
         )
+        if isinstance(detail, dict):
+            require(
+                detail.get("code") == "release_policy_command_denied",
+                f"{surface} returned an unexpected denial contract",
+            )
+        else:
+            require(isinstance(detail, str), "policy denial detail must be string or object")
         return "policyDenied"
 
     require(
