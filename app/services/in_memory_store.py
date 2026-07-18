@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from math import ceil
 import secrets
 from threading import RLock
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 import uuid
 
 from app.services.knowledge_store import (
@@ -43,6 +43,7 @@ from app.observability.events import (
     normalize_machine_code,
     normalize_retention_class,
 )
+from app.observability.operation_metrics import summarize_operation_metrics
 
 
 class InMemoryStore:
@@ -172,6 +173,33 @@ class InMemoryStore:
             "windowEndedAt": records[-1]["occurredAt"] if records else None,
             "events": [item["payload"] for item in records[-bounded_limit:]],
         }
+
+    def summarize_operation_metrics(
+        self,
+        *,
+        expected_routes: Iterable[str] = (),
+        now_iso: Optional[str] = None,
+        event_limit: int = 5_000,
+    ) -> Dict[str, Any]:
+        now = self._parse_iso_datetime(now_iso or self._now())
+        bounded_limit = max(1, min(event_limit, 5_000))
+        with self._evidence_lock:
+            records = [
+                deepcopy(record)
+                for record in self._evidence_events.values()
+                if record.get("eventType") == "operationMetric"
+                and self._evidence_record_is_visible(record, now)
+            ]
+        records.sort(
+            key=lambda item: (
+                self._parse_iso_datetime(str(item["occurredAt"])),
+                str(item.get("eventId") or ""),
+            )
+        )
+        return summarize_operation_metrics(
+            [item["payload"] for item in records[-bounded_limit:]],
+            expected_routes=expected_routes,
+        )
 
     def expire_evidence_events(self, cutoff_iso: str) -> Dict[str, Any]:
         cutoff = self._parse_iso_datetime(normalize_evidence_timestamp(cutoff_iso))

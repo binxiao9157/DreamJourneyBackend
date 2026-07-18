@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 
 from app.services.auth_sessions import AuthSessionError, AuthSessionService
 from app.observability.events import EvidenceEventConflict
+from app.observability.operation_metrics import OperationMetricRecorder
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -161,6 +162,22 @@ class FakeCursor:
                 )
             ]
 
+        def matching_operation_metrics(now_iso):
+            now = datetime.fromisoformat(str(now_iso).replace("Z", "+00:00"))
+            return [
+                item
+                for item in self.connection.evidence_events.values()
+                if item["event_type"] == "operationMetric"
+                and (
+                    item["legal_hold"]
+                    or item["expires_at"] is None
+                    or datetime.fromisoformat(
+                        str(item["expires_at"]).replace("Z", "+00:00")
+                    )
+                    > now
+                )
+            ]
+
         def has_resource_conflict(collections, user_id, item_id):
             return any(
                 existing_user_id != user_id
@@ -238,6 +255,19 @@ class FakeCursor:
             self.result = [
                 {"value": value, "count": count}
                 for value, count in counts.items()
+            ]
+        elif normalized.startswith(
+            "SELECT payload FROM evidence_events WHERE event_type = 'operationMetric'"
+        ):
+            matches = matching_operation_metrics(params[0])
+            reverse = "ORDER BY occurred_at DESC" in normalized
+            matches.sort(
+                key=lambda item: (item["occurred_at"], item["event_id"]),
+                reverse=reverse,
+            )
+            self.result = [
+                {"payload": dict(item["payload"])}
+                for item in matches[: int(params[1])]
             ]
         elif normalized.startswith("SELECT payload FROM evidence_events"):
             matches = matching_evidence(params[0], params[1])
@@ -1411,6 +1441,71 @@ class PostgresStoreTests(unittest.TestCase):
                 retention_class="rolloutObservation",
                 expires_at_iso="2026-08-15T12:00:00+00:00",
             )
+
+    def test_postgres_operation_metrics_summary_reads_persisted_attempts(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        recorder = OperationMetricRecorder(environment="test", build="backend-test")
+        for request_key, attempt, outcome in [
+            ("request-one", 1, "failed"),
+            ("request-two", 2, "succeeded"),
+        ]:
+            event = recorder.build_event(
+                request_key=request_key,
+                operation_key="operation-one",
+                attempt=attempt,
+                route="POST /context/build",
+                operation="contextBuild",
+                outcome=outcome,
+                feedback_state="received",
+                occurred_at=datetime(2026, 7, 18, 12, attempt, tzinfo=timezone.utc),
+            )
+            store.append_evidence_event(
+                event.model_dump(mode="json"),
+                retention_class="operationalTemporary",
+                expires_at_iso="2026-08-18T12:00:00+00:00",
+            )
+
+        summary = store.summarize_operation_metrics(
+            expected_routes={"POST /context/build"},
+            now_iso="2026-07-18T12:30:00+00:00",
+        )
+
+        self.assertEqual(summary["requestCount"], 2)
+        self.assertEqual(summary["operationCount"], 1)
+        self.assertEqual(summary["retryOperationCount"], 1)
+        self.assertEqual(summary["successfulOperationCount"], 1)
+
+    def test_postgres_operation_metrics_summary_uses_the_latest_window(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        recorder = OperationMetricRecorder(environment="test", build="backend-test")
+        for sequence, outcome in enumerate(("failed", "failed", "succeeded"), start=1):
+            event = recorder.build_event(
+                request_key=f"request-window-{sequence}",
+                operation_key=f"operation-window-{sequence}",
+                attempt=1,
+                route="POST /context/build",
+                operation="contextBuild",
+                outcome=outcome,
+                feedback_state="received",
+                occurred_at=datetime(2026, 7, 18, 12, sequence, tzinfo=timezone.utc),
+            )
+            store.append_evidence_event(
+                event.model_dump(mode="json"),
+                retention_class="operationalTemporary",
+                expires_at_iso="2026-08-18T12:00:00+00:00",
+            )
+
+        summary = store.summarize_operation_metrics(
+            expected_routes={"POST /context/build"},
+            now_iso="2026-07-18T12:30:00+00:00",
+            event_limit=2,
+        )
+
+        self.assertEqual(summary["eventCount"], 2)
+        self.assertEqual(summary["failedOperationCount"], 1)
+        self.assertEqual(summary["successfulOperationCount"], 1)
 
     def test_postgres_store_persists_and_rotates_opaque_auth_sessions(self):
         connection = FakeConnection()

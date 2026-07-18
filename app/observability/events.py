@@ -12,6 +12,7 @@ from pydantic import (
     StringConstraints,
     TypeAdapter,
     field_validator,
+    model_validator,
 )
 
 
@@ -93,6 +94,51 @@ class OperationEvidenceEvent(EvidenceEventBase):
     decision: Optional[MachineCode] = None
 
 
+OperationMetricOutcome = Literal[
+    "succeeded",
+    "failed",
+    "timedOut",
+    "cancelled",
+    "deduplicated",
+    "unknown",
+    "feedbackMissing",
+]
+OperationMetricFeedbackState = Literal["received", "missing", "notApplicable"]
+
+
+_OPERATION_METRIC_OUTCOME_STATES: dict[str, EvidenceState] = {
+    "succeeded": "succeeded",
+    "failed": "failed",
+    "timedOut": "unknown",
+    "cancelled": "cancelled",
+    "deduplicated": "succeeded",
+    "unknown": "unknown",
+    "feedbackMissing": "unknown",
+}
+
+
+class OperationMetricEvidenceEvent(EvidenceEventBase):
+    """One value-free attempt sample used to derive request/operation metrics."""
+
+    type: Literal["operationMetric"] = "operationMetric"
+    metricVersion: Literal[1] = 1
+    requestIdHash: Digest
+    attemptIdHash: Digest
+    operation: MachineCode
+    route: RouteCode
+    outcome: OperationMetricOutcome
+    feedbackState: OperationMetricFeedbackState
+    latencyMs: Optional[int] = Field(default=None, ge=0, le=86_400_000)
+    httpStatus: Optional[int] = Field(default=None, ge=100, le=599)
+
+    @model_validator(mode="after")
+    def require_outcome_state_alignment(self) -> "OperationMetricEvidenceEvent":
+        expected_state = _OPERATION_METRIC_OUTCOME_STATES[self.outcome]
+        if self.state != expected_state:
+            raise ValueError("operation metric state does not match outcome")
+        return self
+
+
 class RightsEvidenceEvent(EvidenceEventBase):
     type: Literal["rights"] = "rights"
     right: MachineCode
@@ -123,6 +169,7 @@ class ProviderCostEvidenceEvent(EvidenceEventBase):
 EvidenceEvent = Annotated[
     Union[
         OperationEvidenceEvent,
+        OperationMetricEvidenceEvent,
         RightsEvidenceEvent,
         IncidentEvidenceEvent,
         ProviderCostEvidenceEvent,

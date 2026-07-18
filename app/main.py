@@ -1,11 +1,14 @@
+import asyncio
 import hashlib
 import json
 import logging
 import re
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Any, Dict, Optional, Tuple
+from uuid import UUID
 
 from pydantic import ValidationError
 
@@ -123,6 +126,10 @@ from app.services.route_authentication import (
     validate_route_authentication_startup,
 )
 from app.services.readiness import ReadinessService, liveness_payload
+from app.observability.operation_metrics import (
+    OperationMetricRecorder,
+    summarize_operation_metrics_for_observations,
+)
 from app.services.release_policy import (
     ReleasePolicyCommandGate,
     ReleasePolicyDecisionRecorder,
@@ -258,6 +265,37 @@ RELEASE_POLICY_DECISION_RECORDER = ReleasePolicyDecisionRecorder(
         else None
     ),
     retention_days=settings.evidence_rollout_retention_days,
+)
+_operation_metric_event_sink = getattr(store, "append_evidence_event", None)
+_operation_metric_summary = getattr(store, "summarize_operation_metrics", None)
+
+
+def _operation_metric_expected_routes() -> set[str]:
+    return {
+        f"{rule.method} {rule.path_template}"
+        for rule in ROUTE_AUTHENTICATION_POLICY.registry.rules
+    }
+
+
+OPERATION_METRIC_RECORDER = OperationMetricRecorder(
+    environment=settings.environment,
+    build=f"backend-{app.version}",
+    event_sink=(
+        _operation_metric_event_sink
+        if callable(_operation_metric_event_sink)
+        else None
+    ),
+    event_summary_source=(
+        (
+            lambda: _operation_metric_summary(
+                expected_routes=_operation_metric_expected_routes(),
+            )
+        )
+        if callable(_operation_metric_summary)
+        else None
+    ),
+    retention_days=settings.evidence_rollout_retention_days,
+    identifier_hmac_key=settings.operations_evidence_hmac_key,
 )
 ARCHIVE_MEDIA_UPLOAD_PROVIDER = "mockObjectStorage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_DISPLAY_NAME = "Mock Object Storage"
@@ -913,6 +951,73 @@ def _set_no_store_headers(response: Any) -> Any:
     return response
 
 
+def _operation_metric_attempt(request: Request) -> int:
+    raw = str(request.headers.get("x-dreamjourney-operation-attempt") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 1
+    return value if 1 <= value <= 1000 else 1
+
+
+def _operation_metric_feedback_state(request: Request) -> str:
+    value = str(request.headers.get("x-dreamjourney-feedback-state") or "").strip()
+    return value if value in {"received", "missing", "notApplicable"} else "notApplicable"
+
+
+def _operation_metric_client_identifier(value: Optional[str]) -> Optional[str]:
+    """Accept only opaque UUIDv4 values from callers; never hash arbitrary PII."""
+
+    try:
+        identifier = UUID(str(value or "").strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return identifier.hex if identifier.version == 4 else None
+
+
+def _operation_metric_outcome_for_status(
+    status_code: int,
+    feedback_state: str,
+) -> str:
+    if status_code == 499:
+        return "cancelled"
+    if status_code in {408, 504}:
+        return "timedOut"
+    if 200 <= status_code < 400:
+        if feedback_state == "missing":
+            return "feedbackMissing"
+        return "succeeded"
+    return "failed"
+
+
+def _record_operation_metric_attempt(
+    *,
+    route: str,
+    operation: str,
+    request_key: str,
+    operation_key: str,
+    attempt: int,
+    feedback_state: str,
+    elapsed_ms: int,
+    outcome: str,
+    http_status: Optional[int],
+    correlation_key: Optional[str],
+) -> None:
+    # Metrics are shadow-only. The recorder contains its own sink failure guard.
+    OPERATION_METRIC_RECORDER.record_attempt(
+        request_key=request_key,
+        operation_key=operation_key,
+        attempt=attempt,
+        route=route,
+        operation=operation,
+        outcome=outcome,
+        feedback_state=feedback_state,
+        latency_ms=max(0, elapsed_ms),
+        http_status=http_status,
+        correlation_key=correlation_key,
+    )
+
+
 def _recovery_access_denied_response(request: Request) -> Optional[JSONResponse]:
     decision = RECOVERY_ACCESS_POLICY.evaluate(
         method=str(getattr(request, "method", "GET")),
@@ -1272,6 +1377,74 @@ async def serve_head_as_read_only_get(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def shadow_operation_metric_attempt(request: Request, call_next):
+    method = "GET" if request.method.upper() == "HEAD" else request.method.upper()
+    route_match = ROUTE_AUTHENTICATION_POLICY.registry.match(method, request.url.path)
+    if route_match is None:
+        return await call_next(request)
+
+    route = f"{route_match.rule.method} {route_match.rule.path_template}"
+    operation = route_match.rule.policy_id
+    request_key = _operation_metric_client_identifier(
+        request.headers.get("x-dreamjourney-request-id")
+    ) or secrets.token_hex(16)
+    operation_key = _operation_metric_client_identifier(
+        request.headers.get("x-dreamjourney-operation-id")
+    ) or request_key
+    attempt = _operation_metric_attempt(request)
+    feedback_state = _operation_metric_feedback_state(request)
+    started_at = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+    except asyncio.CancelledError:
+        _record_operation_metric_attempt(
+            route=route,
+            operation=operation,
+            request_key=request_key,
+            operation_key=operation_key,
+            attempt=attempt,
+            feedback_state=feedback_state,
+            elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+            outcome="cancelled",
+            http_status=None,
+            correlation_key=None,
+        )
+        raise
+    except Exception:
+        _record_operation_metric_attempt(
+            route=route,
+            operation=operation,
+            request_key=request_key,
+            operation_key=operation_key,
+            attempt=attempt,
+            feedback_state=feedback_state,
+            elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+            outcome="failed",
+            http_status=500,
+            correlation_key=None,
+        )
+        raise
+
+    _record_operation_metric_attempt(
+        route=route,
+        operation=operation,
+        request_key=request_key,
+        operation_key=operation_key,
+        attempt=attempt,
+        feedback_state=feedback_state,
+        elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+        outcome=_operation_metric_outcome_for_status(
+            int(response.status_code),
+            feedback_state,
+        ),
+        http_status=int(response.status_code),
+        correlation_key=str(response.headers.get("X-DreamJourney-Correlation-Id") or "") or None,
+    )
+    return response
+
+
 @app.on_event("startup")
 def startup() -> None:
     validate_route_authentication_startup(
@@ -1351,6 +1524,9 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
     if not isinstance(principal, RequestPrincipal) or principal.kind != PrincipalKind.MACHINE:
         raise HTTPException(status_code=403, detail="machine principal required")
     summary = RELEASE_POLICY_DECISION_RECORDER.summary()
+    summary["operationMetrics"] = summarize_operation_metrics_for_observations(
+        OPERATION_METRIC_RECORDER.summary()
+    )
     summary["routeAuthentication"] = ROUTE_AUTHENTICATION_DECISION_RECORDER.summary()
     summary["clientCompatibility"] = (
         CLIENT_COMPATIBILITY_DECISION_RECORDER.summary(

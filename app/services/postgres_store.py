@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from math import ceil
 import secrets
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 import uuid
 
 from psycopg.types.json import Jsonb
@@ -22,6 +22,7 @@ from app.observability.events import (
     normalize_machine_code,
     normalize_retention_class,
 )
+from app.observability.operation_metrics import summarize_operation_metrics
 from app.services.user_identity import stable_user_id
 from app.services.knowledge_store import (
     KB_OPERATION_ARCHIVE_DELETE,
@@ -292,6 +293,31 @@ class PostgresStore:
             else None,
             "events": events,
         }
+
+    def summarize_operation_metrics(
+        self,
+        *,
+        expected_routes: Iterable[str] = (),
+        now_iso: Optional[str] = None,
+        event_limit: int = 5_000,
+    ) -> Dict[str, Any]:
+        now = self._parse_iso_datetime(now_iso or self._now()).astimezone(timezone.utc).isoformat()
+        bounded_limit = max(1, min(event_limit, 5_000))
+        rows = self._fetchall(
+            """
+            SELECT payload
+            FROM evidence_events
+            WHERE event_type = 'operationMetric'
+              AND (legal_hold = TRUE OR expires_at IS NULL OR expires_at > %s)
+            ORDER BY occurred_at DESC, event_id DESC
+            LIMIT %s
+            """,
+            (now, bounded_limit),
+        )
+        return summarize_operation_metrics(
+            [deepcopy(row["payload"]) for row in reversed(rows)],
+            expected_routes=expected_routes,
+        )
 
     def expire_evidence_events(self, cutoff_iso: str) -> Dict[str, Any]:
         cutoff = normalize_evidence_timestamp(cutoff_iso)
