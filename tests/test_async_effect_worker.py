@@ -97,6 +97,23 @@ class AsyncEffectWorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["reason"], "asyncEffectSchemaNotReady")
 
+    def test_run_once_accepts_the_postgres_readiness_probe_contract(self):
+        store = _Store()
+        store.readiness_probe = lambda: {
+            "databaseReason": "readWriteProbeSucceeded",
+            "schemaReason": "migrationHeadVerified",
+        }
+        worker = AsyncEffectWorkerRuntime(
+            settings=Settings(async_effect_v1_enabled=True, async_effect_worker_enabled=True),
+            store=store,
+            worker_id="worker-test",
+        )
+
+        result = worker.run_once()
+
+        self.assertEqual(result["status"], "idle")
+        self.assertEqual(result["reason"], "asyncEffectNoRunnableHandlers")
+
 
 if __name__ == "__main__":
     unittest.main()

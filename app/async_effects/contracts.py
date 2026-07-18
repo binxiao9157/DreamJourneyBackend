@@ -68,6 +68,25 @@ class AsyncEffectBusinessOutcome(str, Enum):
     UNKNOWN = "unknown"
 
 
+def is_async_effect_store_ready(payload: object) -> bool:
+    """Accept the supported in-memory and Postgres readiness probe contracts.
+
+    Postgres probes deliberately return evidence reasons instead of an HTTP-style
+    status field. An explicit status always takes precedence so a partially
+    populated or degraded payload cannot accidentally enable a worker.
+    """
+
+    if not isinstance(payload, Mapping):
+        return False
+    status = payload.get("status")
+    if status is not None:
+        return status == "ready"
+    return (
+        payload.get("databaseReason") == "readWriteProbeSucceeded"
+        and payload.get("schemaReason") == "migrationHeadVerified"
+    )
+
+
 def _require_nonblank(value: object, *, field: str) -> str:
     normalized = str(value or "").strip()
     if not normalized:

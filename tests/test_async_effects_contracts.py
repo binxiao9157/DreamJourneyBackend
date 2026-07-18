@@ -5,6 +5,7 @@ from app.async_effects.contracts import (
     AsyncEffectContractError,
     AsyncEffectIntent,
     AsyncEffectTarget,
+    is_async_effect_store_ready,
     resolve_async_effect_runtime_status,
 )
 
@@ -106,6 +107,29 @@ class AsyncEffectContractsTests(unittest.TestCase):
         self.assertEqual(schema_missing.reason, "asyncEffectSchemaNotReady")
         self.assertFalse(worker_disabled.allowed)
         self.assertEqual(worker_disabled.reason, "asyncEffectWorkerDisabled")
+
+    def test_store_readiness_accepts_only_complete_supported_probe_contracts(self):
+        self.assertTrue(is_async_effect_store_ready({"status": "ready"}))
+        self.assertTrue(
+            is_async_effect_store_ready(
+                {
+                    "databaseReason": "readWriteProbeSucceeded",
+                    "schemaReason": "migrationHeadVerified",
+                }
+            )
+        )
+        self.assertFalse(
+            is_async_effect_store_ready(
+                {
+                    "status": "notReady",
+                    "databaseReason": "readWriteProbeSucceeded",
+                    "schemaReason": "migrationHeadVerified",
+                }
+            )
+        )
+        self.assertFalse(
+            is_async_effect_store_ready({"databaseReason": "readWriteProbeSucceeded"})
+        )
 
 
 if __name__ == "__main__":

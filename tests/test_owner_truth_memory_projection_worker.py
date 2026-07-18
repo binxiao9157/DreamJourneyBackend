@@ -164,6 +164,17 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
         )
         self.assertNotIn("content", json.dumps(result, sort_keys=True).lower())
 
+    def test_postgres_readiness_contract_allows_a_current_rebuild(self):
+        self.store.readiness_probe = lambda: {
+            "databaseReason": "readWriteProbeSucceeded",
+            "schemaReason": "migrationHeadVerified",
+        }
+
+        result = self.worker().run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["reason"], "memoryProjectionRebuilt")
+
     def test_stale_authority_blocks_without_rebuilding_a_projection(self):
         self.store.admission_repository.seed_vault(
             vault_id=self.vault_id,

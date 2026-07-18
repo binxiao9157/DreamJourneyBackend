@@ -18,7 +18,11 @@ from typing import Any, Mapping, Optional
 from app.async_effects.consumer_repository import (
     OwnerTruthMemoryProjectionRebuildConsumerCommand,
 )
-from app.async_effects.contracts import AsyncEffectIntent, resolve_async_effect_runtime_status
+from app.async_effects.contracts import (
+    AsyncEffectIntent,
+    is_async_effect_store_ready,
+    resolve_async_effect_runtime_status,
+)
 from app.async_effects.lease_repository import (
     AsyncEffectJobLease,
     AsyncEffectLeaseCancelled,
@@ -241,8 +245,7 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
         probe = getattr(self._store, "readiness_probe", None)
         if not callable(probe):
             return False
-        payload = probe()
-        return isinstance(payload, Mapping) and payload.get("status") == "ready"
+        return is_async_effect_store_ready(probe())
 
     def _supports_worker_store(self) -> bool:
         required = (

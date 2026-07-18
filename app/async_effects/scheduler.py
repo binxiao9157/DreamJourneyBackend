@@ -9,9 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 import socket
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
-from app.async_effects.contracts import resolve_async_effect_runtime_status
+from app.async_effects.contracts import (
+    is_async_effect_store_ready,
+    resolve_async_effect_runtime_status,
+)
 from app.core.config import Settings
 from app.services.store_factory import close_store, make_store, open_store
 
@@ -82,8 +85,7 @@ class AsyncEffectSchedulerRuntime:
         probe = getattr(self._store, "readiness_probe", None)
         if not callable(probe):
             return False
-        payload = probe()
-        return isinstance(payload, Mapping) and payload.get("status") == "ready"
+        return is_async_effect_store_ready(probe())
 
 
 def _parser() -> argparse.ArgumentParser:
