@@ -132,6 +132,28 @@ def _aggregate_status(executions: Tuple["DataRightsExecution", ...]) -> str:
     return "partial"
 
 
+def aggregate_data_rights_status(outcomes: Any) -> str:
+    """Aggregate persisted module outcomes without exposing a boolean result."""
+
+    if not isinstance(outcomes, (list, tuple, set, frozenset)):
+        raise DataRightsValidationError("outcomes must be a collection")
+    normalized = tuple(_required_text(outcome, field="outcome") for outcome in outcomes)
+    if any(outcome not in EXECUTION_OUTCOMES for outcome in normalized):
+        raise DataRightsValidationError("outcome is unsupported")
+    return _aggregate_status(
+        tuple(
+            DataRightsExecution(
+                module="persisted",
+                execution_id_hash="persisted",
+                outcome=outcome,
+                evidence_id_hash=None,
+                updated_at="1970-01-01T00:00:00+00:00",
+            )
+            for outcome in normalized
+        )
+    )
+
+
 @dataclass(frozen=True)
 class DataRightsExecution:
     """Current result for one module in a request."""
@@ -348,4 +370,5 @@ __all__ = [
     "DataRightsRequestNotFound",
     "DataRightsRequestResult",
     "DataRightsValidationError",
+    "aggregate_data_rights_status",
 ]

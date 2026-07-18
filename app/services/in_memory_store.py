@@ -20,6 +20,13 @@ from app.services.knowledge_store import (
     rebuild_compact_knowledge_operation_result,
     verify_knowledge_operation_receipt,
 )
+from app.services.data_rights_contract import (
+    DataRightsCommandConflict,
+    DataRightsExecutionConflict,
+    DataRightsRequest,
+    EXECUTION_OUTCOMES,
+    aggregate_data_rights_status,
+)
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -76,6 +83,11 @@ class InMemoryStore:
         self._identity_proofs: Dict[str, Dict[str, Any]] = {}
         self._identity_lock = RLock()
         self._evidence_events: Dict[str, Dict[str, Any]] = {}
+        self._rights_requests: Dict[str, Dict[str, Any]] = {}
+        self._rights_request_ids_by_command: Dict[Tuple[str, str], str] = {}
+        self._rights_executions: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        self._rights_receipts: Dict[str, Dict[str, Any]] = {}
+        self._rights_lock = RLock()
 
     @contextmanager
     def auth_user_operation(self, user_id: str):
@@ -940,6 +952,175 @@ class InMemoryStore:
     def get_digital_human_session_lease(self, session_id: str) -> Optional[Dict[str, Any]]:
         lease = self._digital_human_sessions.get(session_id)
         return None if lease is None else deepcopy(lease)
+
+    def create_rights_request(self, request: DataRightsRequest) -> Dict[str, Any]:
+        if not isinstance(request, DataRightsRequest):
+            raise TypeError("rights request contract is required")
+        record = {
+            "id": request.request_id,
+            "subjectHash": request.subject_hash,
+            "commandIdHash": request.command_id_hash,
+            "payloadHash": request.payload_hash,
+            "identityProofHash": request.identity_proof_hash,
+            "action": request.action,
+            "scopeHash": request.scope_hash,
+            "status": request.status,
+            "contractVersion": 1,
+            "createdAt": request.created_at,
+            "updatedAt": request.updated_at,
+        }
+        key = (request.subject_hash, request.command_id_hash)
+        with self._rights_lock:
+            existing_id = self._rights_request_ids_by_command.get(key)
+            if existing_id is not None:
+                existing = self._rights_requests[existing_id]
+                if existing["payloadHash"] != request.payload_hash:
+                    raise DataRightsCommandConflict(
+                        "commandId cannot be reused with a different payload"
+                    )
+                return {"outcome": "deduplicated", "request": deepcopy(existing)}
+            if request.request_id in self._rights_requests:
+                existing = self._rights_requests[request.request_id]
+                if existing != record:
+                    raise DataRightsCommandConflict("request id is already bound")
+                return {"outcome": "deduplicated", "request": deepcopy(existing)}
+            self._rights_requests[request.request_id] = record
+            self._rights_request_ids_by_command[key] = request.request_id
+            return {"outcome": "created", "request": deepcopy(record)}
+
+    def get_rights_request(self, request_id: str) -> Optional[Dict[str, Any]]:
+        with self._rights_lock:
+            request = self._rights_requests.get(str(request_id or ""))
+            return None if request is None else deepcopy(request)
+
+    def record_rights_execution(
+        self,
+        request_id: str,
+        *,
+        module_id: str,
+        resource_type: str,
+        execution_id_hash: str,
+        outcome: str,
+        evidence_id_hash: Optional[str] = None,
+        updated_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_outcome = str(outcome or "")
+        if normalized_outcome not in EXECUTION_OUTCOMES:
+            raise ValueError("outcome is unsupported")
+        normalized_module = str(module_id or "").strip()
+        normalized_resource = str(resource_type or "").strip()
+        if not normalized_module or not normalized_resource:
+            raise ValueError("module_id and resource_type are required")
+        timestamp = updated_at or self._now()
+        key = (str(request_id), normalized_module, normalized_resource)
+        with self._rights_lock:
+            request = self._rights_requests.get(str(request_id))
+            if request is None:
+                raise KeyError("rights request not found")
+            existing = self._rights_executions.get(key)
+            if existing is not None and existing["executionIdHash"] == execution_id_hash:
+                if any(
+                    existing.get(field) != value
+                    for field, value in (
+                        ("outcome", normalized_outcome),
+                        ("evidenceIdHash", evidence_id_hash),
+                    )
+                ):
+                    raise DataRightsExecutionConflict(
+                        "execution id cannot be reused with different execution data"
+                    )
+                return {
+                    "outcome": "deduplicated",
+                    "request": deepcopy(request),
+                    "execution": deepcopy(existing),
+                }
+            attempt = int(existing.get("attempt") or 0) + 1 if existing else 1
+            execution = {
+                "id": f"rx_{request_id}_{normalized_module}_{attempt}",
+                "requestId": str(request_id),
+                "moduleId": normalized_module,
+                "resourceType": normalized_resource,
+                "executionIdHash": execution_id_hash,
+                "outcome": normalized_outcome,
+                "attempt": attempt,
+                "evidenceIdHash": evidence_id_hash,
+                "updatedAt": timestamp,
+            }
+            self._rights_executions[key] = execution
+            outcomes = [
+                item["outcome"]
+                for item in self._rights_executions.values()
+                if item["requestId"] == str(request_id)
+            ]
+            request["status"] = aggregate_data_rights_status(outcomes)
+            request["updatedAt"] = timestamp
+            return {
+                "outcome": "updated" if existing else "recorded",
+                "request": deepcopy(request),
+                "execution": deepcopy(execution),
+            }
+
+    def append_resource_deletion_receipt(
+        self,
+        *,
+        receipt_id: str,
+        request_id: str,
+        execution_id_hash: str,
+        module_id: str,
+        resource_scope_hash: str,
+        outcome: str,
+        receipt_hash: str,
+        evidence_event_id_hash: Optional[str] = None,
+        created_at: Optional[str] = None,
+        retention_until: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if str(outcome or "") not in {"completed", "partial", "unsupported", "failed"}:
+            raise ValueError("receipt outcome is unsupported")
+        record = {
+            "id": str(receipt_id),
+            "requestId": str(request_id),
+            "executionIdHash": str(execution_id_hash),
+            "moduleId": str(module_id),
+            "resourceScopeHash": str(resource_scope_hash),
+            "outcome": str(outcome),
+            "receiptHash": str(receipt_hash),
+            "evidenceEventIdHash": evidence_event_id_hash,
+            "createdAt": created_at or self._now(),
+            "retentionUntil": retention_until,
+        }
+        with self._rights_lock:
+            if str(request_id) not in self._rights_requests:
+                raise KeyError("rights request not found")
+            existing = self._rights_receipts.get(str(receipt_id))
+            if existing is not None:
+                if existing != record:
+                    raise ValueError("resource deletion receipt is append-only")
+                return {"outcome": "deduplicated", "receipt": deepcopy(existing)}
+            self._rights_receipts[str(receipt_id)] = record
+            return {"outcome": "appended", "receipt": deepcopy(record)}
+
+    def summarize_rights_request(self, request_id: str) -> Optional[Dict[str, Any]]:
+        with self._rights_lock:
+            request = self._rights_requests.get(str(request_id or ""))
+            if request is None:
+                return None
+            executions = [
+                deepcopy(item)
+                for item in self._rights_executions.values()
+                if item["requestId"] == str(request_id)
+            ]
+            executions.sort(key=lambda item: (item["moduleId"], item["resourceType"]))
+            receipts = [
+                deepcopy(item)
+                for item in self._rights_receipts.values()
+                if item["requestId"] == str(request_id)
+            ]
+            receipts.sort(key=lambda item: (item["createdAt"], item["id"]))
+            return {
+                "request": deepcopy(request),
+                "executions": executions,
+                "receipts": receipts,
+            }
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)

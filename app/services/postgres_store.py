@@ -45,6 +45,13 @@ from app.services.knowledge_privacy_maintenance import (
 from app.services.knowledge_receipt_maintenance import (
     compact_persisted_knowledge_receipt_result,
 )
+from app.services.data_rights_contract import (
+    DataRightsCommandConflict,
+    DataRightsExecutionConflict,
+    DataRightsRequest,
+    EXECUTION_OUTCOMES,
+    aggregate_data_rights_status,
+)
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -1390,6 +1397,351 @@ class PostgresStore:
             "bindingId": binding_id,
             "proofReceiptId": proof_id,
             "verifiedAt": attempted_at_iso,
+        }
+
+    @staticmethod
+    def _rights_request_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": str(row.get("id") or ""),
+            "subjectHash": str(row.get("subject_id") or ""),
+            "commandIdHash": str(row.get("command_id") or ""),
+            "payloadHash": str(row.get("command_hash") or ""),
+            "identityProofHash": str(row.get("identity_proof_id") or ""),
+            "action": str(row.get("action") or ""),
+            "scopeHash": str(row.get("scope_hash") or ""),
+            "status": str(row.get("status") or ""),
+            "contractVersion": int(row.get("contract_version") or 1),
+            "createdAt": PostgresStore._iso_value(row.get("created_at")),
+            "updatedAt": PostgresStore._iso_value(row.get("updated_at")),
+        }
+
+    @staticmethod
+    def _rights_execution_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": str(row.get("id") or ""),
+            "requestId": str(row.get("request_id") or ""),
+            "moduleId": str(row.get("module_id") or ""),
+            "resourceType": str(row.get("resource_type") or ""),
+            "executionIdHash": str(row.get("id") or ""),
+            "outcome": str(row.get("outcome") or ""),
+            "attempt": int(row.get("attempt") or 1),
+            "evidenceIdHash": row.get("evidence_event_id_hash"),
+            "updatedAt": PostgresStore._iso_value(row.get("finished_at") or row.get("started_at")),
+        }
+
+    @staticmethod
+    def _rights_receipt_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": str(row.get("id") or ""),
+            "requestId": str(row.get("request_id") or ""),
+            "executionIdHash": str(row.get("execution_id") or ""),
+            "moduleId": str(row.get("module_id") or ""),
+            "resourceScopeHash": str(row.get("resource_scope_hash") or ""),
+            "outcome": str(row.get("outcome") or ""),
+            "receiptHash": str(row.get("receipt_hash") or ""),
+            "evidenceEventIdHash": row.get("evidence_event_id_hash"),
+            "createdAt": PostgresStore._iso_value(row.get("created_at")),
+            "retentionUntil": (
+                None
+                if row.get("retention_until") is None
+                else PostgresStore._iso_value(row.get("retention_until"))
+            ),
+        }
+
+    def create_rights_request(self, request: DataRightsRequest) -> Dict[str, Any]:
+        if not isinstance(request, DataRightsRequest):
+            raise TypeError("rights request contract is required")
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"rights-request-{request.request_id}",
+                command_id=request.command_id_hash,
+            ):
+                return self.create_rights_request(request)
+        row = self._fetchone(
+            """
+            INSERT INTO rights_requests (
+                id, subject_id, action, scope, scope_hash, command_id,
+                command_hash, identity_proof_id, status, contract_version,
+                created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (subject_id, command_id) DO NOTHING
+            RETURNING id, subject_id, action, scope_hash, command_id,
+                command_hash, identity_proof_id, status, contract_version,
+                created_at, updated_at
+            """,
+            (
+                request.request_id,
+                request.subject_hash,
+                request.action,
+                {"scopeHash": request.scope_hash},
+                request.scope_hash,
+                request.command_id_hash,
+                request.payload_hash,
+                request.identity_proof_hash,
+                request.status,
+                1,
+                request.created_at,
+                request.updated_at,
+            ),
+        )
+        outcome = "created"
+        if row is None:
+            row = self._fetchone(
+                """
+                SELECT id, subject_id, action, scope_hash, command_id,
+                    command_hash, identity_proof_id, status, contract_version,
+                    created_at, updated_at
+                FROM rights_requests
+                WHERE subject_id = %s AND command_id = %s
+                FOR UPDATE
+                """,
+                (request.subject_hash, request.command_id_hash),
+            )
+            outcome = "deduplicated"
+        if row is None:
+            raise RuntimeError("rights request insert did not produce a row")
+        if str(row.get("command_hash") or "") != request.payload_hash:
+            raise DataRightsCommandConflict(
+                "commandId cannot be reused with a different payload"
+            )
+        return {"outcome": outcome, "request": self._rights_request_payload(row)}
+
+    def get_rights_request(self, request_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT id, subject_id, action, scope_hash, command_id,
+                command_hash, identity_proof_id, status, contract_version,
+                created_at, updated_at
+            FROM rights_requests
+            WHERE id = %s
+            """,
+            (str(request_id),),
+        )
+        return None if row is None else self._rights_request_payload(row)
+
+    def record_rights_execution(
+        self,
+        request_id: str,
+        *,
+        module_id: str,
+        resource_type: str,
+        execution_id_hash: str,
+        outcome: str,
+        evidence_id_hash: Optional[str] = None,
+        updated_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_outcome = str(outcome or "")
+        if normalized_outcome not in EXECUTION_OUTCOMES:
+            raise ValueError("outcome is unsupported")
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"rights-execution-{request_id}",
+                command_id=str(execution_id_hash),
+            ):
+                return self.record_rights_execution(
+                    request_id,
+                    module_id=module_id,
+                    resource_type=resource_type,
+                    execution_id_hash=execution_id_hash,
+                    outcome=normalized_outcome,
+                    evidence_id_hash=evidence_id_hash,
+                    updated_at=updated_at,
+                )
+        request = self.get_rights_request(request_id)
+        if request is None:
+            raise KeyError("rights request not found")
+        current = self._fetchone(
+            """
+            SELECT id, request_id, module_id, resource_type, outcome, attempt,
+                error_code, started_at, finished_at, evidence_event_id_hash
+            FROM rights_executions
+            WHERE request_id = %s AND module_id = %s AND resource_type = %s
+            ORDER BY attempt DESC
+            LIMIT 1
+            FOR UPDATE
+            """,
+            (str(request_id), str(module_id), str(resource_type)),
+        )
+        if current is not None and str(current.get("id") or "") == str(execution_id_hash):
+            if str(current.get("outcome") or "") != normalized_outcome or current.get("evidence_event_id_hash") != evidence_id_hash:
+                raise DataRightsExecutionConflict(
+                    "execution id cannot be reused with different execution data"
+                )
+            return {
+                "outcome": "deduplicated",
+                "request": request,
+                "execution": self._rights_execution_payload(current),
+            }
+        attempt = int(current.get("attempt") or 0) + 1 if current is not None else 1
+        timestamp = updated_at or self._now()
+        row = self._fetchone(
+            """
+            INSERT INTO rights_executions (
+                id, request_id, module_id, resource_type, outcome, attempt,
+                error_code, evidence_event_id_hash, started_at, finished_at,
+                receipt_id
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, %s, %s, NULL)
+            RETURNING id, request_id, module_id, resource_type, outcome, attempt,
+                started_at, finished_at, evidence_event_id_hash
+            """,
+            (
+                str(execution_id_hash),
+                str(request_id),
+                str(module_id),
+                str(resource_type),
+                normalized_outcome,
+                attempt,
+                evidence_id_hash,
+                timestamp,
+                timestamp,
+            ),
+        )
+        if row is None:
+            raise RuntimeError("rights execution insert did not produce a row")
+        latest = self._fetchall(
+            """
+            SELECT DISTINCT ON (module_id, resource_type) outcome
+            FROM rights_executions
+            WHERE request_id = %s
+            ORDER BY module_id, resource_type, attempt DESC
+            """,
+            (str(request_id),),
+        )
+        request_status = aggregate_data_rights_status(
+            [str(item.get("outcome") or "") for item in latest]
+        )
+        updated_request = self._fetchone(
+            """
+            UPDATE rights_requests
+            SET status = %s, updated_at = %s
+            WHERE id = %s
+            RETURNING id, subject_id, action, scope_hash, command_id,
+                command_hash, identity_proof_id, status, contract_version,
+                created_at, updated_at
+            """,
+            (request_status, timestamp, str(request_id)),
+        )
+        if updated_request is None:
+            raise RuntimeError("rights request status update did not produce a row")
+        return {
+            "outcome": "updated" if current is not None else "recorded",
+            "request": self._rights_request_payload(updated_request),
+            "execution": self._rights_execution_payload(row),
+        }
+
+    def append_resource_deletion_receipt(
+        self,
+        *,
+        receipt_id: str,
+        request_id: str,
+        execution_id_hash: str,
+        module_id: str,
+        resource_scope_hash: str,
+        outcome: str,
+        receipt_hash: str,
+        evidence_event_id_hash: Optional[str] = None,
+        created_at: Optional[str] = None,
+        retention_until: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if str(outcome or "") not in {"completed", "partial", "unsupported", "failed"}:
+            raise ValueError("receipt outcome is unsupported")
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"rights-receipt-{receipt_id}",
+                command_id=str(receipt_id),
+            ):
+                return self.append_resource_deletion_receipt(
+                    receipt_id=receipt_id,
+                    request_id=request_id,
+                    execution_id_hash=execution_id_hash,
+                    module_id=module_id,
+                    resource_scope_hash=resource_scope_hash,
+                    outcome=outcome,
+                    receipt_hash=receipt_hash,
+                    evidence_event_id_hash=evidence_event_id_hash,
+                    created_at=created_at,
+                    retention_until=retention_until,
+                )
+        if self.get_rights_request(request_id) is None:
+            raise KeyError("rights request not found")
+        timestamp = created_at or self._now()
+        row = self._fetchone(
+            """
+            INSERT INTO resource_deletion_receipts (
+                id, request_id, execution_id, module_id, resource_scope_hash,
+                outcome, evidence_event_id_hash, receipt_hash, created_at,
+                retention_until
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id, request_id, execution_id, module_id, resource_scope_hash,
+                outcome, evidence_event_id_hash, receipt_hash, created_at,
+                retention_until
+            """,
+            (
+                str(receipt_id),
+                str(request_id),
+                str(execution_id_hash),
+                str(module_id),
+                str(resource_scope_hash),
+                str(outcome),
+                evidence_event_id_hash,
+                str(receipt_hash),
+                timestamp,
+                retention_until,
+            ),
+        )
+        result = "appended"
+        if row is None:
+            row = self._fetchone(
+                """
+                SELECT id, request_id, execution_id, module_id, resource_scope_hash,
+                    outcome, evidence_event_id_hash, receipt_hash, created_at,
+                    retention_until
+                FROM resource_deletion_receipts
+                WHERE id = %s
+                """,
+                (str(receipt_id),),
+            )
+            result = "deduplicated"
+        if row is None:
+            raise RuntimeError("resource deletion receipt insert did not produce a row")
+        existing = self._rights_receipt_payload(row)
+        if existing["receiptHash"] != str(receipt_hash) or existing["requestId"] != str(request_id):
+            raise ValueError("resource deletion receipt is append-only")
+        return {"outcome": result, "receipt": existing}
+
+    def summarize_rights_request(self, request_id: str) -> Optional[Dict[str, Any]]:
+        request = self.get_rights_request(request_id)
+        if request is None:
+            return None
+        executions = self._fetchall(
+            """
+            SELECT id, request_id, module_id, resource_type, outcome, attempt,
+                started_at, finished_at, evidence_event_id_hash
+            FROM rights_executions
+            WHERE request_id = %s
+            ORDER BY module_id, resource_type, attempt DESC
+            """,
+            (str(request_id),),
+        )
+        receipts = self._fetchall(
+            """
+            SELECT id, request_id, execution_id, module_id, resource_scope_hash,
+                outcome, evidence_event_id_hash, receipt_hash, created_at,
+                retention_until
+            FROM resource_deletion_receipts
+            WHERE request_id = %s
+            ORDER BY created_at ASC, id ASC
+            """,
+            (str(request_id),),
+        )
+        return {
+            "request": request,
+            "executions": [self._rights_execution_payload(row) for row in executions],
+            "receipts": [self._rights_receipt_payload(row) for row in receipts],
         }
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:

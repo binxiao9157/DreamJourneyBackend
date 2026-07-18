@@ -42,6 +42,7 @@ CREATE TABLE rights_executions (
     ),
     attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),
     error_code TEXT,
+    evidence_event_id_hash TEXT,
     started_at TIMESTAMPTZ NOT NULL,
     finished_at TIMESTAMPTZ,
     receipt_id TEXT,

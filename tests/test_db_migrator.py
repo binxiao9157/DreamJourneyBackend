@@ -437,6 +437,7 @@ class PostgresMigratorTests(unittest.TestCase):
         self.assertIn("CREATE TABLE rights_requests", migration.sql)
         self.assertIn("CREATE TABLE rights_executions", migration.sql)
         self.assertIn("CREATE TABLE resource_deletion_receipts", migration.sql)
+        self.assertIn("evidence_event_id_hash TEXT", migration.sql)
         self.assertIn("UNIQUE (subject_id, command_id)", migration.sql)
         self.assertIn("resource_deletion_receipts are append-only", migration.sql)
 
