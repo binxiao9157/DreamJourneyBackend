@@ -24,6 +24,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.async_effects.contracts import AsyncEffectConflict, AsyncEffectIntent, AsyncEffectTarget
+from app.async_effects.consumer_repository import AsyncEffectSyntheticConsumerCommand
 from app.async_effects.lease_repository import AsyncEffectLeaseCancelled, AsyncEffectLeaseLost
 from app.async_effects.scheduler_repository import AsyncEffectSchedulerLeaseLost
 from app.core.config import settings
@@ -137,6 +138,20 @@ def job_attempt_states(dsn: str, *, job_id: str) -> dict[int, str]:
                 (job_id,),
             )
             return {int(attempt): str(state) for attempt, state in cursor.fetchall()}
+
+
+def count_consumer_receipts(dsn: str, *, operation_id: str, receipt_type: str) -> int:
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM async_effects.business_receipts
+                WHERE operation_id = %s AND receipt_type = %s
+                """,
+                (operation_id, receipt_type),
+            )
+            return int(cursor.fetchone()[0])
 
 
 def main() -> None:
@@ -449,6 +464,127 @@ def main() -> None:
             "current scheduler lease must release without scheduling business work",
         )
 
+        consumer_intent = AsyncEffectIntent(
+            operation_type="asyncEffect.synthetic.consumer",
+            target=AsyncEffectTarget(
+                owner_subject_id="owner-consumer-smoke",
+                vault_id="vault-consumer-smoke",
+                resource_type="syntheticEffect",
+                resource_id="consumer-inbox-smoke",
+                resource_version=1,
+                purpose="consumerFoundation",
+                authority_epoch=0,
+            ),
+            payload_hash=payload_hash("consumer-inbox-metadata-only"),
+        )
+        consumer_command = AsyncEffectSyntheticConsumerCommand(
+            intent=consumer_intent,
+            consumer_name="synthetic.consumer",
+            business_target_key=payload_hash("consumer-business-target"),
+            outcome="completed",
+            reason_code="syntheticCompleted",
+            result_ref_hash=payload_hash("consumer-result-reference"),
+        )
+        with store.request_unit_of_work(
+            correlation_id="async-effect-consumer-seed",
+            command_id="asyncEffectConsumerSeed",
+        ):
+            store.effect_kernel_repository().accept(consumer_intent)
+
+        def consume_once(index: int) -> str:
+            with store.request_unit_of_work(
+                correlation_id=f"async-effect-consumer-{index}",
+                command_id="asyncEffectConsumerCompletion",
+            ):
+                return store.async_effect_consumer_repository().consume(consumer_command).outcome
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            consumer_outcomes = set(executor.map(consume_once, (1, 2)))
+        require(
+            consumer_outcomes == {"accepted", "deduplicated"},
+            "same consumer event must return one immutable completion receipt",
+        )
+        require(
+            count_rows(test_dsn, "consumer_inbox", operation_id=consumer_intent.operation_id) == 1,
+            "consumer completion must create one inbox record",
+        )
+        require(
+            count_consumer_receipts(
+                test_dsn,
+                operation_id=consumer_intent.operation_id,
+                receipt_type=consumer_command.receipt_type,
+            )
+            == 1,
+            "consumer completion must create one immutable business receipt",
+        )
+        changed_target_command = AsyncEffectSyntheticConsumerCommand(
+            intent=consumer_intent,
+            consumer_name=consumer_command.consumer_name,
+            business_target_key=payload_hash("consumer-business-target-changed"),
+            outcome="completed",
+            reason_code="syntheticCompleted",
+            result_ref_hash=payload_hash("consumer-result-reference-changed"),
+        )
+        try:
+            with store.request_unit_of_work(
+                correlation_id="async-effect-consumer-conflict",
+                command_id="asyncEffectConsumerConflict",
+            ):
+                store.async_effect_consumer_repository().consume(changed_target_command)
+            raise AssertionError("consumer event cannot complete a changed business target")
+        except AsyncEffectConflict:
+            pass
+
+        rollback_consumer_intent = AsyncEffectIntent(
+            operation_type="asyncEffect.synthetic.consumer",
+            target=AsyncEffectTarget(
+                owner_subject_id="owner-consumer-smoke",
+                vault_id="vault-consumer-smoke",
+                resource_type="syntheticEffect",
+                resource_id="consumer-inbox-rollback",
+                resource_version=1,
+                purpose="consumerFoundation",
+                authority_epoch=0,
+            ),
+            payload_hash=payload_hash("consumer-inbox-rollback-metadata-only"),
+        )
+        rollback_consumer_command = AsyncEffectSyntheticConsumerCommand(
+            intent=rollback_consumer_intent,
+            consumer_name="synthetic.consumer",
+            business_target_key=payload_hash("consumer-rollback-target"),
+            outcome="completed",
+            reason_code="syntheticCompleted",
+            result_ref_hash=payload_hash("consumer-rollback-result"),
+        )
+        with store.request_unit_of_work(
+            correlation_id="async-effect-consumer-rollback-seed",
+            command_id="asyncEffectConsumerRollbackSeed",
+        ):
+            store.effect_kernel_repository().accept(rollback_consumer_intent)
+        try:
+            with store.request_unit_of_work(
+                correlation_id="async-effect-consumer-rollback",
+                command_id="asyncEffectConsumerRollback",
+            ):
+                store.async_effect_consumer_repository().consume(rollback_consumer_command)
+                raise RuntimeError("force consumer completion rollback")
+        except RuntimeError:
+            pass
+        require(
+            count_rows(test_dsn, "consumer_inbox", operation_id=rollback_consumer_intent.operation_id)
+            == 0,
+            "consumer inbox must roll back with its completion receipt",
+        )
+        require(
+            count_consumer_receipts(
+                test_dsn,
+                operation_id=rollback_consumer_intent.operation_id,
+                receipt_type=rollback_consumer_command.receipt_type,
+            )
+            == 0,
+            "consumer receipt must roll back with its inbox",
+        )
+
         try:
             with store.request_unit_of_work(
                 correlation_id="async-effect-conflict",
@@ -523,7 +659,7 @@ def main() -> None:
         print(
             "Async effect Postgres smoke passed: "
             f"schemaHead={verified['expectedHead']} outcomes={sorted(outcomes)} "
-            "sourceOutbox=true workerLease=true schedulerLease=true rollback=true "
+            "sourceOutbox=true workerLease=true schedulerLease=true consumerInbox=true rollback=true "
             "terminalGuard=true receiptsAppendOnly=true"
         )
     finally:

@@ -37,11 +37,24 @@ from .scheduler_repository import (
     InMemoryAsyncEffectSchedulerLeaseRepository,
     PostgresAsyncEffectSchedulerLeaseRepository,
 )
+from .consumer_repository import (
+    AsyncEffectConsumerAdmissionDenied,
+    AsyncEffectConsumerError,
+    AsyncEffectConsumerIncomplete,
+    AsyncEffectConsumerReceipt,
+    AsyncEffectSyntheticConsumerCommand,
+    InMemoryAsyncEffectConsumerRepository,
+    PostgresAsyncEffectConsumerRepository,
+)
 
 __all__ = [
     "ASYNC_EFFECT_SCHEMA_VERSION",
     "AsyncEffectContractError",
     "AsyncEffectCancelResult",
+    "AsyncEffectConsumerAdmissionDenied",
+    "AsyncEffectConsumerError",
+    "AsyncEffectConsumerIncomplete",
+    "AsyncEffectConsumerReceipt",
     "AsyncEffectConflict",
     "AsyncEffectIntent",
     "AsyncEffectJobLease",
@@ -56,12 +69,15 @@ __all__ = [
     "AsyncEffectSchedulerLeaseRegistration",
     "AsyncEffectSchedulerPreview",
     "AsyncEffectTarget",
+    "AsyncEffectSyntheticConsumerCommand",
     "EffectReceiptSummary",
     "InMemoryEffectKernelRepository",
     "InMemoryAsyncEffectLeaseRepository",
+    "InMemoryAsyncEffectConsumerRepository",
     "InMemoryAsyncEffectSchedulerLeaseRepository",
     "PostgresEffectKernelRepository",
     "PostgresAsyncEffectLeaseRepository",
+    "PostgresAsyncEffectConsumerRepository",
     "PostgresAsyncEffectSchedulerLeaseRepository",
     "resolve_async_effect_runtime_status",
 ]
