@@ -116,6 +116,17 @@ def _hash(value: object, *, field: str) -> str:
     return normalized
 
 
+def _authority_epoch_matches(value: object, expected: int) -> bool:
+    """Compare authority epochs without treating the initial epoch ``0`` as absent."""
+
+    if value is None:
+        return False
+    try:
+        return int(value) == expected
+    except (TypeError, ValueError):
+        return False
+
+
 def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
     if not isinstance(context, OwnerTruthCommandContext):
         raise OwnerTruthCorrectionRequestError("owner truth command context is required")
@@ -622,7 +633,9 @@ class PostgresOwnerTruthCorrectionRequestRepository:
         if (
             citation is None
             or str(citation["answer_owner_subject_id"]) != context.owner_subject_id
-            or int(citation["answer_authority_epoch"] or -1) != authority_epoch
+            or not _authority_epoch_matches(
+                citation["answer_authority_epoch"], authority_epoch
+            )
         ):
             raise OwnerTruthCorrectionRequestAccessDenied(
                 "Answer citation does not exist in this active Owner Vault"

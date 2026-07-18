@@ -30,6 +30,7 @@ from app.services.owner_truth_correction_request import (
     OwnerTruthCorrectionRequestCommand,
     OwnerTruthCorrectionRequestService,
     OwnerTruthCorrectionRequestStaleCitation,
+    _authority_epoch_matches,
     correction_request_summary,
 )
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
@@ -42,6 +43,12 @@ def _hash(value: object) -> str:
 
 
 class OwnerTruthCorrectionRequestTests(unittest.TestCase):
+    def test_initial_authority_epoch_zero_is_not_treated_as_missing(self) -> None:
+        self.assertTrue(_authority_epoch_matches(0, 0))
+        self.assertTrue(_authority_epoch_matches("0", 0))
+        self.assertFalse(_authority_epoch_matches(None, 0))
+        self.assertFalse(_authority_epoch_matches(1, 0))
+
     def setUp(self) -> None:
         self.vault_id = "vault-correction-request"
         self.owner_id = "subject-correction-request"
