@@ -5,7 +5,15 @@ import unittest
 from uuid import uuid4
 
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
-from app.async_effects.target_admission import InMemoryOwnerTruthSourceTargetAdmissionRepository
+from app.async_effects.target_admission import (
+    InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository,
+    InMemoryOwnerTruthSourceTargetAdmissionRepository,
+)
+from app.services.owner_truth_memory_projection_effects import (
+    MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
+    MEMORY_PROJECTION_REBUILD_JOB_TYPE,
+    MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+)
 
 
 def digest(value: str) -> str:
@@ -121,6 +129,97 @@ class AsyncEffectTargetAdmissionTests(unittest.TestCase):
 
         self.assertEqual(operation_result.reason_code, "unsupportedOperation")
         self.assertEqual(target_result.reason_code, "unsupportedTarget")
+
+
+class MemoryProjectionTargetAdmissionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository()
+        self.owner_subject_id = "owner-projection-admission"
+        self.vault_id = "vault-projection-admission"
+        self.memory_version_id = str(uuid4())
+        self.content_hash = digest("projection-admission-metadata-only")
+        self.repository.seed_vault(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            authority_epoch=5,
+            status="active",
+        )
+        self.repository.seed_memory_version(
+            vault_id=self.vault_id,
+            memory_version_id=self.memory_version_id,
+            owner_subject_id=self.owner_subject_id,
+            authority_epoch=5,
+            state="active",
+            source_version=2,
+            version_number=3,
+            is_current=True,
+            content_hash=self.content_hash,
+            source_owner_subject_id=self.owner_subject_id,
+            source_authority_epoch=5,
+            source_state="active",
+            source_version_current=2,
+        )
+
+    def intent(
+        self,
+        *,
+        authority_epoch: int = 5,
+        resource_version: int = 3,
+        payload_hash: str | None = None,
+    ) -> AsyncEffectIntent:
+        return AsyncEffectIntent(
+            operation_type=MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+            target=AsyncEffectTarget(
+                owner_subject_id=self.owner_subject_id,
+                vault_id=self.vault_id,
+                resource_type="memoryVersion",
+                resource_id=self.memory_version_id,
+                resource_version=resource_version,
+                purpose="compatibilityProjection",
+                authority_epoch=authority_epoch,
+            ),
+            payload_hash=payload_hash or self.content_hash,
+            event_type=MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
+            job_type=MEMORY_PROJECTION_REBUILD_JOB_TYPE,
+        )
+
+    def test_current_memory_version_with_current_source_is_admitted(self):
+        result = self.repository.admit_owner_truth_memory_projection(self.intent())
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.reason_code, "targetAuthorized")
+        self.assertEqual(result.resource_version, 3)
+
+    def test_changed_memory_content_hash_is_blocked_without_returning_content(self):
+        result = self.repository.admit_owner_truth_memory_projection(
+            self.intent(payload_hash=digest("different-content"))
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason_code, "memoryContentHashChanged")
+        self.assertFalse(hasattr(result, "content"))
+
+    def test_stale_or_noncurrent_memory_version_is_blocked(self):
+        self.repository.seed_memory_version(
+            vault_id=self.vault_id,
+            memory_version_id=self.memory_version_id,
+            owner_subject_id=self.owner_subject_id,
+            authority_epoch=5,
+            state="active",
+            source_version=2,
+            version_number=3,
+            is_current=False,
+            content_hash=self.content_hash,
+            source_owner_subject_id=self.owner_subject_id,
+            source_authority_epoch=5,
+            source_state="active",
+            source_version_current=2,
+        )
+
+        result = self.repository.admit_owner_truth_memory_projection(self.intent())
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason_code, "memoryVersionNotCurrent")
 
 
 if __name__ == "__main__":

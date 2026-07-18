@@ -16,9 +16,9 @@ The foundation contains:
    retry-wait release semantics.
 2. An opt-in `async-effect-worker` Docker Compose profile. The ordinary API
    deployment does not start this profile.
-3. A shadow worker command that reports only value-free eligible job counts
-   and job types. It has no registered business handler and cannot claim or
-   execute product work.
+3. A generic shadow worker command that reports only value-free eligible job
+   counts and job types. It has no registered business handler and cannot
+   claim or execute product work.
 4. An isolated Postgres smoke extension that creates only a synthetic job and
    proves concurrent claim exclusion, heartbeat, expired-lease reclamation,
    stale-worker rejection, and cancellation fencing.
@@ -31,7 +31,10 @@ worker is observation-only until a separately approved typed handler cohort is
 registered.
 
 The production deployment at this point has `api`, `postgres`, and `redis`
-containers only; no `async-effect-worker` container is running.
+containers only; no `async-effect-worker` container is running. The separate
+Owner Truth projection consumer is deliberately not attached to this generic
+worker: it has its own third default-off flag and one-shot CLI so it cannot
+silently broaden the generic worker's authority.
 
 ## Verification
 
@@ -67,7 +70,9 @@ This is not the full closure of `WI-S1-02-03`. The following remain outside
 this sub-slice and must not be inferred as implemented:
 
 - scheduler leader lease/heartbeat and scheduled dispatch;
-- registered product handlers and consumer inbox completion;
+- registered product handlers and consumer inbox completion for TimeLetter,
+  Echo, APNs or any Provider lane. The narrow Owner Truth projection handler
+  is tracked separately in `2026-07-19-owner-truth-memory-projection.md`;
 - provider retries, provider receipt reconciliation, or dead-letter policy;
 - TimeLetter/Echo/APNs execution;
 - any public feature enablement.

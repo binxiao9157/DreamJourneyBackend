@@ -14,7 +14,7 @@ from threading import RLock
 from typing import Any, Callable, Iterable, Mapping, Optional
 from uuid import UUID, uuid5
 
-from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectJobState
+from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectJobState, AsyncEffectTarget
 
 
 _WORKER_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
@@ -115,11 +115,43 @@ class AsyncEffectJobPreview:
 
 
 @dataclass(frozen=True)
+class AsyncEffectJobCompletion:
+    """Value-free terminal evidence for one currently held worker lease."""
+
+    job_id: str
+    operation_id: str
+    attempt: int
+    job_state: str
+    operation_state: str
+    outbox_state: str
+
+
+@dataclass(frozen=True)
 class AsyncEffectCancelResult:
     job_id: str
     state: str
     outcome: str
     cancel_requested_at: str
+
+
+def _terminal_completion_fields(
+    *,
+    outcome: object,
+    error_code: object,
+) -> tuple[str, str, str, str | None]:
+    normalized_outcome = str(outcome or "").strip()
+    normalized_error = str(error_code or "").strip() or None
+    if normalized_outcome == "succeeded":
+        if normalized_error is not None:
+            raise AsyncEffectLeaseError("successful completion cannot carry an error code")
+        return ("succeeded", "completed", "succeeded", None)
+    if normalized_outcome == "blocked":
+        if normalized_error is None:
+            raise AsyncEffectLeaseError("blocked completion requires an error code")
+        if not _WORKER_IDENTIFIER_PATTERN.fullmatch(normalized_error):
+            raise AsyncEffectLeaseError("blocked completion error code must be an opaque identifier")
+        return ("blocked", "blocked", "terminalFailed", normalized_error)
+    raise AsyncEffectLeaseError("completion outcome must be succeeded or blocked")
 
 
 class InMemoryAsyncEffectLeaseRepository:
@@ -140,6 +172,7 @@ class InMemoryAsyncEffectLeaseRepository:
                 {
                     "jobId": intent.job_id,
                     "operationId": intent.operation_id,
+                    "intent": intent,
                     "jobType": intent.job_type,
                     "state": AsyncEffectJobState.PENDING.value,
                     "attempt": 0,
@@ -194,6 +227,54 @@ class InMemoryAsyncEffectLeaseRepository:
                 "errorCode": None,
             }
             return self._lease_from_job(job, attempt_id=attempt_id)
+
+    def load_intent(self, lease: AsyncEffectJobLease) -> AsyncEffectIntent:
+        now = self._now()
+        with self._lock:
+            job = self._jobs.get(lease.job_id)
+            self._assert_active_lease(job, lease, now)
+            intent = job.get("intent") if job is not None else None
+            if not isinstance(intent, AsyncEffectIntent):
+                raise AsyncEffectLeaseError("leased job does not retain an immutable effect intent")
+            if intent.operation_id != lease.operation_id or intent.job_id != lease.job_id:
+                raise AsyncEffectLeaseError("leased job intent does not match the current lease")
+            return intent
+
+    def complete(
+        self,
+        lease: AsyncEffectJobLease,
+        *,
+        outcome: str,
+        error_code: str | None = None,
+    ) -> AsyncEffectJobCompletion:
+        job_state, operation_state, attempt_state, normalized_error = _terminal_completion_fields(
+            outcome=outcome,
+            error_code=error_code,
+        )
+        now = self._now()
+        with self._lock:
+            job = self._jobs.get(lease.job_id)
+            self._assert_active_lease(job, lease, now)
+            assert job is not None
+            attempt = self._attempts.get((lease.job_id, lease.attempt))
+            if attempt is None or attempt.get("state") != "started":
+                raise AsyncEffectLeaseError("current job attempt is not active")
+            job.update(
+                state=job_state,
+                terminalAt=now,
+                leaseOwner=None,
+                leaseUntil=None,
+                heartbeatAt=None,
+            )
+            attempt.update(state=attempt_state, errorCode=normalized_error, finishedAt=now)
+            return AsyncEffectJobCompletion(
+                job_id=lease.job_id,
+                operation_id=lease.operation_id,
+                attempt=lease.attempt,
+                job_state=job_state,
+                operation_state=operation_state,
+                outbox_state="dispatched",
+            )
 
     def heartbeat(self, lease: AsyncEffectJobLease, *, lease_seconds: int) -> AsyncEffectJobLease:
         normalized_seconds = _normalize_lease_seconds(lease_seconds)
@@ -400,6 +481,179 @@ class PostgresAsyncEffectLeaseRepository:
             )
             return self._lease_from_row(row, attempt_id=attempt_id)
 
+    def load_intent(self, lease: AsyncEffectJobLease) -> AsyncEffectIntent:
+        """Reconstruct exactly one immutable intent while the lease is current."""
+
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    job.job_id,
+                    job.operation_id,
+                    job.owner_subject_id,
+                    job.vault_id,
+                    job.resource_type,
+                    job.resource_id,
+                    job.resource_version,
+                    job.purpose,
+                    job.authority_epoch,
+                    job.stable_key,
+                    job.job_type,
+                    job.payload_hash AS job_payload_hash,
+                    operation.operation_type,
+                    operation.payload_hash AS operation_payload_hash,
+                    outbox.event_id,
+                    outbox.event_type,
+                    outbox.payload_hash AS outbox_payload_hash
+                FROM async_effects.jobs AS job
+                JOIN async_effects.operations AS operation
+                  ON operation.operation_id = job.operation_id
+                JOIN async_effects.outbox_events AS outbox
+                  ON outbox.operation_id = job.operation_id
+                WHERE job.job_id = %s
+                  AND job.state = 'leased'
+                  AND job.lease_owner = %s
+                  AND job.attempt = %s
+                  AND job.cancel_requested_at IS NULL
+                  AND job.lease_until > NOW()
+                FOR SHARE OF job, operation, outbox
+                """,
+                (lease.job_id, lease.worker_id, lease.attempt),
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                self._raise_current_lease_error(cursor, lease)
+            if len(rows) != 1:
+                raise AsyncEffectLeaseError("leased job must have exactly one immutable outbox event")
+            row = rows[0]
+            if (
+                str(row["operation_id"]) != lease.operation_id
+                or str(row["job_id"]) != lease.job_id
+                or str(row["job_type"]) != lease.job_type
+                or str(row["job_payload_hash"]) != str(row["operation_payload_hash"])
+                or str(row["job_payload_hash"]) != str(row["outbox_payload_hash"])
+            ):
+                raise AsyncEffectLeaseError("leased job immutable coordinates are inconsistent")
+            intent = AsyncEffectIntent(
+                operation_type=str(row["operation_type"]),
+                target=AsyncEffectTarget(
+                    owner_subject_id=str(row["owner_subject_id"]),
+                    vault_id=str(row["vault_id"]),
+                    resource_type=str(row["resource_type"]),
+                    resource_id=str(row["resource_id"]),
+                    resource_version=int(row["resource_version"]),
+                    purpose=str(row["purpose"]),
+                    authority_epoch=int(row["authority_epoch"]),
+                ),
+                payload_hash=str(row["job_payload_hash"]),
+                event_type=str(row["event_type"]),
+                job_type=str(row["job_type"]),
+            )
+            if (
+                intent.operation_id != str(row["operation_id"])
+                or intent.job_id != str(row["job_id"])
+                or intent.outbox_event_id != str(row["event_id"])
+                or intent.stable_key != str(row["stable_key"])
+            ):
+                raise AsyncEffectLeaseError("leased job cannot reconstruct its immutable effect intent")
+            return intent
+
+    def complete(
+        self,
+        lease: AsyncEffectJobLease,
+        *,
+        outcome: str,
+        error_code: str | None = None,
+    ) -> AsyncEffectJobCompletion:
+        """Atomically terminalize a leased, internally consumed job.
+
+        Business completion must be written by the typed consumer in the same
+        Unit of Work before this method is called.  This method owns only the
+        coordination state transition and never receives business payloads.
+        """
+
+        job_state, operation_state, attempt_state, normalized_error = _terminal_completion_fields(
+            outcome=outcome,
+            error_code=error_code,
+        )
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE async_effects.jobs
+                SET state = %s,
+                    terminal_at = NOW(),
+                    lease_owner = NULL,
+                    lease_until = NULL,
+                    heartbeat_at = NULL,
+                    updated_at = NOW()
+                WHERE job_id = %s
+                  AND operation_id = %s
+                  AND state = 'leased'
+                  AND lease_owner = %s
+                  AND attempt = %s
+                  AND cancel_requested_at IS NULL
+                  AND lease_until > NOW()
+                RETURNING job_id, operation_id, attempt, state
+                """,
+                (job_state, lease.job_id, lease.operation_id, lease.worker_id, lease.attempt),
+            )
+            job = cursor.fetchone()
+            if job is None:
+                self._raise_current_lease_error(cursor, lease)
+            cursor.execute(
+                """
+                UPDATE async_effects.job_attempts
+                SET state = %s,
+                    error_code = %s,
+                    finished_at = NOW(),
+                    updated_at = NOW()
+                WHERE job_id = %s
+                  AND operation_id = %s
+                  AND attempt = %s
+                  AND state = 'started'
+                RETURNING attempt_id
+                """,
+                (attempt_state, normalized_error, lease.job_id, lease.operation_id, lease.attempt),
+            )
+            if cursor.fetchone() is None:
+                raise AsyncEffectLeaseError("current job attempt is not active")
+            cursor.execute(
+                """
+                UPDATE async_effects.operations
+                SET state = %s,
+                    attempt = %s,
+                    terminal_at = NOW(),
+                    updated_at = NOW()
+                WHERE operation_id = %s AND state = 'accepted'
+                RETURNING operation_id
+                """,
+                (operation_state, lease.attempt, lease.operation_id),
+            )
+            if cursor.fetchone() is None:
+                raise AsyncEffectLeaseError("effect operation is not accepted for completion")
+            cursor.execute(
+                """
+                UPDATE async_effects.outbox_events
+                SET state = 'dispatched',
+                    attempt = %s,
+                    dispatched_at = NOW(),
+                    updated_at = NOW()
+                WHERE operation_id = %s AND state = 'pending'
+                RETURNING event_id
+                """,
+                (lease.attempt, lease.operation_id),
+            )
+            if len(cursor.fetchall()) != 1:
+                raise AsyncEffectLeaseError("effect operation must have one pending outbox event")
+            return AsyncEffectJobCompletion(
+                job_id=str(job["job_id"]),
+                operation_id=str(job["operation_id"]),
+                attempt=int(job["attempt"]),
+                job_state=str(job["state"]),
+                operation_state=operation_state,
+                outbox_state="dispatched",
+            )
+
     def heartbeat(self, lease: AsyncEffectJobLease, *, lease_seconds: int) -> AsyncEffectJobLease:
         normalized_seconds = _normalize_lease_seconds(lease_seconds)
         with self._cursor() as cursor:
@@ -591,6 +845,7 @@ class PostgresAsyncEffectLeaseRepository:
 
 __all__ = [
     "AsyncEffectCancelResult",
+    "AsyncEffectJobCompletion",
     "AsyncEffectJobLease",
     "AsyncEffectJobPreview",
     "AsyncEffectLeaseCancelled",

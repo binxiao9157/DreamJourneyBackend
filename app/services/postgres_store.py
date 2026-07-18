@@ -81,7 +81,10 @@ from app.async_effects.lease_repository import PostgresAsyncEffectLeaseRepositor
 from app.async_effects.repository import PostgresEffectKernelRepository
 from app.async_effects.scheduler_repository import PostgresAsyncEffectSchedulerLeaseRepository
 from app.async_effects.consumer_repository import PostgresAsyncEffectConsumerRepository
-from app.async_effects.target_admission import PostgresOwnerTruthSourceTargetAdmissionRepository
+from app.async_effects.target_admission import (
+    PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository,
+    PostgresOwnerTruthSourceTargetAdmissionRepository,
+)
 from app.services.owner_truth_candidate_extraction import (
     PostgresOwnerTruthCandidateExtractionRepository,
 )
@@ -216,6 +219,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("async effect target admission requires an active unit of work")
         return PostgresOwnerTruthSourceTargetAdmissionRepository(active.connection)
+
+    def owner_truth_memory_projection_target_admission_repository(
+        self,
+    ) -> PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository:
+        """Return the live MemoryVersion guard for a projection rebuild job."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("projection rebuild target admission requires an active unit of work")
+        return PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository(active.connection)
 
     def owner_truth_candidate_extraction_repository(
         self,

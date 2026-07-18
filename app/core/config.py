@@ -79,6 +79,7 @@ class Settings:
     release_policy_emergency_disabled_features: Optional[str] = None
     async_effect_v1_enabled: bool = False
     async_effect_worker_enabled: bool = False
+    owner_truth_memory_projection_worker_enabled: bool = False
     delegated_access_contract_api_enabled: bool = False
     # Candidate review is an Owner Truth QA contract only until the M0 review
     # UI, release policy, and external gates are complete.
@@ -232,6 +233,10 @@ class Settings:
             async_effect_worker_enabled=_env_bool(
                 "ASYNC_EFFECT_WORKER_ENABLED",
                 cls.async_effect_worker_enabled,
+            ),
+            owner_truth_memory_projection_worker_enabled=_env_bool(
+                "OWNER_TRUTH_MEMORY_PROJECTION_WORKER_ENABLED",
+                cls.owner_truth_memory_projection_worker_enabled,
             ),
             delegated_access_contract_api_enabled=_env_bool(
                 "DELEGATED_ACCESS_CONTRACT_API_ENABLED",

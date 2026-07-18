@@ -25,7 +25,10 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from app.core.config import settings
+from app.core.config import Settings, settings
+from app.async_effects.owner_truth_memory_projection_worker import (
+    OwnerTruthMemoryProjectionWorkerRuntime,
+)
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.domain.owner_truth.source_commands import (
     CreateTextSourceCommand,
@@ -691,7 +694,7 @@ def main() -> None:
                     and attempt == 0
                     for operation_id, job_type, _payload_hash, state, attempt in effect_jobs
                 ),
-                "projection worker must remain pending until a later explicit rollout",
+                "projection jobs must remain pending under the default-disabled runtime",
             )
             require(
                 review_content["summary"] not in str(effect_operations)
@@ -706,18 +709,102 @@ def main() -> None:
                 and projection_missing["entries"] == [],
                 "missing MemoryVersion checkpoint must fail closed",
             )
+            projection_worker = OwnerTruthMemoryProjectionWorkerRuntime(
+                settings=Settings(
+                    async_effect_v1_enabled=True,
+                    async_effect_worker_enabled=True,
+                    owner_truth_memory_projection_worker_enabled=True,
+                ),
+                store=store,
+                worker_id="owner-truth-projection-smoke",
+            )
+            first_projection_worker_result = projection_worker.run_once()
+            second_projection_worker_result = projection_worker.run_once()
+            require(
+                first_projection_worker_result["status"] == "completed"
+                and first_projection_worker_result["projectionOutcome"] == "rebuilt"
+                and first_projection_worker_result["jobState"] == "succeeded"
+                and first_projection_worker_result["operationState"] == "completed"
+                and first_projection_worker_result["outboxState"] == "dispatched"
+                and first_projection_worker_result["consumerInboxState"] == "completed"
+                and second_projection_worker_result["status"] == "completed"
+                and second_projection_worker_result["projectionOutcome"] == "unchanged",
+                "enabled projection worker must terminalize each current rebuild intent",
+            )
+            require(
+                review_content["summary"] not in str(first_projection_worker_result)
+                and review_knowledge_content["claim"] not in str(second_projection_worker_result),
+                "projection worker evidence must remain value-free",
+            )
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT state, attempt
+                        FROM async_effects.operations
+                        WHERE vault_id = %s AND operation_type = %s
+                        ORDER BY operation_id ASC
+                        """,
+                        (review_vault_id, MEMORY_PROJECTION_REBUILD_OPERATION_TYPE),
+                    )
+                    worker_operations = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT state, attempt
+                        FROM async_effects.outbox_events
+                        WHERE vault_id = %s AND event_type = %s
+                        ORDER BY operation_id ASC
+                        """,
+                        (review_vault_id, MEMORY_PROJECTION_REBUILD_EVENT_TYPE),
+                    )
+                    worker_outbox = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT state, attempt
+                        FROM async_effects.jobs
+                        WHERE vault_id = %s AND job_type = %s
+                        ORDER BY operation_id ASC
+                        """,
+                        (review_vault_id, MEMORY_PROJECTION_REBUILD_JOB_TYPE),
+                    )
+                    worker_jobs = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT inbox.state, receipt.outcome, receipt.reason_code
+                        FROM async_effects.consumer_inbox AS inbox
+                        JOIN async_effects.business_receipts AS receipt
+                          ON receipt.operation_id = inbox.operation_id
+                        WHERE inbox.consumer_name = 'ownerTruth.memoryProjection.rebuild'
+                          AND inbox.vault_id = %s
+                        ORDER BY inbox.operation_id ASC
+                        """,
+                        (review_vault_id,),
+                    )
+                    worker_receipts = cursor.fetchall()
+            require(
+                len(worker_operations) == 2
+                and all(state == "completed" and attempt == 1 for state, attempt in worker_operations)
+                and len(worker_outbox) == 2
+                and all(state == "dispatched" and attempt == 1 for state, attempt in worker_outbox)
+                and len(worker_jobs) == 2
+                and all(state == "succeeded" and attempt == 1 for state, attempt in worker_jobs)
+                and len(worker_receipts) == 2
+                and all(state == "completed" and outcome == "completed" for state, outcome, _ in worker_receipts),
+                "projection worker must atomically persist terminal effect and consumer evidence",
+            )
             projection_rebuilt = projection_service.rebuild(context=review_context)
             projection_replayed = projection_service.rebuild(context=review_context)
             projection_ready = projection_service.read(context=review_context)
             require(
-                projection_rebuilt.outcome == "rebuilt"
+                projection_rebuilt.outcome == "unchanged"
                 and projection_replayed.outcome == "unchanged",
-                "MemoryVersion projection rebuild must be deterministic",
+                "worker-produced MemoryVersion projection must be deterministic",
             )
             require(
                 projection_ready["state"] == "ready"
                 and projection_ready["entryCount"] == 2
-                and projection_ready["checkpoint"] == projection_rebuilt.snapshot["checkpoint"],
+                and projection_ready["checkpoint"]
+                == first_projection_worker_result["projectionCheckpoint"],
                 "accepted and corrected MemoryVersions must be projection-visible",
             )
             corrected_projection = next(
@@ -1079,17 +1166,21 @@ def main() -> None:
                 and context_shadow_changed["selectedContext"] == [],
                 "Context shadow must fail closed with an invalidated projection checkpoint",
             )
-            projection_after_concurrent = projection_service.rebuild(context=review_context)
-            require(
-                projection_after_concurrent.snapshot["entryCount"] == 3,
-                "rebuild must include each current accepted MemoryVersion exactly once",
-            )
             with psycopg.connect(test_dsn) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
                         "UPDATE owner_truth.sources SET state = 'redacted' WHERE vault_id = %s AND id = %s",
                         (review_vault_id, review_source_id),
                     )
+            stale_projection_worker_result = projection_worker.run_once()
+            require(
+                stale_projection_worker_result["status"] == "blocked"
+                and stale_projection_worker_result["reason"] == "sourceInactive"
+                and stale_projection_worker_result["jobState"] == "blocked"
+                and stale_projection_worker_result["operationState"] == "blocked"
+                and stale_projection_worker_result["consumerInboxState"] == "skipped",
+                "worker must block a source-revoked MemoryVersion instead of rebuilding stale content",
+            )
             projection_revoked = projection_service.read(context=review_context)
             require(
                 projection_revoked["state"] == "rebuilding"
@@ -1155,7 +1246,10 @@ def main() -> None:
                     "memoryProjectionEffectAtomic": True,
                     "memoryProjectionEffectIdempotent": True,
                     "memoryProjectionEffectValueFree": True,
-                    "memoryProjectionEffectWorkerPending": True,
+                    "memoryProjectionWorkerDefaultOff": True,
+                    "memoryProjectionWorkerRebuilds": True,
+                    "memoryProjectionWorkerBlocksStaleTarget": True,
+                    "memoryProjectionWorkerValueFree": True,
                     "memoryProjectionDeterministicRebuild": True,
                     "memoryProjectionCorrectedContent": True,
                     "memoryProjectionRejectsDecisionPayloadLeakage": True,

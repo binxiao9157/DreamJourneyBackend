@@ -39,7 +39,7 @@ accepted | corrected Candidate
 - Writing the effect shares the same Postgres Unit of Work as the terminal
   decision and MemoryVersion activation. A failed effect write rolls all three
   changes back.
-- The job remains `pending`. Neither the normal Compose deployment nor the
+- The job begins as `pending`. Neither the normal Compose deployment nor the
   public API starts a worker, rebuilds KBLite, invokes a provider, or changes
   Echo/context reads.
 
@@ -47,6 +47,42 @@ The registered names are intentionally explicit for a later read-only
 consumer: `ownerTruth.memoryVersion.activated`,
 `ownerTruth.memoryProjection.rebuildRequested`, and
 `ownerTruth.memoryProjection.rebuild`.
+
+## Default-Off Projection Worker
+
+The typed rebuild consumer is now implemented but remains operationally
+disabled by default. It is not part of the public API process or the generic
+Compose shadow-worker profile.
+
+```text
+pending typed job
+  -> claim one lease
+  -> reload immutable intent
+  -> lock/recheck Vault + MemoryVersion + Source authority
+  -> rebuild derived checkpoint
+  -> write value-free consumer receipt
+  -> terminalize job/operation/outbox in the same UoW
+```
+
+It requires all three flags to be true:
+
+```dotenv
+ASYNC_EFFECT_V1_ENABLED=true
+ASYNC_EFFECT_WORKER_ENABLED=true
+OWNER_TRUTH_MEMORY_PROJECTION_WORKER_ENABLED=true
+```
+
+The normal deployment keeps all three false. A deliberate operator/QA run uses
+`python -m app.async_effects.owner_truth_memory_projection_worker --once`.
+The worker processes at most one job per invocation, never calls a Provider,
+does not expose MemoryVersion content in its result, and does not change
+`/context/build`, legacy KBLite writes, or public Echo.
+
+Before it rebuilds, it locks and rechecks the active Vault, current
+MemoryVersion, content hash, source state/version and authority epoch. A stale
+or revoked target writes a terminal `blocked` consumer/coordination receipt;
+an execution exception rolls the work transaction back and releases only that
+lease to `retryWait`.
 
 ## KBLite Compatibility Read
 
@@ -191,12 +227,9 @@ Deployed backend head: `930c9e3`.
 
 This establishes scoped `G0/G2` evidence for the Projection foundation, the
 first read-only KBLite compatibility adapter and a default-off Citation Context
-shadow only. `WI-S1-01-06` remains `PLANNED/STOP` in the Registry because its
-full scope still requires an event-driven projection rebuild consumer, a
-production-ranked typed Citation Context reader, correction-flow integration,
-iOS cache-envelope/authority-epoch handling and the remaining dependencies,
-G1 and G2 evidence.
-
-The next safe closure is the event-driven projection rebuild consumer. It must
-not restore KBLite as a fact-authority writer or make `/context/build` depend
-on a stale projection.
+shadow only. The typed worker code is also default-off and still requires its
+own current G0/G2 evidence before it can be described as internally ready.
+`WI-S1-01-06` remains `PLANNED/STOP` in the Registry because its full scope
+still requires a production-ranked typed Citation Context reader,
+correction-flow integration, iOS cache-envelope/authority-epoch handling and
+the remaining dependencies, G1 and G2 evidence.

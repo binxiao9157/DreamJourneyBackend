@@ -107,6 +107,34 @@ class AsyncEffectLeaseRepositoryTests(unittest.TestCase):
         self.assertEqual(result.outcome, "cancelledBeforeLease")
         self.assertIsNone(self.claim())
 
+    def test_current_lease_can_reconstruct_its_immutable_intent_and_complete(self):
+        lease = self.claim()
+        self.assertIsNotNone(lease)
+
+        loaded = self.repository.load_intent(lease)
+        completion = self.repository.complete(lease, outcome="succeeded")
+
+        self.assertEqual(loaded, self.intent)
+        self.assertEqual(completion.job_state, "succeeded")
+        self.assertEqual(completion.operation_state, "completed")
+        self.assertEqual(completion.outbox_state, "dispatched")
+        self.assertEqual(self.repository.attempt_state(lease.job_id, 1), "succeeded")
+        self.assertIsNone(self.claim("worker-b"))
+
+    def test_blocked_completion_requires_an_opaque_live_reason(self):
+        lease = self.claim()
+        self.assertIsNotNone(lease)
+
+        completion = self.repository.complete(
+            lease,
+            outcome="blocked",
+            error_code="authorityEpochChanged",
+        )
+
+        self.assertEqual(completion.job_state, "blocked")
+        self.assertEqual(completion.operation_state, "blocked")
+        self.assertEqual(self.repository.attempt_state(lease.job_id, 1), "terminalFailed")
+
 
 if __name__ == "__main__":
     unittest.main()

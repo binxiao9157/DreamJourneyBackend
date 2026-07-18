@@ -1,9 +1,9 @@
-"""Synthetic-only Consumer Inbox and Business Completion Receipt kernel.
+"""Value-free Consumer Inbox and Business Completion Receipt kernel.
 
-The initial Stage 1 consumer lane proves idempotency boundaries without owning a
-product aggregate. It accepts only `asyncEffect.synthetic.*` operations, stores
-hashes/opaque coordinates, and must be called inside the aggregate Unit of
-Work. Concrete TimeLetter/Echo consumers are intentionally deferred.
+The kernel accepts synthetic foundation commands and narrow typed consumers
+whose business writers remain in their owning Unit of Work. It stores only
+hashes and opaque coordinates; provider payloads and user content never cross
+this boundary.
 """
 
 from __future__ import annotations
@@ -17,6 +17,11 @@ from uuid import UUID, uuid5
 
 from app.async_effects.contracts import AsyncEffectConflict, AsyncEffectIntent
 from app.async_effects.target_admission import AsyncEffectTargetAdmission
+from app.services.owner_truth_memory_projection_effects import (
+    MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
+    MEMORY_PROJECTION_REBUILD_JOB_TYPE,
+    MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+)
 
 
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
@@ -26,6 +31,7 @@ _SYNTHETIC_OPERATION_PREFIX = "asyncEffect.synthetic."
 _TERMINAL_OUTCOMES = {"completed", "skipped", "blocked", "failed", "unknown"}
 _OWNER_TRUTH_SOURCE_BLOCKED_CONSUMER = "ownerTruth.source.blocked"
 _OWNER_TRUTH_SOURCE_EXTRACTION_CONSUMER = "ownerTruth.source.extraction"
+_OWNER_TRUTH_MEMORY_PROJECTION_CONSUMER = "ownerTruth.memoryProjection.rebuild"
 
 
 class AsyncEffectConsumerError(RuntimeError):
@@ -205,6 +211,68 @@ class OwnerTruthSourceCandidateExtractionConsumerCommand(AsyncEffectConsumerComp
             raise AsyncEffectConsumerError("successful extraction must retain its fixed completion reason")
         if normalized_status == "quarantined" and self.reason_code != "resultQuarantined":
             raise AsyncEffectConsumerError("quarantined extraction must retain its fixed completion reason")
+
+
+@dataclass(frozen=True)
+class OwnerTruthMemoryProjectionRebuildConsumerCommand(AsyncEffectConsumerCompletionCommand):
+    """Complete one admitted or blocked MemoryVersion projection rebuild."""
+
+    admission: AsyncEffectTargetAdmission
+    projection_outcome: str | None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        target = self.intent.target
+        if (
+            self.intent.operation_type != MEMORY_PROJECTION_REBUILD_OPERATION_TYPE
+            or self.intent.event_type != MEMORY_PROJECTION_REBUILD_EVENT_TYPE
+            or self.intent.job_type != MEMORY_PROJECTION_REBUILD_JOB_TYPE
+        ):
+            raise AsyncEffectConsumerAdmissionDenied(
+                "memory projection completion requires its typed effect contract"
+            )
+        if target.resource_type != "memoryVersion" or target.purpose != "compatibilityProjection":
+            raise AsyncEffectConsumerAdmissionDenied(
+                "memory projection completion requires its typed target"
+            )
+        if self.consumer_name != _OWNER_TRUTH_MEMORY_PROJECTION_CONSUMER:
+            raise AsyncEffectConsumerAdmissionDenied(
+                "memory projection completion has one fixed consumer"
+            )
+        if self.business_target_key != self.intent.business_target_key:
+            raise AsyncEffectConsumerAdmissionDenied(
+                "memory projection completion has one fixed business target"
+            )
+        if not isinstance(self.admission, AsyncEffectTargetAdmission):
+            raise AsyncEffectConsumerError("live MemoryVersion target admission is required")
+        if (
+            self.admission.operation_id != self.intent.operation_id
+            or self.admission.target_stable_key != self.intent.stable_key
+        ):
+            raise AsyncEffectConsumerError("MemoryVersion target admission does not belong to this effect")
+        normalized_projection_outcome = (
+            None if self.projection_outcome is None else str(self.projection_outcome).strip()
+        )
+        object.__setattr__(self, "projection_outcome", normalized_projection_outcome)
+        if self.admission.allowed:
+            if self.outcome != "completed":
+                raise AsyncEffectConsumerError("admitted projection rebuild must complete")
+            if normalized_projection_outcome not in {"rebuilt", "unchanged"}:
+                raise AsyncEffectConsumerError("admitted projection rebuild requires a projection outcome")
+            expected_reason = (
+                "memoryProjectionRebuilt"
+                if normalized_projection_outcome == "rebuilt"
+                else "memoryProjectionUnchanged"
+            )
+            if self.reason_code != expected_reason:
+                raise AsyncEffectConsumerError("projection completion must preserve its fixed reason")
+            return
+        if self.outcome != "blocked":
+            raise AsyncEffectConsumerError("blocked MemoryVersion target must write a blocked completion")
+        if self.reason_code != self.admission.reason_code:
+            raise AsyncEffectConsumerError("blocked projection completion must preserve live admission")
+        if normalized_projection_outcome is not None:
+            raise AsyncEffectConsumerError("blocked projection completion cannot claim a rebuild outcome")
 
 
 @dataclass(frozen=True)
@@ -525,6 +593,7 @@ __all__ = [
     "AsyncEffectConsumerReceipt",
     "AsyncEffectSyntheticConsumerCommand",
     "InMemoryAsyncEffectConsumerRepository",
+    "OwnerTruthMemoryProjectionRebuildConsumerCommand",
     "OwnerTruthSourceBlockedConsumerCommand",
     "PostgresAsyncEffectConsumerRepository",
 ]

@@ -20,6 +20,7 @@ from .repository import (
 )
 from .lease_repository import (
     AsyncEffectCancelResult,
+    AsyncEffectJobCompletion,
     AsyncEffectJobLease,
     AsyncEffectJobPreview,
     AsyncEffectLeaseCancelled,
@@ -47,12 +48,15 @@ from .consumer_repository import (
     InMemoryAsyncEffectConsumerRepository,
     OwnerTruthSourceBlockedConsumerCommand,
     OwnerTruthSourceCandidateExtractionConsumerCommand,
+    OwnerTruthMemoryProjectionRebuildConsumerCommand,
     PostgresAsyncEffectConsumerRepository,
 )
 from .target_admission import (
     AsyncEffectTargetAdmission,
     AsyncEffectTargetAdmissionError,
     InMemoryOwnerTruthSourceTargetAdmissionRepository,
+    InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository,
+    PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository,
     PostgresOwnerTruthSourceTargetAdmissionRepository,
 )
 
@@ -68,6 +72,7 @@ __all__ = [
     "AsyncEffectConflict",
     "AsyncEffectIntent",
     "AsyncEffectJobLease",
+    "AsyncEffectJobCompletion",
     "AsyncEffectJobPreview",
     "AsyncEffectLeaseCancelled",
     "AsyncEffectLeaseError",
@@ -88,12 +93,15 @@ __all__ = [
     "InMemoryAsyncEffectConsumerRepository",
     "OwnerTruthSourceBlockedConsumerCommand",
     "OwnerTruthSourceCandidateExtractionConsumerCommand",
+    "OwnerTruthMemoryProjectionRebuildConsumerCommand",
     "InMemoryOwnerTruthSourceTargetAdmissionRepository",
+    "InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository",
     "InMemoryAsyncEffectSchedulerLeaseRepository",
     "PostgresEffectKernelRepository",
     "PostgresAsyncEffectLeaseRepository",
     "PostgresAsyncEffectConsumerRepository",
     "PostgresOwnerTruthSourceTargetAdmissionRepository",
+    "PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository",
     "PostgresAsyncEffectSchedulerLeaseRepository",
     "resolve_async_effect_runtime_status",
 ]
