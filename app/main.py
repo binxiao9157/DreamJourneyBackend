@@ -22,6 +22,14 @@ from app.services.authorization_policy import (
     CrossAccountAuthorizationPolicy,
     owner_authority_claims,
 )
+from app.services.data_rights_adapter import (
+    completed_account_delete_execution,
+    make_account_delete_request,
+)
+from app.services.data_rights_contract import (
+    DataRightsCommandConflict,
+    DataRightsContractError,
+)
 from app.services.client_compatibility import (
     ClientCompatibilityDecision,
     ClientCompatibilityDecisionRecorder,
@@ -1667,6 +1675,122 @@ def _require_account_deletion_confirmations(payload: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="two deletion confirmations are required")
 
 
+def _account_delete_command_id(request: Request, payload: Dict[str, Any], user_id: str) -> str:
+    explicit = str(
+        payload.get("commandId")
+        or request.headers.get("idempotency-key")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    # Legacy callers do not have a command id. Keep compatibility without
+    # pretending separate legacy requests are idempotent.
+    return f"legacy-account-delete:{user_id}:{secrets.token_hex(16)}"
+
+
+def _account_delete_rights_summary(request_id: str, *, outcome: Optional[str] = None) -> Dict[str, Any]:
+    summary = store.summarize_rights_request(request_id) or {}
+    request_record = summary.get("request") or {}
+    response = {
+        "requestId": str(request_record.get("id") or request_id),
+        "status": str(request_record.get("status") or "unknown"),
+        "contractVersion": int(request_record.get("contractVersion") or 1),
+        "executionCount": len(summary.get("executions") or []),
+        "receiptCount": len(summary.get("receipts") or []),
+    }
+    if outcome:
+        response["outcome"] = outcome
+    return response
+
+
+def _prepare_account_delete_rights_request(
+    request: Request,
+    *,
+    payload: Dict[str, Any],
+    user_id: str,
+    phone: str,
+    existing_user: Dict[str, Any],
+) -> Dict[str, Any]:
+    lifecycle_marker = str(int(existing_user.get("restoreCount") or 0))
+    try:
+        contract_request = make_account_delete_request(
+            command_id=_account_delete_command_id(request, payload, user_id),
+            subject_id=user_id,
+            phone=phone,
+            lifecycle_marker=lifecycle_marker,
+            scope=payload.get("rightsScope"),
+        )
+        return store.create_rights_request(contract_request)
+    except DataRightsCommandConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "rightsCommandConflict",
+                "message": "commandId cannot be reused with a different deletion payload",
+            },
+        ) from exc
+    except DataRightsContractError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "rightsRequestInvalid",
+                "message": str(exc),
+            },
+        ) from exc
+
+
+def _record_account_delete_rights_completion(
+    request_id: str,
+    *,
+    request_record: Dict[str, Any],
+    deletion: Dict[str, Any],
+) -> Dict[str, Any]:
+    updated_at = str(
+        deletion.get("updatedAt")
+        or deletion.get("deletedAt")
+        or datetime.now(timezone.utc).isoformat()
+    )
+    # Rebuild only the redacted contract fields returned by the store. No raw
+    # phone or request payload is required to create the execution receipt.
+    from app.services.data_rights_contract import DataRightsRequest
+
+    redacted_request = DataRightsRequest(
+        request_id=str(request_record.get("id") or request_id),
+        command_id_hash=str(request_record.get("commandIdHash") or ""),
+        payload_hash=str(request_record.get("payloadHash") or ""),
+        subject_hash=str(request_record.get("subjectHash") or ""),
+        identity_proof_hash=str(request_record.get("identityProofHash") or ""),
+        action=str(request_record.get("action") or "account.delete"),
+        scope_hash=str(request_record.get("scopeHash") or ""),
+        executions=(),
+        created_at=str(request_record.get("createdAt") or updated_at),
+        updated_at=str(request_record.get("updatedAt") or updated_at),
+    )
+    plan = completed_account_delete_execution(redacted_request, updated_at=updated_at)
+    store.record_rights_execution(
+        request_id,
+        module_id=plan["moduleId"],
+        resource_type=plan["resourceType"],
+        execution_id_hash=plan["executionIdHash"],
+        outcome=plan["outcome"],
+        evidence_id_hash=plan["evidenceIdHash"],
+        updated_at=plan["updatedAt"],
+    )
+    store.append_resource_deletion_receipt(
+        receipt_id=plan["receiptId"],
+        request_id=request_id,
+        execution_id_hash=plan["executionIdHash"],
+        module_id=plan["moduleId"],
+        resource_scope_hash=plan["resourceScopeHash"],
+        outcome=plan["outcome"],
+        receipt_hash=plan["receiptHash"],
+        evidence_event_id_hash=plan["evidenceIdHash"],
+        created_at=plan["updatedAt"],
+        retention_until=deletion.get("purgeAfter"),
+    )
+    return _account_delete_rights_summary(request_id, outcome="recorded")
+
+
 @app.post("/auth/delete")
 def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id, payload = _principal_owned_payload(request, payload)
@@ -1678,6 +1802,47 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
         existing_user = _store_get_user(user_id)
         if existing_user is not None and existing_user.get("deletionState") == "purged":
             raise HTTPException(status_code=410, detail="account was permanently deleted")
+        if existing_user is None:
+            raise HTTPException(status_code=404, detail="account not found")
+        rights_result = _prepare_account_delete_rights_request(
+            request,
+            payload=payload,
+            user_id=user_id,
+            phone=phone,
+            existing_user=existing_user,
+        )
+        rights_record = rights_result["request"]
+        if (
+            rights_result["outcome"] == "deduplicated"
+            and str(rights_record.get("status") or "") == "completed"
+        ):
+            deletion = existing_user
+            delegated_grant_revocation = _delegated_access_service().revoke_subject_access(
+                user_id,
+                reason="accountSoftDeleted",
+            )
+            session_revocation = _auth_session_service().revoke_all_for_user(
+                user_id,
+                reason="accountSoftDeleted",
+            )
+            rights_summary = _account_delete_rights_summary(
+                str(rights_record.get("id") or ""),
+                outcome="deduplicated",
+            )
+            return {
+                "status": "softDeleted",
+                "contractVersion": ACCOUNT_DELETION_CONTRACT_VERSION,
+                "deletion": deletion,
+                "policy": {
+                    "dataExportSupported": False,
+                    "retentionDays": ACCOUNT_DELETION_RETENTION_DAYS,
+                    "restoreLimit": ACCOUNT_RESTORE_LIMIT,
+                    "restoreBySamePhone": True,
+                },
+                "sessionRevocation": session_revocation,
+                "delegatedGrantRevocation": delegated_grant_revocation,
+                "rights": rights_summary,
+            }
         deletion = store.soft_delete_user(user_id, phone=phone)
         if deletion is None:
             raise HTTPException(status_code=404, detail="account not found")
@@ -1688,6 +1853,11 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
         session_revocation = _auth_session_service().revoke_all_for_user(
             user_id,
             reason="accountSoftDeleted",
+        )
+        rights_summary = _record_account_delete_rights_completion(
+            str(rights_record.get("id") or ""),
+            request_record=rights_record,
+            deletion=deletion,
         )
     return {
         "status": "softDeleted",
@@ -1701,6 +1871,7 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
         },
         "sessionRevocation": session_revocation,
         "delegatedGrantRevocation": delegated_grant_revocation,
+        "rights": rights_summary,
     }
 
 
