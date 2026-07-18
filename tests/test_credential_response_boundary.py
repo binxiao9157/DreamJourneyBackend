@@ -210,7 +210,7 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
         self.assertEqual(body["data"], "U09VTkQ=")
         self.assertTrue(body["providerRequestIdHash"].startswith("sha256:"))
         self.assertTrue(body["providerLogIdHash"].startswith("sha256:"))
-        self.assertTrue(body["providerMessageHash"].startswith("sha256:"))
+        self.assertNotIn("providerMessageHash", body)
         self.assertNotIn("raw-provider", response.text)
         self.assertNotIn("appkey", response.text.lower())
 

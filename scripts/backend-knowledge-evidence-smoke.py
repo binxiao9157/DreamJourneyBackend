@@ -33,11 +33,16 @@ def main() -> None:
     require(dry_body.get("extractionSchemaVersion") == 2, "v2 schema version missing")
     require(dry_policy.get("sourcePolicy") == "userEvidenceOnly", "source policy mismatch")
     require(dry_policy.get("userTurnCount") == 1, "user turn count mismatch")
-    require("turns" not in (dry_body.get("context") or {}), "context leaked structured turns")
-    require("existingSummary" not in (dry_body.get("context") or {}), "context leaked summary text")
-    prompt = dry_body["request"]["json"]["messages"][1]["content"]
-    require("sourcePolicy=userEvidenceOnly" in prompt, "provider prompt lacks source policy")
-    require("role=assistant" in prompt and "不得作为证据" in prompt, "assistant evidence rule missing")
+    require("request" not in dry_body, "dry-run leaked upstream request")
+    require("context" not in dry_body, "dry-run leaked sanitized context")
+    require(
+        (dry_body.get("dryRun") or {}).get("redactionPolicyVersion") == "providerDryRun-v2",
+        "dry-run redaction policy version missing",
+    )
+    require(
+        (dry_body.get("dryRun") or {}).get("inputSummary", {}).get("sourcePolicy") == "userEvidenceOnly",
+        "provider dry-run lacks source policy summary",
+    )
 
     provider_extraction = {
         "people": [{"name": "父亲", "sourceTurnIndices": [0]}],

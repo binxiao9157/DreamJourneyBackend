@@ -1,4 +1,3 @@
-import hashlib
 import json
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -6,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.config import Settings
+from app.observability.redaction import provider_dry_run_report
 from app.services.knowledge_extraction import LEGACY_TRANSCRIPT, USER_EVIDENCE_ONLY
 
 
@@ -47,8 +47,13 @@ class ArchiveImageAnalysisProviderAdapter:
     def request_analysis(self, image_base64: str) -> Dict[str, Any]:
         raise NotImplementedError
 
-    def redacted_request(self, image_base64: str) -> Dict[str, Any]:
+    def dry_run_report(self, image_base64: str) -> Dict[str, Any]:
         raise NotImplementedError
+
+    # Compatibility alias for callers that used the former misleading name.
+    # The return value is metadata-only and never an upstream request.
+    def redacted_request(self, image_base64: str) -> Dict[str, Any]:
+        return self.dry_run_report(image_base64)
 
     def response_contract(self) -> Dict[str, Any]:
         return DeepSeekImageAnalysisProxy.response_contract()
@@ -57,10 +62,12 @@ class ArchiveImageAnalysisProviderAdapter:
         self,
         reason: str = "provider_unavailable",
         provider_message: str = "",
+        provider_error_code: str = "providerUnavailable",
     ) -> Dict[str, Any]:
         return DeepSeekImageAnalysisProxy.failure_contract(
             reason=reason,
             provider_message=provider_message,
+            provider_error_code=provider_error_code,
             provider=self.provider_id,
         )
 
@@ -87,8 +94,8 @@ class DeepSeekTextOnlyImageAnalysisAdapter(ArchiveImageAnalysisProviderAdapter):
             )
         )
 
-    def redacted_request(self, image_base64: str) -> Dict[str, Any]:
-        return DeepSeekImageAnalysisProxy(self.settings).redacted_request(image_base64)
+    def dry_run_report(self, image_base64: str) -> Dict[str, Any]:
+        return DeepSeekImageAnalysisProxy(self.settings).dry_run_report(image_base64)
 
 
 class ArchiveImageAnalysisProviderFactory:
@@ -162,13 +169,26 @@ class DeepSeekImageAnalysisProxy:
         parsed = self.parse_analysis(content)
         return parsed
 
+    def dry_run_report(self, image_base64: str) -> Dict[str, Any]:
+        normalized_image = image_base64.strip()
+        if not normalized_image:
+            raise ValueError("imageBase64 is required")
+        return provider_dry_run_report(
+            provider="deepseek/text-only",
+            capability="archiveImageAnalysis",
+            method="POST",
+            configured=bool(self.settings.deepseek_api_key),
+            input_summary={
+                "encodedInputCharacterCount": len(normalized_image),
+                "imageCount": 1,
+                "providerSupportsVision": False,
+            },
+        )
+
+    # Compatibility alias for internal callers during the dry-run contract
+    # migration. It returns the metadata-only report above, not a request.
     def redacted_request(self, image_base64: str) -> Dict[str, Any]:
-        request = self.build_request(image_base64)
-        request["headers"] = {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer <server-side>",
-        }
-        return request
+        return self.dry_run_report(image_base64)
 
     @classmethod
     def parse_analysis(cls, content: str) -> Dict[str, Any]:
@@ -228,6 +248,7 @@ class DeepSeekImageAnalysisProxy:
     def failure_contract(
         reason: str = "provider_unavailable",
         provider_message: str = "",
+        provider_error_code: str = "providerUnavailable",
         provider: str = "deepseek",
     ) -> Dict[str, Any]:
         payload = {
@@ -245,12 +266,8 @@ class DeepSeekImageAnalysisProxy:
             "analysisFailureReason": reason,
             "analysisRetryable": True,
             "provider": provider,
+            "providerErrorCode": provider_error_code,
         }
-        if provider_message:
-            payload["providerErrorCode"] = "providerUnavailable"
-            payload["providerErrorReferenceHash"] = (
-                "sha256:" + hashlib.sha256(provider_message.encode("utf-8")).hexdigest()[:16]
-            )
         return payload
 
     @staticmethod
@@ -372,6 +389,50 @@ class DeepSeekKnowledgeExtractionProxy:
         content = DeepSeekImageAnalysisProxy._extract_content(response.json())
         return self.parse_extraction(content)
 
+    def dry_run_report(
+        self,
+        transcript: str = "",
+        existing_summary: str = "",
+        *,
+        turns: Optional[List[Dict[str, Any]]] = None,
+        source_policy: str = LEGACY_TRANSCRIPT,
+    ) -> Dict[str, Any]:
+        normalized_transcript = transcript.strip()
+        if turns is None and not normalized_transcript:
+            raise ValueError("transcript is required")
+        if turns is not None:
+            if not turns:
+                raise ValueError("turns are required")
+            if source_policy != USER_EVIDENCE_ONLY:
+                raise ValueError("structured turns require sourcePolicy userEvidenceOnly")
+
+        normalized_turns = turns or []
+        return provider_dry_run_report(
+            provider="deepseek",
+            capability="kbExtract",
+            method="POST",
+            configured=bool(self.settings.deepseek_api_key),
+            input_summary={
+                "assistantTurnCount": sum(
+                    1
+                    for turn in normalized_turns
+                    if isinstance(turn, dict) and str(turn.get("role") or "") == "assistant"
+                ),
+                "existingSummaryPresent": bool(existing_summary.strip()),
+                "inputMode": "structuredTurns" if turns is not None else "legacyTranscript",
+                "sourcePolicy": source_policy,
+                "transcriptCharacterCount": len(normalized_transcript),
+                "turnCount": len(normalized_turns),
+                "userTurnCount": sum(
+                    1
+                    for turn in normalized_turns
+                    if isinstance(turn, dict) and str(turn.get("role") or "") == "user"
+                ),
+            },
+        )
+
+    # Compatibility alias for the previous method name. Do not return an
+    # upstream request from a diagnostics surface.
     def redacted_request(
         self,
         transcript: str = "",
@@ -380,17 +441,12 @@ class DeepSeekKnowledgeExtractionProxy:
         turns: Optional[List[Dict[str, Any]]] = None,
         source_policy: str = LEGACY_TRANSCRIPT,
     ) -> Dict[str, Any]:
-        request = self.build_request(
+        return self.dry_run_report(
             transcript=transcript,
             existing_summary=existing_summary,
             turns=turns,
             source_policy=source_policy,
         )
-        request["headers"] = {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer <server-side>",
-        }
-        return request
 
     @staticmethod
     def build_prompt(

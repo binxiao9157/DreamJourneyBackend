@@ -135,6 +135,7 @@ from app.observability.operation_metrics import (
     OperationMetricRecorder,
     summarize_operation_metrics_for_observations,
 )
+from app.observability.redaction import provider_error_detail
 from app.services.release_policy import (
     ReleasePolicyCommandGate,
     ReleasePolicyDecisionRecorder,
@@ -345,7 +346,6 @@ VOICE_CLONE_AUTHORIZATION_COPY = (
     "声音克隆必须由用户主动授权，仅使用用户确认提交的声音样本；"
     "未完成授权、样本质量和合规验收前不会公开训练或合成功能。"
 )
-VOICE_CLONE_PROVIDER_ERROR_PREFIX = "voice clone provider error"
 VOICE_CLONE_DISABLE_CONTRACT = (
     "disableVoiceProfile(profileId:) 应撤销该 voiceProfileId 的合成权限，"
     "当前后端仅保存 mock 禁用状态。"
@@ -2572,14 +2572,13 @@ def _voice_clone_public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     public_profile.pop("providerSpeakerId", None)
     provider_request_id = str(public_profile.pop("providerRequestId", "") or "").strip()
     provider_log_id = str(public_profile.pop("providerLogId", "") or "").strip()
-    provider_message = str(public_profile.pop("providerMessage", "") or "").strip()
+    public_profile.pop("providerMessage", None)
+    public_profile.pop("providerErrorReferenceHash", None)
+    public_profile.pop("providerMessageHash", None)
     if provider_request_id:
         public_profile["providerRequestIdHash"] = _provider_reference_hash(provider_request_id)
     if provider_log_id:
         public_profile["providerLogIdHash"] = _provider_reference_hash(provider_log_id)
-    if provider_message:
-        public_profile["providerErrorCode"] = "providerOperationFailed"
-        public_profile["providerErrorReferenceHash"] = _provider_reference_hash(provider_message)
     public_profile.setdefault(
         "providerBindingMode",
         "legacyDirectProviderId"
@@ -2611,11 +2610,8 @@ def _provider_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         or public_payload.pop("logid", "")
         or ""
     ).strip()
-    provider_message = str(
-        public_payload.pop("providerMessage", "")
-        or public_payload.pop("message", "")
-        or ""
-    ).strip()
+    public_payload.pop("providerMessage", None)
+    public_payload.pop("message", None)
     for key in tuple(public_payload):
         normalized_key = "".join(character for character in key.lower() if character.isalnum())
         if normalized_key in {"appkey", "accesstoken", "apptoken", "apikey", "secretkey"}:
@@ -2624,9 +2620,26 @@ def _provider_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         public_payload["providerRequestIdHash"] = _provider_reference_hash(provider_request_id)
     if provider_log_id:
         public_payload["providerLogIdHash"] = _provider_reference_hash(provider_log_id)
-    if provider_message:
-        public_payload["providerMessageHash"] = _provider_reference_hash(provider_message)
     return public_payload
+
+
+def _voice_clone_provider_error_code(error: Exception) -> str:
+    candidate = str(getattr(error, "provider_error_code", "") or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", candidate):
+        return candidate
+    if isinstance(error, VoiceCloneProviderUnavailable):
+        return "providerUnavailable"
+    return "providerOperationFailed"
+
+
+def _sanitize_voice_profile_provider_metadata(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove legacy raw provider diagnostics before a profile is persisted."""
+
+    sanitized = dict(profile)
+    sanitized.pop("providerMessage", None)
+    sanitized.pop("providerErrorReferenceHash", None)
+    sanitized.pop("providerMessageHash", None)
+    return sanitized
 
 
 def _voice_clone_slot_status(sample_status: str) -> str:
@@ -2772,7 +2785,7 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         except (ValueError, VoiceCloneProviderUnavailable) as exc:
             provider_result = {
                 "providerStatus": "failed",
-                "providerMessage": f"{VOICE_CLONE_PROVIDER_ERROR_PREFIX}: {exc}",
+                "providerErrorCode": _voice_clone_provider_error_code(exc),
                 "sampleStatus": "failed",
             }
             provider_request_id = str(getattr(exc, "provider_request_id", "") or "").strip()
@@ -2822,18 +2835,18 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         profile["providerSpeakerId"] = provider_speaker_id
     provider_request_id = str(provider_result.get("providerRequestId") or "").strip()
     provider_log_id = str(provider_result.get("providerLogId") or "").strip()
-    provider_message = str(provider_result.get("providerMessage") or "").strip()
+    provider_error_code = str(provider_result.get("providerErrorCode") or "").strip()
     if provider_request_id:
         profile["providerRequestId"] = provider_request_id
     if provider_log_id:
         profile["providerLogId"] = provider_log_id[:160]
-    if provider_message:
-        profile["providerMessage"] = provider_message[:300]
+    if provider_error_code:
+        profile["providerErrorCode"] = provider_error_code[:128]
     if "createdAt" in payload:
         profile["createdAt"] = str(payload.get("createdAt") or now)
     else:
         profile["createdAt"] = now
-    return profile
+    return _sanitize_voice_profile_provider_metadata(profile)
 
 
 def _sanitize_family_member_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2862,7 +2875,7 @@ def _sanitize_family_member_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _voice_profile_lifecycle_update(profile: Dict[str, Any], sample_status: str) -> Dict[str, Any]:
-    updated = dict(profile)
+    updated = _sanitize_voice_profile_provider_metadata(profile)
     now = datetime.now(timezone.utc).isoformat()
     updated["sampleStatus"] = sample_status
     updated["isEnabled"] = False
@@ -2889,7 +2902,7 @@ def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
     except (ValueError, VoiceCloneProviderUnavailable) as exc:
         provider_result = {
             "providerStatus": "failed",
-            "providerMessage": f"{VOICE_CLONE_PROVIDER_ERROR_PREFIX}: {exc}",
+            "providerErrorCode": _voice_clone_provider_error_code(exc),
             "sampleStatus": "failed",
         }
         provider_request_id = str(getattr(exc, "provider_request_id", "") or "").strip()
@@ -2901,7 +2914,7 @@ def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
     sample_status = str(provider_result.get("sampleStatus") or profile.get("sampleStatus") or "pending")
     if sample_status not in VOICE_CLONE_SAMPLE_STATUSES:
         sample_status = "pending"
-    updated = dict(profile)
+    updated = _sanitize_voice_profile_provider_metadata(profile)
     updated["sampleStatus"] = sample_status
     updated["isEnabled"] = sample_status == "ready"
     updated["providerMode"] = provider.provider_mode
@@ -2909,13 +2922,13 @@ def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
     updated["providerStatus"] = str(provider_result.get("providerStatus") or updated.get("providerStatus") or "unknown")
     provider_request_id = str(provider_result.get("providerRequestId") or "").strip()
     provider_log_id = str(provider_result.get("providerLogId") or "").strip()
-    provider_message = str(provider_result.get("providerMessage") or "").strip()
+    provider_error_code = str(provider_result.get("providerErrorCode") or "").strip()
     if provider_request_id:
         updated["providerRequestId"] = provider_request_id
     if provider_log_id:
         updated["providerLogId"] = provider_log_id[:160]
-    if provider_message:
-        updated["providerMessage"] = provider_message[:300]
+    if provider_error_code:
+        updated["providerErrorCode"] = provider_error_code[:128]
     updated["updatedAt"] = datetime.now(timezone.utc).isoformat()
     slot_update = _update_voice_clone_slot(voice_profile_id, sample_status)
     if slot_update is not None:
@@ -3150,7 +3163,7 @@ def tts(request: Request, payload: Dict[str, Any], dryRun: bool = False) -> Dict
                     speed_ratio=speed_ratio,
                 )
             )
-        request = proxy.build_request(
+        dry_run_report = proxy.dry_run_report(
             text=text,
             user_id=user_id,
             voice_type=voice_type,
@@ -3160,21 +3173,20 @@ def tts(request: Request, payload: Dict[str, Any], dryRun: bool = False) -> Dict
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail={
-                "code": "tts_request_invalid",
-                "message": "TTS request is unavailable",
-                "errorReferenceHash": _provider_reference_hash(exc),
-            },
+            detail=provider_error_detail(
+                code="ttsRequestInvalid",
+                provider="volcengine",
+                capability="legacyTts",
+                retryable=False,
+                configured=bool(settings.volcengine_api_key and settings.volcengine_voice_type),
+            ),
         ) from exc
 
     return {
         "provider": "volcengine",
-        "request": {
-            "url": request["url"],
-            "headers": {"x-api-key": "<server-side>", "Content-Type": "application/json"},
-            "json": request["json"],
-        },
-        "note": "dryRun=true returns the redacted upstream request without calling VolcEngine.",
+        "capability": "legacyTts",
+        "dryRun": dry_run_report,
+        "note": "dryRun=true returns allowlisted metadata without calling the provider.",
     }
 
 
@@ -3184,13 +3196,23 @@ def amap_district(keyword: str, dryRun: bool = False) -> Dict[str, Any]:
         proxy = AMapDistrictProxy(settings)
         if not dryRun:
             return proxy.request_district(keyword=keyword)
-        url = proxy.build_url(keyword=keyword)
+        dry_run_report = proxy.dry_run_report(keyword=keyword)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(
+            status_code=400,
+            detail=provider_error_detail(
+                code="districtLookupRequestInvalid",
+                provider="amap",
+                capability="districtLookup",
+                retryable=False,
+                configured=bool(settings.amap_web_service_key),
+            ),
+        ) from exc
     return {
         "provider": "amap",
-        "keyword": keyword,
-        "upstreamURL": proxy.redact_url(url, settings.amap_web_service_key),
+        "capability": "districtLookup",
+        "dryRun": dry_run_report,
+        "note": "dryRun=true returns allowlisted metadata without calling the provider.",
     }
 
 
@@ -3628,26 +3650,46 @@ def extract_kb(request: Request, payload: Dict[str, Any], dryRun: bool = False) 
                 except KnowledgeProposalValidationError as exc:
                     raise HTTPException(status_code=400, detail=str(exc))
             return response
-        request = proxy.redacted_request(
+        dry_run_report = proxy.dry_run_report(
             transcript=extraction_input.transcript,
             existing_summary=existing_summary,
             turns=extraction_input.turns,
             source_policy=extraction_input.source_policy,
         )
     except ValueError as exc:
-        status_code = 503 if "DEEPSEEK_API_KEY" in str(exc) else 502
-        raise HTTPException(status_code=status_code, detail=str(exc))
+        configured = bool(settings.deepseek_api_key)
+        raise HTTPException(
+            status_code=503 if not configured else 502,
+            detail=provider_error_detail(
+                code=(
+                    "knowledgeExtractionProviderNotConfigured"
+                    if not configured
+                    else "knowledgeExtractionProviderFailed"
+                ),
+                provider="deepseek",
+                capability="kbExtract",
+                retryable=configured,
+                configured=configured,
+            ),
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=provider_error_detail(
+                code="knowledgeExtractionProviderFailed",
+                provider="deepseek",
+                capability="kbExtract",
+                retryable=True,
+                configured=bool(settings.deepseek_api_key),
+            ),
+        ) from exc
 
     response = {
         "provider": "deepseek",
         "capability": "kbExtract",
-        "userId": user_id,
-        "request": request,
+        "dryRun": dry_run_report,
         "evidencePolicy": empty_evidence_policy(extraction_input),
-        "context": safe_context,
-        "note": "dryRun=true returns the redacted upstream request without calling DeepSeek.",
+        "note": "dryRun=true returns allowlisted metadata without calling the provider.",
     }
     if extraction_input.schema_version == 2:
         response["extractionSchemaVersion"] = 2
@@ -3895,27 +3937,44 @@ def archive_image_analysis(request: Request, payload: Dict[str, Any], dryRun: bo
     try:
         if not dryRun:
             return provider.request_analysis(image_base64=image_base64)
-        request = provider.redacted_request(image_base64=image_base64)
+        dry_run_report = provider.dry_run_report(image_base64=image_base64)
     except ValueError as exc:
         if not dryRun:
-            return provider.failure_contract(provider_message=str(exc))
-        raise HTTPException(status_code=502, detail=str(exc))
+            return provider.failure_contract(
+                provider_error_code="providerUnavailable",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=provider_error_detail(
+                code="archiveImageAnalysisProviderFailed",
+                provider=provider.provider_id,
+                capability="archiveImageAnalysis",
+                retryable=True,
+                configured=bool(provider.enabled),
+            ),
+        ) from exc
     except Exception as exc:
         if not dryRun:
-            return provider.failure_contract(provider_message=str(exc))
-        raise HTTPException(status_code=502, detail=str(exc))
+            return provider.failure_contract(
+                provider_error_code="providerUnavailable",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=provider_error_detail(
+                code="archiveImageAnalysisProviderFailed",
+                provider=provider.provider_id,
+                capability="archiveImageAnalysis",
+                retryable=True,
+                configured=bool(provider.enabled),
+            ),
+        ) from exc
 
     return {
         "provider": provider.provider_id,
         "capability": provider.public_capability(),
-        "request": request,
+        "dryRun": dry_run_report,
         "responseContract": provider.response_contract(),
-        "context": {
-            "userId": user_id,
-            "archiveItemId": archive_item_id,
-            "privacyMetadata": safe_context.get("privacyMetadata"),
-        },
-        "note": "dryRun=true returns the redacted upstream request without calling DeepSeek.",
+        "note": "dryRun=true returns allowlisted metadata without calling the provider.",
     }
 
 

@@ -49,8 +49,16 @@ class VoiceCloneProviderUnavailable(ValueError):
 
 
 class VoiceCloneProviderError(ValueError):
-    def __init__(self, message: str, *, provider_request_id: str = "", provider_log_id: str = ""):
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_error_code: str = "providerOperationFailed",
+        provider_request_id: str = "",
+        provider_log_id: str = "",
+    ):
         super().__init__(message)
+        self.provider_error_code = provider_error_code
         self.provider_request_id = provider_request_id
         self.provider_log_id = provider_log_id
 
@@ -206,20 +214,26 @@ class VolcEngineVoiceCloneV3Provider:
                     result["_providerLogId"] = provider_log_id
             return result
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
+            # Do not retain the provider response body. It can echo request
+            # fields or include third-party diagnostics that are not safe for
+            # profile persistence or application logs.
+            exc.read()
             raise VoiceCloneProviderError(
-                f"voice clone provider HTTP {exc.code}: {detail[:200]}",
+                "voice clone provider HTTP failure",
+                provider_error_code=f"providerHttp{exc.code}",
                 provider_request_id=provider_request_id,
                 provider_log_id=self._header_value(exc.headers, "X-Tt-Logid"),
             ) from exc
         except urllib.error.URLError as exc:
             raise VoiceCloneProviderError(
-                f"voice clone provider network error: {exc.reason}",
+                "voice clone provider network failure",
+                provider_error_code="providerNetworkFailure",
                 provider_request_id=provider_request_id,
             ) from exc
         except json.JSONDecodeError as exc:
             raise VoiceCloneProviderError(
                 "voice clone provider returned invalid JSON",
+                provider_error_code="providerInvalidResponse",
                 provider_request_id=provider_request_id,
             ) from exc
 
@@ -230,7 +244,6 @@ class VolcEngineVoiceCloneV3Provider:
         fallback_voice_profile_id: str,
     ) -> Dict[str, Any]:
         code = response.get("code")
-        message = str(response.get("message") or response.get("msg") or "")
         provider_request_id = str(response.get("request_id") or response.get("reqid") or response.get("task_id") or response.get("_providerRequestId") or "")
         provider_log_id = str(response.get("log_id") or response.get("logid") or response.get("_providerLogId") or "")
         if isinstance(code, int) and code not in {0, 20000000}:
@@ -238,7 +251,7 @@ class VolcEngineVoiceCloneV3Provider:
                 "voiceProfileId": fallback_voice_profile_id,
                 "providerStatus": "failed",
                 "sampleStatus": "failed",
-                "providerMessage": message or f"provider code {code}",
+                "providerErrorCode": "providerOperationFailed",
             }
             if provider_request_id:
                 result["providerRequestId"] = provider_request_id
@@ -264,7 +277,6 @@ class VolcEngineVoiceCloneV3Provider:
             "providerRequestId": provider_request_id,
             "providerStatus": provider_status,
             "sampleStatus": sample_status,
-            "providerMessage": message,
         }
         if provider_log_id:
             result["providerLogId"] = provider_log_id

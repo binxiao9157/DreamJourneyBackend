@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover - Python runtimes without audioop can st
     audioop = None
 
 from app.core.config import Settings
+from app.observability.redaction import provider_dry_run_report
 
 
 class VolcTTSProxy:
@@ -85,6 +86,40 @@ class VolcTTSProxy:
         with urllib.request.urlopen(upstream, timeout=30) as response:
             payload = response.read().decode("utf-8")
         return json.loads(payload)
+
+    def dry_run_report(
+        self,
+        *,
+        text: str,
+        user_id: str,
+        voice_type: str = None,
+        encoding: str = "wav",
+        speed_ratio: float = 1.0,
+    ) -> Dict[str, Any]:
+        # Reuse production validation without returning the generated request,
+        # which contains text, identity, selected voice ID, and credential.
+        self.build_request(
+            text=text,
+            user_id=user_id,
+            voice_type=voice_type,
+            encoding=encoding,
+            speed_ratio=speed_ratio,
+        )
+        normalized_encoding = str(encoding or "wav").strip().lower()
+        return provider_dry_run_report(
+            provider="volcengine",
+            capability="legacyTts",
+            method="POST",
+            configured=bool(self.settings.volcengine_api_key and self.settings.volcengine_voice_type),
+            input_summary={
+                "encodingCategory": (
+                    "standard" if normalized_encoding in {"wav", "mp3", "pcm", "ogg"} else "other"
+                ),
+                "speedRatio": speed_ratio,
+                "textCharacterCount": len(text.strip()),
+                "voiceSelectionMode": "requestOverride" if voice_type else "serverDefault",
+            },
+        )
 
 
 class MockVoiceCloneTTSProvider:

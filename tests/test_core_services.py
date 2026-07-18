@@ -719,25 +719,30 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
         self.assertIn("keywords=", url)
         self.assertIn("%E7%BB%8D%E5%85%B4%E5%B8%82", url)
 
-    def test_knowledge_extraction_proxy_builds_redacted_deepseek_request(self):
+    def test_knowledge_extraction_proxy_dry_run_is_metadata_only(self):
         settings = Settings(deepseek_api_key="deepseek-secret")
         proxy = DeepSeekKnowledgeExtractionProxy(settings)
 
-        request = proxy.redacted_request(
+        report = proxy.dry_run_report(
             transcript="[长辈]: 我叫陈建国，1968年住在绍兴越城区仓桥直街。",
             existing_summary="（暂无已有知识）",
         )
 
-        serialized = str(request)
-        self.assertEqual(request["headers"]["Authorization"], "Bearer <server-side>")
+        serialized = str(report)
+        self.assertEqual(report["redactionPolicyVersion"], "providerDryRun-v2")
+        self.assertFalse(report["transport"]["payloadIncluded"])
         self.assertNotIn("deepseek-secret", serialized)
-        self.assertIn("陈建国", serialized)
-        self.assertIn("严格的 JSON", serialized)
+        self.assertNotIn("陈建国", serialized)
+        self.assertNotIn("严格的 JSON", serialized)
+        self.assertEqual(
+            report["inputSummary"]["transcriptCharacterCount"],
+            len("[长辈]: 我叫陈建国，1968年住在绍兴越城区仓桥直街。"),
+        )
 
     def test_knowledge_extraction_proxy_builds_user_evidence_only_prompt(self):
         proxy = DeepSeekKnowledgeExtractionProxy(Settings(deepseek_api_key="deepseek-secret"))
 
-        request = proxy.redacted_request(
+        request = proxy.build_request(
             turns=[
                 {"index": 0, "role": "user", "text": "我父亲年轻时在南京工作。"},
                 {"index": 1, "role": "assistant", "text": "那一定留下了很多回忆。"},
@@ -850,7 +855,7 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
 
         self.assertEqual(response.status_code, 403)
 
-    def test_kb_extract_endpoint_dry_run_returns_redacted_request(self):
+    def test_kb_extract_endpoint_dry_run_returns_allowlisted_metadata(self):
         client = TestClient(app)
 
         response = client.post(
@@ -879,12 +884,12 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
         self.assertIn("kbExtract", payload["capability"])
         self.assertNotIn("deepseek-secret", serialized)
         self.assertNotIn("用户对话原文不应出现在服务端上下文", serialized)
-        self.assertEqual(
-            payload["context"]["privacyMetadata"]["sourceRefs"][0]["title"],
-            "对话来源",
-        )
+        self.assertNotIn("陈建国", serialized)
+        self.assertNotIn("绍兴", serialized)
+        self.assertNotIn("request", payload)
+        self.assertNotIn("context", payload)
+        self.assertEqual(payload["dryRun"]["redactionPolicyVersion"], "providerDryRun-v2")
         self.assertEqual(payload["evidencePolicy"]["sourcePolicy"], "legacyTranscript")
-        self.assertNotIn("existingSummary", payload["context"])
 
     def test_kb_extract_legacy_transcript_keeps_provider_entities_without_v2_evidence(self):
         provider_extraction = {
@@ -943,11 +948,11 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
                 "filteredReasons": {},
             },
         )
-        self.assertNotIn("turns", payload["context"])
-        self.assertNotIn("existingSummary", payload["context"])
-        self.assertNotIn("正文哨兵", str(payload["evidencePolicy"]))
-        prompt = payload["request"]["json"]["messages"][1]["content"]
-        self.assertIn("sourcePolicy=userEvidenceOnly", prompt)
+        self.assertNotIn("正文哨兵", str(payload))
+        self.assertNotIn("request", payload)
+        self.assertNotIn("context", payload)
+        self.assertEqual(payload["dryRun"]["inputSummary"]["inputMode"], "structuredTurns")
+        self.assertEqual(payload["dryRun"]["inputSummary"]["userTurnCount"], 1)
 
     def test_kb_extract_v2_filters_provider_entities_before_responding(self):
         provider_extraction = {
@@ -3643,7 +3648,8 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
 
         self.assertEqual(getattr(context.exception, "provider_log_id", None), "upstream-logid-123")
         self.assertTrue(getattr(context.exception, "provider_request_id", ""))
-        self.assertIn("resource mismatch", str(context.exception))
+        self.assertEqual(getattr(context.exception, "provider_error_code", None), "providerHttp500")
+        self.assertNotIn("resource mismatch", str(context.exception))
 
     def test_voice_clone_provider_factory_rejects_realtime_app_auth_without_clone_key(self):
         configured = Settings(
@@ -3706,7 +3712,7 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
         self.assertNotIn("rawSampleURL", profile)
         self.assertNotIn("sampleLocalPath", profile)
 
-    def test_voice_clone_profile_persists_provider_failure_message(self):
+    def test_voice_clone_profile_persists_provider_failure_code_without_raw_message(self):
         class FailingProvider:
             is_configured = True
             provider_mode = "volcengineVoiceCloneV3"
@@ -3743,9 +3749,14 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
         self.assertEqual(profile["sampleStatus"], "failed")
         self.assertEqual(profile["providerStatus"], "failed")
         self.assertEqual(profile["providerErrorCode"], "providerOperationFailed")
-        self.assertTrue(profile["providerErrorReferenceHash"].startswith("sha256:"))
+        self.assertNotIn("providerErrorReferenceHash", profile)
+        self.assertNotIn("providerMessage", profile)
         self.assertNotIn("Invalid X-Api-Key", created.text)
         self.assertNotIn("audioBase64", profile)
+        stored = main_module.store.get_voice_profile(user_id, voice_profile_id)
+        self.assertIsNotNone(stored)
+        self.assertNotIn("providerMessage", stored)
+        self.assertNotIn("Invalid X-Api-Key", json.dumps(stored, sort_keys=True))
 
     def test_voice_clone_profile_persists_provider_request_and_log_ids_on_failure(self):
         class ProviderFailure(ValueError):
@@ -5792,7 +5803,7 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
         self.assertTrue(failure["analysisRetryable"])
         self.assertEqual(failure["provider"], "deepseek/text-only")
         self.assertEqual(failure["providerErrorCode"], "providerUnavailable")
-        self.assertTrue(failure["providerErrorReferenceHash"].startswith("sha256:"))
+        self.assertNotIn("providerErrorReferenceHash", failure)
         self.assertNotIn("vision provider unavailable", str(failure))
 
     def test_image_analysis_parse_requires_structured_json(self):
@@ -5847,10 +5858,15 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         serialized = str(response.json())
-        self.assertIn("data:image/jpeg;base64,abc123", serialized)
-        self.assertIn("Authorization", serialized)
-        self.assertIn("Bearer <server-side>", serialized)
+        self.assertNotIn("data:image/jpeg;base64,abc123", serialized)
+        self.assertNotIn("abc123", serialized)
+        self.assertNotIn("Authorization", serialized)
         self.assertNotIn("DEEPSEEK_API_KEY", serialized)
+        self.assertNotIn("archive_image_user", serialized)
+        self.assertNotIn("archive-photo-1", serialized)
+        self.assertNotIn("request", response.json())
+        self.assertNotIn("context", response.json())
+        self.assertEqual(response.json()["dryRun"]["redactionPolicyVersion"], "providerDryRun-v2")
         self.assertIn("responseContract", response.json())
         self.assertEqual(response.json()["responseContract"]["detectedLocations"], [])
         self.assertEqual(response.json()["responseContract"]["detectedScenes"], [])
@@ -5936,7 +5952,7 @@ class ArchiveImageAnalysisAPITests(unittest.TestCase):
         self.assertTrue(payload["analysisRetryable"])
         self.assertEqual(payload["provider"], "deepseek/text-only")
         self.assertEqual(payload["providerErrorCode"], "providerUnavailable")
-        self.assertTrue(payload["providerErrorReferenceHash"].startswith("sha256:"))
+        self.assertNotIn("providerErrorReferenceHash", payload)
         self.assertNotIn("DEEPSEEK_API_KEY is not configured", response.text)
 
 
