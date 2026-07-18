@@ -224,6 +224,18 @@ class RouteOwnershipRegistry:
             _rule("GET", "/v2/release-policy", public, "publicReleasePolicy"),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/candidates",
+                session,
+                "ownerTruthCandidateInbox",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/candidates/{candidate_id}/decisions",
+                session,
+                "ownerTruthCandidateDecision",
+            ),
+            _rule(
+                "GET",
                 "/ops/release-policy/observations",
                 system,
                 "systemReleasePolicyObservations",

@@ -69,6 +69,18 @@ from app.services.privacy import (
     sanitize_mailbox_letter_payload,
 )
 from app.services.owner_truth_source import ArchiveOwnerTruthCompatibilityFacade
+from app.domain.owner_truth.candidate_decisions import (
+    OwnerTruthCandidateReviewAccessDenied,
+    OwnerTruthCandidateReviewCommand,
+    OwnerTruthCandidateReviewConflict,
+    OwnerTruthCandidateReviewError,
+    OwnerTruthCandidateReviewSourceInactive,
+    OwnerTruthCandidateVersionConflict,
+)
+from app.domain.owner_truth.contracts import OwnerTruthContractError
+from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
     KB_OPERATION_GOVERNANCE,
@@ -215,6 +227,9 @@ BACKEND_API_TOKEN = settings.backend_api_token or ""
 DELEGATED_ACCESS_CONTRACT_API_ENABLED = bool(
     settings.delegated_access_contract_api_enabled
 )
+OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = bool(
+    settings.owner_truth_candidate_review_qa_enabled
+)
 AUTH_ACCESS_TTL_SECONDS = max(60, settings.auth_access_ttl_seconds)
 AUTH_REFRESH_TTL_SECONDS = max(AUTH_ACCESS_TTL_SECONDS + 60, settings.auth_refresh_ttl_seconds)
 AUTH_LEGACY_PHONE_LOGIN_ENABLED = legacy_phone_login_enabled(settings)
@@ -227,6 +242,116 @@ AUTH_OWNERSHIP_MODE = (
     if settings.auth_ownership_mode in {"shadow", "enforce"}
     else "shadow"
 )
+
+
+def _require_owner_truth_candidate_review_qa(request: Request) -> str:
+    """Keep the V4 review lane unavailable outside an explicit QA session."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        # A stable not-found response avoids presenting this unfinished contract
+        # as a released product capability.
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthCandidateReviewUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthCandidateReviewUserSessionRequired"},
+        )
+    return user_id
+
+
+def _owner_truth_candidate_review_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_candidate_review_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
+def _owner_truth_candidate_review_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthCandidateReviewAccessDenied):
+        return HTTPException(status_code=403, detail={"code": "ownerTruthCandidateReviewDenied"})
+    if isinstance(error, OwnerTruthCandidateVersionConflict):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "ownerTruthCandidateVersionConflict",
+                "expectedCandidateVersion": error.expected_version,
+                "currentCandidateVersion": error.current_version,
+            },
+        )
+    if isinstance(error, OwnerTruthCandidateReviewSourceInactive):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthCandidateSourceInactive"},
+        )
+    if isinstance(error, OwnerTruthCandidateReviewConflict):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthCandidateReviewConflict"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthCandidateReviewInvalid"},
+    )
+
+
+def _owner_truth_candidate_expected_version(payload: Dict[str, Any]) -> int:
+    try:
+        return int(payload.get("expectedCandidateVersion") or 0)
+    except (TypeError, ValueError) as error:
+        raise OwnerTruthCandidateReviewError(
+            "expectedCandidateVersion must be a positive integer"
+        ) from error
+
+
+def _owner_truth_candidate_inbox_item_response(item: Any) -> Dict[str, Any]:
+    return {
+        "candidateId": item.candidate_id,
+        "sourceId": item.source_id,
+        "memoryKind": item.memory_kind,
+        "perspectiveType": item.perspective_type,
+        "epistemicStatus": item.epistemic_status,
+        "sensitivity": item.sensitivity,
+        "contentSchemaVersion": item.content_schema_version,
+        "content": dict(item.content),
+        "contentHash": item.content_hash,
+        "sourceRefs": [dict(source_ref) for source_ref in item.source_refs],
+        "reviewMode": item.review_mode,
+        "candidateVersion": item.candidate_row_version,
+        "createdAt": item.created_at,
+    }
+
+
+def _owner_truth_candidate_decision_response(result: Any) -> Dict[str, Any]:
+    return {
+        "schemaVersion": "owner-truth-candidate-decision-v1",
+        "status": result.outcome,
+        "receipt": {
+            "receiptId": result.receipt_id,
+            "candidateId": result.candidate_id,
+            "decision": result.decision.value,
+            "candidateVersion": result.candidate_row_version,
+            "candidateBeforeHash": result.candidate_before_hash,
+            "candidateAfterHash": result.candidate_after_hash,
+            "correctedValueId": result.corrected_value_id,
+        },
+        # WI-S1-01-05 alone may create a MemoryRecord/MemoryVersion.
+        "memoryActivation": "notCreated",
+    }
 ROUTE_AUTHENTICATION_POLICY = RouteAuthenticationPolicy()
 ROUTE_AUTHENTICATION_DECISION_RECORDER = RouteAuthenticationDecisionRecorder()
 CLIENT_COMPATIBILITY_MODE = resolve_client_compatibility_mode(
@@ -1017,6 +1142,7 @@ def _evaluate_release_policy_command(
 NO_STORE_PATH_PREFIXES = (
     "/auth/",
     "/v2/auth/",
+    "/v2/vaults/",
     "/voice/",
     "/digital-human/",
     "/ops/incidents",
@@ -1692,6 +1818,68 @@ def release_policy(
                 "knownPolicyRevision": error.known_revision,
             },
         ) from error
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/candidates",
+    include_in_schema=False,
+)
+def owner_truth_candidate_inbox(
+    request: Request,
+    vault_id: str,
+) -> Dict[str, Any]:
+    """QA-only Owner Candidate Inbox; never a public M0 read surface."""
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        items = OwnerTruthCandidateReviewService(store).list_pending(context=context)
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    return {
+        "schemaVersion": "owner-truth-candidate-inbox-v1",
+        "vaultId": context.vault_id,
+        "candidates": [
+            _owner_truth_candidate_inbox_item_response(item) for item in items
+        ],
+    }
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/candidates/{candidate_id}/decisions",
+    include_in_schema=False,
+)
+def review_owner_truth_candidate(
+    request: Request,
+    vault_id: str,
+    candidate_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only terminal review boundary; no MemoryVersion is created here."""
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        command = OwnerTruthCandidateReviewCommand(
+            command_id=str(payload.get("commandId") or ""),
+            candidate_id=candidate_id,
+            expected_candidate_version=_owner_truth_candidate_expected_version(payload),
+            action=str(payload.get("action") or ""),
+            corrected_value=payload.get("correctedValue"),
+            corrected_value_schema_version=str(
+                payload.get("correctedValueSchemaVersion")
+                or OWNER_TRUTH_SCHEMA_VERSION
+            ),
+            reason_code=str(payload.get("reasonCode") or "ownerReviewed"),
+        )
+        result = OwnerTruthCandidateReviewService(store).decide(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_candidate_decision_response(result),
+    )
 
 
 @app.get("/ops/release-policy/observations")

@@ -8,10 +8,12 @@ writes test records to the configured application database.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 import json
 import os
 import sys
+from threading import Barrier
 import uuid
 from pathlib import Path
 
@@ -34,6 +36,7 @@ from app.domain.owner_truth.source_commands import (
 from app.domain.owner_truth.candidate_decisions import (
     CandidateReviewAction,
     OwnerTruthCandidateReviewCommand,
+    OwnerTruthCandidateReviewConflict,
 )
 from app.services.owner_truth_source import (
     ArchiveOwnerTruthCompatibilityFacade,
@@ -371,6 +374,7 @@ def main() -> None:
             review_candidate_id = str(uuid.uuid4())
             review_corrected_candidate_id = str(uuid.uuid4())
             review_unbacked_corrected_candidate_id = str(uuid.uuid4())
+            review_concurrent_candidate_id = str(uuid.uuid4())
             review_content = {"summary": "小时候在院子里听雨。"}
             review_payload = {
                 "schemaVersion": "owner-truth-candidate-proposal-v1",
@@ -410,6 +414,7 @@ def main() -> None:
                         review_candidate_id,
                         review_corrected_candidate_id,
                         review_unbacked_corrected_candidate_id,
+                        review_concurrent_candidate_id,
                     ):
                         cursor.execute(
                             """
@@ -527,6 +532,59 @@ def main() -> None:
                 insert_unbacked_corrected_decision,
                 "a corrected Candidate must retain exactly one corrected Owner value",
             )
+
+            # Two distinct commands race on the same pending Candidate.  The
+            # service must serialize through the Candidate advisory lock and
+            # leave exactly one terminal DecisionReceipt.
+            concurrent_start = Barrier(2)
+
+            def decide_concurrently(index: int) -> str:
+                concurrent_store = PostgresStore(
+                    dsn=test_dsn,
+                    pool_min_size=1,
+                    pool_max_size=1,
+                    pool_timeout_seconds=5.0,
+                )
+                concurrent_store.open_pool(wait=True)
+                try:
+                    concurrent_start.wait(timeout=10)
+                    result = OwnerTruthCandidateReviewService(concurrent_store).decide(
+                        command=OwnerTruthCandidateReviewCommand(
+                            command_id=f"owner-truth-candidate-race-{index}",
+                            candidate_id=review_concurrent_candidate_id,
+                            expected_candidate_version=1,
+                            action=CandidateReviewAction.ACCEPT,
+                            corrected_value=None,
+                            corrected_value_schema_version="owner-truth-v1",
+                            reason_code="ownerReviewed",
+                        ),
+                        context=review_context,
+                    )
+                    return result.outcome
+                except OwnerTruthCandidateReviewConflict:
+                    return "conflict"
+                finally:
+                    concurrent_store.close_pool()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                concurrent_outcomes = list(
+                    executor.map(decide_concurrently, (1, 2))
+                )
+            require(
+                sorted(concurrent_outcomes) == ["conflict", "created"],
+                "concurrent Candidate decisions must produce one writer and one terminal conflict",
+            )
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT count(*) FROM owner_truth.decision_receipts "
+                        "WHERE vault_id = %s AND candidate_id = %s",
+                        (review_vault_id, review_concurrent_candidate_id),
+                    )
+                    require(
+                        int(cursor.fetchone()[0]) == 1,
+                        "concurrent Candidate decisions must persist exactly one receipt",
+                    )
         finally:
             store.close_pool()
 
@@ -575,6 +633,7 @@ def main() -> None:
                     "archiveTextShadowed": True,
                     "archiveMediaLocalOnly": True,
                     "candidateReviewIdempotent": True,
+                    "candidateReviewConcurrentSingleWriter": True,
                     "candidateCorrectionSeparate": True,
                     "correctedDecisionRequiresValue": True,
                     "legacyMemoriesUnchanged": True,

@@ -80,6 +80,9 @@ class Settings:
     async_effect_v1_enabled: bool = False
     async_effect_worker_enabled: bool = False
     delegated_access_contract_api_enabled: bool = False
+    # Candidate review is an Owner Truth QA contract only until the M0 review
+    # UI, release policy, and external gates are complete.
+    owner_truth_candidate_review_qa_enabled: bool = False
     evidence_rollout_retention_days: int = 30
     operations_evidence_hmac_key: Optional[str] = None
     incident_ack_timeout_seconds: int = 900
@@ -233,6 +236,10 @@ class Settings:
             delegated_access_contract_api_enabled=_env_bool(
                 "DELEGATED_ACCESS_CONTRACT_API_ENABLED",
                 cls.delegated_access_contract_api_enabled,
+            ),
+            owner_truth_candidate_review_qa_enabled=_env_bool(
+                "OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED",
+                cls.owner_truth_candidate_review_qa_enabled,
             ),
             evidence_rollout_retention_days=_env_int(
                 "EVIDENCE_ROLLOUT_RETENTION_DAYS",

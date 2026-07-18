@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from hashlib import sha256
@@ -62,14 +62,6 @@ class OwnerTruthCandidateReviewResult:
 
 
 class OwnerTruthCandidateReviewStore(Protocol):
-    def request_unit_of_work(
-        self,
-        *,
-        correlation_id: str,
-        command_id: str,
-    ) -> ContextManager[Any]:
-        ...
-
     def owner_truth_candidate_review_repository(self) -> Any:
         ...
 
@@ -635,7 +627,7 @@ class OwnerTruthCandidateReviewService:
 
     def list_pending(self, *, context: OwnerTruthCommandContext) -> tuple[OwnerTruthCandidateInboxItem, ...]:
         _assert_owner_context(context)
-        with self._store.request_unit_of_work(
+        with self._request_unit_of_work(
             correlation_id=f"owner-truth-candidate-inbox-{context.vault_id}",
             command_id="ownerTruthCandidateInbox",
         ):
@@ -648,7 +640,7 @@ class OwnerTruthCandidateReviewService:
         context: OwnerTruthCommandContext,
     ) -> OwnerTruthCandidateReviewResult:
         _assert_owner_context(context)
-        with self._store.request_unit_of_work(
+        with self._request_unit_of_work(
             correlation_id=f"owner-truth-candidate-decision-{command.command_id_hash}",
             command_id=command.command_id_hash,
         ):
@@ -656,6 +648,19 @@ class OwnerTruthCandidateReviewService:
                 command=command,
                 context=context,
             )
+
+    def _request_unit_of_work(
+        self,
+        *,
+        correlation_id: str,
+        command_id: str,
+    ) -> ContextManager[Any]:
+        """Use Postgres UoW when present; semantic doubles own their own lock."""
+
+        factory = getattr(self._store, "request_unit_of_work", None)
+        if callable(factory):
+            return factory(correlation_id=correlation_id, command_id=command_id)
+        return nullcontext()
 
 
 __all__ = [

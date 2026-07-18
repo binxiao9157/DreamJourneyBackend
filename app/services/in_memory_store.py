@@ -50,6 +50,9 @@ from app.domain.owner_truth.source_commands import (
     OwnerTruthSourceVersionConflict,
     OwnerTruthSourceWriteRecord,
 )
+from app.services.owner_truth_candidate_review import (
+    InMemoryOwnerTruthCandidateReviewRepository,
+)
 from app.services.user_identity import stable_user_id
 from app.observability.events import (
     EvidenceEventConflict,
@@ -78,6 +81,9 @@ class InMemoryStore:
         self._owner_truth_vaults: Dict[str, Dict[str, Any]] = {}
         self._owner_truth_sources: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._owner_truth_source_receipts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._owner_truth_candidate_review_repository = (
+            InMemoryOwnerTruthCandidateReviewRepository()
+        )
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
         self._profiles: Dict[str, Dict[str, Any]] = {}
         self._password_credentials: Dict[str, Dict[str, Any]] = {}
@@ -118,6 +124,11 @@ class InMemoryStore:
             raise ValueError("auth user id is required")
         with self._auth_lock:
             yield
+
+    def owner_truth_candidate_review_repository(
+        self,
+    ) -> InMemoryOwnerTruthCandidateReviewRepository:
+        return self._owner_truth_candidate_review_repository
 
     def append_evidence_event(
         self,
