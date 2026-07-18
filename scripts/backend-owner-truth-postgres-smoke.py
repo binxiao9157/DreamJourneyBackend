@@ -55,6 +55,10 @@ from app.services.owner_truth_context_shadow import (
     OwnerTruthContextShadowReadService,
     context_shadow_summary,
 )
+from app.services.owner_truth_context_shadow_build import (
+    OwnerTruthContextShadowBuildService,
+    context_shadow_build_summary,
+)
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
@@ -872,6 +876,34 @@ def main() -> None:
                 and review_knowledge_content["claim"] not in str(context_shadow_qa_summary),
                 "Context shadow QA output must not expose MemoryVersion content",
             )
+            raw_context_query = "只允许在上下文影子中以哈希存在的问题"
+            context_shadow_build = OwnerTruthContextShadowBuildService(
+                store,
+                enabled=True,
+            ).build(
+                context=review_context,
+                payload={"intent": "echo_chat", "query": raw_context_query},
+            )
+            context_shadow_build_qa_summary = context_shadow_build_summary(context_shadow_build)
+            require(
+                context_shadow_build["contextVersion"] == "echo-context-v4-shadow"
+                and context_shadow_build["legacyContextRead"] is False
+                and context_shadow_build["fallbacks"] == []
+                and len(context_shadow_build["citationProof"]) == 2
+                and all(
+                    item["resolved"] is True
+                    and item["resolution"] == "current_confirmed_projection_entry"
+                    and item["sourceRef"]["sourceId"] == item["citation"]["sourceId"]
+                    for item in context_shadow_build["citationProof"]
+                ),
+                "Context shadow build must resolve only current confirmed projection citations",
+            )
+            require(
+                raw_context_query not in str(context_shadow_build_qa_summary)
+                and review_content["summary"] not in str(context_shadow_build_qa_summary)
+                and review_knowledge_content["claim"] not in str(context_shadow_build_qa_summary),
+                "Context shadow build evidence must not expose raw query or MemoryVersion content",
+            )
 
             expect_rejected(
                 test_dsn,
@@ -1169,6 +1201,21 @@ def main() -> None:
                 and context_shadow_changed["selectedContext"] == [],
                 "Context shadow must fail closed with an invalidated projection checkpoint",
             )
+            context_shadow_build_changed = OwnerTruthContextShadowBuildService(
+                store,
+                enabled=True,
+            ).build(
+                context=review_context,
+                payload={"query": "投影失效时不得读旧上下文"},
+            )
+            require(
+                context_shadow_build_changed["authority"]["state"] == "rebuilding"
+                and context_shadow_build_changed["selectedContext"] == []
+                and context_shadow_build_changed["citationProof"] == []
+                and context_shadow_build_changed["fallbacks"]
+                == ["owner_truth_context_unavailable_no_personal_memory"],
+                "Context shadow build must use explicit no-personal-memory fallback",
+            )
             with psycopg.connect(test_dsn) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
@@ -1265,6 +1312,9 @@ def main() -> None:
                     "contextShadowTypedCitations": True,
                     "contextShadowFailsClosed": True,
                     "contextShadowSummaryValueFree": True,
+                    "contextShadowBuildCitationProof": True,
+                    "contextShadowBuildNoPersonalMemoryFallback": True,
+                    "contextShadowBuildValueFree": True,
                     "legacyMemoriesUnchanged": True,
                     "legacyArchiveUnchanged": True,
                 },

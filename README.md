@@ -64,7 +64,7 @@
 - `RELEASE_POLICY_COMMAND_MODE=observe` 会为受控 command 重新计算服务端发布策略并输出诊断响应头，但暂不拦截旧客户端；这是默认迁移模式。
 - `RELEASE_POLICY_COMMAND_MODE=enforce` 会在受控 command 缺少有效 captured decision、账号代际不匹配或服务端策略拒绝时返回 `403 release_policy_denied`。只能在 observe mismatch 与旧客户端覆盖完成后按 cohort 切换。
 - `DELEGATED_ACCESS_CONTRACT_API_ENABLED=false` 默认关闭 Family/Care/TimeLetter 的 Grant/Relationship 管理接口；安全合同和数据库迁移可以先部署，但在 G4 产品政策通过前不得在常驻服务进程中开启。部署 smoke 仅在独立进程内临时开启该合同。
-- `OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED=false` 默认关闭 V4 Candidate Inbox/Owner 决策接口。即使临时开启，也必须携带认证后的用户会话和 `X-DreamJourney-QA-Owner-Truth: 1`；该接口仅用于 QA，不代表 Candidate 已创建 MemoryVersion 或对公开产品开放。
+- `OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED=false` 默认关闭 V4 Candidate Inbox/Owner 决策、Projection、KBLite compatibility 与 Context shadow QA 接口。即使临时开启，也必须携带认证后的用户会话和 `X-DreamJourney-QA-Owner-Truth: 1`；这些接口仅用于 QA，不代表 Candidate、Projection 或 Context 已对公开产品开放。
 - `ASYNC_EFFECT_V1_ENABLED=false`、`ASYNC_EFFECT_WORKER_ENABLED=false` 和 `OWNER_TRUTH_MEMORY_PROJECTION_WORKER_ENABLED=false` 默认关闭 V4 异步副作用执行。`0013_async_effects_kernel` 只部署可重建的协调 schema；API 不得把本地 timer、notification 或 schema 存在解释为服务端完成。现有 `async-effect-worker` 与 `async-effect-scheduler` Compose profile 仍只允许值无关的 shadow observation。Owner Truth projection 有独立的一次性 typed worker，只有三个开关同时显式开启才会 claim `ownerTruth.memoryProjection.rebuild`，并且不改变 `/context/build`、KBLite legacy writer 或公开 Echo。
 - ReleasePolicy rollout shadow 事件写入严格白名单的 append-only evidence sink；`EVIDENCE_ROLLOUT_RETENTION_DAYS` 只控制临时 rollout 观察保留期，legal hold 不受普通 TTL 或账号 purge 删除。
 

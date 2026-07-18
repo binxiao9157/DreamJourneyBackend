@@ -94,6 +94,10 @@ from app.services.owner_truth_context_shadow import (
     OwnerTruthContextShadowReadService,
     context_shadow_summary,
 )
+from app.services.owner_truth_context_shadow_build import (
+    OwnerTruthContextShadowBuildService,
+    context_shadow_build_summary,
+)
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
@@ -2100,6 +2104,31 @@ def read_owner_truth_context_shadow(
     return {
         "schemaVersion": "owner-truth-context-shadow-read-v1",
         "contextShadow": context_shadow_summary(shadow),
+    }
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/context-shadow/build",
+    include_in_schema=False,
+)
+def build_owner_truth_context_shadow(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """QA-only Context V4 shadow build; the public Context Packet is untouched."""
+
+    try:
+        context = _owner_truth_context_shadow_context(request, vault_id=vault_id)
+        shadow = OwnerTruthContextShadowBuildService(store, enabled=True).build(
+            context=context,
+            payload=payload,
+        )
+    except OwnerTruthMemoryProjectionError as error:
+        raise _owner_truth_memory_projection_http_error(error) from error
+    return {
+        "schemaVersion": "owner-truth-context-shadow-build-response-v1",
+        "contextShadow": context_shadow_build_summary(shadow),
     }
 
 

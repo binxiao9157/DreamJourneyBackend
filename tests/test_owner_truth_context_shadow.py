@@ -29,6 +29,10 @@ from app.services.owner_truth_context_shadow import (
     OwnerTruthContextShadowReadService,
     context_shadow_summary,
 )
+from app.services.owner_truth_context_shadow_build import (
+    OwnerTruthContextShadowBuildService,
+    context_shadow_build_summary,
+)
 from app.services.owner_truth_memory_projection import (
     InMemoryOwnerTruthMemoryProjectionRepository,
     OwnerTruthMemoryProjectionService,
@@ -218,6 +222,65 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
         self.assertEqual(result["filteredContext"], [])
         self.assertIsNone(result["contextHash"])
 
+    def test_shadow_build_uses_only_confirmed_citations_and_never_keeps_raw_query(self) -> None:
+        experience = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "只允许投影作为个人上下文来源"},
+        )
+        restricted = self._candidate(
+            kind=MemoryKind.EMOTION,
+            content={"label": "不应进入上下文"},
+            sensitivity=SensitivityLevel.RESTRICTED,
+        )
+        self._activate(experience, command_id="context-shadow-build-experience")
+        self._activate(restricted, command_id="context-shadow-build-restricted")
+        self.projection_service.rebuild(context=self.context)
+
+        raw_query = "请用这段私密问题构建回响上下文"
+        result = OwnerTruthContextShadowBuildService(self.store, enabled=True).build(
+            context=self.context,
+            payload={"intent": "echo_chat", "query": raw_query},
+        )
+        summary = context_shadow_build_summary(result)
+
+        self.assertEqual(result["contextVersion"], "echo-context-v4-shadow")
+        self.assertTrue(result["shadowOnly"])
+        self.assertTrue(result["legacyContextUnchanged"])
+        self.assertFalse(result["legacyContextRead"])
+        self.assertEqual(result["authority"]["state"], "ready")
+        self.assertEqual(result["fallbacks"], [])
+        self.assertEqual(result["trace"]["citationProofCount"], 1)
+        self.assertEqual(result["citationProof"][0]["resolution"], "current_confirmed_projection_entry")
+        self.assertEqual(
+            result["citationProof"][0]["citation"]["sourceId"],
+            experience.source_id,
+        )
+        self.assertEqual(result["filteredContext"][0]["reason"], "sensitivity_not_context_eligible")
+        self.assertTrue(result["request"]["queryHash"])
+        self.assertNotIn(raw_query, str(summary))
+        self.assertNotIn(experience.content["summary"], str(summary))
+        self.assertNotIn(restricted.content["label"], str(summary))
+
+    def test_shadow_build_uses_explicit_no_personal_memory_fallback_when_projection_unavailable(self) -> None:
+        candidate = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "未重建投影时不得回退旧档案"},
+        )
+        self._activate(candidate, command_id="context-shadow-build-unavailable")
+
+        result = OwnerTruthContextShadowBuildService(self.store, enabled=True).build(
+            context=self.context,
+            payload={"query": "投影未就绪时不得回退旧档案"},
+        )
+
+        self.assertEqual(result["authority"]["state"], "rebuilding")
+        self.assertEqual(result["selectedContext"], [])
+        self.assertEqual(result["citationProof"], [])
+        self.assertEqual(
+            result["fallbacks"],
+            ["owner_truth_context_unavailable_no_personal_memory"],
+        )
+
     def test_non_owner_is_denied(self) -> None:
         non_owner_context = OwnerTruthCommandContext(
             vault_id=self.vault_id,
@@ -228,6 +291,19 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
         with self.assertRaises(OwnerTruthMemoryProjectionAccessDenied):
             OwnerTruthContextShadowReadService(self.store, enabled=True).read(
                 context=non_owner_context
+            )
+
+    def test_unknown_vault_is_normalized_to_projection_access_denied(self) -> None:
+        unknown_vault_context = OwnerTruthCommandContext(
+            vault_id="vault-not-owned-by-context-subject",
+            owner_subject_id=self.owner_id,
+            actor_subject_id=self.owner_id,
+        )
+
+        with self.assertRaises(OwnerTruthMemoryProjectionAccessDenied):
+            OwnerTruthContextShadowBuildService(self.store, enabled=True).build(
+                context=unknown_vault_context,
+                payload={"query": "跨 Vault 访问不应泄露底层异常"},
             )
 
 

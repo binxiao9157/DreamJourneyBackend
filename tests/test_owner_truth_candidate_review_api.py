@@ -123,6 +123,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             "/v2/vaults/vault-hidden/context-shadow",
             headers=headers,
         )
+        context_shadow_build = client.post(
+            "/v2/vaults/vault-hidden/context-shadow/build",
+            headers=headers,
+            json={"query": "default hidden"},
+        )
 
         self.assertEqual(owner_id.startswith("user_"), True)
         self.assertEqual(response.status_code, 404)
@@ -140,6 +145,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(context_shadow.status_code, 404)
         self.assertEqual(
             context_shadow.json()["detail"]["code"],
+            "ownerTruthContextShadowUnavailable",
+        )
+        self.assertEqual(context_shadow_build.status_code, 404)
+        self.assertEqual(
+            context_shadow_build.json()["detail"]["code"],
             "ownerTruthContextShadowUnavailable",
         )
 
@@ -202,8 +212,18 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self._seed(candidate)
 
         denied = client.get("/v2/vaults/vault-other-owner/candidates", headers=headers)
+        shadow_denied = client.post(
+            "/v2/vaults/vault-other-owner/context-shadow/build",
+            headers=headers,
+            json={"query": "跨 Vault 读取不得构建个人上下文"},
+        )
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(denied.json()["detail"]["code"], "ownerTruthCandidateReviewDenied")
+        self.assertEqual(shadow_denied.status_code, 403)
+        self.assertEqual(
+            shadow_denied.json()["detail"]["code"],
+            "ownerTruthMemoryProjectionDenied",
+        )
 
         stale = client.post(
             f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
@@ -320,6 +340,26 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             candidate.source_id,
         )
         self.assertNotIn(candidate.content["summary"], str(shadow))
+
+        raw_query = "只允许在 QA trace 中留下哈希的原始问题"
+        context_shadow_build = client.post(
+            f"/v2/vaults/{vault_id}/context-shadow/build",
+            headers=headers,
+            json={"intent": "echo_chat", "query": raw_query},
+        )
+        self.assertEqual(context_shadow_build.status_code, 200)
+        self.assertEqual(
+            context_shadow_build.json()["schemaVersion"],
+            "owner-truth-context-shadow-build-response-v1",
+        )
+        build = context_shadow_build.json()["contextShadow"]
+        self.assertEqual(build["contextVersion"], "echo-context-v4-shadow")
+        self.assertFalse(build["legacyContextRead"])
+        self.assertEqual(build["fallbacks"], [])
+        self.assertEqual(build["citationProof"][0]["resolution"], "current_confirmed_projection_entry")
+        self.assertEqual(build["citationProof"][0]["citation"]["sourceId"], candidate.source_id)
+        self.assertNotIn(raw_query, str(build))
+        self.assertNotIn(candidate.content["summary"], str(build))
 
 
 if __name__ == "__main__":

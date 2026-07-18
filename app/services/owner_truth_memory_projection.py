@@ -24,6 +24,7 @@ from app.domain.owner_truth.memory_projection import (
     build_ready_memory_projection,
     build_rebuilding_memory_projection,
 )
+from app.domain.owner_truth.candidate_decisions import OwnerTruthCandidateReviewAccessDenied
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 
 
@@ -533,7 +534,10 @@ class OwnerTruthMemoryProjectionService:
             correlation_id=f"owner-truth-memory-projection-rebuild-{context.vault_id}",
             command_id=f"ownerTruthMemoryProjectionRebuild:{context.vault_id}",
         ):
-            return self._store.owner_truth_memory_projection_repository().rebuild(context=context)
+            try:
+                return self._store.owner_truth_memory_projection_repository().rebuild(context=context)
+            except OwnerTruthCandidateReviewAccessDenied as error:
+                raise OwnerTruthMemoryProjectionAccessDenied(str(error)) from error
 
     def read(self, *, context: OwnerTruthCommandContext) -> dict[str, Any]:
         _assert_owner_context(context)
@@ -541,7 +545,10 @@ class OwnerTruthMemoryProjectionService:
             correlation_id=f"owner-truth-memory-projection-read-{context.vault_id}",
             command_id=f"ownerTruthMemoryProjectionRead:{context.vault_id}",
         ):
-            return self._store.owner_truth_memory_projection_repository().read(context=context)
+            try:
+                return self._store.owner_truth_memory_projection_repository().read(context=context)
+            except OwnerTruthCandidateReviewAccessDenied as error:
+                raise OwnerTruthMemoryProjectionAccessDenied(str(error)) from error
 
     def _request_unit_of_work(
         self,

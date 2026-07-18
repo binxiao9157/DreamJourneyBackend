@@ -111,13 +111,14 @@ active confirmed MemoryVersion
 - The QA endpoint returns only a summary: fact identifiers, citation,
   confidence, filtering reason and checkpoint. It never returns fact text.
 
-The four inspection endpoints are deliberately hidden from OpenAPI:
+The five inspection endpoints are deliberately hidden from OpenAPI:
 
 ```text
 GET  /v2/vaults/{vaultId}/memory-projection
 POST /v2/vaults/{vaultId}/memory-projection/rebuild
 GET  /v2/vaults/{vaultId}/kblite-compatibility
 GET  /v2/vaults/{vaultId}/context-shadow
+POST /v2/vaults/{vaultId}/context-shadow/build
 ```
 
 They require `OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED=true`,
@@ -157,6 +158,11 @@ ready Owner Truth projection
 
 This is evidence for a future typed-Citation Context reader, not a cutover.
 It leaves the existing Context Packet and public Echo source selection intact.
+
+The build variant adds a QA-only request digest, citation proof and explicit
+no-personal-memory fallback.  It is documented separately in
+`2026-07-19-owner-truth-context-shadow-build.md`; it still does not read legacy
+Archive/KBLite or change public `/context/build`.
 
 ## Implemented Contract
 
