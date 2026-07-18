@@ -128,6 +128,23 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("authority_epoch", migration.sql)
         self.assertIn("NEW.payload - ARRAY['content', 'evidenceRefs']", migration.sql)
 
+    def test_memory_projection_trigger_fix_preserves_applied_migration_history(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0017"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_memory_projection_trigger_fix")
+        self.assertEqual(migration.phase, "contract")
+        self.assertEqual(migration.compatibility, "backwardCompatible")
+        self.assertEqual(metadata["runtimeCompatibility"], "ownerTruthV1MemoryProjectionTriggerFix")
+        self.assertFalse(metadata["releaseFlags"]["memoryProjectionV1"])
+        self.assertIn("version_schema_version TEXT", migration.sql)
+        self.assertIn("version_schema_version,", migration.sql)
+        self.assertIn("NEW.content_schema_version IS DISTINCT FROM version_schema_version", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

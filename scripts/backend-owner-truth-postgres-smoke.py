@@ -117,7 +117,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(applied["appliedVersions"][-1] == "0016", "owner truth Memory projection migration must apply")
+        require(applied["appliedVersions"][-1] == "0017", "owner truth Memory projection trigger fix must apply")
 
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:

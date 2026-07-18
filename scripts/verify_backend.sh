@@ -80,6 +80,8 @@ test -f scripts/run-backend-async-effects-postgres-smoke.sh
 	test -f db/migrations/0014_owner_truth_candidate_decisions.json
 	test -f db/migrations/0016_owner_truth_memory_projection.sql
 	test -f db/migrations/0016_owner_truth_memory_projection.json
+	test -f db/migrations/0017_owner_truth_memory_projection_trigger_fix.sql
+	test -f db/migrations/0017_owner_truth_memory_projection_trigger_fix.json
 	test -f app/services/owner_truth_memory_projection.py
 	grep -q "COPY db ./db" Dockerfile
 grep -q "psycopg" requirements.txt
