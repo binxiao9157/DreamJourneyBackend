@@ -12,5 +12,5 @@ fi
 [[ -n "$BACKEND_BASE_URL" ]] || { echo "BACKEND_BASE_URL is required" >&2; exit 1; }
 
 cd "$ROOT_DIR"
-BACKEND_BASE_URL="$BACKEND_BASE_URL" \
+PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" BACKEND_BASE_URL="$BACKEND_BASE_URL" \
   "$PYTHON_BIN" scripts/backend-provider-redaction-deployed-smoke.py
