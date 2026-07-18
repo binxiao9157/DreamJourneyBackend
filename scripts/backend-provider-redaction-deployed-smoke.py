@@ -24,6 +24,10 @@ BASE_URL = os.environ.get(
     os.environ.get("DREAMJOURNEY_BACKEND_BASE_URL", ""),
 ).strip().rstrip("/")
 POLICY_VERSION = "providerDryRun-v2"
+HIDDEN_PROVIDER_SURFACE_PREFIXES = (
+    "POST /archive/image-analysis?",
+    "POST /tts?",
+)
 CANARIES = (
     "KB_TRANSCRIPT_CANARY",
     "KB_SUMMARY_CANARY",
@@ -233,7 +237,7 @@ def assert_value_free_response(
     if status == 403:
         detail = body.get("detail") or {}
         require(
-            surface.startswith("POST /archive/image-analysis?"),
+            any(surface.startswith(prefix) for prefix in HIDDEN_PROVIDER_SURFACE_PREFIXES),
             f"{surface} returned an unexpected hidden-provider denial",
         )
         if isinstance(detail, dict):
