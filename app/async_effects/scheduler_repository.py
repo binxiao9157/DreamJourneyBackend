@@ -367,8 +367,8 @@ class PostgresAsyncEffectSchedulerLeaseRepository:
                     updated_at = NOW()
                 FROM candidate
                 WHERE lease.lease_id = candidate.lease_id
-                RETURNING lease_id, operation_id, scheduler_key, attempt,
-                    lease_owner, lease_until, heartbeat_at
+                RETURNING lease.lease_id, lease.operation_id, lease.scheduler_key, lease.attempt,
+                    lease.lease_owner, lease.lease_until, lease.heartbeat_at
                 """,
                 (list(normalized_keys), normalized_scheduler_id, normalized_seconds),
             )

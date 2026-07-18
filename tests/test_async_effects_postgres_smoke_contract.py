@@ -24,6 +24,7 @@ class AsyncEffectsPostgresSmokeContractTests(unittest.TestCase):
         self.assertIn("source must roll back when its effect request cannot commit", source)
         self.assertIn("FOR UPDATE SKIP LOCKED", lease_source)
         self.assertIn("FOR UPDATE SKIP LOCKED", scheduler_source)
+        self.assertIn("RETURNING lease.lease_id", scheduler_source)
         self.assertIn("only one worker may claim the same job", source)
         self.assertIn("expired lease must be reclaimed", source)
         self.assertIn("cancelled worker heartbeat must be rejected", source)
