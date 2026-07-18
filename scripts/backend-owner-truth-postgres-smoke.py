@@ -148,7 +148,10 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(applied["appliedVersions"][-1] == "0019", "owner truth Answer/Citation trigger fix must apply")
+        require(
+            applied["appliedVersions"][-1] == "0020",
+            "owner truth correction request migration must apply",
+        )
 
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:
