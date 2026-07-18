@@ -254,6 +254,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/context-shadow",
+                session,
+                "ownerTruthContextShadowRead",
+            ),
+            _rule(
+                "GET",
                 "/ops/release-policy/observations",
                 system,
                 "systemReleasePolicyObservations",

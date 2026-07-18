@@ -75,17 +75,52 @@ active confirmed MemoryVersion
 - The QA endpoint returns only a summary: fact identifiers, citation,
   confidence, filtering reason and checkpoint. It never returns fact text.
 
-The three inspection endpoints are deliberately hidden from OpenAPI:
+The four inspection endpoints are deliberately hidden from OpenAPI:
 
 ```text
 GET  /v2/vaults/{vaultId}/memory-projection
 POST /v2/vaults/{vaultId}/memory-projection/rebuild
 GET  /v2/vaults/{vaultId}/kblite-compatibility
+GET  /v2/vaults/{vaultId}/context-shadow
 ```
 
 They require `OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED=true`,
 `X-DreamJourney-QA-Owner-Truth: 1`, and an Owner user session. The public
 release remains unaware of this adapter.
+
+## Citation Context Shadow
+
+The next compatibility slice adds a default-off, QA-only Context read shadow:
+
+```text
+ready Owner Truth projection
+  -> citation-only selected/filtered Context trace
+  -> QA inspection only
+```
+
+- The shadow does not call legacy KBLite, assemble generation text, change
+  `/context/build`, or change public Echo behavior.
+- It selects only current, Owner-visible, `standard` sensitivity MemoryVersion
+  records. `sensitive` and `restricted` records remain value-free filtered
+  evidence with `sensitivity_not_context_eligible`; they cannot be silently
+  injected into a response.
+- Each selected item carries a typed Source reference and immutable citation:
+  `vaultId`, `sourceId`, `sourceVersion`, `memoryId`, `memoryVersionId`,
+  `memoryVersion` and `contentHash`. It never returns the MemoryVersion
+  content, Candidate payload, DecisionReceipt identifier or review rationale.
+- Selection order is explicitly tagged as `projectionCitationOrder`. It is
+  deterministic trace order, not a relevance score or a production ranking
+  policy.
+- Missing, stale or invalidated projection checkpoints return `rebuilding`
+  with an empty selection. Disabled reads return `disabled` before reading the
+  projection.
+- The endpoint is Owner-session-only and uses the same explicit QA switch and
+  header as the other Owner Truth inspection endpoints. It has its own
+  unavailable/session error codes so a public client cannot infer an enabled
+  feature from a normal response.
+
+This is evidence for a future typed-Citation Context reader, not a cutover.
+It leaves the existing Context Packet and public Echo source selection intact.
 
 ## Implemented Contract
 
@@ -151,12 +186,15 @@ Deployed backend head: `ddfc82e`.
 
 ## Gate Disposition
 
-This establishes scoped `G0/G2` evidence for the Projection foundation and
-the first read-only KBLite compatibility adapter only. `WI-S1-01-06` remains
-`PLANNED/STOP` in the Registry because its full scope still requires an
-event-driven projection rebuild consumer, typed Citation/context integration,
-correction flow integration and its remaining dependencies/G1 evidence.
+This establishes scoped `G0/G2` evidence for the Projection foundation, the
+first read-only KBLite compatibility adapter and a default-off Citation Context
+shadow only. `WI-S1-01-06` remains `PLANNED/STOP` in the Registry because its
+full scope still requires an event-driven projection rebuild consumer, a
+production-ranked typed Citation Context reader, correction-flow integration,
+iOS cache-envelope/authority-epoch handling and the remaining dependencies,
+G1 and G2 evidence. The deployed route-authentication smoke must be updated
+to `routeCount=84` when this new QA-only endpoint is deployed.
 
-The next safe closure is to use the typed compatibility citation in a
-default-off context-read shadow path. It must not restore KBLite as a
-fact-authority writer or make `/context/build` depend on a stale projection.
+The next safe closure is the event-driven projection rebuild consumer. It must
+not restore KBLite as a fact-authority writer or make `/context/build` depend
+on a stale projection.

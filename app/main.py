@@ -90,6 +90,10 @@ from app.services.owner_truth_kblite_compatibility import (
     OwnerTruthKBLiteCompatibilityReadService,
     compatibility_summary as kblite_compatibility_summary,
 )
+from app.services.owner_truth_context_shadow import (
+    OwnerTruthContextShadowReadService,
+    context_shadow_summary,
+)
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
@@ -316,6 +320,26 @@ def _require_owner_truth_kblite_compatibility_qa(request: Request) -> str:
     return user_id
 
 
+def _require_owner_truth_context_shadow_qa(request: Request) -> str:
+    """Keep the citation-only Context shadow unavailable outside QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthContextShadowUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthContextShadowUserSessionRequired"},
+        )
+    return user_id
+
+
 def _owner_truth_candidate_review_context(
     request: Request,
     *,
@@ -348,6 +372,19 @@ def _owner_truth_kblite_compatibility_context(
     vault_id: str,
 ) -> OwnerTruthCommandContext:
     owner_subject_id = _require_owner_truth_kblite_compatibility_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
+def _owner_truth_context_shadow_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_context_shadow_qa(request)
     return OwnerTruthCommandContext(
         vault_id=vault_id,
         owner_subject_id=owner_subject_id,
@@ -2042,6 +2079,27 @@ def read_owner_truth_kblite_compatibility(
     return {
         "schemaVersion": "owner-truth-kblite-compatibility-read-v1",
         "compatibility": kblite_compatibility_summary(compatibility),
+    }
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/context-shadow",
+    include_in_schema=False,
+)
+def read_owner_truth_context_shadow(
+    request: Request,
+    vault_id: str,
+) -> Dict[str, Any]:
+    """QA-only citation selection plan; legacy Context behavior is untouched."""
+
+    try:
+        context = _owner_truth_context_shadow_context(request, vault_id=vault_id)
+        shadow = OwnerTruthContextShadowReadService(store, enabled=True).read(context=context)
+    except OwnerTruthMemoryProjectionError as error:
+        raise _owner_truth_memory_projection_http_error(error) from error
+    return {
+        "schemaVersion": "owner-truth-context-shadow-read-v1",
+        "contextShadow": context_shadow_summary(shadow),
     }
 
 

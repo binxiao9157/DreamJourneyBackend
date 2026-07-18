@@ -119,6 +119,10 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             "/v2/vaults/vault-hidden/kblite-compatibility",
             headers=headers,
         )
+        context_shadow = client.get(
+            "/v2/vaults/vault-hidden/context-shadow",
+            headers=headers,
+        )
 
         self.assertEqual(owner_id.startswith("user_"), True)
         self.assertEqual(response.status_code, 404)
@@ -132,6 +136,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(
             compatibility.json()["detail"]["code"],
             "ownerTruthKBLiteCompatibilityUnavailable",
+        )
+        self.assertEqual(context_shadow.status_code, 404)
+        self.assertEqual(
+            context_shadow.json()["detail"]["code"],
+            "ownerTruthContextShadowUnavailable",
         )
 
     def test_owner_can_list_decide_activate_memory_and_replay(self) -> None:
@@ -291,6 +300,26 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(compatibility.json()["compatibility"]["factCount"], 0)
         self.assertEqual(compatibility.json()["compatibility"]["filteredEntries"][0]["reason"], "memory_kind_not_compatibility_fact")
         self.assertNotIn(candidate.content["summary"], str(compatibility.json()))
+
+        context_shadow = client.get(
+            f"/v2/vaults/{vault_id}/context-shadow",
+            headers=headers,
+        )
+        self.assertEqual(context_shadow.status_code, 200)
+        self.assertEqual(
+            context_shadow.json()["schemaVersion"],
+            "owner-truth-context-shadow-read-v1",
+        )
+        shadow = context_shadow.json()["contextShadow"]
+        self.assertEqual(shadow["state"], "ready")
+        self.assertTrue(shadow["shadowOnly"])
+        self.assertTrue(shadow["legacyContextUnchanged"])
+        self.assertEqual(len(shadow["selectedContext"]), 1)
+        self.assertEqual(
+            shadow["selectedContext"][0]["citation"]["sourceId"],
+            candidate.source_id,
+        )
+        self.assertNotIn(candidate.content["summary"], str(shadow))
 
 
 if __name__ == "__main__":

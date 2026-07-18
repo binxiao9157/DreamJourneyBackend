@@ -48,6 +48,10 @@ from app.services.owner_truth_kblite_compatibility import (
     OwnerTruthKBLiteCompatibilityReadService,
     compatibility_summary,
 )
+from app.services.owner_truth_context_shadow import (
+    OwnerTruthContextShadowReadService,
+    context_shadow_summary,
+)
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
@@ -755,6 +759,29 @@ def main() -> None:
                 and review_knowledge_content["claim"] not in str(compatibility_qa_summary),
                 "KBLite compatibility summaries must retain filtering reasons without content leakage",
             )
+            context_shadow = OwnerTruthContextShadowReadService(
+                store,
+                enabled=True,
+            ).read(context=review_context)
+            context_shadow_qa_summary = context_shadow_summary(context_shadow)
+            require(
+                context_shadow["state"] == "ready"
+                and context_shadow["shadowOnly"] is True
+                and context_shadow["legacyContextUnchanged"] is True
+                and len(context_shadow["selectedContext"]) == 2
+                and all(
+                    item["citation"]["memoryVersionId"]
+                    and item["sourceRef"]["sourceId"] == item["citation"]["sourceId"]
+                    and item["rank"]["strategy"] == "projectionCitationOrder"
+                    for item in context_shadow["selectedContext"]
+                ),
+                "Context shadow must select current confirmed MemoryVersions with typed citations",
+            )
+            require(
+                review_content["summary"] not in str(context_shadow_qa_summary)
+                and review_knowledge_content["claim"] not in str(context_shadow_qa_summary),
+                "Context shadow QA output must not expose MemoryVersion content",
+            )
 
             expect_rejected(
                 test_dsn,
@@ -1043,6 +1070,15 @@ def main() -> None:
                 and compatibility_changed["graph"]["facts"] == [],
                 "KBLite compatibility must fail closed with an invalidated projection checkpoint",
             )
+            context_shadow_changed = OwnerTruthContextShadowReadService(
+                store,
+                enabled=True,
+            ).read(context=review_context)
+            require(
+                context_shadow_changed["state"] == "rebuilding"
+                and context_shadow_changed["selectedContext"] == [],
+                "Context shadow must fail closed with an invalidated projection checkpoint",
+            )
             projection_after_concurrent = projection_service.rebuild(context=review_context)
             require(
                 projection_after_concurrent.snapshot["entryCount"] == 3,
@@ -1129,6 +1165,9 @@ def main() -> None:
                     "kbliteCompatibilityKnowledgeOnly": True,
                     "kbliteCompatibilityFailsClosed": True,
                     "kbliteCompatibilitySummaryValueFree": True,
+                    "contextShadowTypedCitations": True,
+                    "contextShadowFailsClosed": True,
+                    "contextShadowSummaryValueFree": True,
                     "legacyMemoriesUnchanged": True,
                     "legacyArchiveUnchanged": True,
                 },
