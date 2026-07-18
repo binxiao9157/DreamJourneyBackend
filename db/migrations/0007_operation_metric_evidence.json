@@ -1,0 +1,8 @@
+{
+  "version": "0007",
+  "name": "operation_metric_evidence",
+  "phase": "expand",
+  "compatibility": "backwardCompatible",
+  "runtimeCompatibility": "operationMetricEvidenceStorage",
+  "requiresOldWorkerDrain": false
+}

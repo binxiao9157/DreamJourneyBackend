@@ -18,6 +18,7 @@ from psycopg.types.json import Jsonb
 
 from app.core.config import settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir, load_migrations
+from app.observability.operation_metrics import OperationMetricRecorder
 from app.services.postgres_store import PostgresStore
 
 
@@ -113,6 +114,47 @@ def main():
         require(table_count == 19, "fresh schema table count")
         require(ledger == ("applied", "execute"), "fresh migration receipt")
         require(trigger_count == 1, "append-only trigger")
+
+        operation_metric_store = PostgresStore(
+            dsn=first_dsn,
+            pool_min_size=1,
+            pool_max_size=1,
+            pool_timeout_seconds=2.0,
+        )
+        operation_metric_store.open_pool(wait=True)
+        try:
+            operation_metric = OperationMetricRecorder(
+                environment="migration-smoke",
+                build="g2-fresh",
+                identifier_hmac_key="operation-metric-postgres-smoke-key-0007",
+            ).build_event(
+                request_key="migration-smoke-request",
+                operation_key="migration-smoke-operation",
+                attempt=1,
+                route="GET /v2/release-policy",
+                operation="publicReleasePolicy",
+                outcome="succeeded",
+                feedback_state="notApplicable",
+                latency_ms=1,
+                http_status=200,
+            )
+            receipt = operation_metric_store.append_evidence_event(
+                operation_metric.model_dump(mode="json"),
+                retention_class="operationalTemporary",
+                expires_at_iso=None,
+                legal_hold=False,
+            )
+            operation_metric_summary = operation_metric_store.summarize_operation_metrics(
+                expected_routes=("GET /v2/release-policy",),
+            )
+        finally:
+            operation_metric_store.close_pool()
+        require(receipt["outcome"] == "appended", "operation metric receipt")
+        require(operation_metric_summary["eventCount"] == 1, "operation metric persisted")
+        require(
+            operation_metric_summary["successfulOperationCount"] == 1,
+            "operation metric summary",
+        )
 
         create_database(admin_dsn, concurrent_name)
         concurrent_dsn = database_dsn(base_dsn, concurrent_name)

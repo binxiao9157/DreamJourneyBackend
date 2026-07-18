@@ -441,6 +441,22 @@ class PostgresMigratorTests(unittest.TestCase):
         self.assertIn("UNIQUE (subject_id, command_id)", migration.sql)
         self.assertIn("resource_deletion_receipts are append-only", migration.sql)
 
+    def test_operation_metric_evidence_migration_expands_existing_event_type_check(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.name == "operation_metric_evidence"
+        )
+
+        self.assertEqual(migration.version, "0007")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(migration.compatibility, "backwardCompatible")
+        self.assertIn(
+            "DROP CONSTRAINT IF EXISTS evidence_events_event_type_check",
+            migration.sql,
+        )
+        self.assertIn("'operationMetric'", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()
