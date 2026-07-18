@@ -62,6 +62,7 @@ from app.services.account_deletion_receipts import (
     account_purge_subject_hash,
     build_account_purge_receipt,
 )
+from app.services.data_rights_module_inventory import record_terminal_cleanup_plan
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -2004,7 +2005,8 @@ class PostgresStore:
         item["purgeAfter"] = purge_after.isoformat()
         item["restoreDeadline"] = purge_after.isoformat()
         item["retentionDays"] = 30
-        item["dataExportSupported"] = False
+        item["dataExportSupported"] = True
+        item["dataExportState"] = "availableBeforeDeletionOnly"
         item["restoreLimit"] = 1
         item["restoreCount"] = int(item.get("restoreCount") or 0)
         item.setdefault("retentionHolds", [])
@@ -2063,6 +2065,7 @@ class PostgresStore:
             "restoreDeadline",
             "retentionDays",
             "dataExportSupported",
+            "dataExportState",
             "restoreLimit",
             "deletionRequestId",
         ):
@@ -2118,6 +2121,7 @@ class PostgresStore:
             user = deepcopy(locked_user["payload"])
             if account_purge_block_reason(user, cutoff) is not None:
                 continue
+            cleanup_counts = self._terminal_account_cleanup_counts(user_id)
             receipt = self._record_account_purge_receipt(
                 user_id=user_id,
                 account=user,
@@ -2204,8 +2208,78 @@ class PostgresStore:
                 commit=True,
             )
             if updated is not None:
+                record_terminal_cleanup_plan(
+                    self,
+                    request_id=str(user.get("deletionRequestId") or ""),
+                    terminal_purge_receipt_id=str(receipt["id"]),
+                    updated_at=cutoff.isoformat(),
+                    resource_counts=cleanup_counts,
+                    retention_until=None,
+                )
                 purged.append(deepcopy(updated["payload"]))
         return purged
+
+    def _terminal_account_cleanup_counts(self, user_id: str) -> Dict[str, int]:
+        """Capture local resource counts before a terminal account purge.
+
+        The counts become part of a hashed resource-scope receipt only.  They
+        are not exposed as a new PII-bearing audit record.
+        """
+
+        def count_query(query: str, params: tuple[Any, ...]) -> int:
+            row = self._fetchone(query, params)
+            return int((row or {}).get("count") or 0)
+
+        counts = {
+            "profile": count_query("SELECT COUNT(*) AS count FROM profiles WHERE user_id = %s", (user_id,)),
+            "passwordCredential": count_query("SELECT COUNT(*) AS count FROM password_credentials WHERE user_id = %s", (user_id,)),
+            "knowledgeSnapshot": count_query("SELECT COUNT(*) AS count FROM kb_snapshots WHERE user_id = %s", (user_id,)),
+            "knowledgeChange": count_query("SELECT COUNT(*) AS count FROM kb_changes WHERE user_id = %s", (user_id,)),
+            "knowledgeReceipt": count_query("SELECT COUNT(*) AS count FROM kb_operation_receipts WHERE user_id = %s", (user_id,)),
+            "knowledgeFeedState": count_query("SELECT COUNT(*) AS count FROM kb_change_feed_state WHERE user_id = %s", (user_id,)),
+            "memory": count_query("SELECT COUNT(*) AS count FROM memories WHERE user_id = %s", (user_id,)),
+            "archive": count_query("SELECT COUNT(*) AS count FROM archive_items WHERE user_id = %s", (user_id,)),
+            "mailbox": count_query("SELECT COUNT(*) AS count FROM mailbox_letters WHERE user_id = %s", (user_id,)),
+            "familyMember": count_query("SELECT COUNT(*) AS count FROM family_members WHERE user_id = %s", (user_id,)),
+            "familyRelationship": count_query("SELECT COUNT(*) AS count FROM family_relationships WHERE owner_subject_id = %s OR member_subject_id = %s", (user_id, user_id)),
+            "accessGrant": count_query(
+                """
+                SELECT COUNT(*) AS count
+                FROM access_grants
+                WHERE grantor_subject_id = %s
+                   OR grantee_subject_id = %s
+                   OR relationship_id IN (
+                       SELECT id FROM family_relationships
+                       WHERE owner_subject_id = %s OR member_subject_id = %s
+                   )
+                """,
+                (user_id, user_id, user_id, user_id),
+            ),
+            "grantEvent": count_query(
+                """
+                SELECT COUNT(*) AS count
+                FROM grant_events
+                WHERE relationship_id IN (
+                    SELECT relationship_id FROM access_grants
+                    WHERE grantor_subject_id = %s OR grantee_subject_id = %s
+                    UNION
+                    SELECT id FROM family_relationships
+                    WHERE owner_subject_id = %s OR member_subject_id = %s
+                )
+                """,
+                (user_id, user_id, user_id, user_id),
+            ),
+            "care": count_query("SELECT COUNT(*) AS count FROM care_snapshots WHERE user_id = %s", (user_id,)),
+            "echo": count_query("SELECT COUNT(*) AS count FROM echo_delayed_replies WHERE user_id = %s", (user_id,)),
+            "pushToken": count_query("SELECT COUNT(*) AS count FROM push_device_tokens WHERE user_id = %s", (user_id,)),
+            "voiceProfile": count_query("SELECT COUNT(*) AS count FROM voice_profiles WHERE user_id = %s", (user_id,)),
+            "voiceCloneSlotRetired": count_query("SELECT COUNT(*) AS count FROM voice_clone_slots WHERE user_id = %s AND status NOT IN ('retired', 'deleted')", (user_id,)),
+            "digitalHumanSession": count_query("SELECT COUNT(*) AS count FROM digital_human_sessions WHERE user_id = %s", (user_id,)),
+            "authSession": count_query("SELECT COUNT(*) AS count FROM auth_sessions WHERE user_id = %s", (user_id,)),
+            "authTokenFamily": count_query("SELECT COUNT(*) AS count FROM token_families WHERE user_id = %s", (user_id,)),
+            "authSessionEvent": count_query("SELECT COUNT(*) AS count FROM session_events WHERE user_id = %s", (user_id,)),
+        }
+        return counts
 
     def _record_account_purge_receipt(
         self,

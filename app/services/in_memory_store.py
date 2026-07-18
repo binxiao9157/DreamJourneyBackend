@@ -36,6 +36,7 @@ from app.services.account_deletion_receipts import (
     account_purge_subject_hash,
     build_account_purge_receipt,
 )
+from app.services.data_rights_module_inventory import record_terminal_cleanup_plan
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -1300,7 +1301,8 @@ class InMemoryStore:
         item["purgeAfter"] = purge_after
         item["restoreDeadline"] = purge_after
         item["retentionDays"] = 30
-        item["dataExportSupported"] = False
+        item["dataExportSupported"] = True
+        item["dataExportState"] = "availableBeforeDeletionOnly"
         item["restoreLimit"] = 1
         item["restoreCount"] = int(item.get("restoreCount") or 0)
         item.setdefault("retentionHolds", [])
@@ -1341,6 +1343,7 @@ class InMemoryStore:
                 "restoreDeadline",
                 "retentionDays",
                 "dataExportSupported",
+                "dataExportState",
                 "restoreLimit",
                 "deletionRequestId",
             ):
@@ -1352,12 +1355,77 @@ class InMemoryStore:
         with self._auth_lock:
             return self._purge_expired_deleted_users_locked(cutoff_iso)
 
+    def _terminal_account_cleanup_counts_locked(self, user_id: str) -> Dict[str, int]:
+        relationship_ids = {
+            relationship_id
+            for relationship_id, relationship in self._family_relationships.items()
+            if user_id in {
+                relationship.get("ownerSubjectId"),
+                relationship.get("memberSubjectId"),
+            }
+        }
+        grant_ids = {
+            grant_id
+            for grant_id, grant in self._access_grants.items()
+            if grant.get("relationshipId") in relationship_ids
+            or user_id in {
+                grant.get("grantorSubjectId"),
+                grant.get("granteeSubjectId"),
+            }
+        }
+        return {
+            "profile": int(user_id in self._profiles),
+            "passwordCredential": int(user_id in self._password_credentials),
+            "knowledgeSnapshot": int(user_id in self._kb_snapshots),
+            "knowledgeChange": len(self._kb_changes.get(user_id, [])),
+            "knowledgeReceipt": len(self._kb_operation_receipts.get(user_id, {})),
+            "knowledgeFeedState": int(user_id in self._kb_change_feed_minimum_since_revisions),
+            "memory": len(self._memories.get(user_id, [])),
+            "archive": len(self._archive_items.get(user_id, [])),
+            "mailbox": len(self._mailbox_letters.get(user_id, [])),
+            "familyMember": len(self._family_members.get(user_id, [])),
+            "familyRelationship": len(relationship_ids),
+            "accessGrant": len(grant_ids),
+            "grantEvent": sum(len(self._grant_events.get(grant_id, [])) for grant_id in grant_ids),
+            "care": len(self._care_snapshots.get(user_id, [])),
+            "echo": len(self._echo_delayed_replies.get(user_id, [])),
+            "pushToken": len(self._push_device_tokens.get(user_id, [])),
+            "voiceProfile": len(self._voice_profiles.get(user_id, [])),
+            "voiceCloneSlotRetired": sum(
+                1
+                for slot in self._voice_clone_slots.values()
+                if slot.get("userId") == user_id
+                and slot.get("status") not in {"retired", "deleted"}
+            ),
+            "digitalHumanSession": sum(
+                1
+                for lease in self._digital_human_sessions.values()
+                if lease.get("userId") == user_id
+            ),
+            "authSession": sum(
+                1
+                for session in self._auth_sessions.values()
+                if session.get("userId") == user_id
+            ),
+            "authTokenFamily": sum(
+                1
+                for family in self._auth_token_families.values()
+                if family.get("userId") == user_id
+            ),
+            "authSessionEvent": sum(
+                1
+                for event in self._auth_session_events.values()
+                if event.get("userId") == user_id
+            ),
+        }
+
     def _purge_expired_deleted_users_locked(self, cutoff_iso: str) -> List[Dict[str, Any]]:
         cutoff = self._parse_iso_datetime(cutoff_iso)
         purged: List[Dict[str, Any]] = []
         for user_id, user in list(self._users.items()):
             if account_purge_block_reason(user, cutoff) is not None:
                 continue
+            cleanup_counts = self._terminal_account_cleanup_counts_locked(user_id)
             receipt = build_account_purge_receipt(
                 user_id=user_id,
                 account=user,
@@ -1449,6 +1517,14 @@ class InMemoryStore:
                 slot["status"] = "retired"
                 slot["updatedAt"] = cutoff.isoformat()
             self._voice_profiles.pop(user_id, None)
+            record_terminal_cleanup_plan(
+                self,
+                request_id=str(user.get("deletionRequestId") or ""),
+                terminal_purge_receipt_id=str(receipt["id"]),
+                updated_at=cutoff.isoformat(),
+                resource_counts=cleanup_counts,
+                retention_until=None,
+            )
             purged.append(deepcopy(tombstone))
         return purged
 

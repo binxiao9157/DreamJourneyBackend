@@ -29,6 +29,7 @@ from app import main as main_module
 from app.core.config import settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.services.account_deletion_state import AccountDeletionStateError
+from app.services.data_rights_adapter import make_account_delete_request
 from app.services.postgres_store import PostgresStore
 
 
@@ -158,6 +159,21 @@ def set_retention_holds(store, user_id, holds):
     require(updated is not None, "retention hold update must persist")
 
 
+def create_delete_rights_request(store, *, user_id, phone, command_id):
+    request = make_account_delete_request(
+        command_id=command_id,
+        subject_id=user_id,
+        phone=phone,
+        lifecycle_marker="0",
+        now="2026-01-01T00:00:00+00:00",
+    )
+    created = store.create_rights_request(request)
+    record = created.get("request") or {}
+    request_id = str(record.get("id") or "")
+    require(request_id, "terminal purge smoke must create a data-rights request")
+    return request_id
+
+
 def call_purge_with_server_clock(token, cutoff, payload_cutoff):
     original_cutoff = main_module._account_purge_server_cutoff
     main_module._account_purge_server_cutoff = lambda: cutoff
@@ -211,12 +227,18 @@ def exercise_terminal_purge(dsn):
             phone_prefix="193",
             label="restore",
         )
+        due_request_id = create_delete_rights_request(
+            store,
+            user_id=due_user_id,
+            phone=due_phone,
+            command_id="terminal-purge-smoke-due",
+        )
         deleted_at = "2026-01-01T00:00:00+00:00"
         due = store.soft_delete_user(
             due_user_id,
             phone=due_phone,
             requested_at_iso=deleted_at,
-            deletion_request_id="rr_terminal_due",
+            deletion_request_id=due_request_id,
         )
         held = store.soft_delete_user(
             held_user_id,
@@ -293,6 +315,37 @@ def exercise_terminal_purge(dsn):
         require(due_user_id not in serialized_receipt, "receipt must not retain raw user id")
         assert_append_only_receipt(store, due_receipt["subjectHash"])
 
+        cleanup_summary = store.summarize_rights_request(due_request_id) or {}
+        cleanup_executions = {
+            (str(item.get("moduleId") or ""), str(item.get("resourceType") or "")): str(
+                item.get("outcome") or ""
+            )
+            for item in cleanup_summary.get("executions") or []
+        }
+        cleanup_receipts = {
+            str(item.get("moduleId") or ""): str(item.get("outcome") or "")
+            for item in cleanup_summary.get("receipts") or []
+        }
+        serialized_cleanup = json.dumps(cleanup_summary, sort_keys=True)
+        require(
+            cleanup_executions.get(("archive", "archiveMetadata")) == "completed",
+            "terminal purge must record local archive cleanup",
+        )
+        require(
+            cleanup_executions.get(("providerVoice", "voiceCloneAsset")) == "pending",
+            "provider voice cleanup must remain pending without a provider adapter",
+        )
+        require(
+            cleanup_executions.get(("backupRetention", "backupCopy")) == "pending",
+            "backup retention cleanup must remain pending for the external operator",
+        )
+        require(
+            cleanup_receipts.get("objectStorage") == "unsupported",
+            "object storage must not be reported as application-cleaned",
+        )
+        require(due_phone not in serialized_cleanup, "cleanup receipts must not retain phone")
+        require(due_user_id not in serialized_cleanup, "cleanup receipts must not retain raw user id")
+
         reactivation_blocked = False
         try:
             store.upsert_user(phone=due_phone, nickname="must not revive")
@@ -333,6 +386,8 @@ def exercise_terminal_purge(dsn):
             "releasedHoldPurged": True,
             "terminalReceiptRedacted": True,
             "terminalReceiptAppendOnly": True,
+            "moduleCleanupReceiptsRecorded": True,
+            "externalCleanupBoundaryPreserved": True,
             "purgedAccountCannotReactivate": True,
             "repeatPurgeNoop": True,
         }

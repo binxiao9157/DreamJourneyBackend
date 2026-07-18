@@ -29,7 +29,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 68)
+        self.assertEqual(len(app_routes), 69)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
 
@@ -47,6 +47,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
     def test_high_risk_routes_have_non_service_classification(self):
         expected = {
             ("POST", "/auth/purge-expired-deletions"): RouteOwnershipCategory.SYSTEM_ONLY,
+            ("POST", "/auth/data-export"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/mailbox/letters"): RouteOwnershipCategory.SYSTEM_ONLY,
             ("POST", "/echo/delayed-replies/dispatch-due"): RouteOwnershipCategory.SYSTEM_ONLY,
             ("POST", "/archive/time-letters/dispatch-due"): RouteOwnershipCategory.SYSTEM_ONLY,
@@ -71,8 +72,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 68)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 68)
+        self.assertEqual(summary["routeCount"], 69)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 69)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)

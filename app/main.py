@@ -33,6 +33,7 @@ from app.services.data_rights_contract import (
     DataRightsCommandConflict,
     DataRightsContractError,
 )
+from app.services.data_rights_module_inventory import build_module_owned_data_export
 from app.services.client_compatibility import (
     ClientCompatibilityDecision,
     ClientCompatibilityDecisionRecorder,
@@ -1804,6 +1805,37 @@ def logout_auth_session(request: Request, payload: Dict[str, Any]) -> Dict[str, 
     }
 
 
+@app.post("/auth/data-export")
+def export_account_data(request: Request) -> JSONResponse:
+    """Return the caller's bounded application-data export with no caching."""
+
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="user access token is required")
+    user = _store_get_user(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="account not found")
+    if str(user.get("deletionState") or "active") != "active":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "data_export_unavailable_after_deletion",
+                "message": "data export must be requested before account deletion",
+            },
+        )
+    try:
+        export = build_module_owned_data_export(store, user_id=user_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="account not found") from exc
+    return JSONResponse(
+        content=export,
+        headers={
+            "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+        },
+    )
+
+
 def _store_get_user(user_id: str) -> Optional[Dict[str, Any]]:
     get_user = getattr(store, "get_user", None)
     if not callable(get_user):
@@ -2062,7 +2094,8 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
                 "contractVersion": ACCOUNT_DELETION_CONTRACT_VERSION,
                 "deletion": deletion,
                 "policy": {
-                    "dataExportSupported": False,
+                    "dataExportSupported": True,
+                    "dataExportState": "availableBeforeDeletionOnly",
                     "retentionDays": ACCOUNT_DELETION_RETENTION_DAYS,
                     "restoreLimit": ACCOUNT_RESTORE_LIMIT,
                     "restoreBySamePhone": True,
@@ -2104,7 +2137,8 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
         "contractVersion": ACCOUNT_DELETION_CONTRACT_VERSION,
         "deletion": deletion,
         "policy": {
-            "dataExportSupported": False,
+            "dataExportSupported": True,
+            "dataExportState": "availableBeforeDeletionOnly",
             "retentionDays": ACCOUNT_DELETION_RETENTION_DAYS,
             "restoreLimit": ACCOUNT_RESTORE_LIMIT,
             "restoreBySamePhone": True,

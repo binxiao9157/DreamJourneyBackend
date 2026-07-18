@@ -201,6 +201,7 @@ class RouteOwnershipRegistry:
             _rule("POST", "/auth/login", public, "publicLogin"),
             _rule("POST", "/auth/refresh", public, "publicRefresh"),
             _rule("POST", "/auth/logout", session, "userSession"),
+            _rule("POST", "/auth/data-export", session, "userDataExport"),
             _owner_body("POST", "/auth/delete", "accountOwner"),
             _rule("POST", "/auth/restore", public, "publicAccountRestore"),
             _rule(
