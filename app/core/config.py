@@ -80,6 +80,7 @@ class Settings:
     delegated_access_contract_api_enabled: bool = False
     evidence_rollout_retention_days: int = 30
     operations_evidence_hmac_key: Optional[str] = None
+    incident_ack_timeout_seconds: int = 900
 
     deepseek_api_key: Optional[str] = None
     deepseek_base_url: str = "https://api.deepseek.com/v1/chat/completions"
@@ -228,6 +229,10 @@ class Settings:
                 cls.evidence_rollout_retention_days,
             ),
             operations_evidence_hmac_key=_env("OPERATIONS_EVIDENCE_HMAC_KEY"),
+            incident_ack_timeout_seconds=_env_int(
+                "INCIDENT_ACK_TIMEOUT_SECONDS",
+                cls.incident_ack_timeout_seconds,
+            ),
             deepseek_api_key=_env("DEEPSEEK_API_KEY"),
             deepseek_base_url=_env("DEEPSEEK_BASE_URL", cls.deepseek_base_url) or cls.deepseek_base_url,
             volcengine_api_key=_env("VOLCENGINE_API_KEY"),

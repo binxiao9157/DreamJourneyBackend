@@ -237,6 +237,85 @@ class PostgresStore:
             "legalHold": bool(legal_hold),
         }
 
+    @contextmanager
+    def incident_operation(self, incident_id: str):
+        normalized_incident_id = str(incident_id or "").strip()
+        if not normalized_incident_id:
+            raise ValueError("incident id is required")
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"incident-{uuid.uuid4().hex}",
+                command_id="incidentLifecycle",
+            ):
+                with self.incident_operation(normalized_incident_id):
+                    yield
+            return
+        self._fetchone(
+            "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+            (f"incident:{normalized_incident_id}",),
+        )
+        yield
+
+    def list_evidence_events(
+        self,
+        *,
+        event_type: Optional[str] = None,
+        operation: Optional[str] = None,
+        now_iso: Optional[str] = None,
+        event_limit: int = 5_000,
+    ) -> List[Dict[str, Any]]:
+        normalized_event_type = (
+            None if event_type is None else normalize_machine_code(event_type)
+        )
+        normalized_operation = (
+            None if operation is None else normalize_machine_code(operation)
+        )
+        now = self._parse_iso_datetime(
+            now_iso or self._now()
+        ).astimezone(timezone.utc).isoformat()
+        bounded_limit = max(1, min(event_limit, 5_000))
+        clauses = ["(legal_hold = TRUE OR expires_at IS NULL OR expires_at > %s)"]
+        params: list[Any] = [now]
+        if normalized_event_type is not None:
+            clauses.append("event_type = %s")
+            params.append(normalized_event_type)
+        if normalized_operation is not None:
+            clauses.append("payload->>'operation' = %s")
+            params.append(normalized_operation)
+        params.append(bounded_limit)
+        rows = self._fetchall(
+            f"""
+            SELECT event_id, operation_id, event_type, schema_version,
+                   retention_class, expires_at, legal_hold, payload_hash,
+                   payload, occurred_at, created_at
+            FROM evidence_events
+            WHERE {' AND '.join(clauses)}
+            ORDER BY occurred_at DESC, event_id DESC
+            LIMIT %s
+            """,
+            tuple(params),
+        )
+        records: List[Dict[str, Any]] = []
+        for row in reversed(rows):
+            records.append(
+                {
+                    "eventId": str(row.get("event_id") or ""),
+                    "operationId": str(row.get("operation_id") or ""),
+                    "eventType": str(row.get("event_type") or ""),
+                    "schemaVersion": int(row.get("schema_version") or 1),
+                    "retentionClass": str(row.get("retention_class") or ""),
+                    "expiresAt": self._iso_value(row.get("expires_at"))
+                    if row.get("expires_at") is not None
+                    else None,
+                    "legalHold": bool(row.get("legal_hold")),
+                    "payloadHash": str(row.get("payload_hash") or ""),
+                    "payload": deepcopy(row.get("payload") or {}),
+                    "occurredAt": self._iso_value(row.get("occurred_at")),
+                    "createdAt": self._iso_value(row.get("created_at")),
+                }
+            )
+        return records
+
     def summarize_evidence_events(
         self,
         *,

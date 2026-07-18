@@ -157,6 +157,51 @@ class InMemoryStore:
             self._evidence_events[event_id] = candidate
             return self._evidence_append_result(candidate, outcome="appended")
 
+    @contextmanager
+    def incident_operation(self, incident_id: str):
+        if not str(incident_id or "").strip():
+            raise ValueError("incident id is required")
+        with self._evidence_lock:
+            yield
+
+    def list_evidence_events(
+        self,
+        *,
+        event_type: Optional[str] = None,
+        operation: Optional[str] = None,
+        now_iso: Optional[str] = None,
+        event_limit: int = 5_000,
+    ) -> List[Dict[str, Any]]:
+        normalized_event_type = (
+            None if event_type is None else normalize_machine_code(event_type)
+        )
+        normalized_operation = (
+            None if operation is None else normalize_machine_code(operation)
+        )
+        now = self._parse_iso_datetime(now_iso or self._now())
+        bounded_limit = max(1, min(event_limit, 5_000))
+        with self._evidence_lock:
+            records = [
+                deepcopy(record)
+                for record in self._evidence_events.values()
+                if self._evidence_record_is_visible(record, now)
+                and (
+                    normalized_event_type is None
+                    or record.get("eventType") == normalized_event_type
+                )
+                and (
+                    normalized_operation is None
+                    or record.get("payload", {}).get("operation") == normalized_operation
+                )
+            ]
+        records.sort(
+            key=lambda item: (
+                self._parse_iso_datetime(str(item["occurredAt"])),
+                str(item.get("eventId") or ""),
+            )
+        )
+        return records[-bounded_limit:]
+
     def summarize_evidence_events(
         self,
         *,

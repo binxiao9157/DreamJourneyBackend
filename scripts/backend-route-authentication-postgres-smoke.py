@@ -89,7 +89,7 @@ def main():
         runtime, public_headers = request_json("GET", "/config/runtime")
         route_contract = runtime["auth"]["routeAuthentication"]
         require(route_contract["mode"] == "enforce", "deployed route auth must enforce")
-        require(route_contract["routeCount"] == 69, "deployed route registry does not match the current contract")
+        require(route_contract["routeCount"] == 76, "deployed route registry does not match the current contract")
         require(route_contract["unclassifiedCount"] == 0, "deployed route registry incomplete")
         require(
             public_headers.get("x-dreamjourney-route-auth-reason") == "publicRoute",

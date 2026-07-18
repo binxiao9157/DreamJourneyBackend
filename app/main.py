@@ -127,6 +127,10 @@ from app.services.route_authentication import (
     validate_route_authentication_startup,
 )
 from app.services.readiness import ReadinessService, liveness_payload
+from app.services.incident_lifecycle import (
+    IncidentLifecycleError,
+    IncidentLifecycleService,
+)
 from app.observability.operation_metrics import (
     OperationMetricRecorder,
     summarize_operation_metrics_for_observations,
@@ -298,6 +302,27 @@ OPERATION_METRIC_RECORDER = OperationMetricRecorder(
     retention_days=settings.evidence_rollout_retention_days,
     identifier_hmac_key=settings.operations_evidence_hmac_key,
 )
+INCIDENT_LIFECYCLE_SERVICE = IncidentLifecycleService(
+    store=store,
+    environment=settings.environment,
+    build=f"backend-{app.version}",
+    ack_timeout_seconds=settings.incident_ack_timeout_seconds,
+)
+
+
+def _incident_lifecycle_service() -> IncidentLifecycleService:
+    # Tests and isolated maintenance scripts replace the module store. Keep
+    # incident evidence bound to that active store rather than silently using
+    # the process-startup store from a different database.
+    if INCIDENT_LIFECYCLE_SERVICE.store is store:
+        return INCIDENT_LIFECYCLE_SERVICE
+    return IncidentLifecycleService(
+        store=store,
+        environment=settings.environment,
+        build=f"backend-{app.version}",
+        ack_timeout_seconds=settings.incident_ack_timeout_seconds,
+    )
+
 ARCHIVE_MEDIA_UPLOAD_PROVIDER = "mockObjectStorage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_DISPLAY_NAME = "Mock Object Storage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_MODE = "mock"
@@ -792,6 +817,41 @@ def _evaluate_release_policy_command(
     )
     if feature is None:
         return None, {}
+    incident_block = _incident_lifecycle_service().release_policy_block(feature)
+    if incident_block is not None:
+        route_label = RELEASE_POLICY_COMMAND_GATE.route_label_for_request(
+            request.method,
+            request.url.path,
+            payload,
+        )
+        observed_client_build = _release_policy_int_header(
+            request,
+            "x-dreamjourney-client-build",
+        ) or 1
+        RELEASE_POLICY_DECISION_RECORDER.record(
+            feature=feature,
+            policy_version=RELEASE_POLICY_SERVICE.POLICY_VERSION,
+            client_build=observed_client_build,
+            decision="deny",
+            reason=str(incident_block["reason"]),
+            route=route_label,
+        )
+        response = JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "code": "incident_stop_the_line",
+                    "feature": feature,
+                    "reason": str(incident_block["reason"]),
+                    "retryable": False,
+                }
+            },
+        )
+        response.headers["X-DreamJourney-Incident-Stop-Line"] = "true"
+        response.headers["X-DreamJourney-Incident-Reason"] = str(
+            incident_block["reason"]
+        )
+        return response, {}
     release_stage = RELEASE_POLICY_SERVICE.release_stage_for(feature)
     system_default_closed_bypass = (
         principal.kind == PrincipalKind.MACHINE
@@ -908,6 +968,7 @@ NO_STORE_PATH_PREFIXES = (
     "/v2/auth/",
     "/voice/",
     "/digital-human/",
+    "/ops/incidents",
 )
 NO_STORE_EXACT_PATHS = {
     "/health",
@@ -1483,7 +1544,16 @@ def live() -> Dict[str, str]:
 
 @app.get("/ready")
 def ready() -> JSONResponse:
-    payload = ReadinessService(settings=settings, store=store).evaluate()
+    incident_component_source = (
+        _incident_lifecycle_service().readiness_component
+        if callable(getattr(store, "list_evidence_events", None))
+        else None
+    )
+    payload = ReadinessService(
+        settings=settings,
+        store=store,
+        incident_component_source=incident_component_source,
+    ).evaluate()
     return JSONResponse(
         status_code=200 if payload["status"] == "ready" else 503,
         content=payload,
@@ -1540,7 +1610,123 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
     unit_of_work_metrics = getattr(store, "uow_metrics", None)
     if callable(unit_of_work_metrics):
         summary["databaseUnitOfWork"] = unit_of_work_metrics()
+    summary["incidentLifecycle"] = _incident_lifecycle_service().summary()
     return summary
+
+
+def _incident_error_response(error: IncidentLifecycleError) -> HTTPException:
+    code = error.code
+    if code == "incidentNotFound":
+        status_code = 404
+    elif code in {
+        "incidentAlreadyExists",
+        "incidentAlreadyResolved",
+        "incidentAcknowledgementInvalidState",
+        "incidentAcknowledgementRequired",
+        "incidentFenceIncomplete",
+        "incidentFenceActionAlreadyRecorded",
+        "incidentReopenRequiresResolvedSource",
+    }:
+        status_code = 409
+    elif code in {
+        "incidentEvidenceSinkUnavailable",
+        "incidentEvidenceAppendFailed",
+        "incidentEvidenceQueryUnavailable",
+        "incidentEvidenceQueryFailed",
+        "incidentEvidenceInvalid",
+    }:
+        status_code = 503
+    else:
+        status_code = 400
+    return HTTPException(status_code=status_code, detail={"code": code})
+
+
+@app.post("/ops/incidents")
+def open_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return _incident_lifecycle_service().open(
+            incident_id=payload.get("incidentId", ""),
+            category=payload.get("category", ""),
+            severity=payload.get("severity", ""),
+            owner=payload.get("owner", ""),
+            runbook_id=payload.get("runbookId", ""),
+            reason=payload.get("reason", ""),
+            required_fence_actions=payload.get("requiredFenceActions", ()),
+            command_id=payload.get("commandId", ""),
+            surface=payload.get("surface", "operations"),
+        )
+    except IncidentLifecycleError as exc:
+        raise _incident_error_response(exc) from exc
+
+
+@app.get("/ops/incidents/readiness")
+def incident_readiness() -> Dict[str, Any]:
+    return _incident_lifecycle_service().summary()
+
+
+@app.get("/ops/incidents/{incident_id}")
+def incident_detail(incident_id: str) -> Dict[str, Any]:
+    try:
+        return {
+            "schemaVersion": IncidentLifecycleService.SCHEMA_VERSION,
+            "incident": _incident_lifecycle_service().get(incident_id),
+        }
+    except IncidentLifecycleError as exc:
+        raise _incident_error_response(exc) from exc
+
+
+@app.post("/ops/incidents/{incident_id}/ack")
+def acknowledge_incident(incident_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return _incident_lifecycle_service().acknowledge(
+            incident_id=incident_id,
+            reason=payload.get("reason", ""),
+            command_id=payload.get("commandId", ""),
+        )
+    except IncidentLifecycleError as exc:
+        raise _incident_error_response(exc) from exc
+
+
+@app.post("/ops/incidents/{incident_id}/fence")
+def fence_incident(incident_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return _incident_lifecycle_service().fence(
+            incident_id=incident_id,
+            reason=payload.get("reason", ""),
+            fence_actions=payload.get("fenceActions", ()),
+            command_id=payload.get("commandId", ""),
+        )
+    except IncidentLifecycleError as exc:
+        raise _incident_error_response(exc) from exc
+
+
+@app.post("/ops/incidents/{incident_id}/resolve")
+def resolve_incident(incident_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return _incident_lifecycle_service().resolve(
+            incident_id=incident_id,
+            reason=payload.get("reason", ""),
+            evidence_ids=payload.get("evidenceIds", ()),
+            command_id=payload.get("commandId", ""),
+        )
+    except IncidentLifecycleError as exc:
+        raise _incident_error_response(exc) from exc
+
+
+@app.post("/ops/incidents/{incident_id}/reopen")
+def reopen_incident(incident_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return _incident_lifecycle_service().reopen(
+            incident_id=incident_id,
+            new_incident_id=payload.get("newIncidentId", ""),
+            owner=payload.get("owner", ""),
+            reason=payload.get("reason", ""),
+            runbook_id=payload.get("runbookId", ""),
+            required_fence_actions=payload.get("requiredFenceActions", ()),
+            command_id=payload.get("commandId", ""),
+        )
+    except IncidentLifecycleError as exc:
+        raise _incident_error_response(exc) from exc
 
 
 @app.post("/digital-human/sessions")

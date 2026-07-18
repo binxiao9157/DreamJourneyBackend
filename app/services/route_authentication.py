@@ -25,6 +25,8 @@ MACHINE_SYSTEM_SCOPES = frozenset(
         "mailbox:deliver",
         "releasePolicy:observe",
         "timeLetter:dispatch",
+        "incident:manage",
+        "incident:observe",
     }
 )
 

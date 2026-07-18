@@ -36,6 +36,8 @@ test -f scripts/backend-readiness-postgres-smoke.py
 test -f scripts/backend-readiness-deployed-smoke.py
 test -f scripts/backend-operation-metrics-deployed-smoke.py
 test -f scripts/run-backend-operation-metrics-deployed-smoke.sh
+test -f scripts/backend-incident-lifecycle-deployed-smoke.py
+test -f scripts/run-backend-incident-lifecycle-deployed-smoke.sh
 test -f scripts/backend-account-deletion-rights-deployed-smoke.py
 test -f scripts/run-backend-account-deletion-rights-deployed-smoke.sh
 test -f scripts/backend-account-terminal-purge-deployed-smoke.py

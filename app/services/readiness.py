@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from app.db.pool import ConnectionPoolExhausted
 from app.db.readiness import DatabaseReadinessError, SchemaReadinessError
@@ -22,15 +22,19 @@ class ReadinessService:
         settings: Any,
         store: Any,
         clock: Callable[[], str] = _now_iso,
+        incident_component_source: Optional[Callable[[], Dict[str, str]]] = None,
     ) -> None:
         self.settings = settings
         self.store = store
         self.clock = clock
+        self.incident_component_source = incident_component_source
 
     def evaluate(self) -> Dict[str, Any]:
         evidence_timestamp = self.clock()
         components = self._store_components(evidence_timestamp)
         components.append(self._auth_component(evidence_timestamp))
+        if self.incident_component_source is not None:
+            components.append(self._incident_component(evidence_timestamp))
         status = (
             "ready"
             if all(component["status"] == "ready" for component in components)
@@ -125,6 +129,17 @@ class ReadinessService:
         if environment in PRODUCTION_ENVIRONMENTS and route_mode != "enforce":
             return self._component("auth", "notReady", "routeAuthenticationNotEnforced", timestamp)
         return self._component("auth", "ready", "requiredAuthConfigPresent", timestamp)
+
+    def _incident_component(self, timestamp: str) -> Dict[str, str]:
+        try:
+            component = dict(self.incident_component_source() or {})
+        except Exception:
+            return self._component("incident", "notReady", "incidentEvidenceUnavailable", timestamp)
+        status = str(component.get("status") or "unknown")
+        reason = str(component.get("reason") or "incidentEvidenceUnavailable")
+        if status not in {"ready", "notReady", "unknown"}:
+            return self._component("incident", "notReady", "incidentEvidenceInvalid", timestamp)
+        return self._component("incident", status, reason, timestamp)
 
     @staticmethod
     def _component(

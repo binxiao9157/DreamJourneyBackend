@@ -147,12 +147,97 @@ class RightsEvidenceEvent(EvidenceEventBase):
     receiptIdHash: Optional[Digest] = None
 
 
+IncidentLifecycleState = Literal["open", "acknowledged", "fenced", "resolved"]
+
+
 class IncidentEvidenceEvent(EvidenceEventBase):
     type: Literal["incident"] = "incident"
     incidentClass: MachineCode
     severity: Literal["info", "warning", "critical"]
     action: MachineCode
     surface: Optional[MachineCode] = None
+    # Legacy incident observations intentionally remain valid. New lifecycle
+    # events opt into the fields below and are replayed from the append-only
+    # evidence sink by IncidentLifecycleService.
+    operation: Optional[MachineCode] = None
+    incidentId: Optional[MachineCode] = None
+    incidentState: Optional[IncidentLifecycleState] = None
+    owner: Optional[MachineCode] = None
+    runbookId: Optional[MachineCode] = None
+    requiredFenceActions: tuple[MachineCode, ...] = ()
+    fenceActions: tuple[MachineCode, ...] = ()
+    evidenceIdHashes: tuple[Digest, ...] = ()
+    ackByAt: Optional[datetime] = None
+    reopenedFrom: Optional[MachineCode] = None
+
+    @field_validator("ackByAt")
+    @classmethod
+    def require_ack_deadline_timezone(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("ackByAt must include a timezone")
+        return value.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def require_lifecycle_transition_contract(self) -> "IncidentEvidenceEvent":
+        lifecycle_fields_present = any(
+            value is not None
+            for value in (
+                self.operation,
+                self.incidentId,
+                self.incidentState,
+                self.owner,
+                self.runbookId,
+                self.ackByAt,
+                self.reopenedFrom,
+            )
+        ) or bool(
+            self.requiredFenceActions
+            or self.fenceActions
+            or self.evidenceIdHashes
+        )
+        if not lifecycle_fields_present:
+            return self
+
+        expected = {
+            "open": ("open", "started"),
+            "ack": ("acknowledged", "observed"),
+            "fence": ("fenced", "observed"),
+            "resolve": ("resolved", "succeeded"),
+            "reopen": ("open", "started"),
+        }.get(self.action)
+        if expected is None:
+            raise ValueError("incident lifecycle action is unsupported")
+        if self.operation != "incidentLifecycle":
+            raise ValueError("incident lifecycle operation is required")
+        if not self.incidentId or not self.incidentState or not self.owner:
+            raise ValueError("incident lifecycle id, state, and owner are required")
+        if (self.incidentState, self.state) != expected:
+            raise ValueError("incident lifecycle state does not match action")
+        if len(set(self.requiredFenceActions)) != len(self.requiredFenceActions):
+            raise ValueError("requiredFenceActions must not contain duplicates")
+        if len(set(self.fenceActions)) != len(self.fenceActions):
+            raise ValueError("fenceActions must not contain duplicates")
+        if len(set(self.evidenceIdHashes)) != len(self.evidenceIdHashes):
+            raise ValueError("evidenceIdHashes must not contain duplicates")
+        if self.action in {"open", "reopen"} and self.ackByAt is None:
+            raise ValueError("incident lifecycle open requires ackByAt")
+        if self.action == "reopen" and not self.reopenedFrom:
+            raise ValueError("incident lifecycle reopen requires reopenedFrom")
+        if self.action != "reopen" and self.reopenedFrom is not None:
+            raise ValueError("reopenedFrom is only valid for reopen")
+        if self.action == "fence" and not self.fenceActions:
+            raise ValueError("incident lifecycle fence requires fenceActions")
+        if self.action == "resolve" and not self.evidenceIdHashes:
+            raise ValueError("incident lifecycle resolve requires evidenceIdHashes")
+        if (
+            self.severity == "critical"
+            and self.action in {"open", "reopen"}
+            and not self.requiredFenceActions
+        ):
+            raise ValueError("critical incident lifecycle open requires requiredFenceActions")
+        return self
 
 
 class ProviderCostEvidenceEvent(EvidenceEventBase):
