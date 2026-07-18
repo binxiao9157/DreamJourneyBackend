@@ -37,6 +37,7 @@ from app.domain.owner_truth.candidate_decisions import (
     CandidateReviewAction,
     OwnerTruthCandidateReviewCommand,
     OwnerTruthCandidateReviewConflict,
+    OwnerTruthCandidateReviewSourceInactive,
 )
 from app.services.owner_truth_source import (
     ArchiveOwnerTruthCompatibilityFacade,
@@ -115,7 +116,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(applied["appliedVersions"][-1] == "0014", "owner truth Candidate decision migration must apply")
+        require(applied["appliedVersions"][-1] == "0015", "owner truth Memory activation migration must apply")
 
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:
@@ -373,6 +374,8 @@ def main() -> None:
             review_source_id = str(uuid.uuid4())
             review_candidate_id = str(uuid.uuid4())
             review_corrected_candidate_id = str(uuid.uuid4())
+            review_rejected_candidate_id = str(uuid.uuid4())
+            review_stale_evidence_candidate_id = str(uuid.uuid4())
             review_unbacked_corrected_candidate_id = str(uuid.uuid4())
             review_concurrent_candidate_id = str(uuid.uuid4())
             review_content = {"summary": "小时候在院子里听雨。"}
@@ -413,6 +416,8 @@ def main() -> None:
                     for candidate in (
                         review_candidate_id,
                         review_corrected_candidate_id,
+                        review_rejected_candidate_id,
+                        review_stale_evidence_candidate_id,
                         review_unbacked_corrected_candidate_id,
                         review_concurrent_candidate_id,
                     ):
@@ -434,6 +439,28 @@ def main() -> None:
                                 json.dumps(review_payload),
                             ),
                         )
+                    stale_evidence_payload = {
+                        **review_payload,
+                        "evidenceRefs": [
+                            {
+                                "sourceId": review_source_id,
+                                "sourceVersion": 2,
+                                "span": {"start": 0, "end": 10},
+                            }
+                        ],
+                    }
+                    cursor.execute(
+                        """
+                        UPDATE owner_truth.memory_candidates
+                        SET payload = %s
+                        WHERE vault_id = %s AND id = %s
+                        """,
+                        (
+                            json.dumps(stale_evidence_payload),
+                            review_vault_id,
+                            review_stale_evidence_candidate_id,
+                        ),
+                    )
 
             review_context = OwnerTruthCommandContext(
                 vault_id=review_vault_id,
@@ -442,7 +469,7 @@ def main() -> None:
                 policy_version="owner-truth-v1",
             )
             review_service = OwnerTruthCandidateReviewService(store)
-            accepted = review_service.decide(
+            accepted = review_service.decide_and_activate(
                 command=OwnerTruthCandidateReviewCommand(
                     command_id="owner-truth-candidate-accept-smoke",
                     candidate_id=review_candidate_id,
@@ -454,7 +481,7 @@ def main() -> None:
                 ),
                 context=review_context,
             )
-            accepted_replay = review_service.decide(
+            accepted_replay = review_service.decide_and_activate(
                 command=OwnerTruthCandidateReviewCommand(
                     command_id="owner-truth-candidate-accept-smoke",
                     candidate_id=review_candidate_id,
@@ -466,7 +493,7 @@ def main() -> None:
                 ),
                 context=review_context,
             )
-            corrected = review_service.decide(
+            corrected = review_service.decide_and_activate(
                 command=OwnerTruthCandidateReviewCommand(
                     command_id="owner-truth-candidate-correct-smoke",
                     candidate_id=review_corrected_candidate_id,
@@ -478,10 +505,86 @@ def main() -> None:
                 ),
                 context=review_context,
             )
-            require(accepted.outcome == "created", "Owner Candidate accept must persist once")
-            require(accepted_replay.outcome == "deduplicated", "Owner Candidate replay must deduplicate")
-            require(accepted.receipt_id == accepted_replay.receipt_id, "Owner Candidate replay must preserve receipt")
-            require(corrected.corrected_value_id is not None, "corrected Candidate must retain separate Owner value")
+            rejected = review_service.decide_and_activate(
+                command=OwnerTruthCandidateReviewCommand(
+                    command_id="owner-truth-candidate-reject-smoke",
+                    candidate_id=review_rejected_candidate_id,
+                    expected_candidate_version=1,
+                    action=CandidateReviewAction.REJECT,
+                    corrected_value=None,
+                    corrected_value_schema_version="owner-truth-v1",
+                    reason_code="ownerRejected",
+                ),
+                context=review_context,
+            )
+            require(accepted.review.outcome == "created", "Owner Candidate accept must persist once")
+            require(accepted.memory_activation.outcome == "created", "accepted Candidate must activate one MemoryVersion")
+            require(accepted_replay.review.outcome == "deduplicated", "Owner Candidate replay must deduplicate")
+            require(accepted_replay.memory_activation.outcome == "deduplicated", "Memory activation replay must deduplicate")
+            require(
+                accepted.review.receipt_id == accepted_replay.review.receipt_id,
+                "Owner Candidate replay must preserve receipt",
+            )
+            require(
+                corrected.review.corrected_value_id is not None,
+                "corrected Candidate must retain separate Owner value",
+            )
+            require(
+                corrected.memory_activation.outcome == "created",
+                "corrected Candidate must activate one MemoryVersion",
+            )
+            require(
+                rejected.memory_activation.outcome == "notApplicable"
+                and rejected.memory_activation.memory_id is None,
+                "rejected Candidate must not activate a MemoryVersion",
+            )
+
+            activation_rolled_back = False
+            try:
+                review_service.decide_and_activate(
+                    command=OwnerTruthCandidateReviewCommand(
+                        command_id="owner-truth-candidate-stale-evidence-smoke",
+                        candidate_id=review_stale_evidence_candidate_id,
+                        expected_candidate_version=1,
+                        action=CandidateReviewAction.ACCEPT,
+                        corrected_value=None,
+                        corrected_value_schema_version="owner-truth-v1",
+                        reason_code="ownerReviewed",
+                    ),
+                    context=review_context,
+                )
+            except OwnerTruthCandidateReviewSourceInactive:
+                activation_rolled_back = True
+            require(
+                activation_rolled_back,
+                "stale Candidate source evidence must block MemoryVersion activation",
+            )
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT decision_status
+                        FROM owner_truth.memory_candidates
+                        WHERE vault_id = %s AND id = %s
+                        """,
+                        (review_vault_id, review_stale_evidence_candidate_id),
+                    )
+                    require(
+                        cursor.fetchone()[0] == "pending",
+                        "activation failure must roll back the Candidate terminal transition",
+                    )
+                    cursor.execute(
+                        """
+                        SELECT count(*)
+                        FROM owner_truth.decision_receipts
+                        WHERE vault_id = %s AND candidate_id = %s
+                        """,
+                        (review_vault_id, review_stale_evidence_candidate_id),
+                    )
+                    require(
+                        int(cursor.fetchone()[0]) == 0,
+                        "activation failure must roll back its DecisionReceipt",
+                    )
             pending_inbox_ids = {
                 item.candidate_id
                 for item in review_service.list_pending(context=review_context)
@@ -489,9 +592,62 @@ def main() -> None:
             require(
                 review_candidate_id not in pending_inbox_ids
                 and review_corrected_candidate_id not in pending_inbox_ids
+                and review_rejected_candidate_id not in pending_inbox_ids
+                and review_stale_evidence_candidate_id in pending_inbox_ids
                 and review_unbacked_corrected_candidate_id in pending_inbox_ids,
                 "terminal Candidates must leave the Owner inbox without hiding unrelated pending work",
             )
+
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT memory.decision_receipt_id, memory.content_hash,
+                            version.id, version.version_number, version.is_current,
+                            version.payload
+                        FROM owner_truth.memories AS memory
+                        JOIN owner_truth.memory_versions AS version
+                          ON version.vault_id = memory.vault_id
+                         AND version.memory_id = memory.id
+                        WHERE memory.vault_id = %s
+                          AND memory.decision_receipt_id IN (%s, %s)
+                        ORDER BY memory.decision_receipt_id
+                        """,
+                        (
+                            review_vault_id,
+                            accepted.review.receipt_id,
+                            corrected.review.receipt_id,
+                        ),
+                    )
+                    activated_rows = cursor.fetchall()
+                    require(
+                        len(activated_rows) == 2
+                        and all(row[3] == 1 and row[4] for row in activated_rows),
+                        "accepted/corrected receipts must each create exactly one current initial version",
+                    )
+                    corrected_row = next(
+                        row for row in activated_rows
+                        if str(row[0]) == corrected.review.receipt_id
+                    )
+                    corrected_payload = corrected_row[5]
+                    if isinstance(corrected_payload, str):
+                        corrected_payload = json.loads(corrected_payload)
+                    require(
+                        corrected_payload["content"] == {"summary": "小时候在院子里听雨，后来常常想起。"},
+                        "corrected MemoryVersion must use the immutable Owner value",
+                    )
+                    cursor.execute(
+                        """
+                        SELECT count(*)
+                        FROM owner_truth.memories
+                        WHERE vault_id = %s AND decision_receipt_id = %s
+                        """,
+                        (review_vault_id, rejected.review.receipt_id),
+                    )
+                    require(
+                        int(cursor.fetchone()[0]) == 0,
+                        "rejected DecisionReceipt must not create a MemoryRecord",
+                    )
 
             def insert_unbacked_corrected_decision(cursor):
                 cursor.execute(
@@ -548,7 +704,7 @@ def main() -> None:
                 concurrent_store.open_pool(wait=True)
                 try:
                     concurrent_start.wait(timeout=10)
-                    result = OwnerTruthCandidateReviewService(concurrent_store).decide(
+                    result = OwnerTruthCandidateReviewService(concurrent_store).decide_and_activate(
                         command=OwnerTruthCandidateReviewCommand(
                             command_id=f"owner-truth-candidate-race-{index}",
                             candidate_id=review_concurrent_candidate_id,
@@ -560,7 +716,7 @@ def main() -> None:
                         ),
                         context=review_context,
                     )
-                    return result.outcome
+                    return result.review.outcome
                 except OwnerTruthCandidateReviewConflict:
                     return "conflict"
                 finally:
@@ -584,6 +740,23 @@ def main() -> None:
                     require(
                         int(cursor.fetchone()[0]) == 1,
                         "concurrent Candidate decisions must persist exactly one receipt",
+                    )
+                    cursor.execute(
+                        """
+                        SELECT count(*)
+                        FROM owner_truth.memories
+                        WHERE vault_id = %s
+                          AND decision_receipt_id = (
+                              SELECT id
+                              FROM owner_truth.decision_receipts
+                              WHERE vault_id = %s AND candidate_id = %s
+                          )
+                        """,
+                        (review_vault_id, review_vault_id, review_concurrent_candidate_id),
+                    )
+                    require(
+                        int(cursor.fetchone()[0]) == 1,
+                        "concurrent Candidate activation must persist exactly one MemoryRecord",
                     )
         finally:
             store.close_pool()
@@ -636,6 +809,11 @@ def main() -> None:
                     "candidateReviewConcurrentSingleWriter": True,
                     "candidateCorrectionSeparate": True,
                     "correctedDecisionRequiresValue": True,
+                    "decisionMemoryActivation": True,
+                    "correctedMemoryUsesOwnerValue": True,
+                    "rejectedDecisionNoMemory": True,
+                    "candidateMemoryActivationConcurrentSingleWriter": True,
+                    "decisionMemoryActivationRollback": True,
                     "legacyMemoriesUnchanged": True,
                     "legacyArchiveUnchanged": True,
                 },

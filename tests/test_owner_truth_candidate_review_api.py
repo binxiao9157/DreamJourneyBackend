@@ -116,7 +116,7 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"]["code"], "ownerTruthCandidateReviewUnavailable")
 
-    def test_owner_can_list_decide_and_replay_without_memory_activation(self) -> None:
+    def test_owner_can_list_decide_activate_memory_and_replay(self) -> None:
         owner_id, headers = self._login("13800139102")
         vault_id = "vault-api-owner-review"
         candidate = self._candidate(vault_id=vault_id, owner_subject_id=owner_id)
@@ -142,7 +142,13 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         )
         self.assertEqual(created.status_code, 201)
         self.assertEqual(created.json()["status"], "created")
-        self.assertEqual(created.json()["memoryActivation"], "notCreated")
+        self.assertEqual(
+            created.json()["schemaVersion"],
+            "owner-truth-candidate-decision-memory-v1",
+        )
+        self.assertEqual(created.json()["memoryActivation"]["status"], "created")
+        self.assertTrue(created.json()["memoryActivation"]["memoryId"])
+        self.assertTrue(created.json()["memoryActivation"]["memoryVersionId"])
         self.assertEqual(created.json()["receipt"]["decision"], "accepted")
 
         replay = client.post(
@@ -156,6 +162,7 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             replay.json()["receipt"]["receiptId"],
             created.json()["receipt"]["receiptId"],
         )
+        self.assertEqual(replay.json()["memoryActivation"]["status"], "deduplicated")
         self.assertEqual(
             client.get(f"/v2/vaults/{vault_id}/candidates", headers=headers).json()["candidates"],
             [],

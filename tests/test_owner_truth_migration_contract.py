@@ -93,6 +93,23 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("owner_truth_candidate_decision_values_no_update", migration.sql)
         self.assertIn("owner_truth_decision_receipts_vault_command_id_hash_unique", migration.sql)
 
+    def test_memory_activation_migration_binds_one_memory_to_one_receipt(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0015"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_memory_activation")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(metadata["runtimeCompatibility"], "ownerTruthV1DecisionMemoryShadow")
+        self.assertFalse(metadata["releaseFlags"]["memoryActivationV1"])
+        self.assertIn("decision_receipt_id", migration.sql)
+        self.assertIn("owner_truth_memories_one_per_decision_receipt", migration.sql)
+        self.assertIn("owner_truth_memories_validate_decision_receipt", migration.sql)
+        self.assertIn("owner_truth_memories_decision_receipt_immutable", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

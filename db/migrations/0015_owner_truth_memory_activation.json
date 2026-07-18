@@ -1,0 +1,14 @@
+{
+  "version": "0015",
+  "name": "owner_truth_memory_activation",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthV1DecisionMemoryShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthV1Read": false,
+    "ownerTruthV1Write": false,
+    "candidateReviewV1": false,
+    "memoryActivationV1": false
+  }
+}

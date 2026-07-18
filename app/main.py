@@ -337,20 +337,26 @@ def _owner_truth_candidate_inbox_item_response(item: Any) -> Dict[str, Any]:
 
 
 def _owner_truth_candidate_decision_response(result: Any) -> Dict[str, Any]:
+    review = result.review
+    activation = result.memory_activation
     return {
-        "schemaVersion": "owner-truth-candidate-decision-v1",
-        "status": result.outcome,
+        "schemaVersion": "owner-truth-candidate-decision-memory-v1",
+        "status": review.outcome,
         "receipt": {
-            "receiptId": result.receipt_id,
-            "candidateId": result.candidate_id,
-            "decision": result.decision.value,
-            "candidateVersion": result.candidate_row_version,
-            "candidateBeforeHash": result.candidate_before_hash,
-            "candidateAfterHash": result.candidate_after_hash,
-            "correctedValueId": result.corrected_value_id,
+            "receiptId": review.receipt_id,
+            "candidateId": review.candidate_id,
+            "decision": review.decision.value,
+            "candidateVersion": review.candidate_row_version,
+            "candidateBeforeHash": review.candidate_before_hash,
+            "candidateAfterHash": review.candidate_after_hash,
+            "correctedValueId": review.corrected_value_id,
         },
-        # WI-S1-01-05 alone may create a MemoryRecord/MemoryVersion.
-        "memoryActivation": "notCreated",
+        "memoryActivation": {
+            "status": activation.outcome,
+            "memoryId": activation.memory_id,
+            "memoryVersionId": activation.memory_version_id,
+            "contentHash": activation.content_hash,
+        },
     }
 ROUTE_AUTHENTICATION_POLICY = RouteAuthenticationPolicy()
 ROUTE_AUTHENTICATION_DECISION_RECORDER = RouteAuthenticationDecisionRecorder()
@@ -1854,7 +1860,7 @@ def review_owner_truth_candidate(
     candidate_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """QA-only terminal review boundary; no MemoryVersion is created here."""
+    """QA-only review plus receipt-derived initial MemoryVersion activation."""
 
     try:
         context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
@@ -1870,14 +1876,14 @@ def review_owner_truth_candidate(
             ),
             reason_code=str(payload.get("reasonCode") or "ownerReviewed"),
         )
-        result = OwnerTruthCandidateReviewService(store).decide(
+        result = OwnerTruthCandidateReviewService(store).decide_and_activate(
             command=command,
             context=context,
         )
     except OwnerTruthContractError as error:
         raise _owner_truth_candidate_review_http_error(error) from error
     return JSONResponse(
-        status_code=201 if result.outcome == "created" else 200,
+        status_code=201 if result.review.outcome == "created" else 200,
         content=_owner_truth_candidate_decision_response(result),
     )
 
