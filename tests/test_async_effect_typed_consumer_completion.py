@@ -7,6 +7,7 @@ from uuid import uuid4
 from app.async_effects.consumer_repository import (
     AsyncEffectConsumerError,
     InMemoryAsyncEffectConsumerRepository,
+    OwnerTruthSourceCandidateExtractionConsumerCommand,
     OwnerTruthSourceBlockedConsumerCommand,
 )
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
@@ -132,6 +133,54 @@ class TypedConsumerCompletionTests(unittest.TestCase):
                 reason_code=admission.reason_code,
                 result_ref_hash=digest("source-other-consumer"),
                 admission=admission,
+            )
+
+    def test_admitted_extraction_completion_has_one_fixed_result_target(self):
+        admission = self.admission_repository.admit_owner_truth_source(self.intent)
+        extraction_id = str(uuid4())
+        command = OwnerTruthSourceCandidateExtractionConsumerCommand(
+            intent=self.intent,
+            consumer_name="ownerTruth.source.extraction",
+            business_target_key=digest(f"owner-truth-extraction:{extraction_id}"),
+            outcome="completed",
+            reason_code="candidateProposalsPersisted",
+            result_ref_hash=digest("candidate-result"),
+            admission=admission,
+            extraction_id=extraction_id,
+            extraction_status="succeeded",
+        )
+
+        created = self.consumer_repository.consume(command)
+        replayed = self.consumer_repository.consume(command)
+
+        self.assertTrue(admission.allowed)
+        self.assertEqual(created.outcome, "accepted")
+        self.assertEqual(replayed.outcome, "deduplicated")
+        self.assertEqual(created.business_target_key, command.business_target_key)
+
+    def test_extraction_completion_refuses_an_unauthorized_source_target(self):
+        self.admission_repository.seed_source(
+            vault_id=self.vault_id,
+            source_id=self.source_id,
+            owner_subject_id=self.owner_subject_id,
+            authority_epoch=4,
+            source_version=1,
+            state="active",
+        )
+        admission = self.admission_repository.admit_owner_truth_source(self.intent)
+        extraction_id = str(uuid4())
+
+        with self.assertRaises(AsyncEffectConsumerError):
+            OwnerTruthSourceCandidateExtractionConsumerCommand(
+                intent=self.intent,
+                consumer_name="ownerTruth.source.extraction",
+                business_target_key=digest(f"owner-truth-extraction:{extraction_id}"),
+                outcome="completed",
+                reason_code="candidateProposalsPersisted",
+                result_ref_hash=digest("candidate-result-blocked"),
+                admission=admission,
+                extraction_id=extraction_id,
+                extraction_status="succeeded",
             )
         with self.assertRaises(AsyncEffectConsumerError):
             OwnerTruthSourceBlockedConsumerCommand(

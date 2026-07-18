@@ -32,7 +32,21 @@ from app.async_effects.lease_repository import AsyncEffectLeaseCancelled, AsyncE
 from app.async_effects.scheduler_repository import AsyncEffectSchedulerLeaseLost
 from app.core.config import settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
+from app.domain.owner_truth.candidate_extraction import (
+    CandidateEvidenceSpan,
+    CandidateProposal,
+    CandidateReviewMode,
+    ExtractionResultStatus,
+    SyntheticCandidateExtractionCommand,
+)
+from app.domain.owner_truth.contracts import (
+    EpistemicStatus,
+    MemoryKind,
+    PerspectiveType,
+    SensitivityLevel,
+)
 from app.domain.owner_truth.source_commands import CreateTextSourceCommand, OwnerTruthCommandContext
+from app.services.owner_truth_candidate_extraction import OwnerTruthCandidateExtractionService
 from app.services.owner_truth_source import (
     OwnerTruthSourceAsyncEffectCommandService,
     build_source_created_effect_intent,
@@ -113,6 +127,20 @@ def count_source_rows(dsn: str, *, vault_id: str, source_id: str) -> int:
             cursor.execute(
                 "SELECT COUNT(*) FROM owner_truth.sources WHERE vault_id = %s AND id = %s",
                 (vault_id, source_id),
+            )
+            return int(cursor.fetchone()[0])
+
+
+def count_candidate_rows(dsn: str, *, vault_id: str, extraction_id: str) -> int:
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM owner_truth.memory_candidates
+                WHERE vault_id = %s AND extraction_result_id = %s
+                """,
+                (vault_id, extraction_id),
             )
             return int(cursor.fetchone()[0])
 
@@ -264,6 +292,53 @@ def main() -> None:
         source_effect_intent = build_source_created_effect_intent(
             record=source_command.write_record(context=source_context),
             source=source_created.source,
+        )
+        candidate_extraction_service = OwnerTruthCandidateExtractionService(store)
+        candidate_extraction_command = SyntheticCandidateExtractionCommand(
+            intent=source_effect_intent,
+            extractor_id="deterministicFake",
+            model_id="fixture-v1",
+            prompt_version="candidate-prompt-v1",
+            policy_version="owner-truth-v1",
+            source_content_hash=source_created.source.content_hash,
+            status=ExtractionResultStatus.SUCCEEDED,
+            proposals=(
+                CandidateProposal(
+                    memory_kind=MemoryKind.EXPERIENCE,
+                    perspective_type=PerspectiveType.FIRST_PERSON,
+                    epistemic_status=EpistemicStatus.RECALLED,
+                    sensitivity=SensitivityLevel.STANDARD,
+                    content={"summary": "Synthetic source has an atomic extraction result."},
+                    evidence_span=CandidateEvidenceSpan(start=0, end=9),
+                    confidence=0.75,
+                    review_mode=CandidateReviewMode.BATCH,
+                ),
+            ),
+        )
+        candidate_created = candidate_extraction_service.record(candidate_extraction_command)
+        candidate_replayed = candidate_extraction_service.record(candidate_extraction_command)
+        require(
+            candidate_created.outcome == "created" and candidate_replayed.outcome == "deduplicated",
+            "same Source extraction must persist one immutable result and replay",
+        )
+        require(
+            candidate_created.status is ExtractionResultStatus.SUCCEEDED
+            and len(candidate_created.candidate_ids) == 1,
+            "synthetic extraction must create one pending Candidate",
+        )
+        require(
+            count_candidate_rows(
+                test_dsn,
+                vault_id=source_context.vault_id,
+                extraction_id=candidate_created.extraction_id or "",
+            )
+            == 1,
+            "synthetic extraction must persist one pending Candidate in Postgres",
+        )
+        require(
+            candidate_created.consumer.outcome == "accepted"
+            and candidate_replayed.consumer.outcome == "deduplicated",
+            "candidate extraction must retain one Consumer Inbox completion receipt",
         )
         with store.request_unit_of_work(
             correlation_id="async-effect-source-target-admission",
@@ -732,7 +807,7 @@ def main() -> None:
         print(
             "Async effect Postgres smoke passed: "
             f"schemaHead={verified['expectedHead']} outcomes={sorted(outcomes)} "
-            "sourceOutbox=true sourceTargetAdmission=true sourceBlockedCompletion=true "
+            "sourceOutbox=true candidateExtraction=true sourceTargetAdmission=true sourceBlockedCompletion=true "
             "workerLease=true schedulerLease=true consumerInbox=true rollback=true "
             "terminalGuard=true receiptsAppendOnly=true"
         )

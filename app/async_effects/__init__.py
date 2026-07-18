@@ -46,6 +46,7 @@ from .consumer_repository import (
     AsyncEffectSyntheticConsumerCommand,
     InMemoryAsyncEffectConsumerRepository,
     OwnerTruthSourceBlockedConsumerCommand,
+    OwnerTruthSourceCandidateExtractionConsumerCommand,
     PostgresAsyncEffectConsumerRepository,
 )
 from .target_admission import (
@@ -86,6 +87,7 @@ __all__ = [
     "InMemoryAsyncEffectLeaseRepository",
     "InMemoryAsyncEffectConsumerRepository",
     "OwnerTruthSourceBlockedConsumerCommand",
+    "OwnerTruthSourceCandidateExtractionConsumerCommand",
     "InMemoryOwnerTruthSourceTargetAdmissionRepository",
     "InMemoryAsyncEffectSchedulerLeaseRepository",
     "PostgresEffectKernelRepository",

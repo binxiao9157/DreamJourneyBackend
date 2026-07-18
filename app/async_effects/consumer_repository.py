@@ -25,6 +25,7 @@ _CONSUMER_NAMESPACE = UUID("e767a5e0-01b2-49ea-a61b-75516b4f2dc8")
 _SYNTHETIC_OPERATION_PREFIX = "asyncEffect.synthetic."
 _TERMINAL_OUTCOMES = {"completed", "skipped", "blocked", "failed", "unknown"}
 _OWNER_TRUTH_SOURCE_BLOCKED_CONSUMER = "ownerTruth.source.blocked"
+_OWNER_TRUTH_SOURCE_EXTRACTION_CONSUMER = "ownerTruth.source.extraction"
 
 
 class AsyncEffectConsumerError(RuntimeError):
@@ -72,6 +73,10 @@ def _receipt_id(intent: AsyncEffectIntent, consumer_name: str, business_target_k
             f"async-effect-consumer-receipt:{consumer_name}:{intent.operation_id}:{business_target_key}",
         )
     )
+
+
+def _source_extraction_business_target_key(extraction_id: str) -> str:
+    return sha256(f"owner-truth-extraction:{extraction_id}".encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -150,6 +155,56 @@ class OwnerTruthSourceBlockedConsumerCommand(AsyncEffectConsumerCompletionComman
             raise AsyncEffectConsumerError("current Source target cannot be recorded as blocked")
         if self.outcome != "blocked" or self.reason_code != self.admission.reason_code:
             raise AsyncEffectConsumerError("blocked completion must preserve the live admission result")
+
+
+@dataclass(frozen=True)
+class OwnerTruthSourceCandidateExtractionConsumerCommand(AsyncEffectConsumerCompletionCommand):
+    """Complete one admitted Source extraction without exposing result content."""
+
+    admission: AsyncEffectTargetAdmission
+    extraction_id: str
+    extraction_status: str
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.intent.operation_type != "ownerTruth.source.created":
+            raise AsyncEffectConsumerAdmissionDenied("owner truth extraction requires its typed operation")
+        if self.consumer_name != _OWNER_TRUTH_SOURCE_EXTRACTION_CONSUMER:
+            raise AsyncEffectConsumerAdmissionDenied("owner truth extraction has one fixed consumer")
+        target = self.intent.target
+        if target.resource_type != "source" or target.purpose != "candidateExtraction":
+            raise AsyncEffectConsumerAdmissionDenied("owner truth extraction requires its typed target")
+        try:
+            normalized_extraction_id = str(UUID(self.extraction_id))
+        except (TypeError, ValueError) as exc:
+            raise AsyncEffectConsumerError("extraction_id must be a UUID") from exc
+        object.__setattr__(self, "extraction_id", normalized_extraction_id)
+        normalized_status = str(self.extraction_status or "").strip()
+        if normalized_status not in {"succeeded", "failed", "quarantined"}:
+            raise AsyncEffectConsumerError("extraction_status must be terminal")
+        object.__setattr__(self, "extraction_status", normalized_status)
+        if self.business_target_key != _source_extraction_business_target_key(normalized_extraction_id):
+            raise AsyncEffectConsumerAdmissionDenied(
+                "owner truth extraction has one fixed business target"
+            )
+        if not isinstance(self.admission, AsyncEffectTargetAdmission):
+            raise AsyncEffectConsumerError("live target admission is required")
+        if (
+            self.admission.operation_id != self.intent.operation_id
+            or self.admission.target_stable_key != self.intent.stable_key
+            or not self.admission.allowed
+            or self.admission.outcome != "admitted"
+        ):
+            raise AsyncEffectConsumerError("candidate extraction requires an admitted live Source target")
+        if normalized_status == "failed":
+            if self.outcome != "failed":
+                raise AsyncEffectConsumerError("failed extraction must record a failed completion")
+        elif self.outcome != "completed":
+            raise AsyncEffectConsumerError("successful or quarantined extraction must complete its consumer")
+        if normalized_status == "succeeded" and self.reason_code != "candidateProposalsPersisted":
+            raise AsyncEffectConsumerError("successful extraction must retain its fixed completion reason")
+        if normalized_status == "quarantined" and self.reason_code != "resultQuarantined":
+            raise AsyncEffectConsumerError("quarantined extraction must retain its fixed completion reason")
 
 
 @dataclass(frozen=True)

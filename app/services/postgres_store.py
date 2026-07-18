@@ -82,6 +82,9 @@ from app.async_effects.repository import PostgresEffectKernelRepository
 from app.async_effects.scheduler_repository import PostgresAsyncEffectSchedulerLeaseRepository
 from app.async_effects.consumer_repository import PostgresAsyncEffectConsumerRepository
 from app.async_effects.target_admission import PostgresOwnerTruthSourceTargetAdmissionRepository
+from app.services.owner_truth_candidate_extraction import (
+    PostgresOwnerTruthCandidateExtractionRepository,
+)
 
 
 class PostgresStore:
@@ -207,6 +210,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("async effect target admission requires an active unit of work")
         return PostgresOwnerTruthSourceTargetAdmissionRepository(active.connection)
+
+    def owner_truth_candidate_extraction_repository(
+        self,
+    ) -> PostgresOwnerTruthCandidateExtractionRepository:
+        """Return pending Candidate persistence bound to the active Owner Truth UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth candidate extraction requires an active unit of work")
+        return PostgresOwnerTruthCandidateExtractionRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(
