@@ -181,16 +181,27 @@ else:
                 break
             time.sleep(0.02)
         time.sleep(0.1)
-        os.killpg(interrupted.pid, signal.SIGTERM)
-        interrupted.communicate(timeout=5)
+        # Signal the shell directly so its TERM trap writes the operational
+        # receipt before cleaning up the isolated child process group.
+        os.kill(interrupted.pid, signal.SIGTERM)
+        try:
+            interrupted_stdout, interrupted_stderr = interrupted.communicate(timeout=5)
+        finally:
+            try:
+                os.killpg(interrupted.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         require(interrupted.returncode != 0, "interrupted backup must fail")
         interrupted_manifests = [
             json.loads(path.read_text(encoding="utf-8"))
             for path in (backup_root / "failures").glob("*.failure.json")
         ]
+        interrupted_codes = [item.get("errorCode") for item in interrupted_manifests]
         require(
-            any(item.get("errorCode") == "backupInterrupted" for item in interrupted_manifests),
-            "interruption failure receipt",
+            "backupInterrupted" in interrupted_codes,
+            "interruption failure receipt: "
+            f"codes={interrupted_codes} stdout={interrupted_stdout[-500:]} "
+            f"stderr={interrupted_stderr[-500:]}",
         )
 
         run(["bash", str(ALERT_SCRIPT), "dreamjourney-db-backup.service"], env=env)
