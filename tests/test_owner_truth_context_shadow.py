@@ -247,6 +247,7 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
         self.assertTrue(result["shadowOnly"])
         self.assertTrue(result["legacyContextUnchanged"])
         self.assertFalse(result["legacyContextRead"])
+        self.assertTrue(result["contextHash"])
         self.assertEqual(result["authority"]["state"], "ready")
         self.assertEqual(result["fallbacks"], [])
         self.assertEqual(result["trace"]["citationProofCount"], 1)
@@ -276,6 +277,7 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
         self.assertEqual(result["authority"]["state"], "rebuilding")
         self.assertEqual(result["selectedContext"], [])
         self.assertEqual(result["citationProof"], [])
+        self.assertTrue(result["contextHash"])
         self.assertEqual(
             result["fallbacks"],
             ["owner_truth_context_unavailable_no_personal_memory"],

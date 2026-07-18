@@ -128,6 +128,15 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             headers=headers,
             json={"query": "default hidden"},
         )
+        answer_citation = client.post(
+            "/v2/vaults/vault-hidden/answer-citation-receipts",
+            headers=headers,
+            json={
+                "commandId": "answer-citation-hidden-001",
+                "query": "default hidden",
+                "answerText": "不得公开。",
+            },
+        )
 
         self.assertEqual(owner_id.startswith("user_"), True)
         self.assertEqual(response.status_code, 404)
@@ -151,6 +160,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(
             context_shadow_build.json()["detail"]["code"],
             "ownerTruthContextShadowUnavailable",
+        )
+        self.assertEqual(answer_citation.status_code, 404)
+        self.assertEqual(
+            answer_citation.json()["detail"]["code"],
+            "ownerTruthAnswerCitationUnavailable",
         )
 
     def test_owner_can_list_decide_activate_memory_and_replay(self) -> None:
@@ -217,12 +231,26 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             headers=headers,
             json={"query": "跨 Vault 读取不得构建个人上下文"},
         )
+        answer_citation_denied = client.post(
+            "/v2/vaults/vault-other-owner/answer-citation-receipts",
+            headers=headers,
+            json={
+                "commandId": "answer-citation-cross-vault-001",
+                "query": "跨 Vault 读取不得记录答案引用",
+                "answerText": "不应创建。",
+            },
+        )
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(denied.json()["detail"]["code"], "ownerTruthCandidateReviewDenied")
         self.assertEqual(shadow_denied.status_code, 403)
         self.assertEqual(
             shadow_denied.json()["detail"]["code"],
             "ownerTruthMemoryProjectionDenied",
+        )
+        self.assertEqual(answer_citation_denied.status_code, 403)
+        self.assertEqual(
+            answer_citation_denied.json()["detail"]["code"],
+            "ownerTruthAnswerCitationDenied",
         )
 
         stale = client.post(
@@ -360,6 +388,29 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(build["citationProof"][0]["citation"]["sourceId"], candidate.source_id)
         self.assertNotIn(raw_query, str(build))
         self.assertNotIn(candidate.content["summary"], str(build))
+
+        raw_answer = "我会只依据已确认的个人记忆回答。"
+        answer_citation = client.post(
+            f"/v2/vaults/{vault_id}/answer-citation-receipts",
+            headers=headers,
+            json={
+                "commandId": "answer-citation-api-001",
+                "intent": "echo_chat",
+                "query": raw_query,
+                "answerText": raw_answer,
+            },
+        )
+        self.assertEqual(answer_citation.status_code, 201)
+        self.assertEqual(
+            answer_citation.json()["schemaVersion"],
+            "owner-truth-answer-citation-receipt-response-v1",
+        )
+        evidence = answer_citation.json()["answerCitation"]
+        self.assertEqual(evidence["citationCount"], 1)
+        self.assertTrue(evidence["contextHash"])
+        self.assertNotIn(raw_query, str(evidence))
+        self.assertNotIn(raw_answer, str(evidence))
+        self.assertNotIn(candidate.content["summary"], str(evidence))
 
 
 if __name__ == "__main__":

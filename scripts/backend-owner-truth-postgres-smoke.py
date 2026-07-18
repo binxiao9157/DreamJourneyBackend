@@ -59,6 +59,11 @@ from app.services.owner_truth_context_shadow_build import (
     OwnerTruthContextShadowBuildService,
     context_shadow_build_summary,
 )
+from app.services.owner_truth_answer_citation import (
+    OwnerTruthAnswerCitationCommand,
+    OwnerTruthAnswerCitationService,
+    answer_citation_summary,
+)
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
@@ -137,7 +142,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(applied["appliedVersions"][-1] == "0017", "owner truth Memory projection trigger fix must apply")
+        require(applied["appliedVersions"][-1] == "0018", "owner truth Answer/Citation migration must apply")
 
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:
@@ -905,6 +910,72 @@ def main() -> None:
                 "Context shadow build evidence must not expose raw query or MemoryVersion content",
             )
 
+            raw_answer = "我只根据当前确认的个人记忆回答。"
+            answer_citation_service = OwnerTruthAnswerCitationService(store, enabled=True)
+            answer_citation = answer_citation_service.record(
+                context=review_context,
+                command=OwnerTruthAnswerCitationCommand(
+                    command_id="owner-truth-answer-citation-smoke-001",
+                    answer_text=raw_answer,
+                ),
+                context_payload={"intent": "echo_chat", "query": raw_context_query},
+            )
+            answer_citation_replay = answer_citation_service.record(
+                context=review_context,
+                command=OwnerTruthAnswerCitationCommand(
+                    command_id="owner-truth-answer-citation-smoke-001",
+                    answer_text=raw_answer,
+                ),
+                context_payload={"intent": "echo_chat", "query": raw_context_query},
+            )
+            answer_citation_qa_summary = answer_citation_summary(answer_citation)
+            require(
+                answer_citation.outcome == "created"
+                and answer_citation_replay.outcome == "deduplicated"
+                and answer_citation.answer_id == answer_citation_replay.answer_id
+                and answer_citation.context_hash == context_shadow_build["contextHash"]
+                and answer_citation.citation_count == 2
+                and all(item["resolved"] for item in answer_citation.citations),
+                "Answer/Citation receipt must bind the Context shadow's current typed citations",
+            )
+            require(
+                raw_context_query not in str(answer_citation_qa_summary)
+                and raw_answer not in str(answer_citation_qa_summary)
+                and review_content["summary"] not in str(answer_citation_qa_summary)
+                and review_knowledge_content["claim"] not in str(answer_citation_qa_summary),
+                "Answer/Citation QA evidence must stay value-free",
+            )
+
+            expect_rejected(
+                test_dsn,
+                lambda cursor: cursor.execute(
+                    "UPDATE owner_truth.answers SET answer_length = 0 WHERE id = %s",
+                    (answer_citation.answer_id,),
+                ),
+                "Answer/Citation evidence must be append-only",
+            )
+            expect_rejected(
+                test_dsn,
+                lambda cursor: cursor.execute(
+                    """
+                    INSERT INTO owner_truth.answer_citations (
+                        id, vault_id, answer_id, citation_position, memory_id,
+                        memory_version_id, memory_version, source_id, source_version, content_hash
+                    ) VALUES (%s, %s, %s, 99, %s, %s, 1, %s, 1, %s)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        review_vault_id,
+                        answer_citation.answer_id,
+                        accepted.memory_activation.memory_id,
+                        accepted.memory_activation.memory_version_id,
+                        review_source_id,
+                        "0" * 64,
+                    ),
+                ),
+                "Answer citations must reject a content hash that does not match the current MemoryVersion",
+            )
+
             expect_rejected(
                 test_dsn,
                 lambda cursor: cursor.execute(
@@ -1315,6 +1386,10 @@ def main() -> None:
                     "contextShadowBuildCitationProof": True,
                     "contextShadowBuildNoPersonalMemoryFallback": True,
                     "contextShadowBuildValueFree": True,
+                    "answerCitationTyped": True,
+                    "answerCitationIdempotent": True,
+                    "answerCitationValueFree": True,
+                    "answerCitationImmutable": True,
                     "legacyMemoriesUnchanged": True,
                     "legacyArchiveUnchanged": True,
                 },

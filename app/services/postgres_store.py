@@ -94,6 +94,9 @@ from app.services.owner_truth_candidate_review import (
 from app.services.owner_truth_memory_projection import (
     PostgresOwnerTruthMemoryProjectionRepository,
 )
+from app.services.owner_truth_answer_citation import (
+    PostgresOwnerTruthAnswerCitationRepository,
+)
 
 
 class PostgresStore:
@@ -259,6 +262,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth memory projection requires an active unit of work")
         return PostgresOwnerTruthMemoryProjectionRepository(active.connection)
+
+    def owner_truth_answer_citation_repository(
+        self,
+    ) -> PostgresOwnerTruthAnswerCitationRepository:
+        """Return QA-only Answer/Citation persistence bound to the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth answer citation requires an active unit of work")
+        return PostgresOwnerTruthAnswerCitationRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from hashlib import sha256
+import json
 from typing import Any, Mapping
 
 from app.domain.owner_truth.memory_projection import OwnerTruthMemoryProjectionError
@@ -45,6 +46,35 @@ def _request_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         "queryHash": sha256(query.encode("utf-8")).hexdigest() if query else None,
         "queryLength": len(query),
     }
+
+
+def _fallback_context_hash(
+    *,
+    request: Mapping[str, Any],
+    shadow: Mapping[str, Any],
+) -> str:
+    """Bind an explicit no-personal-memory plan without retaining raw text.
+
+    A ready projection already publishes its stable Context hash.  A stale or
+    rebuilding projection still needs a deterministic evidence key so a later
+    Answer/Citation receipt can prove that it intentionally used the normal
+    no-personal-memory fallback rather than silently reading legacy data.
+    """
+
+    payload = {
+        "schemaVersion": OWNER_TRUTH_CONTEXT_SHADOW_BUILD_SCHEMA_VERSION,
+        "policyVersion": OWNER_TRUTH_CONTEXT_SHADOW_BUILD_POLICY_VERSION,
+        "request": dict(request),
+        "state": str(shadow.get("state") or ""),
+        "vaultId": str(shadow.get("vaultId") or ""),
+        "authorityEpoch": shadow.get("authorityEpoch"),
+        "projectionCheckpoint": shadow.get("projectionCheckpoint"),
+        "selectedContext": list(shadow.get("selectedContext") or []),
+        "filteredContext": list(shadow.get("filteredContext") or []),
+    }
+    return sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _citation_proof(selected_context: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -97,6 +127,9 @@ class OwnerTruthContextShadowBuildService:
         selected_context = deepcopy(list(shadow.get("selectedContext") or []))
         filtered_context = deepcopy(list(shadow.get("filteredContext") or []))
         state = str(shadow.get("state") or "")
+        context_hash = str(shadow.get("contextHash") or "").strip()
+        if not context_hash:
+            context_hash = _fallback_context_hash(request=request, shadow=shadow)
 
         fallbacks: list[str] = []
         if state != "ready":
@@ -124,6 +157,7 @@ class OwnerTruthContextShadowBuildService:
             "shadowOnly": True,
             "legacyContextUnchanged": True,
             "legacyContextRead": False,
+            "contextHash": context_hash,
             "request": request,
             "authority": {
                 "source": OWNER_TRUTH_CONTEXT_SHADOW_SOURCE,
@@ -166,6 +200,7 @@ def context_shadow_build_summary(result: Mapping[str, Any]) -> dict[str, Any]:
         "shadowOnly": bool(result.get("shadowOnly")),
         "legacyContextUnchanged": bool(result.get("legacyContextUnchanged")),
         "legacyContextRead": bool(result.get("legacyContextRead")),
+        "contextHash": str(result.get("contextHash") or ""),
         "request": deepcopy(dict(request)),
         "authority": deepcopy(dict(authority)),
         "selectedContext": deepcopy(list(result["selectedContext"])),

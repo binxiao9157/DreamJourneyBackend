@@ -265,6 +265,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthContextShadowBuild",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/answer-citation-receipts",
+                session,
+                "ownerTruthAnswerCitationReceipt",
+            ),
+            _rule(
                 "GET",
                 "/ops/release-policy/observations",
                 system,

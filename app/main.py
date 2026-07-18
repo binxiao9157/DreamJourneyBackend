@@ -98,6 +98,13 @@ from app.services.owner_truth_context_shadow_build import (
     OwnerTruthContextShadowBuildService,
     context_shadow_build_summary,
 )
+from app.services.owner_truth_answer_citation import (
+    OwnerTruthAnswerCitationCommand,
+    OwnerTruthAnswerCitationConflict,
+    OwnerTruthAnswerCitationError,
+    OwnerTruthAnswerCitationService,
+    answer_citation_summary,
+)
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
@@ -344,6 +351,26 @@ def _require_owner_truth_context_shadow_qa(request: Request) -> str:
     return user_id
 
 
+def _require_owner_truth_answer_citation_qa(request: Request) -> str:
+    """Keep Answer/Citation evidence unavailable outside explicit Owner QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthAnswerCitationUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthAnswerCitationUserSessionRequired"},
+        )
+    return user_id
+
+
 def _owner_truth_candidate_review_context(
     request: Request,
     *,
@@ -396,6 +423,19 @@ def _owner_truth_context_shadow_context(
     )
 
 
+def _owner_truth_answer_citation_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_answer_citation_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_candidate_review_http_error(
     error: OwnerTruthContractError,
 ) -> HTTPException:
@@ -438,6 +478,16 @@ def _owner_truth_memory_projection_http_error(
         status_code=409,
         detail={"code": "ownerTruthMemoryProjectionUnavailable"},
     )
+
+
+def _owner_truth_answer_citation_http_error(
+    error: OwnerTruthMemoryProjectionError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthMemoryProjectionAccessDenied):
+        return HTTPException(status_code=403, detail={"code": "ownerTruthAnswerCitationDenied"})
+    if isinstance(error, OwnerTruthAnswerCitationConflict):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthAnswerCitationConflict"})
+    return HTTPException(status_code=400, detail={"code": "ownerTruthAnswerCitationInvalid"})
 
 
 def _owner_truth_candidate_expected_version(payload: Dict[str, Any]) -> int:
@@ -2130,6 +2180,49 @@ def build_owner_truth_context_shadow(
         "schemaVersion": "owner-truth-context-shadow-build-response-v1",
         "contextShadow": context_shadow_build_summary(shadow),
     }
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/answer-citation-receipts",
+    include_in_schema=False,
+)
+def record_owner_truth_answer_citation(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Persist hash-only Answer/Citation proof for the Context V4 QA lane.
+
+    This endpoint deliberately does not generate an answer or expose an Echo
+    feature.  It proves that a future answer can be bound to exactly the typed
+    MemoryVersion citations selected by the default-off Context shadow.
+    """
+
+    try:
+        context = _owner_truth_answer_citation_context(request, vault_id=vault_id)
+        command = OwnerTruthAnswerCitationCommand(
+            command_id=payload.get("commandId"),
+            answer_text=payload.get("answerText"),
+        )
+        result = OwnerTruthAnswerCitationService(store, enabled=True).record(
+            context=context,
+            command=command,
+            context_payload={
+                "intent": payload.get("intent"),
+                "query": payload.get("query"),
+            },
+        )
+    except OwnerTruthMemoryProjectionError as error:
+        raise _owner_truth_answer_citation_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-answer-citation-receipt-response-v1",
+            "status": result.outcome,
+            "answerCitation": answer_citation_summary(result),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/ops/release-policy/observations")

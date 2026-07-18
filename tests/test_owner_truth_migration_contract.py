@@ -145,6 +145,25 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("version_schema_version,", migration.sql)
         self.assertIn("NEW.content_schema_version IS DISTINCT FROM version_schema_version", migration.sql)
 
+    def test_answer_citation_migration_is_hash_only_and_default_off(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0018"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_answer_citations")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(metadata["runtimeCompatibility"], "ownerTruthV1AnswerCitationShadow")
+        self.assertFalse(metadata["releaseFlags"]["answerCitationV1"])
+        self.assertIn("CREATE TABLE owner_truth.answers", migration.sql)
+        self.assertIn("CREATE TABLE owner_truth.answer_citations", migration.sql)
+        self.assertIn("owner_truth_answer_citations_validate_memory", migration.sql)
+        self.assertIn("owner_truth_answers_no_update", migration.sql)
+        self.assertIn("owner_truth_answer_citations_no_delete", migration.sql)
+        self.assertIn("command_payload_hash", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()
