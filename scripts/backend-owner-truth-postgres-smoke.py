@@ -525,7 +525,10 @@ def main() -> None:
                 command=OwnerTruthCandidateReviewCommand(
                     command_id="owner-truth-candidate-correct-smoke",
                     candidate_id=review_corrected_candidate_id,
-                    expected_candidate_version=1,
+                    # The fixture upgrades this candidate from an experience
+                    # shape to an explicit knowledge claim before review. The
+                    # mutable proposal update advances its optimistic version.
+                    expected_candidate_version=2,
                     action=CandidateReviewAction.CORRECT,
                     corrected_value={"claim": "父亲总会先修好自行车，再带我去公园。"},
                     corrected_value_schema_version="owner-truth-v1",
