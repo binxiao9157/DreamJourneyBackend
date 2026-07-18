@@ -230,7 +230,7 @@ Deployed backend head: `b5155ee`.
   and block a stale Source target without rebuilding. The normal deployed
   process still leaves all worker flags `false`.
 - `scripts/run-backend-route-authentication-postgres-smoke.sh` passed with
-  `routeCount=84`; all four QA-only routes remain user-session-only and do
+  `routeCount=85`; all five QA-only routes remain user-session-only and do
   not change anonymous or machine access.
 - `https://dreamjourney-api.liftora.cn/ready` reports database, schema, auth
   and incident components ready.

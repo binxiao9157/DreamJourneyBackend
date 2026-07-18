@@ -81,15 +81,17 @@ query is returned in the QA summary.
 
 ### G2 deployment
 
-Pending this commit's server deployment.  The deployment acceptance is:
+Deployed backend runtime head: `cc02b59`.
 
-1. Run `scripts/run-backend-owner-truth-postgres-smoke.sh` against a disposable
-   Postgres database and require `contextShadowBuildCitationProof`,
+1. `scripts/run-backend-owner-truth-postgres-smoke.sh` passed in a disposable
+   Postgres database with `contextShadowBuildCitationProof`,
    `contextShadowBuildNoPersonalMemoryFallback` and
-   `contextShadowBuildValueFree`.
-2. Run `scripts/run-backend-route-authentication-postgres-smoke.sh` and require
-   route registry count `85` with no unclassified routes.
-3. Confirm `/ready` remains healthy.
+   `contextShadowBuildValueFree` all true.
+2. `scripts/run-backend-route-authentication-postgres-smoke.sh` passed with
+   route registry count `85`, no unclassified routes, anonymous user-route
+   denial and machine/user boundary checks all true.
+3. `https://dreamjourney-api.liftora.cn/ready` reported database, schema, auth
+   and incident components ready after the rebuild.
 
 ## Gate Disposition
 
