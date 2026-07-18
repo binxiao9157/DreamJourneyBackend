@@ -13,9 +13,9 @@ Source -> Candidate -> DecisionReceipt -> MemoryVersion
                                       -> Owner-only compatibility Projection
 ```
 
-The projection does not replace KBLite, `/context/build`, legacy archive
-reads, or public Echo. It is not a new authority and does not expose a public
-product surface.
+The projection does not replace legacy KBLite writes, `/context/build`, legacy
+archive reads, or public Echo. It is not a new authority and does not expose a
+public product surface.
 
 ## MemoryVersion Rebuild Intent
 
@@ -48,6 +48,45 @@ consumer: `ownerTruth.memoryVersion.activated`,
 `ownerTruth.memoryProjection.rebuildRequested`, and
 `ownerTruth.memoryProjection.rebuild`.
 
+## KBLite Compatibility Read
+
+The first compatibility reader is now implemented, but remains default-off and
+QA-only:
+
+```text
+active confirmed MemoryVersion
+  -> ready Owner Truth projection checkpoint
+  -> read-only KBLite compatibility graph
+```
+
+- It does not call legacy KBLite mutation APIs, write `/kb/sync`, or alter
+  `/context/build`.
+- It only maps an explicit current `memoryKind=knowledge` value with a valid
+  `content.claim` into a compatibility `fact`.
+- Experience, emotion, unsupported schema and empty claims are not guessed
+  into facts, people, places or events. They produce a structured filtering
+  reason without carrying their content.
+- Missing or stale projection checkpoints return `state=rebuilding` with an
+  empty graph. Disabled reads return `state=disabled` before reading the
+  projection.
+- Compatibility facts retain a typed citation to the immutable MemoryVersion
+  and Source version. They do not copy Candidate payloads, DecisionReceipt
+  identifiers or review rationale.
+- The QA endpoint returns only a summary: fact identifiers, citation,
+  confidence, filtering reason and checkpoint. It never returns fact text.
+
+The three inspection endpoints are deliberately hidden from OpenAPI:
+
+```text
+GET  /v2/vaults/{vaultId}/memory-projection
+POST /v2/vaults/{vaultId}/memory-projection/rebuild
+GET  /v2/vaults/{vaultId}/kblite-compatibility
+```
+
+They require `OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED=true`,
+`X-DreamJourney-QA-Owner-Truth: 1`, and an Owner user session. The public
+release remains unaware of this adapter.
+
 ## Implemented Contract
 
 - A projection reads only active, current `MemoryVersion` rows whose Vault,
@@ -66,18 +105,6 @@ consumer: `ownerTruth.memoryVersion.activated`,
   source/version/content, non-current version, or extra payload keys such as
   `decisionReceiptId`.
 
-The two inspection endpoints are deliberately QA-only and excluded from the
-OpenAPI schema:
-
-```text
-GET  /v2/vaults/{vaultId}/memory-projection
-POST /v2/vaults/{vaultId}/memory-projection/rebuild
-```
-
-They require `OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED=true`,
-`X-DreamJourney-QA-Owner-Truth: 1`, and an Owner user session. Responses are
-summaries without projected memory content.
-
 ## Migration Correction
 
 The initial additive migration `0016` created the tables and trigger, but the
@@ -94,39 +121,42 @@ rewrite of an already-recorded migration.
 
 ### G0 local
 
-- Focused projection/review/effect/API suite: 16 tests passed, including
-  idempotent intent creation, rejected-candidate exclusion and rollback after
-  a synthetic effect-write failure.
-- `./scripts/verify_backend.sh` passed with 682 unit tests, credential
+- Focused projection/review/effect/compatibility/API suite passed, including
+  default-hidden QA access, knowledge-only mapping, stale-checkpoint
+  fail-closed behavior and value-free QA summaries.
+- `./scripts/verify_backend.sh` passed with 686 unit tests, credential
   boundary tests, FastAPI smoke, knowledge checks, deployment-file checks and
   backup contract smoke.
 - Python compilation, shell syntax checks and `git diff --check` passed.
 
 ### G2 deployed Postgres
 
-Deployed backend head: `ef29248`.
+Deployed backend head: `ddfc82e`.
 
-- `migrate_db.py --apply --build-id ef29248` reported no pending migrations;
+- `migrate_db.py --apply --build-id 18ce3bd` reported no pending migrations;
   expected and applied schema heads are both `0017`.
 - `scripts/run-backend-owner-truth-postgres-smoke.sh` passed in an isolated
   Postgres database with deterministic rebuild, corrected-content projection,
   source-revocation fail-closed behavior, stale-epoch rejection and
   DecisionReceipt-payload-leakage rejection all true. It additionally verified
   atomic/idempotent, value-free pending rebuild intents for accepted and
-  corrected MemoryVersions, with no intent for a rejected Candidate.
+  corrected MemoryVersions, with no intent for a rejected Candidate. It now
+  also verifies that KBLite compatibility maps only confirmed knowledge claims,
+  fails closed after a stale checkpoint, and keeps QA summaries value-free.
 - `scripts/run-backend-route-authentication-postgres-smoke.sh` passed with
-  `routeCount=82`; the two QA-only routes remain user-session-only and do not
-  change anonymous or machine access.
+  `routeCount=83`; the three QA-only routes remain user-session-only and do
+  not change anonymous or machine access.
 - `https://dreamjourney-api.liftora.cn/ready` reports database, schema, auth
   and incident components ready.
 
 ## Gate Disposition
 
-This establishes scoped `G0/G2` evidence for the Projection foundation only.
-`WI-S1-01-06` remains `PLANNED/STOP` in the Registry because its full scope
-still requires the KBLite compatibility adapter, rights/event-driven rebuild,
-typed Citation/context integration and its remaining dependencies/G1 evidence.
+This establishes scoped `G0/G2` evidence for the Projection foundation and
+the first read-only KBLite compatibility adapter only. `WI-S1-01-06` remains
+`PLANNED/STOP` in the Registry because its full scope still requires an
+event-driven projection rebuild consumer, typed Citation/context integration,
+correction flow integration and its remaining dependencies/G1 evidence.
 
-The next safe closure is a read-only KBLite compatibility adapter that consumes
-the pending projection intents behind a default-off flag. It must not restore
-KBLite as a fact-authority writer.
+The next safe closure is to use the typed compatibility citation in a
+default-off context-read shadow path. It must not restore KBLite as a
+fact-authority writer or make `/context/build` depend on a stale projection.
