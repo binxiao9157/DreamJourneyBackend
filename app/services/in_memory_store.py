@@ -59,6 +59,9 @@ from app.services.owner_truth_memory_projection import (
 from app.services.owner_truth_answer_citation import (
     InMemoryOwnerTruthAnswerCitationRepository,
 )
+from app.services.owner_truth_correction_request import (
+    InMemoryOwnerTruthCorrectionRequestRepository,
+)
 from app.services.user_identity import stable_user_id
 from app.observability.events import (
     EvidenceEventConflict,
@@ -97,6 +100,12 @@ class InMemoryStore:
         )
         self._owner_truth_answer_citation_repository = (
             InMemoryOwnerTruthAnswerCitationRepository()
+        )
+        self._owner_truth_correction_request_repository = (
+            InMemoryOwnerTruthCorrectionRequestRepository(
+                answer_repository=self._owner_truth_answer_citation_repository,
+                review_repository=self._owner_truth_candidate_review_repository,
+            )
         )
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
         self._profiles: Dict[str, Dict[str, Any]] = {}
@@ -153,6 +162,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthAnswerCitationRepository:
         return self._owner_truth_answer_citation_repository
+
+    def owner_truth_correction_request_repository(
+        self,
+    ) -> InMemoryOwnerTruthCorrectionRequestRepository:
+        return self._owner_truth_correction_request_repository
 
     def append_evidence_event(
         self,

@@ -1,0 +1,15 @@
+{
+  "version": "0020",
+  "name": "owner_truth_correction_requests",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthV1CorrectionRequestShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthV1Read": false,
+    "ownerTruthV1Write": false,
+    "memoryProjectionV1": false,
+    "answerCitationV1": false,
+    "correctionRequestV1": false
+  }
+}

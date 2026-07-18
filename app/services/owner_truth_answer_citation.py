@@ -240,13 +240,18 @@ def _record_input(
     if _nonblank_text(authority.get("vaultId"), field="authority.vaultId") != context.vault_id:
         raise OwnerTruthMemoryProjectionAccessDenied("Context shadow build belongs to another Vault")
 
+    answer_id = str(uuid5(_ANSWER_NAMESPACE, f"{context.vault_id}:{command.command_id_hash}"))
     citations = [
         _citation_record(item, context=context, position=index)
         for index, item in enumerate(selected_context, start=1)
     ]
+    for citation in citations:
+        citation["citationId"] = str(
+            uuid5(_ANSWER_NAMESPACE, f"{answer_id}:{citation['position']}")
+        )
     normalized_fallbacks = tuple(_nonblank_text(item, field="fallback") for item in fallbacks)
     return {
-        "answerId": str(uuid5(_ANSWER_NAMESPACE, f"{context.vault_id}:{command.command_id_hash}")),
+        "answerId": answer_id,
         "vaultId": context.vault_id,
         "ownerSubjectId": context.owner_subject_id,
         "commandIdHash": command.command_id_hash,
@@ -343,6 +348,29 @@ class InMemoryOwnerTruthAnswerCitationRepository:
                 "records": list(self._records.values()),
             })
 
+    def find_citation(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        answer_id: str,
+        citation_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve one immutable citation without exposing answer text."""
+
+        _assert_owner_context(context)
+        with self._lock:
+            for record in self._records.values():
+                if (
+                    str(record.get("vaultId") or "") != context.vault_id
+                    or str(record.get("ownerSubjectId") or "") != context.owner_subject_id
+                    or str(record.get("answerId") or "") != answer_id
+                ):
+                    continue
+                for citation in record.get("citations") or []:
+                    if str(citation.get("citationId") or "") == citation_id:
+                        return deepcopy(dict(citation))
+        return None
+
 
 class PostgresOwnerTruthAnswerCitationRepository:
     """Postgres writer bound to one request Unit of Work."""
@@ -427,12 +455,7 @@ class PostgresOwnerTruthAnswerCitationRepository:
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
-                        str(
-                            uuid5(
-                                _ANSWER_NAMESPACE,
-                                f"{normalized['answerId']}:{citation['position']}",
-                            )
-                        ),
+                        citation["citationId"],
                         context.vault_id,
                         normalized["answerId"],
                         citation["position"],
@@ -460,7 +483,7 @@ class PostgresOwnerTruthAnswerCitationRepository:
         answer_id = str(row["id"])
         cursor.execute(
             """
-            SELECT citation_position, memory_id, memory_version_id, memory_version,
+            SELECT id, citation_position, memory_id, memory_version_id, memory_version,
                 source_id, source_version, content_hash
             FROM owner_truth.answer_citations
             WHERE vault_id = %s AND answer_id = %s
@@ -470,6 +493,7 @@ class PostgresOwnerTruthAnswerCitationRepository:
         )
         citations = [
             {
+                "citationId": str(item["id"]),
                 "position": int(item["citation_position"]),
                 "resolved": True,
                 "resolution": "current_confirmed_projection_entry",

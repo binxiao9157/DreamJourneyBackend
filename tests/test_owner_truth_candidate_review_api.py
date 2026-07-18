@@ -137,6 +137,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
                 "answerText": "不得公开。",
             },
         )
+        correction = client.post(
+            "/v2/vaults/vault-hidden/memories/00000000-0000-0000-0000-000000000001/corrections",
+            headers=headers,
+            json={},
+        )
 
         self.assertEqual(owner_id.startswith("user_"), True)
         self.assertEqual(response.status_code, 404)
@@ -165,6 +170,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(
             answer_citation.json()["detail"]["code"],
             "ownerTruthAnswerCitationUnavailable",
+        )
+        self.assertEqual(correction.status_code, 404)
+        self.assertEqual(
+            correction.json()["detail"]["code"],
+            "ownerTruthCorrectionRequestUnavailable",
         )
 
     def test_owner_can_list_decide_activate_memory_and_replay(self) -> None:
@@ -240,6 +250,18 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
                 "answerText": "不应创建。",
             },
         )
+        correction_denied = client.post(
+            f"/v2/vaults/vault-other-owner/memories/{uuid4()}/corrections",
+            headers=headers,
+            json={
+                "commandId": "correction-cross-vault-001",
+                "answerId": str(uuid4()),
+                "citationId": str(uuid4()),
+                "expectedMemoryVersionId": str(uuid4()),
+                "correctionText": "跨 Vault 不得写入纠错请求。",
+                "reasonCode": "ownerReportedCorrection",
+            },
+        )
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(denied.json()["detail"]["code"], "ownerTruthCandidateReviewDenied")
         self.assertEqual(shadow_denied.status_code, 403)
@@ -251,6 +273,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(
             answer_citation_denied.json()["detail"]["code"],
             "ownerTruthAnswerCitationDenied",
+        )
+        self.assertEqual(correction_denied.status_code, 403)
+        self.assertEqual(
+            correction_denied.json()["detail"]["code"],
+            "ownerTruthCorrectionRequestDenied",
         )
 
         stale = client.post(
@@ -407,10 +434,37 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         )
         evidence = answer_citation.json()["answerCitation"]
         self.assertEqual(evidence["citationCount"], 1)
+        self.assertTrue(evidence["citations"][0]["citationId"])
         self.assertTrue(evidence["contextHash"])
         self.assertNotIn(raw_query, str(evidence))
         self.assertNotIn(raw_answer, str(evidence))
         self.assertNotIn(candidate.content["summary"], str(evidence))
+
+        correction_text = "不是父亲，是外祖父在院子里讲故事。"
+        citation = evidence["citations"][0]
+        correction = client.post(
+            f"/v2/vaults/{vault_id}/memories/{citation['citation']['memoryId']}/corrections",
+            headers=headers,
+            json={
+                "commandId": "correction-api-001",
+                "answerId": evidence["answerId"],
+                "citationId": citation["citationId"],
+                "expectedMemoryVersionId": citation["citation"]["memoryVersionId"],
+                "correctionText": correction_text,
+                "reasonCode": "ownerReportedCorrection",
+            },
+        )
+        self.assertEqual(correction.status_code, 201)
+        self.assertEqual(
+            correction.json()["schemaVersion"],
+            "owner-truth-correction-request-response-v1",
+        )
+        request_summary = correction.json()["correctionRequest"]
+        self.assertEqual(request_summary["status"], "pendingReview")
+        self.assertEqual(request_summary["answerId"], evidence["answerId"])
+        self.assertEqual(request_summary["citationId"], citation["citationId"])
+        self.assertNotIn(correction_text, str(request_summary))
+        self.assertNotIn(candidate.content["summary"], str(request_summary))
 
 
 if __name__ == "__main__":

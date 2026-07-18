@@ -271,6 +271,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthAnswerCitationReceipt",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/memories/{memory_id}/corrections",
+                session,
+                "ownerTruthCorrectionRequest",
+            ),
+            _rule(
                 "GET",
                 "/ops/release-policy/observations",
                 system,

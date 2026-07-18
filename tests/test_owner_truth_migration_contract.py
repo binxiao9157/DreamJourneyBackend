@@ -181,6 +181,24 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("memory_version.version_number", migration.sql)
         self.assertIn("version_number_value", migration.sql)
 
+    def test_correction_request_migration_is_pending_only_and_default_off(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0020"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_correction_requests")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(metadata["runtimeCompatibility"], "ownerTruthV1CorrectionRequestShadow")
+        self.assertFalse(metadata["releaseFlags"]["correctionRequestV1"])
+        self.assertIn("CREATE TABLE owner_truth.correction_requests", migration.sql)
+        self.assertIn("owner_truth_correction_requests_validate_target", migration.sql)
+        self.assertIn("owner_truth_correction_requests_immutable_fields", migration.sql)
+        self.assertIn("owner_truth_correction_requests_no_delete", migration.sql)
+        self.assertNotIn("UPDATE owner_truth.memory_versions", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

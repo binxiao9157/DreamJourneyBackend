@@ -42,6 +42,7 @@ from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateReviewConflict,
     OwnerTruthCandidateReviewSourceInactive,
 )
+from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.services.owner_truth_source import (
     ArchiveOwnerTruthCompatibilityFacade,
     OwnerTruthSourceCommandService,
@@ -63,6 +64,11 @@ from app.services.owner_truth_answer_citation import (
     OwnerTruthAnswerCitationCommand,
     OwnerTruthAnswerCitationService,
     answer_citation_summary,
+)
+from app.services.owner_truth_correction_request import (
+    OwnerTruthCorrectionRequestCommand,
+    OwnerTruthCorrectionRequestService,
+    correction_request_summary,
 )
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.owner_truth_memory_projection_effects import (
@@ -976,6 +982,86 @@ def main() -> None:
                 "Answer citations must reject a content hash that does not match the current MemoryVersion",
             )
 
+            correction_text = "不是父亲，是外祖父在院子里讲故事。"
+            correction_citation = answer_citation.citations[0]
+            correction_fields = correction_citation["citation"]
+            correction_service = OwnerTruthCorrectionRequestService(store, enabled=True)
+            correction_request = correction_service.request(
+                context=review_context,
+                command=OwnerTruthCorrectionRequestCommand(
+                    command_id="owner-truth-correction-request-smoke-001",
+                    answer_id=answer_citation.answer_id,
+                    citation_id=correction_citation["citationId"],
+                    memory_id=correction_fields["memoryId"],
+                    expected_memory_version_id=correction_fields["memoryVersionId"],
+                    correction_text=correction_text,
+                    reason_code="ownerReportedCorrection",
+                ),
+            )
+            correction_replay = correction_service.request(
+                context=review_context,
+                command=OwnerTruthCorrectionRequestCommand(
+                    command_id="owner-truth-correction-request-smoke-001",
+                    answer_id=answer_citation.answer_id,
+                    citation_id=correction_citation["citationId"],
+                    memory_id=correction_fields["memoryId"],
+                    expected_memory_version_id=correction_fields["memoryVersionId"],
+                    correction_text=correction_text,
+                    reason_code="ownerReportedCorrection",
+                ),
+            )
+            correction_qa_summary = correction_request_summary(correction_request)
+            require(
+                correction_request.outcome == "created"
+                and correction_replay.outcome == "deduplicated"
+                and correction_request.correction_request_id
+                == correction_replay.correction_request_id
+                and correction_request.answer_id == answer_citation.answer_id
+                and correction_request.citation_id == correction_citation["citationId"]
+                and correction_request.memory_id == correction_fields["memoryId"],
+                "Correction request must bind one exact Answer/Citation/MemoryVersion chain",
+            )
+            require(
+                correction_text not in str(correction_qa_summary)
+                and review_content["summary"] not in str(correction_qa_summary),
+                "Correction request QA summary must stay value-free",
+            )
+            try:
+                review_service.decide_and_activate(
+                    command=OwnerTruthCandidateReviewCommand(
+                        command_id="owner-truth-correction-generic-review-smoke-001",
+                        candidate_id=correction_request.candidate_id,
+                        expected_candidate_version=1,
+                        action=CandidateReviewAction.CORRECT,
+                        corrected_value={"summary": "外祖父在院子里讲故事"},
+                        corrected_value_schema_version=OWNER_TRUTH_SCHEMA_VERSION,
+                        reason_code="ownerReviewed",
+                    ),
+                    context=review_context,
+                )
+            except OwnerTruthCandidateReviewConflict:
+                pass
+            else:
+                raise AssertionError(
+                    "Correction Candidate must not enter the generic initial-Memory activation path"
+                )
+            expect_rejected(
+                test_dsn,
+                lambda cursor: cursor.execute(
+                    "UPDATE owner_truth.correction_requests SET correction_text_hash = %s WHERE id = %s",
+                    ("0" * 64, correction_request.correction_request_id),
+                ),
+                "Correction request evidence fields must be immutable",
+            )
+            expect_rejected(
+                test_dsn,
+                lambda cursor: cursor.execute(
+                    "DELETE FROM owner_truth.correction_requests WHERE id = %s",
+                    (correction_request.correction_request_id,),
+                ),
+                "Correction requests must remain append-only",
+            )
+
             expect_rejected(
                 test_dsn,
                 lambda cursor: cursor.execute(
@@ -1390,6 +1476,11 @@ def main() -> None:
                     "answerCitationIdempotent": True,
                     "answerCitationValueFree": True,
                     "answerCitationImmutable": True,
+                    "correctionRequestCitationBound": True,
+                    "correctionRequestIdempotent": True,
+                    "correctionRequestValueFree": True,
+                    "correctionRequestGenericActivationBlocked": True,
+                    "correctionRequestImmutable": True,
                     "legacyMemoriesUnchanged": True,
                     "legacyArchiveUnchanged": True,
                 },

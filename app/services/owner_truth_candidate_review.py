@@ -96,6 +96,21 @@ def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
         )
 
 
+def _assert_generic_activation_allowed(candidate: OwnerTruthCandidateSnapshot) -> None:
+    """Keep correction candidates out of the initial-Memory activation path.
+
+    A correction Candidate points at an already authoritative MemoryVersion.
+    Reusing the generic decision-and-activate flow would create a second
+    MemoryRecord instead of superseding that version, so it must wait for the
+    dedicated correction resolver.
+    """
+
+    if str(candidate.payload.get("reviewMode") or "") == "correction":
+        raise OwnerTruthCandidateReviewConflict(
+            "correction Candidate requires the correction-specific resolver"
+        )
+
+
 def _inbox_item(candidate: OwnerTruthCandidateSnapshot, *, created_at: str | None = None) -> OwnerTruthCandidateInboxItem:
     payload = dict(candidate.payload)
     return OwnerTruthCandidateInboxItem(
@@ -204,6 +219,7 @@ class InMemoryOwnerTruthCandidateReviewRepository:
             if candidate is None:
                 raise OwnerTruthCandidateReviewAccessDenied("Candidate does not exist in this Vault")
             self._assert_live_target(candidate=candidate, context=context)
+            _assert_generic_activation_allowed(candidate)
             record = command.write_record(candidate=candidate, context=context)
             existing_receipt_id = self._candidate_receipts.get(candidate.candidate_id)
             if existing_receipt_id is not None or candidate.decision is not CandidateDecision.PENDING:
@@ -570,6 +586,7 @@ class PostgresOwnerTruthCandidateReviewRepository:
             vault = self._active_vault(cursor, context=context, lock=True)
             candidate = self._locked_candidate(cursor, candidate_id=command.candidate_id, context=context)
             self._assert_candidate_live(cursor, candidate=candidate, context=context, vault=vault)
+            _assert_generic_activation_allowed(candidate)
             record = command.write_record(candidate=candidate, context=context)
             self._assert_candidate_has_no_receipt(cursor, candidate=candidate)
 

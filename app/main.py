@@ -105,6 +105,15 @@ from app.services.owner_truth_answer_citation import (
     OwnerTruthAnswerCitationService,
     answer_citation_summary,
 )
+from app.services.owner_truth_correction_request import (
+    OwnerTruthCorrectionRequestAccessDenied,
+    OwnerTruthCorrectionRequestCommand,
+    OwnerTruthCorrectionRequestConflict,
+    OwnerTruthCorrectionRequestError,
+    OwnerTruthCorrectionRequestService,
+    OwnerTruthCorrectionRequestStaleCitation,
+    correction_request_summary,
+)
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
@@ -371,6 +380,26 @@ def _require_owner_truth_answer_citation_qa(request: Request) -> str:
     return user_id
 
 
+def _require_owner_truth_correction_request_qa(request: Request) -> str:
+    """Keep Answer/Citation correction requests unavailable outside Owner QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthCorrectionRequestUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthCorrectionRequestUserSessionRequired"},
+        )
+    return user_id
+
+
 def _owner_truth_candidate_review_context(
     request: Request,
     *,
@@ -436,6 +465,19 @@ def _owner_truth_answer_citation_context(
     )
 
 
+def _owner_truth_correction_request_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_correction_request_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_candidate_review_http_error(
     error: OwnerTruthContractError,
 ) -> HTTPException:
@@ -488,6 +530,18 @@ def _owner_truth_answer_citation_http_error(
     if isinstance(error, OwnerTruthAnswerCitationConflict):
         return HTTPException(status_code=409, detail={"code": "ownerTruthAnswerCitationConflict"})
     return HTTPException(status_code=400, detail={"code": "ownerTruthAnswerCitationInvalid"})
+
+
+def _owner_truth_correction_request_http_error(
+    error: OwnerTruthCorrectionRequestError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthCorrectionRequestAccessDenied):
+        return HTTPException(status_code=403, detail={"code": "ownerTruthCorrectionRequestDenied"})
+    if isinstance(error, OwnerTruthCorrectionRequestStaleCitation):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthCorrectionRequestStaleCitation"})
+    if isinstance(error, OwnerTruthCorrectionRequestConflict):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthCorrectionRequestConflict"})
+    return HTTPException(status_code=400, detail={"code": "ownerTruthCorrectionRequestInvalid"})
 
 
 def _owner_truth_candidate_expected_version(payload: Dict[str, Any]) -> int:
@@ -2220,6 +2274,50 @@ def record_owner_truth_answer_citation(
             "schemaVersion": "owner-truth-answer-citation-receipt-response-v1",
             "status": result.outcome,
             "answerCitation": answer_citation_summary(result),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memories/{memory_id}/corrections",
+    include_in_schema=False,
+)
+def request_owner_truth_answer_citation_correction(
+    request: Request,
+    vault_id: str,
+    memory_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Create a pending correction Candidate without changing Memory authority.
+
+    The raw correction is retained only by a private Owner Truth Source.  The
+    response is intentionally value-free and no public Echo behavior changes.
+    """
+
+    try:
+        context = _owner_truth_correction_request_context(request, vault_id=vault_id)
+        command = OwnerTruthCorrectionRequestCommand(
+            command_id=payload.get("commandId"),
+            answer_id=payload.get("answerId"),
+            citation_id=payload.get("citationId"),
+            memory_id=memory_id,
+            expected_memory_version_id=payload.get("expectedMemoryVersionId"),
+            correction_text=payload.get("correctionText"),
+            reason_code=payload.get("reasonCode"),
+        )
+        result = OwnerTruthCorrectionRequestService(store, enabled=True).request(
+            context=context,
+            command=command,
+        )
+    except OwnerTruthCorrectionRequestError as error:
+        raise _owner_truth_correction_request_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-correction-request-response-v1",
+            "status": result.outcome,
+            "correctionRequest": correction_request_summary(result),
         },
         headers={"Cache-Control": "no-store"},
     )
