@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from hashlib import sha256
 import unittest
 from uuid import uuid4
@@ -8,6 +9,7 @@ from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
 from app.async_effects.target_admission import (
     InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository,
     InMemoryOwnerTruthSourceTargetAdmissionRepository,
+    PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository,
 )
 from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
@@ -18,6 +20,36 @@ from app.services.owner_truth_memory_projection_effects import (
 
 def digest(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
+
+
+class _PostgresCursor:
+    def __init__(self, rows):
+        self._rows = deque(rows)
+        self._current = None
+        self.executions = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, statement, params):
+        self.executions.append((statement, params))
+        self._current = self._rows.popleft()
+
+    def fetchone(self):
+        return self._current
+
+
+class _PostgresConnection:
+    def __init__(self, cursor):
+        self.cursor_instance = cursor
+        self.row_factory = None
+
+    def cursor(self, *, row_factory=None):
+        self.row_factory = row_factory
+        return self.cursor_instance
 
 
 class AsyncEffectTargetAdmissionTests(unittest.TestCase):
@@ -137,6 +169,7 @@ class MemoryProjectionTargetAdmissionTests(unittest.TestCase):
         self.owner_subject_id = "owner-projection-admission"
         self.vault_id = "vault-projection-admission"
         self.memory_version_id = str(uuid4())
+        self.source_id = str(uuid4())
         self.content_hash = digest("projection-admission-metadata-only")
         self.repository.seed_vault(
             vault_id=self.vault_id,
@@ -220,6 +253,42 @@ class MemoryProjectionTargetAdmissionTests(unittest.TestCase):
 
         self.assertFalse(result.allowed)
         self.assertEqual(result.reason_code, "memoryVersionNotCurrent")
+
+    def test_postgres_admission_locks_and_evaluates_the_current_target(self):
+        cursor = _PostgresCursor(
+            [
+                {
+                    "owner_subject_id": self.owner_subject_id,
+                    "authority_epoch": 5,
+                    "status": "active",
+                },
+                {
+                    "memory_owner_subject_id": self.owner_subject_id,
+                    "memory_authority_epoch": 5,
+                    "memory_status": "active",
+                    "memory_source_id": self.source_id,
+                    "memory_source_version": 2,
+                    "version_number": 3,
+                    "is_current": True,
+                    "content_hash": self.content_hash,
+                },
+                {
+                    "owner_subject_id": self.owner_subject_id,
+                    "authority_epoch": 5,
+                    "state": "active",
+                    "source_version": 2,
+                },
+            ]
+        )
+        repository = PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository(
+            _PostgresConnection(cursor)
+        )
+
+        result = repository.admit_owner_truth_memory_projection(self.intent())
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.reason_code, "targetAuthorized")
+        self.assertEqual(len(cursor.executions), 3)
 
 
 if __name__ == "__main__":

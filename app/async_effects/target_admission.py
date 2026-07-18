@@ -352,7 +352,6 @@ class InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository:
             memory_version=memory_version,
         )
 
-
 class PostgresOwnerTruthSourceTargetAdmissionRepository:
     """Owner Truth Source target admission bound to the active Postgres UoW."""
 
@@ -517,6 +516,13 @@ class PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository:
             vault=vault,
             memory_version=memory_version,
         )
+
+    def _cursor(self):
+        try:
+            from psycopg.rows import dict_row
+        except ImportError:  # pragma: no cover - production dependency
+            dict_row = None
+        return self._connection.cursor(row_factory=dict_row)
 
 
 __all__ = [
