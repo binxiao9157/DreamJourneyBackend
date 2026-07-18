@@ -87,5 +87,20 @@ derived projection rebuild.
 
 ## Deployment Evidence
 
-Pending deployment. This section is updated only after the server migration,
-`/ready` check and disposable Postgres smoke complete successfully.
+Deployed on 2026-07-19 (Asia/Shanghai).
+
+- Backend commits: `daaa5cc`, `e0e730b`, `79e9377`, `018da5b`.
+- The server applied migration head `0022`; `migrate_db.py --verify` reported
+  `status=ready` with no pending migrations.
+- The disposable Postgres Owner Truth smoke passed against the deployed API
+  container. It proved same-record v1 -> v2 lineage, one-current enforcement,
+  idempotent resolution, stale-request fail-closed behavior, immutable
+  outdated-Answer evidence, and projection rebuild.
+- The deployed route-authentication smoke passed with `routeCount=88`: public
+  runtime is allowed, anonymous access to user routes is denied, machine
+  credentials cannot use user routes, and user sessions cannot use machine
+  routes.
+- `/ready` reported `database`, `schema`, `auth`, and `incident` as ready.
+
+The resolver remains QA-only and default-off. Deployment does not promote
+Owner Truth, KBLite, Archive, Echo, or iOS UI reads to public authority.
