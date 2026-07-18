@@ -231,6 +231,20 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/ops/evidence-manifests",
+                system,
+                "systemEvidenceManifestIssue",
+                required_scopes=("evidenceManifest:issue",),
+            ),
+            _rule(
+                "GET",
+                "/ops/evidence-manifests",
+                system,
+                "systemEvidenceManifestObserve",
+                required_scopes=("evidenceManifest:observe",),
+            ),
+            _rule(
+                "POST",
                 "/ops/incidents",
                 system,
                 "systemIncidentManage",

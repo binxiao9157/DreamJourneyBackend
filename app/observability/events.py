@@ -28,6 +28,10 @@ Digest = Annotated[
     str,
     StringConstraints(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"),
 ]
+SourceCommit = Annotated[
+    str,
+    StringConstraints(min_length=7, max_length=64, pattern=r"^[0-9a-f]{7,64}$"),
+]
 RouteCode = Annotated[
     str,
     StringConstraints(
@@ -48,6 +52,7 @@ EvidenceState = Literal[
 EvidenceRetentionClass = Literal[
     "rolloutObservation",
     "operationalTemporary",
+    "verificationManifest",
     "rightsAudit",
     "incidentAudit",
     "providerCost",
@@ -265,6 +270,71 @@ class ProviderCostEvidenceEvent(EvidenceEventBase):
         return self
 
 
+EvidenceManifestStatus = Literal[
+    "passed",
+    "failed",
+    "blocked",
+    "notRun",
+    "legacyUnverified",
+]
+
+_EVIDENCE_MANIFEST_STATUS_STATES: dict[str, EvidenceState] = {
+    "passed": "succeeded",
+    "failed": "failed",
+    "blocked": "denied",
+    "notRun": "unknown",
+    "legacyUnverified": "unknown",
+}
+
+
+class EvidenceManifestEvent(EvidenceEventBase):
+    """Immutable, value-free metadata for one verifiable acceptance package."""
+
+    type: Literal["evidenceManifest"] = "evidenceManifest"
+    manifestVersion: Literal[1] = 1
+    manifestType: MachineCode
+    sourceCommit: SourceCommit
+    commandId: MachineCode
+    sampleCount: int = Field(ge=0, le=1_000_000)
+    sampleSetHash: Digest
+    exclusionCodes: tuple[MachineCode, ...] = Field(default=(), max_length=32)
+    sourceSchemaVersions: tuple[MachineCode, ...] = Field(min_length=1, max_length=32)
+    artifactHashes: tuple[Digest, ...] = Field(min_length=1, max_length=32)
+    windowStartedAt: datetime
+    windowEndedAt: datetime
+    issuedAt: datetime
+    expiresAt: datetime
+    issuer: MachineCode
+    manifestStatus: EvidenceManifestStatus
+    ownerLeaseHash: Optional[Digest] = None
+
+    @field_validator("windowStartedAt", "windowEndedAt", "issuedAt", "expiresAt")
+    @classmethod
+    def require_manifest_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("evidence manifest timestamps must include a timezone")
+        return value.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def require_manifest_integrity(self) -> "EvidenceManifestEvent":
+        expected_state = _EVIDENCE_MANIFEST_STATUS_STATES[self.manifestStatus]
+        if self.state != expected_state:
+            raise ValueError("evidence manifest state does not match manifestStatus")
+        if self.windowStartedAt > self.windowEndedAt:
+            raise ValueError("evidence manifest window is invalid")
+        if self.issuedAt < self.windowEndedAt:
+            raise ValueError("evidence manifest issuedAt must follow its window")
+        if self.expiresAt <= self.issuedAt:
+            raise ValueError("evidence manifest expiresAt must follow issuedAt")
+        if len(set(self.exclusionCodes)) != len(self.exclusionCodes):
+            raise ValueError("evidence manifest exclusionCodes must not contain duplicates")
+        if len(set(self.sourceSchemaVersions)) != len(self.sourceSchemaVersions):
+            raise ValueError("evidence manifest sourceSchemaVersions must not contain duplicates")
+        if len(set(self.artifactHashes)) != len(self.artifactHashes):
+            raise ValueError("evidence manifest artifactHashes must not contain duplicates")
+        return self
+
+
 EvidenceEvent = Annotated[
     Union[
         OperationEvidenceEvent,
@@ -272,6 +342,7 @@ EvidenceEvent = Annotated[
         RightsEvidenceEvent,
         IncidentEvidenceEvent,
         ProviderCostEvidenceEvent,
+        EvidenceManifestEvent,
     ],
     Field(discriminator="type"),
 ]

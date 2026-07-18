@@ -139,6 +139,10 @@ from app.observability.provider_costs import (
     ProviderCostEvidenceRecorder,
     summarize_provider_cost_evidence_for_observations,
 )
+from app.observability.evidence_manifest import (
+    EvidenceManifestError,
+    EvidenceManifestService,
+)
 from app.observability.redaction import provider_error_detail
 from app.services.release_policy import (
     ReleasePolicyCommandGate,
@@ -334,6 +338,21 @@ PROVIDER_COST_EVIDENCE_RECORDER = ProviderCostEvidenceRecorder(
     retention_days=settings.evidence_rollout_retention_days,
     identifier_hmac_key=settings.operations_evidence_hmac_key,
 )
+
+
+def _evidence_manifest_service() -> EvidenceManifestService:
+    """Bind manifest persistence to the active store, including test stores."""
+    sink = getattr(store, "append_evidence_event", None)
+    source = getattr(store, "list_evidence_events", None)
+    return EvidenceManifestService(
+        environment=settings.environment,
+        build=f"backend-{app.version}",
+        event_sink=sink if callable(sink) else None,
+        event_source=source if callable(source) else None,
+        retention_days=settings.evidence_rollout_retention_days,
+    )
+
+
 INCIDENT_LIFECYCLE_SERVICE = IncidentLifecycleService(
     store=store,
     environment=settings.environment,
@@ -1008,6 +1027,7 @@ NO_STORE_EXACT_PATHS = {
     "/config/runtime",
     "/v2/release-policy",
     "/ops/release-policy/observations",
+    "/ops/evidence-manifests",
     "/tts",
     "/archive/image-analysis",
 }
@@ -1699,6 +1719,81 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
         summary["databaseUnitOfWork"] = unit_of_work_metrics()
     summary["incidentLifecycle"] = _incident_lifecycle_service().summary()
     return summary
+
+
+def _evidence_manifest_error_response(error: EvidenceManifestError) -> HTTPException:
+    status_code = 503 if error.code.endswith(("Unavailable", "Failed")) else 400
+    return HTTPException(status_code=status_code, detail={"code": error.code})
+
+
+@app.post("/ops/evidence-manifests")
+def issue_evidence_manifest(payload: Dict[str, Any], request: Request) -> JSONResponse:
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, RequestPrincipal) or principal.kind != PrincipalKind.MACHINE:
+        raise HTTPException(status_code=403, detail="machine principal required")
+    allowed_fields = {
+        "manifestType",
+        "sourceCommit",
+        "commandId",
+        "sampleCount",
+        "sampleSetHash",
+        "exclusionCodes",
+        "sourceSchemaVersions",
+        "artifactHashes",
+        "windowStartedAt",
+        "windowEndedAt",
+        "issuer",
+        "manifestStatus",
+        "build",
+        "ownerLeaseHash",
+    }
+    if set(payload).difference(allowed_fields):
+        # This endpoint is deliberately metadata-only. Reject unknown fields
+        # rather than silently dropping a report body, raw trace, or secret.
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "evidenceManifestUnexpectedField"},
+        )
+    try:
+        manifest = _evidence_manifest_service().issue(
+            manifest_type=payload.get("manifestType", ""),
+            source_commit=payload.get("sourceCommit", ""),
+            command_id=payload.get("commandId", ""),
+            sample_count=payload.get("sampleCount", 0),
+            sample_set_hash=payload.get("sampleSetHash", ""),
+            exclusion_codes=payload.get("exclusionCodes", ()),
+            source_schema_versions=payload.get("sourceSchemaVersions", ()),
+            artifact_hashes=payload.get("artifactHashes", ()),
+            window_started_at=payload.get("windowStartedAt"),
+            window_ended_at=payload.get("windowEndedAt"),
+            issuer=payload.get("issuer", ""),
+            manifest_status=payload.get("manifestStatus", ""),
+            build=payload.get("build"),
+            owner_lease_hash=payload.get("ownerLeaseHash"),
+        )
+    except EvidenceManifestError as exc:
+        raise _evidence_manifest_error_response(exc) from exc
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "evidenceManifestInvalid"},
+        ) from exc
+    return _set_no_store_headers(JSONResponse(content=manifest))
+
+
+@app.get("/ops/evidence-manifests")
+def list_evidence_manifests(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> JSONResponse:
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, RequestPrincipal) or principal.kind != PrincipalKind.MACHINE:
+        raise HTTPException(status_code=403, detail="machine principal required")
+    try:
+        summary = _evidence_manifest_service().list_manifests(limit=limit)
+    except EvidenceManifestError as exc:
+        raise _evidence_manifest_error_response(exc) from exc
+    return _set_no_store_headers(JSONResponse(content=summary))
 
 
 def _incident_error_response(error: IncidentLifecycleError) -> HTTPException:

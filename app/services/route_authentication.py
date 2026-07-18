@@ -24,6 +24,8 @@ MACHINE_SYSTEM_SCOPES = frozenset(
         "echo:dispatch",
         "mailbox:deliver",
         "releasePolicy:observe",
+        "evidenceManifest:issue",
+        "evidenceManifest:observe",
         "timeLetter:dispatch",
         "incident:manage",
         "incident:observe",

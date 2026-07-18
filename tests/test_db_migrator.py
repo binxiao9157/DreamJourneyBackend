@@ -491,6 +491,19 @@ class PostgresMigratorTests(unittest.TestCase):
         ].split(");", 1)[0].lower()
         self.assertNotIn("phone", table_definition)
 
+    def test_evidence_manifest_migration_expands_append_only_event_types(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.name == "evidence_manifest"
+        )
+
+        self.assertEqual(migration.version, "0010")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(migration.compatibility, "backwardCompatible")
+        self.assertIn("'evidenceManifest'", migration.sql)
+        self.assertIn("idx_evidence_events_manifest_type_expiry", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

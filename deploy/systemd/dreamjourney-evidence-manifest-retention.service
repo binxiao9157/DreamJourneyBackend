@@ -1,0 +1,13 @@
+[Unit]
+Description=Expire DreamJourney evidence manifests after their TTL
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/services/dreamjourney/DreamJourneyBackend
+ExecStart=/usr/bin/docker compose exec -T -e EVIDENCE_MANIFEST_RETENTION_RUN=1 api python scripts/evidence_manifest_retention.py
+UMask=0077

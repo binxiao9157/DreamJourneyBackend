@@ -44,6 +44,10 @@ test -f scripts/run-backend-provider-redaction-deployed-smoke.sh
 test -f scripts/backend-provider-cost-evidence-smoke.py
 test -f scripts/backend-provider-cost-evidence-deployed-smoke.py
 test -f scripts/run-backend-provider-cost-evidence-deployed-smoke.sh
+test -f scripts/evidence_manifest_retention.py
+test -f scripts/run-evidence-manifest-retention.sh
+test -f scripts/backend-evidence-manifest-deployed-smoke.py
+test -f scripts/run-backend-evidence-manifest-deployed-smoke.sh
 test -f scripts/backend-account-deletion-rights-deployed-smoke.py
 test -f scripts/run-backend-account-deletion-rights-deployed-smoke.sh
 test -f scripts/backend-account-terminal-purge-deployed-smoke.py
@@ -54,10 +58,14 @@ test -f scripts/db/verify_backup_manifest.py
 test -f scripts/db/verify_latest_backup.py
 test -f scripts/db/backup-deployed-smoke.py
 test -f deploy/systemd/dreamjourney-db-backup.timer
+test -f deploy/systemd/dreamjourney-evidence-manifest-retention.service
+test -f deploy/systemd/dreamjourney-evidence-manifest-retention.timer
 test -f db/migrations/0001_existing_schema_baseline.sql
 test -f db/migrations/0001_existing_schema_baseline.json
 test -f db/migrations/0009_account_purge_receipts.sql
 test -f db/migrations/0009_account_purge_receipts.json
+test -f db/migrations/0010_evidence_manifest.sql
+test -f db/migrations/0010_evidence_manifest.json
 grep -q "COPY db ./db" Dockerfile
 grep -q "psycopg" requirements.txt
 

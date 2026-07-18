@@ -1,0 +1,8 @@
+{
+  "version": "0010",
+  "name": "evidence_manifest",
+  "phase": "expand",
+  "compatibility": "backwardCompatible",
+  "runtimeCompatibility": "valueFreeEvidenceManifest",
+  "requiresOldWorkerDrain": false
+}

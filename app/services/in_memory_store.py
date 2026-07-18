@@ -170,6 +170,7 @@ class InMemoryStore:
         event_type: Optional[str] = None,
         operation: Optional[str] = None,
         now_iso: Optional[str] = None,
+        include_expired: bool = False,
         event_limit: int = 5_000,
     ) -> List[Dict[str, Any]]:
         normalized_event_type = (
@@ -184,7 +185,7 @@ class InMemoryStore:
             records = [
                 deepcopy(record)
                 for record in self._evidence_events.values()
-                if self._evidence_record_is_visible(record, now)
+                if (include_expired or self._evidence_record_is_visible(record, now))
                 and (
                     normalized_event_type is None
                     or record.get("eventType") == normalized_event_type

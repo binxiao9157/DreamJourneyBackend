@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule DreamJourney evidence manifest retention
+
+[Timer]
+OnCalendar=*-*-* 03:45:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=dreamjourney-evidence-manifest-retention.service
+
+[Install]
+WantedBy=timers.target

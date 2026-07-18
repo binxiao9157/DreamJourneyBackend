@@ -262,6 +262,7 @@ class PostgresStore:
         event_type: Optional[str] = None,
         operation: Optional[str] = None,
         now_iso: Optional[str] = None,
+        include_expired: bool = False,
         event_limit: int = 5_000,
     ) -> List[Dict[str, Any]]:
         normalized_event_type = (
@@ -274,8 +275,11 @@ class PostgresStore:
             now_iso or self._now()
         ).astimezone(timezone.utc).isoformat()
         bounded_limit = max(1, min(event_limit, 5_000))
-        clauses = ["(legal_hold = TRUE OR expires_at IS NULL OR expires_at > %s)"]
-        params: list[Any] = [now]
+        clauses: list[str] = ["TRUE"]
+        params: list[Any] = []
+        if not include_expired:
+            clauses.append("(legal_hold = TRUE OR expires_at IS NULL OR expires_at > %s)")
+            params.append(now)
         if normalized_event_type is not None:
             clauses.append("event_type = %s")
             params.append(normalized_event_type)
