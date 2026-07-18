@@ -188,6 +188,7 @@ def main() -> None:
                 {
                     "policyVersion": POLICY_VERSION,
                     "providerDryRunReports": outcomes.count("report"),
+                    "safePolicyDenials": outcomes.count("policyDenied"),
                     "safeProviderErrors": outcomes.count("safeError"),
                     "status": "passed",
                     "surfaces": len(surfaces),
@@ -214,6 +215,15 @@ def assert_value_free_response(status: int, body: dict, *, surface: str) -> str:
         require(report.get("schemaVersion") == 1, "deployed dry-run schema version missing")
         require((report.get("transport") or {}).get("payloadIncluded") is False, "payloadIncluded must be false")
         return "report"
+
+    if status == 403:
+        detail = body.get("detail") or {}
+        require(isinstance(detail, dict), "policy denial detail must be structured")
+        require(
+            detail.get("code") == "release_policy_command_denied",
+            f"{surface} returned an unexpected denial contract",
+        )
+        return "policyDenied"
 
     require(
         status in {400, 502, 503},
