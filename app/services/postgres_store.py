@@ -81,6 +81,7 @@ from app.async_effects.lease_repository import PostgresAsyncEffectLeaseRepositor
 from app.async_effects.repository import PostgresEffectKernelRepository
 from app.async_effects.scheduler_repository import PostgresAsyncEffectSchedulerLeaseRepository
 from app.async_effects.consumer_repository import PostgresAsyncEffectConsumerRepository
+from app.async_effects.target_admission import PostgresOwnerTruthSourceTargetAdmissionRepository
 
 
 class PostgresStore:
@@ -196,6 +197,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("async effect consumer requires an active unit of work")
         return PostgresAsyncEffectConsumerRepository(active.connection)
+
+    def owner_truth_source_target_admission_repository(
+        self,
+    ) -> PostgresOwnerTruthSourceTargetAdmissionRepository:
+        """Return the execution-time Source target guard bound to the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("async effect target admission requires an active unit of work")
+        return PostgresOwnerTruthSourceTargetAdmissionRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(

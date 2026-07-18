@@ -30,7 +30,10 @@ from app.async_effects.scheduler_repository import AsyncEffectSchedulerLeaseLost
 from app.core.config import settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.domain.owner_truth.source_commands import CreateTextSourceCommand, OwnerTruthCommandContext
-from app.services.owner_truth_source import OwnerTruthSourceAsyncEffectCommandService
+from app.services.owner_truth_source import (
+    OwnerTruthSourceAsyncEffectCommandService,
+    build_source_created_effect_intent,
+)
 from app.services.postgres_store import PostgresStore
 
 
@@ -254,6 +257,40 @@ def main() -> None:
             )
             == 1,
             "source effect must create exactly one outbox event",
+        )
+        source_effect_intent = build_source_created_effect_intent(
+            record=source_command.write_record(context=source_context),
+            source=source_created.source,
+        )
+        with store.request_unit_of_work(
+            correlation_id="async-effect-source-target-admission",
+            command_id="asyncEffectSourceTargetAdmission",
+        ):
+            source_admission = store.owner_truth_source_target_admission_repository().admit_owner_truth_source(
+                source_effect_intent
+            )
+        require(source_admission.allowed, "current owner truth source target must be admitted")
+        with psycopg.connect(test_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE owner_truth.vaults
+                    SET authority_epoch = authority_epoch + 1, updated_at = NOW()
+                    WHERE vault_id = %s
+                    """,
+                    (source_context.vault_id,),
+                )
+        with store.request_unit_of_work(
+            correlation_id="async-effect-source-target-stale",
+            command_id="asyncEffectSourceTargetStale",
+        ):
+            stale_source_admission = store.owner_truth_source_target_admission_repository().admit_owner_truth_source(
+                source_effect_intent
+            )
+        require(
+            not stale_source_admission.allowed
+            and stale_source_admission.reason_code == "authorityEpochChanged",
+            "stale source authority epoch must block target admission",
         )
 
         rollback_source_command = CreateTextSourceCommand(
@@ -659,7 +696,8 @@ def main() -> None:
         print(
             "Async effect Postgres smoke passed: "
             f"schemaHead={verified['expectedHead']} outcomes={sorted(outcomes)} "
-            "sourceOutbox=true workerLease=true schedulerLease=true consumerInbox=true rollback=true "
+            "sourceOutbox=true sourceTargetAdmission=true workerLease=true schedulerLease=true "
+            "consumerInbox=true rollback=true "
             "terminalGuard=true receiptsAppendOnly=true"
         )
     finally:

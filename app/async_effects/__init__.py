@@ -46,6 +46,12 @@ from .consumer_repository import (
     InMemoryAsyncEffectConsumerRepository,
     PostgresAsyncEffectConsumerRepository,
 )
+from .target_admission import (
+    AsyncEffectTargetAdmission,
+    AsyncEffectTargetAdmissionError,
+    InMemoryOwnerTruthSourceTargetAdmissionRepository,
+    PostgresOwnerTruthSourceTargetAdmissionRepository,
+)
 
 __all__ = [
     "ASYNC_EFFECT_SCHEMA_VERSION",
@@ -70,14 +76,18 @@ __all__ = [
     "AsyncEffectSchedulerPreview",
     "AsyncEffectTarget",
     "AsyncEffectSyntheticConsumerCommand",
+    "AsyncEffectTargetAdmission",
+    "AsyncEffectTargetAdmissionError",
     "EffectReceiptSummary",
     "InMemoryEffectKernelRepository",
     "InMemoryAsyncEffectLeaseRepository",
     "InMemoryAsyncEffectConsumerRepository",
+    "InMemoryOwnerTruthSourceTargetAdmissionRepository",
     "InMemoryAsyncEffectSchedulerLeaseRepository",
     "PostgresEffectKernelRepository",
     "PostgresAsyncEffectLeaseRepository",
     "PostgresAsyncEffectConsumerRepository",
+    "PostgresOwnerTruthSourceTargetAdmissionRepository",
     "PostgresAsyncEffectSchedulerLeaseRepository",
     "resolve_async_effect_runtime_status",
 ]
