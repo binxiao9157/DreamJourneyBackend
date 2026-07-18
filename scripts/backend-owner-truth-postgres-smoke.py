@@ -477,9 +477,15 @@ def main() -> None:
             require(accepted_replay.outcome == "deduplicated", "Owner Candidate replay must deduplicate")
             require(accepted.receipt_id == accepted_replay.receipt_id, "Owner Candidate replay must preserve receipt")
             require(corrected.corrected_value_id is not None, "corrected Candidate must retain separate Owner value")
+            pending_inbox_ids = {
+                item.candidate_id
+                for item in review_service.list_pending(context=review_context)
+            }
             require(
-                not review_service.list_pending(context=review_context),
-                "terminal Candidates must leave the Owner inbox",
+                review_candidate_id not in pending_inbox_ids
+                and review_corrected_candidate_id not in pending_inbox_ids
+                and review_unbacked_corrected_candidate_id in pending_inbox_ids,
+                "terminal Candidates must leave the Owner inbox without hiding unrelated pending work",
             )
 
             def insert_unbacked_corrected_decision(cursor):
