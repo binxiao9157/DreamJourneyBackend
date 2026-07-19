@@ -50,6 +50,7 @@ from app.services.owner_truth_source import (
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.owner_truth_kblite_compatibility import (
     OwnerTruthKBLiteCompatibilityReadService,
+    compatibility_read_envelope,
     compatibility_summary,
 )
 from app.services.owner_truth_context_shadow import (
@@ -873,6 +874,7 @@ def main() -> None:
                 enabled=True,
             ).read(context=review_context)
             compatibility_qa_summary = compatibility_summary(compatibility)
+            compatibility_read_envelope_result = compatibility_read_envelope(compatibility)
             require(
                 compatibility["state"] == "ready"
                 and compatibility["factCount"] == 1
@@ -883,6 +885,18 @@ def main() -> None:
                 and compatibility["graph"]["places"] == []
                 and compatibility["graph"]["events"] == [],
                 "KBLite compatibility must map only the confirmed knowledge claim",
+            )
+            require(
+                compatibility_read_envelope_result["schemaVersion"]
+                == "owner-truth-kblite-read-envelope-v1"
+                and compatibility_read_envelope_result["projectionSource"] == "v4"
+                and compatibility_read_envelope_result["state"] == "ready"
+                and compatibility_read_envelope_result["cacheDisposition"] == "replace"
+                and compatibility_read_envelope_result["contentHash"]
+                and compatibility_read_envelope_result["projectionCheckpoint"]
+                == projection_ready["checkpoint"]
+                and len(compatibility_read_envelope_result["graph"]["facts"]) == 1,
+                "KBLite read envelope must carry only a checkpointed compatibility graph",
             )
             require(
                 compatibility["filteredEntries"]
@@ -1694,6 +1708,7 @@ def main() -> None:
                     "memoryProjectionCorrectedContent": True,
                     "memoryProjectionRejectsDecisionPayloadLeakage": True,
                     "memoryProjectionStaleEpochRejected": True,
+                    "kbliteCompatibilityReadEnvelope": True,
                     "memoryProjectionInvalidatesOnMemoryChange": True,
                     "memoryProjectionFailsClosedOnSourceRevocation": True,
                     "kbliteCompatibilityKnowledgeOnly": True,

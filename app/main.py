@@ -88,6 +88,7 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.owner_truth_kblite_compatibility import (
     OwnerTruthKBLiteCompatibilityReadService,
+    compatibility_read_envelope as kblite_compatibility_read_envelope,
     compatibility_summary as kblite_compatibility_summary,
 )
 from app.services.owner_truth_context_shadow import (
@@ -2253,6 +2254,35 @@ def read_owner_truth_kblite_compatibility(
         "schemaVersion": "owner-truth-kblite-compatibility-read-v1",
         "compatibility": kblite_compatibility_summary(compatibility),
     }
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/kblite-compatibility/read-envelope",
+    include_in_schema=False,
+)
+def read_owner_truth_kblite_compatibility_envelope(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """QA-only, cacheable Projection read contract for the isolated iOS cohort.
+
+    This route remains invisible and default-off.  It does not alter legacy
+    KBLite snapshot/change routes or public Echo context selection.
+    """
+
+    try:
+        context = _owner_truth_kblite_compatibility_context(request, vault_id=vault_id)
+        compatibility = OwnerTruthKBLiteCompatibilityReadService(
+            store,
+            enabled=True,
+        ).read(context=context)
+        envelope = kblite_compatibility_read_envelope(compatibility)
+    except OwnerTruthMemoryProjectionError as error:
+        raise _owner_truth_memory_projection_http_error(error) from error
+    return JSONResponse(
+        content=envelope,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get(

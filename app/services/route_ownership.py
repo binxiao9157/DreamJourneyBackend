@@ -254,6 +254,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/kblite-compatibility/read-envelope",
+                session,
+                "ownerTruthKBLiteCompatibilityReadEnvelope",
+            ),
+            _rule(
+                "GET",
                 "/v2/vaults/{vault_id}/context-shadow",
                 session,
                 "ownerTruthContextShadowRead",

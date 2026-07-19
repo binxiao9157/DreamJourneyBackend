@@ -119,6 +119,10 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             "/v2/vaults/vault-hidden/kblite-compatibility",
             headers=headers,
         )
+        compatibility_envelope = client.get(
+            "/v2/vaults/vault-hidden/kblite-compatibility/read-envelope",
+            headers=headers,
+        )
         context_shadow = client.get(
             "/v2/vaults/vault-hidden/context-shadow",
             headers=headers,
@@ -159,6 +163,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(compatibility.status_code, 404)
         self.assertEqual(
             compatibility.json()["detail"]["code"],
+            "ownerTruthKBLiteCompatibilityUnavailable",
+        )
+        self.assertEqual(compatibility_envelope.status_code, 404)
+        self.assertEqual(
+            compatibility_envelope.json()["detail"]["code"],
             "ownerTruthKBLiteCompatibilityUnavailable",
         )
         self.assertEqual(context_shadow.status_code, 404)
@@ -385,6 +394,22 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(compatibility.json()["compatibility"]["factCount"], 0)
         self.assertEqual(compatibility.json()["compatibility"]["filteredEntries"][0]["reason"], "memory_kind_not_compatibility_fact")
         self.assertNotIn(candidate.content["summary"], str(compatibility.json()))
+
+        compatibility_envelope = client.get(
+            f"/v2/vaults/{vault_id}/kblite-compatibility/read-envelope",
+            headers=headers,
+        )
+        self.assertEqual(compatibility_envelope.status_code, 200)
+        self.assertEqual(compatibility_envelope.headers["cache-control"], "no-store")
+        self.assertEqual(
+            compatibility_envelope.json()["schemaVersion"],
+            "owner-truth-kblite-read-envelope-v1",
+        )
+        self.assertEqual(compatibility_envelope.json()["state"], "ready")
+        self.assertEqual(compatibility_envelope.json()["cacheDisposition"], "replace")
+        self.assertTrue(compatibility_envelope.json()["contentHash"])
+        self.assertEqual(compatibility_envelope.json()["graph"]["facts"], [])
+        self.assertNotIn(candidate.content["summary"], str(compatibility_envelope.json()))
 
         context_shadow = client.get(
             f"/v2/vaults/{vault_id}/context-shadow",

@@ -11,6 +11,8 @@ events.
 from __future__ import annotations
 
 from copy import deepcopy
+from hashlib import sha256
+import json
 from typing import Any, Mapping
 
 from app.domain.owner_truth.memory_projection import (
@@ -27,10 +29,35 @@ from app.services.owner_truth_memory_projection import (
 
 OWNER_TRUTH_KBLITE_COMPATIBILITY_SCHEMA_VERSION = "owner-truth-kblite-compatibility-v1"
 OWNER_TRUTH_KBLITE_COMPATIBILITY_SOURCE = "owner-truth-memory-projection"
+OWNER_TRUTH_KBLITE_READ_ENVELOPE_SCHEMA_VERSION = "owner-truth-kblite-read-envelope-v1"
+OWNER_TRUTH_KBLITE_READ_ENVELOPE_PROJECTION_SOURCE = "v4"
 
 
 def _empty_graph() -> dict[str, list[dict[str, Any]]]:
     return {"people": [], "places": [], "events": [], "facts": []}
+
+
+def _canonical_graph_hash(graph: Mapping[str, Any]) -> str:
+    """Hash the value-bearing graph returned to the QA-only compatibility cache.
+
+    This hash is intentionally over the mapped graph, rather than the underlying
+    Projection checkpoint.  The checkpoint proves the Projection input set; the
+    graph hash lets a client reject a corrupted or tampered local compatibility
+    cache without turning that cache into a source of truth.
+    """
+
+    try:
+        encoded = json.dumps(
+            dict(graph),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise OwnerTruthMemoryProjectionError(
+            "compatibility graph must be canonical JSON"
+        ) from error
+    return sha256(encoded).hexdigest()
 
 
 def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
@@ -92,6 +119,12 @@ def _compatibility_fact(
     citation: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     if str(entry.get("memoryKind") or "") != "knowledge":
+        return None
+    # The first client cache cohort is deliberately narrower than the owner-only
+    # Projection. Sensitive/restricted confirmed facts remain in the Projection
+    # and must obtain their own explicit read policy before they can leave the
+    # backend as cacheable compatibility data.
+    if str(entry.get("sensitivity") or "") != "standard":
         return None
     if str(entry.get("contentSchemaVersion") or "") != OWNER_TRUTH_SCHEMA_VERSION:
         return None
@@ -214,6 +247,8 @@ class OwnerTruthKBLiteCompatibilityReadService:
             content = entry.get("content")
             if memory_kind != "knowledge":
                 reason = "memory_kind_not_compatibility_fact"
+            elif str(entry.get("sensitivity") or "") != "standard":
+                reason = "sensitivity_not_cacheable"
             elif content_schema_version != OWNER_TRUTH_SCHEMA_VERSION:
                 reason = "content_schema_not_supported"
             elif not isinstance(content, Mapping) or _nonblank_text(content.get("claim")) is None:
@@ -224,6 +259,61 @@ class OwnerTruthKBLiteCompatibilityReadService:
 
         result["factCount"] = len(facts)
         return result
+
+
+def compatibility_read_envelope(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the cacheable, default-off read contract for the iOS QA cohort.
+
+    ``compatibility_summary`` remains a value-free diagnostic response.  This
+    separate envelope is the only route allowed to carry cacheable, confirmed
+    *standard* knowledge facts.  It never impersonates legacy ``/kb/snapshot``
+    or exposes a mutable revision/change feed.
+    """
+
+    graph = result.get("graph")
+    state = str(result.get("state") or "")
+    if state not in {"disabled", "rebuilding", "ready"}:
+        raise OwnerTruthMemoryProjectionError("compatibility state is invalid")
+    if not isinstance(graph, Mapping):
+        raise OwnerTruthMemoryProjectionError("compatibility result has an invalid graph")
+
+    envelope: dict[str, Any] = {
+        "schemaVersion": OWNER_TRUTH_KBLITE_READ_ENVELOPE_SCHEMA_VERSION,
+        "projectionSource": OWNER_TRUTH_KBLITE_READ_ENVELOPE_PROJECTION_SOURCE,
+        "compatibilitySource": str(result.get("compatibilitySource") or ""),
+        "state": state,
+        "vaultId": str(result.get("vaultId") or ""),
+        "ownerSubjectId": str(result.get("ownerSubjectId") or ""),
+        "authorityEpoch": result.get("authorityEpoch"),
+        "projectionCheckpoint": result.get("projectionCheckpoint"),
+        "cacheDisposition": "replace" if state == "ready" else "discard",
+        "contentHash": None,
+        "graph": _empty_graph(),
+        "filteredEntries": deepcopy(result.get("filteredEntries") or []),
+    }
+    if state != "ready":
+        return envelope
+
+    checkpoint = _nonblank_text(result.get("projectionCheckpoint"))
+    authority_epoch = result.get("authorityEpoch")
+    if checkpoint is None:
+        raise OwnerTruthMemoryProjectionError(
+            "ready compatibility result requires a projection checkpoint"
+        )
+    if isinstance(authority_epoch, bool) or not isinstance(authority_epoch, int) or authority_epoch < 0:
+        raise OwnerTruthMemoryProjectionError(
+            "ready compatibility result requires a non-negative authority epoch"
+        )
+
+    copied_graph = deepcopy(dict(graph))
+    for key in ("people", "places", "events", "facts"):
+        if not isinstance(copied_graph.get(key), list):
+            raise OwnerTruthMemoryProjectionError(
+                f"compatibility graph {key} must be a list"
+            )
+    envelope["graph"] = copied_graph
+    envelope["contentHash"] = _canonical_graph_hash(copied_graph)
+    return envelope
 
 
 def compatibility_summary(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -266,6 +356,9 @@ def compatibility_summary(result: Mapping[str, Any]) -> dict[str, Any]:
 __all__ = [
     "OWNER_TRUTH_KBLITE_COMPATIBILITY_SCHEMA_VERSION",
     "OWNER_TRUTH_KBLITE_COMPATIBILITY_SOURCE",
+    "OWNER_TRUTH_KBLITE_READ_ENVELOPE_SCHEMA_VERSION",
+    "OWNER_TRUTH_KBLITE_READ_ENVELOPE_PROJECTION_SOURCE",
     "OwnerTruthKBLiteCompatibilityReadService",
+    "compatibility_read_envelope",
     "compatibility_summary",
 ]
