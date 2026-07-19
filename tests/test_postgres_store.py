@@ -434,6 +434,14 @@ class FakeCursor:
                     or (item.get("metadata") or {}).get("deliveryStatus")
                     or (item.get("metadata") or {}).get("deliveryExecutionState")
                 ) == "scheduled"
+                and (
+                    "deliveryProtocolVersion" not in normalized
+                    or (
+                        item.get("deliveryProtocolVersion")
+                        or (item.get("metadata") or {}).get("deliveryProtocolVersion")
+                    )
+                    != "time-letter-delivery-v1"
+                )
                 and str(item.get("openAt") or (item.get("metadata") or {}).get("openAt") or "") <= cutoff_iso
             ]
             matches = sorted(
@@ -1081,6 +1089,16 @@ class FakeCursor:
                             or (item.get("metadata") or {}).get("deliveryExecutionState")
                         )
                         != "scheduled"
+                    ):
+                        self.result = None
+                        break
+                    if (
+                        "deliveryProtocolVersion" in normalized
+                        and (
+                            item.get("deliveryProtocolVersion")
+                            or (item.get("metadata") or {}).get("deliveryProtocolVersion")
+                        )
+                        == "time-letter-delivery-v1"
                     ):
                         self.result = None
                         break
@@ -2950,6 +2968,37 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(listed["time-letter-due"]["metadata"]["deliveryExecutionState"], "delivered")
         self.assertEqual(listed["time-letter-due"]["metadata"]["deliveredAt"], "2026-07-02T09:00:00Z")
         self.assertEqual(listed["time-letter-future"]["deliveryStatus"], "scheduled")
+
+    def test_legacy_dispatch_excludes_hidden_v4_time_letter_protocol(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        store.add_archive_item(
+            "u1",
+            {
+                "id": "time-letter-v4-hidden",
+                "kind": "timeLetter",
+                "deliveryState": "sealed",
+                "deliveryStatus": "scheduled",
+                "deliveryProtocolVersion": "time-letter-delivery-v1",
+                "openAt": "2026-07-02T08:00:00Z",
+                "metadata": {
+                    "deliveryState": "sealed",
+                    "deliveryStatus": "scheduled",
+                    "deliveryProtocolVersion": "time-letter-delivery-v1",
+                    "openAt": "2026-07-02T08:00:00Z",
+                },
+            },
+        )
+
+        dispatched = store.mark_due_time_letters_delivered(
+            cutoff_iso="2026-07-02T09:00:00Z",
+            delivered_at_iso="2026-07-02T09:00:00Z",
+            limit=10,
+        )
+
+        self.assertEqual(dispatched, [])
+        listed = {item["id"]: item for item in store.list_archive_items("u1")}
+        self.assertEqual(listed["time-letter-v4-hidden"]["deliveryStatus"], "scheduled")
 
     def test_store_does_not_dispatch_time_letter_when_concurrent_worker_already_delivered_it(self):
         connection = FakeConnection()

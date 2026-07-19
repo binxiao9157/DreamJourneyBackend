@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from math import ceil
 import secrets
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 import uuid
 
 from psycopg.types.json import Jsonb
@@ -4429,6 +4429,123 @@ class PostgresStore:
             raise ArchiveItemOwnershipConflict("archive item id belongs to another owner")
         return deepcopy(row["payload"])
 
+    def get_time_letter_for_atomic_delivery(
+        self,
+        owner_subject_id: str,
+        letter_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Lock one hidden V4 TimeLetter inside the caller's active UoW.
+
+        This is intentionally separate from the legacy due dispatcher.  The
+        caller validates the sealed envelope before it writes any target
+        mailbox/receipt and retains ``rowVersion`` for the final CAS update.
+        """
+
+        if self._current_uow.get() is None:
+            raise RuntimeError("atomic timeLetter delivery requires an active unit of work")
+        row = self._fetchone(
+            """
+            SELECT payload, row_version
+            FROM archive_items
+            WHERE user_id = %s AND id = %s AND authority_state = 'active'
+            FOR UPDATE
+            """,
+            (owner_subject_id, letter_id),
+        )
+        if row is None:
+            return None
+        item = deepcopy(row["payload"])
+        item["rowVersion"] = int(row.get("row_version") or 1)
+        return item
+
+    def update_time_letter_delivery_summary(
+        self,
+        owner_subject_id: str,
+        letter_id: str,
+        snapshot: Any,
+        expected_row_version: int,
+        summary: Dict[str, Any],
+        delivered_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        """CAS-finalize a V4 target-delivery summary in the active UoW.
+
+        The row is still locked by ``get_time_letter_for_atomic_delivery``.
+        Rechecking the immutable envelope plus ``row_version`` makes a stale
+        plan fail closed instead of writing a delivered-looking aggregate.
+        """
+
+        if self._current_uow.get() is None:
+            raise RuntimeError("atomic timeLetter delivery requires an active unit of work")
+        delivery_status = str(summary.get("deliveryStatus") or "").strip()
+        if delivery_status not in {"delivered", "partial", "blocked"}:
+            raise ValueError("timeLetter delivery summary requires a terminal deliveryStatus")
+        if not isinstance(expected_row_version, int) or expected_row_version < 1:
+            raise ValueError("timeLetter delivery summary requires an expected row version")
+
+        row = self._fetchone(
+            """
+            SELECT payload, row_version
+            FROM archive_items
+            WHERE user_id = %s AND id = %s AND authority_state = 'active'
+            FOR UPDATE
+            """,
+            (owner_subject_id, letter_id),
+        )
+        if row is None or int(row.get("row_version") or 0) != expected_row_version:
+            return None
+        item = deepcopy(row["payload"])
+        metadata = deepcopy(item.get("metadata") if isinstance(item.get("metadata"), dict) else {})
+        if (
+            str(item.get("kind") or "") != "timeLetter"
+            or str(self._time_letter_delivery_field(item, metadata, "deliveryState") or "") != "sealed"
+            or str(self._time_letter_delivery_field(item, metadata, "deliveryStatus") or "") != "scheduled"
+            or str(self._time_letter_delivery_field(item, metadata, "ownerSubjectId") or "")
+            != str(snapshot.owner_subject_id)
+            or str(self._time_letter_delivery_field(item, metadata, "vaultId") or "")
+            != str(snapshot.vault_id)
+            or int(self._time_letter_delivery_field(item, metadata, "authorityEpoch") or -1)
+            != int(snapshot.authority_epoch)
+            or int(self._time_letter_delivery_field(item, metadata, "sealedVersion") or -1)
+            != int(snapshot.sealed_version)
+            or str(self._time_letter_delivery_field(item, metadata, "sealedPayloadHash") or "")
+            != str(snapshot.sealed_payload_hash)
+            or str(self._time_letter_delivery_field(item, metadata, "openAt") or "")
+            != str(snapshot.open_at)
+        ):
+            return None
+
+        item["deliveryStatus"] = delivery_status
+        item["deliveryExecutionState"] = delivery_status
+        item["deliverySummary"] = deepcopy(summary)
+        item["deliveredAt"] = delivered_at_iso
+        item["dispatchAttemptedAt"] = delivered_at_iso
+        item["deliveryProtocolVersion"] = str(summary.get("schemaVersion") or "")
+        item["updatedAt"] = delivered_at_iso
+        metadata["deliveryStatus"] = delivery_status
+        metadata["deliveryExecutionState"] = delivery_status
+        metadata["deliverySummary"] = deepcopy(summary)
+        metadata["deliveredAt"] = delivered_at_iso
+        metadata["dispatchAttemptedAt"] = delivered_at_iso
+        metadata["deliveryProtocolVersion"] = str(summary.get("schemaVersion") or "")
+        item["metadata"] = metadata
+
+        updated = self._fetchone(
+            """
+            UPDATE archive_items
+            SET payload = %s
+            WHERE user_id = %s AND id = %s AND row_version = %s
+                AND authority_state = 'active'
+            RETURNING payload, row_version
+            """,
+            (item, owner_subject_id, letter_id, expected_row_version),
+            commit=True,
+        )
+        if updated is None:
+            return None
+        result = deepcopy(updated["payload"])
+        result["rowVersion"] = int(updated.get("row_version") or expected_row_version + 1)
+        return result
+
     def create_owner_truth_source(
         self,
         record: OwnerTruthSourceWriteRecord,
@@ -4811,6 +4928,12 @@ class PostgresStore:
                     payload->'metadata'->>'deliveryStatus',
                     payload->'metadata'->>'deliveryExecutionState'
                 ) = 'scheduled'
+                -- V4 targets are consumed only by the hidden receipt-first
+                -- path.  The legacy dispatcher must never race it.
+                AND COALESCE(
+                    payload->>'deliveryProtocolVersion',
+                    payload->'metadata'->>'deliveryProtocolVersion'
+                ) IS DISTINCT FROM 'time-letter-delivery-v1'
                 AND COALESCE(payload->>'openAt', payload->'metadata'->>'openAt') <= %s
             ORDER BY COALESCE(payload->>'openAt', payload->'metadata'->>'openAt') ASC
             LIMIT %s
@@ -4851,6 +4974,10 @@ class PostgresStore:
                         payload->'metadata'->>'deliveryStatus',
                         payload->'metadata'->>'deliveryExecutionState'
                     ) = 'scheduled'
+                    AND COALESCE(
+                        payload->>'deliveryProtocolVersion',
+                        payload->'metadata'->>'deliveryProtocolVersion'
+                    ) IS DISTINCT FROM 'time-letter-delivery-v1'
                     AND COALESCE(payload->>'openAt', payload->'metadata'->>'openAt') <= %s
                 RETURNING payload
                 """,
@@ -6237,6 +6364,14 @@ class PostgresStore:
         item["userId"] = user_id
         item.setdefault("createdAt", PostgresStore._now())
         return item
+
+    @staticmethod
+    def _time_letter_delivery_field(
+        item: Mapping[str, Any],
+        metadata: Mapping[str, Any],
+        name: str,
+    ) -> object:
+        return item.get(name) if item.get(name) is not None else metadata.get(name)
 
     @staticmethod
     def _now() -> str:
