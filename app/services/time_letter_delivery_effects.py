@@ -17,6 +17,7 @@ import json
 import re
 from typing import Any, Mapping, Sequence
 
+from app.async_effects.consumer_repository import AsyncEffectConsumerCompletionCommand
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
 
 
@@ -26,6 +27,7 @@ TIME_LETTER_DELIVERY_EVENT_TYPE = "timeLetter.deliveryTarget.dispatchRequested"
 TIME_LETTER_DELIVERY_JOB_TYPE = "timeLetter.deliveryTarget.dispatch"
 TIME_LETTER_DELIVERY_RESOURCE_TYPE = "timeLetterDeliveryTarget"
 TIME_LETTER_DELIVERY_PURPOSE = "timeLetterDelivery"
+TIME_LETTER_DELIVERY_CONSUMER_NAME = "timeLetter.deliveryTarget"
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -39,6 +41,24 @@ class TimeLetterDeliveryDisposition(str, Enum):
     SKIPPED_REVOKED = "skipped_revoked"
     BLOCKED = "blocked"
     NOT_DUE = "not_due"
+
+
+_SKIPPED_REVOKED_REASONS = frozenset(
+    {
+        "familyRecipientInactive",
+        "grantRevoked",
+        "recipientSubjectChanged",
+        "recipientSubjectUnavailable",
+    }
+)
+_BLOCKED_REASONS = frozenset(
+    {
+        "authorityEpochChanged",
+        "letterNoLongerSealed",
+        "sealedVersionChanged",
+        "timeLetterTargetInvalid",
+    }
+)
 
 
 def _required(value: object, *, field: str) -> str:
@@ -235,6 +255,81 @@ class TimeLetterDeliveryAdmission:
 
 
 @dataclass(frozen=True)
+class TimeLetterDeliveryCompletion:
+    """Map one rechecked target outcome to the generic receipt-only kernel."""
+
+    target: TimeLetterDeliveryTarget
+    disposition: TimeLetterDeliveryDisposition
+    reason_code: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, TimeLetterDeliveryTarget):
+            raise TimeLetterDeliveryContractError("delivery target is required")
+        if not isinstance(self.disposition, TimeLetterDeliveryDisposition):
+            raise TimeLetterDeliveryContractError("delivery disposition is required")
+        normalized_reason = _required(self.reason_code, field="reasonCode")
+        if self.disposition is TimeLetterDeliveryDisposition.NOT_DUE:
+            raise TimeLetterDeliveryContractError("not_due targets cannot write a terminal receipt")
+        if self.disposition is TimeLetterDeliveryDisposition.DELIVERED:
+            if self.target.recipient_subject_id is None:
+                raise TimeLetterDeliveryContractError(
+                    "delivered target requires a recipient subject"
+                )
+            if normalized_reason != "mailboxPersisted":
+                raise TimeLetterDeliveryContractError(
+                    "delivered target must retain mailboxPersisted"
+                )
+        elif self.disposition is TimeLetterDeliveryDisposition.SKIPPED_REVOKED:
+            if self.target.role != "recipient":
+                raise TimeLetterDeliveryContractError("owner target cannot be skipped as revoked")
+            if normalized_reason not in _SKIPPED_REVOKED_REASONS:
+                raise TimeLetterDeliveryContractError("skipped target has an invalid reasonCode")
+        elif self.disposition is TimeLetterDeliveryDisposition.BLOCKED:
+            if normalized_reason not in _BLOCKED_REASONS:
+                raise TimeLetterDeliveryContractError("blocked target has an invalid reasonCode")
+        object.__setattr__(self, "reason_code", normalized_reason)
+
+    @property
+    def outcome(self) -> str:
+        if self.disposition is TimeLetterDeliveryDisposition.DELIVERED:
+            return "completed"
+        if self.disposition is TimeLetterDeliveryDisposition.SKIPPED_REVOKED:
+            return "skipped"
+        return "blocked"
+
+    @property
+    def result_ref_hash(self) -> str:
+        return _canonical_hash(
+            {
+                "disposition": self.disposition.value,
+                "reasonCode": self.reason_code,
+                "schemaVersion": TIME_LETTER_DELIVERY_SCHEMA_VERSION,
+                "targetKey": self.target.stable_target_key,
+            }
+        )
+
+    @property
+    def consumer_command(self) -> AsyncEffectConsumerCompletionCommand:
+        intent = self.target.effect_intent
+        return AsyncEffectConsumerCompletionCommand(
+            intent=intent,
+            consumer_name=TIME_LETTER_DELIVERY_CONSUMER_NAME,
+            business_target_key=intent.business_target_key,
+            outcome=self.outcome,
+            reason_code=self.reason_code,
+            result_ref_hash=self.result_ref_hash,
+        )
+
+    def value_free_summary(self) -> Mapping[str, object]:
+        return {
+            "disposition": self.disposition.value,
+            "reasonCode": self.reason_code,
+            "resultRefHash": self.result_ref_hash,
+            "target": self.target.value_free_reference(),
+        }
+
+
+@dataclass(frozen=True)
 class TimeLetterDeliveryPlan:
     snapshot: TimeLetterSealedSnapshot
     targets: tuple[TimeLetterDeliveryTarget, ...]
@@ -354,6 +449,7 @@ def build_time_letter_delivery_plan(
 
 __all__ = [
     "TIME_LETTER_DELIVERY_EVENT_TYPE",
+    "TIME_LETTER_DELIVERY_CONSUMER_NAME",
     "TIME_LETTER_DELIVERY_JOB_TYPE",
     "TIME_LETTER_DELIVERY_OPERATION_TYPE",
     "TIME_LETTER_DELIVERY_PURPOSE",
@@ -361,6 +457,7 @@ __all__ = [
     "TIME_LETTER_DELIVERY_SCHEMA_VERSION",
     "TimeLetterDeliveryAdmission",
     "TimeLetterDeliveryContractError",
+    "TimeLetterDeliveryCompletion",
     "TimeLetterDeliveryDisposition",
     "TimeLetterDeliveryPlan",
     "TimeLetterDeliveryTarget",

@@ -2,9 +2,11 @@ import unittest
 from hashlib import sha256
 
 from app.async_effects.contracts import AsyncEffectConflict
+from app.async_effects.consumer_repository import InMemoryAsyncEffectConsumerRepository
 from app.async_effects.repository import InMemoryEffectKernelRepository
 from app.services.time_letter_delivery_effects import (
     TimeLetterDeliveryContractError,
+    TimeLetterDeliveryCompletion,
     TimeLetterDeliveryDisposition,
     build_time_letter_delivery_plan,
 )
@@ -118,6 +120,79 @@ class TimeLetterDeliveryEffectsTests(unittest.TestCase):
             [admission.reason_code for admission in plan.admissions],
             ["timeLetterNotOpen"] * 3,
         )
+
+    def test_each_due_target_has_its_own_idempotent_consumer_receipt(self):
+        plan = build_time_letter_delivery_plan(
+            _sealed_item(),
+            now_iso="2026-07-20T09:00:01Z",
+        )
+        kernel = InMemoryEffectKernelRepository()
+        consumer = InMemoryAsyncEffectConsumerRepository()
+        for intent in plan.effect_intents:
+            kernel.accept(intent)
+
+        owner_completion = TimeLetterDeliveryCompletion(
+            target=plan.targets[0],
+            disposition=TimeLetterDeliveryDisposition.DELIVERED,
+            reason_code="mailboxPersisted",
+        )
+        recipient_completion = TimeLetterDeliveryCompletion(
+            target=plan.targets[1],
+            disposition=TimeLetterDeliveryDisposition.DELIVERED,
+            reason_code="mailboxPersisted",
+        )
+        owner_receipt = consumer.consume(owner_completion.consumer_command)
+        owner_replay = consumer.consume(owner_completion.consumer_command)
+        recipient_receipt = consumer.consume(recipient_completion.consumer_command)
+
+        self.assertEqual(owner_receipt.outcome, "accepted")
+        self.assertEqual(owner_replay.outcome, "deduplicated")
+        self.assertEqual(recipient_receipt.outcome, "accepted")
+        self.assertNotEqual(owner_receipt.operation_id, recipient_receipt.operation_id)
+        self.assertNotEqual(owner_receipt.business_target_key, recipient_receipt.business_target_key)
+        self.assertEqual(owner_receipt.business_outcome, "completed")
+
+    def test_revoked_recipient_is_a_terminal_skip_not_a_silent_drop(self):
+        plan = build_time_letter_delivery_plan(
+            _sealed_item(),
+            now_iso="2026-07-20T09:00:01Z",
+        )
+        completion = TimeLetterDeliveryCompletion(
+            target=plan.targets[1],
+            disposition=TimeLetterDeliveryDisposition.SKIPPED_REVOKED,
+            reason_code="grantRevoked",
+        )
+
+        command = completion.consumer_command
+        self.assertEqual(command.outcome, "skipped")
+        self.assertEqual(command.reason_code, "grantRevoked")
+        self.assertEqual(command.consumer_name, "timeLetter.deliveryTarget")
+
+    def test_missing_recipient_subject_cannot_claim_mailbox_delivery(self):
+        plan = build_time_letter_delivery_plan(
+            _sealed_item(),
+            now_iso="2026-07-20T09:00:01Z",
+        )
+
+        with self.assertRaisesRegex(TimeLetterDeliveryContractError, "recipient subject"):
+            TimeLetterDeliveryCompletion(
+                target=plan.targets[2],
+                disposition=TimeLetterDeliveryDisposition.DELIVERED,
+                reason_code="mailboxPersisted",
+            )
+
+    def test_not_due_admission_cannot_be_promoted_to_a_terminal_receipt(self):
+        plan = build_time_letter_delivery_plan(
+            _sealed_item(),
+            now_iso="2026-07-20T08:59:59Z",
+        )
+
+        with self.assertRaisesRegex(TimeLetterDeliveryContractError, "not_due"):
+            TimeLetterDeliveryCompletion(
+                target=plan.targets[0],
+                disposition=TimeLetterDeliveryDisposition.NOT_DUE,
+                reason_code="timeLetterNotOpen",
+            )
 
     def test_missing_immutable_sealed_envelope_fails_closed(self):
         missing_version = _sealed_item(sealedVersion=None)
