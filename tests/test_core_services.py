@@ -36,6 +36,7 @@ from app.services.user_identity import stable_user_id
 from app.services.voice_clone import VolcEngineVoiceCloneV3Provider, VoiceCloneProviderFactory
 from app.services.amap import AMapDistrictProxy
 from app.services.deepseek import DeepSeekImageAnalysisProxy, DeepSeekKnowledgeExtractionProxy
+from app.services.echo_delayed_reply_effects import ECHO_DELAYED_REPLY_SCHEMA_VERSION
 from app.services.delegated_access import (
     AccessGrantCommand,
     AccessGrantPurpose,
@@ -3113,6 +3114,36 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.json()["items"][0]["id"], "reply_1")
         self.assertNotIn("ECHO_RAW_SENTINEL", str(listed.json()))
+
+    def test_echo_delayed_reply_legacy_route_fails_closed_for_v4_envelopes(self):
+        previous_store = main_module.store
+        main_module.store = InMemoryStore()
+        client = TestClient(app)
+        try:
+            response = client.post(
+                "/echo/delayed-replies",
+                json={
+                    "userId": "echo_user_v4_disabled",
+                    "delayedReplyId": "reply_v4_disabled",
+                    "deliverAt": "2026-07-20T12:05:00Z",
+                    "minutes": 7,
+                    "trigger": "tenRoundBaseline",
+                    "rawTranscript": "This V4 reply must not silently use the legacy route.",
+                    "deliveryProtocolVersion": ECHO_DELAYED_REPLY_SCHEMA_VERSION,
+                    "conversationId": "conversation-v4",
+                    "requestId": "request-v4",
+                    "contextHash": "a" * 64,
+                },
+            )
+            listed = client.get("/echo/delayed-replies/echo_user_v4_disabled")
+        finally:
+            main_module.store = previous_store
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["code"], "echo_delayed_reply_v4_disabled")
+        self.assertFalse(response.json()["detail"]["retryable"])
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["items"], [])
 
     def test_echo_delayed_reply_dispatch_due_marks_only_due_items(self):
         previous_store = main_module.store

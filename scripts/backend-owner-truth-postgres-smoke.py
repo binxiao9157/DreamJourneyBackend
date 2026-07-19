@@ -153,8 +153,8 @@ def main() -> None:
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         require(
-            applied["appliedVersions"][-1] == "0023",
-            "owner truth legacy inventory migration must apply",
+            applied["appliedVersions"][-1] == "0024",
+            "current migration head must apply after owner truth inventory",
         )
 
         with psycopg.connect(test_dsn) as connection:

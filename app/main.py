@@ -41,6 +41,7 @@ from app.services.client_compatibility import (
     resolve_client_compatibility_mode,
 )
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
+from app.services.echo_delayed_reply_effects import ECHO_DELAYED_REPLY_SCHEMA_VERSION
 from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.delegated_access import (
     AccessGrantCommand,
@@ -5227,6 +5228,19 @@ def _sanitize_push_device_token_payload(payload: Dict[str, Any]) -> Dict[str, An
 
 
 def _sanitize_echo_delayed_reply_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    requested_protocol = str(payload.get("deliveryProtocolVersion") or "").strip()
+    if requested_protocol == ECHO_DELAYED_REPLY_SCHEMA_VERSION:
+        # The typed V4 path is intentionally server-off until its worker and
+        # Provider-effect gates are enabled. Do not silently reinterpret a V4
+        # envelope as the legacy scheduled -> readyForProvider protocol.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "echo_delayed_reply_v4_disabled",
+                "message": "typed delayed reply completion is not enabled",
+                "retryable": False,
+            },
+        )
     user_id = str(payload.get("userId") or "").strip()
     delayed_reply_id = str(payload.get("delayedReplyId") or "").strip()
     deliver_at = str(payload.get("deliverAt") or "").strip()

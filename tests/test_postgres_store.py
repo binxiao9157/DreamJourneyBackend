@@ -23,6 +23,12 @@ from app.services.knowledge_store import (
 )
 from app.services.postgres_store import PostgresStore
 from app.services.store_factory import init_store
+from app.services.echo_delayed_reply_effects import (
+    ECHO_DELAYED_REPLY_SCHEMA_VERSION,
+    EchoDelayedReplyCompletion,
+    EchoDelayedReplyGeneratedAnswer,
+    build_echo_delayed_reply_plan,
+)
 
 
 def unwrap_jsonb(value):
@@ -539,12 +545,45 @@ class FakeCursor:
                 )
             else:
                 self.result = [{"payload": item} for item in self.connection.mailbox_letters.get(user_id, [])]
+        elif normalized.startswith(
+            "SELECT payload, row_version, authority_state, vault_id, owner_subject_id FROM echo_delayed_replies"
+        ):
+            owner_subject_id, item_id = params
+            item = next(
+                (
+                    item
+                    for item in self.connection.echo_delayed_replies.get(owner_subject_id, [])
+                    if item.get("id") == item_id
+                ),
+                None,
+            )
+            self.result = None if item is None else {
+                "payload": item,
+                "row_version": int(item.get("rowVersion") or 1),
+                "authority_state": str(item.get("authorityState") or "active"),
+                "vault_id": str(item.get("vaultId") or owner_subject_id),
+                "owner_subject_id": owner_subject_id,
+            }
+        elif normalized.startswith("SELECT payload FROM echo_delayed_reply_answers"):
+            vault_id, delayed_reply_id = params
+            self.result = next(
+                (
+                    {"payload": item}
+                    for item in self.connection.echo_delayed_reply_answers.values()
+                    if item.get("vaultId") == vault_id and item.get("delayedReplyId") == delayed_reply_id
+                ),
+                None,
+            )
         elif normalized.startswith("SELECT user_id, id, payload FROM echo_delayed_replies"):
-            cutoff_iso, limit = params
+            cutoff_iso, limit = params[-2:]
             matches = [
                 item for replies in self.connection.echo_delayed_replies.values()
                 for item in replies
                 if item.get("deliveryState") == "scheduled"
+                and (
+                    item.get("deliveryProtocolVersion")
+                    or (item.get("metadata") or {}).get("deliveryProtocolVersion")
+                ) != "echo-delayed-reply-v1"
                 and str(item.get("deliverAt") or "") <= cutoff_iso
             ]
             matches = sorted(matches, key=lambda item: str(item.get("deliverAt") or ""))[:limit]
@@ -939,6 +978,19 @@ class FakeCursor:
                 if item.get("userId") != user_id
             }
             self.result = deleted
+        elif normalized.startswith("DELETE FROM echo_delayed_reply_answers"):
+            user_id = params[0]
+            deleted = [
+                {"user_id": item.get("userId")}
+                for item in self.connection.echo_delayed_reply_answers.values()
+                if item.get("userId") == user_id
+            ]
+            self.connection.echo_delayed_reply_answers = {
+                answer_id: item
+                for answer_id, item in self.connection.echo_delayed_reply_answers.items()
+                if item.get("userId") != user_id
+            }
+            self.result = deleted
         elif normalized.startswith("INSERT INTO users"):
             user_id, phone, nickname, payload = params
             payload = unwrap_jsonb(payload)
@@ -1124,6 +1176,25 @@ class FakeCursor:
             letters[:] = [item for item in letters if item.get("id") != item_id]
             letters.insert(0, dict(payload))
             self.result = {"payload": payload}
+        elif normalized.startswith("INSERT INTO echo_delayed_reply_answers"):
+            payload = unwrap_jsonb(params[15])
+            answer_id = params[0]
+            if answer_id in self.connection.echo_delayed_reply_answers:
+                self.result = None
+                return
+            duplicate = next(
+                (
+                    item
+                    for item in self.connection.echo_delayed_reply_answers.values()
+                    if item.get("vaultId") == params[3] and item.get("delayedReplyId") == params[4]
+                ),
+                None,
+            )
+            if duplicate is not None:
+                self.result = None
+                return
+            self.connection.echo_delayed_reply_answers[answer_id] = dict(payload)
+            self.result = {"payload": payload}
         elif normalized.startswith("INSERT INTO echo_delayed_replies"):
             user_id, item_id, payload = params
             payload = unwrap_jsonb(payload)
@@ -1134,6 +1205,29 @@ class FakeCursor:
             replies[:] = [item for item in replies if item.get("id") != item_id]
             replies.insert(0, dict(payload))
             self.result = {"payload": payload}
+        elif normalized.startswith("UPDATE echo_delayed_replies SET payload = %s WHERE owner_subject_id"):
+            payload, owner_subject_id, vault_id, item_id, expected_row_version = params
+            payload = unwrap_jsonb(payload)
+            replies = self.connection.echo_delayed_replies.get(owner_subject_id, [])
+            for index, item in enumerate(replies):
+                if (
+                    item.get("id") == item_id
+                    and str(item.get("vaultId") or owner_subject_id) == vault_id
+                    and int(item.get("rowVersion") or 1) == expected_row_version
+                    and str(item.get("authorityState") or "active") == "active"
+                    and item.get("deliveryState") in {"scheduled", "ready", "generating"}
+                ):
+                    replies[index] = dict(payload)
+                    self.result = {
+                        "payload": payload,
+                        "row_version": int(payload.get("rowVersion") or expected_row_version + 1),
+                        "authority_state": str(payload.get("authorityState") or "active"),
+                        "vault_id": vault_id,
+                        "owner_subject_id": owner_subject_id,
+                    }
+                    break
+            else:
+                self.result = None
         elif normalized.startswith("UPDATE echo_delayed_replies"):
             payload, user_id, item_id = params
             payload = unwrap_jsonb(payload)
@@ -1331,6 +1425,7 @@ class FakeConnection:
         self.archive_items = {}
         self.mailbox_letters = {}
         self.echo_delayed_replies = {}
+        self.echo_delayed_reply_answers = {}
         self.push_device_tokens = {}
         self.voice_profiles = {}
         self.voice_clone_slots = {}
@@ -3312,6 +3407,7 @@ class PostgresStoreTests(unittest.TestCase):
             "family_members",
             "care_snapshots",
             "echo_delayed_replies",
+            "echo_delayed_reply_answers",
             "push_device_tokens",
             "voice_profiles",
             "digital_human_sessions",
@@ -3378,6 +3474,19 @@ class PostgresStoreTests(unittest.TestCase):
         store.add_echo_delayed_reply(
             "u1",
             {
+                "id": "reply_v4_due",
+                "delayedReplyId": "reply_v4_due",
+                "deliverAt": "2026-06-18T12:04:00Z",
+                "minutes": 7,
+                "trigger": "tenRoundBaseline",
+                "deliveryState": "scheduled",
+                "deliveryProtocolVersion": "echo-delayed-reply-v1",
+                "pushProviderState": "pending",
+            },
+        )
+        store.add_echo_delayed_reply(
+            "u1",
+            {
                 "id": "reply_future",
                 "delayedReplyId": "reply_future",
                 "deliverAt": "2026-06-18T12:20:00Z",
@@ -3402,6 +3511,86 @@ class PostgresStoreTests(unittest.TestCase):
         listed = {item["id"]: item for item in store.list_echo_delayed_replies("u1")}
         self.assertEqual(listed["reply_due"]["deliveryState"], "readyForProvider")
         self.assertEqual(listed["reply_future"]["deliveryState"], "scheduled")
+        self.assertEqual(listed["reply_v4_due"]["deliveryState"], "scheduled")
+
+    def test_store_persists_v4_delayed_reply_answer_and_completion_with_cas(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        item = {
+            "id": "reply_v4_completion",
+            "delayedReplyId": "reply_v4_completion",
+            "ownerSubjectId": "u1",
+            "vaultId": "u1",
+            "conversationId": "conversation_1",
+            "requestId": "request_1",
+            "replyGeneration": 1,
+            "contextHash": "a" * 64,
+            "contextVersion": "echo-context-v4",
+            "policyVersion": "echo-policy-v4",
+            "authorityEpoch": 0,
+            "rowVersion": 1,
+            "deliverAt": "2026-07-20T09:00:00Z",
+            "authorityState": "active",
+            "deliveryState": "scheduled",
+            "deliveryProtocolVersion": ECHO_DELAYED_REPLY_SCHEMA_VERSION,
+        }
+        store.add_echo_delayed_reply("u1", item)
+        generated_answer = EchoDelayedReplyGeneratedAnswer(
+            answer_text="private answer body",
+            citation_receipt_hash="b" * 64,
+            provider_result_hash="c" * 64,
+        )
+
+        with store.request_unit_of_work(correlation_id="echo-v4-test", command_id="echo-v4-test"):
+            locked = store.get_echo_delayed_reply_for_completion("u1", "reply_v4_completion")
+            plan = build_echo_delayed_reply_plan(locked, now_iso="2026-07-20T09:00:01Z")
+            completion = EchoDelayedReplyCompletion(
+                snapshot=plan.snapshot,
+                outcome="completed",
+                reason_code="answerInboxPersisted",
+                answer=generated_answer,
+            )
+            persisted = store.persist_echo_delayed_reply_answer(
+                "u1",
+                plan.snapshot,
+                completion,
+                {
+                    "id": completion.answer_id,
+                    "answerId": completion.answer_id,
+                    "ownerSubjectId": "u1",
+                    "vaultId": "u1",
+                    "delayedReplyId": "reply_v4_completion",
+                    "conversationId": "conversation_1",
+                    "requestId": "request_1",
+                    "responseMessageId": completion.answer_id,
+                    "replyGeneration": 1,
+                    "contextHash": "a" * 64,
+                    "contextVersion": "echo-context-v4",
+                    "policyVersion": "echo-policy-v4",
+                    "authorityEpoch": 0,
+                    "citationReceiptHash": "b" * 64,
+                    "providerResultHash": "c" * 64,
+                    "answerHash": generated_answer.answer_hash,
+                    "answerLength": generated_answer.answer_length,
+                    "body": generated_answer.answer_text,
+                    "completedAt": "2026-07-20T09:00:01Z",
+                    "schemaVersion": ECHO_DELAYED_REPLY_SCHEMA_VERSION,
+                },
+                "2026-07-20T09:00:01Z",
+            )
+            updated = store.update_echo_delayed_reply_completion(
+                "u1",
+                "reply_v4_completion",
+                plan.snapshot,
+                completion,
+                1,
+                "2026-07-20T09:00:01Z",
+            )
+
+        self.assertEqual(persisted["body"], "private answer body")
+        self.assertEqual(len(connection.echo_delayed_reply_answers), 1)
+        self.assertEqual(updated["deliveryState"], "completed")
+        self.assertEqual(updated["responseAnswerId"], completion.answer_id)
 
     def test_store_persists_push_device_tokens_by_user(self):
         connection = FakeConnection()

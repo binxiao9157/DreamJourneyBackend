@@ -122,8 +122,8 @@ def main() -> None:
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         require(
-            applied["appliedVersions"][-1] == "0023",
-            "legacy inventory schema must be present before parity observation",
+            applied["appliedVersions"][-1] == "0024",
+            "current migration head must be present before parity observation",
         )
 
         store = PostgresStore(dsn=test_dsn, pool_min_size=1, pool_max_size=2)

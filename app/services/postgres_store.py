@@ -24,6 +24,11 @@ from app.observability.events import (
 )
 from app.observability.operation_metrics import summarize_operation_metrics
 from app.services.user_identity import stable_user_id
+from app.services.echo_delayed_reply_effects import (
+    ECHO_DELAYED_REPLY_SCHEMA_VERSION,
+    EchoDelayedReplyCompletion,
+    EchoDelayedReplySnapshot,
+)
 from app.services.knowledge_store import (
     KB_OPERATION_ARCHIVE_DELETE,
     KB_OPERATION_MUTATION,
@@ -2408,6 +2413,7 @@ class PostgresStore:
                 "family_members",
                 "care_snapshots",
                 "echo_delayed_replies",
+                "echo_delayed_reply_answers",
                 "push_device_tokens",
                 "voice_profiles",
                 "digital_human_sessions",
@@ -5095,6 +5101,190 @@ class PostgresStore:
     def list_echo_delayed_replies(self, user_id: str) -> List[Dict[str, Any]]:
         return self._list_payloads("echo_delayed_replies", user_id)
 
+    def get_echo_delayed_reply_for_completion(
+        self,
+        owner_subject_id: str,
+        delayed_reply_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Lock and return one V4 reply aggregate for its typed consumer."""
+
+        row = self._fetchone(
+            """
+            SELECT payload, row_version, authority_state, vault_id, owner_subject_id
+            FROM echo_delayed_replies
+            WHERE owner_subject_id = %s AND id = %s
+            FOR UPDATE
+            """,
+            (owner_subject_id, delayed_reply_id),
+        )
+        return None if row is None else self._echo_delayed_reply_completion_payload(row)
+
+    def persist_echo_delayed_reply_answer(
+        self,
+        owner_subject_id: str,
+        snapshot: EchoDelayedReplySnapshot,
+        completion: EchoDelayedReplyCompletion,
+        payload: Mapping[str, Any],
+        completed_at_iso: str,
+    ) -> Dict[str, Any]:
+        """Insert the private Answer once; conflicts are immutable-meaning errors."""
+
+        if completion.answer is None:
+            raise ValueError("completed delayed reply requires an Answer")
+        if owner_subject_id != snapshot.owner_subject_id:
+            raise ResourceOwnershipConflict("delayed reply Answer belongs to another owner")
+        item = deepcopy(dict(payload))
+        required_matches = {
+            "id": completion.answer_id,
+            "answerId": completion.answer_id,
+            "ownerSubjectId": snapshot.owner_subject_id,
+            "vaultId": snapshot.vault_id,
+            "delayedReplyId": snapshot.delayed_reply_id,
+            "conversationId": snapshot.conversation_id,
+            "requestId": snapshot.request_id,
+            "contextHash": snapshot.context_hash,
+            "contextVersion": snapshot.context_version,
+            "policyVersion": snapshot.policy_version,
+            "authorityEpoch": snapshot.authority_epoch,
+            "replyGeneration": snapshot.reply_generation,
+            "answerHash": completion.answer.answer_hash,
+            "citationReceiptHash": completion.answer.citation_receipt_hash,
+            "providerResultHash": completion.answer.provider_result_hash,
+            "schemaVersion": ECHO_DELAYED_REPLY_SCHEMA_VERSION,
+        }
+        if any(item.get(field) != expected for field, expected in required_matches.items()):
+            raise ValueError("delayed reply Answer payload does not match immutable completion")
+        item["userId"] = owner_subject_id
+
+        existing = self._fetchone(
+            """
+            SELECT payload FROM echo_delayed_reply_answers
+            WHERE vault_id = %s AND delayed_reply_id = %s
+            FOR UPDATE
+            """,
+            (snapshot.vault_id, snapshot.delayed_reply_id),
+        )
+        if existing is not None:
+            stored = deepcopy(existing["payload"])
+            if stored != item:
+                raise ValueError("delayed reply Answer identity cannot be reused with new content")
+            return stored
+
+        row = self._fetchone(
+            """
+            INSERT INTO echo_delayed_reply_answers (
+                id, user_id, owner_subject_id, vault_id, delayed_reply_id,
+                conversation_id, request_id, reply_generation, context_hash,
+                context_version, policy_version, authority_epoch, answer_hash,
+                citation_receipt_hash, provider_result_hash, payload, completed_at
+            ) VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s, %s
+            )
+            ON CONFLICT DO NOTHING
+            RETURNING payload
+            """,
+            (
+                completion.answer_id,
+                owner_subject_id,
+                snapshot.owner_subject_id,
+                snapshot.vault_id,
+                snapshot.delayed_reply_id,
+                snapshot.conversation_id,
+                snapshot.request_id,
+                snapshot.reply_generation,
+                snapshot.context_hash,
+                snapshot.context_version,
+                snapshot.policy_version,
+                snapshot.authority_epoch,
+                completion.answer.answer_hash,
+                completion.answer.citation_receipt_hash,
+                completion.answer.provider_result_hash,
+                item,
+                completed_at_iso,
+            ),
+        )
+        if row is not None:
+            return deepcopy(row["payload"])
+
+        replay = self._fetchone(
+            """
+            SELECT payload FROM echo_delayed_reply_answers
+            WHERE vault_id = %s AND delayed_reply_id = %s
+            FOR UPDATE
+            """,
+            (snapshot.vault_id, snapshot.delayed_reply_id),
+        )
+        if replay is None:
+            raise RuntimeError("delayed reply Answer insert conflict did not produce a row")
+        stored = deepcopy(replay["payload"])
+        if stored != item:
+            raise ValueError("delayed reply Answer identity cannot be reused with new content")
+        return stored
+
+    def update_echo_delayed_reply_completion(
+        self,
+        owner_subject_id: str,
+        delayed_reply_id: str,
+        snapshot: EchoDelayedReplySnapshot,
+        completion: EchoDelayedReplyCompletion,
+        expected_row_version: int,
+        completed_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        """CAS the scheduling aggregate only after its terminal evidence exists."""
+
+        row = self._fetchone(
+            """
+            SELECT payload, row_version, authority_state, vault_id, owner_subject_id
+            FROM echo_delayed_replies
+            WHERE owner_subject_id = %s AND id = %s
+            FOR UPDATE
+            """,
+            (owner_subject_id, delayed_reply_id),
+        )
+        if row is None:
+            return None
+        current = self._echo_delayed_reply_completion_payload(row)
+        if (
+            current.get("vaultId") != snapshot.vault_id
+            or int(current.get("rowVersion") or 0) != expected_row_version
+            or current.get("authorityState") != "active"
+        ):
+            return None
+        item = deepcopy(current)
+        item["deliveryState"] = completion.outcome
+        item["completedAt"] = completed_at_iso
+        item["completionSummary"] = dict(completion.value_free_summary())
+        item["responseAnswerId"] = completion.answer_id if completion.answer is not None else None
+        item["rowVersion"] = expected_row_version + 1
+        item["deliveryProtocolVersion"] = ECHO_DELAYED_REPLY_SCHEMA_VERSION
+        updated = self._fetchone(
+            """
+            UPDATE echo_delayed_replies
+            SET payload = %s
+            WHERE owner_subject_id = %s
+                AND vault_id = %s
+                AND id = %s
+                AND row_version = %s
+                AND authority_state = 'active'
+                AND payload->>'deliveryState' IN ('scheduled', 'ready', 'generating')
+            RETURNING payload, row_version, authority_state, vault_id, owner_subject_id
+            """,
+            (item, owner_subject_id, snapshot.vault_id, delayed_reply_id, expected_row_version),
+        )
+        return None if updated is None else self._echo_delayed_reply_completion_payload(updated)
+
+    @staticmethod
+    def _echo_delayed_reply_completion_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(row["payload"])
+        item["ownerSubjectId"] = str(row["owner_subject_id"])
+        item["vaultId"] = str(row["vault_id"])
+        item["rowVersion"] = int(row["row_version"])
+        item["authorityState"] = str(row["authority_state"])
+        return item
+
     def mark_due_echo_delayed_replies_for_dispatch(
         self,
         cutoff_iso: str,
@@ -5106,11 +5296,17 @@ class PostgresStore:
             """
             SELECT user_id, id, payload FROM echo_delayed_replies
             WHERE payload->>'deliveryState' = 'scheduled'
+                -- V4 replies are consumed only by the hidden Answer/Inbox
+                -- receipt-first path. The legacy dispatcher must not race it.
+                AND COALESCE(
+                    payload->>'deliveryProtocolVersion',
+                    payload->'metadata'->>'deliveryProtocolVersion'
+                ) IS DISTINCT FROM %s
                 AND payload->>'deliverAt' <= %s
             ORDER BY payload->>'deliverAt' ASC
             LIMIT %s
             """,
-            (cutoff_iso, bounded_limit),
+            (ECHO_DELAYED_REPLY_SCHEMA_VERSION, cutoff_iso, bounded_limit),
         )
 
         dispatched: List[Dict[str, Any]] = []

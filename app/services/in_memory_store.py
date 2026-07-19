@@ -67,6 +67,7 @@ from app.services.owner_truth_legacy_migration import (
     LegacyMigrationLegacyRows,
 )
 from app.services.user_identity import stable_user_id
+from app.services.echo_delayed_reply_effects import ECHO_DELAYED_REPLY_SCHEMA_VERSION
 from app.observability.events import (
     EvidenceEventConflict,
     canonicalize_evidence_event,
@@ -2493,6 +2494,14 @@ class InMemoryStore:
                 if len(due) >= bounded_limit:
                     break
                 if reply.get("deliveryState") != "scheduled":
+                    continue
+                metadata = reply.get("metadata") if isinstance(reply.get("metadata"), dict) else {}
+                # V4 replies are admitted only by the receipt-first consumer.
+                # The legacy scheduled -> readyForProvider path must never race it.
+                if (
+                    reply.get("deliveryProtocolVersion")
+                    or metadata.get("deliveryProtocolVersion")
+                ) == ECHO_DELAYED_REPLY_SCHEMA_VERSION:
                     continue
                 deliver_at = str(reply.get("deliverAt") or "")
                 if not deliver_at or deliver_at > cutoff_iso:

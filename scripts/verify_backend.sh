@@ -96,6 +96,13 @@ test -f db/migrations/0023_owner_truth_legacy_migration_inventory.json
 test -f app/domain/owner_truth/legacy_migration.py
 test -f app/services/owner_truth_legacy_migration.py
 test -f app/services/owner_truth_legacy_shadow_parity.py
+test -f db/migrations/0024_echo_delayed_reply_answer_completion.sql
+test -f db/migrations/0024_echo_delayed_reply_answer_completion.json
+test -f app/services/echo_delayed_reply_effects.py
+test -f app/services/echo_delayed_reply_service.py
+test -f scripts/run-backend-echo-delayed-reply-answer-inbox-contract-gate.sh
+test -f scripts/backend-echo-delayed-reply-atomic-completion-postgres-smoke.py
+test -f scripts/run-backend-echo-delayed-reply-atomic-completion-postgres-smoke.sh
 test -f scripts/backend-owner-truth-legacy-migration-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-legacy-migration-postgres-smoke.sh
 test -f scripts/backend-owner-truth-legacy-shadow-parity-postgres-smoke.py

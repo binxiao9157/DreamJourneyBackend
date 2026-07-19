@@ -1,0 +1,11 @@
+{
+  "version": "0024",
+  "name": "echo_delayed_reply_answer_completion",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "echoDelayedReplyV1Shadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "echoDelayedReplyAnswerV1": false
+  }
+}
