@@ -195,6 +195,69 @@ class OwnerTruthKnowledgeDimensionConfirmationTests(unittest.TestCase):
 
         self.assertEqual(record["vaultId"], self.vault)
 
+    def test_postgres_projection_query_selects_and_returns_vault_scope(self) -> None:
+        row = {
+            "vault_id": self.vault,
+            "id": str(uuid4()),
+            "command_id_hash": _hash("command"),
+            "command_payload_hash": _hash("payload"),
+            "memory_id": self.memory.memory_id,
+            "memory_version_id": self.memory.memory_version_id,
+            "bound_content_hash": self.content_hash,
+            "owner_subject_id": self.owner,
+            "actor_subject_id": self.owner,
+            "authority_epoch": 4,
+            "dimension": "keyDecisions",
+            "covered_facets": ["choice", "reason"],
+            "confirmation_method": "ownerExplicitSelection",
+            "schema_version": "owner-truth-knowledge-dimension-confirmation-v1",
+            "ui_schema_version": "knowledge-dimension-review-v1",
+        }
+
+        class Cursor:
+            def __init__(self) -> None:
+                self.executions: list[str] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                return None
+
+            def execute(self, query, params) -> None:
+                del params
+                self.executions.append(str(query))
+
+            def fetchone(self):
+                return {
+                    "owner_subject_id": self_owner,
+                    "authority_epoch": 4,
+                    "status": "active",
+                }
+
+            def fetchall(self):
+                return [row]
+
+        class Connection:
+            def __init__(self, cursor: Cursor) -> None:
+                self._cursor = cursor
+
+            def cursor(self, *, row_factory=None):
+                del row_factory
+                return self._cursor
+
+        self_owner = self.owner
+        cursor = Cursor()
+        records = PostgresOwnerTruthKnowledgeDimensionConfirmationRepository(
+            Connection(cursor)
+        ).list_for_projection(
+            context=self.context,
+            memory_version_ids=(self.memory.memory_version_id,),
+        )
+
+        self.assertEqual(records[0]["vaultId"], self.vault)
+        self.assertIn("SELECT vault_id, id", cursor.executions[-1])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

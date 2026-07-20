@@ -545,7 +545,7 @@ class PostgresOwnerTruthKnowledgeDimensionConfirmationRepository:
             self._assert_active_vault(cursor, context=context, authority_epoch=None)
             cursor.execute(
                 f"""
-                SELECT id, command_id_hash, command_payload_hash, memory_id,
+                SELECT vault_id, id, command_id_hash, command_payload_hash, memory_id,
                     memory_version_id, bound_content_hash, owner_subject_id,
                     actor_subject_id, authority_epoch, dimension, covered_facets,
                     confirmation_method, schema_version, ui_schema_version
