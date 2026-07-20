@@ -206,6 +206,9 @@ test -f app/domain/owner_truth/interview_candidate_batch_decision.py
 test -f app/services/owner_truth_interview_candidate_batch_decision.py
 test -f tests/test_owner_truth_interview_candidate_batch_decision.py
 test -f tests/test_owner_truth_interview_candidate_batch_decision_migration_contract.py
+test -f app/domain/owner_truth/interview_candidate_single_review.py
+test -f app/services/owner_truth_interview_candidate_single_review.py
+test -f tests/test_owner_truth_interview_candidate_single_review.py
 test -f db/migrations/0030_owner_truth_interview_pacing_state.sql
 test -f db/migrations/0030_owner_truth_interview_pacing_state.json
 test -f app/services/owner_truth_interview_session_orchestration.py

@@ -4,9 +4,10 @@
 The smoke creates an isolated database, applies all migrations, then proves
 owner/vault isolation, command replay, optimistic version checks, append-only
 message records, restart reads, and the controlled path from an acknowledged
-batch to one conversation Source plus a default-off extraction effect. It
-proves that this path still creates no Candidate decision or MemoryVersion.
-It never writes to the configured application database.
+batch to one conversation Source plus a default-off extraction effect. It also
+proves partial ordinary and individual sensitive Candidate review, while
+keeping MemoryVersion activation outside this private review lane. It never
+writes to the configured application database.
 """
 
 from __future__ import annotations
@@ -51,6 +52,10 @@ from app.domain.owner_truth.interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchAcceptCommand,
     OwnerTruthInterviewCandidateBatchSelection,
 )
+from app.domain.owner_truth.interview_candidate_single_review import (
+    OwnerTruthInterviewCandidateSingleReviewCommand,
+)
+from app.domain.owner_truth.candidate_decisions import CandidateReviewAction
 from app.domain.owner_truth.candidate_extraction import (
     CandidateEvidenceSpan,
     CandidateProposal,
@@ -64,6 +69,7 @@ from app.domain.owner_truth.contracts import (
     PerspectiveType,
     SensitivityLevel,
 )
+from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
 from app.services.owner_truth_candidate_extraction import (
@@ -78,6 +84,9 @@ from app.services.owner_truth_interview_candidate_review import (
 )
 from app.services.owner_truth_interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchDecisionService,
+)
+from app.services.owner_truth_interview_candidate_single_review import (
+    OwnerTruthInterviewCandidateSingleReviewService,
 )
 from app.services.owner_truth_interview_session_orchestration import (
     InterviewSessionOrchestrationSignals,
@@ -642,6 +651,44 @@ def main() -> None:
             and len(remaining_composition.single_candidates) == 1,
             "partial batch acceptance must leave the sensitive Candidate pending for single review",
         )
+        single_item = remaining_composition.single_candidates[0]
+        single_review_command = OwnerTruthInterviewCandidateSingleReviewCommand(
+            command_id="interview-single-review-smoke",
+            review_batch_id=review_batch.review_batch.review_batch_id,
+            candidate_id=single_item.candidate_id,
+            expected_candidate_version=single_item.candidate_row_version,
+            action=CandidateReviewAction.REJECT,
+            corrected_value=None,
+            corrected_value_schema_version=OWNER_TRUTH_SCHEMA_VERSION,
+            reason_code="ownerReviewed",
+        )
+        single_review_service = OwnerTruthInterviewCandidateSingleReviewService(store)
+        single_reviewed = single_review_service.review_single(
+            command=single_review_command,
+            context=context,
+        )
+        replayed_single_review = single_review_service.review_single(
+            command=single_review_command,
+            context=context,
+        )
+        require(
+            single_reviewed.outcome == "created"
+            and single_reviewed.review.decision.value == "rejected",
+            "sensitive Candidate must receive one terminal single-review DecisionReceipt",
+        )
+        require(
+            replayed_single_review.outcome == "deduplicated"
+            and replayed_single_review.review.outcome == "deduplicated",
+            "single-review replay must not create another DecisionReceipt",
+        )
+        exhausted_composition = OwnerTruthInterviewCandidateReviewCompositionService(store).compose(
+            review_batch_id=review_batch.review_batch.review_batch_id,
+            context=context,
+        )
+        require(
+            exhausted_composition.readiness.value == "noCandidates",
+            "terminal single review must leave no pending Candidate in the admitted batch",
+        )
 
         follow_up_thread_id = str(uuid.uuid4())
         follow_up_session_id = str(uuid.uuid4())
@@ -709,8 +756,8 @@ def main() -> None:
                     (context.vault_id, review_batch.review_batch.review_batch_id),
                 )
                 require(
-                    cursor.fetchone()[0] == 1,
-                    "partial batch acceptance must retain one root command ledger record",
+                    cursor.fetchone()[0] == 2,
+                    "partial batch and sensitive single review must retain two root command ledger records",
                 )
                 cursor.execute(
                     """
@@ -731,13 +778,13 @@ def main() -> None:
                         )
                     elif relation == "decision_receipts":
                         require(
-                            count == 1,
-                            "partial batch acceptance must create exactly one Candidate DecisionReceipt",
+                            count == 2,
+                            "partial batch and sensitive single review must create exactly two Candidate DecisionReceipts",
                         )
                     else:
                         require(
                             count == 0,
-                            f"partial batch acceptance must not activate owner_truth.{relation}",
+                            f"interview Candidate review must not activate owner_truth.{relation}",
                         )
                 immutable_message_rejected = False
                 try:

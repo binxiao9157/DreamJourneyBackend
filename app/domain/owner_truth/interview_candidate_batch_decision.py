@@ -147,6 +147,10 @@ class OwnerTruthInterviewCandidateBatchAcceptCommand:
         return sha256(self.command_id.encode("utf-8")).hexdigest()
 
     @property
+    def selection_count(self) -> int:
+        return len(self.selections)
+
+    @property
     def payload_hash(self) -> str:
         return sha256(
             _canonical_json(

@@ -84,6 +84,18 @@ class OwnerTruthInterviewCandidateBatchDecisionStore(Protocol):
         ...
 
 
+class OwnerTruthInterviewCandidateDecisionLedgerCommand(Protocol):
+    """Minimal root-command shape persisted by the review-batch ledger."""
+
+    review_batch_id: str
+    command_id_hash: str
+    payload_hash: str
+    selection_count: int
+
+    def batch_decision_id(self, *, vault_id: str) -> str:
+        ...
+
+
 def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
     if not isinstance(context, OwnerTruthCommandContext):
         raise OwnerTruthInterviewCandidateBatchDecisionConflict(
@@ -110,7 +122,7 @@ class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
     def claim(
         self,
         *,
-        command: OwnerTruthInterviewCandidateBatchAcceptCommand,
+        command: OwnerTruthInterviewCandidateDecisionLedgerCommand,
         context: OwnerTruthCommandContext,
         authority_epoch: int,
     ) -> tuple[str, OwnerTruthInterviewCandidateBatchDecisionLedgerRecord]:
@@ -122,7 +134,7 @@ class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
             payload_hash=command.payload_hash,
             owner_subject_id=context.owner_subject_id,
             authority_epoch=authority_epoch,
-            selection_count=len(command.selections),
+            selection_count=command.selection_count,
         )
         with self._lock:
             existing = self._records.get(key)
@@ -135,7 +147,7 @@ class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
     def lookup(
         self,
         *,
-        command: OwnerTruthInterviewCandidateBatchAcceptCommand,
+        command: OwnerTruthInterviewCandidateDecisionLedgerCommand,
         context: OwnerTruthCommandContext,
     ) -> OwnerTruthInterviewCandidateBatchDecisionLedgerRecord | None:
         with self._lock:
@@ -168,7 +180,7 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
     def claim(
         self,
         *,
-        command: OwnerTruthInterviewCandidateBatchAcceptCommand,
+        command: OwnerTruthInterviewCandidateDecisionLedgerCommand,
         context: OwnerTruthCommandContext,
         authority_epoch: int,
     ) -> tuple[str, OwnerTruthInterviewCandidateBatchDecisionLedgerRecord]:
@@ -179,7 +191,7 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
             payload_hash=command.payload_hash,
             owner_subject_id=context.owner_subject_id,
             authority_epoch=authority_epoch,
-            selection_count=len(command.selections),
+            selection_count=command.selection_count,
         )
         with self._cursor() as cursor:
             cursor.execute(
@@ -259,7 +271,7 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
     def lookup(
         self,
         *,
-        command: OwnerTruthInterviewCandidateBatchAcceptCommand,
+        command: OwnerTruthInterviewCandidateDecisionLedgerCommand,
         context: OwnerTruthCommandContext,
     ) -> OwnerTruthInterviewCandidateBatchDecisionLedgerRecord | None:
         with self._cursor() as cursor:
@@ -322,7 +334,7 @@ def _assert_ledger_replay(
 def _assert_ledger_command_identity(
     *,
     existing: OwnerTruthInterviewCandidateBatchDecisionLedgerRecord,
-    command: OwnerTruthInterviewCandidateBatchAcceptCommand,
+    command: OwnerTruthInterviewCandidateDecisionLedgerCommand,
     context: OwnerTruthCommandContext,
 ) -> None:
     if (
@@ -330,7 +342,7 @@ def _assert_ledger_command_identity(
         or existing.command_id_hash != command.command_id_hash
         or existing.payload_hash != command.payload_hash
         or existing.owner_subject_id != context.owner_subject_id
-        or existing.selection_count != len(command.selections)
+        or existing.selection_count != command.selection_count
     ):
         raise OwnerTruthInterviewCandidateBatchDecisionConflict(
             "commandId cannot be reused with a different interview batch decision"
@@ -461,6 +473,7 @@ __all__ = [
     "OwnerTruthInterviewCandidateBatchAcceptResult",
     "OwnerTruthInterviewCandidateBatchDecisionLedgerRecord",
     "OwnerTruthInterviewCandidateBatchDecisionService",
+    "OwnerTruthInterviewCandidateDecisionLedgerCommand",
     "OwnerTruthInterviewCandidateBatchDecisionStore",
     "PostgresOwnerTruthInterviewCandidateBatchDecisionRepository",
 ]
