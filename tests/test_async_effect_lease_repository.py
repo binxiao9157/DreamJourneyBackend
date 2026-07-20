@@ -75,6 +75,21 @@ class AsyncEffectLeaseRepositoryTests(unittest.TestCase):
         with self.assertRaises(AsyncEffectLeaseLost):
             self.repository.heartbeat(first, lease_seconds=30)
 
+    def test_expired_lease_preview_is_read_only_and_omits_job_identifiers(self):
+        lease = self.claim("worker-a")
+        self.assertIsNotNone(lease)
+        self.clock.advance(31)
+
+        previews = self.repository.preview_expired_leases(limit=5)
+
+        self.assertEqual(len(previews), 1)
+        self.assertEqual(previews[0].job_type, self.intent.job_type)
+        self.assertEqual(previews[0].attempt, 1)
+        self.assertEqual(self.repository.attempt_state(lease.job_id, 1), "started")
+        self.assertNotIn(lease.job_id, str(previews[0]))
+        self.assertNotIn(lease.operation_id, str(previews[0]))
+        self.assertNotIn("worker-a", str(previews[0]))
+
     def test_heartbeat_renews_a_current_lease_then_retry_release_records_attempt(self):
         lease = self.claim()
         self.assertIsNotNone(lease)

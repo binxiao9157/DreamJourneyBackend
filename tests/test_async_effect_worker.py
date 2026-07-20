@@ -4,18 +4,25 @@ from contextlib import contextmanager
 import unittest
 
 from app.async_effects.lease_repository import AsyncEffectJobPreview
+from app.async_effects.lease_repository import AsyncEffectExpiredLeasePreview
 from app.async_effects.worker import AsyncEffectWorkerRuntime
 from app.core.config import Settings
 
 
 class _LeaseRepository:
-    def __init__(self, previews):
+    def __init__(self, previews, expired_previews=()):
         self.previews = list(previews)
+        self.expired_previews = list(expired_previews)
         self.preview_calls = 0
+        self.expired_preview_calls = 0
 
     def preview_eligible(self, *, limit: int):
         self.preview_calls += 1
         return self.previews[:limit]
+
+    def preview_expired_leases(self, *, limit: int):
+        self.expired_preview_calls += 1
+        return self.expired_previews[:limit]
 
 
 class _FailingLeaseRepository(_LeaseRepository):
@@ -93,6 +100,30 @@ class AsyncEffectWorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(store.uow_calls, 1)
         self.assertEqual(result["readinessEvidence"]["observationState"], "blocked")
         self.assertEqual(result["readinessEvidence"]["backlogEligibleCount"], 1)
+        self.assertEqual(result["workerLossEvidence"]["observationState"], "clear")
+
+    def test_shadow_once_reports_expired_lease_without_reclaiming_it(self):
+        store = _Store()
+        store.repository = _LeaseRepository(
+            (),
+            expired_previews=(
+                AsyncEffectExpiredLeasePreview(
+                    job_type="timeLetter.delivery",
+                    attempt=1,
+                    lease_until="2026-07-19T00:00:00+00:00",
+                    lease_owner="worker-lost",
+                ),
+            ),
+        )
+        worker = AsyncEffectWorkerRuntime(settings=Settings(), store=store, worker_id="worker-test")
+
+        result = worker.shadow_once()
+
+        self.assertEqual(result["status"], "observed")
+        self.assertEqual(result["expiredLeaseCount"], 1)
+        self.assertEqual(result["workerLossEvidence"]["observationState"], "observed")
+        self.assertTrue(result["workerLossEvidence"]["requiresManualReview"])
+        self.assertEqual(store.repository.expired_preview_calls, 1)
 
     def test_shadow_once_fails_closed_when_readiness_is_not_ready(self):
         store = _Store(ready=False)

@@ -1,0 +1,14 @@
+{
+  "version": "0028",
+  "name": "async_effect_worker_loss_observations",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "asyncEffectV1WorkerLossEvidenceShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "asyncEffectV1": false,
+    "asyncEffectWorker": false,
+    "asyncEffectDeadLetterReplayV1": false,
+    "asyncEffectWorkerLossAutoRecoverV1": false
+  }
+}

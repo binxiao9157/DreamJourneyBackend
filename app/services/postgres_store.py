@@ -91,6 +91,9 @@ from app.async_effects.dead_letter_repository import PostgresAsyncEffectDeadLett
 from app.async_effects.dead_letter_replay_repository import (
     PostgresAsyncEffectDeadLetterReplayRequestRepository,
 )
+from app.async_effects.worker_loss_observation_repository import (
+    PostgresAsyncEffectWorkerLossObservationRepository,
+)
 from app.async_effects.target_admission import (
     PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository,
     PostgresOwnerTruthSourceTargetAdmissionRepository,
@@ -266,6 +269,20 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("async effect dead-letter replay persistence requires an active unit of work")
         return PostgresAsyncEffectDeadLetterReplayRequestRepository(active.connection)
+
+    def async_effect_worker_loss_observation_repository(
+        self,
+    ) -> PostgresAsyncEffectWorkerLossObservationRepository:
+        """Return append-only, value-free worker-loss evidence persistence.
+
+        The repository records only expired-lease aggregate evidence. It cannot
+        claim/requeue a job, change a job attempt, or invoke a Provider.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("async effect worker-loss evidence requires an active unit of work")
+        return PostgresAsyncEffectWorkerLossObservationRepository(active.connection)
 
     def owner_truth_source_target_admission_repository(
         self,

@@ -18,6 +18,7 @@ from app.async_effects.contracts import (
     resolve_async_effect_runtime_status,
 )
 from app.async_effects.readiness_evidence import build_async_effect_worker_readiness_evidence
+from app.async_effects.worker_loss_evidence import build_async_effect_worker_loss_evidence
 from app.core.config import Settings
 from app.services.store_factory import close_store, make_store, open_store
 
@@ -55,7 +56,26 @@ class AsyncEffectWorkerRuntime:
                 correlation_id="async-effect-worker-shadow",
                 command_id="asyncEffectWorkerShadow",
             ):
-                previews = repository_factory().preview_eligible(limit=limit)
+                repository = repository_factory()
+                previews = repository.preview_eligible(limit=limit)
+                expired_preview = getattr(repository, "preview_expired_leases", None)
+                if callable(expired_preview):
+                    try:
+                        expired_leases = expired_preview(limit=limit)
+                        worker_loss_evidence = self._worker_loss_evidence(
+                            status,
+                            previews=expired_leases,
+                        )
+                    except Exception:
+                        worker_loss_evidence = self._worker_loss_evidence(
+                            status,
+                            collection_error_code="asyncEffectWorkerLossObservationFailed",
+                        )
+                else:
+                    worker_loss_evidence = self._worker_loss_evidence(
+                        status,
+                        store_supported=False,
+                    )
         except Exception:
             return {
                 "mode": "shadow",
@@ -75,6 +95,8 @@ class AsyncEffectWorkerRuntime:
             "eligibleJobCount": len(previews),
             "eligibleJobTypes": sorted({item.job_type for item in previews}),
             "readinessEvidence": self._readiness_evidence(status, previews=previews),
+            "expiredLeaseCount": worker_loss_evidence["expiredLeaseCount"],
+            "workerLossEvidence": worker_loss_evidence,
         }
 
     def run_once(self) -> dict[str, Any]:
@@ -123,6 +145,26 @@ class AsyncEffectWorkerRuntime:
             worker_id=self._worker_id,
             previews=previews,
             runnable_handler_count=0,
+            observed_at=observed_at,
+            expires_at=observed_at + timedelta(minutes=5),
+            store_supported=store_supported,
+            collection_error_code=collection_error_code,
+        )
+        return evidence.value_free_summary(now=observed_at)
+
+    def _worker_loss_evidence(
+        self,
+        status: Any,
+        *,
+        previews: Iterable[Any] = (),
+        store_supported: bool = True,
+        collection_error_code: Optional[str] = None,
+    ) -> dict[str, Any]:
+        observed_at = datetime.now(timezone.utc)
+        evidence = build_async_effect_worker_loss_evidence(
+            runtime_status=status,
+            observer_worker_id=self._worker_id,
+            previews=previews,
             observed_at=observed_at,
             expires_at=observed_at + timedelta(minutes=5),
             store_supported=store_supported,

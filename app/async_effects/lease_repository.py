@@ -7,7 +7,7 @@ hold a request/job Unit of Work for every Postgres mutation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import re
 from threading import RLock
@@ -71,6 +71,18 @@ def _normalize_retry_seconds(retry_seconds: object) -> int:
     return normalized
 
 
+def _normalize_preview_limit(limit: object) -> int:
+    if isinstance(limit, bool):
+        raise AsyncEffectLeaseError("preview limit must be a positive integer")
+    try:
+        normalized = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise AsyncEffectLeaseError("preview limit must be a positive integer") from exc
+    if normalized < 1:
+        raise AsyncEffectLeaseError("preview limit must be a positive integer")
+    return min(normalized, 100)
+
+
 def _normalize_job_types(job_types: Iterable[str]) -> tuple[str, ...]:
     normalized = tuple(sorted({str(item or "").strip() for item in job_types if str(item or "").strip()}))
     if not normalized:
@@ -112,6 +124,35 @@ class AsyncEffectJobPreview:
     state: str
     attempt: int
     available_at: str
+
+
+@dataclass(frozen=True)
+class AsyncEffectExpiredLeasePreview:
+    """Ephemeral expired-lease coordinates for value-free worker-loss evidence.
+
+    This preview deliberately omits job, operation, vault, payload, and
+    resource identifiers. ``lease_owner`` is retained only in process long
+    enough for the evidence builder to derive an irreversible hash; it is
+    excluded from ``repr`` and must never be persisted or summarized.
+    """
+
+    job_type: str
+    attempt: int
+    lease_until: str
+    lease_owner: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        normalized_job_type = str(self.job_type or "").strip()
+        if not _WORKER_IDENTIFIER_PATTERN.fullmatch(normalized_job_type):
+            raise AsyncEffectLeaseError("expired lease job_type must be an opaque identifier")
+        if isinstance(self.attempt, bool) or not isinstance(self.attempt, int) or self.attempt < 1:
+            raise AsyncEffectLeaseError("expired lease attempt must be a positive integer")
+        normalized_lease_until = str(self.lease_until or "").strip()
+        if not normalized_lease_until:
+            raise AsyncEffectLeaseError("expired lease lease_until is required")
+        object.__setattr__(self, "job_type", normalized_job_type)
+        object.__setattr__(self, "lease_until", normalized_lease_until)
+        object.__setattr__(self, "lease_owner", _normalize_worker_id(self.lease_owner))
 
 
 @dataclass(frozen=True)
@@ -340,6 +381,32 @@ class InMemoryAsyncEffectLeaseRepository:
         with self._lock:
             row = self._attempts.get((job_id, attempt))
             return None if row is None else str(row["state"])
+
+    def preview_expired_leases(self, *, limit: int = 20) -> list[AsyncEffectExpiredLeasePreview]:
+        """Read expired leases without reclaiming or changing an attempt."""
+
+        normalized_limit = _normalize_preview_limit(limit)
+        now = self._now()
+        with self._lock:
+            candidates = [
+                job
+                for job in self._jobs.values()
+                if job["state"] == AsyncEffectJobState.LEASED.value
+                and job["cancelRequestedAt"] is None
+                and job["leaseUntil"] is not None
+                and job["leaseUntil"] <= now
+                and job["leaseOwner"] is not None
+            ]
+            candidates.sort(key=lambda item: (item["leaseUntil"], item["jobId"]))
+            return [
+                AsyncEffectExpiredLeasePreview(
+                    job_type=str(job["jobType"]),
+                    attempt=int(job["attempt"]),
+                    lease_until=_utc_iso(job["leaseUntil"]),
+                    lease_owner=str(job["leaseOwner"]),
+                )
+                for job in candidates[:normalized_limit]
+            ]
 
     def _is_claimable(self, job: Mapping[str, Any], now: datetime) -> bool:
         state = str(job["state"])
@@ -783,7 +850,7 @@ class PostgresAsyncEffectLeaseRepository:
             return self._preview_from_row(row)
 
     def preview_eligible(self, *, limit: int = 20) -> list[AsyncEffectJobPreview]:
-        normalized_limit = max(1, min(int(limit), 100))
+        normalized_limit = _normalize_preview_limit(limit)
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -800,6 +867,39 @@ class PostgresAsyncEffectLeaseRepository:
                 (normalized_limit,),
             )
             return [self._preview_from_row(row) for row in cursor.fetchall()]
+
+    def preview_expired_leases(self, *, limit: int = 20) -> list[AsyncEffectExpiredLeasePreview]:
+        """Read expired lease evidence without locking, claiming, or retrying.
+
+        This is intentionally narrower than ``preview_eligible``: it excludes
+        pending/retryable jobs and returns no business identifiers. Callers may
+        only build value-free worker-loss evidence from the result.
+        """
+
+        normalized_limit = _normalize_preview_limit(limit)
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT job_type, attempt, lease_until, lease_owner
+                FROM async_effects.jobs
+                WHERE state = 'leased'
+                  AND cancel_requested_at IS NULL
+                  AND lease_until <= NOW()
+                  AND lease_owner IS NOT NULL
+                ORDER BY lease_until ASC, created_at ASC, job_id ASC
+                LIMIT %s
+                """,
+                (normalized_limit,),
+            )
+            return [
+                AsyncEffectExpiredLeasePreview(
+                    job_type=str(row["job_type"]),
+                    attempt=int(row["attempt"]),
+                    lease_until=_utc_iso(row["lease_until"]),
+                    lease_owner=str(row["lease_owner"]),
+                )
+                for row in cursor.fetchall()
+            ]
 
     def _raise_current_lease_error(self, cursor: Any, lease: AsyncEffectJobLease) -> None:
         cursor.execute(
@@ -846,6 +946,7 @@ class PostgresAsyncEffectLeaseRepository:
 __all__ = [
     "AsyncEffectCancelResult",
     "AsyncEffectJobCompletion",
+    "AsyncEffectExpiredLeasePreview",
     "AsyncEffectJobLease",
     "AsyncEffectJobPreview",
     "AsyncEffectLeaseCancelled",
