@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# G0-only: validates that business completion, in-app messages, and delivery
-# observations remain separate. It never registers a device token, invokes
-# APNs, schedules a local notification, or requires Postgres.
+# G0-only: validates that business completion, in-app messages, hash-only
+# subscription rotation/revoke, and delivery observations remain separate. It
+# never sends a raw device token, invokes APNs, schedules a local notification,
+# or requires Postgres.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 
