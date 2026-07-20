@@ -149,7 +149,9 @@ class OwnerTruthPersonaAuthorityCommandContext:
     owner_subject_id: str
     actor_subject_id: str
     current_persona_version: int
+    authority_epoch: int = 0
     subject_kind: OwnerTruthPersonaAuthoritySubjectKind = OwnerTruthPersonaAuthoritySubjectKind.SELF_OWNER
+    policy_version: str = OWNER_TRUTH_PERSONA_AUTHORITY_COMMAND_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "vault_id", _identifier(self.vault_id, field="vault_id"))
@@ -168,6 +170,11 @@ class OwnerTruthPersonaAuthorityCommandContext:
             "current_persona_version",
             _non_negative_version(self.current_persona_version, field="current_persona_version"),
         )
+        object.__setattr__(
+            self,
+            "authority_epoch",
+            _non_negative_version(self.authority_epoch, field="authority_epoch"),
+        )
         try:
             subject_kind = OwnerTruthPersonaAuthoritySubjectKind(self.subject_kind)
         except ValueError as exc:
@@ -176,6 +183,11 @@ class OwnerTruthPersonaAuthorityCommandContext:
                 reason_code="invalidPersonaSubjectKind",
             ) from exc
         object.__setattr__(self, "subject_kind", subject_kind)
+        object.__setattr__(
+            self,
+            "policy_version",
+            _identifier(self.policy_version, field="policy_version"),
+        )
 
     def scope_hash(self, *, persona_id: str) -> str:
         return _digest(
