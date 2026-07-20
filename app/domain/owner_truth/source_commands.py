@@ -13,7 +13,7 @@ import json
 from typing import Any, Mapping
 from uuid import UUID, uuid5
 
-from .contracts import OwnerTruthContractError, require_nonblank, require_uuid
+from .contracts import OwnerTruthContractError, SourceKind, require_nonblank, require_uuid
 from .ontology import OWNER_TRUTH_SCHEMA_VERSION
 
 
@@ -88,6 +88,7 @@ class CreateTextSourceCommand:
     expected_version: int
     text: str
     metadata: Mapping[str, Any]
+    source_kind: SourceKind = SourceKind.TEXT
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
@@ -99,6 +100,13 @@ class CreateTextSourceCommand:
             raise OwnerTruthContractError("text exceeds maximum source length")
         object.__setattr__(self, "text", normalized_text)
         object.__setattr__(self, "metadata", _normalized_metadata(self.metadata))
+        try:
+            source_kind = SourceKind(self.source_kind)
+        except (TypeError, ValueError) as exc:
+            raise OwnerTruthContractError("source_kind is not supported") from exc
+        if source_kind not in {SourceKind.TEXT, SourceKind.CONVERSATION}:
+            raise OwnerTruthContractError("CreateTextSourceCommand supports text or conversation sources")
+        object.__setattr__(self, "source_kind", source_kind)
 
     def write_record(self, *, context: OwnerTruthCommandContext) -> "OwnerTruthSourceWriteRecord":
         payload = {
@@ -108,6 +116,11 @@ class CreateTextSourceCommand:
             "text": self.text,
             "metadata": self.metadata,
         }
+        # Keep legacy text-source command fingerprints stable. Conversation
+        # sources are a new, explicit admission path and therefore include
+        # their distinct kind in the immutable command/source hashes.
+        if self.source_kind is not SourceKind.TEXT:
+            payload["sourceKind"] = self.source_kind.value
         payload_hash = _sha256(_canonical_json(payload))
         command_id_hash = _sha256(self.command_id)
         receipt_id = str(
@@ -120,6 +133,8 @@ class CreateTextSourceCommand:
             "schemaVersion": OWNER_TRUTH_CREATE_SOURCE_SCHEMA_VERSION,
             "text": self.text,
         }
+        if self.source_kind is not SourceKind.TEXT:
+            source_payload["sourceKind"] = self.source_kind.value
         return OwnerTruthSourceWriteRecord(
             receipt_id=receipt_id,
             command_id_hash=command_id_hash,
@@ -133,6 +148,7 @@ class CreateTextSourceCommand:
             content_hash=_sha256(_canonical_json(source_payload)),
             content_payload=source_payload,
             metadata=self.metadata,
+            source_kind=self.source_kind,
         )
 
 
@@ -150,6 +166,16 @@ class OwnerTruthSourceWriteRecord:
     content_hash: str
     content_payload: Mapping[str, Any]
     metadata: Mapping[str, Any]
+    source_kind: SourceKind = SourceKind.TEXT
+
+    def __post_init__(self) -> None:
+        try:
+            source_kind = SourceKind(self.source_kind)
+        except (TypeError, ValueError) as exc:
+            raise OwnerTruthContractError("source_kind is not supported") from exc
+        if source_kind not in {SourceKind.TEXT, SourceKind.CONVERSATION}:
+            raise OwnerTruthContractError("OwnerTruthSourceWriteRecord supports text or conversation sources")
+        object.__setattr__(self, "source_kind", source_kind)
 
 
 @dataclass(frozen=True)

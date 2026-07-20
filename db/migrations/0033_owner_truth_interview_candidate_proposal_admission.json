@@ -1,0 +1,13 @@
+{
+  "version": "0033",
+  "name": "owner_truth_interview_candidate_proposal_admission",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthInterviewCandidateProposalAdmissionShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthConversationV1": false,
+    "guidedInterviewM0A": false,
+    "ownerTruthInterviewCandidateProposalM0A": false
+  }
+}

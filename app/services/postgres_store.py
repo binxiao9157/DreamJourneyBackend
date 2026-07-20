@@ -119,6 +119,9 @@ from app.services.owner_truth_legacy_migration import (
 from app.services.owner_truth_conversation import (
     PostgresOwnerTruthConversationRepository,
 )
+from app.services.owner_truth_interview_candidate_proposal import (
+    PostgresOwnerTruthInterviewCandidateProposalRepository,
+)
 
 
 class PostgresStore:
@@ -381,6 +384,21 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth conversation requires an active unit of work")
         return PostgresOwnerTruthConversationRepository(active.connection)
+
+    def owner_truth_interview_candidate_proposal_repository(
+        self,
+    ) -> PostgresOwnerTruthInterviewCandidateProposalRepository:
+        """Return the acknowledged-review-batch proposal admission port.
+
+        The port can create only a private conversation Source plus a
+        default-off candidate-extraction effect. It never creates a Candidate
+        decision or promotes a MemoryVersion.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("interview candidate proposal admission requires an active unit of work")
+        return PostgresOwnerTruthInterviewCandidateProposalRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(
@@ -4748,7 +4766,7 @@ class PostgresStore:
                         id, vault_id, owner_subject_id, source_kind, state,
                         source_version, content_hash, content_payload,
                         policy_version, authority_epoch, metadata
-                    ) VALUES (%s, %s, %s, 'text', 'active', 1, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, 'active', 1, %s, %s, %s, %s, %s)
                     RETURNING source_version, authority_epoch, content_hash
                     """,
                     self._adapt_params(
@@ -4756,6 +4774,7 @@ class PostgresStore:
                             record.source_id,
                             record.vault_id,
                             record.owner_subject_id,
+                            record.source_kind.value,
                             record.content_hash,
                             dict(record.content_payload),
                             record.policy_version,

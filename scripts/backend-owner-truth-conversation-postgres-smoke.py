@@ -3,8 +3,10 @@
 
 The smoke creates an isolated database, applies all migrations, then proves
 owner/vault isolation, command replay, optimistic version checks, append-only
-message records, restart reads, and the absence of Source/Candidate/Memory
-promotion. It never writes to the configured application database.
+message records, restart reads, and the controlled path from an acknowledged
+batch to one conversation Source plus a default-off extraction effect. It
+proves that this path still creates no Candidate decision or MemoryVersion.
+It never writes to the configured application database.
 """
 
 from __future__ import annotations
@@ -42,8 +44,14 @@ from app.domain.owner_truth.conversation import (
     StartInterviewSessionCommand,
 )
 from app.domain.owner_truth.interview_orchestration import InterviewAction
+from app.domain.owner_truth.interview_candidate_proposal import (
+    AdmitInterviewReviewBatchForCandidateProposalCommand,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_conversation import OwnerTruthConversationService
+from app.services.owner_truth_interview_candidate_proposal import (
+    OwnerTruthInterviewCandidateProposalService,
+)
 from app.services.owner_truth_interview_session_orchestration import (
     InterviewSessionOrchestrationSignals,
     OwnerTruthInterviewSessionOrchestrationService,
@@ -112,6 +120,19 @@ def invoke_orchestration(
         )
 
 
+def invoke_candidate_proposal(
+    store: PostgresStore,
+    *,
+    command_id: str,
+    operation: Callable[[OwnerTruthInterviewCandidateProposalService], object],
+) -> object:
+    with store.request_unit_of_work(
+        correlation_id=f"owner-truth-interview-candidate-proposal-smoke-{command_id}",
+        command_id=command_id,
+    ):
+        return operation(OwnerTruthInterviewCandidateProposalService(store))
+
+
 def main() -> None:
     base_dsn = os.environ.get("DATABASE_URL", settings.database_url).strip()
     require(base_dsn, "DATABASE_URL is required")
@@ -135,7 +156,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require("0032" in applied["appliedVersions"], "conversation topic switch migration must apply")
+        require("0033" in applied["appliedVersions"], "review batch candidate proposal migration must apply")
 
         store = PostgresStore(dsn=test_dsn, pool_min_size=1, pool_max_size=2)
         store.open_pool(wait=True)
@@ -415,6 +436,52 @@ def main() -> None:
             "review acknowledgement replay must deduplicate",
         )
 
+        with psycopg.connect(test_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM owner_truth.sources WHERE vault_id = %s", (context.vault_id,))
+                require(
+                    cursor.fetchone()[0] == 0,
+                    "acknowledgement alone must not promote a private message into a Source",
+                )
+
+        candidate_proposal = invoke_candidate_proposal(
+            store,
+            command_id="admit-conversation-review-batch-candidate-proposal",
+            operation=lambda service: service.admit_review_batch(
+                command=AdmitInterviewReviewBatchForCandidateProposalCommand(
+                    command_id="admit-conversation-review-batch-candidate-proposal",
+                    review_batch_id=review_batch.review_batch.review_batch_id,
+                    expected_review_batch_version=2,
+                ),
+                context=context,
+            ),
+        )
+        require(candidate_proposal.outcome == "created", "explicit review admission must create one Source effect")
+        require(
+            candidate_proposal.owner_message_count == 1,
+            "candidate proposal source must contain only the acknowledged owner-turn window",
+        )
+        replayed_candidate_proposal = invoke_candidate_proposal(
+            store,
+            command_id="admit-conversation-review-batch-candidate-proposal-replay",
+            operation=lambda service: service.admit_review_batch(
+                command=AdmitInterviewReviewBatchForCandidateProposalCommand(
+                    command_id="admit-conversation-review-batch-candidate-proposal",
+                    review_batch_id=review_batch.review_batch.review_batch_id,
+                    expected_review_batch_version=2,
+                ),
+                context=context,
+            ),
+        )
+        require(
+            replayed_candidate_proposal.outcome == "deduplicated",
+            "review batch candidate proposal admission must deduplicate",
+        )
+        require(
+            replayed_candidate_proposal.source_id == candidate_proposal.source_id,
+            "replayed admission must point to the same immutable conversation Source",
+        )
+
         follow_up_thread_id = str(uuid.uuid4())
         follow_up_session_id = str(uuid.uuid4())
         follow_up = invoke(
@@ -443,14 +510,50 @@ def main() -> None:
                     (context.vault_id,),
                 )
                 require(cursor.fetchone()[0] == 1, "exactly one private message must persist")
-                for relation in (
-                    "sources",
-                    "memory_candidates",
-                    "memories",
-                    "memory_versions",
-                ):
+                cursor.execute(
+                    """
+                    SELECT source_kind, metadata ->> 'reviewBatchId' AS review_batch_id,
+                        content_payload ->> 'text' AS source_text
+                    FROM owner_truth.sources
+                    WHERE vault_id = %s AND id = %s
+                    """,
+                    (context.vault_id, candidate_proposal.source_id),
+                )
+                admitted_source = cursor.fetchone()
+                require(admitted_source is not None, "candidate proposal admission must retain one Source")
+                require(admitted_source[0] == "conversation", "admitted Source must be a conversation Source")
+                require(
+                    admitted_source[1] == review_batch.review_batch.review_batch_id,
+                    "conversation Source must retain review-batch provenance without raw message metadata",
+                )
+                require(
+                    admitted_source[2] == append.text,
+                    "conversation Source must contain only the acknowledged owner message",
+                )
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM owner_truth.interview_review_batch_candidate_admissions
+                    WHERE vault_id = %s AND review_batch_id = %s
+                    """,
+                    (context.vault_id, review_batch.review_batch.review_batch_id),
+                )
+                require(cursor.fetchone()[0] == 1, "one review batch must have one admission record")
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM async_effects.operations
+                    WHERE vault_id = %s AND operation_id = %s
+                    """,
+                    (context.vault_id, candidate_proposal.effect_operation_id),
+                )
+                require(cursor.fetchone()[0] == 1, "admission must retain one default-off extraction effect")
+                for relation in ("memory_candidates", "decision_receipts", "memories", "memory_versions"):
                     cursor.execute(f"SELECT COUNT(*) FROM owner_truth.{relation}")
-                    require(cursor.fetchone()[0] == 0, f"conversation must not write owner_truth.{relation}")
+                    require(
+                        cursor.fetchone()[0] == 0,
+                        f"candidate proposal admission must not write owner_truth.{relation}",
+                    )
                 immutable_message_rejected = False
                 try:
                     cursor.execute(
