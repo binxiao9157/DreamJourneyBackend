@@ -144,6 +144,12 @@ class OwnerTruthLegacyShadowParityAPITests(unittest.TestCase):
         self.assertFalse(payload["cutoverAllowed"])
         self.assertFalse(payload["authorityEpochChanged"])
         self.assertFalse(payload["legacyWriterRetired"])
+        self.assertEqual(payload["cutoverAdmission"]["status"], "external_go_required")
+        self.assertFalse(payload["cutoverAdmission"]["cutoverAllowed"])
+        self.assertIn(
+            "separateProductionGoRecordRequired",
+            payload["cutoverAdmission"]["reasonCodes"],
+        )
         self.assertNotIn(raw_archive_body, str(payload))
         self.assertNotIn("legacy-shadow-api", str(payload))
         self.assertEqual(replay.status_code, 200)

@@ -21,6 +21,11 @@ from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionError,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.owner_truth_cutover_admission_shadow import (
+    OwnerTruthCutoverAdmissionContext,
+    OwnerTruthCutoverAdmissionShadow,
+    observe_owner_truth_cutover_admission,
+)
 from app.services.owner_truth_legacy_migration import (
     OwnerTruthLegacyMigrationAccessDenied,
     OwnerTruthLegacyMigrationConflict,
@@ -43,9 +48,11 @@ class OwnerTruthLegacyShadowParityObservation:
     inventory_outcome: str
     inventory_run_id: str
     report: LegacyShadowParityReport
+    cutover_admission: OwnerTruthCutoverAdmissionShadow
 
     def public_summary(self) -> dict[str, object]:
         summary = self.report.summary()
+        summary["cutoverAdmission"] = self.cutover_admission.value_free_summary()
         summary["inventoryOutcome"] = self.inventory_outcome
         return summary
 
@@ -97,10 +104,20 @@ class OwnerTruthLegacyShadowParityService:
             owner_subject_id=context.owner_subject_id,
             projection_snapshot=projection_snapshot,
         )
+        cutover_admission = observe_owner_truth_cutover_admission(
+            report,
+            context=OwnerTruthCutoverAdmissionContext(
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                authority_epoch=report.projection_authority_epoch,
+            ),
+            enabled=True,
+        )
         return OwnerTruthLegacyShadowParityObservation(
             inventory_outcome=run.outcome,
             inventory_run_id=run.run_id,
             report=report,
+            cutover_admission=cutover_admission,
         )
 
 

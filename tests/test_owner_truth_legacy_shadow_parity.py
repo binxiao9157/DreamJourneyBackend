@@ -112,6 +112,14 @@ class OwnerTruthLegacyShadowParityServiceTests(unittest.TestCase):
         self.assertFalse(summary["cutoverAllowed"])
         self.assertFalse(summary["authorityEpochChanged"])
         self.assertFalse(summary["legacyWriterRetired"])
+        self.assertEqual(summary["cutoverAdmission"]["status"], "external_go_required")
+        self.assertFalse(summary["cutoverAdmission"]["cutoverAllowed"])
+        self.assertFalse(summary["cutoverAdmission"]["authorityEpochChanged"])
+        self.assertFalse(summary["cutoverAdmission"]["legacyWriterRetired"])
+        self.assertIn(
+            "separateProductionGoRecordRequired",
+            summary["cutoverAdmission"]["reasonCodes"],
+        )
         self.assertIn("legacyEvidenceIncomplete", summary["reasonCodes"])
         self.assertIn("authorityEpochCutoverRequiresSeparateGate", summary["reasonCodes"])
         self.assertNotIn(raw_archive_body, str(summary))
@@ -126,6 +134,7 @@ class OwnerTruthLegacyShadowParityServiceTests(unittest.TestCase):
         self.assertEqual(summary["comparisonStatus"], "projectionRebuilding")
         self.assertEqual(summary["projection"]["state"], "rebuilding")
         self.assertFalse(summary["cutoverAllowed"])
+        self.assertEqual(summary["cutoverAdmission"]["status"], "external_go_required")
         self.assertIn("projectionRebuilding", summary["reasonCodes"])
 
     def test_cross_owner_is_rejected_before_legacy_inventory_is_written(self) -> None:
