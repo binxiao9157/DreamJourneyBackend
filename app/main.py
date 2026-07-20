@@ -564,38 +564,36 @@ def _owner_truth_candidate_review_context(
     )
 
 
-def _owner_truth_interview_natural_input_context(
+def _owner_truth_captured_release_policy_context(
     request: Request,
     *,
     vault_id: str,
+    feature: str,
+    route: str,
+    user_session_required_code: str,
 ) -> OwnerTruthCommandContext:
-    """Authorize the M0 natural-input write without opening review QA routes.
+    """Authorize one owner-only route from a captured release policy.
 
-    The historical QA caller keeps its explicit header and feature flag. Every
-    other caller must present a current server-authorized ``echoTextInput``
-    release-policy capture. This route-level check remains fail-closed even
-    while the broader command-policy middleware is in observation mode.
+    Callers must carry a current server-authorized feature capture. This stays
+    fail-closed even while the broader command-policy middleware observes
+    other routes. QA routes intentionally use their own explicit helpers and
+    must never inherit this authorization path.
     """
-
-    if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
-        return _owner_truth_candidate_review_context(request, vault_id=vault_id)
-
     principal = getattr(request.state, "auth_principal", None)
     owner_subject_id = _request_user_principal_id(request)
     if not isinstance(principal, RequestPrincipal) or owner_subject_id is None:
         raise HTTPException(
             status_code=401,
-            detail={"code": "ownerTruthInterviewNaturalInputUserSessionRequired"},
+            detail={"code": user_session_required_code},
         )
 
     observed_client_build = _release_policy_int_header(
         request,
         "x-dreamjourney-client-build",
     ) or 1
-    route = f"{request.method.upper()} /v2/vaults/*/interview-sessions"
     try:
         captured = RELEASE_POLICY_COMMAND_GATE.capture(
-            feature="echoTextInput",
+            feature=feature,
             audience=_release_policy_audience(request, principal),
             cohort=str(
                 request.headers.get("x-dreamjourney-policy-cohort")
@@ -628,7 +626,7 @@ def _owner_truth_interview_natural_input_context(
         RELEASE_POLICY_COMMAND_GATE.revalidate_effect(captured)
     except ReleasePolicyFeatureAccessDenied as error:
         RELEASE_POLICY_DECISION_RECORDER.record(
-            feature="echoTextInput",
+            feature=feature,
             policy_version=RELEASE_POLICY_SERVICE.POLICY_VERSION,
             client_build=observed_client_build,
             decision="deny",
@@ -647,7 +645,7 @@ def _owner_truth_interview_natural_input_context(
         ) from error
 
     RELEASE_POLICY_DECISION_RECORDER.record(
-        feature="echoTextInput",
+        feature=feature,
         policy_version=captured.policy_version,
         client_build=observed_client_build,
         decision="allow",
@@ -658,6 +656,42 @@ def _owner_truth_interview_natural_input_context(
         vault_id=vault_id,
         owner_subject_id=owner_subject_id,
         actor_subject_id=owner_subject_id,
+    )
+
+
+def _owner_truth_interview_natural_input_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize M0 natural input without opening review QA routes."""
+
+    if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
+        return _owner_truth_candidate_review_context(request, vault_id=vault_id)
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="echoTextInput",
+        route=f"{request.method.upper()} /v2/vaults/*/interview-sessions",
+        user_session_required_code="ownerTruthInterviewNaturalInputUserSessionRequired",
+    )
+
+
+def _owner_truth_interview_candidate_confirmation_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the future product confirmation read, never the QA route."""
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=(
+            f"{request.method.upper()} /v2/vaults/*/interview-review-batches/*/confirmation"
+        ),
+        user_session_required_code="ownerTruthInterviewCandidateConfirmationUserSessionRequired",
     )
 
 
@@ -1115,6 +1149,33 @@ def _owner_truth_interview_candidate_review_read_response(
         "schemaVersion": "owner-truth-interview-candidate-review-read-v1",
         "vaultId": vault_id,
         "review": result.composition.public_summary(),
+        "batchCandidates": [
+            _owner_truth_interview_candidate_review_item_response(item)
+            for item in result.batch_candidates
+        ],
+        "singleCandidates": [
+            _owner_truth_interview_candidate_review_item_response(item)
+            for item in result.single_candidates
+        ],
+    }
+
+
+def _owner_truth_interview_candidate_confirmation_read_response(
+    *,
+    vault_id: str,
+    result: Any,
+) -> Dict[str, Any]:
+    """Return the same owner-scoped review material under product policy.
+
+    The confirmation content is intentionally available only behind the
+    dedicated release-policy feature. Natural-input presentation never calls
+    this response builder and remains content-free.
+    """
+
+    return {
+        "schemaVersion": "owner-truth-interview-candidate-confirmation-read-v1",
+        "vaultId": vault_id,
+        "confirmation": result.composition.public_summary(),
         "batchCandidates": [
             _owner_truth_interview_candidate_review_item_response(item)
             for item in result.batch_candidates
@@ -2981,6 +3042,43 @@ def read_owner_truth_interview_candidate_review(
     return JSONResponse(
         status_code=200,
         content=_owner_truth_interview_candidate_review_read_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/confirmation",
+    include_in_schema=False,
+)
+def read_owner_truth_interview_candidate_confirmation(
+    request: Request,
+    vault_id: str,
+    review_batch_id: str,
+) -> JSONResponse:
+    """Default-off product confirmation read for owner-reviewed Candidates.
+
+    This is deliberately separate from the QA candidate-review route. A QA
+    header alone cannot read it; the caller needs an allowed, captured
+    ``ownerTruthCandidateReview`` release-policy decision.
+    """
+
+    try:
+        context = _owner_truth_interview_candidate_confirmation_context(
+            request,
+            vault_id=vault_id,
+        )
+        result = OwnerTruthInterviewCandidateReviewReadService(store).read(
+            review_batch_id=review_batch_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=_owner_truth_interview_candidate_confirmation_read_response(
             vault_id=context.vault_id,
             result=result,
         ),

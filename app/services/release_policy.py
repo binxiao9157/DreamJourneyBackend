@@ -340,6 +340,7 @@ class ReleasePolicyService:
 
     _FEATURE_GATES: dict[str, tuple[Gate, ...]] = {
         "echoTextInput": ("G0", "G1"),
+        "ownerTruthCandidateReview": ("G0", "G1", "G2"),
         "echoImageInput": ("G0", "G1", "G2"),
         "timeLetters": ("G0", "G1", "G2", "G4"),
         "profileSettings": ("G0", "G1"),

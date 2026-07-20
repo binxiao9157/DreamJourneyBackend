@@ -148,6 +148,33 @@ def assert_deployed_readiness_and_policy() -> dict[str, object]:
         isinstance(snapshot.get("policyRevision"), int),
         "deployed policy revision is required",
     )
+
+    confirmation_query = urllib.parse.urlencode(
+        {
+            "audience": "owner",
+            "cohort": "closedPilotAdultSelf",
+            "clientBuild": str(SMOKE_CLIENT_BUILD),
+            "feature": "ownerTruthCandidateReview",
+        }
+    )
+    confirmation_snapshot = deployed_json(
+        f"/v2/release-policy?{confirmation_query}"
+    )
+    confirmation_features = confirmation_snapshot.get("features") or []
+    require(
+        len(confirmation_features) == 1 and isinstance(confirmation_features[0], dict),
+        "ownerTruthCandidateReview policy missing",
+    )
+    confirmation_decision = confirmation_features[0]
+    require(
+        confirmation_decision.get("feature") == "ownerTruthCandidateReview",
+        "unexpected candidate confirmation feature",
+    )
+    require(
+        confirmation_decision.get("enabled") is False
+        and confirmation_decision.get("releaseVisible") is False,
+        "candidate confirmation must remain default closed",
+    )
     return snapshot
 
 
@@ -247,6 +274,26 @@ def exercise_formal_natural_input(
             isinstance(denied_detail, dict)
             and denied_detail.get("reason") == "missingCapturedPolicy",
             "missing capture must expose only the expected policy reason",
+        )
+
+        confirmation_status, confirmation_body, _ = app_request(
+            "GET",
+            (
+                f"/v2/vaults/{vault_id}/interview-review-batches/"
+                f"{uuid.uuid4()}/confirmation"
+            ),
+            token=access_token,
+        )
+        require(
+            confirmation_status == 403,
+            "candidate confirmation must reject a missing dedicated policy capture",
+        )
+        confirmation_detail = confirmation_body.get("detail")
+        require(
+            isinstance(confirmation_detail, dict)
+            and confirmation_detail.get("code") == "release_policy_denied"
+            and confirmation_detail.get("feature") == "ownerTruthCandidateReview",
+            "candidate confirmation must remain behind its own default-closed feature",
         )
 
         policy_headers = {
@@ -361,6 +408,8 @@ def exercise_formal_natural_input(
             "formalMatchingCapturePresentation": True,
             "contentFreeStateVerified": True,
             "contentFreePresentationVerified": True,
+            "deployedCandidateReviewPolicyDefaultClosed": True,
+            "formalCandidateConfirmationDenied": True,
         }
     finally:
         main_module.store = previous_store

@@ -77,6 +77,21 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
         }
 
     @staticmethod
+    def _login_release_policy(phone: str) -> tuple[str, dict[str, str], str]:
+        response = client.post(
+            "/auth/login",
+            json={"phone": phone, "nickname": "访谈确认测试", "password": "password123"},
+        )
+        if response.status_code != 200:
+            raise AssertionError(response.text)
+        payload = response.json()
+        return (
+            payload["user"]["id"],
+            {"Authorization": f"Bearer {payload['auth']['accessToken']}"},
+            payload["auth"]["sessionId"],
+        )
+
+    @staticmethod
     def _candidate(
         *,
         vault_id: str,
@@ -181,6 +196,32 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
             f"{review_batch_id}/candidate-review"
         )
 
+    @staticmethod
+    def _confirmation_path(vault_id: str, review_batch_id: str) -> str:
+        return (
+            f"/v2/vaults/{vault_id}/interview-review-batches/"
+            f"{review_batch_id}/confirmation"
+        )
+
+    @staticmethod
+    def _confirmation_policy_headers(
+        headers: dict[str, str],
+        *,
+        session_id: str,
+        decision_id: str,
+    ) -> dict[str, str]:
+        return {
+            **headers,
+            "X-DreamJourney-Feature": "ownerTruthCandidateReview",
+            "X-DreamJourney-Feature-Decision-Id": decision_id,
+            "X-DreamJourney-Feature-Allowed": "true",
+            "X-DreamJourney-Policy-Version": "release-policy-v1",
+            "X-DreamJourney-Policy-Revision": "1",
+            "X-DreamJourney-Account-Generation": sha256(
+                session_id.encode("utf-8")
+            ).hexdigest()[:24],
+        }
+
     def test_contract_is_default_hidden(self) -> None:
         owner_id, headers = self._login("13800139401")
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = False
@@ -196,6 +237,73 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
             response.json()["detail"]["code"],
             "ownerTruthCandidateReviewUnavailable",
         )
+
+    def test_product_confirmation_requires_its_own_policy_and_keeps_qa_separate(self) -> None:
+        owner_id, owner_headers, owner_session_id = self._login_release_policy("13800139411")
+        vault_id = "vault-interview-confirmation-policy"
+        review_batch_id, standard, sensitive = self._seed_review_batch(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        path = self._confirmation_path(vault_id, review_batch_id)
+
+        qa_header_only = client.get(
+            path,
+            headers={**owner_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+        )
+        self.assertEqual(qa_header_only.status_code, 403)
+        self.assertEqual(
+            qa_header_only.json()["detail"]["code"],
+            "release_policy_denied",
+        )
+        self.assertEqual(
+            qa_header_only.json()["detail"]["feature"],
+            "ownerTruthCandidateReview",
+        )
+
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthCandidateReview"
+        }
+        try:
+            response = client.get(
+                path,
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="candidate-confirmation-owner",
+                ),
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            payload = response.json()
+            self.assertEqual(
+                payload["schemaVersion"],
+                "owner-truth-interview-candidate-confirmation-read-v1",
+            )
+            self.assertEqual(payload["confirmation"]["readiness"], "reviewReady")
+            self.assertEqual(payload["batchCandidates"][0]["candidateId"], standard.candidate_id)
+            self.assertEqual(payload["singleCandidates"][0]["candidateId"], sensitive.candidate_id)
+            self.assertIn("summary", payload["batchCandidates"][0]["content"])
+            self.assertNotIn("review", payload)
+
+            _, other_headers, other_session_id = self._login_release_policy("13800139412")
+            denied = client.get(
+                path,
+                headers=self._confirmation_policy_headers(
+                    other_headers,
+                    session_id=other_session_id,
+                    decision_id="candidate-confirmation-other-owner",
+                ),
+            )
+            self.assertEqual(denied.status_code, 403)
+            self.assertEqual(
+                denied.json()["detail"]["code"],
+                "ownerTruthInterviewCandidateReviewDenied",
+            )
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 
     def test_owner_can_partially_accept_standard_and_individually_reject_sensitive_without_memory_activation(self) -> None:
         owner_id, headers = self._login("13800139402")

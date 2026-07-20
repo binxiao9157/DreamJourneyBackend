@@ -120,6 +120,21 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertEqual(decisions["careDashboard"].releaseStage, "M3")
         self.assertEqual(decisions["digitalInheritance"].releaseStage, "M4")
 
+    def test_owner_truth_candidate_review_is_explicitly_default_closed(self):
+        snapshot = ReleasePolicyService().build_snapshot(
+            audience="owner",
+            cohort="closedPilotAdultSelf",
+            client_build=1,
+            requested_feature="ownerTruthCandidateReview",
+        )
+
+        decision = snapshot.features[0]
+        self.assertEqual(decision.feature, "ownerTruthCandidateReview")
+        self.assertFalse(decision.enabled)
+        self.assertFalse(decision.releaseVisible)
+        self.assertEqual(decision.requiredGates, ("G0", "G1", "G2"))
+        self.assertEqual(decision.reason, "notApprovedForClosedPilot")
+
     def test_m1_through_m4_are_explicit_default_closed_stages_during_shadow_rollout(self):
         service = ReleasePolicyService(shadow_mode=True)
 
