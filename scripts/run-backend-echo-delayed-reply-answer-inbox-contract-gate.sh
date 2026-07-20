@@ -21,8 +21,10 @@ PYTHONPATH=. "$PYTHON_BIN" - <<'PY'
 from app.db.migrator import default_migrations_dir, load_migrations
 
 migrations = load_migrations(default_migrations_dir())
-assert migrations[-1].version == "0024", migrations[-1].version
-assert migrations[-1].name == "echo_delayed_reply_answer_completion", migrations[-1].name
+by_version = {migration.version: migration for migration in migrations}
+completion = by_version.get("0024")
+assert completion is not None, "0024 echo delayed reply migration is missing"
+assert completion.name == "echo_delayed_reply_answer_completion", completion.name
 print("Echo delayed reply Answer/Inbox migration contract passed")
 PY
 
@@ -31,6 +33,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/services/echo_delayed_reply_service.py \
   app/services/in_memory_store.py \
   app/services/postgres_store.py \
-  scripts/backend-echo-delayed-reply-atomic-completion-postgres-smoke.py
+  scripts/backend-echo-delayed-reply-atomic-completion-postgres-smoke.py \
+  scripts/backend-echo-context-reply-runtime-postgres-smoke.py
 
 echo "Echo delayed reply Answer/Inbox local contract gate passed"
