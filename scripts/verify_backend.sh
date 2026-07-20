@@ -191,6 +191,11 @@ test -f tests/test_owner_truth_conversation.py
 test -f tests/test_owner_truth_conversation_migration_contract.py
 test -f scripts/backend-owner-truth-conversation-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-conversation-postgres-smoke.sh
+test -f db/migrations/0030_owner_truth_interview_pacing_state.sql
+test -f db/migrations/0030_owner_truth_interview_pacing_state.json
+test -f app/services/owner_truth_interview_session_orchestration.py
+test -f tests/test_owner_truth_interview_pacing_state.py
+test -f tests/test_owner_truth_interview_pacing_state_migration_contract.py
 test -f app/async_effects/readiness_evidence.py
 test -f tests/test_async_effect_readiness_evidence.py
 test -f scripts/run-backend-async-effect-readiness-evidence-contract-gate.sh

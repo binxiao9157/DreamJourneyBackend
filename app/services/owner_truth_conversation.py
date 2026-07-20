@@ -16,6 +16,8 @@ from app.domain.owner_truth.conversation import (
     AppendInterviewMessageCommand,
     AppendInterviewMessageWriteRecord,
     InterviewBoundary,
+    InterviewFatigue,
+    InterviewPacingState,
     InterviewSessionState,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationConflict,
@@ -23,6 +25,8 @@ from app.domain.owner_truth.conversation import (
     OwnerTruthInterviewSessionResult,
     OwnerTruthInterviewSessionSnapshot,
     OwnerTruthInterviewSessionStateConflict,
+    RecordInterviewPacingCommand,
+    RecordInterviewPacingWriteRecord,
     SetInterviewBoundaryCommand,
     SetInterviewBoundaryWriteRecord,
     StartInterviewSessionCommand,
@@ -47,6 +51,12 @@ class OwnerTruthConversationRepository(Protocol):
     def set_interview_boundary(
         self,
         record: SetInterviewBoundaryWriteRecord,
+    ) -> OwnerTruthInterviewSessionResult:
+        ...
+
+    def record_interview_pacing(
+        self,
+        record: RecordInterviewPacingWriteRecord,
     ) -> OwnerTruthInterviewSessionResult:
         ...
 
@@ -100,6 +110,15 @@ class OwnerTruthConversationService:
     ) -> OwnerTruthInterviewSessionResult:
         _assert_owner_context(context)
         return self._repository.set_interview_boundary(command.write_record(context=context))
+
+    def record_pacing(
+        self,
+        *,
+        command: RecordInterviewPacingCommand,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewSessionResult:
+        _assert_owner_context(context)
+        return self._repository.record_interview_pacing(command.write_record(context=context))
 
     def read_session(
         self,
@@ -175,6 +194,9 @@ class InMemoryOwnerTruthConversationRepository:
                 "state": InterviewSessionState.ACTIVE,
                 "boundary": InterviewBoundary.OPEN,
                 "turnCount": 0,
+                "deepeningTurnCount": 0,
+                "candidateBatchTurnCount": 0,
+                "fatigue": InterviewFatigue.NORMAL,
             }
             result = OwnerTruthInterviewSessionResult(
                 outcome="created",
@@ -248,6 +270,7 @@ class InMemoryOwnerTruthConversationRepository:
             session["rowVersion"] += 1
             if record.author.value == "owner":
                 session["turnCount"] += 1
+                session["candidateBatchTurnCount"] += 1
             result = OwnerTruthInterviewSessionResult(
                 outcome="created",
                 receipt_id=record.receipt_id,
@@ -304,6 +327,57 @@ class InMemoryOwnerTruthConversationRepository:
             self._store_receipt(record, result)
             return result
 
+    def record_interview_pacing(
+        self,
+        record: RecordInterviewPacingWriteRecord,
+    ) -> OwnerTruthInterviewSessionResult:
+        with self._lock:
+            self._ensure_active_vault(
+                vault_id=record.vault_id,
+                owner_subject_id=record.owner_subject_id,
+            )
+            existing = self._existing_receipt(record)
+            if existing is not None:
+                return self._replay_result(existing, record=record)
+            session, thread = self._live_session_and_thread(
+                vault_id=record.vault_id,
+                session_id=record.session_id,
+                thread_id=record.thread_id,
+                owner_subject_id=record.owner_subject_id,
+            )
+            if session["state"] is not InterviewSessionState.ACTIVE:
+                raise OwnerTruthInterviewSessionStateConflict(
+                    "interview session is not active for a pacing transition"
+                )
+            self._assert_version(
+                resource="interview session",
+                expected=record.expected_session_version,
+                current=int(session["rowVersion"]),
+            )
+            pacing = InterviewPacingState(
+                boundary=session["boundary"],
+                deepening_turn_count=int(session["deepeningTurnCount"]),
+                candidate_batch_turn_count=int(session["candidateBatchTurnCount"]),
+                fatigue=session["fatigue"],
+            ).apply(record.event)
+            session["boundary"] = pacing.boundary
+            session["deepeningTurnCount"] = pacing.deepening_turn_count
+            session["candidateBatchTurnCount"] = pacing.candidate_batch_turn_count
+            session["fatigue"] = pacing.fatigue
+            session["rowVersion"] += 1
+            result = OwnerTruthInterviewSessionResult(
+                outcome="created",
+                receipt_id=record.receipt_id,
+                thread_id=record.thread_id,
+                session_id=record.session_id,
+                thread_version=int(thread["rowVersion"]),
+                session_version=int(session["rowVersion"]),
+                state=session["state"],
+                boundary=session["boundary"],
+            )
+            self._store_receipt(record, result)
+            return result
+
     def get_interview_session(
         self,
         *,
@@ -334,6 +408,9 @@ class InMemoryOwnerTruthConversationRepository:
                 row_version=int(session["rowVersion"]),
                 thread_version=int(thread["rowVersion"]),
                 turn_count=int(session["turnCount"]),
+                deepening_turn_count=int(session["deepeningTurnCount"]),
+                candidate_batch_turn_count=int(session["candidateBatchTurnCount"]),
+                fatigue=session["fatigue"],
                 authority_epoch=int(vault["authorityEpoch"]),
             )
 
@@ -366,6 +443,7 @@ class InMemoryOwnerTruthConversationRepository:
                         **deepcopy(item),
                         "state": item["state"].value,
                         "boundary": item["boundary"].value,
+                        "fatigue": item["fatigue"].value,
                     }
                     for (stored_vault_id, _), item in self._sessions.items()
                     if stored_vault_id == vault_id
@@ -631,11 +709,14 @@ class PostgresOwnerTruthConversationRepository:
             cursor.execute(
                 """
                 UPDATE owner_truth.interview_sessions
-                SET turn_count = turn_count + %s, updated_at = NOW()
+                SET turn_count = turn_count + %s,
+                    candidate_batch_turn_count = candidate_batch_turn_count + %s,
+                    updated_at = NOW()
                 WHERE vault_id = %s AND id = %s AND row_version = %s
                 RETURNING row_version, state, boundary
                 """,
                 (
+                    1 if record.author.value == "owner" else 0,
                     1 if record.author.value == "owner" else 0,
                     record.vault_id,
                     record.session_id,
@@ -772,6 +853,95 @@ class PostgresOwnerTruthConversationRepository:
             boundary=InterviewBoundary(str(updated_session["boundary"])),
         )
 
+    def record_interview_pacing(
+        self,
+        record: RecordInterviewPacingWriteRecord,
+    ) -> OwnerTruthInterviewSessionResult:
+        with self._cursor() as cursor:
+            self._lock(cursor, f"owner-truth-conversation-command:{record.vault_id}:{record.command_id_hash}")
+            self._lock(cursor, f"owner-truth-conversation-session:{record.vault_id}:{record.session_id}")
+            vault = self._active_vault(
+                cursor,
+                vault_id=record.vault_id,
+                owner_subject_id=record.owner_subject_id,
+                lock=True,
+            )
+            existing = self._receipt_by_command(
+                cursor,
+                vault_id=record.vault_id,
+                command_id_hash=record.command_id_hash,
+            )
+            if existing is not None:
+                return self._deduplicated_result(cursor, existing=existing, record=record)
+            session, thread = self._locked_session_and_thread(cursor, record=record)
+            self._assert_live_session(
+                session=session,
+                thread=thread,
+                record=record,
+                authority_epoch=int(vault["authority_epoch"]),
+            )
+            if str(session["state"]) != InterviewSessionState.ACTIVE.value:
+                raise OwnerTruthInterviewSessionStateConflict(
+                    "interview session is not active for a pacing transition"
+                )
+            self._assert_version(
+                resource="interview session",
+                expected=record.expected_session_version,
+                current=int(session["row_version"]),
+            )
+            pacing = InterviewPacingState(
+                boundary=InterviewBoundary(str(session["boundary"])),
+                deepening_turn_count=int(session["deepening_turn_count"]),
+                candidate_batch_turn_count=int(session["candidate_batch_turn_count"]),
+                fatigue=InterviewFatigue(str(session["fatigue"])),
+            ).apply(record.event)
+            cursor.execute(
+                """
+                UPDATE owner_truth.interview_sessions
+                SET boundary = %s,
+                    deepening_turn_count = %s,
+                    candidate_batch_turn_count = %s,
+                    fatigue = %s,
+                    updated_at = NOW()
+                WHERE vault_id = %s AND id = %s AND row_version = %s
+                RETURNING row_version, state, boundary
+                """,
+                (
+                    pacing.boundary.value,
+                    pacing.deepening_turn_count,
+                    pacing.candidate_batch_turn_count,
+                    pacing.fatigue.value,
+                    record.vault_id,
+                    record.session_id,
+                    record.expected_session_version,
+                ),
+            )
+            updated_session = cursor.fetchone()
+            if updated_session is None:
+                raise OwnerTruthConversationVersionConflict(
+                    resource="interview session",
+                    expected_version=record.expected_session_version,
+                    current_version=int(session["row_version"]),
+                )
+            self._insert_receipt(
+                cursor,
+                record=record,
+                authority_epoch=int(vault["authority_epoch"]),
+                result_message_id=None,
+                expected_thread_version=None,
+                expected_session_version=record.expected_session_version,
+            )
+        return OwnerTruthInterviewSessionResult(
+            outcome="created",
+            receipt_id=record.receipt_id,
+            thread_id=record.thread_id,
+            session_id=record.session_id,
+            thread_version=int(thread["row_version"]),
+            session_version=int(updated_session["row_version"]),
+            state=InterviewSessionState(str(updated_session["state"])),
+            boundary=InterviewBoundary(str(updated_session["boundary"])),
+        )
+
     def get_interview_session(
         self,
         *,
@@ -790,6 +960,7 @@ class PostgresOwnerTruthConversationRepository:
                 """
                 SELECT s.id, s.vault_id, s.owner_subject_id, s.current_thread_id,
                     s.state, s.boundary, s.row_version, s.turn_count,
+                    s.deepening_turn_count, s.candidate_batch_turn_count, s.fatigue,
                     s.authority_epoch, t.row_version AS thread_row_version
                 FROM owner_truth.interview_sessions AS s
                 JOIN owner_truth.conversation_threads AS t
@@ -825,6 +996,9 @@ class PostgresOwnerTruthConversationRepository:
             row_version=int(row["row_version"]),
             thread_version=int(row["thread_row_version"]),
             turn_count=int(row["turn_count"]),
+            deepening_turn_count=int(row["deepening_turn_count"]),
+            candidate_batch_turn_count=int(row["candidate_batch_turn_count"]),
+            fatigue=InterviewFatigue(str(row["fatigue"])),
             authority_epoch=int(row["authority_epoch"]),
         )
 
@@ -891,6 +1065,8 @@ class PostgresOwnerTruthConversationRepository:
             return "appendInterviewMessage"
         if isinstance(record, SetInterviewBoundaryWriteRecord):
             return "setInterviewBoundary"
+        if isinstance(record, RecordInterviewPacingWriteRecord):
+            return "recordInterviewPacing"
         raise TypeError("unsupported owner truth conversation write record")
 
     def _receipt_by_command(
@@ -1036,7 +1212,8 @@ class PostgresOwnerTruthConversationRepository:
         cursor.execute(
             """
             SELECT s.id, s.owner_subject_id, s.current_thread_id, s.state,
-                s.boundary, s.turn_count, s.authority_epoch, s.row_version,
+                s.boundary, s.turn_count, s.deepening_turn_count,
+                s.candidate_batch_turn_count, s.fatigue, s.authority_epoch, s.row_version,
                 t.id AS thread_id, t.owner_subject_id AS thread_owner_subject_id,
                 t.authority_epoch AS thread_authority_epoch,
                 t.row_version AS thread_row_version
@@ -1060,6 +1237,9 @@ class PostgresOwnerTruthConversationRepository:
             "state": str(row["state"]),
             "boundary": str(row["boundary"]),
             "turn_count": int(row["turn_count"]),
+            "deepening_turn_count": int(row["deepening_turn_count"]),
+            "candidate_batch_turn_count": int(row["candidate_batch_turn_count"]),
+            "fatigue": str(row["fatigue"]),
             "authority_epoch": int(row["authority_epoch"]),
             "row_version": int(row["row_version"]),
         }

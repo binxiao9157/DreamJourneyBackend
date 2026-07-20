@@ -1,9 +1,9 @@
 """Read-only bridge from persisted M0-A sessions to interview policy.
 
 The conversation repository is authoritative for session state, boundary,
-owner turn count, and authority epoch. Callers may supply only bounded,
-value-free policy signals such as an opaque topic identifier or a fatigue
-state. This bridge cannot read message text, call a provider, or create an
+owner turn count, pacing counters, fatigue, and authority epoch. Callers may
+supply only bounded, value-free policy signals such as an opaque topic
+identifier. This bridge cannot read message text, call a provider, or create an
 Owner Truth Source, Candidate, DecisionReceipt, or MemoryVersion.
 """
 
@@ -43,26 +43,18 @@ class OwnerTruthInterviewSessionOrchestrationError(ValueError):
 class InterviewSessionOrchestrationSignals:
     """Transient policy signals that never contain raw conversation content.
 
-    ``candidate_batch_turn_count``, session state, user boundary, owner, Vault,
+    Pacing counters, fatigue, session state, user boundary, owner, Vault,
     thread, and authority epoch deliberately are not caller supplied. The
     bridge reads those values from the persisted private session instead.
     """
 
     topic_id: str
-    deepening_turn_count: int = 0
     topic_incomplete: bool = False
     needs_clarification: bool = False
     user_changed_topic: bool = False
     is_sensitive: bool = False
-    fatigue: InterviewFatigue = InterviewFatigue.NORMAL
 
     def __post_init__(self) -> None:
-        if not isinstance(self.deepening_turn_count, int) or isinstance(
-            self.deepening_turn_count, bool
-        ) or self.deepening_turn_count < 0:
-            raise OwnerTruthInterviewSessionOrchestrationError(
-                "deepening_turn_count must be a non-negative integer"
-            )
         for field in (
             "topic_incomplete",
             "needs_clarification",
@@ -73,12 +65,6 @@ class InterviewSessionOrchestrationSignals:
                 raise OwnerTruthInterviewSessionOrchestrationError(
                     f"{field} must be a boolean"
                 )
-        try:
-            object.__setattr__(self, "fatigue", InterviewFatigue(self.fatigue))
-        except (TypeError, ValueError) as exc:
-            raise OwnerTruthInterviewSessionOrchestrationError(
-                "fatigue is not supported"
-            ) from exc
 
 
 @dataclass(frozen=True)
@@ -89,8 +75,9 @@ class OwnerTruthInterviewSessionOrchestrationResult:
     decision: InterviewDecision
     persisted_owner_turn_count: int
     persisted_boundary: PersistedInterviewBoundary
-    deepening_turn_count: int
-    fatigue: InterviewFatigue
+    persisted_deepening_turn_count: int
+    persisted_candidate_batch_turn_count: int
+    persisted_fatigue: InterviewFatigue
 
     def value_free_summary(self) -> Mapping[str, object]:
         """Expose no identifiers, topic names, or message content to QA traces."""
@@ -101,13 +88,13 @@ class OwnerTruthInterviewSessionOrchestrationResult:
             "decision": self.decision.value_free_summary(),
             "persistedSession": {
                 "boundary": self.persisted_boundary.value,
+                "candidateBatchTurnCount": self.persisted_candidate_batch_turn_count,
+                "deepeningTurnCount": self.persisted_deepening_turn_count,
+                "fatigue": self.persisted_fatigue.value,
                 "ownerTurnCount": self.persisted_owner_turn_count,
                 "state": self.persisted_session.state.value,
             },
-            "transientSignals": {
-                "deepeningTurnCount": self.deepening_turn_count,
-                "fatigue": self.fatigue.value,
-            },
+            "transientSignals": "opaqueTopicAndBooleanPolicySignalsOnly",
         }
 
 
@@ -128,9 +115,9 @@ _POLICY_BOUNDARY_BY_PERSISTED_BOUNDARY = {
 class OwnerTruthInterviewSessionOrchestrationService:
     """Decide the next safe interview action from one persisted session.
 
-    This service is read-only. A later command slice must explicitly persist a
-    one-shot boundary consumption, topic switch, fatigue transition, or review
-    batch acknowledgement; deciding an action is not an effect.
+    This service is read-only. Pacing changes are recorded only by an explicit
+    private command after their real interaction milestone completes; deciding
+    an action is not itself an effect.
     """
 
     def __init__(
@@ -173,14 +160,14 @@ class OwnerTruthInterviewSessionOrchestrationService:
                 topic_id=signals.topic_id,
                 authority_epoch=persisted.authority_epoch,
                 session_state=policy_state,
-                deepening_turn_count=signals.deepening_turn_count,
-                candidate_batch_turn_count=persisted.turn_count,
+                deepening_turn_count=persisted.deepening_turn_count,
+                candidate_batch_turn_count=persisted.candidate_batch_turn_count,
                 topic_incomplete=signals.topic_incomplete,
                 needs_clarification=signals.needs_clarification,
                 user_changed_topic=signals.user_changed_topic,
                 user_boundary=policy_boundary,
                 is_sensitive=signals.is_sensitive,
-                fatigue=signals.fatigue,
+                fatigue=persisted.fatigue,
             )
         )
         return OwnerTruthInterviewSessionOrchestrationResult(
@@ -188,8 +175,9 @@ class OwnerTruthInterviewSessionOrchestrationService:
             decision=decision,
             persisted_owner_turn_count=persisted.turn_count,
             persisted_boundary=persisted.boundary,
-            deepening_turn_count=signals.deepening_turn_count,
-            fatigue=signals.fatigue,
+            persisted_deepening_turn_count=persisted.deepening_turn_count,
+            persisted_candidate_batch_turn_count=persisted.candidate_batch_turn_count,
+            persisted_fatigue=persisted.fatigue,
         )
 
 

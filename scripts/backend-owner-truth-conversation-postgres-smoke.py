@@ -30,8 +30,10 @@ from app.domain.owner_truth.conversation import (
     ConversationMessageAuthor,
     ConversationMessageKind,
     InterviewBoundary,
+    InterviewPacingEvent,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationVersionConflict,
+    RecordInterviewPacingCommand,
     SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
 )
@@ -129,7 +131,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require("0029" in applied["appliedVersions"], "conversation migration must apply")
+        require("0030" in applied["appliedVersions"], "conversation pacing migration must apply")
 
         store = PostgresStore(dsn=test_dsn, pool_min_size=1, pool_max_size=2)
         store.open_pool(wait=True)
@@ -187,6 +189,23 @@ def main() -> None:
         )
         require(replayed_append.outcome == "deduplicated", "append replay must deduplicate")
 
+        pacing = invoke(
+            store,
+            command_id="record-conversation-pacing-smoke",
+            operation=lambda service: service.record_pacing(
+                command=RecordInterviewPacingCommand(
+                    command_id="record-conversation-pacing-smoke",
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    expected_session_version=2,
+                    event=InterviewPacingEvent.DEEPENING_COMPLETED,
+                ),
+                context=context,
+            ),
+        )
+        require(pacing.outcome == "created", "pacing transition must persist")
+        require(pacing.session_version == 3, "pacing transition must advance session version")
+
         bridged = invoke_orchestration(
             store,
             command_id="read-only-orchestration-bridge",
@@ -202,6 +221,11 @@ def main() -> None:
         require(
             bridged.decision.action is InterviewAction.LISTEN,
             "read-only bridge must use persisted active session state",
+        )
+        require(
+            bridged.persisted_deepening_turn_count == 1
+            and bridged.persisted_candidate_batch_turn_count == 1,
+            "bridge must read persisted pacing counters instead of transient caller values",
         )
         bridge_summary = str(bridged.value_free_summary())
         require(
@@ -257,7 +281,7 @@ def main() -> None:
             command_id="boundary-conversation-smoke",
             thread_id=thread_id,
             session_id=session_id,
-            expected_session_version=2,
+            expected_session_version=3,
             boundary=InterviewBoundary.DO_NOT_ASK,
         )
         paused = invoke(
@@ -318,8 +342,10 @@ def main() -> None:
             command_id="read-after-restart",
             operation=lambda service: service.read_session(session_id=session_id, context=context),
         )
-        require(restored.row_version == 3, "session state must survive a store restart")
+        require(restored.row_version == 4, "session state must survive a store restart")
         require(restored.boundary is InterviewBoundary.DO_NOT_ASK, "boundary must survive restart")
+        require(restored.deepening_turn_count == 1, "pacing state must survive restart")
+        require(restored.candidate_batch_turn_count == 1, "batch count must survive restart")
         print("owner_truth_conversation_postgres_smoke=passed")
     finally:
         if restarted_store is not None:

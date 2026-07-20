@@ -16,6 +16,7 @@ from typing import Any, Mapping, Optional, Tuple
 from uuid import UUID, uuid5
 
 from .contracts import OwnerTruthContractError, require_nonblank, require_uuid
+from .interview_orchestration import InterviewFatigue, MAX_DEEPENING_TURNS_BEFORE_SUMMARY
 from .source_commands import OwnerTruthCommandContext
 
 
@@ -76,6 +77,17 @@ class InterviewSessionState(str, Enum):
     ENDED = "ended"
 
 
+class InterviewPacingEvent(str, Enum):
+    """Explicit, content-free facts that can advance session pacing state."""
+
+    DEEPENING_COMPLETED = "deepeningCompleted"
+    SUMMARY_COMPLETED = "summaryCompleted"
+    FATIGUE_GUARDED = "fatigueGuarded"
+    FATIGUE_EXHAUSTED = "fatigueExhausted"
+    FATIGUE_RESET = "fatigueReset"
+    SKIP_ONCE_CONSUMED = "skipOnceConsumed"
+
+
 def _canonical_json(value: Mapping[str, Any]) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -103,6 +115,97 @@ def _normalise_enum(value: Any, enum_type: Any, *, field: str) -> Any:
         return enum_type(value)
     except (TypeError, ValueError) as exc:
         raise OwnerTruthConversationError(f"{field} is not supported") from exc
+
+
+@dataclass(frozen=True)
+class InterviewPacingState:
+    """Private, bounded state used by the provider-neutral interview policy."""
+
+    boundary: InterviewBoundary
+    deepening_turn_count: int
+    candidate_batch_turn_count: int
+    fatigue: InterviewFatigue
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "boundary",
+            _normalise_enum(self.boundary, InterviewBoundary, field="boundary"),
+        )
+        try:
+            object.__setattr__(self, "fatigue", InterviewFatigue(self.fatigue))
+        except (TypeError, ValueError) as exc:
+            raise OwnerTruthConversationError("fatigue is not supported") from exc
+        for field in ("deepening_turn_count", "candidate_batch_turn_count"):
+            value = getattr(self, field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise OwnerTruthConversationError(f"{field} must be a non-negative integer")
+
+    def apply(self, event: InterviewPacingEvent) -> "InterviewPacingState":
+        event = _normalise_enum(event, InterviewPacingEvent, field="event")
+        if event is InterviewPacingEvent.DEEPENING_COMPLETED:
+            if self.boundary is not InterviewBoundary.OPEN:
+                raise OwnerTruthConversationConflict(
+                    "deepening requires an open interview boundary"
+                )
+            if self.fatigue is InterviewFatigue.EXHAUSTED:
+                raise OwnerTruthConversationConflict(
+                    "deepening is not allowed while interview fatigue is exhausted"
+                )
+            if self.deepening_turn_count >= MAX_DEEPENING_TURNS_BEFORE_SUMMARY:
+                raise OwnerTruthConversationConflict(
+                    "deepening cannot exceed the bounded interview follow-up budget"
+                )
+            return InterviewPacingState(
+                boundary=self.boundary,
+                deepening_turn_count=self.deepening_turn_count + 1,
+                candidate_batch_turn_count=self.candidate_batch_turn_count,
+                fatigue=self.fatigue,
+            )
+        if event is InterviewPacingEvent.SUMMARY_COMPLETED:
+            return InterviewPacingState(
+                boundary=self.boundary,
+                deepening_turn_count=0,
+                candidate_batch_turn_count=self.candidate_batch_turn_count,
+                fatigue=self.fatigue,
+            )
+        if event is InterviewPacingEvent.FATIGUE_GUARDED:
+            if self.fatigue is InterviewFatigue.EXHAUSTED:
+                raise OwnerTruthConversationConflict(
+                    "exhausted fatigue requires an explicit reset before guarded"
+                )
+            return InterviewPacingState(
+                boundary=self.boundary,
+                deepening_turn_count=self.deepening_turn_count,
+                candidate_batch_turn_count=self.candidate_batch_turn_count,
+                fatigue=InterviewFatigue.GUARDED,
+            )
+        if event is InterviewPacingEvent.FATIGUE_EXHAUSTED:
+            return InterviewPacingState(
+                boundary=self.boundary,
+                deepening_turn_count=self.deepening_turn_count,
+                candidate_batch_turn_count=self.candidate_batch_turn_count,
+                fatigue=InterviewFatigue.EXHAUSTED,
+            )
+        if event is InterviewPacingEvent.FATIGUE_RESET:
+            return InterviewPacingState(
+                boundary=self.boundary,
+                deepening_turn_count=self.deepening_turn_count,
+                candidate_batch_turn_count=self.candidate_batch_turn_count,
+                fatigue=InterviewFatigue.NORMAL,
+            )
+        if event is InterviewPacingEvent.SKIP_ONCE_CONSUMED:
+            if self.boundary is not InterviewBoundary.SKIP_ONCE:
+                raise OwnerTruthConversationConflict(
+                    "skipOnce can only be consumed while that boundary is active"
+                )
+            return InterviewPacingState(
+                boundary=InterviewBoundary.OPEN,
+                deepening_turn_count=self.deepening_turn_count,
+                candidate_batch_turn_count=self.candidate_batch_turn_count,
+                fatigue=self.fatigue,
+            )
+        raise OwnerTruthConversationError("event is not supported")
 
 
 @dataclass(frozen=True)
@@ -282,6 +385,50 @@ class SetInterviewBoundaryCommand:
 
 
 @dataclass(frozen=True)
+class RecordInterviewPacingCommand:
+    command_id: str
+    thread_id: str
+    session_id: str
+    expected_session_version: int
+    event: InterviewPacingEvent
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
+        object.__setattr__(self, "thread_id", require_uuid(self.thread_id, field="thread_id"))
+        object.__setattr__(self, "session_id", require_uuid(self.session_id, field="session_id"))
+        _positive_version(self.expected_session_version, field="expected_session_version")
+        object.__setattr__(
+            self,
+            "event",
+            _normalise_enum(self.event, InterviewPacingEvent, field="event"),
+        )
+
+    def write_record(self, *, context: OwnerTruthCommandContext) -> "RecordInterviewPacingWriteRecord":
+        command_id_hash = _sha256(self.command_id)
+        payload = {
+            "schemaVersion": OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION,
+            "commandType": "recordInterviewPacing",
+            "threadId": self.thread_id,
+            "sessionId": self.session_id,
+            "expectedSessionVersion": self.expected_session_version,
+            "event": self.event.value,
+        }
+        return RecordInterviewPacingWriteRecord(
+            receipt_id=_receipt_id(context=context, command_id_hash=command_id_hash),
+            command_id_hash=command_id_hash,
+            payload_hash=_sha256(_canonical_json(payload)),
+            thread_id=self.thread_id,
+            session_id=self.session_id,
+            expected_session_version=self.expected_session_version,
+            event=self.event,
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            actor_subject_id=context.actor_subject_id,
+            policy_version=context.policy_version,
+        )
+
+
+@dataclass(frozen=True)
 class StartInterviewSessionWriteRecord:
     receipt_id: str
     command_id_hash: str
@@ -326,6 +473,21 @@ class SetInterviewBoundaryWriteRecord:
     expected_session_version: int
     boundary: InterviewBoundary
     state: InterviewSessionState
+    vault_id: str
+    owner_subject_id: str
+    actor_subject_id: str
+    policy_version: str
+
+
+@dataclass(frozen=True)
+class RecordInterviewPacingWriteRecord:
+    receipt_id: str
+    command_id_hash: str
+    payload_hash: str
+    thread_id: str
+    session_id: str
+    expected_session_version: int
+    event: InterviewPacingEvent
     vault_id: str
     owner_subject_id: str
     actor_subject_id: str
@@ -379,6 +541,9 @@ class OwnerTruthInterviewSessionSnapshot:
     row_version: int
     thread_version: int
     turn_count: int
+    deepening_turn_count: int
+    candidate_batch_turn_count: int
+    fatigue: InterviewFatigue
     authority_epoch: int
 
 
@@ -388,6 +553,9 @@ __all__ = [
     "ConversationMessageAuthor",
     "ConversationMessageKind",
     "InterviewBoundary",
+    "InterviewFatigue",
+    "InterviewPacingEvent",
+    "InterviewPacingState",
     "InterviewSessionState",
     "OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION",
     "OwnerTruthConversationAccessDenied",
@@ -397,6 +565,8 @@ __all__ = [
     "OwnerTruthInterviewSessionResult",
     "OwnerTruthInterviewSessionSnapshot",
     "OwnerTruthInterviewSessionStateConflict",
+    "RecordInterviewPacingCommand",
+    "RecordInterviewPacingWriteRecord",
     "SetInterviewBoundaryCommand",
     "SetInterviewBoundaryWriteRecord",
     "StartInterviewSessionCommand",
