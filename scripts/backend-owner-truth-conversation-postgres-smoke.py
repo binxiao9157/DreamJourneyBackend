@@ -47,10 +47,29 @@ from app.domain.owner_truth.interview_orchestration import InterviewAction
 from app.domain.owner_truth.interview_candidate_proposal import (
     AdmitInterviewReviewBatchForCandidateProposalCommand,
 )
+from app.domain.owner_truth.candidate_extraction import (
+    CandidateEvidenceSpan,
+    CandidateProposal,
+    CandidateReviewMode,
+    SyntheticCandidateExtractionCommand,
+)
+from app.domain.owner_truth.contracts import (
+    EpistemicStatus,
+    MemoryKind,
+    PerspectiveType,
+    SensitivityLevel,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
+from app.services.owner_truth_candidate_extraction import (
+    OwnerTruthCandidateExtractionService,
+)
 from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_interview_candidate_proposal import (
     OwnerTruthInterviewCandidateProposalService,
+)
+from app.services.owner_truth_interview_candidate_review import (
+    OwnerTruthInterviewCandidateReviewCompositionService,
 )
 from app.services.owner_truth_interview_session_orchestration import (
     InterviewSessionOrchestrationSignals,
@@ -482,6 +501,98 @@ def main() -> None:
             "replayed admission must point to the same immutable conversation Source",
         )
 
+        with psycopg.connect(test_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT payload_hash FROM async_effects.operations WHERE operation_id = %s",
+                    (candidate_proposal.effect_operation_id,),
+                )
+                effect_row = cursor.fetchone()
+                require(
+                    effect_row is not None,
+                    "candidate proposal admission must retain source effect payload hash",
+                )
+                source_effect_payload_hash = str(effect_row[0])
+
+        source_effect_intent = AsyncEffectIntent(
+            operation_type="ownerTruth.source.created",
+            target=AsyncEffectTarget(
+                owner_subject_id=context.owner_subject_id,
+                vault_id=context.vault_id,
+                resource_type="source",
+                resource_id=candidate_proposal.source_id,
+                resource_version=candidate_proposal.source_version,
+                purpose="candidateExtraction",
+                authority_epoch=0,
+            ),
+            payload_hash=source_effect_payload_hash,
+        )
+        require(
+            source_effect_intent.operation_id == candidate_proposal.effect_operation_id,
+            "candidate extraction must reuse the admitted immutable Source effect",
+        )
+        extraction_command = SyntheticCandidateExtractionCommand(
+            intent=source_effect_intent,
+            extractor_id="deterministicInterviewFixture",
+            model_id="fixture-v1",
+            prompt_version="interview-candidate-review-v1",
+            policy_version=context.policy_version,
+            source_content_hash=candidate_proposal.source_content_hash,
+            proposals=(
+                CandidateProposal(
+                    memory_kind=MemoryKind.EXPERIENCE,
+                    perspective_type=PerspectiveType.FIRST_PERSON,
+                    epistemic_status=EpistemicStatus.RECALLED,
+                    sensitivity=SensitivityLevel.STANDARD,
+                    content={"summary": "这是一条可批量审核的访谈候选。"},
+                    evidence_span=CandidateEvidenceSpan(start=0, end=5),
+                    confidence=0.72,
+                    review_mode=CandidateReviewMode.BATCH,
+                ),
+                CandidateProposal(
+                    memory_kind=MemoryKind.EXPERIENCE,
+                    perspective_type=PerspectiveType.FIRST_PERSON,
+                    epistemic_status=EpistemicStatus.RECALLED,
+                    sensitivity=SensitivityLevel.SENSITIVE,
+                    content={"summary": "这是一条必须逐条确认的敏感访谈候选。"},
+                    evidence_span=CandidateEvidenceSpan(start=0, end=5),
+                    confidence=0.64,
+                    review_mode=CandidateReviewMode.SINGLE,
+                ),
+            ),
+        )
+        extraction_service = OwnerTruthCandidateExtractionService(store)
+        extracted = extraction_service.record(extraction_command)
+        replayed_extraction = extraction_service.record(extraction_command)
+        require(extracted.outcome == "created", "conversation Source extraction must persist")
+        require(
+            replayed_extraction.outcome == "deduplicated",
+            "conversation Source extraction replay must deduplicate",
+        )
+        require(
+            len(extracted.candidate_ids) == 2,
+            "conversation Source extraction must produce two pending Candidates",
+        )
+        composition = OwnerTruthInterviewCandidateReviewCompositionService(store).compose(
+            review_batch_id=review_batch.review_batch.review_batch_id,
+            context=context,
+        )
+        require(
+            composition.readiness.value == "reviewReady",
+            "admitted batch Candidates must become reviewable without direct activation",
+        )
+        require(
+            len(composition.batch_candidates) == 1
+            and len(composition.single_candidates) == 1,
+            "standard batch Candidate and sensitive Candidate must use separate review paths",
+        )
+        composition_summary = composition.public_summary()
+        require(
+            "这是一条可批量审核的访谈候选。" not in str(composition_summary)
+            and "这是一条必须逐条确认的敏感访谈候选。" not in str(composition_summary),
+            "review composition summary must remain value-free",
+        )
+
         follow_up_thread_id = str(uuid.uuid4())
         follow_up_session_id = str(uuid.uuid4())
         follow_up = invoke(
@@ -550,10 +661,17 @@ def main() -> None:
                 require(cursor.fetchone()[0] == 1, "admission must retain one default-off extraction effect")
                 for relation in ("memory_candidates", "decision_receipts", "memories", "memory_versions"):
                     cursor.execute(f"SELECT COUNT(*) FROM owner_truth.{relation}")
-                    require(
-                        cursor.fetchone()[0] == 0,
-                        f"candidate proposal admission must not write owner_truth.{relation}",
-                    )
+                    count = cursor.fetchone()[0]
+                    if relation == "memory_candidates":
+                        require(
+                            count == 2,
+                            "synthetic review composition may create only its two pending Candidates",
+                        )
+                    else:
+                        require(
+                            count == 0,
+                            f"review composition must not write owner_truth.{relation}",
+                        )
                 immutable_message_rejected = False
                 try:
                     cursor.execute(

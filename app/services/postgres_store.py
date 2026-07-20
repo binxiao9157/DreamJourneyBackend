@@ -122,6 +122,9 @@ from app.services.owner_truth_conversation import (
 from app.services.owner_truth_interview_candidate_proposal import (
     PostgresOwnerTruthInterviewCandidateProposalRepository,
 )
+from app.services.owner_truth_interview_candidate_review import (
+    PostgresOwnerTruthInterviewCandidateReviewRepository,
+)
 
 
 class PostgresStore:
@@ -399,6 +402,21 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("interview candidate proposal admission requires an active unit of work")
         return PostgresOwnerTruthInterviewCandidateProposalRepository(active.connection)
+
+    def owner_truth_interview_candidate_review_repository(
+        self,
+    ) -> PostgresOwnerTruthInterviewCandidateReviewRepository:
+        """Return private review-batch Candidate composition in the active UoW.
+
+        This is a value-minimized read model. It groups only pending Candidates
+        from an admitted conversation Source and cannot write a decision or a
+        MemoryVersion.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("interview candidate review composition requires an active unit of work")
+        return PostgresOwnerTruthInterviewCandidateReviewRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(

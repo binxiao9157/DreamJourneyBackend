@@ -25,6 +25,7 @@ from app.domain.owner_truth.contracts import (
 from app.services.owner_truth_candidate_extraction import (
     InMemoryOwnerTruthCandidateExtractionRepository,
     OwnerTruthCandidateExtractionService,
+    PostgresOwnerTruthCandidateExtractionRepository,
 )
 
 
@@ -227,6 +228,46 @@ class OwnerTruthCandidateExtractionTests(unittest.TestCase):
     def test_candidate_requires_a_nonempty_source_span(self) -> None:
         with self.assertRaises(ValueError):
             CandidateEvidenceSpan(start=9, end=9)
+
+    def test_text_bearing_conversation_source_is_admitted_for_extraction(self) -> None:
+        record = self._command().write_record()
+        owner_subject_id = self.owner_subject_id
+        source_text = self.source_text
+
+        class _Cursor:
+            def __init__(self):
+                self._rows = [
+                    {
+                        "owner_subject_id": owner_subject_id,
+                        "authority_epoch": 2,
+                        "status": "active",
+                    },
+                    {
+                        "owner_subject_id": owner_subject_id,
+                        "authority_epoch": 2,
+                        "source_version": 1,
+                        "state": "active",
+                        "content_hash": record.source_content_hash,
+                        "source_kind": "conversation",
+                        "content_payload": {
+                            "sourceKind": "conversation",
+                            "text": source_text,
+                        },
+                    },
+                ]
+
+            def execute(self, *_args, **_kwargs):
+                return None
+
+            def fetchone(self):
+                return self._rows.pop(0)
+
+        cursor = _Cursor()
+
+        PostgresOwnerTruthCandidateExtractionRepository(object())._assert_live_source(
+            cursor,
+            record,
+        )
 
 
 if __name__ == "__main__":
