@@ -89,9 +89,13 @@ append-only trigger enforcement, immutable reload, and proof that the
 historical job/operation/outbox/attempt remain terminal. It does not alter
 production business rows or server `.env`/`.env.backup*` files.
 
-## Remaining `WI-S1-02-09` Work
+## Follow-on `WI-S1-02-09` Work
 
-Implement durable, value-free worker-loss observation evidence. It must report
-expired leased work without auto-claiming, auto-retrying, or making the replay
-request executable. Provider reconciliation and any real replay remain G3 and
-later-worker concerns.
+The durable, value-free worker-loss observation slice is now deployed at
+`main@19bf02f`; see
+`2026-07-20-async-effect-worker-loss-evidence.md`. It reports expired leased
+work without auto-claiming, auto-retrying, or making this replay request
+executable.
+
+Provider reconciliation/query and any real replay remain G3 and later-worker
+concerns.
