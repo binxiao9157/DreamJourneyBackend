@@ -84,3 +84,29 @@ The existing disposable-Postgres smoke now calls
 `OwnerTruthInterviewSessionReadService` after a store restart and verifies that
 the state read preserves version fences and returns no pending review batch
 after acknowledgement. It never touches the configured application database.
+
+## G2 Deployment Evidence
+
+The contract was deployed to the production-like Postgres environment at
+backend revision `f7c7dab` on 2026-07-20.
+
+- The API container was rebuilt and `/ready` returned `status=ready`, including
+  database, schema, auth and incident readiness.
+- `python scripts/migrate_db.py --verify --build-id f7c7dab` reported schema
+  head `0034`, no pending migration and `status=ready`.
+- `python scripts/backend-owner-truth-conversation-postgres-smoke.py` returned
+  `owner_truth_conversation_postgres_smoke=passed`, including the state read
+  after a store restart.
+- `env PYTHONPATH=. BACKEND_BASE_URL=http://127.0.0.1:8080 python
+  scripts/backend-route-authentication-postgres-smoke.py` returned `status=passed`
+  with `routeCount=96`.
+
+No server `.env` value or credential was read, changed or committed. The QA
+gate remains default-off, so this endpoint is deployed but not public.
+
+## Next Consumer Boundary
+
+The next increment is an iOS typed QA-only consumer. It may display only the
+value-minimized session state above, must discard results after an account lease
+change, and must not connect the route to public Echo UI or persist it as a
+memory artifact.
