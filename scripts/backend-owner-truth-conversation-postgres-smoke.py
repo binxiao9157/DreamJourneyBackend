@@ -37,8 +37,8 @@ from app.domain.owner_truth.conversation import (
     InterviewReviewBatchTrigger,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationVersionConflict,
+    PauseInterviewForTopicSwitchCommand,
     RecordInterviewPacingCommand,
-    SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
 )
 from app.domain.owner_truth.interview_orchestration import InterviewAction
@@ -135,7 +135,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require("0031" in applied["appliedVersions"], "conversation review batch migration must apply")
+        require("0032" in applied["appliedVersions"], "conversation topic switch migration must apply")
 
         store = PostgresStore(dsn=test_dsn, pool_min_size=1, pool_max_size=2)
         store.open_pool(wait=True)
@@ -281,19 +281,36 @@ def main() -> None:
             cross_owner_rejected = True
         require(cross_owner_rejected, "cross-owner read must be denied")
 
-        boundary = SetInterviewBoundaryCommand(
-            command_id="boundary-conversation-smoke",
+        topic_switch = PauseInterviewForTopicSwitchCommand(
+            command_id="pause-conversation-topic-switch-smoke",
             thread_id=thread_id,
             session_id=session_id,
+            expected_thread_version=2,
             expected_session_version=3,
-            boundary=InterviewBoundary.DO_NOT_ASK,
         )
         paused = invoke(
             store,
-            command_id="boundary-conversation-smoke",
-            operation=lambda service: service.set_boundary(command=boundary, context=context),
+            command_id="pause-conversation-topic-switch-smoke",
+            operation=lambda service: service.pause_for_topic_switch(
+                command=topic_switch,
+                context=context,
+            ),
         )
-        require(paused.state.value == "paused", "doNotAsk must pause the interview session")
+        require(paused.state.value == "paused", "topic switch must pause the interview session")
+        require(paused.thread_version == 3, "topic switch must advance the thread version")
+        require(paused.session_version == 4, "topic switch must advance the session version")
+        replayed_topic_switch = invoke(
+            store,
+            command_id="pause-conversation-topic-switch-smoke-replay",
+            operation=lambda service: service.pause_for_topic_switch(
+                command=topic_switch,
+                context=context,
+            ),
+        )
+        require(
+            replayed_topic_switch.outcome == "deduplicated",
+            "topic switch replay must deduplicate",
+        )
         paused_bridge = invoke_orchestration(
             store,
             command_id="read-only-orchestration-paused",
@@ -308,7 +325,7 @@ def main() -> None:
         )
         require(
             paused_bridge.decision.action is InterviewAction.PAUSE,
-            "persisted doNotAsk state must fail closed in the bridge",
+            "persisted topic-switch pause must fail closed in the bridge",
         )
         require(
             paused_bridge.decision.review_batch_due,
@@ -398,6 +415,27 @@ def main() -> None:
             "review acknowledgement replay must deduplicate",
         )
 
+        follow_up_thread_id = str(uuid.uuid4())
+        follow_up_session_id = str(uuid.uuid4())
+        follow_up = invoke(
+            store,
+            command_id="start-conversation-after-topic-switch",
+            operation=lambda service: service.start_session(
+                command=StartInterviewSessionCommand(
+                    command_id="start-conversation-after-topic-switch",
+                    thread_id=follow_up_thread_id,
+                    session_id=follow_up_session_id,
+                    expected_thread_version=0,
+                    entry_mode="naturalInput",
+                ),
+                context=context,
+            ),
+        )
+        require(
+            follow_up.state.value == "active",
+            "an explicit replacement session must be possible after a topic switch pause",
+        )
+
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -434,7 +472,7 @@ def main() -> None:
             operation=lambda service: service.read_session(session_id=session_id, context=context),
         )
         require(restored.row_version == 6, "session state must survive a store restart")
-        require(restored.boundary is InterviewBoundary.DO_NOT_ASK, "boundary must survive restart")
+        require(restored.boundary is InterviewBoundary.OPEN, "open boundary must survive topic switch")
         require(restored.deepening_turn_count == 1, "pacing state must survive restart")
         require(restored.candidate_batch_turn_count == 0, "acknowledgement must consume only its batch")
         require(restored.pending_review_batch_id is None, "acknowledgement must clear pending batch")

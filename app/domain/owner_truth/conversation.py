@@ -418,6 +418,58 @@ class SetInterviewBoundaryCommand:
 
 
 @dataclass(frozen=True)
+class PauseInterviewForTopicSwitchCommand:
+    """Pause the current private thread when the Owner explicitly changes topic.
+
+    Topic classification remains upstream. This command intentionally carries no
+    topic text, topic identifier, model output, or Candidate payload: it only
+    records the lifecycle fence that prevents the old thread from receiving a
+    subsequent turn.
+    """
+
+    command_id: str
+    thread_id: str
+    session_id: str
+    expected_thread_version: int
+    expected_session_version: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
+        object.__setattr__(self, "thread_id", require_uuid(self.thread_id, field="thread_id"))
+        object.__setattr__(self, "session_id", require_uuid(self.session_id, field="session_id"))
+        _positive_version(self.expected_thread_version, field="expected_thread_version")
+        _positive_version(self.expected_session_version, field="expected_session_version")
+
+    def write_record(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> "PauseInterviewForTopicSwitchWriteRecord":
+        command_id_hash = _sha256(self.command_id)
+        payload = {
+            "schemaVersion": OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION,
+            "commandType": "pauseInterviewForTopicSwitch",
+            "threadId": self.thread_id,
+            "sessionId": self.session_id,
+            "expectedThreadVersion": self.expected_thread_version,
+            "expectedSessionVersion": self.expected_session_version,
+        }
+        return PauseInterviewForTopicSwitchWriteRecord(
+            receipt_id=_receipt_id(context=context, command_id_hash=command_id_hash),
+            command_id_hash=command_id_hash,
+            payload_hash=_sha256(_canonical_json(payload)),
+            thread_id=self.thread_id,
+            session_id=self.session_id,
+            expected_thread_version=self.expected_thread_version,
+            expected_session_version=self.expected_session_version,
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            actor_subject_id=context.actor_subject_id,
+            policy_version=context.policy_version,
+        )
+
+
+@dataclass(frozen=True)
 class RecordInterviewPacingCommand:
     command_id: str
     thread_id: str
@@ -609,6 +661,21 @@ class SetInterviewBoundaryWriteRecord:
 
 
 @dataclass(frozen=True)
+class PauseInterviewForTopicSwitchWriteRecord:
+    receipt_id: str
+    command_id_hash: str
+    payload_hash: str
+    thread_id: str
+    session_id: str
+    expected_thread_version: int
+    expected_session_version: int
+    vault_id: str
+    owner_subject_id: str
+    actor_subject_id: str
+    policy_version: str
+
+
+@dataclass(frozen=True)
 class RecordInterviewPacingWriteRecord:
     receipt_id: str
     command_id_hash: str
@@ -759,6 +826,8 @@ __all__ = [
     "OwnerTruthInterviewSessionStateConflict",
     "OwnerTruthInterviewReviewBatchResult",
     "OwnerTruthInterviewReviewBatchSnapshot",
+    "PauseInterviewForTopicSwitchCommand",
+    "PauseInterviewForTopicSwitchWriteRecord",
     "CreateInterviewReviewBatchCommand",
     "CreateInterviewReviewBatchWriteRecord",
     "RecordInterviewPacingCommand",
