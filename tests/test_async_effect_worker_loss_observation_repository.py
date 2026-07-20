@@ -38,7 +38,7 @@ def _evidence(*, observed_at: datetime | None = None):
 class AsyncEffectWorkerLossObservationRepositoryTests(unittest.TestCase):
     def test_record_is_append_only_and_idempotent_for_same_observation(self):
         repository = InMemoryAsyncEffectWorkerLossObservationRepository()
-        evidence = _evidence(observed_at=datetime(2026, 7, 20, 4, 30, tzinfo=timezone.utc))
+        evidence = _evidence(observed_at=datetime.now(timezone.utc))
 
         first = repository.record(evidence)
         replay = repository.record(evidence)
@@ -51,9 +51,10 @@ class AsyncEffectWorkerLossObservationRepositoryTests(unittest.TestCase):
 
     def test_observation_id_cannot_be_reused_with_different_immutable_evidence(self):
         repository = InMemoryAsyncEffectWorkerLossObservationRepository()
-        evidence = _evidence(observed_at=datetime(2026, 7, 20, 4, 30, tzinfo=timezone.utc))
+        observed_at = datetime.now(timezone.utc)
+        evidence = _evidence(observed_at=observed_at)
         repository.record(evidence)
-        changed = _evidence(observed_at=datetime(2026, 7, 20, 4, 31, tzinfo=timezone.utc))
+        changed = _evidence(observed_at=observed_at + timedelta(minutes=1))
         object.__setattr__(changed, "observation_id", evidence.observation_id)
 
         with self.assertRaises(AsyncEffectWorkerLossObservationConflict):

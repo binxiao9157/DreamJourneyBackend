@@ -43,6 +43,16 @@ class TimeLetterDeliveryDisposition(str, Enum):
     NOT_DUE = "not_due"
 
 
+class TimeLetterDeliveryAdmissionShadowDisposition(str, Enum):
+    """Non-authoritative outcomes for the disabled-by-default admission probe."""
+
+    SHADOW_DISABLED = "shadow_disabled"
+    LEGACY_ENVELOPE_IGNORED = "legacy_envelope_ignored"
+    NOT_DUE = "not_due"
+    WOULD_ADMIT = "would_admit"
+    INVALID_V4_ENVELOPE = "invalid_v4_envelope"
+
+
 _SKIPPED_REVOKED_REASONS = frozenset(
     {
         "familyRecipientInactive",
@@ -374,6 +384,55 @@ class TimeLetterDeliveryPlan:
         }
 
 
+@dataclass(frozen=True)
+class TimeLetterDeliveryAdmissionShadow:
+    """Value-free, non-authoritative preview of a V4 TimeLetter admission.
+
+    The shadow result intentionally exposes only values already hashed by the
+    effect contract.  It is not an effect intent, cannot be consumed, and must
+    never be used as evidence that a mailbox write or provider delivery ran.
+    """
+
+    enabled: bool
+    disposition: TimeLetterDeliveryAdmissionShadowDisposition
+    reason_code: str
+    intent_stable_key_hashes: tuple[str, ...] = ()
+    plan_summary: Mapping[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TimeLetterDeliveryContractError("shadow enabled must be a boolean")
+        if not isinstance(self.disposition, TimeLetterDeliveryAdmissionShadowDisposition):
+            raise TimeLetterDeliveryContractError("shadow disposition is required")
+        object.__setattr__(self, "reason_code", _required(self.reason_code, field="shadowReasonCode"))
+        for value in self.intent_stable_key_hashes:
+            _sha256_hex(value, field="intentStableKeyHash")
+        if self.plan_summary is not None and not isinstance(self.plan_summary, Mapping):
+            raise TimeLetterDeliveryContractError("shadow plan summary must be a mapping")
+
+    @property
+    def would_admit(self) -> bool:
+        return self.disposition is TimeLetterDeliveryAdmissionShadowDisposition.WOULD_ADMIT
+
+    def value_free_summary(self) -> Mapping[str, object]:
+        summary: dict[str, object] = {
+            "effectAdmissionPerformed": False,
+            "enabled": self.enabled,
+            "intentCount": len(self.intent_stable_key_hashes),
+            "intentStableKeyHashes": list(self.intent_stable_key_hashes),
+            "legacyDirectDispatchUnchanged": True,
+            "mode": "admissionShadow",
+            "reasonCode": self.reason_code,
+            "schemaVersion": TIME_LETTER_DELIVERY_SCHEMA_VERSION,
+            "shadowOnly": True,
+            "status": self.disposition.value,
+            "wouldAdmit": self.would_admit,
+        }
+        if self.plan_summary is not None:
+            summary["plan"] = self.plan_summary
+        return summary
+
+
 def _target_records(item: Mapping[str, Any], snapshot: TimeLetterSealedSnapshot) -> Sequence[TimeLetterDeliveryTarget]:
     recipients = item.get("recipients")
     records = recipients if isinstance(recipients, list) else []
@@ -447,6 +506,73 @@ def build_time_letter_delivery_plan(
     return TimeLetterDeliveryPlan(snapshot=snapshot, targets=targets, admissions=admissions)
 
 
+def build_time_letter_delivery_admission_shadow(
+    item: object,
+    *,
+    now_iso: str,
+    enabled: bool = False,
+) -> TimeLetterDeliveryAdmissionShadow:
+    """Preview whether a sealed V4 letter *would* enter the typed effect lane.
+
+    This is deliberately a pure G0 shadow: it does not admit an effect, call
+    the atomic delivery service, write a receipt/mailbox, or inspect/replace
+    the legacy direct dispatcher.  Disabled and legacy paths return before
+    parsing the rest of the envelope, so a malformed legacy payload cannot
+    become a new typed-path failure.
+    """
+
+    if not enabled:
+        return TimeLetterDeliveryAdmissionShadow(
+            enabled=False,
+            disposition=TimeLetterDeliveryAdmissionShadowDisposition.SHADOW_DISABLED,
+            reason_code="shadowDisabled",
+        )
+    if not isinstance(item, Mapping):
+        return TimeLetterDeliveryAdmissionShadow(
+            enabled=True,
+            disposition=TimeLetterDeliveryAdmissionShadowDisposition.INVALID_V4_ENVELOPE,
+            reason_code="invalidV4Envelope",
+        )
+
+    metadata = _metadata(item)
+    protocol = str(_field(item, metadata, "deliveryProtocolVersion") or "").strip()
+    if protocol != TIME_LETTER_DELIVERY_SCHEMA_VERSION:
+        return TimeLetterDeliveryAdmissionShadow(
+            enabled=True,
+            disposition=TimeLetterDeliveryAdmissionShadowDisposition.LEGACY_ENVELOPE_IGNORED,
+            reason_code="legacyProtocolIgnored",
+        )
+
+    try:
+        plan = build_time_letter_delivery_plan(item, now_iso=now_iso)
+    except TimeLetterDeliveryContractError:
+        return TimeLetterDeliveryAdmissionShadow(
+            enabled=True,
+            disposition=TimeLetterDeliveryAdmissionShadowDisposition.INVALID_V4_ENVELOPE,
+            reason_code="invalidV4Envelope",
+        )
+
+    plan_summary = plan.value_free_summary()
+    if not plan.is_due:
+        return TimeLetterDeliveryAdmissionShadow(
+            enabled=True,
+            disposition=TimeLetterDeliveryAdmissionShadowDisposition.NOT_DUE,
+            reason_code="timeLetterNotOpen",
+            plan_summary=plan_summary,
+        )
+
+    return TimeLetterDeliveryAdmissionShadow(
+        enabled=True,
+        disposition=TimeLetterDeliveryAdmissionShadowDisposition.WOULD_ADMIT,
+        reason_code="typedEffectAdmissionShadowOnly",
+        intent_stable_key_hashes=tuple(
+            sha256(intent.stable_key.encode("utf-8")).hexdigest()
+            for intent in plan.effect_intents
+        ),
+        plan_summary=plan_summary,
+    )
+
+
 __all__ = [
     "TIME_LETTER_DELIVERY_EVENT_TYPE",
     "TIME_LETTER_DELIVERY_CONSUMER_NAME",
@@ -456,11 +582,14 @@ __all__ = [
     "TIME_LETTER_DELIVERY_RESOURCE_TYPE",
     "TIME_LETTER_DELIVERY_SCHEMA_VERSION",
     "TimeLetterDeliveryAdmission",
+    "TimeLetterDeliveryAdmissionShadow",
+    "TimeLetterDeliveryAdmissionShadowDisposition",
     "TimeLetterDeliveryContractError",
     "TimeLetterDeliveryCompletion",
     "TimeLetterDeliveryDisposition",
     "TimeLetterDeliveryPlan",
     "TimeLetterDeliveryTarget",
     "TimeLetterSealedSnapshot",
+    "build_time_letter_delivery_admission_shadow",
     "build_time_letter_delivery_plan",
 ]
