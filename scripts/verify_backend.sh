@@ -26,6 +26,9 @@ echo "== Backend py_compile =="
 echo "== Voice clone 2.0 contract smoke =="
 PYTHONPATH=. "$PYTHON_BIN" scripts/voice_clone_2_contract_smoke.py >/dev/null
 
+echo "== Provider effect G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-effect-contract-gate.sh
+
 echo "== Backend deployment files =="
 test -f Dockerfile
 test -f docker-compose.yml
@@ -103,6 +106,9 @@ test -f app/services/echo_delayed_reply_service.py
 test -f scripts/run-backend-echo-delayed-reply-answer-inbox-contract-gate.sh
 test -f scripts/backend-echo-delayed-reply-atomic-completion-postgres-smoke.py
 test -f scripts/run-backend-echo-delayed-reply-atomic-completion-postgres-smoke.sh
+test -f app/async_effects/provider_effects.py
+test -f tests/test_provider_effects.py
+test -f scripts/run-backend-provider-effect-contract-gate.sh
 test -f scripts/backend-owner-truth-legacy-migration-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-legacy-migration-postgres-smoke.sh
 test -f scripts/backend-owner-truth-legacy-shadow-parity-postgres-smoke.py
