@@ -96,7 +96,27 @@ G0 local verification includes:
 - `scripts/verify_backend.sh`, including the full unittest suite and contract
   gates.
 
-G2 deployment verification is recorded after the code revision is deployed:
+## G2 Deployment Evidence
+
+The implementation was deployed to the production-like Postgres environment at
+backend revision `81be076`.
+
+- API container rebuilt and `/ready` returned `status=ready` with database,
+  schema, auth and incident components ready.
+- `scripts/migrate_db.py --verify --build-id 81be076` reported schema head
+  `0034`, no pending migration and `status=ready`.
+- `scripts/run-backend-owner-truth-conversation-postgres-smoke.sh` returned
+  `owner_truth_conversation_postgres_smoke=passed`, including the read join
+  before, during and after terminal interview review.
+- `scripts/run-backend-route-authentication-postgres-smoke.sh` returned
+  `routeCount=95`, `userRouteAllowed=true`, `machineBusinessRouteDenied=true`
+  and `status=passed`.
+
+The QA flag remains default-off in the deployed environment. The new
+interview-review routes are present and authenticated, but not publicly
+discoverable or release-visible.
+
+## Deployment Commands
 
 - `scripts/run-backend-owner-truth-conversation-postgres-smoke.sh` verifies
   the canonical Postgres read join before, during and after terminal review;
