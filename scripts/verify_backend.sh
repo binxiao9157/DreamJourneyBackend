@@ -56,6 +56,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-readiness-evidence-con
 echo "== Async-effect recovery/evidence G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-recovery-evidence-contract-gate.sh
 
+echo "== Verified media processor admission G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-verified-media-processor-shadow-gate.sh
+
 echo "== Backend deployment files =="
 test -f Dockerfile
 test -f docker-compose.yml
