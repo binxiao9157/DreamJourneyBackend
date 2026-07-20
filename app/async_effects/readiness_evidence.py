@@ -36,6 +36,12 @@ class AsyncEffectReadinessObservationState(str, Enum):
     EXPIRED = "expired"
 
 
+class AsyncEffectReadinessManifestStatus(str, Enum):
+    PASSED = "passed"
+    BLOCKED = "blocked"
+    NOT_RUN = "notRun"
+
+
 def _utc(value: object, *, field: str) -> datetime:
     if not isinstance(value, datetime):
         raise AsyncEffectReadinessEvidenceError(f"{field} must be a datetime")
@@ -169,6 +175,47 @@ class AsyncEffectWorkerReadinessEvidence:
         }
 
 
+@dataclass(frozen=True)
+class AsyncEffectReadinessManifestPlan:
+    """A value-free plan for the generic evidence manifest sink.
+
+    It does not write evidence. Later durable wiring must pass this plan to the
+    shared append-only manifest service. The mapping is intentionally strict:
+    skipped, unknown, and expired observations are all ``notRun``.
+    """
+
+    manifest_id: str
+    observation_id: str
+    observation_state: AsyncEffectReadinessObservationState
+    status: AsyncEffectReadinessManifestStatus
+    reason: str
+    artifact_hash: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "manifest_id", _identifier(self.manifest_id, field="manifest_id"))
+        object.__setattr__(self, "observation_id", _identifier(self.observation_id, field="observation_id"))
+        if not isinstance(self.observation_state, AsyncEffectReadinessObservationState):
+            raise AsyncEffectReadinessEvidenceError("observation_state is invalid")
+        if not isinstance(self.status, AsyncEffectReadinessManifestStatus):
+            raise AsyncEffectReadinessEvidenceError("manifest status is invalid")
+        object.__setattr__(self, "reason", _identifier(self.reason, field="reason"))
+        normalized_hash = str(self.artifact_hash or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", normalized_hash):
+            raise AsyncEffectReadinessEvidenceError("artifact_hash must be a lowercase SHA-256 digest")
+        object.__setattr__(self, "artifact_hash", normalized_hash)
+
+    def value_free_summary(self) -> dict[str, object]:
+        return {
+            "schemaVersion": ASYNC_EFFECT_READINESS_EVIDENCE_SCHEMA_VERSION,
+            "manifestId": self.manifest_id,
+            "observationId": self.observation_id,
+            "observationState": self.observation_state.value,
+            "manifestStatus": self.status.value,
+            "reason": self.reason,
+            "artifactHash": self.artifact_hash,
+        }
+
+
 def build_async_effect_worker_readiness_evidence(
     *,
     runtime_status: AsyncEffectRuntimeStatus,
@@ -248,10 +295,45 @@ def build_async_effect_worker_readiness_evidence(
     )
 
 
+def build_async_effect_readiness_manifest_plan(
+    evidence: AsyncEffectWorkerReadinessEvidence,
+    *,
+    now: Optional[datetime] = None,
+) -> AsyncEffectReadinessManifestPlan:
+    """Map an observation to a future append-only evidence manifest plan."""
+
+    if not isinstance(evidence, AsyncEffectWorkerReadinessEvidence):
+        raise AsyncEffectReadinessEvidenceError("readiness evidence is required")
+    state = evidence.effective_state(now=now)
+    if state is AsyncEffectReadinessObservationState.READY:
+        status = AsyncEffectReadinessManifestStatus.PASSED
+    elif state is AsyncEffectReadinessObservationState.BLOCKED:
+        status = AsyncEffectReadinessManifestStatus.BLOCKED
+    else:
+        status = AsyncEffectReadinessManifestStatus.NOT_RUN
+    summary = evidence.value_free_summary(now=now)
+    artifact_hash = sha256(
+        json.dumps(summary, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    manifest_seed = f"{evidence.observation_id}|{state.value}|{status.value}|{artifact_hash}"
+    manifest_id = f"aem-{sha256(manifest_seed.encode('utf-8')).hexdigest()[:32]}"
+    return AsyncEffectReadinessManifestPlan(
+        manifest_id=manifest_id,
+        observation_id=evidence.observation_id,
+        observation_state=state,
+        status=status,
+        reason=str(summary["reason"]),
+        artifact_hash=artifact_hash,
+    )
+
+
 __all__ = [
     "ASYNC_EFFECT_READINESS_EVIDENCE_SCHEMA_VERSION",
     "AsyncEffectReadinessEvidenceError",
+    "AsyncEffectReadinessManifestPlan",
+    "AsyncEffectReadinessManifestStatus",
     "AsyncEffectReadinessObservationState",
     "AsyncEffectWorkerReadinessEvidence",
     "build_async_effect_worker_readiness_evidence",
+    "build_async_effect_readiness_manifest_plan",
 ]
