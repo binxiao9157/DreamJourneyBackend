@@ -15,6 +15,7 @@ MACHINE_TOKEN = os.environ.get(
     "BACKEND_API_TOKEN",
     os.environ.get("DREAMJOURNEY_BACKEND_API_TOKEN", ""),
 ).strip()
+EXPECTED_ROUTE_COUNT = 96
 
 
 def require(condition, message):
@@ -89,7 +90,10 @@ def main():
         runtime, public_headers = request_json("GET", "/config/runtime")
         route_contract = runtime["auth"]["routeAuthentication"]
         require(route_contract["mode"] == "enforce", "deployed route auth must enforce")
-        require(route_contract["routeCount"] == 95, "deployed route registry does not match the current contract")
+        require(
+            route_contract["routeCount"] == EXPECTED_ROUTE_COUNT,
+            "deployed route registry does not match the current contract",
+        )
         require(route_contract["unclassifiedCount"] == 0, "deployed route registry incomplete")
         require(
             public_headers.get("x-dreamjourney-route-auth-reason") == "publicRoute",

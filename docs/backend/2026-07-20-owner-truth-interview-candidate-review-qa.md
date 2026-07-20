@@ -131,3 +131,10 @@ discoverable or release-visible.
 - No `MemoryVersion`, projection, KBLite fact, publication, provider call or
   digital-human training input.
 - No cross-account/family review authority.
+
+## Subsequent route inventory note
+
+The deployment evidence above correctly recorded `95` routes for revision
+`81be076`. The later QA-only interview-session state read was added in
+`dffb6c3`, increasing the current typed route inventory to `96`; the deployed
+route-authentication smoke follows that current count.
