@@ -60,6 +60,13 @@ from .dead_letter_effects import (
     admit_dead_letter,
     authorize_dead_letter_replay,
 )
+from .dead_letter_repository import (
+    DeadLetterPersistenceConflict,
+    DeadLetterPersistenceError,
+    DeadLetterPersistenceSummary,
+    InMemoryAsyncEffectDeadLetterRepository,
+    PostgresAsyncEffectDeadLetterRepository,
+)
 from .readiness_evidence import (
     ASYNC_EFFECT_READINESS_EVIDENCE_SCHEMA_VERSION,
     AsyncEffectReadinessEvidenceError,
@@ -136,6 +143,9 @@ __all__ = [
     "DeadLetterReplayDecision",
     "DeadLetterReplayReason",
     "DeadLetterState",
+    "DeadLetterPersistenceConflict",
+    "DeadLetterPersistenceError",
+    "DeadLetterPersistenceSummary",
     "DeadLetterRestoreReplayContext",
     "DeadLetterRestoreReplayDecision",
     "DeadLetterRestoreReplayReason",
@@ -179,6 +189,7 @@ __all__ = [
     "InMemoryEffectKernelRepository",
     "InMemoryProviderEffectRepository",
     "InMemoryAsyncEffectLeaseRepository",
+    "InMemoryAsyncEffectDeadLetterRepository",
     "InMemoryAsyncEffectConsumerRepository",
     "OwnerTruthSourceBlockedConsumerCommand",
     "OwnerTruthSourceCandidateExtractionConsumerCommand",
@@ -199,6 +210,7 @@ __all__ = [
     "PostgresEffectKernelRepository",
     "PostgresProviderEffectRepository",
     "PostgresAsyncEffectLeaseRepository",
+    "PostgresAsyncEffectDeadLetterRepository",
     "PostgresAsyncEffectConsumerRepository",
     "PostgresOwnerTruthSourceTargetAdmissionRepository",
     "PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository",

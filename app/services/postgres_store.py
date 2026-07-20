@@ -87,6 +87,7 @@ from app.async_effects.repository import PostgresEffectKernelRepository
 from app.async_effects.scheduler_repository import PostgresAsyncEffectSchedulerLeaseRepository
 from app.async_effects.consumer_repository import PostgresAsyncEffectConsumerRepository
 from app.async_effects.provider_effect_repository import PostgresProviderEffectRepository
+from app.async_effects.dead_letter_repository import PostgresAsyncEffectDeadLetterRepository
 from app.async_effects.target_admission import (
     PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository,
     PostgresOwnerTruthSourceTargetAdmissionRepository,
@@ -236,6 +237,18 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("provider effect persistence requires an active unit of work")
         return PostgresProviderEffectRepository(active.connection)
+
+    def async_effect_dead_letter_repository(self) -> PostgresAsyncEffectDeadLetterRepository:
+        """Return durable dead-letter admission persistence in the active UoW.
+
+        This boundary persists only terminal, value-free dead-letter evidence.
+        It does not re-enqueue a job, start a worker, or invoke a Provider.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("async effect dead-letter persistence requires an active unit of work")
+        return PostgresAsyncEffectDeadLetterRepository(active.connection)
 
     def owner_truth_source_target_admission_repository(
         self,

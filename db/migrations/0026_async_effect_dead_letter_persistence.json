@@ -1,0 +1,14 @@
+{
+  "version": "0026",
+  "name": "async_effect_dead_letter_persistence",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "asyncEffectV1DeadLetterPersistenceShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "asyncEffectV1": false,
+    "asyncEffectWorker": false,
+    "asyncEffectDeadLetterPersistenceV1": false,
+    "asyncEffectDeadLetterReplayV1": false
+  }
+}
