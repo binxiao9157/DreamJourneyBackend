@@ -67,6 +67,10 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
     def _append_path(vault_id: str, session_id: str) -> str:
         return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/messages"
 
+    @staticmethod
+    def _presentation_path(vault_id: str, session_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/presentation"
+
     def _start_session(
         self,
         *,
@@ -297,6 +301,86 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         )
         self.assertEqual(append.status_code, 201)
         self.assertEqual(append.json()["receipt"]["messageSequence"], 1)
+
+    def test_formal_presentation_is_policy_bound_and_content_free(self) -> None:
+        _, headers, auth_session_id = self._login("13800139607", qa=False)
+        headers.update(
+            {
+                "X-DreamJourney-Feature": "echoTextInput",
+                "X-DreamJourney-Feature-Decision-Id": "decision-interview-presentation",
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": hashlib.sha256(
+                    auth_session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        vault_id = "vault-interview-presentation"
+        thread_id = str(uuid4())
+        interview_session_id = str(uuid4())
+        start = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=interview_session_id,
+        )
+        self.assertEqual(start.status_code, 201)
+
+        text = "这段私人叙述不能进入产品呈现合同。"
+        append = client.post(
+            self._append_path(vault_id, interview_session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": text,
+            },
+        )
+        self.assertEqual(append.status_code, 201)
+
+        response = client.get(
+            self._presentation_path(vault_id, interview_session_id),
+            headers=headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(
+            response.json(),
+            {
+                "schemaVersion": "owner-truth-interview-session-presentation-v1",
+                "vaultId": vault_id,
+                "presentation": {
+                    "state": "narrativeRecorded",
+                    "canContinue": True,
+                    "canContinueLater": True,
+                },
+            },
+        )
+        rendered = json.dumps(response.json(), ensure_ascii=False, sort_keys=True)
+        for forbidden in (
+            text,
+            "threadId",
+            "sessionId",
+            "candidate",
+            "memory",
+            "fatigue",
+            "ownerTurnCount",
+            "pendingReviewBatchId",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+        denied = client.get(
+            self._presentation_path(vault_id, interview_session_id),
+            headers={"Authorization": headers["Authorization"]},
+        )
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.json()["detail"]["code"], "release_policy_denied")
+        self.assertEqual(denied.json()["detail"]["reason"], "missingCapturedPolicy")
 
 
 if __name__ == "__main__":

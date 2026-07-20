@@ -307,12 +307,60 @@ def exercise_formal_natural_input(
         serialized = json.dumps(state_body, ensure_ascii=False, sort_keys=True)
         require("仅用于隔离 smoke" not in serialized, "state must not echo narrative content")
 
+        presentation_status, presentation_body, presentation_headers = app_request(
+            "GET",
+            f"{start_path}/{session_id}/presentation",
+            token=access_token,
+            policy_headers=policy_headers,
+        )
+        require(
+            presentation_status == 200,
+            "matching policy capture must read product continuation guidance",
+        )
+        require(
+            presentation_headers.get("cache-control") == "no-store",
+            "presentation must not cache",
+        )
+        require(
+            presentation_body == {
+                "schemaVersion": "owner-truth-interview-session-presentation-v1",
+                "vaultId": vault_id,
+                "presentation": {
+                    "state": "narrativeRecorded",
+                    "canContinue": True,
+                    "canContinueLater": True,
+                },
+            },
+            "presentation must expose only bounded continuation guidance",
+        )
+        presentation_serialized = json.dumps(
+            presentation_body,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        for forbidden in (
+            "仅用于隔离 smoke",
+            "threadId",
+            "sessionId",
+            "candidate",
+            "memory",
+            "fatigue",
+            "ownerTurnCount",
+            "pendingReviewBatchId",
+        ):
+            require(
+                forbidden not in presentation_serialized,
+                "presentation must remain content and internals free",
+            )
+
         return {
             "formalMissingCaptureDenied": True,
             "formalMatchingCaptureStarted": True,
             "formalMatchingCaptureAppended": True,
             "formalMatchingCaptureRead": True,
+            "formalMatchingCapturePresentation": True,
             "contentFreeStateVerified": True,
+            "contentFreePresentationVerified": True,
         }
     finally:
         main_module.store = previous_store

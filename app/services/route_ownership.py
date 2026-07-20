@@ -253,6 +253,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthInterviewSessionStateRead",
             ),
             _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/presentation",
+                session,
+                "ownerTruthInterviewSessionPresentationRead",
+            ),
+            _rule(
                 "POST",
                 "/v2/vaults/{vault_id}/interview-sessions",
                 session,

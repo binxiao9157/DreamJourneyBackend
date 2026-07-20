@@ -1151,6 +1151,47 @@ def _owner_truth_interview_session_state_read_response(
     }
 
 
+def _owner_truth_interview_session_presentation_response(
+    *,
+    vault_id: str,
+    snapshot: Any,
+) -> Dict[str, Any]:
+    """Project one private session into product-safe, value-minimized guidance.
+
+    The product surface must not receive transcript text, candidate content,
+    review identifiers, pacing counters, fatigue or internal authority values.
+    It only needs enough state to explain whether the owner can continue now or
+    has a confirmation boundary ahead.  iOS owns the natural-language copy.
+    """
+
+    if snapshot.pending_review_batch_id is not None:
+        state = "reviewPending"
+        can_continue = False
+        can_continue_later = True
+    elif snapshot.state.value == "active" and snapshot.boundary.value == "open":
+        state = "readyForNarrative" if snapshot.turn_count == 0 else "narrativeRecorded"
+        can_continue = True
+        can_continue_later = True
+    elif snapshot.state.value == "ended":
+        state = "ended"
+        can_continue = False
+        can_continue_later = True
+    else:
+        state = "paused"
+        can_continue = False
+        can_continue_later = snapshot.boundary.value != "doNotAsk"
+
+    return {
+        "schemaVersion": "owner-truth-interview-session-presentation-v1",
+        "vaultId": vault_id,
+        "presentation": {
+            "state": state,
+            "canContinue": can_continue,
+            "canContinueLater": can_continue_later,
+        },
+    }
+
+
 def _owner_truth_interview_session_command_response(
     *,
     vault_id: str,
@@ -2776,6 +2817,41 @@ def read_owner_truth_interview_session_state(
     return JSONResponse(
         status_code=200,
         content=_owner_truth_interview_session_state_read_response(
+            vault_id=context.vault_id,
+            snapshot=snapshot,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/presentation",
+    include_in_schema=False,
+)
+def read_owner_truth_interview_session_presentation(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+) -> JSONResponse:
+    """Read product-safe continuation guidance for one private interview.
+
+    This route follows the same captured ``echoTextInput`` policy boundary as
+    the natural-input commands.  It deliberately does not promote or expose
+    Candidate review content; it only makes the current continuation boundary
+    renderable in the product sheet.
+    """
+
+    try:
+        context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
+        snapshot = OwnerTruthInterviewSessionReadService(store).read(
+            session_id=session_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=_owner_truth_interview_session_presentation_response(
             vault_id=context.vault_id,
             snapshot=snapshot,
         ),
