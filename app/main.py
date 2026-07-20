@@ -102,9 +102,15 @@ from app.domain.owner_truth.interview_candidate_single_review import (
 )
 from app.domain.owner_truth.contracts import OwnerTruthContractError
 from app.domain.owner_truth.conversation import (
+    AppendInterviewMessageCommand,
+    ConversationMessageAuthor,
+    ConversationMessageKind,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationConflict,
     OwnerTruthConversationError,
+    OwnerTruthConversationVersionConflict,
+    OwnerTruthInterviewSessionStateConflict,
+    StartInterviewSessionCommand,
 )
 from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionAccessDenied,
@@ -123,6 +129,7 @@ from app.services.owner_truth_interview_candidate_review import (
 from app.services.owner_truth_interview_session_read import (
     OwnerTruthInterviewSessionReadService,
 )
+from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_interview_candidate_single_review import (
     OwnerTruthInterviewCandidateSingleReviewService,
 )
@@ -698,7 +705,14 @@ def _owner_truth_interview_session_state_http_error(
             status_code=403,
             detail={"code": "ownerTruthInterviewSessionDenied"},
         )
-    if isinstance(error, OwnerTruthConversationConflict):
+    if isinstance(
+        error,
+        (
+            OwnerTruthConversationConflict,
+            OwnerTruthConversationVersionConflict,
+            OwnerTruthInterviewSessionStateConflict,
+        ),
+    ):
         return HTTPException(
             status_code=409,
             detail={"code": "ownerTruthInterviewSessionConflict"},
@@ -901,6 +915,36 @@ def _owner_truth_interview_session_state_read_response(
             "hasPendingReviewBatch": snapshot.pending_review_batch_id is not None,
             "authorityEpoch": snapshot.authority_epoch,
         },
+    }
+
+
+def _owner_truth_interview_session_command_response(
+    *,
+    vault_id: str,
+    result: Any,
+) -> Dict[str, Any]:
+    """Return a write receipt without echoing a private conversation message."""
+
+    receipt = result.public_receipt()
+    minimized_receipt = {
+        key: receipt[key]
+        for key in (
+            "status",
+            "threadId",
+            "sessionId",
+            "threadVersion",
+            "sessionVersion",
+            "state",
+            "boundary",
+            "messageId",
+            "messageSequence",
+        )
+        if key in receipt
+    }
+    return {
+        "schemaVersion": "owner-truth-interview-session-command-v1",
+        "vaultId": vault_id,
+        "receipt": minimized_receipt,
     }
 
 
@@ -2501,6 +2545,106 @@ def read_owner_truth_interview_session_state(
         content=_owner_truth_interview_session_state_read_response(
             vault_id=context.vault_id,
             snapshot=snapshot,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions",
+    include_in_schema=False,
+)
+def start_owner_truth_interview_session(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only natural-input session bootstrap; it creates no memory artifact."""
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        command = StartInterviewSessionCommand(
+            command_id=str(payload.get("commandId") or ""),
+            thread_id=str(payload.get("threadId") or ""),
+            session_id=str(payload.get("sessionId") or ""),
+            expected_thread_version=0,
+            entry_mode="naturalInput",
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-input-start:"
+                f"{context.vault_id}:{command.session_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = OwnerTruthConversationService(
+                store.owner_truth_conversation_repository()
+            ).start_session(
+                command=command,
+                context=context,
+            )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_session_command_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/messages",
+    include_in_schema=False,
+)
+def append_owner_truth_interview_narrative(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only Owner narrative append; response remains content-free."""
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        command = AppendInterviewMessageCommand(
+            command_id=str(payload.get("commandId") or ""),
+            thread_id=str(payload.get("threadId") or ""),
+            session_id=session_id,
+            message_id=str(payload.get("messageId") or ""),
+            expected_thread_version=int(payload.get("expectedThreadVersion") or 0),
+            expected_session_version=int(payload.get("expectedSessionVersion") or 0),
+            author=ConversationMessageAuthor.OWNER,
+            kind=ConversationMessageKind.NARRATIVE,
+            text=str(payload.get("text") or ""),
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-input-append:"
+                f"{context.vault_id}:{command.session_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = OwnerTruthConversationService(
+                store.owner_truth_conversation_repository()
+            ).append_message(
+                command=command,
+                context=context,
+            )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        ) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_session_command_response(
+            vault_id=context.vault_id,
+            result=result,
         ),
         headers={"Cache-Control": "no-store"},
     )

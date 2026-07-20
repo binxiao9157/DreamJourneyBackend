@@ -241,6 +241,18 @@ class RouteOwnershipRegistry:
                 "ownerTruthInterviewSessionStateRead",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-sessions",
+                session,
+                "ownerTruthInterviewSessionStart",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/messages",
+                session,
+                "ownerTruthInterviewSessionAppendMessage",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review",
                 session,
