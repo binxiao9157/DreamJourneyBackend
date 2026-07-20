@@ -116,6 +116,9 @@ from app.services.owner_truth_correction_request import (
 from app.services.owner_truth_legacy_migration import (
     PostgresOwnerTruthLegacyMigrationRepository,
 )
+from app.services.owner_truth_conversation import (
+    PostgresOwnerTruthConversationRepository,
+)
 
 
 class PostgresStore:
@@ -363,6 +366,21 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth legacy migration requires an active unit of work")
         return PostgresOwnerTruthLegacyMigrationRepository(active.connection)
+
+    def owner_truth_conversation_repository(
+        self,
+    ) -> PostgresOwnerTruthConversationRepository:
+        """Return M0-A private conversation persistence in the active UoW.
+
+        This port is deliberately not bound to a public route. It stores only
+        conversation/session state and cannot promote a message into a Source,
+        Candidate, or MemoryVersion.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth conversation requires an active unit of work")
+        return PostgresOwnerTruthConversationRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(

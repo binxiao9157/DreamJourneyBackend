@@ -1,0 +1,12 @@
+{
+  "version": "0029",
+  "name": "owner_truth_conversation_session_bootstrap",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthConversationInterviewShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthConversationV1": false,
+    "guidedInterviewM0A": false
+  }
+}

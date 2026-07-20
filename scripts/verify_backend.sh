@@ -183,6 +183,14 @@ test -f tests/test_async_effect_worker_loss_observation_migration_contract.py
 test -f scripts/run-backend-async-effect-worker-loss-evidence-contract-gate.sh
 test -f scripts/backend-async-effect-worker-loss-evidence-postgres-smoke.py
 test -f scripts/run-backend-async-effect-worker-loss-evidence-postgres-smoke.sh
+test -f db/migrations/0029_owner_truth_conversation_session_bootstrap.sql
+test -f db/migrations/0029_owner_truth_conversation_session_bootstrap.json
+test -f app/domain/owner_truth/conversation.py
+test -f app/services/owner_truth_conversation.py
+test -f tests/test_owner_truth_conversation.py
+test -f tests/test_owner_truth_conversation_migration_contract.py
+test -f scripts/backend-owner-truth-conversation-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-conversation-postgres-smoke.sh
 test -f app/async_effects/readiness_evidence.py
 test -f tests/test_async_effect_readiness_evidence.py
 test -f scripts/run-backend-async-effect-readiness-evidence-contract-gate.sh
