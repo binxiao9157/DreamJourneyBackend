@@ -284,6 +284,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/confirmation/batch-accept",
+                session,
+                "ownerTruthInterviewCandidateConfirmationBatchDecision",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review/batch-accept",
                 session,
                 "ownerTruthInterviewCandidateBatchDecision",

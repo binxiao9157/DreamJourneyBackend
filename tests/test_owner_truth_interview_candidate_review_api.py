@@ -203,6 +203,10 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
             f"{review_batch_id}/confirmation"
         )
 
+    @classmethod
+    def _confirmation_batch_accept_path(cls, vault_id: str, review_batch_id: str) -> str:
+        return f"{cls._confirmation_path(vault_id, review_batch_id)}/batch-accept"
+
     @staticmethod
     def _confirmation_policy_headers(
         headers: dict[str, str],
@@ -301,6 +305,143 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
             self.assertEqual(
                 denied.json()["detail"]["code"],
                 "ownerTruthInterviewCandidateReviewDenied",
+            )
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
+    def test_product_confirmation_batch_accept_requires_policy_and_keeps_qa_separate(self) -> None:
+        owner_id, owner_headers, owner_session_id = self._login_release_policy("13800139413")
+        vault_id = "vault-interview-confirmation-batch-accept"
+        review_batch_id, standard, sensitive = self._seed_review_batch(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        path = self._confirmation_batch_accept_path(vault_id, review_batch_id)
+        payload = {
+            "commandId": "candidate-confirmation-batch-accept-owner",
+            "selections": [
+                {
+                    "candidateId": standard.candidate_id,
+                    "expectedCandidateVersion": 1,
+                }
+            ],
+        }
+
+        qa_header_only = client.post(
+            path,
+            headers={**owner_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+            json=payload,
+        )
+        self.assertEqual(qa_header_only.status_code, 403)
+        self.assertEqual(
+            qa_header_only.json()["detail"]["code"],
+            "release_policy_denied",
+        )
+        self.assertEqual(
+            qa_header_only.json()["detail"]["feature"],
+            "ownerTruthCandidateReview",
+        )
+
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthCandidateReview"
+        }
+        try:
+            accepted = client.post(
+                path,
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="candidate-confirmation-batch-accept-owner",
+                ),
+                json=payload,
+            )
+            self.assertEqual(accepted.status_code, 201)
+            self.assertEqual(accepted.headers["cache-control"], "no-store")
+            accepted_body = accepted.json()
+            self.assertEqual(
+                accepted_body["schemaVersion"],
+                "owner-truth-interview-candidate-confirmation-batch-decision-response-v1",
+            )
+            self.assertEqual(accepted_body["acceptedCandidateCount"], 1)
+            self.assertEqual(accepted_body["acceptedCandidateIds"], [standard.candidate_id])
+            self.assertNotIn("receipts", accepted_body)
+            self.assertNotIn("content", accepted_body)
+            self.assertNotIn("review", accepted_body)
+            self.assertFalse(accepted_body["memoryActivation"]["memoryVersionCreated"])
+            self.assertEqual(
+                self.store.owner_truth_candidate_review_repository().snapshot()["memoryActivations"],
+                {},
+            )
+
+            replay = client.post(
+                path,
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="candidate-confirmation-batch-accept-owner-replay",
+                ),
+                json=payload,
+            )
+            self.assertEqual(replay.status_code, 200)
+            self.assertEqual(replay.json()["status"], "deduplicated")
+
+            confirmation = client.get(
+                self._confirmation_path(vault_id, review_batch_id),
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="candidate-confirmation-after-batch-accept",
+                ),
+            )
+            self.assertEqual(confirmation.status_code, 200)
+            self.assertEqual(confirmation.json()["batchCandidates"], [])
+            self.assertEqual(
+                confirmation.json()["singleCandidates"][0]["candidateId"],
+                sensitive.candidate_id,
+            )
+
+            _, other_headers, other_session_id = self._login_release_policy("13800139414")
+            denied = client.post(
+                path,
+                headers=self._confirmation_policy_headers(
+                    other_headers,
+                    session_id=other_session_id,
+                    decision_id="candidate-confirmation-batch-accept-other-owner",
+                ),
+                json={
+                    **payload,
+                    "commandId": "candidate-confirmation-batch-accept-other-owner",
+                },
+            )
+            self.assertEqual(denied.status_code, 403)
+            self.assertEqual(
+                denied.json()["detail"]["code"],
+                "ownerTruthInterviewCandidateReviewDenied",
+            )
+
+            sensitive_batch = client.post(
+                self._confirmation_batch_accept_path(vault_id, review_batch_id),
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="candidate-confirmation-batch-accept-sensitive",
+                ),
+                json={
+                    "commandId": "candidate-confirmation-batch-accept-sensitive",
+                    "selections": [
+                        {
+                            "candidateId": sensitive.candidate_id,
+                            "expectedCandidateVersion": 1,
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(sensitive_batch.status_code, 409)
+            self.assertEqual(
+                sensitive_batch.json()["detail"]["code"],
+                "ownerTruthInterviewCandidateSingleReviewRequired",
             )
         finally:
             policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible

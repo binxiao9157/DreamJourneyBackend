@@ -682,7 +682,7 @@ def _owner_truth_interview_candidate_confirmation_context(
     *,
     vault_id: str,
 ) -> OwnerTruthCommandContext:
-    """Authorize the future product confirmation read, never the QA route."""
+    """Authorize the default-off product confirmation read, never QA routes."""
 
     return _owner_truth_captured_release_policy_context(
         request,
@@ -690,6 +690,29 @@ def _owner_truth_interview_candidate_confirmation_context(
         feature="ownerTruthCandidateReview",
         route=(
             f"{request.method.upper()} /v2/vaults/*/interview-review-batches/*/confirmation"
+        ),
+        user_session_required_code="ownerTruthInterviewCandidateConfirmationUserSessionRequired",
+    )
+
+
+def _owner_truth_interview_candidate_confirmation_write_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize one product confirmation effect behind the captured policy.
+
+    The formal confirmation action must stay separate from both the QA review
+    routes and the read route. A QA header is never an authorization bypass.
+    """
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=(
+            f"{request.method.upper()} /v2/vaults/*/interview-review-batches/*/"
+            "confirmation/batch-accept"
         ),
         user_session_required_code="ownerTruthInterviewCandidateConfirmationUserSessionRequired",
     )
@@ -1305,6 +1328,31 @@ def _owner_truth_interview_candidate_batch_decision_response(result: Any) -> Dic
             for item in result.candidate_results
         ],
         # This QA-only M0-A route deliberately stops at an immutable receipt.
+        "memoryActivation": {
+            "status": "notApplicable",
+            "memoryVersionCreated": False,
+        },
+    }
+
+
+def _owner_truth_interview_candidate_confirmation_batch_decision_response(
+    result: Any,
+) -> Dict[str, Any]:
+    """Return a product receipt without exposing the QA review envelope."""
+
+    return {
+        "schemaVersion": (
+            "owner-truth-interview-candidate-confirmation-batch-decision-response-v1"
+        ),
+        "status": result.outcome,
+        "batchDecisionId": result.batch_decision_id,
+        "reviewBatchId": result.review_batch_id,
+        "acceptedCandidateCount": result.accepted_candidate_count,
+        "acceptedCandidateIds": [
+            review.candidate_id for review in result.candidate_results
+        ],
+        # M0-A confirmation records receipts only. Memory activation remains a
+        # distinct authority transition and is intentionally not reachable here.
         "memoryActivation": {
             "status": "notApplicable",
             "memoryVersionCreated": False,
@@ -3082,6 +3130,47 @@ def read_owner_truth_interview_candidate_confirmation(
             vault_id=context.vault_id,
             result=result,
         ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/confirmation/batch-accept",
+    include_in_schema=False,
+)
+def accept_owner_truth_interview_candidate_confirmation_batch(
+    request: Request,
+    vault_id: str,
+    review_batch_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Default-off product batch confirmation for ordinary Candidates.
+
+    This formal path deliberately does not delegate to or share the QA route.
+    It accepts a captured release-policy decision, records terminal Candidate
+    receipts only, and never activates a MemoryVersion.
+    """
+
+    try:
+        context = _owner_truth_interview_candidate_confirmation_write_context(
+            request,
+            vault_id=vault_id,
+        )
+        command = OwnerTruthInterviewCandidateBatchAcceptCommand(
+            command_id=str(payload.get("commandId") or ""),
+            review_batch_id=review_batch_id,
+            selections=_owner_truth_interview_candidate_batch_selections(payload),
+            reason_code="ownerConfirmedAtBoundary",
+        )
+        result = OwnerTruthInterviewCandidateBatchDecisionService(store).accept_selected(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_candidate_confirmation_batch_decision_response(result),
         headers={"Cache-Control": "no-store"},
     )
 

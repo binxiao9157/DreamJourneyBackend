@@ -276,12 +276,14 @@ def exercise_formal_natural_input(
             "missing capture must expose only the expected policy reason",
         )
 
+        confirmation_batch_id = str(uuid.uuid4())
+        confirmation_path = (
+            f"/v2/vaults/{vault_id}/interview-review-batches/"
+            f"{confirmation_batch_id}/confirmation"
+        )
         confirmation_status, confirmation_body, _ = app_request(
             "GET",
-            (
-                f"/v2/vaults/{vault_id}/interview-review-batches/"
-                f"{uuid.uuid4()}/confirmation"
-            ),
+            confirmation_path,
             token=access_token,
         )
         require(
@@ -294,6 +296,27 @@ def exercise_formal_natural_input(
             and confirmation_detail.get("code") == "release_policy_denied"
             and confirmation_detail.get("feature") == "ownerTruthCandidateReview",
             "candidate confirmation must remain behind its own default-closed feature",
+        )
+
+        confirmation_action_status, confirmation_action_body, _ = app_request(
+            "POST",
+            f"{confirmation_path}/batch-accept",
+            token=access_token,
+            payload={
+                "commandId": f"smoke-confirmation-batch-accept-{suffix}",
+                "selections": [],
+            },
+        )
+        require(
+            confirmation_action_status == 403,
+            "candidate confirmation action must reject a missing dedicated policy capture",
+        )
+        confirmation_action_detail = confirmation_action_body.get("detail")
+        require(
+            isinstance(confirmation_action_detail, dict)
+            and confirmation_action_detail.get("code") == "release_policy_denied"
+            and confirmation_action_detail.get("feature") == "ownerTruthCandidateReview",
+            "candidate confirmation action must remain behind its own default-closed feature",
         )
 
         policy_headers = {
@@ -410,6 +433,7 @@ def exercise_formal_natural_input(
             "contentFreePresentationVerified": True,
             "deployedCandidateReviewPolicyDefaultClosed": True,
             "formalCandidateConfirmationDenied": True,
+            "formalCandidateConfirmationActionDenied": True,
         }
     finally:
         main_module.store = previous_store
