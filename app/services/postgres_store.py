@@ -110,6 +110,9 @@ from app.services.owner_truth_memory_projection import (
 from app.services.owner_truth_answer_citation import (
     PostgresOwnerTruthAnswerCitationRepository,
 )
+from app.services.owner_truth_knowledge_dimension_confirmation import (
+    PostgresOwnerTruthKnowledgeDimensionConfirmationRepository,
+)
 from app.services.owner_truth_correction_request import (
     PostgresOwnerTruthCorrectionRequestRepository,
 )
@@ -355,6 +358,18 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth answer citation requires an active unit of work")
         return PostgresOwnerTruthAnswerCitationRepository(active.connection)
+
+    def owner_truth_knowledge_dimension_confirmation_repository(
+        self,
+    ) -> PostgresOwnerTruthKnowledgeDimensionConfirmationRepository:
+        """Return QA-only dimension confirmation persistence in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError(
+                "knowledge dimension confirmation requires an active unit of work"
+            )
+        return PostgresOwnerTruthKnowledgeDimensionConfirmationRepository(active.connection)
 
     def owner_truth_correction_request_repository(
         self,

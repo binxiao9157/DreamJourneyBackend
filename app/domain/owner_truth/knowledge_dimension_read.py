@@ -1,18 +1,19 @@
 """Fail-closed M0-B read adapter for Owner-confirmed knowledge dimensions.
 
-The M0-B selector must never infer a life dimension from memory text, KBLite,
-or an AI label.  This module consumes the existing owner-scoped
-``MemoryVersion`` projection only when a current, standard knowledge memory
-contains an explicit classification that a future Owner review flow has marked
-as confirmed.  It is read-only and deliberately produces no Candidate,
-MemoryVersion, projection checkpoint, outbox intent, or provider effect.
+Coverage never comes from memory text, an embedded payload annotation, KBLite,
+or an AI label.  It comes only from a separately persisted, append-only Owner
+confirmation receipt that matches a current Owner Truth ``MemoryVersion`` and
+its exact content hash.  Replacing a memory version therefore invalidates the
+old receipt naturally, without rewriting historical data.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Mapping, Optional, Protocol
+from hashlib import sha256
+import json
+from typing import Any, Iterable, Mapping, Optional, Protocol
 
 from .contracts import OwnerTruthContractError, require_nonblank
 from .knowledge_recommendations import (
@@ -25,10 +26,19 @@ from .memory_projection import OwnerTruthMemoryProjectionAccessDenied
 from .source_commands import OwnerTruthCommandContext
 
 
+# Retained only as a source-compatibility symbol for old QA callers.  The
+# reader intentionally ignores this embedded payload annotation.
 OWNER_TRUTH_KNOWLEDGE_DIMENSION_EVIDENCE_SCHEMA_VERSION = (
     "owner-truth-knowledge-dimension-evidence-v1"
 )
-OWNER_TRUTH_KNOWLEDGE_DIMENSION_READ_SCHEMA_VERSION = "owner-truth-knowledge-dimension-read-v1"
+OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_SCHEMA_VERSION = (
+    "owner-truth-knowledge-dimension-confirmation-v1"
+)
+OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_METHOD = "ownerExplicitSelection"
+OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_UI_SCHEMA_VERSION = (
+    "knowledge-dimension-review-v1"
+)
+OWNER_TRUTH_KNOWLEDGE_DIMENSION_READ_SCHEMA_VERSION = "owner-truth-knowledge-dimension-read-v2"
 
 
 class OwnerTruthKnowledgeDimensionReadError(OwnerTruthContractError):
@@ -64,6 +74,8 @@ class OwnerTruthKnowledgeDimensionReadResult:
     vault_id: str
     authority_epoch: int
     checkpoint: Optional[str]
+    memory_projection_checkpoint: Optional[str]
+    confirmation_checkpoint: Optional[str]
     coverage: Optional[DimensionProjection]
     included_memory_version_ids: tuple[str, ...]
     exclusions: tuple[KnowledgeDimensionEvidenceExclusion, ...]
@@ -81,21 +93,37 @@ class OwnerTruthKnowledgeDimensionReadResult:
         if self.authority_epoch < 0:
             raise OwnerTruthKnowledgeDimensionReadError("authority_epoch must not be negative")
         checkpoint = str(self.checkpoint or "").strip()
+        memory_projection_checkpoint = str(self.memory_projection_checkpoint or "").strip()
+        confirmation_checkpoint = str(self.confirmation_checkpoint or "").strip()
         if self.state is OwnerTruthKnowledgeDimensionReadState.READY:
-            if not checkpoint or self.coverage is None:
+            if (
+                not checkpoint
+                or not memory_projection_checkpoint
+                or not confirmation_checkpoint
+                or self.coverage is None
+            ):
                 raise OwnerTruthKnowledgeDimensionReadError(
-                    "ready dimension read requires a checkpoint and coverage"
+                    "ready dimension read requires projection, receipt and combined checkpoints"
                 )
             if (
                 self.coverage.owner_subject_id != self.owner_subject_id
                 or self.coverage.vault_id != self.vault_id
             ):
                 raise OwnerTruthKnowledgeDimensionReadError("coverage scope does not match read scope")
-        elif self.coverage is not None or self.included_memory_version_ids or self.exclusions:
+        elif (
+            self.coverage is not None
+            or self.included_memory_version_ids
+            or self.exclusions
+            or checkpoint
+            or memory_projection_checkpoint
+            or confirmation_checkpoint
+        ):
             raise OwnerTruthKnowledgeDimensionReadError(
                 "non-ready dimension reads must not retain coverage evidence"
             )
         object.__setattr__(self, "checkpoint", checkpoint or None)
+        object.__setattr__(self, "memory_projection_checkpoint", memory_projection_checkpoint or None)
+        object.__setattr__(self, "confirmation_checkpoint", confirmation_checkpoint or None)
 
     def value_free_summary(self) -> dict[str, object]:
         """Export only opaque evidence references and policy-safe counts."""
@@ -106,6 +134,8 @@ class OwnerTruthKnowledgeDimensionReadResult:
             "vaultId": self.vault_id,
             "authorityEpoch": self.authority_epoch,
             "checkpoint": self.checkpoint,
+            "memoryProjectionCheckpoint": self.memory_projection_checkpoint,
+            "confirmationCheckpoint": self.confirmation_checkpoint,
             "includedMemoryVersionIds": list(self.included_memory_version_ids),
             "excluded": [item.value_free_summary() for item in self.exclusions],
         }
@@ -119,11 +149,26 @@ class OwnerTruthMemoryProjectionReader(Protocol):
         ...
 
 
-class OwnerTruthKnowledgeDimensionReadService:
-    """Read M0-B coverage through the existing fail-closed MemoryVersion view."""
+class OwnerTruthKnowledgeDimensionConfirmationReader(Protocol):
+    def list_for_projection(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        memory_version_ids: Iterable[str],
+    ) -> Iterable[Mapping[str, Any]]:
+        ...
 
-    def __init__(self, memory_projection_reader: OwnerTruthMemoryProjectionReader) -> None:
+
+class OwnerTruthKnowledgeDimensionReadService:
+    """Read M0-B coverage through current projections plus immutable receipts."""
+
+    def __init__(
+        self,
+        memory_projection_reader: OwnerTruthMemoryProjectionReader,
+        confirmation_reader: OwnerTruthKnowledgeDimensionConfirmationReader | None = None,
+    ) -> None:
         self._memory_projection_reader = memory_projection_reader
+        self._confirmation_reader = confirmation_reader
 
     def read(
         self,
@@ -137,10 +182,17 @@ class OwnerTruthKnowledgeDimensionReadService:
                 "only the Vault Owner may read knowledge dimension coverage"
             )
         snapshot = self._memory_projection_reader.read(context=context)
+        confirmations: Iterable[Mapping[str, Any]] = ()
+        if self._confirmation_reader is not None:
+            confirmations = self._confirmation_reader.list_for_projection(
+                context=context,
+                memory_version_ids=_projection_memory_version_ids(snapshot),
+            )
         return read_owner_confirmed_dimension_coverage(
             memory_projection=snapshot,
             owner_subject_id=context.owner_subject_id,
             vault_id=context.vault_id,
+            confirmations=confirmations,
         )
 
 
@@ -149,13 +201,13 @@ def read_owner_confirmed_dimension_coverage(
     memory_projection: Mapping[str, Any],
     owner_subject_id: str,
     vault_id: str,
+    confirmations: Iterable[Mapping[str, Any]] = (),
 ) -> OwnerTruthKnowledgeDimensionReadResult:
-    """Map explicit, Owner-confirmed annotations from a ready projection.
+    """Map explicit receipt evidence from a complete current projection.
 
-    The source projection has already checked active Owner/Vault/epoch state.
-    This adapter checks the scope again and treats any malformed top-level
-    snapshot as unavailable.  Per-memory classification omissions are normal
-    during migration and become value-free exclusions, not guessed coverage.
+    Top-level projection corruption becomes unavailable.  Missing or malformed
+    per-memory confirmation receipts are value-free exclusions rather than
+    opportunities to infer coverage from a payload or model label.
     """
 
     owner = require_nonblank(owner_subject_id, field="owner_subject_id")
@@ -174,112 +226,189 @@ def read_owner_confirmed_dimension_coverage(
 
     state = str(memory_projection.get("state") or "").strip()
     if state == OwnerTruthKnowledgeDimensionReadState.REBUILDING.value:
-        return OwnerTruthKnowledgeDimensionReadResult(
+        return _non_ready_result(
             state=OwnerTruthKnowledgeDimensionReadState.REBUILDING,
             owner_subject_id=owner,
             vault_id=vault,
             authority_epoch=authority_epoch,
-            checkpoint=None,
-            coverage=None,
-            included_memory_version_ids=(),
-            exclusions=(),
         )
     if state != OwnerTruthKnowledgeDimensionReadState.READY.value:
-        return OwnerTruthKnowledgeDimensionReadResult(
+        return _non_ready_result(
             state=OwnerTruthKnowledgeDimensionReadState.UNAVAILABLE,
             owner_subject_id=owner,
             vault_id=vault,
             authority_epoch=authority_epoch,
-            checkpoint=None,
-            coverage=None,
-            included_memory_version_ids=(),
-            exclusions=(),
         )
 
-    checkpoint = str(memory_projection.get("checkpoint") or "").strip()
+    projection_checkpoint = str(memory_projection.get("checkpoint") or "").strip()
     entries = memory_projection.get("entries")
-    if not checkpoint or not isinstance(entries, list):
-        return OwnerTruthKnowledgeDimensionReadResult(
+    if not projection_checkpoint or not isinstance(entries, list):
+        return _non_ready_result(
             state=OwnerTruthKnowledgeDimensionReadState.UNAVAILABLE,
             owner_subject_id=owner,
             vault_id=vault,
             authority_epoch=authority_epoch,
-            checkpoint=None,
-            coverage=None,
-            included_memory_version_ids=(),
-            exclusions=(),
         )
 
+    receipt_index = _confirmation_index(confirmations)
     included: list[ConfirmedMemoryDimensionEvidence] = []
+    included_ids: list[str] = []
     exclusions: list[KnowledgeDimensionEvidenceExclusion] = []
     for raw_entry in entries:
-        if not isinstance(raw_entry, Mapping):
-            return _unavailable_result(
-                owner_subject_id=owner,
-                vault_id=vault,
-                authority_epoch=authority_epoch,
-            )
-        if not _is_complete_projection_entry(raw_entry):
-            return _unavailable_result(
+        if not isinstance(raw_entry, Mapping) or not _is_complete_projection_entry(raw_entry):
+            return _non_ready_result(
+                state=OwnerTruthKnowledgeDimensionReadState.UNAVAILABLE,
                 owner_subject_id=owner,
                 vault_id=vault,
                 authority_epoch=authority_epoch,
             )
         memory_version_id = _memory_version_id(raw_entry)
         if memory_version_id is None:
-            return _unavailable_result(
+            return _non_ready_result(
+                state=OwnerTruthKnowledgeDimensionReadState.UNAVAILABLE,
                 owner_subject_id=owner,
                 vault_id=vault,
                 authority_epoch=authority_epoch,
             )
         evidence, reason_code = _dimension_evidence_from_entry(
             raw_entry,
+            receipts=receipt_index.get(memory_version_id, ()),
             vault_id=vault,
             owner_subject_id=owner,
+            authority_epoch=authority_epoch,
         )
-        if evidence is None:
+        if not evidence:
             exclusions.append(
                 KnowledgeDimensionEvidenceExclusion(
                     memory_version_id=memory_version_id,
-                    reason_code=reason_code or "dimensionEvidenceUnavailable",
+                    reason_code=reason_code or "ownerConfirmationUnavailable",
                 )
             )
             continue
-        included.append(evidence)
+        included.extend(evidence)
+        included_ids.append(memory_version_id)
 
     coverage = KnowledgeDimensionProjector().project(
         owner_subject_id=owner,
         vault_id=vault,
         evidence=included,
     )
+    confirmation_checkpoint = _confirmation_checkpoint(receipt_index)
+    combined_checkpoint = _digest(
+        {
+            "memoryProjectionCheckpoint": projection_checkpoint,
+            "confirmationCheckpoint": confirmation_checkpoint,
+        }
+    )
     return OwnerTruthKnowledgeDimensionReadResult(
         state=OwnerTruthKnowledgeDimensionReadState.READY,
         owner_subject_id=owner,
         vault_id=vault,
         authority_epoch=authority_epoch,
-        checkpoint=checkpoint,
+        checkpoint=combined_checkpoint,
+        memory_projection_checkpoint=projection_checkpoint,
+        confirmation_checkpoint=confirmation_checkpoint,
         coverage=coverage,
-        included_memory_version_ids=tuple(item.memory_version_id for item in included),
+        included_memory_version_ids=tuple(dict.fromkeys(included_ids)),
         exclusions=tuple(exclusions),
     )
 
 
-def _unavailable_result(
+def _non_ready_result(
     *,
+    state: OwnerTruthKnowledgeDimensionReadState,
     owner_subject_id: str,
     vault_id: str,
     authority_epoch: int,
 ) -> OwnerTruthKnowledgeDimensionReadResult:
     return OwnerTruthKnowledgeDimensionReadResult(
-        state=OwnerTruthKnowledgeDimensionReadState.UNAVAILABLE,
+        state=state,
         owner_subject_id=owner_subject_id,
         vault_id=vault_id,
         authority_epoch=authority_epoch,
         checkpoint=None,
+        memory_projection_checkpoint=None,
+        confirmation_checkpoint=None,
         coverage=None,
         included_memory_version_ids=(),
         exclusions=(),
     )
+
+
+def _digest(value: Any) -> str:
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise OwnerTruthKnowledgeDimensionReadError("confirmation checkpoint values are invalid") from exc
+    return sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _projection_memory_version_ids(snapshot: Mapping[str, Any]) -> tuple[str, ...]:
+    if not isinstance(snapshot, Mapping) or str(snapshot.get("state") or "") != "ready":
+        return ()
+    entries = snapshot.get("entries")
+    if not isinstance(entries, list):
+        return ()
+    values: list[str] = []
+    for entry in entries:
+        if isinstance(entry, Mapping):
+            memory_version_id = _memory_version_id(entry)
+            if memory_version_id is not None:
+                values.append(memory_version_id)
+    return tuple(dict.fromkeys(values))
+
+
+def _confirmation_index(
+    confirmations: Iterable[Mapping[str, Any]],
+) -> dict[str, tuple[Mapping[str, Any], ...]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    try:
+        iterator = iter(confirmations)
+    except TypeError as exc:
+        raise OwnerTruthKnowledgeDimensionReadError("confirmations must be iterable") from exc
+    for raw_receipt in iterator:
+        if not isinstance(raw_receipt, Mapping):
+            # Retain malformed entries under a synthetic key only so they cannot
+            # become evidence; no raw detail crosses this boundary.
+            continue
+        memory_version_id = str(raw_receipt.get("memoryVersionId") or "").strip()
+        if not memory_version_id:
+            continue
+        grouped.setdefault(memory_version_id, []).append(dict(raw_receipt))
+    return {
+        key: tuple(
+            sorted(
+                values,
+                key=lambda item: (
+                    str(item.get("dimension") or ""),
+                    str(item.get("confirmationId") or ""),
+                ),
+            )
+        )
+        for key, values in grouped.items()
+    }
+
+
+def _confirmation_checkpoint(
+    index: Mapping[str, tuple[Mapping[str, Any], ...]],
+) -> str:
+    records: list[dict[str, Any]] = []
+    for memory_version_id in sorted(index):
+        for receipt in index[memory_version_id]:
+            records.append(
+                {
+                    "confirmationId": str(receipt.get("confirmationId") or ""),
+                    "memoryVersionId": memory_version_id,
+                    "boundContentHash": str(receipt.get("boundContentHash") or ""),
+                    "authorityEpoch": receipt.get("authorityEpoch"),
+                    "dimension": str(receipt.get("dimension") or ""),
+                    "coveredFacets": list(receipt.get("coveredFacets") or []),
+                    "confirmationMethod": str(receipt.get("confirmationMethod") or ""),
+                    "schemaVersion": str(receipt.get("schemaVersion") or ""),
+                    "uiSchemaVersion": str(receipt.get("uiSchemaVersion") or ""),
+                }
+            )
+    return _digest(records)
 
 
 def _memory_version_id(entry: Mapping[str, Any]) -> Optional[str]:
@@ -291,16 +420,18 @@ def _memory_version_id(entry: Mapping[str, Any]) -> Optional[str]:
 
 
 def _is_complete_projection_entry(entry: Mapping[str, Any]) -> bool:
-    """Distinguish an unclassified MemoryVersion from a corrupt checkpoint."""
+    """Distinguish a no-receipt memory from a corrupt projection checkpoint."""
 
     citation = entry.get("citation")
     if not isinstance(citation, Mapping):
+        return False
+    if not str(citation.get("memoryId") or "").strip():
         return False
     if not str(citation.get("memoryVersionId") or "").strip():
         return False
     if not str(citation.get("sourceId") or "").strip():
         return False
-    if not isinstance(entry.get("content"), Mapping):
+    if not str(citation.get("contentHash") or "").strip():
         return False
     return all(
         str(entry.get(field) or "").strip()
@@ -317,60 +448,93 @@ def _is_complete_projection_entry(entry: Mapping[str, Any]) -> bool:
 def _dimension_evidence_from_entry(
     entry: Mapping[str, Any],
     *,
+    receipts: Iterable[Mapping[str, Any]],
     vault_id: str,
     owner_subject_id: str,
-) -> tuple[Optional[ConfirmedMemoryDimensionEvidence], Optional[str]]:
+    authority_epoch: int,
+) -> tuple[list[ConfirmedMemoryDimensionEvidence], Optional[str]]:
     if str(entry.get("visibility") or "") != "owner":
-        return None, "ownerVisibilityRequired"
+        return [], "ownerVisibilityRequired"
     if str(entry.get("memoryKind") or "") != "knowledge":
-        return None, "memoryKindNotKnowledge"
+        return [], "memoryKindNotKnowledge"
     if str(entry.get("sensitivity") or "") != "standard":
-        return None, "sensitivityNotStandard"
+        return [], "sensitivityNotStandard"
     if str(entry.get("perspectiveType") or "") == "inferred":
-        return None, "inferredPerspective"
+        return [], "inferredPerspective"
     if str(entry.get("epistemicStatus") or "") == "inferred":
-        return None, "inferredEpistemicStatus"
-
-    content = entry.get("content")
-    if not isinstance(content, Mapping):
-        return None, "missingDimensionEvidence"
-    annotation = content.get("knowledgeDimensionEvidence")
-    if not isinstance(annotation, Mapping):
-        return None, "missingDimensionEvidence"
-    if str(annotation.get("schemaVersion") or "") != OWNER_TRUTH_KNOWLEDGE_DIMENSION_EVIDENCE_SCHEMA_VERSION:
-        return None, "unsupportedDimensionEvidenceSchema"
-    if annotation.get("classificationConfirmedByOwner") is not True:
-        return None, "dimensionClassificationNotOwnerConfirmed"
-    if annotation.get("isAiInferenceOnly") is not False:
-        return None, "aiInferenceOnly"
+        return [], "inferredEpistemicStatus"
 
     citation = entry.get("citation")
     if not isinstance(citation, Mapping):
-        return None, "invalidCitation"
-    try:
-        evidence = ConfirmedMemoryDimensionEvidence(
-            memory_version_id=str(citation.get("memoryVersionId") or ""),
-            source_id=str(citation.get("sourceId") or ""),
-            vault_id=vault_id,
-            owner_subject_id=owner_subject_id,
-            dimension=str(annotation.get("dimension") or ""),
-            covered_facets=tuple(annotation.get("coveredFacets") or ()),
-            is_current_confirmed=True,
-            is_accessible=True,
-            is_deleted=False,
-            is_revoked=False,
-            is_disputed=False,
-            is_ai_inference_only=False,
-        )
-    except (KnowledgeRecommendationError, TypeError, ValueError):
-        return None, "invalidDimensionEvidence"
-    return evidence, None
+        return [], "invalidCitation"
+    memory_id = str(citation.get("memoryId") or "").strip()
+    memory_version_id = str(citation.get("memoryVersionId") or "").strip()
+    source_id = str(citation.get("sourceId") or "").strip()
+    content_hash = str(citation.get("contentHash") or "").strip()
+    if not memory_id or not memory_version_id or not source_id or not content_hash:
+        return [], "invalidCitation"
+
+    evidence: list[ConfirmedMemoryDimensionEvidence] = []
+    seen_dimensions: set[str] = set()
+    invalid_receipt = False
+    for receipt in receipts:
+        try:
+            if (
+                str(receipt.get("schemaVersion") or "")
+                != OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_SCHEMA_VERSION
+                or str(receipt.get("uiSchemaVersion") or "")
+                != OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_UI_SCHEMA_VERSION
+                or str(receipt.get("confirmationMethod") or "")
+                != OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_METHOD
+                or str(receipt.get("vaultId") or "") != vault_id
+                or str(receipt.get("ownerSubjectId") or "") != owner_subject_id
+                or str(receipt.get("actorSubjectId") or "") != owner_subject_id
+                or int(receipt.get("authorityEpoch")) != authority_epoch
+                or str(receipt.get("memoryId") or "") != memory_id
+                or str(receipt.get("memoryVersionId") or "") != memory_version_id
+                or str(receipt.get("boundContentHash") or "") != content_hash
+            ):
+                invalid_receipt = True
+                continue
+            dimension = str(receipt.get("dimension") or "")
+            if dimension in seen_dimensions:
+                invalid_receipt = True
+                continue
+            item = ConfirmedMemoryDimensionEvidence(
+                memory_version_id=memory_version_id,
+                source_id=source_id,
+                vault_id=vault_id,
+                owner_subject_id=owner_subject_id,
+                dimension=dimension,
+                covered_facets=tuple(receipt.get("coveredFacets") or ()),
+                is_current_confirmed=True,
+                is_accessible=True,
+                is_deleted=False,
+                is_revoked=False,
+                is_disputed=False,
+                is_ai_inference_only=False,
+            )
+        except (KnowledgeRecommendationError, TypeError, ValueError):
+            invalid_receipt = True
+            continue
+        seen_dimensions.add(dimension)
+        evidence.append(item)
+
+    if evidence:
+        return evidence, None
+    if invalid_receipt:
+        return [], "invalidOwnerConfirmationReceipt"
+    return [], "missingOwnerConfirmationReceipt"
 
 
 __all__ = [
     "KnowledgeDimensionEvidenceExclusion",
+    "OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_METHOD",
+    "OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_SCHEMA_VERSION",
+    "OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_UI_SCHEMA_VERSION",
     "OWNER_TRUTH_KNOWLEDGE_DIMENSION_EVIDENCE_SCHEMA_VERSION",
     "OWNER_TRUTH_KNOWLEDGE_DIMENSION_READ_SCHEMA_VERSION",
+    "OwnerTruthKnowledgeDimensionConfirmationReader",
     "OwnerTruthKnowledgeDimensionReadError",
     "OwnerTruthKnowledgeDimensionReadResult",
     "OwnerTruthKnowledgeDimensionReadService",

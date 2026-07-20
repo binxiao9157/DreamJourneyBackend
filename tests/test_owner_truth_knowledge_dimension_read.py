@@ -1,26 +1,11 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from hashlib import sha256
 import json
 import unittest
 from uuid import uuid4
 
-from app.domain.owner_truth.candidate_decisions import (
-    CandidateReviewAction,
-    OwnerTruthCandidateReviewCommand,
-    OwnerTruthCandidateSnapshot,
-)
-from app.domain.owner_truth.contracts import (
-    CandidateDecision,
-    EpistemicStatus,
-    MemoryKind,
-    PerspectiveType,
-    SensitivityLevel,
-)
 from app.domain.owner_truth.knowledge_dimension_read import (
-    OWNER_TRUTH_KNOWLEDGE_DIMENSION_EVIDENCE_SCHEMA_VERSION,
-    OwnerTruthKnowledgeDimensionReadError,
     OwnerTruthKnowledgeDimensionReadService,
     OwnerTruthKnowledgeDimensionReadState,
     read_owner_confirmed_dimension_coverage,
@@ -31,14 +16,10 @@ from app.domain.owner_truth.memory_projection import (
     build_rebuilding_memory_projection,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
-from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
-from app.services.owner_truth_candidate_review import (
-    InMemoryOwnerTruthCandidateReviewRepository,
-    OwnerTruthCandidateReviewService,
-)
-from app.services.owner_truth_memory_projection import (
-    InMemoryOwnerTruthMemoryProjectionRepository,
-    OwnerTruthMemoryProjectionService,
+from app.services.owner_truth_knowledge_dimension_confirmation import (
+    InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository,
+    OwnerTruthKnowledgeDimensionConfirmationCommand,
+    OwnerTruthKnowledgeDimensionConfirmationService,
 )
 
 
@@ -54,26 +35,21 @@ class _ProjectionReader:
         self.read_count = 0
 
     def read(self, *, context: OwnerTruthCommandContext) -> dict[str, object]:
+        del context
         self.read_count += 1
         return self.snapshot
 
 
-class _LiveProjectionStore:
-    def __init__(self) -> None:
-        self.review_repository = InMemoryOwnerTruthCandidateReviewRepository()
-        self.projection_repository = InMemoryOwnerTruthMemoryProjectionRepository(
-            self.review_repository
-        )
-
-    @contextmanager
-    def request_unit_of_work(self, *, correlation_id: str, command_id: str):
-        yield
-
-    def owner_truth_candidate_review_repository(self):
-        return self.review_repository
+class _ConfirmationStore:
+    def __init__(self, reader: _ProjectionReader) -> None:
+        self.reader = reader
+        self.repository = InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository()
 
     def owner_truth_memory_projection_repository(self):
-        return self.projection_repository
+        return self.reader
+
+    def owner_truth_knowledge_dimension_confirmation_repository(self):
+        return self.repository
 
 
 class OwnerTruthKnowledgeDimensionReadTests(unittest.TestCase):
@@ -96,6 +72,7 @@ class OwnerTruthKnowledgeDimensionReadTests(unittest.TestCase):
         content: dict[str, object] | None = None,
     ) -> OwnerTruthMemoryProjectionInput:
         source_id = str(uuid4())
+        content = content or {"claim": "I chose to leave my first job."}
         return OwnerTruthMemoryProjectionInput(
             memory_id=str(uuid4()),
             memory_version_id=str(uuid4()),
@@ -110,14 +87,9 @@ class OwnerTruthKnowledgeDimensionReadTests(unittest.TestCase):
             epistemic_status=epistemic_status,
             sensitivity=sensitivity,
             content_schema_version="owner-truth-v1",
-            content_hash="hash-dimension-read",
-            content=content or {"claim": "I chose to leave my first job."},
-            evidence_refs=(
-                {
-                    "sourceId": source_id,
-                    "sourceVersion": 1,
-                },
-            ),
+            content_hash=_hash(content),
+            content=content,
+            evidence_refs=({"sourceId": source_id, "sourceVersion": 1},),
         )
 
     def _snapshot(self, *inputs: OwnerTruthMemoryProjectionInput) -> dict[str, object]:
@@ -128,41 +100,43 @@ class OwnerTruthKnowledgeDimensionReadTests(unittest.TestCase):
             inputs=inputs,
         )
 
-    @staticmethod
-    def _owner_confirmed_annotation() -> dict[str, object]:
+    def _receipt(
+        self,
+        memory: OwnerTruthMemoryProjectionInput,
+        *,
+        dimension: str = "keyDecisions",
+        facets: tuple[str, ...] = ("choice", "reason"),
+        content_hash: str | None = None,
+    ) -> dict[str, object]:
         return {
-            "schemaVersion": OWNER_TRUTH_KNOWLEDGE_DIMENSION_EVIDENCE_SCHEMA_VERSION,
-            "dimension": "keyDecisions",
-            "coveredFacets": ["choice", "reason"],
-            "classificationConfirmedByOwner": True,
-            "isAiInferenceOnly": False,
+            "confirmationId": str(uuid4()),
+            "commandIdHash": _hash("dimension-confirm-command"),
+            "payloadHash": _hash({"dimension": dimension, "facets": facets}),
+            "vaultId": self.vault_id,
+            "ownerSubjectId": self.owner_id,
+            "actorSubjectId": self.owner_id,
+            "authorityEpoch": 3,
+            "memoryId": memory.memory_id,
+            "memoryVersionId": memory.memory_version_id,
+            "boundContentHash": content_hash or memory.content_hash,
+            "dimension": dimension,
+            "coveredFacets": list(facets),
+            "confirmationMethod": "ownerExplicitSelection",
+            "schemaVersion": "owner-truth-knowledge-dimension-confirmation-v1",
+            "uiSchemaVersion": "knowledge-dimension-review-v1",
         }
 
-    def test_owner_confirmed_standard_knowledge_memory_contributes_value_free_coverage(self) -> None:
+    def test_inline_annotation_is_ignored_without_a_separate_receipt(self) -> None:
         memory = self._input(
             content={
                 "claim": "I chose a smaller city so I could care for family.",
-                "knowledgeDimensionEvidence": self._owner_confirmed_annotation(),
-            }
-        )
-        reader = _ProjectionReader(self._snapshot(memory))
-
-        result = OwnerTruthKnowledgeDimensionReadService(reader).read(context=self.context)
-
-        self.assertEqual(reader.read_count, 1)
-        self.assertEqual(result.state, OwnerTruthKnowledgeDimensionReadState.READY)
-        self.assertEqual(result.included_memory_version_ids, (memory.memory_version_id,))
-        self.assertEqual(result.coverage.for_dimension("keyDecisions").covered_facets, ("choice", "reason"))
-        summary = result.value_free_summary()
-        self.assertEqual(summary["coverage"]["dimensions"][2]["dimension"], "keyDecisions")
-        self.assertNotIn("smaller city", str(summary))
-        self.assertNotIn("claim", str(summary))
-
-    def test_real_uuid_memory_and_source_identifiers_are_admissible(self) -> None:
-        memory = self._input(
-            content={
-                "claim": "I chose a path that kept time for family.",
-                "knowledgeDimensionEvidence": self._owner_confirmed_annotation(),
+                "knowledgeDimensionEvidence": {
+                    "schemaVersion": "owner-truth-knowledge-dimension-evidence-v1",
+                    "dimension": "keyDecisions",
+                    "coveredFacets": ["choice", "reason"],
+                    "classificationConfirmedByOwner": True,
+                    "isAiInferenceOnly": False,
+                },
             }
         )
 
@@ -172,192 +146,106 @@ class OwnerTruthKnowledgeDimensionReadTests(unittest.TestCase):
             vault_id=self.vault_id,
         )
 
-        self.assertEqual(result.included_memory_version_ids, (memory.memory_version_id,))
+        self.assertEqual(result.state, OwnerTruthKnowledgeDimensionReadState.READY)
+        self.assertEqual(result.included_memory_version_ids, ())
+        self.assertEqual(result.coverage.for_dimension("keyDecisions").covered_facets, ())
+        self.assertEqual(result.exclusions[0].reason_code, "missingOwnerConfirmationReceipt")
+        self.assertNotIn("smaller city", str(result.value_free_summary()))
 
-    def test_service_reads_a_real_current_memory_version_checkpoint(self) -> None:
-        store = _LiveProjectionStore()
-        review_service = OwnerTruthCandidateReviewService(store)
-        projection_service = OwnerTruthMemoryProjectionService(store)
-        source_id = str(uuid4())
-        content = {
-            "claim": "I chose work close to home.",
-            "knowledgeDimensionEvidence": self._owner_confirmed_annotation(),
-        }
-        candidate = OwnerTruthCandidateSnapshot(
-            candidate_id=str(uuid4()),
-            vault_id=self.vault_id,
+    def test_matching_explicit_receipt_contributes_value_free_coverage(self) -> None:
+        memory = self._input()
+
+        result = read_owner_confirmed_dimension_coverage(
+            memory_projection=self._snapshot(memory),
             owner_subject_id=self.owner_id,
-            source_id=source_id,
-            memory_kind=MemoryKind.KNOWLEDGE,
-            perspective_type=PerspectiveType.FIRST_PERSON,
-            epistemic_status=EpistemicStatus.RECALLED,
-            sensitivity=SensitivityLevel.STANDARD,
-            decision=CandidateDecision.PENDING,
-            policy_version=OWNER_TRUTH_SCHEMA_VERSION,
-            authority_epoch=0,
-            row_version=1,
-            content_hash=_hash(content),
-            content_schema_version=OWNER_TRUTH_SCHEMA_VERSION,
-            payload={
-                "schemaVersion": "owner-truth-candidate-proposal-v1",
-                "contentSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION,
-                "content": content,
-                "evidenceRefs": [{"sourceId": source_id, "sourceVersion": 1}],
-                "reviewMode": "single",
-            },
-        )
-        store.review_repository.seed(candidate)
-        review_service.decide_and_activate(
-            command=OwnerTruthCandidateReviewCommand(
-                command_id="dimension-read-real-memory-accept",
-                candidate_id=candidate.candidate_id,
-                expected_candidate_version=1,
-                action=CandidateReviewAction.ACCEPT,
-                corrected_value=None,
-                corrected_value_schema_version=OWNER_TRUTH_SCHEMA_VERSION,
-                reason_code="ownerReviewed",
-            ),
-            context=self.context,
-        )
-        projection_service.rebuild(context=self.context)
-
-        result = OwnerTruthKnowledgeDimensionReadService(projection_service).read(
-            context=self.context
+            vault_id=self.vault_id,
+            confirmations=(self._receipt(memory),),
         )
 
         self.assertEqual(result.state, OwnerTruthKnowledgeDimensionReadState.READY)
-        self.assertEqual(len(result.included_memory_version_ids), 1)
-        self.assertEqual(result.coverage.for_dimension("keyDecisions").covered_facets, ("choice", "reason"))
-
-    def test_missing_or_unsafe_annotations_are_excluded_without_guessing_from_memory_text(self) -> None:
-        accepted = self._input(
-            content={
-                "claim": "I selected work that kept weekends free.",
-                "knowledgeDimensionEvidence": self._owner_confirmed_annotation(),
-            }
-        )
-        missing = self._input()
-        ai_only = self._input(
-            content={
-                "claim": "A model guessed I value stability.",
-                "knowledgeDimensionEvidence": {
-                    **self._owner_confirmed_annotation(),
-                    "isAiInferenceOnly": True,
-                },
-            }
-        )
-        sensitive = self._input(
-            sensitivity="sensitive",
-            content={
-                "claim": "Sensitive context.",
-                "knowledgeDimensionEvidence": self._owner_confirmed_annotation(),
-            },
-        )
-        inferred = self._input(
-            epistemic_status="inferred",
-            content={
-                "claim": "Inferred context.",
-                "knowledgeDimensionEvidence": self._owner_confirmed_annotation(),
-            },
-        )
-
-        result = read_owner_confirmed_dimension_coverage(
-            memory_projection=self._snapshot(accepted, missing, ai_only, sensitive, inferred),
-            owner_subject_id=self.owner_id,
-            vault_id=self.vault_id,
-        )
-
-        self.assertEqual(result.included_memory_version_ids, (accepted.memory_version_id,))
+        self.assertEqual(result.included_memory_version_ids, (memory.memory_version_id,))
         self.assertEqual(
-            {item.memory_version_id: item.reason_code for item in result.exclusions},
-            {
-                missing.memory_version_id: "missingDimensionEvidence",
-                ai_only.memory_version_id: "aiInferenceOnly",
-                sensitive.memory_version_id: "sensitivityNotStandard",
-                inferred.memory_version_id: "inferredEpistemicStatus",
-            },
+            result.coverage.for_dimension("keyDecisions").covered_facets,
+            ("choice", "reason"),
         )
-        self.assertEqual(result.coverage.excluded_evidence_count, 0)
+        self.assertNotEqual(result.checkpoint, result.memory_projection_checkpoint)
+        self.assertNotIn("claim", str(result.value_free_summary()))
 
-    def test_invalid_facet_and_unconfirmed_annotation_cannot_increase_coverage(self) -> None:
-        invalid = self._input(
-            content={
-                "claim": "Invalid metadata.",
-                "knowledgeDimensionEvidence": {
-                    **self._owner_confirmed_annotation(),
-                    "coveredFacets": ["notAStableFacet"],
-                },
-            }
-        )
-        unconfirmed = self._input(
-            content={
-                "claim": "Unconfirmed metadata.",
-                "knowledgeDimensionEvidence": {
-                    **self._owner_confirmed_annotation(),
-                    "classificationConfirmedByOwner": False,
-                },
-            }
-        )
+    def test_receipt_hash_mismatch_and_old_version_do_not_contribute(self) -> None:
+        current = self._input()
+        old = self._input()
+        stale_hash = self._receipt(current, content_hash=_hash("old-content"))
+        old_version = self._receipt(old)
 
         result = read_owner_confirmed_dimension_coverage(
-            memory_projection=self._snapshot(invalid, unconfirmed),
+            memory_projection=self._snapshot(current),
             owner_subject_id=self.owner_id,
             vault_id=self.vault_id,
+            confirmations=(stale_hash, old_version),
         )
 
         self.assertEqual(result.included_memory_version_ids, ())
-        self.assertEqual(
-            {item.memory_version_id: item.reason_code for item in result.exclusions},
-            {
-                invalid.memory_version_id: "invalidDimensionEvidence",
-                unconfirmed.memory_version_id: "dimensionClassificationNotOwnerConfirmed",
-            },
-        )
-        self.assertEqual(
-            result.coverage.for_dimension("keyDecisions").covered_facets,
-            (),
-        )
+        self.assertEqual(result.exclusions[0].reason_code, "invalidOwnerConfirmationReceipt")
 
-    def test_rebuilding_or_malformed_snapshot_never_returns_partial_coverage(self) -> None:
-        rebuilding = build_rebuilding_memory_projection(
-            vault_id=self.vault_id,
-            owner_subject_id=self.owner_id,
-            authority_epoch=3,
-        )
-        rebuilding_result = read_owner_confirmed_dimension_coverage(
-            memory_projection=rebuilding,
+    def test_unsafe_current_memory_does_not_contribute_even_with_receipt(self) -> None:
+        memory = self._input(sensitivity="sensitive")
+
+        result = read_owner_confirmed_dimension_coverage(
+            memory_projection=self._snapshot(memory),
             owner_subject_id=self.owner_id,
             vault_id=self.vault_id,
+            confirmations=(self._receipt(memory),),
         )
-        self.assertEqual(rebuilding_result.state, OwnerTruthKnowledgeDimensionReadState.REBUILDING)
-        self.assertIsNone(rebuilding_result.coverage)
 
-        malformed = {
-            "state": "ready",
-            "ownerSubjectId": self.owner_id,
-            "vaultId": self.vault_id,
-            "authorityEpoch": 3,
-            "checkpoint": "checkpoint",
-            "entries": [{"citation": {"memoryVersionId": str(uuid4())}}],
-        }
-        unavailable = read_owner_confirmed_dimension_coverage(
-            memory_projection=malformed,
-            owner_subject_id=self.owner_id,
-            vault_id=self.vault_id,
+        self.assertEqual(result.included_memory_version_ids, ())
+        self.assertEqual(result.exclusions[0].reason_code, "sensitivityNotStandard")
+
+    def test_service_reads_repository_receipts_and_rejects_missing_receipt_by_default(self) -> None:
+        memory = self._input()
+        reader = _ProjectionReader(self._snapshot(memory))
+        store = _ConfirmationStore(reader)
+
+        empty = OwnerTruthKnowledgeDimensionReadService(reader).read(context=self.context)
+        self.assertEqual(empty.included_memory_version_ids, ())
+
+        created = OwnerTruthKnowledgeDimensionConfirmationService(store, enabled=True).confirm(
+            context=self.context,
+            memory_version_id=memory.memory_version_id,
+            command=OwnerTruthKnowledgeDimensionConfirmationCommand(
+                command_id="dimension-read-confirm-001",
+                expected_content_hash=memory.content_hash,
+                dimension="keyDecisions",
+                covered_facets=("choice", "reason"),
+            ),
         )
-        self.assertEqual(unavailable.state, OwnerTruthKnowledgeDimensionReadState.UNAVAILABLE)
-        self.assertIsNone(unavailable.coverage)
-        self.assertEqual(unavailable.included_memory_version_ids, ())
+        self.assertEqual(created.outcome, "created")
 
-    def test_cross_owner_or_vault_snapshot_is_rejected_before_any_read_result(self) -> None:
-        snapshot = self._snapshot(self._input())
-        with self.assertRaisesRegex(OwnerTruthKnowledgeDimensionReadError, "scope"):
-            read_owner_confirmed_dimension_coverage(
-                memory_projection=snapshot,
-                owner_subject_id="other-owner",
+        result = OwnerTruthKnowledgeDimensionReadService(
+            reader,
+            store.owner_truth_knowledge_dimension_confirmation_repository(),
+        ).read(context=self.context)
+
+        self.assertEqual(reader.read_count, 3)
+        self.assertEqual(result.included_memory_version_ids, (memory.memory_version_id,))
+        persisted = store.repository.snapshot()
+        self.assertNotIn("I chose", str(persisted))
+        self.assertNotIn("claim", str(persisted))
+
+    def test_rebuilding_projection_remains_fail_closed(self) -> None:
+        result = read_owner_confirmed_dimension_coverage(
+            memory_projection=build_rebuilding_memory_projection(
                 vault_id=self.vault_id,
-            )
+                owner_subject_id=self.owner_id,
+                authority_epoch=3,
+            ),
+            owner_subject_id=self.owner_id,
+            vault_id=self.vault_id,
+            confirmations=(),
+        )
+
+        self.assertEqual(result.state, OwnerTruthKnowledgeDimensionReadState.REBUILDING)
+        self.assertIsNone(result.coverage)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     unittest.main()

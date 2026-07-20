@@ -65,6 +65,21 @@ _DIMENSION_FACETS: Mapping[KnowledgeDimension, Tuple[str, ...]] = {
 }
 
 
+def knowledge_dimension_facets(dimension: KnowledgeDimension | str) -> Tuple[str, ...]:
+    """Return the stable, policy-owned facet order for one knowledge dimension.
+
+    Confirmation writers use this helper to normalize an Owner's explicit
+    selection.  Keeping the order in this module prevents an independent
+    receipt contract from quietly drifting away from the recommendation policy.
+    """
+
+    try:
+        normalized = KnowledgeDimension(dimension)
+    except (TypeError, ValueError) as exc:
+        raise KnowledgeRecommendationError("dimension is not supported") from exc
+    return _DIMENSION_FACETS[normalized]
+
+
 def _opaque_identifier(value: object, *, field: str) -> str:
     normalized = str(value or "").strip()
     if _OPAQUE_IDENTIFIER.fullmatch(normalized):
@@ -670,6 +685,7 @@ __all__ = [
     "DimensionCoverage",
     "DimensionProjection",
     "KnowledgeDimension",
+    "knowledge_dimension_facets",
     "KnowledgeDimensionProjector",
     "KnowledgeRecommendationError",
     "KNOWLEDGE_DIMENSION_POLICY_VERSION",

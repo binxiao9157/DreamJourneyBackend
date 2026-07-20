@@ -157,6 +157,15 @@ from app.services.owner_truth_answer_citation import (
     OwnerTruthAnswerCitationService,
     answer_citation_summary,
 )
+from app.services.owner_truth_knowledge_dimension_confirmation import (
+    OwnerTruthKnowledgeDimensionConfirmationAccessDenied,
+    OwnerTruthKnowledgeDimensionConfirmationCommand,
+    OwnerTruthKnowledgeDimensionConfirmationConflict,
+    OwnerTruthKnowledgeDimensionConfirmationError,
+    OwnerTruthKnowledgeDimensionConfirmationService,
+    OwnerTruthKnowledgeDimensionConfirmationStaleMemory,
+    confirmation_summary as knowledge_dimension_confirmation_summary,
+)
 from app.services.owner_truth_correction_request import (
     OwnerTruthCorrectionRequestAccessDenied,
     OwnerTruthCorrectionRequestCommand,
@@ -332,6 +341,9 @@ DELEGATED_ACCESS_CONTRACT_API_ENABLED = bool(
 OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = bool(
     settings.owner_truth_candidate_review_qa_enabled
 )
+OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = bool(
+    settings.owner_truth_knowledge_dimension_confirmation_qa_enabled
+)
 AUTH_ACCESS_TTL_SECONDS = max(60, settings.auth_access_ttl_seconds)
 AUTH_REFRESH_TTL_SECONDS = max(AUTH_ACCESS_TTL_SECONDS + 60, settings.auth_refresh_ttl_seconds)
 AUTH_LEGACY_PHONE_LOGIN_ENABLED = legacy_phone_login_enabled(settings)
@@ -448,6 +460,27 @@ def _require_owner_truth_answer_citation_qa(request: Request) -> str:
     return user_id
 
 
+def _require_owner_truth_knowledge_dimension_confirmation_qa(request: Request) -> str:
+    """Keep explicit Owner dimension confirmation unavailable outside QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthKnowledgeDimensionConfirmationUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthKnowledgeDimensionConfirmationUserSessionRequired"},
+        )
+    return user_id
+
+
 def _require_owner_truth_correction_request_qa(request: Request) -> str:
     """Keep Answer/Citation correction requests unavailable outside Owner QA."""
 
@@ -546,6 +579,19 @@ def _owner_truth_answer_citation_context(
     vault_id: str,
 ) -> OwnerTruthCommandContext:
     owner_subject_id = _require_owner_truth_answer_citation_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
+def _owner_truth_knowledge_dimension_confirmation_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_knowledge_dimension_confirmation_qa(request)
     return OwnerTruthCommandContext(
         vault_id=vault_id,
         owner_subject_id=owner_subject_id,
@@ -754,6 +800,30 @@ def _owner_truth_answer_citation_http_error(
     if isinstance(error, OwnerTruthAnswerCitationConflict):
         return HTTPException(status_code=409, detail={"code": "ownerTruthAnswerCitationConflict"})
     return HTTPException(status_code=400, detail={"code": "ownerTruthAnswerCitationInvalid"})
+
+
+def _owner_truth_knowledge_dimension_confirmation_http_error(
+    error: OwnerTruthKnowledgeDimensionConfirmationError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthKnowledgeDimensionConfirmationAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthKnowledgeDimensionConfirmationDenied"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeDimensionConfirmationStaleMemory):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthKnowledgeDimensionConfirmationStaleMemory"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeDimensionConfirmationConflict):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthKnowledgeDimensionConfirmationConflict"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthKnowledgeDimensionConfirmationInvalid"},
+    )
 
 
 def _owner_truth_correction_request_http_error(
@@ -2945,6 +3015,59 @@ def record_owner_truth_answer_citation(
             "schemaVersion": "owner-truth-answer-citation-receipt-response-v1",
             "status": result.outcome,
             "answerCitation": answer_citation_summary(result),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memory-versions/{memory_version_id}/knowledge-dimension-confirmations",
+    include_in_schema=False,
+)
+def confirm_owner_truth_knowledge_dimension(
+    request: Request,
+    vault_id: str,
+    memory_version_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Record one explicit, immutable Owner classification in the M0-B QA lane.
+
+    This does not alter a MemoryVersion or expose a public recommendation/Echo
+    feature.  The service binds the receipt to the current projection hash and
+    Postgres revalidates the authoritative current-version record on insert.
+    """
+
+    try:
+        context = _owner_truth_knowledge_dimension_confirmation_context(
+            request,
+            vault_id=vault_id,
+        )
+        command = OwnerTruthKnowledgeDimensionConfirmationCommand(
+            command_id=payload.get("commandId"),
+            expected_content_hash=payload.get("expectedContentHash"),
+            dimension=payload.get("dimension"),
+            covered_facets=tuple(payload.get("coveredFacets") or ()),
+            confirmation_method=payload.get("confirmationMethod")
+            or "ownerExplicitSelection",
+            ui_schema_version=payload.get("uiSchemaVersion")
+            or "knowledge-dimension-review-v1",
+        )
+        result = OwnerTruthKnowledgeDimensionConfirmationService(
+            store,
+            enabled=True,
+        ).confirm(
+            context=context,
+            memory_version_id=memory_version_id,
+            command=command,
+        )
+    except OwnerTruthKnowledgeDimensionConfirmationError as error:
+        raise _owner_truth_knowledge_dimension_confirmation_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-knowledge-dimension-confirmation-response-v1",
+            "status": result.outcome,
+            "confirmation": knowledge_dimension_confirmation_summary(result),
         },
         headers={"Cache-Control": "no-store"},
     )

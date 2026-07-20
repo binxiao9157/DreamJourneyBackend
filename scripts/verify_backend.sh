@@ -19,6 +19,9 @@ STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" -m unittest discover tests
 echo "== Credential response boundary smoke =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-credential-response-boundary-smoke.sh
 
+echo "== Owner Truth knowledge dimension confirmation gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-knowledge-recommendation-gate.sh
+
 echo "== Backend py_compile =="
 "$PYTHON_BIN" -m compileall -q app tests
 "$PYTHON_BIN" -m py_compile scripts/*.py
@@ -211,6 +214,15 @@ test -f db/migrations/0034_owner_truth_interview_candidate_batch_decisions.json
 test -f app/domain/owner_truth/interview_candidate_batch_decision.py
 test -f app/services/owner_truth_interview_candidate_batch_decision.py
 test -f tests/test_owner_truth_interview_candidate_batch_decision.py
+test -f db/migrations/0035_owner_truth_knowledge_dimension_confirmation_receipts.sql
+test -f db/migrations/0035_owner_truth_knowledge_dimension_confirmation_receipts.json
+test -f app/services/owner_truth_knowledge_dimension_confirmation.py
+test -f app/domain/owner_truth/knowledge_dimension_read.py
+test -f scripts/backend-owner-truth-knowledge-dimension-confirmation-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-knowledge-dimension-confirmation-postgres-smoke.sh
+test -f tests/test_owner_truth_knowledge_dimension_confirmation.py
+test -f tests/test_owner_truth_knowledge_dimension_confirmation_api.py
+test -f tests/test_owner_truth_knowledge_dimension_confirmation_migration_contract.py
 test -f tests/test_owner_truth_interview_candidate_batch_decision_migration_contract.py
 test -f app/domain/owner_truth/interview_candidate_single_review.py
 test -f app/services/owner_truth_interview_candidate_single_review.py

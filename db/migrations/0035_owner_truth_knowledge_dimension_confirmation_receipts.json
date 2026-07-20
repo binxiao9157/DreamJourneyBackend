@@ -1,0 +1,12 @@
+{
+  "version": "0035",
+  "name": "owner_truth_knowledge_dimension_confirmation_receipts",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthKnowledgeDimensionConfirmationQaOnly",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthKnowledgeDimensionConfirmationQa": false
+  }
+}

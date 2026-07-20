@@ -235,6 +235,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthCandidateDecision",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/memory-versions/{memory_version_id}/knowledge-dimension-confirmations",
+                session,
+                "ownerTruthKnowledgeDimensionConfirmation",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/interview-sessions/{session_id}/state",
                 session,

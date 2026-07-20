@@ -16,7 +16,9 @@ cd "$ROOT"
 if [[ -f tests/test_owner_truth_knowledge_recommendations.py && -f tests/test_owner_truth_knowledge_dimension_read.py ]]; then
   PYTHONPATH=. "$PYTHON_BIN" -m unittest \
     tests.test_owner_truth_knowledge_recommendations \
-    tests.test_owner_truth_knowledge_dimension_read
+    tests.test_owner_truth_knowledge_dimension_read \
+    tests.test_owner_truth_knowledge_dimension_confirmation \
+    tests.test_owner_truth_knowledge_dimension_confirmation_migration_contract
 else
   echo "Owner Truth knowledge recommendation unit tests unavailable in this image; running deployed policy smoke"
 fi
@@ -25,10 +27,10 @@ PYTHONPATH=. "$PYTHON_BIN" - <<'PY'
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from app.domain.owner_truth.knowledge_dimension_read import (
-    OWNER_TRUTH_KNOWLEDGE_DIMENSION_EVIDENCE_SCHEMA_VERSION,
-    read_owner_confirmed_dimension_coverage,
-)
+from hashlib import sha256
+import json
+
+from app.domain.owner_truth.knowledge_dimension_read import read_owner_confirmed_dimension_coverage
 from app.domain.owner_truth.knowledge_recommendations import (
     ConfirmedMemoryDimensionEvidence,
     KnowledgeDimension,
@@ -97,14 +99,20 @@ assert [item.slot.value for item in selection.selected] == ["continuity", "bread
 assert len(projection.coverage) == 6
 
 source_id = str(uuid4())
+content = {"claim": "The owner chose a new direction."}
+content_hash = sha256(
+    json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+memory_id = str(uuid4())
+memory_version_id = str(uuid4())
 dimension_snapshot = build_ready_memory_projection(
     vault_id=vault,
     owner_subject_id=owner,
     authority_epoch=0,
     inputs=(
         OwnerTruthMemoryProjectionInput(
-            memory_id=str(uuid4()),
-            memory_version_id=str(uuid4()),
+            memory_id=memory_id,
+            memory_version_id=memory_version_id,
             vault_id=vault,
             owner_subject_id=owner,
             authority_epoch=0,
@@ -116,17 +124,8 @@ dimension_snapshot = build_ready_memory_projection(
             epistemic_status="recalled",
             sensitivity="standard",
             content_schema_version="owner-truth-v1",
-            content_hash="deployed-dimension-smoke",
-            content={
-                "claim": "The owner chose a new direction.",
-                "knowledgeDimensionEvidence": {
-                    "schemaVersion": OWNER_TRUTH_KNOWLEDGE_DIMENSION_EVIDENCE_SCHEMA_VERSION,
-                    "dimension": "keyDecisions",
-                    "coveredFacets": ["choice"],
-                    "classificationConfirmedByOwner": True,
-                    "isAiInferenceOnly": False,
-                },
-            },
+            content_hash=content_hash,
+            content=content,
             evidence_refs=({"sourceId": source_id, "sourceVersion": 1},),
         ),
     ),
@@ -135,6 +134,25 @@ dimension_result = read_owner_confirmed_dimension_coverage(
     memory_projection=dimension_snapshot,
     owner_subject_id=owner,
     vault_id=vault,
+    confirmations=(
+        {
+            "confirmationId": str(uuid4()),
+            "commandIdHash": sha256(b"deployed-dimension-command").hexdigest(),
+            "payloadHash": sha256(b"deployed-dimension-payload").hexdigest(),
+            "vaultId": vault,
+            "ownerSubjectId": owner,
+            "actorSubjectId": owner,
+            "authorityEpoch": 0,
+            "memoryId": memory_id,
+            "memoryVersionId": memory_version_id,
+            "boundContentHash": content_hash,
+            "dimension": "keyDecisions",
+            "coveredFacets": ["choice"],
+            "confirmationMethod": "ownerExplicitSelection",
+            "schemaVersion": "owner-truth-knowledge-dimension-confirmation-v1",
+            "uiSchemaVersion": "knowledge-dimension-review-v1",
+        },
+    ),
 )
 assert dimension_result.state.value == "ready"
 assert dimension_result.included_memory_version_ids
@@ -160,12 +178,14 @@ for required in (
     assert required in source, f"missing M0-B recommendation policy invariant: {required}"
 dimension_source = Path("app/domain/owner_truth/knowledge_dimension_read.py").read_text(encoding="utf-8")
 for required in (
-    "classificationConfirmedByOwner",
-    "isAiInferenceOnly",
+    "missingOwnerConfirmationReceipt",
+    "boundContentHash",
+    "ownerExplicitSelection",
     "sensitivityNotStandard",
     "inferredEpistemicStatus",
     "non-ready dimension reads must not retain coverage evidence",
 ):
     assert required in dimension_source, f"missing M0-B dimension read invariant: {required}"
+assert "knowledgeDimensionEvidence" not in dimension_source, "inline payload annotations must not count"
 print("Owner Truth knowledge recommendation G0 gate passed")
 PY
