@@ -17,6 +17,7 @@ from app.services.owner_truth_knowledge_dimension_confirmation import (
     OwnerTruthKnowledgeDimensionConfirmationService,
     OwnerTruthKnowledgeDimensionConfirmationStaleMemory,
     OwnerTruthKnowledgeDimensionConfirmationUnavailable,
+    PostgresOwnerTruthKnowledgeDimensionConfirmationRepository,
 )
 
 
@@ -170,6 +171,29 @@ class OwnerTruthKnowledgeDimensionConfirmationTests(unittest.TestCase):
             self._command(dimension="inventedDimension")
         with self.assertRaisesRegex(Exception, "unsupported"):
             self._command(covered_facets=("inventedFacet",))
+
+    def test_postgres_projection_record_retains_vault_scope(self) -> None:
+        record = PostgresOwnerTruthKnowledgeDimensionConfirmationRepository._row_to_record(
+            {
+                "vault_id": self.vault,
+                "id": str(uuid4()),
+                "command_id_hash": _hash("command"),
+                "command_payload_hash": _hash("payload"),
+                "memory_id": self.memory.memory_id,
+                "memory_version_id": self.memory.memory_version_id,
+                "bound_content_hash": self.content_hash,
+                "owner_subject_id": self.owner,
+                "actor_subject_id": self.owner,
+                "authority_epoch": 4,
+                "dimension": "keyDecisions",
+                "covered_facets": ["choice", "reason"],
+                "confirmation_method": "ownerExplicitSelection",
+                "schema_version": "owner-truth-knowledge-dimension-confirmation-v1",
+                "ui_schema_version": "knowledge-dimension-review-v1",
+            }
+        )
+
+        self.assertEqual(record["vaultId"], self.vault)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -451,7 +451,7 @@ class PostgresOwnerTruthKnowledgeDimensionConfirmationRepository:
             )
             cursor.execute(
                 """
-                SELECT id, command_id_hash, command_payload_hash, memory_id,
+                SELECT vault_id, id, command_id_hash, command_payload_hash, memory_id,
                     memory_version_id, bound_content_hash, authority_epoch,
                     dimension, covered_facets
                 FROM owner_truth.knowledge_dimension_confirmation_receipts
@@ -651,6 +651,7 @@ class PostgresOwnerTruthKnowledgeDimensionConfirmationRepository:
         if isinstance(facets, str):
             facets = json.loads(facets)
         return {
+            "vaultId": str(row.get("vault_id") or ""),
             "confirmationId": str(row["id"]),
             "commandIdHash": str(row["command_id_hash"]),
             "payloadHash": str(row["command_payload_hash"]),
