@@ -81,6 +81,7 @@ from app.services.owner_truth_interview_candidate_proposal import (
 )
 from app.services.owner_truth_interview_candidate_review import (
     OwnerTruthInterviewCandidateReviewCompositionService,
+    OwnerTruthInterviewCandidateReviewReadService,
 )
 from app.services.owner_truth_interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchDecisionService,
@@ -610,6 +611,22 @@ def main() -> None:
             and "这是一条必须逐条确认的敏感访谈候选。" not in str(composition_summary),
             "review composition summary must remain value-free",
         )
+        initial_review_read = OwnerTruthInterviewCandidateReviewReadService(store).read(
+            review_batch_id=review_batch.review_batch.review_batch_id,
+            context=context,
+        )
+        require(
+            len(initial_review_read.batch_candidates) == 1
+            and len(initial_review_read.single_candidates) == 1,
+            "review read must pair each pending Candidate with its review path",
+        )
+        require(
+            initial_review_read.batch_candidates[0].candidate.candidate_id
+            == composition.batch_candidates[0].candidate_id
+            and initial_review_read.single_candidates[0].candidate.candidate_id
+            == composition.single_candidates[0].candidate_id,
+            "review read must use the canonical pending Candidate state",
+        )
         batch_item = composition.batch_candidates[0]
         batch_accept_command = OwnerTruthInterviewCandidateBatchAcceptCommand(
             command_id="interview-batch-accept-smoke",
@@ -651,6 +668,15 @@ def main() -> None:
             and len(remaining_composition.single_candidates) == 1,
             "partial batch acceptance must leave the sensitive Candidate pending for single review",
         )
+        remaining_review_read = OwnerTruthInterviewCandidateReviewReadService(store).read(
+            review_batch_id=review_batch.review_batch.review_batch_id,
+            context=context,
+        )
+        require(
+            len(remaining_review_read.batch_candidates) == 0
+            and len(remaining_review_read.single_candidates) == 1,
+            "review read must hide terminal batch Candidates after partial acceptance",
+        )
         single_item = remaining_composition.single_candidates[0]
         single_review_command = OwnerTruthInterviewCandidateSingleReviewCommand(
             command_id="interview-single-review-smoke",
@@ -688,6 +714,15 @@ def main() -> None:
         require(
             exhausted_composition.readiness.value == "noCandidates",
             "terminal single review must leave no pending Candidate in the admitted batch",
+        )
+        exhausted_review_read = OwnerTruthInterviewCandidateReviewReadService(store).read(
+            review_batch_id=review_batch.review_batch.review_batch_id,
+            context=context,
+        )
+        require(
+            not exhausted_review_read.batch_candidates
+            and not exhausted_review_read.single_candidates,
+            "review read must not render terminal Candidates as pending",
         )
 
         follow_up_thread_id = str(uuid.uuid4())

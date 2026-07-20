@@ -236,6 +236,24 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review",
+                session,
+                "ownerTruthInterviewCandidateReviewRead",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review/batch-accept",
+                session,
+                "ownerTruthInterviewCandidateBatchDecision",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review/candidates/{candidate_id}/decision",
+                session,
+                "ownerTruthInterviewCandidateSingleDecision",
+            ),
+            _rule(
+                "GET",
                 "/v2/vaults/{vault_id}/memory-projection",
                 session,
                 "ownerTruthMemoryProjectionRead",

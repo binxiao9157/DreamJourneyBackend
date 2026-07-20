@@ -71,12 +71,34 @@ from app.services.privacy import (
 )
 from app.services.owner_truth_source import ArchiveOwnerTruthCompatibilityFacade
 from app.domain.owner_truth.candidate_decisions import (
+    CandidateReviewAction,
     OwnerTruthCandidateReviewAccessDenied,
     OwnerTruthCandidateReviewCommand,
     OwnerTruthCandidateReviewConflict,
     OwnerTruthCandidateReviewError,
     OwnerTruthCandidateReviewSourceInactive,
     OwnerTruthCandidateVersionConflict,
+)
+from app.domain.owner_truth.interview_candidate_batch_decision import (
+    OwnerTruthInterviewCandidateBatchAcceptCommand,
+    OwnerTruthInterviewCandidateBatchDecisionConflict,
+    OwnerTruthInterviewCandidateBatchDecisionError,
+    OwnerTruthInterviewCandidateBatchDecisionNotReady,
+    OwnerTruthInterviewCandidateBatchDecisionSingleReviewRequired,
+    OwnerTruthInterviewCandidateBatchSelection,
+)
+from app.domain.owner_truth.interview_candidate_review import (
+    OwnerTruthInterviewCandidateReviewAccessDenied,
+    OwnerTruthInterviewCandidateReviewConflict,
+    OwnerTruthInterviewCandidateReviewError,
+    OwnerTruthInterviewCandidateReviewSourceInactive,
+)
+from app.domain.owner_truth.interview_candidate_single_review import (
+    OwnerTruthInterviewCandidateSingleReviewBatchRequired,
+    OwnerTruthInterviewCandidateSingleReviewCommand,
+    OwnerTruthInterviewCandidateSingleReviewConflict,
+    OwnerTruthInterviewCandidateSingleReviewError,
+    OwnerTruthInterviewCandidateSingleReviewNotReady,
 )
 from app.domain.owner_truth.contracts import OwnerTruthContractError
 from app.domain.owner_truth.memory_projection import (
@@ -87,6 +109,15 @@ from app.domain.owner_truth.memory_projection import (
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
+from app.services.owner_truth_interview_candidate_batch_decision import (
+    OwnerTruthInterviewCandidateBatchDecisionService,
+)
+from app.services.owner_truth_interview_candidate_review import (
+    OwnerTruthInterviewCandidateReviewReadService,
+)
+from app.services.owner_truth_interview_candidate_single_review import (
+    OwnerTruthInterviewCandidateSingleReviewService,
+)
 from app.services.owner_truth_kblite_compatibility import (
     OwnerTruthKBLiteCompatibilityReadService,
     compatibility_read_envelope as kblite_compatibility_read_envelope,
@@ -559,6 +590,96 @@ def _owner_truth_candidate_review_http_error(
     )
 
 
+def _owner_truth_interview_candidate_review_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    """Map the M0-A non-activation review lane to stable QA-only errors."""
+
+    if isinstance(
+        error,
+        (
+            OwnerTruthInterviewCandidateReviewAccessDenied,
+            OwnerTruthCandidateReviewAccessDenied,
+        ),
+    ):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthInterviewCandidateReviewDenied"},
+        )
+    if isinstance(error, OwnerTruthCandidateVersionConflict):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "ownerTruthInterviewCandidateVersionConflict",
+                "expectedCandidateVersion": error.expected_version,
+                "currentCandidateVersion": error.current_version,
+            },
+        )
+    if isinstance(
+        error,
+        (
+            OwnerTruthInterviewCandidateReviewSourceInactive,
+            OwnerTruthCandidateReviewSourceInactive,
+        ),
+    ):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthInterviewCandidateSourceInactive"},
+        )
+    if isinstance(
+        error,
+        (
+            OwnerTruthInterviewCandidateBatchDecisionNotReady,
+            OwnerTruthInterviewCandidateSingleReviewNotReady,
+        ),
+    ):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthInterviewCandidateReviewNotReady"},
+        )
+    if isinstance(
+        error,
+        (
+            OwnerTruthInterviewCandidateBatchDecisionSingleReviewRequired,
+            OwnerTruthInterviewCandidateSingleReviewBatchRequired,
+        ),
+    ):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthInterviewCandidateSingleReviewRequired"},
+        )
+    if isinstance(
+        error,
+        (
+            OwnerTruthInterviewCandidateReviewConflict,
+            OwnerTruthInterviewCandidateBatchDecisionConflict,
+            OwnerTruthInterviewCandidateSingleReviewConflict,
+            OwnerTruthCandidateReviewConflict,
+        ),
+    ):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthInterviewCandidateReviewConflict"},
+        )
+    if isinstance(
+        error,
+        (
+            OwnerTruthInterviewCandidateReviewError,
+            OwnerTruthInterviewCandidateBatchDecisionError,
+            OwnerTruthInterviewCandidateSingleReviewError,
+            OwnerTruthCandidateReviewError,
+        ),
+    ):
+        return HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewCandidateReviewInvalid"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthInterviewCandidateReviewInvalid"},
+    )
+
+
 def _owner_truth_memory_projection_http_error(
     error: OwnerTruthMemoryProjectionError,
 ) -> HTTPException:
@@ -620,6 +741,35 @@ def _owner_truth_candidate_expected_version(payload: Dict[str, Any]) -> int:
         ) from error
 
 
+def _owner_truth_interview_candidate_batch_selections(
+    payload: Dict[str, Any],
+) -> tuple[OwnerTruthInterviewCandidateBatchSelection, ...]:
+    raw_selections = payload.get("selections")
+    if not isinstance(raw_selections, list):
+        raise OwnerTruthInterviewCandidateBatchDecisionError(
+            "selections must be a non-empty array"
+        )
+    selections: list[OwnerTruthInterviewCandidateBatchSelection] = []
+    for raw_selection in raw_selections:
+        if not isinstance(raw_selection, dict):
+            raise OwnerTruthInterviewCandidateBatchDecisionError(
+                "each selection must be an object"
+            )
+        try:
+            expected_version = int(raw_selection.get("expectedCandidateVersion") or 0)
+        except (TypeError, ValueError) as error:
+            raise OwnerTruthInterviewCandidateBatchDecisionError(
+                "expectedCandidateVersion must be a positive integer"
+            ) from error
+        selections.append(
+            OwnerTruthInterviewCandidateBatchSelection(
+                candidate_id=str(raw_selection.get("candidateId") or ""),
+                expected_candidate_version=expected_version,
+            )
+        )
+    return tuple(selections)
+
+
 def _owner_truth_candidate_inbox_item_response(item: Any) -> Dict[str, Any]:
     return {
         "candidateId": item.candidate_id,
@@ -658,6 +808,83 @@ def _owner_truth_candidate_decision_response(result: Any) -> Dict[str, Any]:
             "memoryId": activation.memory_id,
             "memoryVersionId": activation.memory_version_id,
             "contentHash": activation.content_hash,
+        },
+    }
+
+
+def _owner_truth_interview_candidate_review_item_response(item: Any) -> Dict[str, Any]:
+    """Reuse the existing Owner Candidate preview without changing its authority."""
+
+    response = _owner_truth_candidate_inbox_item_response(item.candidate)
+    response.update(
+        {
+            "extractionId": item.review_item.extraction_id,
+            "reviewPath": item.review_item.review_path.value,
+        }
+    )
+    return response
+
+
+def _owner_truth_interview_candidate_review_read_response(
+    *,
+    vault_id: str,
+    result: Any,
+) -> Dict[str, Any]:
+    return {
+        "schemaVersion": "owner-truth-interview-candidate-review-read-v1",
+        "vaultId": vault_id,
+        "review": result.composition.public_summary(),
+        "batchCandidates": [
+            _owner_truth_interview_candidate_review_item_response(item)
+            for item in result.batch_candidates
+        ],
+        "singleCandidates": [
+            _owner_truth_interview_candidate_review_item_response(item)
+            for item in result.single_candidates
+        ],
+    }
+
+
+def _owner_truth_interview_candidate_review_receipt_response(review: Any) -> Dict[str, Any]:
+    return {
+        "receiptId": review.receipt_id,
+        "candidateId": review.candidate_id,
+        "decision": review.decision.value,
+        "candidateVersion": review.candidate_row_version,
+        "correctedValueId": review.corrected_value_id,
+    }
+
+
+def _owner_truth_interview_candidate_batch_decision_response(result: Any) -> Dict[str, Any]:
+    return {
+        "schemaVersion": "owner-truth-interview-candidate-batch-decision-response-v1",
+        "status": result.outcome,
+        "batchDecisionId": result.batch_decision_id,
+        "reviewBatchId": result.review_batch_id,
+        "acceptedCandidateCount": result.accepted_candidate_count,
+        "receipts": [
+            _owner_truth_interview_candidate_review_receipt_response(item)
+            for item in result.candidate_results
+        ],
+        # This QA-only M0-A route deliberately stops at an immutable receipt.
+        "memoryActivation": {
+            "status": "notApplicable",
+            "memoryVersionCreated": False,
+        },
+    }
+
+
+def _owner_truth_interview_candidate_single_review_response(result: Any) -> Dict[str, Any]:
+    return {
+        "schemaVersion": "owner-truth-interview-candidate-single-review-response-v1",
+        "status": result.outcome,
+        "batchDecisionId": result.batch_decision_id,
+        "reviewBatchId": result.review_batch_id,
+        "receipt": _owner_truth_interview_candidate_review_receipt_response(result.review),
+        # This QA-only M0-A route deliberately stops at an immutable receipt.
+        "memoryActivation": {
+            "status": "notApplicable",
+            "memoryVersionCreated": False,
         },
     }
 ROUTE_AUTHENTICATION_POLICY = RouteAuthenticationPolicy()
@@ -2188,6 +2415,117 @@ def review_owner_truth_candidate(
     return JSONResponse(
         status_code=201 if result.review.outcome == "created" else 200,
         content=_owner_truth_candidate_decision_response(result),
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review",
+    include_in_schema=False,
+)
+def read_owner_truth_interview_candidate_review(
+    request: Request,
+    vault_id: str,
+    review_batch_id: str,
+) -> JSONResponse:
+    """QA-only M0-A review read; it never turns a Candidate into a Memory."""
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        result = OwnerTruthInterviewCandidateReviewReadService(store).read(
+            review_batch_id=review_batch_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=_owner_truth_interview_candidate_review_read_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review/batch-accept",
+    include_in_schema=False,
+)
+def accept_owner_truth_interview_candidate_batch(
+    request: Request,
+    vault_id: str,
+    review_batch_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only partial acceptance for standard M0-A Candidates.
+
+    It records terminal Candidate decisions and immutable receipts only. The
+    existing initial-Memory activation route remains a separate Authority step.
+    """
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        command = OwnerTruthInterviewCandidateBatchAcceptCommand(
+            command_id=str(payload.get("commandId") or ""),
+            review_batch_id=review_batch_id,
+            selections=_owner_truth_interview_candidate_batch_selections(payload),
+            reason_code=str(payload.get("reasonCode") or "ownerReviewed"),
+        )
+        result = OwnerTruthInterviewCandidateBatchDecisionService(store).accept_selected(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_candidate_batch_decision_response(result),
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review/candidates/{candidate_id}/decision",
+    include_in_schema=False,
+)
+def review_owner_truth_interview_candidate_single(
+    request: Request,
+    vault_id: str,
+    review_batch_id: str,
+    candidate_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only sensitive/explicit-single M0-A Candidate decision."""
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        command = OwnerTruthInterviewCandidateSingleReviewCommand(
+            command_id=str(payload.get("commandId") or ""),
+            review_batch_id=review_batch_id,
+            candidate_id=candidate_id,
+            expected_candidate_version=_owner_truth_candidate_expected_version(payload),
+            action=CandidateReviewAction(str(payload.get("action") or "")),
+            corrected_value=payload.get("correctedValue"),
+            corrected_value_schema_version=str(
+                payload.get("correctedValueSchemaVersion")
+                or OWNER_TRUTH_SCHEMA_VERSION
+            ),
+            reason_code=str(payload.get("reasonCode") or "ownerReviewed"),
+        )
+        result = OwnerTruthInterviewCandidateSingleReviewService(store).review_single(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_review_http_error(error) from error
+    except (TypeError, ValueError) as error:
+        raise _owner_truth_interview_candidate_review_http_error(
+            OwnerTruthInterviewCandidateSingleReviewError(
+                "single-review action is unsupported"
+            )
+        ) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_candidate_single_review_response(result),
     )
 
 

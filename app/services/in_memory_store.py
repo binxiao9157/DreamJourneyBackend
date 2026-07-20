@@ -53,6 +53,12 @@ from app.domain.owner_truth.source_commands import (
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
 )
+from app.services.owner_truth_interview_candidate_batch_decision import (
+    InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository,
+)
+from app.services.owner_truth_interview_candidate_review import (
+    InMemoryOwnerTruthInterviewCandidateReviewRepository,
+)
 from app.services.owner_truth_memory_projection import (
     InMemoryOwnerTruthMemoryProjectionRepository,
 )
@@ -79,6 +85,16 @@ from app.observability.events import (
 from app.observability.operation_metrics import summarize_operation_metrics
 
 
+class _InMemoryRequestUnitOfWork:
+    """No-op transaction handle matching the HTTP middleware contract."""
+
+    def __init__(self) -> None:
+        self.rollback_reason: str | None = None
+
+    def mark_rollback(self, reason: str) -> None:
+        self.rollback_reason = str(reason or "httpErrorResponse")
+
+
 class InMemoryStore:
     def __init__(self):
         self._users: Dict[str, Dict[str, Any]] = {}
@@ -97,6 +113,16 @@ class InMemoryStore:
         self._owner_truth_source_receipts: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._owner_truth_candidate_review_repository = (
             InMemoryOwnerTruthCandidateReviewRepository()
+        )
+        self._owner_truth_interview_candidate_review_repository = (
+            InMemoryOwnerTruthInterviewCandidateReviewRepository(
+                candidate_snapshot_lookup=(
+                    self._owner_truth_candidate_review_repository.candidate_snapshot
+                )
+            )
+        )
+        self._owner_truth_interview_candidate_batch_decision_repository = (
+            InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository()
         )
         self._owner_truth_memory_projection_repository = (
             InMemoryOwnerTruthMemoryProjectionRepository(
@@ -166,6 +192,32 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthCandidateReviewRepository:
         return self._owner_truth_candidate_review_repository
+
+    @contextmanager
+    def request_unit_of_work(
+        self,
+        *,
+        correlation_id: str,
+        command_id: str,
+    ):
+        """Provide the same nested request boundary expected by V4 services."""
+
+        del correlation_id, command_id
+        # FastAPI middleware opens this context on the event-loop thread while
+        # synchronous endpoint functions run in a worker thread. Holding an
+        # RLock here would deadlock that test-double-only path. Individual
+        # in-memory repositories retain their own operation locks instead.
+        yield _InMemoryRequestUnitOfWork()
+
+    def owner_truth_interview_candidate_review_repository(
+        self,
+    ) -> InMemoryOwnerTruthInterviewCandidateReviewRepository:
+        return self._owner_truth_interview_candidate_review_repository
+
+    def owner_truth_interview_candidate_batch_decision_repository(
+        self,
+    ) -> InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
+        return self._owner_truth_interview_candidate_batch_decision_repository
 
     def owner_truth_memory_projection_repository(
         self,

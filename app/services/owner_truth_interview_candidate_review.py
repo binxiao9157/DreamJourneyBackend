@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 from threading import RLock
-from typing import Any, ContextManager, Mapping, Protocol
+from typing import Any, Callable, ContextManager, Mapping, Protocol
 
 from app.domain.owner_truth.candidate_decisions import OwnerTruthCandidateSnapshot
 from app.domain.owner_truth.contracts import CandidateDecision, SensitivityLevel, require_uuid
@@ -25,6 +25,7 @@ from app.domain.owner_truth.interview_candidate_review import (
     OwnerTruthInterviewCandidateReviewSourceInactive,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.owner_truth_candidate_review import OwnerTruthCandidateInboxItem
 
 
 def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
@@ -119,8 +120,16 @@ class OwnerTruthInterviewCandidateReviewStore(Protocol):
 class InMemoryOwnerTruthInterviewCandidateReviewRepository:
     """Semantic double for the batch composition and its safety boundaries."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        candidate_snapshot_lookup: Callable[[str], OwnerTruthCandidateSnapshot | None] | None = None,
+    ) -> None:
         self._lock = RLock()
+        # The application in-memory store keeps terminal Candidate state in
+        # the canonical review repository.  Reading through this callback
+        # makes this composition double observe that state like Postgres does.
+        self._candidate_snapshot_lookup = candidate_snapshot_lookup
         self._vaults: dict[str, tuple[str, str, int]] = {}
         self._admissions: dict[tuple[str, str], _InMemoryAdmission] = {}
         self._extractions: dict[str, _InMemoryExtraction] = {}
@@ -249,7 +258,13 @@ class InMemoryOwnerTruthInterviewCandidateReviewRepository:
             }
             items: list[OwnerTruthInterviewReviewCandidateItem] = []
             for stored in self._candidates.values():
-                candidate = stored.snapshot
+                candidate = (
+                    self._candidate_snapshot_lookup(stored.snapshot.candidate_id)
+                    if self._candidate_snapshot_lookup is not None
+                    else stored.snapshot
+                )
+                if candidate is None:
+                    continue
                 if (
                     stored.extraction_id not in successful_ids
                     or stored.source_version != admission.source_version
@@ -542,9 +557,103 @@ class OwnerTruthInterviewCandidateReviewCompositionService:
             )
 
 
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateReviewReadItem:
+    """One owner-visible pending Candidate plus its immutable review path."""
+
+    review_item: OwnerTruthInterviewReviewCandidateItem
+    candidate: OwnerTruthCandidateInboxItem
+
+
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateReviewReadResult:
+    """One coherent review-batch read within a single unit of work."""
+
+    composition: OwnerTruthInterviewCandidateReviewComposition
+    batch_candidates: tuple[OwnerTruthInterviewCandidateReviewReadItem, ...]
+    single_candidates: tuple[OwnerTruthInterviewCandidateReviewReadItem, ...]
+
+
+class OwnerTruthInterviewCandidateReviewReadService:
+    """Pair composition references with current owner-scoped Candidate previews.
+
+    The composition intentionally stores only value-minimized metadata. This
+    read service joins the existing Candidate inbox in the same UoW so a
+    terminal Candidate can never be rendered as still awaiting review.
+    """
+
+    def __init__(self, store: Any):
+        self._store = store
+
+    def read(
+        self,
+        *,
+        review_batch_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewCandidateReviewReadResult:
+        _assert_owner_context(context)
+        normalized_batch_id = require_uuid(review_batch_id, field="review_batch_id")
+        with self._store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-candidate-review-read-"
+                f"{context.vault_id}:{normalized_batch_id}"
+            ),
+            command_id=f"read:{normalized_batch_id}",
+        ):
+            composition = self._store.owner_truth_interview_candidate_review_repository().compose(
+                review_batch_id=normalized_batch_id,
+                context=context,
+            )
+            pending_by_id = {
+                item.candidate_id: item
+                for item in self._store.owner_truth_candidate_review_repository().list_pending(
+                    context=context
+                )
+            }
+            return OwnerTruthInterviewCandidateReviewReadResult(
+                composition=composition,
+                batch_candidates=self._pair_items(
+                    composition.batch_candidates,
+                    pending_by_id=pending_by_id,
+                ),
+                single_candidates=self._pair_items(
+                    composition.single_candidates,
+                    pending_by_id=pending_by_id,
+                ),
+            )
+
+    @staticmethod
+    def _pair_items(
+        review_items: tuple[OwnerTruthInterviewReviewCandidateItem, ...],
+        *,
+        pending_by_id: Mapping[str, OwnerTruthCandidateInboxItem],
+    ) -> tuple[OwnerTruthInterviewCandidateReviewReadItem, ...]:
+        paired: list[OwnerTruthInterviewCandidateReviewReadItem] = []
+        for review_item in review_items:
+            candidate = pending_by_id.get(review_item.candidate_id)
+            if candidate is None:
+                raise OwnerTruthInterviewCandidateReviewConflict(
+                    "review composition Candidate is no longer pending"
+                )
+            if candidate.candidate_row_version != review_item.candidate_row_version:
+                raise OwnerTruthInterviewCandidateReviewConflict(
+                    "review composition Candidate version is stale"
+                )
+            paired.append(
+                OwnerTruthInterviewCandidateReviewReadItem(
+                    review_item=review_item,
+                    candidate=candidate,
+                )
+            )
+        return tuple(paired)
+
+
 __all__ = [
     "InMemoryOwnerTruthInterviewCandidateReviewRepository",
     "OwnerTruthInterviewCandidateReviewCompositionService",
+    "OwnerTruthInterviewCandidateReviewReadItem",
+    "OwnerTruthInterviewCandidateReviewReadResult",
+    "OwnerTruthInterviewCandidateReviewReadService",
     "OwnerTruthInterviewCandidateReviewStore",
     "PostgresOwnerTruthInterviewCandidateReviewRepository",
 ]

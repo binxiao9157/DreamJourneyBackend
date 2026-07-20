@@ -679,6 +679,17 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 "receipts": deepcopy(self._receipts),
             }
 
+    def candidate_snapshot(self, candidate_id: str) -> OwnerTruthCandidateSnapshot | None:
+        """Return the current semantic-double Candidate state for a read join.
+
+        This is intentionally only a narrow in-memory test-double bridge. The
+        Postgres review-batch composition reads the canonical table directly.
+        """
+
+        with self._lock:
+            candidate = self._candidates.get(str(candidate_id or ""))
+            return None if candidate is None else deepcopy(candidate)
+
 
 class PostgresOwnerTruthCandidateReviewRepository:
     """Postgres Owner Truth review port bound to one active Unit of Work."""

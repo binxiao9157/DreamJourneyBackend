@@ -109,3 +109,18 @@ G4 also remains open because review is QA-only and not release-enabled.
 The next direct Owner Truth slice is `WI-S1-01-05`: accepted/corrected
 decisions may create immutable `MemoryVersion` records under a separate
 transactional contract. Reject must continue to create no memory.
+
+## Follow-up Boundary: Interview Review Batches
+
+`2026-07-20-owner-truth-interview-candidate-review-qa.md` records a separate
+QA-only route family for the M0-A interview pipeline. It is intentionally not
+an extension of these generic Candidate Inbox endpoints:
+
+- generic Candidate Inbox decisions retain their existing activation contract;
+- interview batch/single decisions only write terminal Candidate decisions and
+  immutable receipts;
+- neither interview endpoint may create a `MemoryVersion`.
+
+Callers must not route an M0-A `reviewBatchId` through the generic Candidate
+Inbox action UI. Keeping the contracts separate prevents a review-only
+interview candidate from being promoted by accident.

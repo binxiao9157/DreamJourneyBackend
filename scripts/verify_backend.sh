@@ -200,6 +200,7 @@ test -f tests/test_owner_truth_interview_candidate_proposal_migration_contract.p
 test -f app/domain/owner_truth/interview_candidate_review.py
 test -f app/services/owner_truth_interview_candidate_review.py
 test -f tests/test_owner_truth_interview_candidate_review.py
+test -f tests/test_owner_truth_interview_candidate_review_api.py
 test -f db/migrations/0034_owner_truth_interview_candidate_batch_decisions.sql
 test -f db/migrations/0034_owner_truth_interview_candidate_batch_decisions.json
 test -f app/domain/owner_truth/interview_candidate_batch_decision.py
