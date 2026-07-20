@@ -29,7 +29,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 98)
+        self.assertEqual(len(app_routes), 99)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
 
@@ -54,6 +54,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
             ("GET", "/ops/release-policy/observations"): RouteOwnershipCategory.SYSTEM_ONLY,
             ("POST", "/ops/evidence-manifests"): RouteOwnershipCategory.SYSTEM_ONLY,
             ("GET", "/ops/evidence-manifests"): RouteOwnershipCategory.SYSTEM_ONLY,
+            ("GET", "/ops/data-rights/requests/{request_id}/evidence"): RouteOwnershipCategory.SYSTEM_ONLY,
             ("GET", "/mailbox/letters/{user_id}"): RouteOwnershipCategory.OWNER_PATH,
             ("GET", "/echo/delayed-replies/{user_id}/{delayed_reply_id}/answer"): RouteOwnershipCategory.OWNER_PATH,
             ("GET", "/kb/source-ref-audit/{user_id}"): RouteOwnershipCategory.OWNER_PATH,
@@ -90,8 +91,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 98)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 98)
+        self.assertEqual(summary["routeCount"], 99)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 99)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)

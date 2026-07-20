@@ -267,6 +267,31 @@ def exercise_lifecycle(dsn):
         serialized = json.dumps(summary, ensure_ascii=False, sort_keys=True)
         require(concurrent_phone not in serialized, "rights summary leaked phone")
         require(command_id not in serialized, "rights summary leaked command id")
+        machine_token = main_module._configured_backend_api_token()
+        require(machine_token, "deployed container must configure BACKEND_API_TOKEN")
+        evidence_status, evidence_body, evidence_headers = app_request(
+            "GET",
+            f"/ops/data-rights/requests/{request_id}/evidence",
+            token=machine_token,
+        )
+        require(evidence_status == 200, "rights evidence report must be readable by machine principal")
+        require(
+            evidence_headers.get("cache-control") == "no-store",
+            "rights evidence report must disable caching",
+        )
+        require(
+            str((evidence_body.get("accessRevocation") or {}).get("status") or "")
+            == "revoked",
+            "rights evidence report must separate recorded access revocation",
+        )
+        require(
+            str((evidence_body.get("physicalCleanup") or {}).get("status") or "")
+            == "completed",
+            "rights evidence report must require the terminal cleanup receipt",
+        )
+        evidence_serialized = json.dumps(evidence_body, ensure_ascii=False, sort_keys=True)
+        require(concurrent_phone not in evidence_serialized, "rights evidence report leaked phone")
+        require(command_id not in evidence_serialized, "rights evidence report leaked command id")
 
         conflict_user_id, conflict_phone = seeded_user(
             store, phone_prefix="194", label="conflict"
@@ -442,6 +467,7 @@ def exercise_lifecycle(dsn):
 
         return {
             "concurrentSameCommandDeduplicated": True,
+            "rightsEvidenceProjectionVerified": True,
             "commandConflictRejected": True,
             "rollbackRestoredActiveState": True,
             "crossAccountDenied": True,

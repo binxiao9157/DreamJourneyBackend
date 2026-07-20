@@ -358,6 +358,13 @@ class RouteOwnershipRegistry:
                 required_scopes=("evidenceManifest:observe",),
             ),
             _rule(
+                "GET",
+                "/ops/data-rights/requests/{request_id}/evidence",
+                system,
+                "systemDataRightsEvidenceObserve",
+                required_scopes=("rightsEvidence:observe",),
+            ),
+            _rule(
                 "POST",
                 "/ops/incidents",
                 system,

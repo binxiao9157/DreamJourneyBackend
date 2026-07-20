@@ -33,6 +33,10 @@ from app.services.data_rights_contract import (
     DataRightsCommandConflict,
     DataRightsContractError,
 )
+from app.services.data_rights_evidence_projection import (
+    DataRightsEvidenceProjectionError,
+    build_data_rights_evidence_projection,
+)
 from app.services.data_rights_module_inventory import build_module_owned_data_export
 from app.services.client_compatibility import (
     ClientCompatibilityDecision,
@@ -3592,6 +3596,42 @@ def export_account_data(request: Request) -> JSONResponse:
         content=export,
         headers={
             "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+@app.get(
+    "/ops/data-rights/requests/{request_id}/evidence",
+    include_in_schema=False,
+)
+def observe_data_rights_evidence(request_id: str) -> JSONResponse:
+    """Return a machine-only, read-only evidence projection for one request."""
+
+    summary = store.summarize_rights_request(request_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail={"code": "rightsRequestNotFound"})
+    list_access_revocations = getattr(store, "list_rights_access_revocation_outbox", None)
+    access_revocations = (
+        list_access_revocations(request_id)
+        if callable(list_access_revocations)
+        else []
+    )
+    try:
+        report = build_data_rights_evidence_projection(
+            summary,
+            access_revocation_events=access_revocations,
+        )
+    except DataRightsEvidenceProjectionError as exc:
+        logger.error("data rights evidence projection failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "rightsEvidenceUnavailable"},
+        ) from exc
+    return JSONResponse(
+        content=report,
+        headers={
+            "Cache-Control": "no-store",
             "Pragma": "no-cache",
         },
     )

@@ -29,6 +29,7 @@ MACHINE_SYSTEM_SCOPES = frozenset(
         "timeLetter:dispatch",
         "incident:manage",
         "incident:observe",
+        "rightsEvidence:observe",
     }
 )
 
