@@ -29,6 +29,9 @@ PYTHONPATH=. "$PYTHON_BIN" scripts/voice_clone_2_contract_smoke.py >/dev/null
 echo "== Provider effect G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-effect-contract-gate.sh
 
+echo "== Provider effect G2 reconciliation contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-effect-reconciliation-contract-gate.sh
+
 echo "== Backend deployment files =="
 test -f Dockerfile
 test -f docker-compose.yml
@@ -109,6 +112,14 @@ test -f scripts/run-backend-echo-delayed-reply-atomic-completion-postgres-smoke.
 test -f app/async_effects/provider_effects.py
 test -f tests/test_provider_effects.py
 test -f scripts/run-backend-provider-effect-contract-gate.sh
+test -f db/migrations/0025_provider_effect_reconciliation_projection.sql
+test -f db/migrations/0025_provider_effect_reconciliation_projection.json
+test -f app/async_effects/provider_effect_repository.py
+test -f tests/test_provider_effect_repository.py
+test -f tests/test_provider_effect_reconciliation_migration_contract.py
+test -f scripts/run-backend-provider-effect-reconciliation-contract-gate.sh
+test -f scripts/backend-provider-effect-reconciliation-postgres-smoke.py
+test -f scripts/run-backend-provider-effect-reconciliation-postgres-smoke.sh
 test -f scripts/backend-owner-truth-legacy-migration-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-legacy-migration-postgres-smoke.sh
 test -f scripts/backend-owner-truth-legacy-shadow-parity-postgres-smoke.py

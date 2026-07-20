@@ -87,6 +87,36 @@ class ProviderEffectIntentTests(unittest.TestCase):
         self.assertNotIn("private prompt", str(summary))
         self.assertNotIn("providerRequestId", summary)
 
+    def test_effect_and_receipt_identities_keep_effect_stable_but_distinguish_observation_origin(self):
+        intent = ProviderEffectIntent(
+            effect_intent=_effect_intent(),
+            provider="volcengineVoiceClone",
+            capability="voiceCloneTraining",
+            request_hash=sha256(b"stable-provider-request").hexdigest(),
+        )
+        timeout = ProviderEffectReceipt(
+            intent=intent,
+            state=ProviderEffectState.UNKNOWN,
+            reason_code="providerTimeout",
+            observation_origin="timeoutObservation",
+        )
+        callback = ProviderEffectReceipt(
+            intent=intent,
+            state=ProviderEffectState.UNKNOWN,
+            reason_code="providerTimeout",
+            observation_origin="providerCallback",
+        )
+
+        replay = ProviderEffectIntent(
+            effect_intent=_effect_intent(),
+            provider="volcengineVoiceClone",
+            capability="voiceCloneTraining",
+            request_hash=sha256(b"stable-provider-request").hexdigest(),
+        )
+        self.assertEqual(intent.provider_effect_id, replay.provider_effect_id)
+        self.assertNotEqual(timeout.storage_receipt_hash, callback.storage_receipt_hash)
+        self.assertNotEqual(timeout.provider_receipt_id, callback.provider_receipt_id)
+
     def test_rejects_invalid_request_hash_and_machine_identifiers(self):
         with self.assertRaises(ProviderEffectContractError):
             ProviderEffectIntent(

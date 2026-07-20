@@ -1,0 +1,14 @@
+{
+  "version": "0025",
+  "name": "provider_effect_reconciliation_projection",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "asyncEffectV1ProviderReconciliationShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "asyncEffectV1": false,
+    "asyncEffectWorker": false,
+    "providerEffectPersistenceV1": false,
+    "providerEffectReconciliationV1": false
+  }
+}

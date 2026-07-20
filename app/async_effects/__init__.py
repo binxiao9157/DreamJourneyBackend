@@ -18,6 +18,11 @@ from .repository import (
     InMemoryEffectKernelRepository,
     PostgresEffectKernelRepository,
 )
+from .provider_effect_repository import (
+    InMemoryProviderEffectRepository,
+    PostgresProviderEffectRepository,
+    ProviderEffectPersistenceSummary,
+)
 from .lease_repository import (
     AsyncEffectCancelResult,
     AsyncEffectJobCompletion,
@@ -89,6 +94,7 @@ __all__ = [
     "AsyncEffectTargetAdmissionError",
     "EffectReceiptSummary",
     "InMemoryEffectKernelRepository",
+    "InMemoryProviderEffectRepository",
     "InMemoryAsyncEffectLeaseRepository",
     "InMemoryAsyncEffectConsumerRepository",
     "OwnerTruthSourceBlockedConsumerCommand",
@@ -98,10 +104,12 @@ __all__ = [
     "InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository",
     "InMemoryAsyncEffectSchedulerLeaseRepository",
     "PostgresEffectKernelRepository",
+    "PostgresProviderEffectRepository",
     "PostgresAsyncEffectLeaseRepository",
     "PostgresAsyncEffectConsumerRepository",
     "PostgresOwnerTruthSourceTargetAdmissionRepository",
     "PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository",
     "PostgresAsyncEffectSchedulerLeaseRepository",
     "resolve_async_effect_runtime_status",
+    "ProviderEffectPersistenceSummary",
 ]

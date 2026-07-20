@@ -86,6 +86,7 @@ from app.async_effects.lease_repository import PostgresAsyncEffectLeaseRepositor
 from app.async_effects.repository import PostgresEffectKernelRepository
 from app.async_effects.scheduler_repository import PostgresAsyncEffectSchedulerLeaseRepository
 from app.async_effects.consumer_repository import PostgresAsyncEffectConsumerRepository
+from app.async_effects.provider_effect_repository import PostgresProviderEffectRepository
 from app.async_effects.target_admission import (
     PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository,
     PostgresOwnerTruthSourceTargetAdmissionRepository,
@@ -223,6 +224,18 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("async effect consumer requires an active unit of work")
         return PostgresAsyncEffectConsumerRepository(active.connection)
+
+    def provider_effect_repository(self) -> PostgresProviderEffectRepository:
+        """Return append-only Provider evidence persistence in the active UoW.
+
+        This port records value-free provider observations only. It never
+        invokes a provider, starts a worker, or owns a commit boundary.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("provider effect persistence requires an active unit of work")
+        return PostgresProviderEffectRepository(active.connection)
 
     def owner_truth_source_target_admission_repository(
         self,

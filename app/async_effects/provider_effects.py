@@ -23,6 +23,7 @@ PROVIDER_EFFECT_SCHEMA_VERSION = "provider-effect-v1"
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _PROVIDER_REQUEST_NAMESPACE = UUID("e1463b2a-6ab2-4b5d-bc39-4eebf756b3f8")
+_PROVIDER_EFFECT_NAMESPACE = UUID("fbba5f5d-6dd9-4412-9b50-b3b399a9e913")
 
 
 class ProviderEffectContractError(ValueError):
@@ -119,6 +120,15 @@ class ProviderEffectIntent:
         )
 
     @property
+    def provider_effect_id(self) -> str:
+        return str(
+            uuid5(
+                _PROVIDER_EFFECT_NAMESPACE,
+                f"provider-effect:{self.provider}:{self.provider_effect_key}",
+            )
+        )
+
+    @property
     def provider_request_id_hash(self) -> str:
         return _canonical_hash(
             {
@@ -190,6 +200,7 @@ class ProviderEffectReceipt:
     reason_code: str
     attempt: int = 1
     provider_receipt_hash: str | None = None
+    observation_origin: str = "providerObservation"
 
     def __post_init__(self) -> None:
         if not isinstance(self.intent, ProviderEffectIntent):
@@ -205,12 +216,18 @@ class ProviderEffectReceipt:
                 "provider_receipt_hash",
                 _require_hash(self.provider_receipt_hash, field="providerReceiptHash"),
             )
+        object.__setattr__(
+            self,
+            "observation_origin",
+            _require_identifier(self.observation_origin, field="observationOrigin"),
+        )
 
     @property
     def observation_hash(self) -> str:
         return _canonical_hash(
             {
                 "attempt": self.attempt,
+                "observationOrigin": self.observation_origin,
                 "providerEffectKey": self.intent.provider_effect_key,
                 "providerReceiptHash": self.provider_receipt_hash,
                 "reasonCode": self.reason_code,
@@ -219,10 +236,26 @@ class ProviderEffectReceipt:
             }
         )
 
+    @property
+    def storage_receipt_hash(self) -> str:
+        """Stable local receipt identity; never an upstream raw identifier."""
+
+        return self.observation_hash
+
+    @property
+    def provider_receipt_id(self) -> str:
+        return str(
+            uuid5(
+                _PROVIDER_EFFECT_NAMESPACE,
+                f"provider-receipt:{self.intent.provider_effect_id}:{self.storage_receipt_hash}",
+            )
+        )
+
     def value_free_summary(self) -> dict[str, object]:
         return {
             "attempt": self.attempt,
             "observationHash": self.observation_hash,
+            "observationOrigin": self.observation_origin,
             "providerEffectKey": self.intent.provider_effect_key,
             "providerReceiptPresent": self.provider_receipt_hash is not None,
             "reasonCode": self.reason_code,
@@ -278,6 +311,16 @@ class ProviderEffectReconciliation:
 
         return False
 
+    @property
+    def reconciliation_id(self) -> str:
+        return str(
+            uuid5(
+                _PROVIDER_EFFECT_NAMESPACE,
+                "provider-reconciliation:"
+                f"{self.prior_unknown.intent.provider_effect_id}:{self.query_receipt_hash}",
+            )
+        )
+
     def terminal_receipt(self) -> ProviderEffectReceipt:
         return ProviderEffectReceipt(
             intent=self.prior_unknown.intent,
@@ -285,7 +328,21 @@ class ProviderEffectReconciliation:
             reason_code=self.reason_code,
             attempt=self.prior_unknown.attempt,
             provider_receipt_hash=self.query_receipt_hash,
+            observation_origin="providerQuery",
         )
+
+    def value_free_summary(self) -> dict[str, object]:
+        terminal = self.terminal_receipt()
+        return {
+            "effectiveState": self.result_state.value,
+            "manualReviewRequired": self.requires_manual_review,
+            "providerEffectKey": self.prior_unknown.intent.provider_effect_key,
+            "queryReceiptHash": self.query_receipt_hash,
+            "reconciliationId": self.reconciliation_id,
+            "reissueAllowed": self.reissue_allowed,
+            "resultReceiptHash": terminal.storage_receipt_hash,
+            "schemaVersion": self.prior_unknown.intent.contract_version,
+        }
 
 
 @dataclass(frozen=True)
