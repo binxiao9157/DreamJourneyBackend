@@ -1,0 +1,14 @@
+{
+  "version": "0027",
+  "name": "async_effect_dead_letter_replay_requests",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "asyncEffectV1DeadLetterReplayRequestShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "asyncEffectV1": false,
+    "asyncEffectWorker": false,
+    "asyncEffectDeadLetterPersistenceV1": false,
+    "asyncEffectDeadLetterReplayV1": false
+  }
+}

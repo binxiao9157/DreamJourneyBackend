@@ -159,6 +159,30 @@ class PostgresAsyncEffectDeadLetterRepository:
                 raise DeadLetterPersistenceError("dead letter is not durably recorded")
             return self._admission_from_row(rows[0])
 
+    def load_for_replay(self, dead_letter_id: str) -> DeadLetterAdmission:
+        """Lock and reconstruct an open admission before an inert replay request.
+
+        This is deliberately not a replay operation.  It only gives a later
+        persistence boundary a transaction-scoped, immutable view of the
+        original terminal job and dead-letter coordinates.
+        """
+
+        normalized_id = _normalize_dead_letter_id(dead_letter_id)
+        with self._cursor() as cursor:
+            cursor.execute(
+                self._select_record_sql(
+                    where_clause="dead_letter.dead_letter_id = %s",
+                    lock_clause="FOR UPDATE OF dead_letter, job, operation, outbox",
+                ),
+                (normalized_id,),
+            )
+            rows = cursor.fetchall()
+            if len(rows) != 1:
+                raise DeadLetterPersistenceError("dead letter is not durably recorded")
+            admission = self._admission_from_row(rows[0])
+            _require_open_admission(admission)
+            return admission
+
     @staticmethod
     def _insert_params(admission: DeadLetterAdmission) -> tuple[object, ...]:
         target = admission.intent.target

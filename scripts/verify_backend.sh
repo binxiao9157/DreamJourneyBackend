@@ -41,6 +41,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-dead-letter-contract-g
 echo "== Async-effect dead-letter G2 persistence contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-dead-letter-persistence-contract-gate.sh
 
+echo "== Async-effect dead-letter G2 replay-request contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-dead-letter-replay-request-contract-gate.sh
+
 echo "== Async-effect readiness/evidence G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-readiness-evidence-contract-gate.sh
 
@@ -149,6 +152,14 @@ test -f tests/test_async_effect_dead_letter_persistence_migration_contract.py
 test -f scripts/run-backend-async-effect-dead-letter-persistence-contract-gate.sh
 test -f scripts/backend-async-effect-dead-letter-persistence-postgres-smoke.py
 test -f scripts/run-backend-async-effect-dead-letter-persistence-postgres-smoke.sh
+test -f db/migrations/0027_async_effect_dead_letter_replay_requests.sql
+test -f db/migrations/0027_async_effect_dead_letter_replay_requests.json
+test -f app/async_effects/dead_letter_replay_repository.py
+test -f tests/test_async_effect_dead_letter_replay_repository.py
+test -f tests/test_async_effect_dead_letter_replay_request_migration_contract.py
+test -f scripts/run-backend-async-effect-dead-letter-replay-request-contract-gate.sh
+test -f scripts/backend-async-effect-dead-letter-replay-request-postgres-smoke.py
+test -f scripts/run-backend-async-effect-dead-letter-replay-request-postgres-smoke.sh
 test -f app/async_effects/readiness_evidence.py
 test -f tests/test_async_effect_readiness_evidence.py
 test -f scripts/run-backend-async-effect-readiness-evidence-contract-gate.sh

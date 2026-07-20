@@ -88,6 +88,9 @@ from app.async_effects.scheduler_repository import PostgresAsyncEffectSchedulerL
 from app.async_effects.consumer_repository import PostgresAsyncEffectConsumerRepository
 from app.async_effects.provider_effect_repository import PostgresProviderEffectRepository
 from app.async_effects.dead_letter_repository import PostgresAsyncEffectDeadLetterRepository
+from app.async_effects.dead_letter_replay_repository import (
+    PostgresAsyncEffectDeadLetterReplayRequestRepository,
+)
 from app.async_effects.target_admission import (
     PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository,
     PostgresOwnerTruthSourceTargetAdmissionRepository,
@@ -249,6 +252,20 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("async effect dead-letter persistence requires an active unit of work")
         return PostgresAsyncEffectDeadLetterRepository(active.connection)
+
+    def async_effect_dead_letter_replay_request_repository(
+        self,
+    ) -> PostgresAsyncEffectDeadLetterReplayRequestRepository:
+        """Return inert dead-letter replay authority persistence in the active UoW.
+
+        This port records a restore-fenced authorization receipt only. It does
+        not requeue a terminal job, start a worker, or call a Provider.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("async effect dead-letter replay persistence requires an active unit of work")
+        return PostgresAsyncEffectDeadLetterReplayRequestRepository(active.connection)
 
     def owner_truth_source_target_admission_repository(
         self,
