@@ -196,6 +196,10 @@ test -f db/migrations/0030_owner_truth_interview_pacing_state.json
 test -f app/services/owner_truth_interview_session_orchestration.py
 test -f tests/test_owner_truth_interview_pacing_state.py
 test -f tests/test_owner_truth_interview_pacing_state_migration_contract.py
+test -f db/migrations/0031_owner_truth_interview_review_batches.sql
+test -f db/migrations/0031_owner_truth_interview_review_batches.json
+test -f tests/test_owner_truth_interview_review_batch.py
+test -f tests/test_owner_truth_interview_review_batch_migration_contract.py
 test -f app/async_effects/readiness_evidence.py
 test -f tests/test_async_effect_readiness_evidence.py
 test -f scripts/run-backend-async-effect-readiness-evidence-contract-gate.sh

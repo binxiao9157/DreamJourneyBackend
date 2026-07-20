@@ -26,11 +26,15 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from app.core.config import settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.domain.owner_truth.conversation import (
+    AcknowledgeInterviewReviewBatchCommand,
     AppendInterviewMessageCommand,
     ConversationMessageAuthor,
     ConversationMessageKind,
+    CreateInterviewReviewBatchCommand,
     InterviewBoundary,
     InterviewPacingEvent,
+    InterviewReviewBatchState,
+    InterviewReviewBatchTrigger,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationVersionConflict,
     RecordInterviewPacingCommand,
@@ -131,7 +135,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require("0030" in applied["appliedVersions"], "conversation pacing migration must apply")
+        require("0031" in applied["appliedVersions"], "conversation review batch migration must apply")
 
         store = PostgresStore(dsn=test_dsn, pool_min_size=1, pool_max_size=2)
         store.open_pool(wait=True)
@@ -306,6 +310,93 @@ def main() -> None:
             paused_bridge.decision.action is InterviewAction.PAUSE,
             "persisted doNotAsk state must fail closed in the bridge",
         )
+        require(
+            paused_bridge.decision.review_batch_due,
+            "session exit with an unreviewed private turn must surface one review boundary",
+        )
+
+        review_batch = invoke(
+            store,
+            command_id="create-conversation-review-batch-smoke",
+            operation=lambda service: service.create_review_batch(
+                command=CreateInterviewReviewBatchCommand(
+                    command_id="create-conversation-review-batch-smoke",
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    expected_session_version=4,
+                ),
+                context=context,
+            ),
+        )
+        require(review_batch.outcome == "created", "review batch must persist")
+        require(
+            review_batch.review_batch.trigger is InterviewReviewBatchTrigger.SESSION_EXIT,
+            "paused session must create an exit review batch",
+        )
+        require(
+            review_batch.review_batch.captured_candidate_batch_turn_count == 1,
+            "review batch must freeze only the unreviewed owner-turn count",
+        )
+        replayed_review_batch = invoke(
+            store,
+            command_id="create-conversation-review-batch-smoke-replay",
+            operation=lambda service: service.create_review_batch(
+                command=CreateInterviewReviewBatchCommand(
+                    command_id="create-conversation-review-batch-smoke",
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    expected_session_version=4,
+                ),
+                context=context,
+            ),
+        )
+        require(
+            replayed_review_batch.outcome == "deduplicated",
+            "review batch command replay must deduplicate",
+        )
+
+        acknowledged_review_batch = invoke(
+            store,
+            command_id="acknowledge-conversation-review-batch-smoke",
+            operation=lambda service: service.acknowledge_review_batch(
+                command=AcknowledgeInterviewReviewBatchCommand(
+                    command_id="acknowledge-conversation-review-batch-smoke",
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    review_batch_id=review_batch.review_batch.review_batch_id,
+                    expected_session_version=5,
+                    expected_review_batch_version=1,
+                ),
+                context=context,
+            ),
+        )
+        require(
+            acknowledged_review_batch.outcome == "acknowledged",
+            "review boundary acknowledgement must persist",
+        )
+        require(
+            acknowledged_review_batch.review_batch.state is InterviewReviewBatchState.ACKNOWLEDGED,
+            "review batch must become terminal after acknowledgement",
+        )
+        replayed_acknowledgement = invoke(
+            store,
+            command_id="acknowledge-conversation-review-batch-smoke-replay",
+            operation=lambda service: service.acknowledge_review_batch(
+                command=AcknowledgeInterviewReviewBatchCommand(
+                    command_id="acknowledge-conversation-review-batch-smoke",
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    review_batch_id=review_batch.review_batch.review_batch_id,
+                    expected_session_version=5,
+                    expected_review_batch_version=1,
+                ),
+                context=context,
+            ),
+        )
+        require(
+            replayed_acknowledgement.outcome == "deduplicated",
+            "review acknowledgement replay must deduplicate",
+        )
 
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:
@@ -342,10 +433,24 @@ def main() -> None:
             command_id="read-after-restart",
             operation=lambda service: service.read_session(session_id=session_id, context=context),
         )
-        require(restored.row_version == 4, "session state must survive a store restart")
+        require(restored.row_version == 6, "session state must survive a store restart")
         require(restored.boundary is InterviewBoundary.DO_NOT_ASK, "boundary must survive restart")
         require(restored.deepening_turn_count == 1, "pacing state must survive restart")
-        require(restored.candidate_batch_turn_count == 1, "batch count must survive restart")
+        require(restored.candidate_batch_turn_count == 0, "acknowledgement must consume only its batch")
+        require(restored.pending_review_batch_id is None, "acknowledgement must clear pending batch")
+        restored_batches = invoke(
+            restarted_store,
+            command_id="list-conversation-review-batch-after-restart",
+            operation=lambda service: service.list_review_batches(
+                session_id=session_id,
+                context=context,
+            ),
+        )
+        require(len(restored_batches) == 1, "one review batch must survive restart")
+        require(
+            restored_batches[0].state is InterviewReviewBatchState.ACKNOWLEDGED,
+            "acknowledged review state must survive restart",
+        )
         print("owner_truth_conversation_postgres_smoke=passed")
     finally:
         if restarted_store is not None:

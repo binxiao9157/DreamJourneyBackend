@@ -1,0 +1,13 @@
+{
+  "version": "0031",
+  "name": "owner_truth_interview_review_batches",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthConversationInterviewReviewBatchShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthConversationV1": false,
+    "guidedInterviewM0A": false,
+    "ownerTruthInterviewReviewBatchM0A": false
+  }
+}

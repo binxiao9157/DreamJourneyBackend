@@ -16,12 +16,17 @@ from typing import Any, Mapping, Optional, Tuple
 from uuid import UUID, uuid5
 
 from .contracts import OwnerTruthContractError, require_nonblank, require_uuid
-from .interview_orchestration import InterviewFatigue, MAX_DEEPENING_TURNS_BEFORE_SUMMARY
+from .interview_orchestration import (
+    InterviewFatigue,
+    MAX_DEEPENING_TURNS_BEFORE_SUMMARY,
+    MIN_TURNS_BEFORE_CANDIDATE_BATCH,
+)
 from .source_commands import OwnerTruthCommandContext
 
 
 OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION = "owner-truth-conversation-v1"
 _RECEIPT_NAMESPACE = UUID("10c87c90-f96f-4da5-98d2-f1925d472c26")
+_REVIEW_BATCH_NAMESPACE = UUID("66e875da-e2ca-40b1-8a68-a9074b8fac27")
 _MAX_MESSAGE_CHARACTERS = 20_000
 _ENTRY_MODES = frozenset({"naturalInput", "recommendation", "resume"})
 
@@ -88,6 +93,20 @@ class InterviewPacingEvent(str, Enum):
     SKIP_ONCE_CONSUMED = "skipOnceConsumed"
 
 
+class InterviewReviewBatchState(str, Enum):
+    """A private interview review batch is not a Candidate decision."""
+
+    PENDING_ACKNOWLEDGEMENT = "pendingAcknowledgement"
+    ACKNOWLEDGED = "acknowledged"
+
+
+class InterviewReviewBatchTrigger(str, Enum):
+    """The persisted policy condition that made a batch reviewable."""
+
+    TURN_THRESHOLD = "turnThreshold"
+    SESSION_EXIT = "sessionExit"
+
+
 def _canonical_json(value: Mapping[str, Any]) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -108,6 +127,20 @@ def _positive_version(value: int, *, field: str, allow_zero: bool = False) -> in
 
 def _receipt_id(*, context: OwnerTruthCommandContext, command_id_hash: str) -> str:
     return str(uuid5(_RECEIPT_NAMESPACE, f"{context.vault_id}:{command_id_hash}"))
+
+
+def _review_batch_id(
+    *,
+    context: OwnerTruthCommandContext,
+    session_id: str,
+    command_id_hash: str,
+) -> str:
+    return str(
+        uuid5(
+            _REVIEW_BATCH_NAMESPACE,
+            f"{context.vault_id}:{session_id}:{command_id_hash}",
+        )
+    )
 
 
 def _normalise_enum(value: Any, enum_type: Any, *, field: str) -> Any:
@@ -429,6 +462,102 @@ class RecordInterviewPacingCommand:
 
 
 @dataclass(frozen=True)
+class CreateInterviewReviewBatchCommand:
+    """Create a private, value-free batch only after persisted policy says due."""
+
+    command_id: str
+    thread_id: str
+    session_id: str
+    expected_session_version: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
+        object.__setattr__(self, "thread_id", require_uuid(self.thread_id, field="thread_id"))
+        object.__setattr__(self, "session_id", require_uuid(self.session_id, field="session_id"))
+        _positive_version(self.expected_session_version, field="expected_session_version")
+
+    def write_record(self, *, context: OwnerTruthCommandContext) -> "CreateInterviewReviewBatchWriteRecord":
+        command_id_hash = _sha256(self.command_id)
+        payload = {
+            "schemaVersion": OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION,
+            "commandType": "createInterviewReviewBatch",
+            "threadId": self.thread_id,
+            "sessionId": self.session_id,
+            "expectedSessionVersion": self.expected_session_version,
+        }
+        return CreateInterviewReviewBatchWriteRecord(
+            receipt_id=_receipt_id(context=context, command_id_hash=command_id_hash),
+            review_batch_id=_review_batch_id(
+                context=context,
+                session_id=self.session_id,
+                command_id_hash=command_id_hash,
+            ),
+            command_id_hash=command_id_hash,
+            payload_hash=_sha256(_canonical_json(payload)),
+            thread_id=self.thread_id,
+            session_id=self.session_id,
+            expected_session_version=self.expected_session_version,
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            actor_subject_id=context.actor_subject_id,
+            policy_version=context.policy_version,
+        )
+
+
+@dataclass(frozen=True)
+class AcknowledgeInterviewReviewBatchCommand:
+    """Acknowledge a private review boundary without deciding any Candidate."""
+
+    command_id: str
+    thread_id: str
+    session_id: str
+    review_batch_id: str
+    expected_session_version: int
+    expected_review_batch_version: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
+        object.__setattr__(self, "thread_id", require_uuid(self.thread_id, field="thread_id"))
+        object.__setattr__(self, "session_id", require_uuid(self.session_id, field="session_id"))
+        object.__setattr__(
+            self,
+            "review_batch_id",
+            require_uuid(self.review_batch_id, field="review_batch_id"),
+        )
+        _positive_version(self.expected_session_version, field="expected_session_version")
+        _positive_version(
+            self.expected_review_batch_version,
+            field="expected_review_batch_version",
+        )
+
+    def write_record(self, *, context: OwnerTruthCommandContext) -> "AcknowledgeInterviewReviewBatchWriteRecord":
+        command_id_hash = _sha256(self.command_id)
+        payload = {
+            "schemaVersion": OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION,
+            "commandType": "acknowledgeInterviewReviewBatch",
+            "threadId": self.thread_id,
+            "sessionId": self.session_id,
+            "reviewBatchId": self.review_batch_id,
+            "expectedSessionVersion": self.expected_session_version,
+            "expectedReviewBatchVersion": self.expected_review_batch_version,
+        }
+        return AcknowledgeInterviewReviewBatchWriteRecord(
+            receipt_id=_receipt_id(context=context, command_id_hash=command_id_hash),
+            command_id_hash=command_id_hash,
+            payload_hash=_sha256(_canonical_json(payload)),
+            thread_id=self.thread_id,
+            session_id=self.session_id,
+            review_batch_id=self.review_batch_id,
+            expected_session_version=self.expected_session_version,
+            expected_review_batch_version=self.expected_review_batch_version,
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            actor_subject_id=context.actor_subject_id,
+            policy_version=context.policy_version,
+        )
+
+
+@dataclass(frozen=True)
 class StartInterviewSessionWriteRecord:
     receipt_id: str
     command_id_hash: str
@@ -495,6 +624,37 @@ class RecordInterviewPacingWriteRecord:
 
 
 @dataclass(frozen=True)
+class CreateInterviewReviewBatchWriteRecord:
+    receipt_id: str
+    review_batch_id: str
+    command_id_hash: str
+    payload_hash: str
+    thread_id: str
+    session_id: str
+    expected_session_version: int
+    vault_id: str
+    owner_subject_id: str
+    actor_subject_id: str
+    policy_version: str
+
+
+@dataclass(frozen=True)
+class AcknowledgeInterviewReviewBatchWriteRecord:
+    receipt_id: str
+    command_id_hash: str
+    payload_hash: str
+    thread_id: str
+    session_id: str
+    review_batch_id: str
+    expected_session_version: int
+    expected_review_batch_version: int
+    vault_id: str
+    owner_subject_id: str
+    actor_subject_id: str
+    policy_version: str
+
+
+@dataclass(frozen=True)
 class OwnerTruthInterviewSessionResult:
     outcome: str
     receipt_id: str
@@ -543,19 +703,51 @@ class OwnerTruthInterviewSessionSnapshot:
     turn_count: int
     deepening_turn_count: int
     candidate_batch_turn_count: int
+    pending_review_batch_id: Optional[str]
     fatigue: InterviewFatigue
     authority_epoch: int
+
+
+@dataclass(frozen=True)
+class OwnerTruthInterviewReviewBatchSnapshot:
+    review_batch_id: str
+    vault_id: str
+    owner_subject_id: str
+    session_id: str
+    thread_id: str
+    trigger: InterviewReviewBatchTrigger
+    state: InterviewReviewBatchState
+    captured_candidate_batch_turn_count: int
+    owner_turn_start_count: int
+    owner_turn_end_count: int
+    through_message_sequence: int
+    row_version: int
+    authority_epoch: int
+
+
+@dataclass(frozen=True)
+class OwnerTruthInterviewReviewBatchResult:
+    outcome: str
+    receipt_id: str
+    thread_id: str
+    session_id: str
+    session_version: int
+    review_batch: OwnerTruthInterviewReviewBatchSnapshot
 
 
 __all__ = [
     "AppendInterviewMessageCommand",
     "AppendInterviewMessageWriteRecord",
+    "AcknowledgeInterviewReviewBatchCommand",
+    "AcknowledgeInterviewReviewBatchWriteRecord",
     "ConversationMessageAuthor",
     "ConversationMessageKind",
     "InterviewBoundary",
     "InterviewFatigue",
     "InterviewPacingEvent",
     "InterviewPacingState",
+    "InterviewReviewBatchState",
+    "InterviewReviewBatchTrigger",
     "InterviewSessionState",
     "OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION",
     "OwnerTruthConversationAccessDenied",
@@ -565,6 +757,10 @@ __all__ = [
     "OwnerTruthInterviewSessionResult",
     "OwnerTruthInterviewSessionSnapshot",
     "OwnerTruthInterviewSessionStateConflict",
+    "OwnerTruthInterviewReviewBatchResult",
+    "OwnerTruthInterviewReviewBatchSnapshot",
+    "CreateInterviewReviewBatchCommand",
+    "CreateInterviewReviewBatchWriteRecord",
     "RecordInterviewPacingCommand",
     "RecordInterviewPacingWriteRecord",
     "SetInterviewBoundaryCommand",

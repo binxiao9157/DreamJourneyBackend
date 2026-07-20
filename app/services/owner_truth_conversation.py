@@ -13,15 +13,23 @@ from threading import RLock
 from typing import Any, Mapping, Protocol
 
 from app.domain.owner_truth.conversation import (
+    AcknowledgeInterviewReviewBatchCommand,
+    AcknowledgeInterviewReviewBatchWriteRecord,
     AppendInterviewMessageCommand,
     AppendInterviewMessageWriteRecord,
+    CreateInterviewReviewBatchCommand,
+    CreateInterviewReviewBatchWriteRecord,
     InterviewBoundary,
     InterviewFatigue,
     InterviewPacingState,
+    InterviewReviewBatchState,
+    InterviewReviewBatchTrigger,
     InterviewSessionState,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationConflict,
     OwnerTruthConversationVersionConflict,
+    OwnerTruthInterviewReviewBatchResult,
+    OwnerTruthInterviewReviewBatchSnapshot,
     OwnerTruthInterviewSessionResult,
     OwnerTruthInterviewSessionSnapshot,
     OwnerTruthInterviewSessionStateConflict,
@@ -32,6 +40,7 @@ from app.domain.owner_truth.conversation import (
     StartInterviewSessionCommand,
     StartInterviewSessionWriteRecord,
 )
+from app.domain.owner_truth.interview_orchestration import MIN_TURNS_BEFORE_CANDIDATE_BATCH
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 
 
@@ -58,6 +67,26 @@ class OwnerTruthConversationRepository(Protocol):
         self,
         record: RecordInterviewPacingWriteRecord,
     ) -> OwnerTruthInterviewSessionResult:
+        ...
+
+    def create_interview_review_batch(
+        self,
+        record: CreateInterviewReviewBatchWriteRecord,
+    ) -> OwnerTruthInterviewReviewBatchResult:
+        ...
+
+    def acknowledge_interview_review_batch(
+        self,
+        record: AcknowledgeInterviewReviewBatchWriteRecord,
+    ) -> OwnerTruthInterviewReviewBatchResult:
+        ...
+
+    def list_interview_review_batches(
+        self,
+        *,
+        session_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewReviewBatchSnapshot, ...]:
         ...
 
     def get_interview_session(
@@ -120,6 +149,38 @@ class OwnerTruthConversationService:
         _assert_owner_context(context)
         return self._repository.record_interview_pacing(command.write_record(context=context))
 
+    def create_review_batch(
+        self,
+        *,
+        command: CreateInterviewReviewBatchCommand,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewReviewBatchResult:
+        _assert_owner_context(context)
+        return self._repository.create_interview_review_batch(command.write_record(context=context))
+
+    def acknowledge_review_batch(
+        self,
+        *,
+        command: AcknowledgeInterviewReviewBatchCommand,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewReviewBatchResult:
+        _assert_owner_context(context)
+        return self._repository.acknowledge_interview_review_batch(
+            command.write_record(context=context)
+        )
+
+    def list_review_batches(
+        self,
+        *,
+        session_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewReviewBatchSnapshot, ...]:
+        _assert_owner_context(context)
+        return self._repository.list_interview_review_batches(
+            session_id=session_id,
+            context=context,
+        )
+
     def read_session(
         self,
         *,
@@ -140,6 +201,7 @@ class InMemoryOwnerTruthConversationRepository:
         self._sessions: dict[tuple[str, str], dict[str, Any]] = {}
         self._messages: dict[tuple[str, str], dict[str, Any]] = {}
         self._receipts: dict[tuple[str, str], dict[str, Any]] = {}
+        self._review_batches: dict[tuple[str, str], dict[str, Any]] = {}
 
     def start_interview_session(
         self,
@@ -196,6 +258,7 @@ class InMemoryOwnerTruthConversationRepository:
                 "turnCount": 0,
                 "deepeningTurnCount": 0,
                 "candidateBatchTurnCount": 0,
+                "pendingReviewBatchId": None,
                 "fatigue": InterviewFatigue.NORMAL,
             }
             result = OwnerTruthInterviewSessionResult(
@@ -210,6 +273,190 @@ class InMemoryOwnerTruthConversationRepository:
             )
             self._store_receipt(record, result)
             return result
+
+    def create_interview_review_batch(
+        self,
+        record: CreateInterviewReviewBatchWriteRecord,
+    ) -> OwnerTruthInterviewReviewBatchResult:
+        with self._lock:
+            self._ensure_active_vault(
+                vault_id=record.vault_id,
+                owner_subject_id=record.owner_subject_id,
+            )
+            existing = self._existing_receipt(record)
+            if existing is not None:
+                return self._replay_review_batch_result(existing, record=record)
+            session, thread = self._live_session_and_thread(
+                vault_id=record.vault_id,
+                session_id=record.session_id,
+                thread_id=record.thread_id,
+                owner_subject_id=record.owner_subject_id,
+            )
+            self._assert_version(
+                resource="interview session",
+                expected=record.expected_session_version,
+                current=int(session["rowVersion"]),
+            )
+            if session["pendingReviewBatchId"] is not None:
+                raise OwnerTruthConversationConflict(
+                    "a pending review batch must be acknowledged before another is created"
+                )
+            captured_turn_count = int(session["candidateBatchTurnCount"])
+            trigger = self._review_batch_trigger(
+                session=session,
+                captured_turn_count=captured_turn_count,
+            )
+            if trigger is None:
+                raise OwnerTruthConversationConflict(
+                    "persisted interview state does not have a review batch due"
+                )
+            review_batch_key = (record.vault_id, record.review_batch_id)
+            if review_batch_key in self._review_batches:
+                raise OwnerTruthConversationConflict(
+                    "reviewBatchId already exists without this command receipt"
+                )
+            through_message_sequence = self._through_message_sequence(
+                vault_id=record.vault_id,
+                thread_id=record.thread_id,
+                session_id=record.session_id,
+            )
+            if through_message_sequence < 1:
+                raise OwnerTruthConversationConflict(
+                    "review batch requires at least one persisted conversation message"
+                )
+            owner_turn_end_count = int(session["turnCount"])
+            owner_turn_start_count = owner_turn_end_count - captured_turn_count + 1
+            if owner_turn_start_count < 1:
+                raise OwnerTruthConversationConflict(
+                    "review batch owner turn window is not recoverable"
+                )
+            item = {
+                "id": record.review_batch_id,
+                "vaultId": record.vault_id,
+                "ownerSubjectId": record.owner_subject_id,
+                "sessionId": record.session_id,
+                "threadId": record.thread_id,
+                "trigger": trigger,
+                "state": InterviewReviewBatchState.PENDING_ACKNOWLEDGEMENT,
+                "capturedCandidateBatchTurnCount": captured_turn_count,
+                "ownerTurnStartCount": owner_turn_start_count,
+                "ownerTurnEndCount": owner_turn_end_count,
+                "throughMessageSequence": through_message_sequence,
+                "rowVersion": 1,
+                "authorityEpoch": int(session["authorityEpoch"]),
+            }
+            self._review_batches[review_batch_key] = item
+            session["pendingReviewBatchId"] = record.review_batch_id
+            session["rowVersion"] += 1
+            result = OwnerTruthInterviewReviewBatchResult(
+                outcome="created",
+                receipt_id=record.receipt_id,
+                thread_id=record.thread_id,
+                session_id=record.session_id,
+                session_version=int(session["rowVersion"]),
+                review_batch=self._review_batch_snapshot_from_item(item),
+            )
+            self._store_receipt(record, result)
+            return result
+
+    def acknowledge_interview_review_batch(
+        self,
+        record: AcknowledgeInterviewReviewBatchWriteRecord,
+    ) -> OwnerTruthInterviewReviewBatchResult:
+        with self._lock:
+            self._ensure_active_vault(
+                vault_id=record.vault_id,
+                owner_subject_id=record.owner_subject_id,
+            )
+            existing = self._existing_receipt(record)
+            if existing is not None:
+                return self._replay_review_batch_result(existing, record=record)
+            session, thread = self._live_session_and_thread(
+                vault_id=record.vault_id,
+                session_id=record.session_id,
+                thread_id=record.thread_id,
+                owner_subject_id=record.owner_subject_id,
+            )
+            self._assert_version(
+                resource="interview session",
+                expected=record.expected_session_version,
+                current=int(session["rowVersion"]),
+            )
+            item = self._review_batches.get((record.vault_id, record.review_batch_id))
+            if (
+                item is None
+                or item["ownerSubjectId"] != record.owner_subject_id
+                or item["sessionId"] != record.session_id
+                or item["threadId"] != record.thread_id
+                or int(item["authorityEpoch"]) != int(session["authorityEpoch"])
+            ):
+                raise OwnerTruthConversationAccessDenied(
+                    "review batch does not belong to this active Owner interview session"
+                )
+            if session["pendingReviewBatchId"] != record.review_batch_id:
+                raise OwnerTruthConversationConflict(
+                    "review batch is no longer the pending session review boundary"
+                )
+            if item["state"] is not InterviewReviewBatchState.PENDING_ACKNOWLEDGEMENT:
+                raise OwnerTruthConversationConflict("review batch is already acknowledged")
+            self._assert_version(
+                resource="interview review batch",
+                expected=record.expected_review_batch_version,
+                current=int(item["rowVersion"]),
+            )
+            captured_turn_count = int(item["capturedCandidateBatchTurnCount"])
+            current_batch_turn_count = int(session["candidateBatchTurnCount"])
+            if current_batch_turn_count < captured_turn_count:
+                raise OwnerTruthConversationConflict(
+                    "review batch acknowledgement cannot discard an unknown turn window"
+                )
+            item["state"] = InterviewReviewBatchState.ACKNOWLEDGED
+            item["rowVersion"] += 1
+            session["candidateBatchTurnCount"] = current_batch_turn_count - captured_turn_count
+            session["pendingReviewBatchId"] = None
+            session["rowVersion"] += 1
+            result = OwnerTruthInterviewReviewBatchResult(
+                outcome="acknowledged",
+                receipt_id=record.receipt_id,
+                thread_id=record.thread_id,
+                session_id=record.session_id,
+                session_version=int(session["rowVersion"]),
+                review_batch=self._review_batch_snapshot_from_item(item),
+            )
+            self._store_receipt(record, result)
+            return result
+
+    def list_interview_review_batches(
+        self,
+        *,
+        session_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewReviewBatchSnapshot, ...]:
+        _assert_owner_context(context)
+        with self._lock:
+            self._ensure_active_vault(
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+            )
+            session = self._sessions.get((context.vault_id, session_id))
+            if session is None or session["ownerSubjectId"] != context.owner_subject_id:
+                raise OwnerTruthConversationAccessDenied(
+                    "interview session does not belong to this active Owner Vault"
+                )
+            rows = [
+                self._review_batch_snapshot_from_item(item)
+                for (vault_id, _), item in self._review_batches.items()
+                if vault_id == context.vault_id and item["sessionId"] == session_id
+            ]
+            return tuple(
+                sorted(
+                    rows,
+                    key=lambda item: (
+                        item.owner_turn_end_count,
+                        item.review_batch_id,
+                    ),
+                )
+            )
 
     def append_interview_message(
         self,
@@ -410,6 +657,7 @@ class InMemoryOwnerTruthConversationRepository:
                 turn_count=int(session["turnCount"]),
                 deepening_turn_count=int(session["deepeningTurnCount"]),
                 candidate_batch_turn_count=int(session["candidateBatchTurnCount"]),
+                pending_review_batch_id=session["pendingReviewBatchId"],
                 fatigue=session["fatigue"],
                 authority_epoch=int(vault["authorityEpoch"]),
             )
@@ -449,10 +697,67 @@ class InMemoryOwnerTruthConversationRepository:
                     if stored_vault_id == vault_id
                 ],
                 "messages": messages,
+                "reviewBatches": [
+                    self._review_batch_snapshot_from_item(item)
+                    for (stored_vault_id, _), item in self._review_batches.items()
+                    if stored_vault_id == vault_id
+                ],
                 "candidateCount": 0,
                 "memoryVersionCount": 0,
                 "authorityEffects": (),
             }
+
+    @staticmethod
+    def _review_batch_trigger(
+        *,
+        session: Mapping[str, Any],
+        captured_turn_count: int,
+    ) -> InterviewReviewBatchTrigger | None:
+        if captured_turn_count < 1:
+            return None
+        if session["state"] is InterviewSessionState.ACTIVE:
+            if captured_turn_count >= MIN_TURNS_BEFORE_CANDIDATE_BATCH:
+                return InterviewReviewBatchTrigger.TURN_THRESHOLD
+            return None
+        return InterviewReviewBatchTrigger.SESSION_EXIT
+
+    def _through_message_sequence(
+        self,
+        *,
+        vault_id: str,
+        thread_id: str,
+        session_id: str,
+    ) -> int:
+        return max(
+            (
+                int(item["sequence"])
+                for item in self._messages.values()
+                if item["vaultId"] == vault_id
+                and item["threadId"] == thread_id
+                and item["sessionId"] == session_id
+            ),
+            default=0,
+        )
+
+    @staticmethod
+    def _review_batch_snapshot_from_item(
+        item: Mapping[str, Any],
+    ) -> OwnerTruthInterviewReviewBatchSnapshot:
+        return OwnerTruthInterviewReviewBatchSnapshot(
+            review_batch_id=str(item["id"]),
+            vault_id=str(item["vaultId"]),
+            owner_subject_id=str(item["ownerSubjectId"]),
+            session_id=str(item["sessionId"]),
+            thread_id=str(item["threadId"]),
+            trigger=InterviewReviewBatchTrigger(item["trigger"]),
+            state=InterviewReviewBatchState(item["state"]),
+            captured_candidate_batch_turn_count=int(item["capturedCandidateBatchTurnCount"]),
+            owner_turn_start_count=int(item["ownerTurnStartCount"]),
+            owner_turn_end_count=int(item["ownerTurnEndCount"]),
+            through_message_sequence=int(item["throughMessageSequence"]),
+            row_version=int(item["rowVersion"]),
+            authority_epoch=int(item["authorityEpoch"]),
+        )
 
     def _ensure_active_vault(self, *, vault_id: str, owner_subject_id: str) -> Mapping[str, Any]:
         vault = self._vaults.get(vault_id)
@@ -494,6 +799,7 @@ class InMemoryOwnerTruthConversationRepository:
         if existing is None:
             return None
         expected = {
+            "commandType": self._command_type(record),
             "payloadHash": record.payload_hash,
             "actorSubjectId": record.actor_subject_id,
             "ownerSubjectId": record.owner_subject_id,
@@ -514,8 +820,25 @@ class InMemoryOwnerTruthConversationRepository:
                 current_version=current,
             )
 
-    def _store_receipt(self, record: Any, result: OwnerTruthInterviewSessionResult) -> None:
+    @staticmethod
+    def _command_type(record: Any) -> str:
+        if isinstance(record, StartInterviewSessionWriteRecord):
+            return "startInterviewSession"
+        if isinstance(record, AppendInterviewMessageWriteRecord):
+            return "appendInterviewMessage"
+        if isinstance(record, SetInterviewBoundaryWriteRecord):
+            return "setInterviewBoundary"
+        if isinstance(record, RecordInterviewPacingWriteRecord):
+            return "recordInterviewPacing"
+        if isinstance(record, CreateInterviewReviewBatchWriteRecord):
+            return "createInterviewReviewBatch"
+        if isinstance(record, AcknowledgeInterviewReviewBatchWriteRecord):
+            return "acknowledgeInterviewReviewBatch"
+        raise TypeError("unsupported owner truth conversation write record")
+
+    def _store_receipt(self, record: Any, result: Any) -> None:
         self._receipts[(record.vault_id, record.command_id_hash)] = {
+            "commandType": self._command_type(record),
             "payloadHash": record.payload_hash,
             "actorSubjectId": record.actor_subject_id,
             "ownerSubjectId": record.owner_subject_id,
@@ -546,6 +869,32 @@ class InMemoryOwnerTruthConversationRepository:
             message_id=result.message_id,
             message_sequence=result.message_sequence,
             authority_effects=result.authority_effects,
+        )
+
+    def _replay_review_batch_result(
+        self,
+        existing: Mapping[str, Any],
+        *,
+        record: CreateInterviewReviewBatchWriteRecord | AcknowledgeInterviewReviewBatchWriteRecord,
+    ) -> OwnerTruthInterviewReviewBatchResult:
+        result = existing.get("result")
+        if not isinstance(result, OwnerTruthInterviewReviewBatchResult):
+            raise OwnerTruthConversationConflict("conversation command receipt has no review batch result")
+        if result.thread_id != record.thread_id or result.session_id != record.session_id:
+            raise OwnerTruthConversationConflict("conversation command receipt target does not match command")
+        if result.review_batch.review_batch_id != record.review_batch_id:
+            raise OwnerTruthConversationConflict("conversation command receipt review batch does not match command")
+        session = self._sessions.get((record.vault_id, record.session_id))
+        review_batch = self._review_batches.get((record.vault_id, record.review_batch_id))
+        if session is None or review_batch is None:
+            raise OwnerTruthConversationConflict("conversation command receipt points to a missing review batch")
+        return OwnerTruthInterviewReviewBatchResult(
+            outcome="deduplicated",
+            receipt_id=result.receipt_id,
+            thread_id=result.thread_id,
+            session_id=result.session_id,
+            session_version=int(session["rowVersion"]),
+            review_batch=self._review_batch_snapshot_from_item(review_batch),
         )
 
 
@@ -942,6 +1291,319 @@ class PostgresOwnerTruthConversationRepository:
             boundary=InterviewBoundary(str(updated_session["boundary"])),
         )
 
+    def create_interview_review_batch(
+        self,
+        record: CreateInterviewReviewBatchWriteRecord,
+    ) -> OwnerTruthInterviewReviewBatchResult:
+        with self._cursor() as cursor:
+            self._lock(cursor, f"owner-truth-conversation-command:{record.vault_id}:{record.command_id_hash}")
+            self._lock(cursor, f"owner-truth-conversation-session:{record.vault_id}:{record.session_id}")
+            vault = self._active_vault(
+                cursor,
+                vault_id=record.vault_id,
+                owner_subject_id=record.owner_subject_id,
+                lock=True,
+            )
+            existing = self._receipt_by_command(
+                cursor,
+                vault_id=record.vault_id,
+                command_id_hash=record.command_id_hash,
+            )
+            if existing is not None:
+                return self._deduplicated_review_batch_result(
+                    cursor,
+                    existing=existing,
+                    record=record,
+                )
+            session, thread = self._locked_session_and_thread(cursor, record=record)
+            self._assert_live_session(
+                session=session,
+                thread=thread,
+                record=record,
+                authority_epoch=int(vault["authority_epoch"]),
+            )
+            self._assert_version(
+                resource="interview session",
+                expected=record.expected_session_version,
+                current=int(session["row_version"]),
+            )
+            if session["pending_review_batch_id"] is not None:
+                raise OwnerTruthConversationConflict(
+                    "a pending review batch must be acknowledged before another is created"
+                )
+            captured_turn_count = int(session["candidate_batch_turn_count"])
+            trigger = self._review_batch_trigger_for_session(
+                session=session,
+                captured_turn_count=captured_turn_count,
+            )
+            if trigger is None:
+                raise OwnerTruthConversationConflict(
+                    "persisted interview state does not have a review batch due"
+                )
+            through_message_sequence = self._through_message_sequence(
+                cursor,
+                vault_id=record.vault_id,
+                thread_id=record.thread_id,
+                session_id=record.session_id,
+            )
+            if through_message_sequence < 1:
+                raise OwnerTruthConversationConflict(
+                    "review batch requires at least one persisted conversation message"
+                )
+            owner_turn_end_count = int(session["turn_count"])
+            owner_turn_start_count = owner_turn_end_count - captured_turn_count + 1
+            if owner_turn_start_count < 1:
+                raise OwnerTruthConversationConflict(
+                    "review batch owner turn window is not recoverable"
+                )
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.interview_review_batches (
+                    id, vault_id, owner_subject_id, session_id, thread_id,
+                    trigger, state, captured_candidate_batch_turn_count,
+                    owner_turn_start_count, owner_turn_end_count,
+                    through_message_sequence, policy_version, authority_epoch
+                ) VALUES (%s, %s, %s, %s, %s, %s, 'pendingAcknowledgement', %s, %s, %s, %s, %s, %s)
+                RETURNING id, vault_id, owner_subject_id, session_id, thread_id,
+                    trigger, state, captured_candidate_batch_turn_count,
+                    owner_turn_start_count, owner_turn_end_count,
+                    through_message_sequence, row_version, authority_epoch
+                """,
+                (
+                    record.review_batch_id,
+                    record.vault_id,
+                    record.owner_subject_id,
+                    record.session_id,
+                    record.thread_id,
+                    trigger.value,
+                    captured_turn_count,
+                    owner_turn_start_count,
+                    owner_turn_end_count,
+                    through_message_sequence,
+                    record.policy_version,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            batch = cursor.fetchone()
+            cursor.execute(
+                """
+                UPDATE owner_truth.interview_sessions
+                SET pending_review_batch_id = %s,
+                    updated_at = NOW()
+                WHERE vault_id = %s AND id = %s AND row_version = %s
+                RETURNING row_version
+                """,
+                (
+                    record.review_batch_id,
+                    record.vault_id,
+                    record.session_id,
+                    record.expected_session_version,
+                ),
+            )
+            updated_session = cursor.fetchone()
+            if updated_session is None:
+                raise OwnerTruthConversationVersionConflict(
+                    resource="interview session",
+                    expected_version=record.expected_session_version,
+                    current_version=int(session["row_version"]),
+                )
+            self._insert_receipt(
+                cursor,
+                record=record,
+                authority_epoch=int(vault["authority_epoch"]),
+                result_message_id=None,
+                result_review_batch_id=record.review_batch_id,
+                expected_thread_version=None,
+                expected_session_version=record.expected_session_version,
+                expected_review_batch_version=None,
+            )
+        return OwnerTruthInterviewReviewBatchResult(
+            outcome="created",
+            receipt_id=record.receipt_id,
+            thread_id=record.thread_id,
+            session_id=record.session_id,
+            session_version=int(updated_session["row_version"]),
+            review_batch=self._review_batch_snapshot_from_row(batch),
+        )
+
+    def acknowledge_interview_review_batch(
+        self,
+        record: AcknowledgeInterviewReviewBatchWriteRecord,
+    ) -> OwnerTruthInterviewReviewBatchResult:
+        with self._cursor() as cursor:
+            self._lock(cursor, f"owner-truth-conversation-command:{record.vault_id}:{record.command_id_hash}")
+            self._lock(cursor, f"owner-truth-conversation-session:{record.vault_id}:{record.session_id}")
+            self._lock(cursor, f"owner-truth-conversation-review-batch:{record.vault_id}:{record.review_batch_id}")
+            vault = self._active_vault(
+                cursor,
+                vault_id=record.vault_id,
+                owner_subject_id=record.owner_subject_id,
+                lock=True,
+            )
+            existing = self._receipt_by_command(
+                cursor,
+                vault_id=record.vault_id,
+                command_id_hash=record.command_id_hash,
+            )
+            if existing is not None:
+                return self._deduplicated_review_batch_result(
+                    cursor,
+                    existing=existing,
+                    record=record,
+                )
+            session, thread = self._locked_session_and_thread(cursor, record=record)
+            self._assert_live_session(
+                session=session,
+                thread=thread,
+                record=record,
+                authority_epoch=int(vault["authority_epoch"]),
+            )
+            self._assert_version(
+                resource="interview session",
+                expected=record.expected_session_version,
+                current=int(session["row_version"]),
+            )
+            batch = self._locked_review_batch(
+                cursor,
+                vault_id=record.vault_id,
+                review_batch_id=record.review_batch_id,
+            )
+            if (
+                str(batch["owner_subject_id"]) != record.owner_subject_id
+                or str(batch["session_id"]) != record.session_id
+                or str(batch["thread_id"]) != record.thread_id
+                or int(batch["authority_epoch"]) != int(vault["authority_epoch"])
+            ):
+                raise OwnerTruthConversationAccessDenied(
+                    "review batch does not belong to this active Owner interview session"
+                )
+            if session["pending_review_batch_id"] != record.review_batch_id:
+                raise OwnerTruthConversationConflict(
+                    "review batch is no longer the pending session review boundary"
+                )
+            if str(batch["state"]) != InterviewReviewBatchState.PENDING_ACKNOWLEDGEMENT.value:
+                raise OwnerTruthConversationConflict("review batch is already acknowledged")
+            self._assert_version(
+                resource="interview review batch",
+                expected=record.expected_review_batch_version,
+                current=int(batch["row_version"]),
+            )
+            captured_turn_count = int(batch["captured_candidate_batch_turn_count"])
+            current_batch_turn_count = int(session["candidate_batch_turn_count"])
+            if current_batch_turn_count < captured_turn_count:
+                raise OwnerTruthConversationConflict(
+                    "review batch acknowledgement cannot discard an unknown turn window"
+                )
+            cursor.execute(
+                """
+                UPDATE owner_truth.interview_review_batches
+                SET state = 'acknowledged',
+                    acknowledged_at = NOW(),
+                    updated_at = NOW()
+                WHERE vault_id = %s AND id = %s AND row_version = %s
+                RETURNING id, vault_id, owner_subject_id, session_id, thread_id,
+                    trigger, state, captured_candidate_batch_turn_count,
+                    owner_turn_start_count, owner_turn_end_count,
+                    through_message_sequence, row_version, authority_epoch
+                """,
+                (
+                    record.vault_id,
+                    record.review_batch_id,
+                    record.expected_review_batch_version,
+                ),
+            )
+            updated_batch = cursor.fetchone()
+            if updated_batch is None:
+                raise OwnerTruthConversationVersionConflict(
+                    resource="interview review batch",
+                    expected_version=record.expected_review_batch_version,
+                    current_version=int(batch["row_version"]),
+                )
+            cursor.execute(
+                """
+                UPDATE owner_truth.interview_sessions
+                SET candidate_batch_turn_count = candidate_batch_turn_count - %s,
+                    pending_review_batch_id = NULL,
+                    updated_at = NOW()
+                WHERE vault_id = %s AND id = %s AND row_version = %s
+                RETURNING row_version
+                """,
+                (
+                    captured_turn_count,
+                    record.vault_id,
+                    record.session_id,
+                    record.expected_session_version,
+                ),
+            )
+            updated_session = cursor.fetchone()
+            if updated_session is None:
+                raise OwnerTruthConversationVersionConflict(
+                    resource="interview session",
+                    expected_version=record.expected_session_version,
+                    current_version=int(session["row_version"]),
+                )
+            self._insert_receipt(
+                cursor,
+                record=record,
+                authority_epoch=int(vault["authority_epoch"]),
+                result_message_id=None,
+                result_review_batch_id=record.review_batch_id,
+                expected_thread_version=None,
+                expected_session_version=record.expected_session_version,
+                expected_review_batch_version=record.expected_review_batch_version,
+            )
+        return OwnerTruthInterviewReviewBatchResult(
+            outcome="acknowledged",
+            receipt_id=record.receipt_id,
+            thread_id=record.thread_id,
+            session_id=record.session_id,
+            session_version=int(updated_session["row_version"]),
+            review_batch=self._review_batch_snapshot_from_row(updated_batch),
+        )
+
+    def list_interview_review_batches(
+        self,
+        *,
+        session_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewReviewBatchSnapshot, ...]:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            vault = self._active_vault(
+                cursor,
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                lock=False,
+            )
+            cursor.execute(
+                """
+                SELECT b.id, b.vault_id, b.owner_subject_id, b.session_id, b.thread_id,
+                    b.trigger, b.state, b.captured_candidate_batch_turn_count,
+                    b.owner_turn_start_count, b.owner_turn_end_count,
+                    b.through_message_sequence, b.row_version, b.authority_epoch
+                FROM owner_truth.interview_review_batches AS b
+                JOIN owner_truth.interview_sessions AS s
+                  ON s.vault_id = b.vault_id AND s.id = b.session_id
+                WHERE b.vault_id = %s
+                  AND b.session_id = %s
+                  AND b.owner_subject_id = %s
+                  AND b.authority_epoch = %s
+                  AND s.owner_subject_id = %s
+                  AND s.authority_epoch = %s
+                ORDER BY b.owner_turn_end_count ASC, b.id ASC
+                """,
+                (
+                    context.vault_id,
+                    session_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            rows = cursor.fetchall()
+        return tuple(self._review_batch_snapshot_from_row(row) for row in rows)
+
     def get_interview_session(
         self,
         *,
@@ -960,7 +1622,8 @@ class PostgresOwnerTruthConversationRepository:
                 """
                 SELECT s.id, s.vault_id, s.owner_subject_id, s.current_thread_id,
                     s.state, s.boundary, s.row_version, s.turn_count,
-                    s.deepening_turn_count, s.candidate_batch_turn_count, s.fatigue,
+                    s.deepening_turn_count, s.candidate_batch_turn_count,
+                    s.pending_review_batch_id, s.fatigue,
                     s.authority_epoch, t.row_version AS thread_row_version
                 FROM owner_truth.interview_sessions AS s
                 JOIN owner_truth.conversation_threads AS t
@@ -998,6 +1661,11 @@ class PostgresOwnerTruthConversationRepository:
             turn_count=int(row["turn_count"]),
             deepening_turn_count=int(row["deepening_turn_count"]),
             candidate_batch_turn_count=int(row["candidate_batch_turn_count"]),
+            pending_review_batch_id=(
+                None
+                if row["pending_review_batch_id"] is None
+                else str(row["pending_review_batch_id"])
+            ),
             fatigue=InterviewFatigue(str(row["fatigue"])),
             authority_epoch=int(row["authority_epoch"]),
         )
@@ -1067,6 +1735,10 @@ class PostgresOwnerTruthConversationRepository:
             return "setInterviewBoundary"
         if isinstance(record, RecordInterviewPacingWriteRecord):
             return "recordInterviewPacing"
+        if isinstance(record, CreateInterviewReviewBatchWriteRecord):
+            return "createInterviewReviewBatch"
+        if isinstance(record, AcknowledgeInterviewReviewBatchWriteRecord):
+            return "acknowledgeInterviewReviewBatch"
         raise TypeError("unsupported owner truth conversation write record")
 
     def _receipt_by_command(
@@ -1079,7 +1751,8 @@ class PostgresOwnerTruthConversationRepository:
         cursor.execute(
             """
             SELECT id, payload_hash, command_type, target_thread_id,
-                target_session_id, result_message_id, actor_subject_id,
+                target_session_id, result_message_id, result_review_batch_id,
+                expected_review_batch_version, actor_subject_id,
                 owner_subject_id, authority_epoch, policy_version
             FROM owner_truth.conversation_command_receipts
             WHERE vault_id = %s AND command_id_hash = %s
@@ -1138,6 +1811,52 @@ class PostgresOwnerTruthConversationRepository:
             boundary=InterviewBoundary(str(session["boundary"])),
             message_id=None if message_id is None else str(message_id),
             message_sequence=message_sequence,
+        )
+
+    def _deduplicated_review_batch_result(
+        self,
+        cursor: Any,
+        *,
+        existing: Mapping[str, Any],
+        record: CreateInterviewReviewBatchWriteRecord | AcknowledgeInterviewReviewBatchWriteRecord,
+    ) -> OwnerTruthInterviewReviewBatchResult:
+        if any(
+            (
+                str(existing["payload_hash"]) != record.payload_hash,
+                str(existing["command_type"]) != self._command_type(record),
+                str(existing["target_thread_id"]) != record.thread_id,
+                str(existing["target_session_id"]) != record.session_id,
+                str(existing["actor_subject_id"]) != record.actor_subject_id,
+                str(existing["owner_subject_id"]) != record.owner_subject_id,
+                str(existing["policy_version"]) != record.policy_version,
+                existing.get("result_review_batch_id") is None,
+                str(existing.get("result_review_batch_id")) != record.review_batch_id,
+            )
+        ):
+            raise OwnerTruthConversationConflict(
+                "commandId cannot be reused with a different review batch command"
+            )
+        session, _ = self._locked_session_and_thread(cursor, record=record)
+        batch = self._locked_review_batch(
+            cursor,
+            vault_id=record.vault_id,
+            review_batch_id=record.review_batch_id,
+        )
+        if (
+            str(batch["owner_subject_id"]) != record.owner_subject_id
+            or str(batch["session_id"]) != record.session_id
+            or str(batch["thread_id"]) != record.thread_id
+        ):
+            raise OwnerTruthConversationConflict(
+                "review batch command receipt points to a different review batch"
+            )
+        return OwnerTruthInterviewReviewBatchResult(
+            outcome="deduplicated",
+            receipt_id=str(existing["id"]),
+            thread_id=record.thread_id,
+            session_id=record.session_id,
+            session_version=int(session["row_version"]),
+            review_batch=self._review_batch_snapshot_from_row(batch),
         )
 
     @staticmethod
@@ -1208,12 +1927,91 @@ class PostgresOwnerTruthConversationRepository:
             raise OwnerTruthConversationConflict("messageId already exists without this command receipt")
 
     @staticmethod
+    def _review_batch_trigger_for_session(
+        *,
+        session: Mapping[str, Any],
+        captured_turn_count: int,
+    ) -> InterviewReviewBatchTrigger | None:
+        if captured_turn_count < 1:
+            return None
+        if str(session["state"]) == InterviewSessionState.ACTIVE.value:
+            if captured_turn_count >= MIN_TURNS_BEFORE_CANDIDATE_BATCH:
+                return InterviewReviewBatchTrigger.TURN_THRESHOLD
+            return None
+        return InterviewReviewBatchTrigger.SESSION_EXIT
+
+    @staticmethod
+    def _through_message_sequence(
+        cursor: Any,
+        *,
+        vault_id: str,
+        thread_id: str,
+        session_id: str,
+    ) -> int:
+        cursor.execute(
+            """
+            SELECT COALESCE(MAX(sequence_number), 0) AS through_message_sequence
+            FROM owner_truth.conversation_messages
+            WHERE vault_id = %s AND thread_id = %s AND session_id = %s
+            """,
+            (vault_id, thread_id, session_id),
+        )
+        return int(cursor.fetchone()["through_message_sequence"])
+
+    @staticmethod
+    def _review_batch_snapshot_from_row(
+        row: Mapping[str, Any],
+    ) -> OwnerTruthInterviewReviewBatchSnapshot:
+        return OwnerTruthInterviewReviewBatchSnapshot(
+            review_batch_id=str(row["id"]),
+            vault_id=str(row["vault_id"]),
+            owner_subject_id=str(row["owner_subject_id"]),
+            session_id=str(row["session_id"]),
+            thread_id=str(row["thread_id"]),
+            trigger=InterviewReviewBatchTrigger(str(row["trigger"])),
+            state=InterviewReviewBatchState(str(row["state"])),
+            captured_candidate_batch_turn_count=int(row["captured_candidate_batch_turn_count"]),
+            owner_turn_start_count=int(row["owner_turn_start_count"]),
+            owner_turn_end_count=int(row["owner_turn_end_count"]),
+            through_message_sequence=int(row["through_message_sequence"]),
+            row_version=int(row["row_version"]),
+            authority_epoch=int(row["authority_epoch"]),
+        )
+
+    @staticmethod
+    def _locked_review_batch(
+        cursor: Any,
+        *,
+        vault_id: str,
+        review_batch_id: str,
+    ) -> Mapping[str, Any]:
+        cursor.execute(
+            """
+            SELECT id, vault_id, owner_subject_id, session_id, thread_id,
+                trigger, state, captured_candidate_batch_turn_count,
+                owner_turn_start_count, owner_turn_end_count,
+                through_message_sequence, row_version, authority_epoch
+            FROM owner_truth.interview_review_batches
+            WHERE vault_id = %s AND id = %s
+            FOR UPDATE
+            """,
+            (vault_id, review_batch_id),
+        )
+        batch = cursor.fetchone()
+        if batch is None:
+            raise OwnerTruthConversationAccessDenied(
+                "review batch does not belong to this active Owner Vault"
+            )
+        return batch
+
+    @staticmethod
     def _locked_session_and_thread(cursor: Any, *, record: Any) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
         cursor.execute(
             """
             SELECT s.id, s.owner_subject_id, s.current_thread_id, s.state,
                 s.boundary, s.turn_count, s.deepening_turn_count,
-                s.candidate_batch_turn_count, s.fatigue, s.authority_epoch, s.row_version,
+                s.candidate_batch_turn_count, s.pending_review_batch_id,
+                s.fatigue, s.authority_epoch, s.row_version,
                 t.id AS thread_id, t.owner_subject_id AS thread_owner_subject_id,
                 t.authority_epoch AS thread_authority_epoch,
                 t.row_version AS thread_row_version
@@ -1239,6 +2037,11 @@ class PostgresOwnerTruthConversationRepository:
             "turn_count": int(row["turn_count"]),
             "deepening_turn_count": int(row["deepening_turn_count"]),
             "candidate_batch_turn_count": int(row["candidate_batch_turn_count"]),
+            "pending_review_batch_id": (
+                None
+                if row["pending_review_batch_id"] is None
+                else str(row["pending_review_batch_id"])
+            ),
             "fatigue": str(row["fatigue"]),
             "authority_epoch": int(row["authority_epoch"]),
             "row_version": int(row["row_version"]),
@@ -1260,15 +2063,17 @@ class PostgresOwnerTruthConversationRepository:
         result_message_id: str | None,
         expected_thread_version: int | None,
         expected_session_version: int | None,
+        result_review_batch_id: str | None = None,
+        expected_review_batch_version: int | None = None,
     ) -> None:
         cursor.execute(
             """
             INSERT INTO owner_truth.conversation_command_receipts (
                 id, vault_id, command_id_hash, payload_hash, command_type,
-                target_thread_id, target_session_id, result_message_id,
-                expected_thread_version, expected_session_version,
+                target_thread_id, target_session_id, result_message_id, result_review_batch_id,
+                expected_thread_version, expected_session_version, expected_review_batch_version,
                 actor_subject_id, owner_subject_id, authority_epoch, policy_version
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 record.receipt_id,
@@ -1279,8 +2084,10 @@ class PostgresOwnerTruthConversationRepository:
                 record.thread_id,
                 record.session_id,
                 result_message_id,
+                result_review_batch_id,
                 expected_thread_version,
                 expected_session_version,
+                expected_review_batch_version,
                 record.actor_subject_id,
                 record.owner_subject_id,
                 authority_epoch,

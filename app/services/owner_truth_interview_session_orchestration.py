@@ -168,6 +168,7 @@ class OwnerTruthInterviewSessionOrchestrationService:
                 user_boundary=policy_boundary,
                 is_sensitive=signals.is_sensitive,
                 fatigue=persisted.fatigue,
+                has_pending_review_batch=persisted.pending_review_batch_id is not None,
             )
         )
         return OwnerTruthInterviewSessionOrchestrationResult(

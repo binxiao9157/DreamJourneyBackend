@@ -91,6 +91,7 @@ class InterviewOrchestrationInput:
     user_boundary: InterviewBoundary
     is_sensitive: bool
     fatigue: InterviewFatigue = InterviewFatigue.NORMAL
+    has_pending_review_batch: bool = False
 
     def __post_init__(self) -> None:
         normalized_thread_id = str(self.thread_id or "").strip()
@@ -118,7 +119,13 @@ class InterviewOrchestrationInput:
             value = getattr(self, field)
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise InterviewOrchestrationError(f"{field} must be a non-negative integer")
-        for field in ("topic_incomplete", "needs_clarification", "user_changed_topic", "is_sensitive"):
+        for field in (
+            "topic_incomplete",
+            "needs_clarification",
+            "user_changed_topic",
+            "is_sensitive",
+            "has_pending_review_batch",
+        ):
             if not isinstance(getattr(self, field), bool):
                 raise InterviewOrchestrationError(f"{field} must be a boolean")
 
@@ -252,12 +259,11 @@ class InterviewOrchestrator:
 
     @staticmethod
     def _review_batch_due(state: InterviewOrchestrationInput) -> bool:
+        if state.has_pending_review_batch:
+            return False
         if state.candidate_batch_turn_count >= MIN_TURNS_BEFORE_CANDIDATE_BATCH:
             return True
-        return (
-            state.session_state is InterviewSessionState.ENDING
-            and state.candidate_batch_turn_count > 0
-        )
+        return state.session_state is not InterviewSessionState.ACTIVE and state.candidate_batch_turn_count > 0
 
     @staticmethod
     def _pause(reason_code: str, *, batch_due: bool) -> InterviewDecision:
