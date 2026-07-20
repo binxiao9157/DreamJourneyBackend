@@ -35,8 +35,13 @@ from app.domain.owner_truth.conversation import (
     SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
 )
+from app.domain.owner_truth.interview_orchestration import InterviewAction
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_conversation import OwnerTruthConversationService
+from app.services.owner_truth_interview_session_orchestration import (
+    InterviewSessionOrchestrationSignals,
+    OwnerTruthInterviewSessionOrchestrationService,
+)
 from app.services.postgres_store import PostgresStore
 
 
@@ -79,6 +84,26 @@ def invoke(
         command_id=command_id,
     ):
         return operation(OwnerTruthConversationService(store.owner_truth_conversation_repository()))
+
+
+def invoke_orchestration(
+    store: PostgresStore,
+    *,
+    command_id: str,
+    operation: Callable[[OwnerTruthInterviewSessionOrchestrationService], object],
+) -> object:
+    with store.request_unit_of_work(
+        correlation_id=f"owner-truth-conversation-orchestration-smoke-{command_id}",
+        command_id=command_id,
+    ):
+        conversation_service = OwnerTruthConversationService(
+            store.owner_truth_conversation_repository()
+        )
+        return operation(
+            OwnerTruthInterviewSessionOrchestrationService(
+                conversation_service=conversation_service
+            )
+        )
 
 
 def main() -> None:
@@ -162,6 +187,28 @@ def main() -> None:
         )
         require(replayed_append.outcome == "deduplicated", "append replay must deduplicate")
 
+        bridged = invoke_orchestration(
+            store,
+            command_id="read-only-orchestration-bridge",
+            operation=lambda service: service.decide(
+                session_id=session_id,
+                context=context,
+                signals=InterviewSessionOrchestrationSignals(
+                    topic_id="topic-smoke-private-story",
+                    topic_incomplete=False,
+                ),
+            ),
+        )
+        require(
+            bridged.decision.action is InterviewAction.LISTEN,
+            "read-only bridge must use persisted active session state",
+        )
+        bridge_summary = str(bridged.value_free_summary())
+        require(
+            append.text not in bridge_summary and session_id not in bridge_summary,
+            "bridge trace must not leak private message content or session identifiers",
+        )
+
         stale_rejected = False
         try:
             invoke(
@@ -219,6 +266,22 @@ def main() -> None:
             operation=lambda service: service.set_boundary(command=boundary, context=context),
         )
         require(paused.state.value == "paused", "doNotAsk must pause the interview session")
+        paused_bridge = invoke_orchestration(
+            store,
+            command_id="read-only-orchestration-paused",
+            operation=lambda service: service.decide(
+                session_id=session_id,
+                context=context,
+                signals=InterviewSessionOrchestrationSignals(
+                    topic_id="topic-smoke-private-story",
+                    topic_incomplete=True,
+                ),
+            ),
+        )
+        require(
+            paused_bridge.decision.action is InterviewAction.PAUSE,
+            "persisted doNotAsk state must fail closed in the bridge",
+        )
 
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:
