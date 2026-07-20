@@ -1,0 +1,211 @@
+{
+  "schemaVersion": "dreamjourney.legacy-timer-callback-inventory.v1",
+  "scope": "WI-S1-02-10 G0 source inventory only. It records scheduling and callback surfaces without observing a host, changing a timer, starting a worker, or dispatching an effect.",
+  "entries": [
+    {
+      "id": "api-startup-store-lifecycle",
+      "surface": "apiStartupLifecycle",
+      "executionMode": "API_STARTUP_LIFECYCLE",
+      "directEffectStatus": "NO_BUSINESS_EFFECT",
+      "ownerBoundary": "api-process-store-lifecycle",
+      "generationFence": "not-applicable-store-lifecycle",
+      "cutoverState": "NO_CUTOVER_REQUIRED",
+      "evidenceState": "SOURCE_INVENTORIED",
+      "sources": [
+        {
+          "path": "app/main.py",
+          "markers": [
+            "@app.on_event(\"startup\")",
+            "validate_route_authentication_startup(",
+            "init_store(store)",
+            "@app.on_event(\"shutdown\")",
+            "close_store(store)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "time-letter-api-direct-dispatch",
+      "surface": "apiDueRoute",
+      "executionMode": "DIRECT_API_REQUEST",
+      "directEffectStatus": "LEGACY_DIRECT_BUSINESS_EFFECT",
+      "ownerBoundary": "authenticated-route-and-store-idempotency",
+      "generationFence": "route-authentication-and-time-letter-state",
+      "cutoverState": "NOT_AUTHORIZED",
+      "evidenceState": "SOURCE_INVENTORIED",
+      "sources": [
+        {
+          "path": "app/main.py",
+          "markers": [
+            "@app.post(\"/archive/time-letters/dispatch-due\")",
+            "def dispatch_due_time_letters(payload: Dict[str, Any])",
+            "return dispatch_due_time_letters_for_store(store"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "time-letter-cli-direct-dispatch",
+      "surface": "hostCliDispatch",
+      "executionMode": "DIRECT_CLI_INVOCATION",
+      "directEffectStatus": "LEGACY_DIRECT_BUSINESS_EFFECT",
+      "ownerBoundary": "host-operator-and-store-idempotency",
+      "generationFence": "time-letter-state-only",
+      "cutoverState": "NOT_AUTHORIZED",
+      "evidenceState": "SOURCE_INVENTORIED",
+      "sources": [
+        {
+          "path": "scripts/dispatch_due_time_letters.py",
+          "markers": [
+            "Dispatch due DreamJourney time letters.",
+            "dispatch_due_time_letters_for_store(backend_store"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "time-letter-host-scheduler-documentation",
+      "surface": "hostTimerCandidate",
+      "executionMode": "DOCUMENTED_HOST_TIMER_CANDIDATE",
+      "directEffectStatus": "LEGACY_DIRECT_BUSINESS_EFFECT",
+      "ownerBoundary": "host-operator-required",
+      "generationFence": "time-letter-state-only",
+      "cutoverState": "NOT_AUTHORIZED",
+      "evidenceState": "HOST_UNVERIFIED_G2_REQUIRED",
+      "sources": [
+        {
+          "path": "docs/backend/server-update-operations.md",
+          "markers": [
+            "dreamjourney-time-letter-dispatch.timer",
+            "scripts/dispatch_due_time_letters.py --limit 50"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "async-effect-scheduler-shadow",
+      "surface": "typedSchedulerFoundation",
+      "executionMode": "DEFAULT_DISABLED_SHADOW",
+      "directEffectStatus": "NO_BUSINESS_EFFECT",
+      "ownerBoundary": "scheduler-lease-foundation",
+      "generationFence": "scheduler-lease-only",
+      "cutoverState": "NOT_AUTHORIZED",
+      "evidenceState": "SOURCE_INVENTORIED",
+      "sources": [
+        {
+          "path": "app/async_effects/scheduler.py",
+          "markers": [
+            "Default-disabled async-effect scheduler shadow entry support.",
+            "asyncEffectNoRunnableSchedulers",
+            "Claiming a due operation without a typed handler would"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "digital-human-session-heartbeat-route",
+      "surface": "clientLeaseHeartbeatCallback",
+      "executionMode": "CLIENT_HEARTBEAT_CALLBACK",
+      "directEffectStatus": "RUNTIME_LEASE_RENEWAL",
+      "ownerBoundary": "principal-owned-digital-human-session",
+      "generationFence": "session-owner-device-and-expiry",
+      "cutoverState": "NO_CUTOVER_REQUIRED",
+      "evidenceState": "SOURCE_INVENTORIED",
+      "sources": [
+        {
+          "path": "app/main.py",
+          "markers": [
+            "@app.post(\"/digital-human/sessions/{session_id}/heartbeat\")",
+            "def heartbeat_digital_human_session",
+            "store.heartbeat_digital_human_session_lease("
+          ]
+        },
+        {
+          "path": "app/services/route_ownership.py",
+          "markers": [
+            "\"/digital-human/sessions/{session_id}/heartbeat\"",
+            "resource_type=\"digitalHumanSession\""
+          ]
+        }
+      ]
+    },
+    {
+      "id": "provider-effect-external-callback-boundary",
+      "surface": "providerCallbackOrQuery",
+      "executionMode": "EXTERNAL_PROVIDER_CALLBACK_UNIMPLEMENTED",
+      "directEffectStatus": "EXTERNAL_PROVIDER_DISABLED",
+      "ownerBoundary": "provider-query-authorization-required",
+      "generationFence": "provider-receipt-reconciliation-only",
+      "cutoverState": "NOT_AUTHORIZED",
+      "evidenceState": "EXTERNAL_G3_REQUIRED",
+      "sources": [
+        {
+          "path": "app/async_effects/provider_query_operations.py",
+          "markers": [
+            "This module deliberately stops there: it does not",
+            "\"providerQueryExecutionEnabled\": False",
+            "\"automaticReconciliationEnabled\": False",
+            "\"replayEnabled\": False"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "operations-db-backup-timer",
+      "surface": "systemdOperationsTimer",
+      "executionMode": "SYSTEMD_OPERATIONS_TIMER",
+      "directEffectStatus": "OPERATIONS_MAINTENANCE_ONLY",
+      "ownerBoundary": "backup-operations",
+      "generationFence": "backup-manifest-and-retention-policy",
+      "cutoverState": "NO_CUTOVER_REQUIRED",
+      "evidenceState": "HOST_UNVERIFIED_G2_REQUIRED",
+      "sources": [
+        {
+          "path": "deploy/systemd/dreamjourney-db-backup.timer",
+          "markers": [
+            "Schedule DreamJourney verified PostgreSQL backups",
+            "Unit=dreamjourney-db-backup.service"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "operations-db-backup-retention-audit-timer",
+      "surface": "systemdOperationsTimer",
+      "executionMode": "SYSTEMD_OPERATIONS_TIMER",
+      "directEffectStatus": "OPERATIONS_MAINTENANCE_ONLY",
+      "ownerBoundary": "backup-operations",
+      "generationFence": "audit-only-retention-policy",
+      "cutoverState": "NO_CUTOVER_REQUIRED",
+      "evidenceState": "HOST_UNVERIFIED_G2_REQUIRED",
+      "sources": [
+        {
+          "path": "deploy/systemd/dreamjourney-db-backup-retention-audit.timer",
+          "markers": [
+            "Schedule DreamJourney PostgreSQL backup retention audits",
+            "Unit=dreamjourney-db-backup-retention-audit.service"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "operations-evidence-manifest-retention-timer",
+      "surface": "systemdOperationsTimer",
+      "executionMode": "SYSTEMD_OPERATIONS_TIMER",
+      "directEffectStatus": "OPERATIONS_MAINTENANCE_ONLY",
+      "ownerBoundary": "evidence-operations",
+      "generationFence": "evidence-manifest-retention-policy",
+      "cutoverState": "NO_CUTOVER_REQUIRED",
+      "evidenceState": "HOST_UNVERIFIED_G2_REQUIRED",
+      "sources": [
+        {
+          "path": "deploy/systemd/dreamjourney-evidence-manifest-retention.timer",
+          "markers": [
+            "Schedule DreamJourney evidence manifest retention",
+            "Unit=dreamjourney-evidence-manifest-retention.service"
+          ]
+        }
+      ]
+    }
+  ]
+}
