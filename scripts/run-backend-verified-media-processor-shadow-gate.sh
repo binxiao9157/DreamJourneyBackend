@@ -52,5 +52,9 @@ assert '"confirmedMemoryWritten": False' in source
 assert '"personaWritten": False' in source
 assert "WOULD_QUERY_RECONCILE" in source
 assert "WOULD_RETRY_SOURCE_EXTRACTION" in source
+assert "VerifiedMediaExtractionResultShadow" in source
+assert '"resultFingerprint"' in source
+assert '"segmentCount"' in source
+assert '"extractionResultPersisted": False' in source
 print("Verified media processor admission shadow G0 contract gate passed")
 PY

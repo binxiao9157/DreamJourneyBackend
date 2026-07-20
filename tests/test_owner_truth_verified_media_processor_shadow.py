@@ -9,8 +9,11 @@ from app.services.owner_truth_media_source_object_shadow import (
     MediaSourceObjectAdmissionContext,
 )
 from app.services.owner_truth_verified_media_processor_shadow import (
+    VerifiedMediaExtractionResultStatus,
+    VerifiedMediaExtractionSegmentRef,
     VerifiedMediaProcessorDescriptor,
     VerifiedMediaProcessorDisposition,
+    build_verified_media_extraction_result_shadow,
     plan_verified_media_processor_admission,
 )
 
@@ -179,6 +182,80 @@ class VerifiedMediaProcessorAdmissionShadowTests(unittest.TestCase):
             VerifiedMediaProcessorDisposition.STALE_OR_FOREIGN_ATTEMPT,
         )
         self.assertFalse(stale.would_enqueue_source_extraction)
+
+
+class VerifiedMediaExtractionResultShadowTests(unittest.TestCase):
+    def _admission(self):
+        return plan_verified_media_processor_admission(
+            _verified_source_object(),
+            context=_context(),
+            descriptor=_descriptor(),
+            enabled=True,
+        )
+
+    def test_successful_media_result_is_value_minimized_and_requires_a_separate_proposal(self) -> None:
+        admission = self._admission()
+        result = build_verified_media_extraction_result_shadow(
+            admission,
+            status=VerifiedMediaExtractionResultStatus.SUCCEEDED,
+            segments=(
+                VerifiedMediaExtractionSegmentRef(
+                    segment_id="segment-image-001",
+                    locator_fingerprint="b" * 64,
+                    content_fingerprint="c" * 64,
+                    confidence=0.91,
+                ),
+            ),
+        )
+
+        self.assertTrue(result.requires_separate_candidate_proposal)
+        summary = result.value_free_summary()
+        self.assertEqual(summary["segmentCount"], 1)
+        self.assertTrue(summary["requiresSeparateCandidateProposal"])
+        self.assertFalse(summary["candidateProposalPerformed"])
+        self.assertFalse(summary["extractionResultPersisted"])
+        self.assertFalse(summary["confirmedMemoryWritten"])
+        self.assertFalse(summary["personaWritten"])
+        self.assertFalse(summary["providerCallPerformed"])
+        self.assertFalse(summary["objectReadPerformed"])
+        self.assertNotIn("vault-media-processor", repr(summary))
+        self.assertNotIn("source-object-media-processor-001", repr(summary))
+        self.assertNotIn("segment-image-001", repr(summary))
+        self.assertNotIn("b" * 64, repr(summary))
+        self.assertNotIn("c" * 64, repr(summary))
+
+    def test_failed_retryable_or_empty_results_never_propose_candidates(self) -> None:
+        admission = self._admission()
+        empty = build_verified_media_extraction_result_shadow(
+            admission,
+            status=VerifiedMediaExtractionResultStatus.SUCCEEDED,
+            segments=(),
+        )
+        retryable = build_verified_media_extraction_result_shadow(
+            admission,
+            status=VerifiedMediaExtractionResultStatus.FAILED,
+            failure_code="providerUnavailable",
+            retryable=True,
+        )
+
+        self.assertFalse(empty.requires_separate_candidate_proposal)
+        self.assertFalse(retryable.requires_separate_candidate_proposal)
+        self.assertTrue(retryable.retryable)
+        self.assertEqual(retryable.value_free_summary()["status"], "failed")
+
+    def test_result_requires_an_eligible_enqueue_or_retry_admission(self) -> None:
+        rejected = plan_verified_media_processor_admission(
+            _verified_source_object(),
+            context=_context(),
+            descriptor=_descriptor(enabled=False),
+            enabled=True,
+        )
+
+        with self.assertRaises(ValueError):
+            build_verified_media_extraction_result_shadow(
+                rejected,
+                status=VerifiedMediaExtractionResultStatus.SUCCEEDED,
+            )
 
 
 if __name__ == "__main__":

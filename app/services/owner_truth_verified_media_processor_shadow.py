@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
 import json
+import math
 import re
 from typing import Any, Mapping
 
@@ -23,6 +24,9 @@ from app.services.owner_truth_media_source_object_shadow import (
 
 VERIFIED_MEDIA_PROCESSOR_ADMISSION_SCHEMA_VERSION = (
     "owner-truth-verified-media-processor-admission-shadow-v1"
+)
+VERIFIED_MEDIA_EXTRACTION_RESULT_SHADOW_SCHEMA_VERSION = (
+    "owner-truth-media-extraction-result-shadow-v1"
 )
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -49,6 +53,14 @@ class VerifiedMediaProcessorDisposition(str, Enum):
     TERMINAL_FAILURE_RECORDED = "terminal_failure_recorded"
     WOULD_QUERY_RECONCILE = "would_query_reconcile"
     WOULD_ENQUEUE_SOURCE_EXTRACTION = "would_enqueue_source_extraction"
+
+
+class VerifiedMediaExtractionResultStatus(str, Enum):
+    """The only result states a future media processor may report."""
+
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    QUARANTINED = "quarantined"
 
 
 def _identifier(value: object, *, field: str) -> str:
@@ -172,6 +184,157 @@ class VerifiedMediaProcessorAdmissionShadow:
         if self.extraction_request_fingerprint is not None:
             summary["extractionRequestFingerprint"] = self.extraction_request_fingerprint
         return summary
+
+
+@dataclass(frozen=True)
+class VerifiedMediaExtractionSegmentRef:
+    """A value-minimized segment reference, never raw media or extracted text."""
+
+    segment_id: str
+    locator_fingerprint: str
+    content_fingerprint: str
+    confidence: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "segment_id", _identifier(self.segment_id, field="segment_id"))
+        object.__setattr__(
+            self,
+            "locator_fingerprint",
+            _sha256(self.locator_fingerprint, field="locator_fingerprint"),
+        )
+        object.__setattr__(
+            self,
+            "content_fingerprint",
+            _sha256(self.content_fingerprint, field="content_fingerprint"),
+        )
+        try:
+            confidence = float(self.confidence)
+        except (TypeError, ValueError) as exc:
+            raise VerifiedMediaProcessorContractError("segment confidence must be numeric") from exc
+        if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            raise VerifiedMediaProcessorContractError("segment confidence must be within [0, 1]")
+        object.__setattr__(self, "confidence", confidence)
+
+    def fingerprint_material(self) -> dict[str, object]:
+        return {
+            "confidence": self.confidence,
+            "contentFingerprint": self.content_fingerprint,
+            "locatorFingerprint": self.locator_fingerprint,
+            "segmentId": self.segment_id,
+        }
+
+
+@dataclass(frozen=True)
+class VerifiedMediaExtractionResultShadow:
+    """Immutable, side-effect-free media result awaiting a separate proposal command.
+
+    This is deliberately not compatible with the text-bearing Candidate writer.
+    It retains only fingerprints and confidence, never bytes, transcripts,
+    provider locators, Candidate payloads, or owner authority.
+    """
+
+    admission: VerifiedMediaProcessorAdmissionShadow
+    status: VerifiedMediaExtractionResultStatus
+    segments: tuple[VerifiedMediaExtractionSegmentRef, ...] = ()
+    failure_code: str | None = None
+    retryable: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.admission, VerifiedMediaProcessorAdmissionShadow):
+            raise VerifiedMediaProcessorContractError("media result requires a processor admission")
+        if not self.admission.would_enqueue_source_extraction:
+            raise VerifiedMediaProcessorContractError(
+                "media result requires an eligible enqueue or retry processor admission"
+            )
+        if (
+            self.admission.media_kind is None
+            or self.admission.processor_id is None
+            or self.admission.processor_version is None
+            or self.admission.policy_version is None
+            or self.admission.extraction_request_fingerprint is None
+        ):
+            raise VerifiedMediaProcessorContractError("media result admission is incomplete")
+        try:
+            object.__setattr__(self, "status", VerifiedMediaExtractionResultStatus(self.status))
+        except ValueError as exc:
+            raise VerifiedMediaProcessorContractError("unsupported media extraction result status") from exc
+        if not isinstance(self.retryable, bool):
+            raise VerifiedMediaProcessorContractError("retryable must be a boolean")
+        object.__setattr__(self, "segments", tuple(self.segments))
+        for segment in self.segments:
+            if not isinstance(segment, VerifiedMediaExtractionSegmentRef):
+                raise VerifiedMediaProcessorContractError("media result segment reference is required")
+        if len({segment.segment_id for segment in self.segments}) != len(self.segments):
+            raise VerifiedMediaProcessorContractError("media result segment ids must be unique")
+        if self.status is VerifiedMediaExtractionResultStatus.SUCCEEDED:
+            if self.failure_code is not None or self.retryable:
+                raise VerifiedMediaProcessorContractError(
+                    "successful media result cannot carry failure state"
+                )
+        else:
+            if self.segments:
+                raise VerifiedMediaProcessorContractError(
+                    "failed or quarantined media result cannot carry segments"
+                )
+            object.__setattr__(self, "failure_code", _identifier(self.failure_code, field="failure_code"))
+            if self.status is VerifiedMediaExtractionResultStatus.QUARANTINED and self.retryable:
+                raise VerifiedMediaProcessorContractError("quarantined media result is not retryable")
+
+    @property
+    def result_fingerprint(self) -> str:
+        material = {
+            "admissionFingerprint": self.admission.extraction_request_fingerprint,
+            "failureCode": self.failure_code,
+            "retryable": self.retryable,
+            "segments": [segment.fingerprint_material() for segment in self.segments],
+            "status": self.status.value,
+        }
+        return sha256(_canonical_json(material).encode("utf-8")).hexdigest()
+
+    @property
+    def requires_separate_candidate_proposal(self) -> bool:
+        return self.status is VerifiedMediaExtractionResultStatus.SUCCEEDED and bool(self.segments)
+
+    def value_free_summary(self) -> dict[str, object]:
+        return {
+            "candidateProposalPerformed": False,
+            "confirmedMemoryWritten": False,
+            "extractionRequestFingerprint": self.admission.extraction_request_fingerprint,
+            "extractionResultPersisted": False,
+            "mediaKind": self.admission.media_kind,
+            "objectReadPerformed": False,
+            "personaWritten": False,
+            "policyVersion": self.admission.policy_version,
+            "processorId": self.admission.processor_id,
+            "processorVersion": self.admission.processor_version,
+            "providerCallPerformed": False,
+            "requiresSeparateCandidateProposal": self.requires_separate_candidate_proposal,
+            "resultFingerprint": self.result_fingerprint,
+            "retryable": self.retryable,
+            "schemaVersion": VERIFIED_MEDIA_EXTRACTION_RESULT_SHADOW_SCHEMA_VERSION,
+            "segmentCount": len(self.segments),
+            "shadowOnly": True,
+            "status": self.status.value,
+        }
+
+
+def build_verified_media_extraction_result_shadow(
+    admission: VerifiedMediaProcessorAdmissionShadow,
+    *,
+    status: VerifiedMediaExtractionResultStatus,
+    segments: tuple[VerifiedMediaExtractionSegmentRef, ...] = (),
+    failure_code: str | None = None,
+    retryable: bool = False,
+) -> VerifiedMediaExtractionResultShadow:
+    """Build a synthetic, immutable result without reading or persisting media."""
+
+    return VerifiedMediaExtractionResultShadow(
+        admission=admission,
+        status=status,
+        segments=segments,
+        failure_code=failure_code,
+        retryable=retryable,
+    )
 
 
 def _extraction_request_fingerprint(
@@ -381,10 +544,15 @@ def plan_verified_media_processor_admission(
 
 
 __all__ = [
+    "VERIFIED_MEDIA_EXTRACTION_RESULT_SHADOW_SCHEMA_VERSION",
     "VERIFIED_MEDIA_PROCESSOR_ADMISSION_SCHEMA_VERSION",
+    "VerifiedMediaExtractionResultShadow",
+    "VerifiedMediaExtractionResultStatus",
+    "VerifiedMediaExtractionSegmentRef",
     "VerifiedMediaProcessorAdmissionShadow",
     "VerifiedMediaProcessorContractError",
     "VerifiedMediaProcessorDescriptor",
     "VerifiedMediaProcessorDisposition",
+    "build_verified_media_extraction_result_shadow",
     "plan_verified_media_processor_admission",
 ]
