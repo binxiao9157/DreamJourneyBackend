@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import re
 from typing import Iterable, Mapping, Optional, Tuple
+from uuid import UUID
 
 from .contracts import OwnerTruthContractError, require_nonblank
 
@@ -66,9 +67,16 @@ _DIMENSION_FACETS: Mapping[KnowledgeDimension, Tuple[str, ...]] = {
 
 def _opaque_identifier(value: object, *, field: str) -> str:
     normalized = str(value or "").strip()
-    if not _OPAQUE_IDENTIFIER.fullmatch(normalized):
-        raise KnowledgeRecommendationError(f"{field} must be an opaque identifier")
-    return normalized
+    if _OPAQUE_IDENTIFIER.fullmatch(normalized):
+        return normalized
+    # Owner Truth records use UUID primary keys.  The original synthetic-only
+    # matcher rejected valid production MemoryVersion and Source identifiers
+    # that begin with a numeral, preventing a read-only projection from ever
+    # consume real authority records.
+    try:
+        return str(UUID(normalized))
+    except (TypeError, ValueError) as exc:
+        raise KnowledgeRecommendationError(f"{field} must be an opaque identifier") from exc
 
 
 def _identifier_tuple(values: Iterable[object], *, field: str) -> Tuple[str, ...]:
