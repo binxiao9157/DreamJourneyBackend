@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
-
-from app.async_effects.legacy_timer_callback_inventory import load_and_validate_inventory
-
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "docs/backend/legacy-timer-callback-inventory-v1.json"
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.async_effects.legacy_timer_callback_inventory import load_and_validate_inventory
 
 
 def main() -> None:
