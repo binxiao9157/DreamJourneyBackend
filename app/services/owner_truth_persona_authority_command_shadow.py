@@ -46,6 +46,7 @@ class OwnerTruthPersonaAuthorityCommandDisposition(str, Enum):
     SHADOW_DISABLED = "shadow_disabled"
     INVALID_CONTEXT = "invalid_context"
     INVALID_COMMAND = "invalid_command"
+    ORIGIN_NOT_ALLOWED = "origin_not_allowed"
     ACTOR_NOT_OWNER = "actor_not_owner"
     MEMORIAL_CONTROLLER_REQUIRED = "memorial_controller_required"
     EXPECTED_VERSION_CONFLICT = "expected_version_conflict"
@@ -55,6 +56,24 @@ class OwnerTruthPersonaAuthorityCommandDisposition(str, Enum):
 class OwnerTruthPersonaAuthoritySubjectKind(str, Enum):
     SELF_OWNER = "self_owner"
     MEMORIAL_REPRESENTED = "memorial_represented"
+
+
+class OwnerTruthPersonaAuthorityCommandOrigin(str, Enum):
+    OWNER_INTERACTIVE = "owner_interactive"
+    FAMILY = "family"
+    ASSISTANT = "assistant"
+    PROVIDER = "provider"
+    RUNTIME = "runtime"
+    UNKNOWN = "unknown"
+
+
+_ORIGIN_DENIAL_REASON_CODES = {
+    OwnerTruthPersonaAuthorityCommandOrigin.FAMILY: "familyCannotWritePersonaAuthority",
+    OwnerTruthPersonaAuthorityCommandOrigin.ASSISTANT: "assistantCannotWritePersonaAuthority",
+    OwnerTruthPersonaAuthorityCommandOrigin.PROVIDER: "providerCannotWritePersonaAuthority",
+    OwnerTruthPersonaAuthorityCommandOrigin.RUNTIME: "runtimeCannotWritePersonaAuthority",
+    OwnerTruthPersonaAuthorityCommandOrigin.UNKNOWN: "unknownOriginCannotWritePersonaAuthority",
+}
 
 
 def _identifier(value: object, *, field: str) -> str:
@@ -152,6 +171,9 @@ class OwnerTruthPersonaAuthorityCommandContext:
     authority_epoch: int = 0
     subject_kind: OwnerTruthPersonaAuthoritySubjectKind = OwnerTruthPersonaAuthoritySubjectKind.SELF_OWNER
     policy_version: str = OWNER_TRUTH_PERSONA_AUTHORITY_COMMAND_SCHEMA_VERSION
+    command_origin: OwnerTruthPersonaAuthorityCommandOrigin = (
+        OwnerTruthPersonaAuthorityCommandOrigin.OWNER_INTERACTIVE
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "vault_id", _identifier(self.vault_id, field="vault_id"))
@@ -188,6 +210,14 @@ class OwnerTruthPersonaAuthorityCommandContext:
             "policy_version",
             _identifier(self.policy_version, field="policy_version"),
         )
+        try:
+            command_origin = OwnerTruthPersonaAuthorityCommandOrigin(self.command_origin)
+        except ValueError as exc:
+            raise OwnerTruthPersonaAuthorityCommandContractError(
+                "command_origin is unsupported",
+                reason_code="invalidPersonaAuthorityCommandOrigin",
+            ) from exc
+        object.__setattr__(self, "command_origin", command_origin)
 
     def scope_hash(self, *, persona_id: str) -> str:
         return _digest(
@@ -418,6 +448,12 @@ def preflight_self_persona_authority_command(
             disposition=OwnerTruthPersonaAuthorityCommandDisposition.INVALID_CONTEXT,
             reason_codes=("invalidPersonaAuthorityContext",),
         )
+    if context.command_origin is not OwnerTruthPersonaAuthorityCommandOrigin.OWNER_INTERACTIVE:
+        return _result(
+            enabled=True,
+            disposition=OwnerTruthPersonaAuthorityCommandDisposition.ORIGIN_NOT_ALLOWED,
+            reason_codes=(_ORIGIN_DENIAL_REASON_CODES[context.command_origin],),
+        )
     if context.subject_kind is OwnerTruthPersonaAuthoritySubjectKind.MEMORIAL_REPRESENTED:
         return _result(
             enabled=True,
@@ -465,6 +501,7 @@ __all__ = [
     "OwnerTruthPersonaAuthorityCommandContext",
     "OwnerTruthPersonaAuthorityCommandContractError",
     "OwnerTruthPersonaAuthorityCommandDisposition",
+    "OwnerTruthPersonaAuthorityCommandOrigin",
     "OwnerTruthPersonaAuthorityCommandShadow",
     "OwnerTruthPersonaAuthoritySubjectKind",
     "OwnerTruthSelfPersonaAuthorityCommand",

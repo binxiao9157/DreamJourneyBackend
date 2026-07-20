@@ -20,9 +20,18 @@ from pathlib import Path
 
 from app.services.owner_truth_persona_authority_command_shadow import (
     PERSONA_PROFILE_ALLOWED_FIELD_NAMES,
+    OwnerTruthPersonaAuthorityCommandOrigin,
 )
 
 assert PERSONA_PROFILE_ALLOWED_FIELD_NAMES == {"birthDate", "displayName", "gender"}
+assert set(OwnerTruthPersonaAuthorityCommandOrigin) == {
+    OwnerTruthPersonaAuthorityCommandOrigin.OWNER_INTERACTIVE,
+    OwnerTruthPersonaAuthorityCommandOrigin.FAMILY,
+    OwnerTruthPersonaAuthorityCommandOrigin.ASSISTANT,
+    OwnerTruthPersonaAuthorityCommandOrigin.PROVIDER,
+    OwnerTruthPersonaAuthorityCommandOrigin.RUNTIME,
+    OwnerTruthPersonaAuthorityCommandOrigin.UNKNOWN,
+}
 
 path = Path("app/services/owner_truth_persona_authority_command_shadow.py")
 source = path.read_text(encoding="utf-8")
@@ -43,6 +52,10 @@ for required in (
     '"decisionReceiptWritten": self.decision_receipt_written',
     '"providerOrRuntimeMutated": self.provider_or_runtime_mutated',
     '"deceasedPersonaRequiresControllerNotLoginPrincipal"',
+    '"familyCannotWritePersonaAuthority"',
+    '"assistantCannotWritePersonaAuthority"',
+    '"providerCannotWritePersonaAuthority"',
+    '"runtimeCannotWritePersonaAuthority"',
     '"shadowPreflightDoesNotMutateAuthority"',
 ):
     assert required in source, f"missing Persona Authority G0 invariant: {required}"

@@ -8,6 +8,7 @@ import unittest
 from app.services.owner_truth_persona_authority_command_shadow import (
     OwnerTruthPersonaAuthorityCommandContext,
     OwnerTruthPersonaAuthorityCommandDisposition,
+    OwnerTruthPersonaAuthorityCommandOrigin,
     OwnerTruthPersonaAuthoritySubjectKind,
     preflight_self_persona_authority_command,
 )
@@ -155,6 +156,40 @@ class OwnerTruthPersonaAuthorityCommandShadowTests(unittest.TestCase):
             OwnerTruthPersonaAuthorityCommandDisposition.ACTOR_NOT_OWNER,
         )
         self.assertIn("selfPersonaRequiresVaultOwner", result.reason_codes)
+
+    def test_family_assistant_provider_runtime_and_unknown_origins_fail_before_payload_is_parsed(self) -> None:
+        expected_reason = {
+            OwnerTruthPersonaAuthorityCommandOrigin.FAMILY: "familyCannotWritePersonaAuthority",
+            OwnerTruthPersonaAuthorityCommandOrigin.ASSISTANT: "assistantCannotWritePersonaAuthority",
+            OwnerTruthPersonaAuthorityCommandOrigin.PROVIDER: "providerCannotWritePersonaAuthority",
+            OwnerTruthPersonaAuthorityCommandOrigin.RUNTIME: "runtimeCannotWritePersonaAuthority",
+            OwnerTruthPersonaAuthorityCommandOrigin.UNKNOWN: "unknownOriginCannotWritePersonaAuthority",
+        }
+        for origin, reason_code in expected_reason.items():
+            with self.subTest(origin=origin.value):
+                with patch(
+                    "app.services.owner_truth_persona_authority_command_shadow."
+                    "OwnerTruthSelfPersonaAuthorityCommand.from_payload"
+                ) as from_payload:
+                    result = self._preflight(
+                        _command(),
+                        context=OwnerTruthPersonaAuthorityCommandContext(
+                            vault_id="vault-persona-command-a",
+                            owner_subject_id="owner-persona-command-a",
+                            actor_subject_id="owner-persona-command-a",
+                            current_persona_version=2,
+                            command_origin=origin,
+                        ),
+                    )
+
+                from_payload.assert_not_called()
+                self.assertEqual(
+                    result.disposition,
+                    OwnerTruthPersonaAuthorityCommandDisposition.ORIGIN_NOT_ALLOWED,
+                )
+                self.assertIn(reason_code, result.reason_codes)
+                self.assertFalse(result.command_accepted_for_future_persistence)
+                self.assertFalse(result.persona_version_written)
 
     def test_stale_expected_version_is_rejected_without_a_write(self) -> None:
         result = self._preflight(_command(expected_version=1))

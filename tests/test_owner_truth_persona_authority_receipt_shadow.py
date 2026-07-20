@@ -8,6 +8,7 @@ import unittest
 
 from app.services.owner_truth_persona_authority_command_shadow import (
     OwnerTruthPersonaAuthorityCommandContext,
+    OwnerTruthPersonaAuthorityCommandOrigin,
 )
 from app.services.owner_truth_persona_authority_receipt_shadow import (
     OwnerTruthPersonaAuthorityReceiptDisposition,
@@ -142,6 +143,26 @@ class OwnerTruthPersonaAuthorityReceiptShadowTests(unittest.TestCase):
         self.assertIsNone(invalid.decision_receipt)
         self.assertFalse(stale.records_written)
         self.assertFalse(invalid.records_written)
+
+    def test_non_owner_origin_cannot_plan_a_receipt(self) -> None:
+        plan = self._plan(
+            _command(),
+            context=OwnerTruthPersonaAuthorityCommandContext(
+                vault_id="vault-persona-receipt-a",
+                owner_subject_id="owner-persona-receipt-a",
+                actor_subject_id="owner-persona-receipt-a",
+                current_persona_version=2,
+                command_origin=OwnerTruthPersonaAuthorityCommandOrigin.PROVIDER,
+            ),
+        )
+
+        self.assertEqual(
+            plan.disposition,
+            OwnerTruthPersonaAuthorityReceiptDisposition.NOT_ADMITTED,
+        )
+        self.assertIsNone(plan.persona_version)
+        self.assertIsNone(plan.decision_receipt)
+        self.assertFalse(plan.records_written)
 
 
 if __name__ == "__main__":
