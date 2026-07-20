@@ -51,6 +51,7 @@ from app.domain.owner_truth.candidate_extraction import (
     CandidateEvidenceSpan,
     CandidateProposal,
     CandidateReviewMode,
+    ExtractionResultStatus,
     SyntheticCandidateExtractionCommand,
 )
 from app.domain.owner_truth.contracts import (
@@ -538,6 +539,7 @@ def main() -> None:
             prompt_version="interview-candidate-review-v1",
             policy_version=context.policy_version,
             source_content_hash=candidate_proposal.source_content_hash,
+            status=ExtractionResultStatus.SUCCEEDED,
             proposals=(
                 CandidateProposal(
                     memory_kind=MemoryKind.EXPERIENCE,
