@@ -5,6 +5,7 @@ import unittest
 
 from app.async_effects.lease_repository import AsyncEffectJobPreview
 from app.async_effects.lease_repository import AsyncEffectExpiredLeasePreview
+from app.async_effects.provider_query_operations import ProviderQueryBacklogEntry
 from app.async_effects.worker import AsyncEffectWorkerRuntime
 from app.core.config import Settings
 
@@ -47,6 +48,25 @@ class _Store:
 
     def async_effect_lease_repository(self):
         return self.repository
+
+
+class _ProviderEffectRepository:
+    def __init__(self, backlog=()):
+        self.backlog = tuple(backlog)
+        self.backlog_calls = 0
+
+    def reconciliation_backlog(self):
+        self.backlog_calls += 1
+        return self.backlog
+
+
+class _StoreWithProviderEffects(_Store):
+    def __init__(self, *, ready: bool = True, previews=(), backlog=()):
+        super().__init__(ready=ready, previews=previews)
+        self.provider_repository = _ProviderEffectRepository(backlog)
+
+    def provider_effect_repository(self):
+        return self.provider_repository
 
 
 class AsyncEffectWorkerRuntimeTests(unittest.TestCase):
@@ -124,6 +144,31 @@ class AsyncEffectWorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(result["workerLossEvidence"]["observationState"], "observed")
         self.assertTrue(result["workerLossEvidence"]["requiresManualReview"])
         self.assertEqual(store.repository.expired_preview_calls, 1)
+
+    def test_shadow_once_reports_provider_query_backlog_without_querying_or_replaying(self):
+        store = _StoreWithProviderEffects(
+            backlog=(
+                ProviderQueryBacklogEntry(
+                    provider="volcengineVoiceClone",
+                    capability="voiceCloneTraining",
+                    unknown_effect_count=1,
+                    pending_reconciliation_count=1,
+                    manual_review_count=0,
+                    reconciliation_conflict_count=0,
+                ),
+            ),
+        )
+        worker = AsyncEffectWorkerRuntime(settings=Settings(), store=store, worker_id="worker-test")
+
+        result = worker.shadow_once()
+
+        baseline = result["providerQueryOperations"]
+        self.assertEqual(baseline["observationState"], "observed")
+        self.assertEqual(baseline["unknownEffectCount"], 1)
+        self.assertFalse(baseline["providerQueryExecutionEnabled"])
+        self.assertFalse(baseline["automaticReconciliationEnabled"])
+        self.assertFalse(baseline["replayEnabled"])
+        self.assertEqual(store.provider_repository.backlog_calls, 1)
 
     def test_shadow_once_fails_closed_when_readiness_is_not_ready(self):
         store = _Store(ready=False)

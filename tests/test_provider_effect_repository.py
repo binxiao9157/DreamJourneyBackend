@@ -203,6 +203,48 @@ class ProviderEffectRepositoryTests(unittest.TestCase):
         self.assertNotIn("providerRequestId", summary)
         self.assertNotIn("canonical-provider-request", str(summary))
 
+    def test_reconciliation_backlog_aggregates_only_effective_unknowns(self):
+        repository = InMemoryProviderEffectRepository()
+        pending_intent = _intent()
+        resolved_intent = ProviderEffectIntent(
+            effect_intent=_effect_intent(),
+            provider="volcengineVoiceClone",
+            capability="voiceCloneSynthesis",
+            request_hash=sha256(b"provider-effect-resolved").hexdigest(),
+        )
+        pending_unknown = _receipt(
+            pending_intent,
+            ProviderEffectState.UNKNOWN,
+            reason_code="providerTimeout",
+            observation_origin="timeoutObservation",
+        )
+        resolved_unknown = _receipt(
+            resolved_intent,
+            ProviderEffectState.UNKNOWN,
+            reason_code="providerTimeout",
+            observation_origin="timeoutObservation",
+        )
+        repository.record(pending_unknown)
+        repository.record(resolved_unknown)
+        repository.reconcile(
+            ProviderEffectReconciliation(
+                prior_unknown=resolved_unknown,
+                outcome=ProviderEffectQueryOutcome.COMPLETED,
+                query_receipt_hash=sha256(b"provider-effect-resolved-query").hexdigest(),
+            )
+        )
+
+        backlog = repository.reconciliation_backlog()
+
+        self.assertEqual(len(backlog), 1)
+        self.assertEqual(backlog[0].provider, "volcengineVoiceClone")
+        self.assertEqual(backlog[0].capability, "voiceCloneTraining")
+        self.assertEqual(backlog[0].unknown_effect_count, 1)
+        self.assertEqual(backlog[0].pending_reconciliation_count, 1)
+        self.assertEqual(backlog[0].manual_review_count, 0)
+        self.assertEqual(backlog[0].reconciliation_conflict_count, 0)
+        self.assertNotIn("owner-provider-001", str(backlog[0].value_free_summary()))
+
 
 if __name__ == "__main__":
     unittest.main()

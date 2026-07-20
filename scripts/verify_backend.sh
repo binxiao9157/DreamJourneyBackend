@@ -32,6 +32,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-effect-contract-gate.sh
 echo "== Provider effect G2 reconciliation contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-effect-reconciliation-contract-gate.sh
 
+echo "== Provider-query operations G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-query-operations-contract-gate.sh
+
 echo "== Business completion/message/notification G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-notification-contract-gate.sh
 
@@ -141,6 +144,11 @@ test -f tests/test_provider_effect_reconciliation_migration_contract.py
 test -f scripts/run-backend-provider-effect-reconciliation-contract-gate.sh
 test -f scripts/backend-provider-effect-reconciliation-postgres-smoke.py
 test -f scripts/run-backend-provider-effect-reconciliation-postgres-smoke.sh
+test -f app/async_effects/provider_query_operations.py
+test -f tests/test_provider_query_operations.py
+test -f scripts/run-backend-provider-query-operations-contract-gate.sh
+test -f scripts/backend-provider-query-operations-postgres-smoke.py
+test -f scripts/run-backend-provider-query-operations-postgres-smoke.sh
 test -f app/async_effects/message_notification_effects.py
 test -f tests/test_business_message_notification_effects.py
 test -f scripts/run-backend-business-message-notification-contract-gate.sh

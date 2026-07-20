@@ -23,6 +23,14 @@ from .provider_effect_repository import (
     PostgresProviderEffectRepository,
     ProviderEffectPersistenceSummary,
 )
+from .provider_query_operations import (
+    PROVIDER_QUERY_OPERATIONS_SCHEMA_VERSION,
+    ProviderQueryBacklogEntry,
+    ProviderQueryOperationsError,
+    ProviderQueryOperationsEvidence,
+    ProviderQueryOperationsObservationState,
+    build_provider_query_operations_evidence,
+)
 from .message_notification_effects import (
     BUSINESS_MESSAGE_NOTIFICATION_SCHEMA_VERSION,
     BusinessCompletionMessageNotificationPlan,
@@ -260,9 +268,15 @@ __all__ = [
     "PostgresAsyncEffectSchedulerLeaseRepository",
     "resolve_async_effect_runtime_status",
     "ProviderEffectPersistenceSummary",
+    "PROVIDER_QUERY_OPERATIONS_SCHEMA_VERSION",
+    "ProviderQueryBacklogEntry",
+    "ProviderQueryOperationsError",
+    "ProviderQueryOperationsEvidence",
+    "ProviderQueryOperationsObservationState",
     "build_business_completion_message_notification_plan",
     "build_async_effect_readiness_manifest_plan",
     "build_async_effect_worker_readiness_evidence",
+    "build_provider_query_operations_evidence",
     "build_async_effect_worker_loss_evidence",
     "admit_dead_letter",
     "authorize_dead_letter_replay",

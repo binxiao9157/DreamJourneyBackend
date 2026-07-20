@@ -18,6 +18,10 @@ from app.async_effects.contracts import (
     resolve_async_effect_runtime_status,
 )
 from app.async_effects.readiness_evidence import build_async_effect_worker_readiness_evidence
+from app.async_effects.provider_query_operations import (
+    ProviderQueryBacklogEntry,
+    build_provider_query_operations_evidence,
+)
 from app.async_effects.worker_loss_evidence import build_async_effect_worker_loss_evidence
 from app.core.config import Settings
 from app.services.store_factory import close_store, make_store, open_store
@@ -50,6 +54,9 @@ class AsyncEffectWorkerRuntime:
                     status,
                     store_supported=False,
                 ),
+                "providerQueryOperations": self._provider_query_operations_evidence(
+                    store_supported=False,
+                ),
             }
         try:
             with request_uow(
@@ -76,6 +83,21 @@ class AsyncEffectWorkerRuntime:
                         status,
                         store_supported=False,
                     )
+                provider_repository_factory = getattr(self._store, "provider_effect_repository", None)
+                if callable(provider_repository_factory):
+                    try:
+                        provider_query_backlog = provider_repository_factory().reconciliation_backlog()
+                        provider_query_operations = self._provider_query_operations_evidence(
+                            backlog_entries=provider_query_backlog,
+                        )
+                    except Exception:
+                        provider_query_operations = self._provider_query_operations_evidence(
+                            collection_error_code="providerQueryOperationsObservationFailed",
+                        )
+                else:
+                    provider_query_operations = self._provider_query_operations_evidence(
+                        store_supported=False,
+                    )
         except Exception:
             return {
                 "mode": "shadow",
@@ -85,6 +107,9 @@ class AsyncEffectWorkerRuntime:
                 "readinessEvidence": self._readiness_evidence(
                     status,
                     collection_error_code="asyncEffectBacklogObservationFailed",
+                ),
+                "providerQueryOperations": self._provider_query_operations_evidence(
+                    collection_error_code="providerQueryOperationsObservationFailed",
                 ),
             }
         return {
@@ -97,6 +122,7 @@ class AsyncEffectWorkerRuntime:
             "readinessEvidence": self._readiness_evidence(status, previews=previews),
             "expiredLeaseCount": worker_loss_evidence["expiredLeaseCount"],
             "workerLossEvidence": worker_loss_evidence,
+            "providerQueryOperations": provider_query_operations,
         }
 
     def run_once(self) -> dict[str, Any]:
@@ -165,6 +191,25 @@ class AsyncEffectWorkerRuntime:
             runtime_status=status,
             observer_worker_id=self._worker_id,
             previews=previews,
+            observed_at=observed_at,
+            expires_at=observed_at + timedelta(minutes=5),
+            store_supported=store_supported,
+            collection_error_code=collection_error_code,
+        )
+        return evidence.value_free_summary(now=observed_at)
+
+    def _provider_query_operations_evidence(
+        self,
+        *,
+        backlog_entries: Iterable[ProviderQueryBacklogEntry] = (),
+        store_supported: bool = True,
+        collection_error_code: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Expose a bounded G3 query baseline without invoking a Provider."""
+
+        observed_at = datetime.now(timezone.utc)
+        evidence = build_provider_query_operations_evidence(
+            backlog_entries=backlog_entries,
             observed_at=observed_at,
             expires_at=observed_at + timedelta(minutes=5),
             store_supported=store_supported,

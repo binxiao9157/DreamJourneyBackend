@@ -21,6 +21,7 @@ from app.async_effects.provider_effects import (
     ProviderEffectState,
     assert_same_provider_request,
 )
+from app.async_effects.provider_query_operations import ProviderQueryBacklogEntry
 
 
 _INITIAL_STATES = {ProviderEffectState.ACCEPTED, ProviderEffectState.UNKNOWN}
@@ -181,6 +182,51 @@ class InMemoryProviderEffectRepository:
         with self._lock:
             return self._project_record(self._require_record(intent))[0]
 
+    def reconciliation_backlog(self) -> tuple[ProviderQueryBacklogEntry, ...]:
+        """Return aggregate unresolved Provider evidence without identifiers.
+
+        This read-only helper is deliberately not a query executor.  It gives
+        operations a bounded denominator for the G3 query gate while leaving
+        actual Provider lookup, replay and state mutation disabled.
+        """
+
+        with self._lock:
+            buckets: dict[tuple[str, str], dict[str, int]] = {}
+            for record in self._effects.values():
+                effective_state, reconciliation_status, _manual_review = self._project_record(record)
+                if effective_state is not ProviderEffectState.UNKNOWN:
+                    continue
+                intent = self._record_intent(record)
+                bucket = buckets.setdefault(
+                    (intent.provider, intent.capability),
+                    {
+                        "unknown": 0,
+                        "pending": 0,
+                        "manual": 0,
+                        "conflict": 0,
+                    },
+                )
+                bucket["unknown"] += 1
+                if reconciliation_status == "pendingReconcile":
+                    bucket["pending"] += 1
+                elif reconciliation_status == "manualReview":
+                    bucket["manual"] += 1
+                elif reconciliation_status == "reconciliationConflict":
+                    bucket["conflict"] += 1
+                else:  # The projection must never produce an unclassified unknown.
+                    raise RuntimeError("unknown provider effect has an unsupported reconciliation status")
+            return tuple(
+                ProviderQueryBacklogEntry(
+                    provider=provider,
+                    capability=capability,
+                    unknown_effect_count=counts["unknown"],
+                    pending_reconciliation_count=counts["pending"],
+                    manual_review_count=counts["manual"],
+                    reconciliation_conflict_count=counts["conflict"],
+                )
+                for (provider, capability), counts in sorted(buckets.items())
+            )
+
     def _require_record(self, intent: ProviderEffectIntent) -> dict[str, object]:
         record = self._effects.get(intent.provider_effect_id)
         if record is None:
@@ -340,6 +386,50 @@ class PostgresProviderEffectRepository:
                 receipt_hash="",
             )
             return summary.effective_state
+
+    def reconciliation_backlog(self) -> tuple[ProviderQueryBacklogEntry, ...]:
+        """Read aggregate unresolved effects without taking a row lock.
+
+        The query intentionally omits every durable identifier and does not
+        mutate coordination, receipts or the reconciliation projection.
+        """
+
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    effect.provider_name,
+                    effect.capability,
+                    COUNT(*) AS unknown_effect_count,
+                    COUNT(*) FILTER (
+                        WHERE projection.reconciliation_status = 'pendingReconcile'
+                    ) AS pending_reconciliation_count,
+                    COUNT(*) FILTER (
+                        WHERE projection.reconciliation_status = 'manualReview'
+                    ) AS manual_review_count,
+                    COUNT(*) FILTER (
+                        WHERE projection.reconciliation_status = 'reconciliationConflict'
+                    ) AS reconciliation_conflict_count
+                FROM async_effects.provider_effects AS effect
+                INNER JOIN async_effects.provider_effect_reconciliation_projection AS projection
+                    ON projection.effect_id = effect.effect_id
+                WHERE projection.effective_state = 'unknown'
+                GROUP BY effect.provider_name, effect.capability
+                ORDER BY effect.provider_name, effect.capability
+                """
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            ProviderQueryBacklogEntry(
+                provider=str(row["provider_name"]),
+                capability=str(row["capability"]),
+                unknown_effect_count=int(row["unknown_effect_count"]),
+                pending_reconciliation_count=int(row["pending_reconciliation_count"]),
+                manual_review_count=int(row["manual_review_count"]),
+                reconciliation_conflict_count=int(row["reconciliation_conflict_count"]),
+            )
+            for row in rows
+        )
 
     def _cursor(self) -> Any:
         try:
