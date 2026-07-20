@@ -101,6 +101,11 @@ from app.domain.owner_truth.interview_candidate_single_review import (
     OwnerTruthInterviewCandidateSingleReviewNotReady,
 )
 from app.domain.owner_truth.contracts import OwnerTruthContractError
+from app.domain.owner_truth.conversation import (
+    OwnerTruthConversationAccessDenied,
+    OwnerTruthConversationConflict,
+    OwnerTruthConversationError,
+)
 from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionAccessDenied,
     OwnerTruthMemoryProjectionError,
@@ -114,6 +119,9 @@ from app.services.owner_truth_interview_candidate_batch_decision import (
 )
 from app.services.owner_truth_interview_candidate_review import (
     OwnerTruthInterviewCandidateReviewReadService,
+)
+from app.services.owner_truth_interview_session_read import (
+    OwnerTruthInterviewSessionReadService,
 )
 from app.services.owner_truth_interview_candidate_single_review import (
     OwnerTruthInterviewCandidateSingleReviewService,
@@ -680,6 +688,32 @@ def _owner_truth_interview_candidate_review_http_error(
     )
 
 
+def _owner_truth_interview_session_state_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    """Keep the private session-state read behind stable QA-only errors."""
+
+    if isinstance(error, OwnerTruthConversationAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthInterviewSessionDenied"},
+        )
+    if isinstance(error, OwnerTruthConversationConflict):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthInterviewSessionConflict"},
+        )
+    if isinstance(error, OwnerTruthConversationError):
+        return HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthInterviewSessionInvalid"},
+    )
+
+
 def _owner_truth_memory_projection_http_error(
     error: OwnerTruthMemoryProjectionError,
 ) -> HTTPException:
@@ -842,6 +876,31 @@ def _owner_truth_interview_candidate_review_read_response(
             _owner_truth_interview_candidate_review_item_response(item)
             for item in result.single_candidates
         ],
+    }
+
+
+def _owner_truth_interview_session_state_read_response(
+    *,
+    vault_id: str,
+    snapshot: Any,
+) -> Dict[str, Any]:
+    """Return only session lifecycle metadata needed by hidden QA diagnostics."""
+
+    return {
+        "schemaVersion": "owner-truth-interview-session-state-read-v1",
+        "vaultId": vault_id,
+        "session": {
+            "state": snapshot.state.value,
+            "boundary": snapshot.boundary.value,
+            "rowVersion": snapshot.row_version,
+            "threadVersion": snapshot.thread_version,
+            "ownerTurnCount": snapshot.turn_count,
+            "deepeningTurnCount": snapshot.deepening_turn_count,
+            "candidateBatchTurnCount": snapshot.candidate_batch_turn_count,
+            "fatigue": snapshot.fatigue.value,
+            "hasPendingReviewBatch": snapshot.pending_review_batch_id is not None,
+            "authorityEpoch": snapshot.authority_epoch,
+        },
     }
 
 
@@ -2415,6 +2474,35 @@ def review_owner_truth_candidate(
     return JSONResponse(
         status_code=201 if result.review.outcome == "created" else 200,
         content=_owner_truth_candidate_decision_response(result),
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/state",
+    include_in_schema=False,
+)
+def read_owner_truth_interview_session_state(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+) -> JSONResponse:
+    """QA-only private session state; it exposes no conversation content."""
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        snapshot = OwnerTruthInterviewSessionReadService(store).read(
+            session_id=session_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=_owner_truth_interview_session_state_read_response(
+            vault_id=context.vault_id,
+            snapshot=snapshot,
+        ),
+        headers={"Cache-Control": "no-store"},
     )
 
 

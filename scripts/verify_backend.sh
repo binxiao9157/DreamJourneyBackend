@@ -187,8 +187,10 @@ test -f db/migrations/0029_owner_truth_conversation_session_bootstrap.sql
 test -f db/migrations/0029_owner_truth_conversation_session_bootstrap.json
 test -f app/domain/owner_truth/conversation.py
 test -f app/services/owner_truth_conversation.py
+test -f app/services/owner_truth_interview_session_read.py
 test -f tests/test_owner_truth_conversation.py
 test -f tests/test_owner_truth_conversation_migration_contract.py
+test -f tests/test_owner_truth_interview_session_state_api.py
 test -f scripts/backend-owner-truth-conversation-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-conversation-postgres-smoke.sh
 test -f db/migrations/0033_owner_truth_interview_candidate_proposal_admission.sql

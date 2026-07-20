@@ -93,6 +93,9 @@ from app.services.owner_truth_interview_session_orchestration import (
     InterviewSessionOrchestrationSignals,
     OwnerTruthInterviewSessionOrchestrationService,
 )
+from app.services.owner_truth_interview_session_read import (
+    OwnerTruthInterviewSessionReadService,
+)
 from app.services.postgres_store import PostgresStore
 
 
@@ -846,6 +849,20 @@ def main() -> None:
         require(restored.deepening_turn_count == 1, "pacing state must survive restart")
         require(restored.candidate_batch_turn_count == 0, "acknowledgement must consume only its batch")
         require(restored.pending_review_batch_id is None, "acknowledgement must clear pending batch")
+        restored_read = OwnerTruthInterviewSessionReadService(restarted_store).read(
+            session_id=session_id,
+            context=context,
+        )
+        require(
+            restored_read.row_version == restored.row_version
+            and restored_read.thread_version == restored.thread_version,
+            "session-state read adapter must preserve persisted version fences",
+        )
+        require(
+            restored_read.pending_review_batch_id is None
+            and restored_read.boundary is InterviewBoundary.OPEN,
+            "session-state read adapter must remain value-minimized after restart",
+        )
         restored_batches = invoke(
             restarted_store,
             command_id="list-conversation-review-batch-after-restart",

@@ -53,6 +53,9 @@ from app.domain.owner_truth.source_commands import (
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
 )
+from app.services.owner_truth_conversation import (
+    InMemoryOwnerTruthConversationRepository,
+)
 from app.services.owner_truth_interview_candidate_batch_decision import (
     InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository,
 )
@@ -113,6 +116,9 @@ class InMemoryStore:
         self._owner_truth_source_receipts: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._owner_truth_candidate_review_repository = (
             InMemoryOwnerTruthCandidateReviewRepository()
+        )
+        self._owner_truth_conversation_repository = (
+            InMemoryOwnerTruthConversationRepository()
         )
         self._owner_truth_interview_candidate_review_repository = (
             InMemoryOwnerTruthInterviewCandidateReviewRepository(
@@ -192,6 +198,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthCandidateReviewRepository:
         return self._owner_truth_candidate_review_repository
+
+    def owner_truth_conversation_repository(
+        self,
+    ) -> InMemoryOwnerTruthConversationRepository:
+        return self._owner_truth_conversation_repository
 
     @contextmanager
     def request_unit_of_work(
