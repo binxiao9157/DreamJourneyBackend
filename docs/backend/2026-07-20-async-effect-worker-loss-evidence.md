@@ -86,6 +86,11 @@ files.
 
 ## Remaining `WI-S1-02-09` Work
 
-G0 and G2 are now scoped and deployed. G3 remains unstarted: Provider query
-and operations baseline, including separate authorization, audit, incident,
-and rollout gates before any real replay becomes possible.
+The internal Provider query/operations baseline is now deployed at
+`main@1d87023`; see `2026-07-20-provider-query-operations-baseline.md`. It
+observes unresolved effects without calling a Provider or enabling replay.
+
+G3 remains externally blocked: real Provider query credentials, protected
+lookup references, authorization, audit, rollout approval, and Provider
+console evidence are still required before any live query or reconcile path
+may exist.
