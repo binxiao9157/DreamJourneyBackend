@@ -60,6 +60,13 @@ from .dead_letter_effects import (
     admit_dead_letter,
     authorize_dead_letter_replay,
 )
+from .readiness_evidence import (
+    ASYNC_EFFECT_READINESS_EVIDENCE_SCHEMA_VERSION,
+    AsyncEffectReadinessEvidenceError,
+    AsyncEffectReadinessObservationState,
+    AsyncEffectWorkerReadinessEvidence,
+    build_async_effect_worker_readiness_evidence,
+)
 from .lease_repository import (
     AsyncEffectCancelResult,
     AsyncEffectJobCompletion,
@@ -104,6 +111,7 @@ from .target_admission import (
 
 __all__ = [
     "ASYNC_EFFECT_SCHEMA_VERSION",
+    "ASYNC_EFFECT_READINESS_EVIDENCE_SCHEMA_VERSION",
     "BUSINESS_MESSAGE_NOTIFICATION_SCHEMA_VERSION",
     "BusinessCompletionMessageNotificationPlan",
     "BusinessCompletionMessageSource",
@@ -137,6 +145,8 @@ __all__ = [
     "AsyncEffectLeaseError",
     "AsyncEffectLeaseLost",
     "AsyncEffectRuntimeStatus",
+    "AsyncEffectReadinessEvidenceError",
+    "AsyncEffectReadinessObservationState",
     "AsyncEffectSchedulerLease",
     "AsyncEffectSchedulerLeaseError",
     "AsyncEffectSchedulerLeaseLost",
@@ -146,6 +156,7 @@ __all__ = [
     "AsyncEffectSyntheticConsumerCommand",
     "AsyncEffectTargetAdmission",
     "AsyncEffectTargetAdmissionError",
+    "AsyncEffectWorkerReadinessEvidence",
     "EffectReceiptSummary",
     "InMemoryEffectKernelRepository",
     "InMemoryProviderEffectRepository",
@@ -177,6 +188,7 @@ __all__ = [
     "resolve_async_effect_runtime_status",
     "ProviderEffectPersistenceSummary",
     "build_business_completion_message_notification_plan",
+    "build_async_effect_worker_readiness_evidence",
     "admit_dead_letter",
     "authorize_dead_letter_replay",
     "register_device_subscription",

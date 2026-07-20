@@ -38,6 +38,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-notification-contr
 echo "== Async-effect dead-letter G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-dead-letter-contract-gate.sh
 
+echo "== Async-effect readiness/evidence G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-readiness-evidence-contract-gate.sh
+
 echo "== Backend deployment files =="
 test -f Dockerfile
 test -f docker-compose.yml
@@ -132,6 +135,9 @@ test -f scripts/run-backend-business-message-notification-contract-gate.sh
 test -f app/async_effects/dead_letter_effects.py
 test -f tests/test_async_effect_dead_letter_contract.py
 test -f scripts/run-backend-async-effect-dead-letter-contract-gate.sh
+test -f app/async_effects/readiness_evidence.py
+test -f tests/test_async_effect_readiness_evidence.py
+test -f scripts/run-backend-async-effect-readiness-evidence-contract-gate.sh
 test -f scripts/backend-owner-truth-legacy-migration-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-legacy-migration-postgres-smoke.sh
 test -f scripts/backend-owner-truth-legacy-shadow-parity-postgres-smoke.py

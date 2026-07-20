@@ -8,14 +8,16 @@ and therefore never claims or executes existing product jobs.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import json
 import socket
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from app.async_effects.contracts import (
     is_async_effect_store_ready,
     resolve_async_effect_runtime_status,
 )
+from app.async_effects.readiness_evidence import build_async_effect_worker_readiness_evidence
 from app.core.config import Settings
 from app.services.store_factory import close_store, make_store, open_store
 
@@ -43,12 +45,28 @@ class AsyncEffectWorkerRuntime:
                 "status": "blocked",
                 "reason": "asyncEffectWorkerStoreUnsupported",
                 "workerId": self._worker_id,
+                "readinessEvidence": self._readiness_evidence(
+                    status,
+                    store_supported=False,
+                ),
             }
-        with request_uow(
-            correlation_id="async-effect-worker-shadow",
-            command_id="asyncEffectWorkerShadow",
-        ):
-            previews = repository_factory().preview_eligible(limit=limit)
+        try:
+            with request_uow(
+                correlation_id="async-effect-worker-shadow",
+                command_id="asyncEffectWorkerShadow",
+            ):
+                previews = repository_factory().preview_eligible(limit=limit)
+        except Exception:
+            return {
+                "mode": "shadow",
+                "status": "blocked",
+                "reason": "asyncEffectBacklogObservationFailed",
+                "workerId": self._worker_id,
+                "readinessEvidence": self._readiness_evidence(
+                    status,
+                    collection_error_code="asyncEffectBacklogObservationFailed",
+                ),
+            }
         return {
             "mode": "shadow",
             "status": "observed",
@@ -56,6 +74,7 @@ class AsyncEffectWorkerRuntime:
             "workerId": self._worker_id,
             "eligibleJobCount": len(previews),
             "eligibleJobTypes": sorted({item.job_type for item in previews}),
+            "readinessEvidence": self._readiness_evidence(status, previews=previews),
         }
 
     def run_once(self) -> dict[str, Any]:
@@ -71,6 +90,7 @@ class AsyncEffectWorkerRuntime:
                 "status": "blocked",
                 "reason": status.reason,
                 "workerId": self._worker_id,
+                "readinessEvidence": self._readiness_evidence(status),
             }
         # No business handler is registered in this foundation slice. This is
         # deliberate: claiming a real job before its consumer contract exists
@@ -80,6 +100,7 @@ class AsyncEffectWorkerRuntime:
             "status": "idle",
             "reason": "asyncEffectNoRunnableHandlers",
             "workerId": self._worker_id,
+            "readinessEvidence": self._readiness_evidence(status),
         }
 
     def _readiness(self) -> bool:
@@ -87,6 +108,27 @@ class AsyncEffectWorkerRuntime:
         if not callable(probe):
             return False
         return is_async_effect_store_ready(probe())
+
+    def _readiness_evidence(
+        self,
+        status: Any,
+        *,
+        previews: Iterable[Any] = (),
+        store_supported: bool = True,
+        collection_error_code: Optional[str] = None,
+    ) -> dict[str, Any]:
+        observed_at = datetime.now(timezone.utc)
+        evidence = build_async_effect_worker_readiness_evidence(
+            runtime_status=status,
+            worker_id=self._worker_id,
+            previews=previews,
+            runnable_handler_count=0,
+            observed_at=observed_at,
+            expires_at=observed_at + timedelta(minutes=5),
+            store_supported=store_supported,
+            collection_error_code=collection_error_code,
+        )
+        return evidence.value_free_summary(now=observed_at)
 
 
 def _parser() -> argparse.ArgumentParser:
