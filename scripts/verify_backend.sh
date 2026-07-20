@@ -218,11 +218,14 @@ test -f db/migrations/0035_owner_truth_knowledge_dimension_confirmation_receipts
 test -f db/migrations/0035_owner_truth_knowledge_dimension_confirmation_receipts.json
 test -f app/services/owner_truth_knowledge_dimension_confirmation.py
 test -f app/domain/owner_truth/knowledge_dimension_read.py
+test -f app/services/owner_truth_knowledge_recommendation_read.py
 test -f scripts/backend-owner-truth-knowledge-dimension-confirmation-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-knowledge-dimension-confirmation-postgres-smoke.sh
 test -f tests/test_owner_truth_knowledge_dimension_confirmation.py
 test -f tests/test_owner_truth_knowledge_dimension_confirmation_api.py
 test -f tests/test_owner_truth_knowledge_dimension_confirmation_migration_contract.py
+test -f tests/test_owner_truth_knowledge_recommendation_read.py
+test -f tests/test_owner_truth_knowledge_recommendation_read_api.py
 test -f tests/test_owner_truth_interview_candidate_batch_decision_migration_contract.py
 test -f app/domain/owner_truth/interview_candidate_single_review.py
 test -f app/services/owner_truth_interview_candidate_single_review.py

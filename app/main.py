@@ -122,6 +122,7 @@ from app.domain.owner_truth.memory_projection import (
     projection_summary,
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.knowledge_recommendations import RecommendationCandidate
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.owner_truth_interview_candidate_batch_decision import (
@@ -165,6 +166,10 @@ from app.services.owner_truth_knowledge_dimension_confirmation import (
     OwnerTruthKnowledgeDimensionConfirmationService,
     OwnerTruthKnowledgeDimensionConfirmationStaleMemory,
     confirmation_summary as knowledge_dimension_confirmation_summary,
+)
+from app.services.owner_truth_knowledge_recommendation_read import (
+    OwnerTruthKnowledgeRecommendationReadError,
+    OwnerTruthKnowledgeRecommendationReadService,
 )
 from app.services.owner_truth_correction_request import (
     OwnerTruthCorrectionRequestAccessDenied,
@@ -344,6 +349,9 @@ OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = bool(
 OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = bool(
     settings.owner_truth_knowledge_dimension_confirmation_qa_enabled
 )
+OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = bool(
+    settings.owner_truth_knowledge_recommendation_read_qa_enabled
+)
 AUTH_ACCESS_TTL_SECONDS = max(60, settings.auth_access_ttl_seconds)
 AUTH_REFRESH_TTL_SECONDS = max(AUTH_ACCESS_TTL_SECONDS + 60, settings.auth_refresh_ttl_seconds)
 AUTH_LEGACY_PHONE_LOGIN_ENABLED = legacy_phone_login_enabled(settings)
@@ -481,6 +489,28 @@ def _require_owner_truth_knowledge_dimension_confirmation_qa(request: Request) -
     return user_id
 
 
+def _require_owner_truth_knowledge_recommendation_read_qa(request: Request) -> str:
+    """Keep M0-B recommendation QA unavailable outside a separate gate."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthKnowledgeRecommendationReadUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthKnowledgeRecommendationReadUserSessionRequired"},
+        )
+    return user_id
+
+
 def _require_owner_truth_correction_request_qa(request: Request) -> str:
     """Keep Answer/Citation correction requests unavailable outside Owner QA."""
 
@@ -592,6 +622,19 @@ def _owner_truth_knowledge_dimension_confirmation_context(
     vault_id: str,
 ) -> OwnerTruthCommandContext:
     owner_subject_id = _require_owner_truth_knowledge_dimension_confirmation_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
+def _owner_truth_knowledge_recommendation_read_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_knowledge_recommendation_read_qa(request)
     return OwnerTruthCommandContext(
         vault_id=vault_id,
         owner_subject_id=owner_subject_id,
@@ -823,6 +866,25 @@ def _owner_truth_knowledge_dimension_confirmation_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthKnowledgeDimensionConfirmationInvalid"},
+    )
+
+
+def _owner_truth_knowledge_recommendation_read_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthMemoryProjectionAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthKnowledgeRecommendationReadDenied"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeRecommendationReadError):
+        return HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthKnowledgeRecommendationReadInvalid"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthKnowledgeRecommendationReadInvalid"},
     )
 
 
@@ -3068,6 +3130,168 @@ def confirm_owner_truth_knowledge_dimension(
             "schemaVersion": "owner-truth-knowledge-dimension-confirmation-response-v1",
             "status": result.outcome,
             "confirmation": knowledge_dimension_confirmation_summary(result),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+_OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_CANDIDATE_FIELDS = frozenset(
+    {
+        "candidateId",
+        "slot",
+        "threadId",
+        "targetDimension",
+        "missingFacet",
+        "questionTemplateId",
+        "evidenceKind",
+        "evidenceRefs",
+        "reasonCode",
+        "explicitIntentPriority",
+        "continuityScore",
+        "importanceScore",
+        "isAccessible",
+        "isDoNotAsk",
+        "isInCooldown",
+        "consecutiveSkipCount",
+        "wasReopenedByUser",
+        "isSensitive",
+        "hasRecentUserConsent",
+        "isAiInferenceOnly",
+        "isDeleted",
+        "isRevoked",
+        "isDisputed",
+        "isMinorRisk",
+        "requiresPersona",
+        "expiresAt",
+    }
+)
+
+_OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_FIELDS = frozenset(
+    {
+        "candidates",
+        "crisisActive",
+    }
+)
+
+
+def _owner_truth_knowledge_recommendation_candidate(
+    payload: Any,
+    *,
+    owner_subject_id: str,
+    vault_id: str,
+) -> RecommendationCandidate:
+    """Parse a strict, value-free candidate envelope for hidden QA only."""
+
+    if not isinstance(payload, dict):
+        raise OwnerTruthKnowledgeRecommendationReadError("recommendation candidate must be an object")
+    unsupported = sorted(set(payload).difference(_OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_CANDIDATE_FIELDS))
+    if unsupported:
+        raise OwnerTruthKnowledgeRecommendationReadError(
+            "recommendation candidate contains unsupported fields"
+        )
+    evidence_refs = payload.get("evidenceRefs")
+    if not isinstance(evidence_refs, list):
+        raise OwnerTruthKnowledgeRecommendationReadError("recommendation candidate evidenceRefs must be a list")
+    expires_at = payload.get("expiresAt")
+    if expires_at is not None:
+        if not isinstance(expires_at, str):
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "recommendation candidate expiresAt must be an ISO timestamp"
+            )
+        try:
+            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "recommendation candidate expiresAt must be an ISO timestamp"
+            ) from error
+        if expires_at.tzinfo is None:
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "recommendation candidate expiresAt must include a timezone"
+            )
+    return RecommendationCandidate(
+        candidate_id=payload.get("candidateId"),
+        owner_subject_id=owner_subject_id,
+        vault_id=vault_id,
+        slot=payload.get("slot"),
+        thread_id=payload.get("threadId"),
+        target_dimension=payload.get("targetDimension"),
+        missing_facet=payload.get("missingFacet"),
+        question_template_id=payload.get("questionTemplateId"),
+        evidence_kind=payload.get("evidenceKind"),
+        evidence_refs=tuple(evidence_refs),
+        reason_code=payload.get("reasonCode"),
+        explicit_intent_priority=payload.get("explicitIntentPriority", 0),
+        continuity_score=payload.get("continuityScore", 0),
+        importance_score=payload.get("importanceScore", 0),
+        is_accessible=payload.get("isAccessible", True),
+        is_do_not_ask=payload.get("isDoNotAsk", False),
+        is_in_cooldown=payload.get("isInCooldown", False),
+        consecutive_skip_count=payload.get("consecutiveSkipCount", 0),
+        was_reopened_by_user=payload.get("wasReopenedByUser", False),
+        is_sensitive=payload.get("isSensitive", False),
+        has_recent_user_consent=payload.get("hasRecentUserConsent", False),
+        is_ai_inference_only=payload.get("isAiInferenceOnly", False),
+        is_deleted=payload.get("isDeleted", False),
+        is_revoked=payload.get("isRevoked", False),
+        is_disputed=payload.get("isDisputed", False),
+        is_minor_risk=payload.get("isMinorRisk", False),
+        requires_persona=payload.get("requiresPersona", False),
+        expires_at=expires_at,
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/knowledge-recommendations/read",
+    include_in_schema=False,
+)
+def read_owner_truth_knowledge_recommendations(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Read receipt-bound M0-B selection policy without exposing Echo UI.
+
+    This is a default-off QA adapter. It does not generate question text, write
+    a recommendation record, call a provider, or alter a ConversationThread,
+    Candidate, DecisionReceipt, MemoryVersion, or projection.
+    """
+
+    try:
+        context = _owner_truth_knowledge_recommendation_read_context(
+            request,
+            vault_id=vault_id,
+        )
+        unsupported = sorted(
+            set(payload).difference(_OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_FIELDS)
+        )
+        if unsupported:
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "knowledge recommendation read contains unsupported fields"
+            )
+        raw_candidates = payload.get("candidates")
+        if not isinstance(raw_candidates, list):
+            raise OwnerTruthKnowledgeRecommendationReadError("candidates must be a list")
+        candidates = tuple(
+            _owner_truth_knowledge_recommendation_candidate(
+                item,
+                owner_subject_id=context.owner_subject_id,
+                vault_id=context.vault_id,
+            )
+            for item in raw_candidates
+        )
+        result = OwnerTruthKnowledgeRecommendationReadService(store).read(
+            context=context,
+            candidates=candidates,
+            crisis_active=payload.get("crisisActive", False),
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_knowledge_recommendation_read_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-knowledge-recommendation-read-response-v1",
+            "vaultId": context.vault_id,
+            "recommendations": result.value_free_summary(),
         },
         headers={"Cache-Control": "no-store"},
     )

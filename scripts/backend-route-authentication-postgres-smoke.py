@@ -17,7 +17,7 @@ MACHINE_TOKEN = os.environ.get(
 ).strip()
 # Keep this explicit so a deployed smoke also proves the expected release
 # inventory, not merely that the server and its local registry agree.
-EXPECTED_ROUTE_COUNT = 100
+EXPECTED_ROUTE_COUNT = 101
 
 
 def require(condition, message):

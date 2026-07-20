@@ -18,7 +18,9 @@ if [[ -f tests/test_owner_truth_knowledge_recommendations.py && -f tests/test_ow
     tests.test_owner_truth_knowledge_recommendations \
     tests.test_owner_truth_knowledge_dimension_read \
     tests.test_owner_truth_knowledge_dimension_confirmation \
-    tests.test_owner_truth_knowledge_dimension_confirmation_migration_contract
+    tests.test_owner_truth_knowledge_dimension_confirmation_migration_contract \
+    tests.test_owner_truth_knowledge_recommendation_read \
+    tests.test_owner_truth_knowledge_recommendation_read_api
 else
   echo "Owner Truth knowledge recommendation unit tests unavailable in this image; running deployed policy smoke"
 fi

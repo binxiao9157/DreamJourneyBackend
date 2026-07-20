@@ -264,6 +264,7 @@ def main() -> None:
     previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
     previous_candidate_qa = main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
     previous_confirmation_qa = main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
+    previous_recommendation_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED
 
     try:
         create_database(admin_dsn, database_name)
@@ -364,6 +365,58 @@ def main() -> None:
             "only the explicit receipt may contribute dimension coverage",
         )
 
+        recommendation_path = f"/v2/vaults/{vault_id}/knowledge-recommendations/read"
+        recommendation_payload = {
+            "candidates": [
+                {
+                    "candidateId": "confirmation-smoke-continuity",
+                    "slot": "continuity",
+                    "threadId": "confirmation-smoke-thread",
+                    "targetDimension": "keyDecisions",
+                    "missingFacet": "outcome",
+                    "questionTemplateId": "confirmation-smoke-template",
+                    "evidenceKind": "confirmedMemory",
+                    "evidenceRefs": [memory_version_id],
+                    "reasonCode": "qaConfirmedMemory",
+                }
+            ]
+        }
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = False
+        recommendation_hidden = client.post(
+            recommendation_path,
+            headers=owner_headers,
+            json=recommendation_payload,
+        )
+        require(
+            recommendation_hidden.status_code == 404,
+            "knowledge recommendation read route must default hidden",
+        )
+        require(
+            route_code(recommendation_hidden) == "ownerTruthKnowledgeRecommendationReadUnavailable",
+            "hidden recommendation route must expose a stable unavailable code",
+        )
+
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = True
+        recommendation_read = client.post(
+            recommendation_path,
+            headers=owner_headers,
+            json=recommendation_payload,
+        )
+        require(
+            recommendation_read.status_code == 200,
+            f"recommendation read failed: {recommendation_read.text}",
+        )
+        recommendation_body = recommendation_read.json()
+        selected = (recommendation_body.get("recommendations") or {}).get("selected") or []
+        require(
+            [item.get("slot") for item in selected] == ["continuity"],
+            "receipt-bound recommendation read must select only the verified continuity candidate",
+        )
+        require(
+            "只用于隔离" not in recommendation_read.text and "claim" not in recommendation_read.text,
+            "recommendation read response leaked memory text",
+        )
+
         stale = client.post(
             path,
             headers=owner_headers,
@@ -408,7 +461,8 @@ def main() -> None:
         print(
             "owner truth knowledge dimension confirmation postgres smoke passed "
             f"schemaHead={verified['expectedHead']} defaultHidden=true receiptCreated=true "
-            "receiptReplay=true hashBound=true appendOnly=true supersededReceiptExcluded=true"
+            "receiptReplay=true hashBound=true appendOnly=true recommendationRead=true "
+            "supersededReceiptExcluded=true"
         )
     finally:
         main_module.store = previous_store
@@ -418,6 +472,7 @@ def main() -> None:
         main_module.AUTH_OWNERSHIP_MODE = previous_ownership_mode
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = previous_candidate_qa
         main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = previous_confirmation_qa
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = previous_recommendation_qa
         if store is not None:
             store.close_pool()
         try:

@@ -77,12 +77,15 @@ DATABASE_URL='<admin postgres dsn>' \
 ```
 
 The disposable smoke proves route gating, receipt creation/replay, stale-hash
-rejection, append-only enforcement, and automatic exclusion after the current
-memory version changes. It does not write product data or enable QA flags in
-the deployed runtime.
+rejection, append-only enforcement, receipt-bound value-free recommendation
+read, and automatic exclusion after the current memory version changes. It
+does not write product data or enable QA flags in the deployed runtime.
 
 ## Gate Disposition
 
-This establishes a safe M0-B confirmation evidence boundary only. Public
-knowledge-map UI, recommendation routing, broader owner review journeys, and
-any Echo use remain outside this slice and must pass their own gates.
+This establishes a safe M0-B confirmation evidence boundary only. The
+separate QA-only recommendation read adapter is documented in
+`2026-07-21-owner-truth-knowledge-recommendation-read.md`; it remains
+disabled by default and does not expose public recommendation routing. Public
+knowledge-map UI, broader owner review journeys, and any Echo use remain
+outside this slice and must pass their own gates.

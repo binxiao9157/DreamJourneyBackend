@@ -1,0 +1,234 @@
+"""Fail-closed, value-free QA reads for the M0-B recommendation selector.
+
+The selector is deliberately not connected to Echo or a public recommendation
+surface here.  This adapter only proves that QA candidate references are bound
+to the current Owner-confirmed MemoryVersion set before the deterministic
+policy selects at most one continuity and one breadth recommendation.
+"""
+
+from __future__ import annotations
+
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Iterable, Optional, Protocol
+
+from app.domain.owner_truth.contracts import OwnerTruthContractError
+from app.domain.owner_truth.knowledge_dimension_read import (
+    OWNER_TRUTH_KNOWLEDGE_DIMENSION_READ_SCHEMA_VERSION,
+    OwnerTruthKnowledgeDimensionReadResult,
+    OwnerTruthKnowledgeDimensionReadService,
+    OwnerTruthKnowledgeDimensionReadState,
+)
+from app.domain.owner_truth.knowledge_recommendations import (
+    KNOWLEDGE_DIMENSION_POLICY_VERSION,
+    RECOMMENDATION_SELECTION_SCHEMA_VERSION,
+    RecommendationCandidate,
+    RecommendationEvidenceKind,
+    RecommendationSelection,
+    RecommendationSelector,
+)
+from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+
+
+OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_SCHEMA_VERSION = (
+    "owner-truth-knowledge-recommendation-read-v1"
+)
+
+
+class OwnerTruthKnowledgeRecommendationReadError(OwnerTruthContractError):
+    """A QA-only recommendation read is malformed or not safely bound."""
+
+
+class OwnerTruthKnowledgeRecommendationReadStore(Protocol):
+    def request_unit_of_work(
+        self,
+        *,
+        correlation_id: str,
+        command_id: str,
+    ) -> AbstractContextManager[Any]:
+        ...
+
+    def owner_truth_memory_projection_repository(self) -> Any:
+        ...
+
+    def owner_truth_knowledge_dimension_confirmation_repository(self) -> Any:
+        ...
+
+
+@dataclass(frozen=True)
+class OwnerTruthKnowledgeRecommendationReadResult:
+    """A value-free composition of receipt-backed coverage and selection."""
+
+    dimension_read: OwnerTruthKnowledgeDimensionReadResult
+    selection: Optional[RecommendationSelection]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dimension_read, OwnerTruthKnowledgeDimensionReadResult):
+            raise TypeError("dimension_read must be an OwnerTruthKnowledgeDimensionReadResult")
+        if self.dimension_read.state is OwnerTruthKnowledgeDimensionReadState.READY:
+            if self.selection is None:
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "ready knowledge dimension read requires a recommendation selection"
+                )
+            if (
+                self.selection.owner_subject_id != self.dimension_read.owner_subject_id
+                or self.selection.vault_id != self.dimension_read.vault_id
+            ):
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "recommendation selection scope does not match dimension read"
+                )
+        elif self.selection is not None:
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "non-ready knowledge dimension reads must not retain a recommendation selection"
+            )
+
+    @property
+    def state(self) -> OwnerTruthKnowledgeDimensionReadState:
+        return self.dimension_read.state
+
+    def value_free_summary(self) -> dict[str, object]:
+        """Return no raw memory, candidate, message, or template text."""
+
+        summary: dict[str, object] = {
+            "schemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_SCHEMA_VERSION,
+            "selectionState": self.dimension_read.state.value,
+            "dimensionReadSchemaVersion": OWNER_TRUTH_KNOWLEDGE_DIMENSION_READ_SCHEMA_VERSION,
+            "dimensionRead": self.dimension_read.value_free_summary(),
+            "selected": [],
+            "filtered": [],
+            "policyVersion": KNOWLEDGE_DIMENSION_POLICY_VERSION,
+            "selectionSchemaVersion": RECOMMENDATION_SELECTION_SCHEMA_VERSION,
+        }
+        if self.selection is not None:
+            selection_summary = self.selection.value_free_summary()
+            summary["selected"] = selection_summary["selected"]
+            summary["filtered"] = selection_summary["filtered"]
+            summary["policyVersion"] = selection_summary["policyVersion"]
+            summary["selectionSchemaVersion"] = selection_summary["schemaVersion"]
+        return summary
+
+
+class OwnerTruthKnowledgeRecommendationReadService:
+    """Compose existing receipt-backed coverage with the pure selector.
+
+    The caller may supply only typed, value-free QA candidates.  A candidate is
+    accepted only when every evidence reference is a current explicit Owner
+    confirmation in the same dimension read.  No candidate or selection is
+    persisted by this adapter.
+    """
+
+    def __init__(
+        self,
+        store: OwnerTruthKnowledgeRecommendationReadStore,
+        *,
+        selector: RecommendationSelector | None = None,
+    ) -> None:
+        self._store = store
+        self._selector = selector or RecommendationSelector()
+
+    def read(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        candidates: Iterable[RecommendationCandidate],
+        now: Optional[datetime] = None,
+        crisis_active: bool = False,
+    ) -> OwnerTruthKnowledgeRecommendationReadResult:
+        if not isinstance(context, OwnerTruthCommandContext):
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "owner truth command context is required"
+            )
+        if not isinstance(crisis_active, bool):
+            raise OwnerTruthKnowledgeRecommendationReadError("crisis_active must be a boolean")
+        candidate_rows = self._candidate_rows(candidates)
+        current_time = self._current_time(now)
+        with self._store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-knowledge-recommendation-read-"
+                f"{context.vault_id}:{context.owner_subject_id}"
+            ),
+            command_id="ownerTruthKnowledgeRecommendationRead",
+        ):
+            dimension_read = OwnerTruthKnowledgeDimensionReadService(
+                self._store.owner_truth_memory_projection_repository(),
+                self._store.owner_truth_knowledge_dimension_confirmation_repository(),
+            ).read(context=context)
+            if dimension_read.state is not OwnerTruthKnowledgeDimensionReadState.READY:
+                return OwnerTruthKnowledgeRecommendationReadResult(
+                    dimension_read=dimension_read,
+                    selection=None,
+                )
+            assert dimension_read.coverage is not None
+            self._assert_current_owner_confirmed_evidence(
+                candidates=candidate_rows,
+                dimension_read=dimension_read,
+            )
+            selection = self._selector.select(
+                owner_subject_id=context.owner_subject_id,
+                vault_id=context.vault_id,
+                coverage=dimension_read.coverage,
+                candidates=candidate_rows,
+                now=current_time,
+                crisis_active=crisis_active,
+            )
+            return OwnerTruthKnowledgeRecommendationReadResult(
+                dimension_read=dimension_read,
+                selection=selection,
+            )
+
+    @staticmethod
+    def _candidate_rows(
+        candidates: Iterable[RecommendationCandidate],
+    ) -> tuple[RecommendationCandidate, ...]:
+        try:
+            rows = tuple(candidates)
+        except TypeError as exc:
+            raise OwnerTruthKnowledgeRecommendationReadError("candidates must be iterable") from exc
+        if any(not isinstance(candidate, RecommendationCandidate) for candidate in rows):
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "candidates must contain RecommendationCandidate"
+            )
+        return rows
+
+    @staticmethod
+    def _current_time(now: Optional[datetime]) -> datetime:
+        if now is None:
+            return datetime.now(timezone.utc)
+        if not isinstance(now, datetime) or now.tzinfo is None:
+            raise OwnerTruthKnowledgeRecommendationReadError("now must be timezone-aware")
+        return now.astimezone(timezone.utc)
+
+    @staticmethod
+    def _assert_current_owner_confirmed_evidence(
+        *,
+        candidates: Iterable[RecommendationCandidate],
+        dimension_read: OwnerTruthKnowledgeDimensionReadResult,
+    ) -> None:
+        assert dimension_read.coverage is not None
+        allowed = frozenset(dimension_read.included_memory_version_ids)
+        for candidate in candidates:
+            if candidate.evidence_kind is not RecommendationEvidenceKind.CONFIRMED_MEMORY:
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "QA recommendation candidates must use confirmedMemory evidence"
+                )
+            if not set(candidate.evidence_refs).issubset(allowed):
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "candidate evidence_refs must reference current owner-confirmed MemoryVersion records"
+                )
+            dimension_refs = frozenset(
+                dimension_read.coverage.for_dimension(candidate.target_dimension).memory_version_ids
+            )
+            if not set(candidate.evidence_refs).issubset(dimension_refs):
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "candidate evidence_refs must confirm the target knowledge dimension"
+                )
+
+
+__all__ = [
+    "OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_SCHEMA_VERSION",
+    "OwnerTruthKnowledgeRecommendationReadError",
+    "OwnerTruthKnowledgeRecommendationReadResult",
+    "OwnerTruthKnowledgeRecommendationReadService",
+    "OwnerTruthKnowledgeRecommendationReadStore",
+]

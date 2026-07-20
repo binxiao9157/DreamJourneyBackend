@@ -16,6 +16,7 @@ import json
 from typing import Any, Iterable, Mapping, Optional, Protocol
 
 from .contracts import OwnerTruthContractError, require_nonblank
+from .candidate_decisions import OwnerTruthCandidateReviewAccessDenied
 from .knowledge_recommendations import (
     ConfirmedMemoryDimensionEvidence,
     DimensionProjection,
@@ -181,7 +182,27 @@ class OwnerTruthKnowledgeDimensionReadService:
             raise OwnerTruthMemoryProjectionAccessDenied(
                 "only the Vault Owner may read knowledge dimension coverage"
             )
-        snapshot = self._memory_projection_reader.read(context=context)
+        try:
+            snapshot = self._memory_projection_reader.read(context=context)
+        except OwnerTruthCandidateReviewAccessDenied as error:
+            # In-memory and persistence-backed projection readers may expose
+            # their lower-level Vault denial directly. Normalize it at this
+            # read boundary so callers never mistake an ownership failure for
+            # an invalid receipt or candidate payload.
+            raise OwnerTruthMemoryProjectionAccessDenied(str(error)) from error
+        if (
+            not isinstance(snapshot, Mapping)
+            or str(snapshot.get("vaultId") or "").strip() != context.vault_id
+            or str(snapshot.get("ownerSubjectId") or "").strip()
+            != context.owner_subject_id
+        ):
+            # A repository may return a checkpoint belonging to another Owner
+            # only when its scope boundary is broken. Treat that as denial,
+            # rather than a malformed caller request, and never continue to
+            # inspect receipts or coverage.
+            raise OwnerTruthMemoryProjectionAccessDenied(
+                "memory projection is not active for this Owner Vault"
+            )
         confirmations: Iterable[Mapping[str, Any]] = ()
         if self._confirmation_reader is not None:
             confirmations = self._confirmation_reader.list_for_projection(

@@ -241,6 +241,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthKnowledgeDimensionConfirmation",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/knowledge-recommendations/read",
+                session,
+                "ownerTruthKnowledgeRecommendationRead",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/interview-sessions/{session_id}/state",
                 session,
