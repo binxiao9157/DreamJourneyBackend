@@ -54,6 +54,29 @@ The focused gate validates the inventory schema, rejects payload-bearing
 metadata, rejects a self-authorized direct-effect retirement, and proves every
 catalogued marker still exists in source.
 
+## Deployment Evidence
+
+Backend commits `2184116` and `101e258` were pushed to `main` and deployed to
+`miao-server`. The `api` image was rebuilt and the API container recreated;
+`/ready` reported database, schema, auth, and incident components ready.
+
+The deployed image intentionally contains application and script code but not
+test modules, documentation, or systemd unit files. The production source
+smoke therefore ran the deployed image with the checked-out `docs` and
+`deploy` directories mounted read-only:
+
+```bash
+sudo docker compose run --rm --no-deps \
+  -v "$PWD/docs:/app/docs:ro" \
+  -v "$PWD/deploy:/app/deploy:ro" \
+  api python scripts/check_legacy_timer_callback_inventory.py
+```
+
+It passed with 10 entries, 11 source references, 3 legacy direct-effect
+surfaces, 4 host-unverified surfaces, and 1 external Provider boundary. The
+smoke does not access production business rows, start a worker, or inspect or
+change server timer state.
+
 ## Remaining Gates
 
 - **G0 follow-up:** decide and implement lifecycle-safe handling for each
