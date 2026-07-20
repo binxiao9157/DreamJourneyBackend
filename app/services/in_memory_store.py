@@ -127,6 +127,10 @@ class InMemoryStore:
         self._delegated_access_lock = RLock()
         self._care_snapshots: Dict[str, List[Dict[str, Any]]] = {}
         self._echo_delayed_replies: Dict[str, List[Dict[str, Any]]] = {}
+        # V4 delayed-reply Answers intentionally live outside the Inbox
+        # projection. The in-memory store only needs the read shape for local
+        # contract tests while the typed completion writer remains server-off.
+        self._echo_delayed_reply_answers: Dict[str, List[Dict[str, Any]]] = {}
         self._push_device_tokens: Dict[str, List[Dict[str, Any]]] = {}
         self._voice_profiles: Dict[str, List[Dict[str, Any]]] = {}
         self._voice_clone_slots: Dict[str, Dict[str, Any]] = {}
@@ -1574,6 +1578,7 @@ class InMemoryStore:
             "grantEvent": sum(len(self._grant_events.get(grant_id, [])) for grant_id in grant_ids),
             "care": len(self._care_snapshots.get(user_id, [])),
             "echo": len(self._echo_delayed_replies.get(user_id, [])),
+            "echoDelayedReplyAnswer": len(self._echo_delayed_reply_answers.get(user_id, [])),
             "pushToken": len(self._push_device_tokens.get(user_id, [])),
             "voiceProfile": len(self._voice_profiles.get(user_id, [])),
             "voiceCloneSlotRetired": sum(
@@ -1670,6 +1675,7 @@ class InMemoryStore:
                 self._family_relationships.pop(relationship_id, None)
             self._care_snapshots.pop(user_id, None)
             self._echo_delayed_replies.pop(user_id, None)
+            self._echo_delayed_reply_answers.pop(user_id, None)
             self._push_device_tokens.pop(user_id, None)
             self._digital_human_sessions = {
                 session_id: lease
@@ -2480,6 +2486,36 @@ class InMemoryStore:
 
     def list_echo_delayed_replies(self, user_id: str) -> List[Dict[str, Any]]:
         return deepcopy(self._echo_delayed_replies.get(user_id, []))
+
+    def get_echo_delayed_reply_answer_receipt(
+        self,
+        user_id: str,
+        delayed_reply_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the private Answer with its aggregate, never an Inbox body."""
+
+        reply = next(
+            (
+                candidate
+                for candidate in self._echo_delayed_replies.get(user_id, [])
+                if str(candidate.get("id") or candidate.get("delayedReplyId") or "") == delayed_reply_id
+            ),
+            None,
+        )
+        if reply is None:
+            return None
+        answer = next(
+            (
+                candidate
+                for candidate in self._echo_delayed_reply_answers.get(user_id, [])
+                if str(candidate.get("delayedReplyId") or "") == delayed_reply_id
+            ),
+            None,
+        )
+        return {
+            "reply": deepcopy(reply),
+            "answer": None if answer is None else deepcopy(answer),
+        }
 
     def mark_due_echo_delayed_replies_for_dispatch(
         self,

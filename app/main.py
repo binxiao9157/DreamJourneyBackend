@@ -994,6 +994,7 @@ def _ownership_path_user_id(path: str) -> str:
         r"^/memories/([^/]+)$",
         r"^/archive/items/([^/]+)(?:/|$)",
         r"^/mailbox/letters/([^/]+)(?:/|$)",
+        r"^/echo/delayed-replies/([^/]+)/[^/]+/answer$",
         r"^/echo/delayed-replies/([^/]+)$",
         r"^/family/members/([^/]+)(?:/|$)",
         r"^/care/snapshots/(?:latest/)?([^/]+)$",
@@ -5277,6 +5278,115 @@ def _sanitize_echo_delayed_reply_payload(payload: Dict[str, Any]) -> Dict[str, A
     }
 
 
+def _echo_delayed_reply_field(item: Dict[str, Any], name: str) -> Any:
+    metadata = item.get("metadata")
+    if item.get(name) is not None:
+        return item.get(name)
+    return metadata.get(name) if isinstance(metadata, dict) else None
+
+
+def _echo_delayed_reply_answer_read_contract(
+    receipt: Dict[str, Any],
+    *,
+    user_id: str,
+    delayed_reply_id: str,
+) -> Dict[str, Any]:
+    """Build the Owner-only result for a persisted V4 delayed reply Answer."""
+
+    reply = receipt.get("reply")
+    answer = receipt.get("answer")
+    if not isinstance(reply, dict):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "echo_delayed_reply_not_found", "retryable": False},
+        )
+
+    protocol = str(_echo_delayed_reply_field(reply, "deliveryProtocolVersion") or "").strip()
+    state = str(_echo_delayed_reply_field(reply, "deliveryState") or "scheduled").strip()
+    if protocol != ECHO_DELAYED_REPLY_SCHEMA_VERSION:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "echo_delayed_reply_answer_legacy_unavailable",
+                "deliveryState": state,
+                "retryable": False,
+            },
+        )
+    if state != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "echo_delayed_reply_answer_not_ready",
+                "deliveryState": state,
+                "retryable": state in {"scheduled", "ready", "generating", "unknown"},
+            },
+        )
+    if not isinstance(answer, dict):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "echo_delayed_reply_answer_reconcile_required",
+                "deliveryState": state,
+                "retryable": True,
+            },
+        )
+
+    answer_id = str(answer.get("answerId") or answer.get("id") or "").strip()
+    expected_answer_id = str(_echo_delayed_reply_field(reply, "responseAnswerId") or "").strip()
+    if (
+        not answer_id
+        or answer_id != expected_answer_id
+        or str(answer.get("ownerSubjectId") or answer.get("userId") or "").strip() != user_id
+        or str(answer.get("delayedReplyId") or "").strip() != delayed_reply_id
+        or str(answer.get("schemaVersion") or "").strip() != ECHO_DELAYED_REPLY_SCHEMA_VERSION
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "echo_delayed_reply_answer_reconcile_required",
+                "deliveryState": state,
+                "retryable": True,
+            },
+        )
+
+    body = str(answer.get("body") or "").strip()
+    if not body:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "echo_delayed_reply_answer_reconcile_required",
+                "deliveryState": state,
+                "retryable": True,
+            },
+        )
+
+    return {
+        "status": "completed",
+        "userId": user_id,
+        "delayedReplyId": delayed_reply_id,
+        "answer": {
+            "answerId": answer_id,
+            "body": body,
+            "completedAt": str(answer.get("completedAt") or ""),
+            "conversationId": str(answer.get("conversationId") or ""),
+            "requestId": str(answer.get("requestId") or ""),
+            "replyGeneration": answer.get("replyGeneration"),
+            "contextReceipt": {
+                "contextHash": str(answer.get("contextHash") or ""),
+                "contextVersion": str(answer.get("contextVersion") or ""),
+                "citationReceiptHash": str(answer.get("citationReceiptHash") or ""),
+                "policyVersion": str(answer.get("policyVersion") or ""),
+            },
+        },
+        "receipt": {
+            "deliveryState": state,
+            "deliveryProtocolVersion": protocol,
+            "mailboxProjectionBodyRedacted": True,
+            "sourceAnswerId": answer_id,
+        },
+    }
+
+
 def _enforce_echo_delayed_reply_safety(payload: Dict[str, Any]) -> None:
     raw_transcript = str(payload.get("rawTranscript") or "").strip()
     if not raw_transcript:
@@ -5368,6 +5478,26 @@ def dispatch_due_time_letters(payload: Dict[str, Any]) -> Dict[str, Any]:
 def list_echo_delayed_replies(request: Request, user_id: str) -> Dict[str, Any]:
     user_id = _principal_path_owner(request, user_id)
     return {"userId": user_id, "items": store.list_echo_delayed_replies(user_id)}
+
+
+@app.get("/echo/delayed-replies/{user_id}/{delayed_reply_id}/answer")
+def get_echo_delayed_reply_answer(
+    request: Request,
+    user_id: str,
+    delayed_reply_id: str,
+) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
+    receipt = store.get_echo_delayed_reply_answer_receipt(user_id, delayed_reply_id)
+    if receipt is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "echo_delayed_reply_not_found", "retryable": False},
+        )
+    return _echo_delayed_reply_answer_read_contract(
+        receipt,
+        user_id=user_id,
+        delayed_reply_id=delayed_reply_id,
+    )
 
 
 @app.post("/family/invite")

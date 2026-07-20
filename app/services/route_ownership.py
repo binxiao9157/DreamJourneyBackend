@@ -515,6 +515,11 @@ class RouteOwnershipRegistry:
                 required_scopes=("timeLetter:dispatch",),
             ),
             _owner_path("GET", "/echo/delayed-replies/{user_id}", "echoOwner"),
+            _owner_path(
+                "GET",
+                "/echo/delayed-replies/{user_id}/{delayed_reply_id}/answer",
+                "echoOwner",
+            ),
             _owner_body("POST", "/family/invite", "familyOwner"),
             _owner_path("GET", "/family/members/{user_id}", "familyOwner"),
             _owner_body("POST", "/family/access-grants", "familyGrantOwner"),

@@ -545,6 +545,36 @@ class FakeCursor:
                 )
             else:
                 self.result = [{"payload": item} for item in self.connection.mailbox_letters.get(user_id, [])]
+        elif normalized.startswith("SELECT reply.payload AS reply_payload,"):
+            user_id, owner_subject_id, delayed_reply_id = params
+            reply = next(
+                (
+                    item
+                    for item in self.connection.echo_delayed_replies.get(user_id, [])
+                    if item.get("id") == delayed_reply_id
+                    and str(item.get("ownerSubjectId") or user_id) == owner_subject_id
+                ),
+                None,
+            )
+            answer = next(
+                (
+                    item
+                    for item in self.connection.echo_delayed_reply_answers.values()
+                    if item.get("userId") == user_id
+                    and str(item.get("ownerSubjectId") or user_id) == owner_subject_id
+                    and str(item.get("vaultId") or user_id) == str(reply.get("vaultId") or user_id)
+                    and item.get("delayedReplyId") == delayed_reply_id
+                ),
+                None,
+            ) if reply is not None else None
+            self.result = None if reply is None else {
+                "reply_payload": reply,
+                "reply_row_version": int(reply.get("rowVersion") or 1),
+                "reply_authority_state": str(reply.get("authorityState") or "active"),
+                "reply_vault_id": str(reply.get("vaultId") or user_id),
+                "reply_owner_subject_id": str(reply.get("ownerSubjectId") or user_id),
+                "answer_payload": answer,
+            }
         elif normalized.startswith(
             "SELECT payload, row_version, authority_state, vault_id, owner_subject_id FROM echo_delayed_replies"
         ):
@@ -3591,6 +3621,12 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(len(connection.echo_delayed_reply_answers), 1)
         self.assertEqual(updated["deliveryState"], "completed")
         self.assertEqual(updated["responseAnswerId"], completion.answer_id)
+        receipt = store.get_echo_delayed_reply_answer_receipt("u1", "reply_v4_completion")
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["reply"]["deliveryState"], "completed")
+        self.assertEqual(receipt["reply"]["responseAnswerId"], completion.answer_id)
+        self.assertEqual(receipt["answer"]["body"], "private answer body")
+        self.assertEqual(receipt["answer"]["userId"], "u1")
 
     def test_store_persists_push_device_tokens_by_user(self):
         connection = FakeConnection()

@@ -3010,6 +3010,60 @@ class BackendUserIdentityTests(unittest.TestCase):
 
 
 class EchoDelayedReplyAPITests(unittest.TestCase):
+    @staticmethod
+    def _seed_v4_completed_reply(
+        store: InMemoryStore,
+        *,
+        user_id: str = "echo_user_v4",
+        delayed_reply_id: str = "reply_v4_completed",
+        answer_id: str = "answer_v4_completed",
+        body: str = "PRIVATE_ECHO_DELAYED_REPLY_BODY",
+    ) -> None:
+        store._echo_delayed_replies[user_id] = [
+            {
+                "id": delayed_reply_id,
+                "delayedReplyId": delayed_reply_id,
+                "userId": user_id,
+                "ownerSubjectId": user_id,
+                "vaultId": f"vault-{user_id}",
+                "authorityState": "active",
+                "deliveryState": "completed",
+                "deliveryProtocolVersion": ECHO_DELAYED_REPLY_SCHEMA_VERSION,
+                "responseAnswerId": answer_id,
+            }
+        ]
+        store._echo_delayed_reply_answers[user_id] = [
+            {
+                "id": answer_id,
+                "answerId": answer_id,
+                "userId": user_id,
+                "ownerSubjectId": user_id,
+                "vaultId": f"vault-{user_id}",
+                "delayedReplyId": delayed_reply_id,
+                "conversationId": "conversation-v4",
+                "requestId": "request-v4",
+                "replyGeneration": 1,
+                "contextHash": "a" * 64,
+                "contextVersion": "echo-context-v2",
+                "policyVersion": "echo-policy-v1",
+                "citationReceiptHash": "b" * 64,
+                "body": body,
+                "completedAt": "2026-07-20T12:07:00Z",
+                "schemaVersion": ECHO_DELAYED_REPLY_SCHEMA_VERSION,
+            }
+        ]
+        store._mailbox_letters[user_id] = [
+            {
+                "id": "mailbox-v4-completed",
+                "kind": "echoDelayedReply",
+                "sourceDelayedReplyId": delayed_reply_id,
+                "sourceAnswerId": answer_id,
+                "status": "unread",
+                "metadataOnly": True,
+                "contentRedacted": True,
+            }
+        ]
+
     def test_push_device_token_api_registers_without_returning_raw_token(self):
         previous_store = main_module.store
         main_module.store = InMemoryStore()
@@ -3144,6 +3198,50 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
         self.assertFalse(response.json()["detail"]["retryable"])
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.json()["items"], [])
+
+    def test_echo_delayed_reply_answer_read_is_owner_scoped_and_keeps_mailbox_redacted(self):
+        previous_store = main_module.store
+        store = InMemoryStore()
+        main_module.store = store
+        client = TestClient(app)
+        self._seed_v4_completed_reply(store)
+        try:
+            answer = client.get("/echo/delayed-replies/echo_user_v4/reply_v4_completed/answer")
+            mailbox = client.get("/mailbox/letters/echo_user_v4")
+        finally:
+            main_module.store = previous_store
+
+        self.assertEqual(answer.status_code, 200)
+        payload = answer.json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["answer"]["answerId"], "answer_v4_completed")
+        self.assertEqual(payload["answer"]["body"], "PRIVATE_ECHO_DELAYED_REPLY_BODY")
+        self.assertEqual(payload["receipt"]["deliveryProtocolVersion"], ECHO_DELAYED_REPLY_SCHEMA_VERSION)
+        self.assertTrue(payload["receipt"]["mailboxProjectionBodyRedacted"])
+        self.assertEqual(mailbox.status_code, 200)
+        self.assertNotIn("PRIVATE_ECHO_DELAYED_REPLY_BODY", str(mailbox.json()))
+        self.assertTrue(mailbox.json()["items"][0]["contentRedacted"])
+
+    def test_echo_delayed_reply_answer_read_reports_not_ready_or_reconcile_gap_honestly(self):
+        previous_store = main_module.store
+        store = InMemoryStore()
+        main_module.store = store
+        client = TestClient(app)
+        self._seed_v4_completed_reply(store)
+        try:
+            store._echo_delayed_replies["echo_user_v4"][0]["deliveryState"] = "generating"
+            not_ready = client.get("/echo/delayed-replies/echo_user_v4/reply_v4_completed/answer")
+
+            store._echo_delayed_replies["echo_user_v4"][0]["deliveryState"] = "completed"
+            store._echo_delayed_reply_answers["echo_user_v4"] = []
+            missing_answer = client.get("/echo/delayed-replies/echo_user_v4/reply_v4_completed/answer")
+        finally:
+            main_module.store = previous_store
+
+        self.assertEqual(not_ready.status_code, 409)
+        self.assertEqual(not_ready.json()["detail"]["code"], "echo_delayed_reply_answer_not_ready")
+        self.assertEqual(missing_answer.status_code, 409)
+        self.assertEqual(missing_answer.json()["detail"]["code"], "echo_delayed_reply_answer_reconcile_required")
 
     def test_echo_delayed_reply_dispatch_due_marks_only_due_items(self):
         previous_store = main_module.store

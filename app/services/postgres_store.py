@@ -5101,6 +5101,57 @@ class PostgresStore:
     def list_echo_delayed_replies(self, user_id: str) -> List[Dict[str, Any]]:
         return self._list_payloads("echo_delayed_replies", user_id)
 
+    def get_echo_delayed_reply_answer_receipt(
+        self,
+        user_id: str,
+        delayed_reply_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Read one Owner-scoped V4 Answer alongside its source aggregate.
+
+        The Inbox entry is deliberately not used as a source of truth because
+        it contains only a redacted pointer. A missing Answer is preserved in
+        the result so callers can distinguish "not ready" from a persistence
+        reconciliation gap.
+        """
+
+        row = self._fetchone(
+            """
+            SELECT
+                reply.payload AS reply_payload,
+                reply.row_version AS reply_row_version,
+                reply.authority_state AS reply_authority_state,
+                reply.vault_id AS reply_vault_id,
+                reply.owner_subject_id AS reply_owner_subject_id,
+                answer.payload AS answer_payload
+            FROM echo_delayed_replies AS reply
+            LEFT JOIN echo_delayed_reply_answers AS answer
+              ON answer.user_id = reply.user_id
+             AND answer.owner_subject_id = reply.owner_subject_id
+             AND answer.vault_id = reply.vault_id
+             AND answer.delayed_reply_id = reply.id
+            WHERE reply.user_id = %s
+              AND reply.owner_subject_id = %s
+              AND reply.id = %s
+            """,
+            (user_id, user_id, delayed_reply_id),
+        )
+        if row is None:
+            return None
+        reply = self._echo_delayed_reply_completion_payload(
+            {
+                "payload": row["reply_payload"],
+                "row_version": row["reply_row_version"],
+                "authority_state": row["reply_authority_state"],
+                "vault_id": row["reply_vault_id"],
+                "owner_subject_id": row["reply_owner_subject_id"],
+            }
+        )
+        answer_payload = row.get("answer_payload")
+        return {
+            "reply": reply,
+            "answer": None if answer_payload is None else deepcopy(answer_payload),
+        }
+
     def get_echo_delayed_reply_for_completion(
         self,
         owner_subject_id: str,
