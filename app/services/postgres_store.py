@@ -125,6 +125,9 @@ from app.services.owner_truth_interview_candidate_proposal import (
 from app.services.owner_truth_interview_candidate_review import (
     PostgresOwnerTruthInterviewCandidateReviewRepository,
 )
+from app.services.owner_truth_interview_candidate_batch_decision import (
+    PostgresOwnerTruthInterviewCandidateBatchDecisionRepository,
+)
 
 
 class PostgresStore:
@@ -417,6 +420,21 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("interview candidate review composition requires an active unit of work")
         return PostgresOwnerTruthInterviewCandidateReviewRepository(active.connection)
+
+    def owner_truth_interview_candidate_batch_decision_repository(
+        self,
+    ) -> PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
+        """Return private partial-batch acceptance idempotency in the active UoW.
+
+        The repository only records the root command boundary. Per-Candidate
+        terminal decisions continue through the existing review repository,
+        and no MemoryVersion is activated here.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("interview candidate batch decision requires an active unit of work")
+        return PostgresOwnerTruthInterviewCandidateBatchDecisionRepository(active.connection)
 
     def readiness_probe(self) -> Dict[str, str]:
         migrator = PostgresMigrator(

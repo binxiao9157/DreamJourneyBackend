@@ -291,6 +291,7 @@ class InMemoryOwnerTruthInterviewCandidateReviewRepository:
             admission_id=admission.admission_id,
             source_id=admission.source_id,
             source_version=admission.source_version,
+            authority_epoch=int(vault[2]),
             readiness=_readiness(
                 latest_extraction_status=latest_status,
                 has_candidates=bool(ordered),
@@ -401,6 +402,7 @@ class PostgresOwnerTruthInterviewCandidateReviewRepository:
             admission_id=str(admission["admission_id"]),
             source_id=str(admission["source_id"]),
             source_version=int(admission["source_version"]),
+            authority_epoch=int(admission["vault_authority_epoch"]),
             readiness=_readiness(
                 latest_extraction_status=latest_status,
                 has_candidates=bool(items),

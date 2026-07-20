@@ -47,6 +47,10 @@ from app.domain.owner_truth.interview_orchestration import InterviewAction
 from app.domain.owner_truth.interview_candidate_proposal import (
     AdmitInterviewReviewBatchForCandidateProposalCommand,
 )
+from app.domain.owner_truth.interview_candidate_batch_decision import (
+    OwnerTruthInterviewCandidateBatchAcceptCommand,
+    OwnerTruthInterviewCandidateBatchSelection,
+)
 from app.domain.owner_truth.candidate_extraction import (
     CandidateEvidenceSpan,
     CandidateProposal,
@@ -71,6 +75,9 @@ from app.services.owner_truth_interview_candidate_proposal import (
 )
 from app.services.owner_truth_interview_candidate_review import (
     OwnerTruthInterviewCandidateReviewCompositionService,
+)
+from app.services.owner_truth_interview_candidate_batch_decision import (
+    OwnerTruthInterviewCandidateBatchDecisionService,
 )
 from app.services.owner_truth_interview_session_orchestration import (
     InterviewSessionOrchestrationSignals,
@@ -594,6 +601,47 @@ def main() -> None:
             and "这是一条必须逐条确认的敏感访谈候选。" not in str(composition_summary),
             "review composition summary must remain value-free",
         )
+        batch_item = composition.batch_candidates[0]
+        batch_accept_command = OwnerTruthInterviewCandidateBatchAcceptCommand(
+            command_id="interview-batch-accept-smoke",
+            review_batch_id=review_batch.review_batch.review_batch_id,
+            selections=(
+                OwnerTruthInterviewCandidateBatchSelection(
+                    candidate_id=batch_item.candidate_id,
+                    expected_candidate_version=batch_item.candidate_row_version,
+                ),
+            ),
+            reason_code="ownerReviewed",
+        )
+        batch_accept_service = OwnerTruthInterviewCandidateBatchDecisionService(store)
+        batch_accepted = batch_accept_service.accept_selected(
+            command=batch_accept_command,
+            context=context,
+        )
+        replayed_batch_accept = batch_accept_service.accept_selected(
+            command=batch_accept_command,
+            context=context,
+        )
+        require(
+            batch_accepted.outcome == "created"
+            and batch_accepted.accepted_candidate_count == 1
+            and batch_accepted.candidate_results[0].outcome == "created",
+            "selected standard Candidate must receive one terminal DecisionReceipt",
+        )
+        require(
+            replayed_batch_accept.outcome == "deduplicated"
+            and replayed_batch_accept.candidate_results[0].outcome == "deduplicated",
+            "batch acceptance replay must not create another DecisionReceipt",
+        )
+        remaining_composition = OwnerTruthInterviewCandidateReviewCompositionService(store).compose(
+            review_batch_id=review_batch.review_batch.review_batch_id,
+            context=context,
+        )
+        require(
+            len(remaining_composition.batch_candidates) == 0
+            and len(remaining_composition.single_candidates) == 1,
+            "partial batch acceptance must leave the sensitive Candidate pending for single review",
+        )
 
         follow_up_thread_id = str(uuid.uuid4())
         follow_up_session_id = str(uuid.uuid4())
@@ -655,6 +703,18 @@ def main() -> None:
                 cursor.execute(
                     """
                     SELECT COUNT(*)
+                    FROM owner_truth.interview_review_batch_candidate_decisions
+                    WHERE vault_id = %s AND review_batch_id = %s
+                    """,
+                    (context.vault_id, review_batch.review_batch.review_batch_id),
+                )
+                require(
+                    cursor.fetchone()[0] == 1,
+                    "partial batch acceptance must retain one root command ledger record",
+                )
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
                     FROM async_effects.operations
                     WHERE vault_id = %s AND operation_id = %s
                     """,
@@ -669,10 +729,15 @@ def main() -> None:
                             count == 2,
                             "synthetic review composition may create only its two pending Candidates",
                         )
+                    elif relation == "decision_receipts":
+                        require(
+                            count == 1,
+                            "partial batch acceptance must create exactly one Candidate DecisionReceipt",
+                        )
                     else:
                         require(
                             count == 0,
-                            f"review composition must not write owner_truth.{relation}",
+                            f"partial batch acceptance must not activate owner_truth.{relation}",
                         )
                 immutable_message_rejected = False
                 try:

@@ -1,0 +1,14 @@
+{
+  "version": "0034",
+  "name": "owner_truth_interview_candidate_batch_decisions",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthInterviewCandidateBatchDecisionShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthConversationV1": false,
+    "guidedInterviewM0A": false,
+    "ownerTruthInterviewCandidateProposalM0A": false,
+    "ownerTruthInterviewCandidateBatchDecisionM0A": false
+  }
+}

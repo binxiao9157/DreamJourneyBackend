@@ -94,6 +94,7 @@ class OwnerTruthInterviewCandidateReviewComposition:
     admission_id: str
     source_id: str
     source_version: int
+    authority_epoch: int
     readiness: InterviewCandidateReviewReadiness
     latest_extraction_status: str | None
     batch_candidates: tuple[OwnerTruthInterviewReviewCandidateItem, ...]
@@ -105,6 +106,10 @@ class OwnerTruthInterviewCandidateReviewComposition:
         if not isinstance(self.source_version, int) or self.source_version < 1:
             raise OwnerTruthInterviewCandidateReviewError(
                 "source_version must be a positive integer"
+            )
+        if not isinstance(self.authority_epoch, int) or self.authority_epoch < 0:
+            raise OwnerTruthInterviewCandidateReviewError(
+                "authority_epoch must be a non-negative integer"
             )
         try:
             object.__setattr__(self, "readiness", InterviewCandidateReviewReadiness(self.readiness))
@@ -152,6 +157,7 @@ class OwnerTruthInterviewCandidateReviewComposition:
             "admissionId": self.admission_id,
             "sourceId": self.source_id,
             "sourceVersion": self.source_version,
+            "authorityEpoch": self.authority_epoch,
             "readiness": self.readiness.value,
             "latestExtractionStatus": self.latest_extraction_status,
             "batchCandidateCount": len(self.batch_candidates),
