@@ -23,11 +23,15 @@ def _context(
     *,
     current_persona_version: int = 2,
     authority_epoch: int = 7,
+    vault_id: str = "vault-persona-receipt-a",
+    owner_subject_id: str = "owner-persona-receipt-a",
+    persona_id: str = _PERSONA_ID,
 ) -> OwnerTruthPersonaAuthorityCommandContext:
     return OwnerTruthPersonaAuthorityCommandContext(
-        vault_id="vault-persona-receipt-a",
-        owner_subject_id="owner-persona-receipt-a",
-        actor_subject_id="owner-persona-receipt-a",
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+        resolved_persona_id=persona_id,
         current_persona_version=current_persona_version,
         authority_epoch=authority_epoch,
     )
@@ -37,7 +41,6 @@ def _command(*, expected_version: int = 2) -> dict[str, object]:
     return {
         "commandId": "persona-receipt-command-a",
         "expectedVersion": expected_version,
-        "personaId": _PERSONA_ID,
         "profile": {
             "birthDate": "1950-01-01",
             "displayName": "不应出现在 Persona receipt 摘要中的称呼",
@@ -121,6 +124,28 @@ class OwnerTruthPersonaAuthorityReceiptShadowTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             first.decision_receipt.after_version = 999  # type: ignore[misc]
 
+    def test_server_resolved_persona_and_vault_context_bind_the_future_records(self) -> None:
+        second_persona_id = "5babc7b7-62aa-4dc7-a68d-b7469ccfed89"
+        first = self._plan(_command())
+        second = self._plan(
+            _command(),
+            context=_context(
+                vault_id="vault-persona-receipt-b",
+                owner_subject_id="owner-persona-receipt-b",
+                persona_id=second_persona_id,
+            ),
+        )
+        assert first.persona_version is not None
+        assert first.decision_receipt is not None
+        assert second.persona_version is not None
+        assert second.decision_receipt is not None
+
+        self.assertEqual(first.persona_version.persona_id, _PERSONA_ID)
+        self.assertEqual(second.persona_version.persona_id, second_persona_id)
+        self.assertNotEqual(first.persona_version.version_id, second.persona_version.version_id)
+        self.assertNotEqual(first.persona_version.scope_hash, second.persona_version.scope_hash)
+        self.assertNotIn(second_persona_id, repr(second.value_free_summary()))
+
     def test_stale_or_invalid_command_cannot_plan_a_receipt(self) -> None:
         stale = self._plan(_command(expected_version=1))
         invalid_payload = _command()
@@ -151,6 +176,7 @@ class OwnerTruthPersonaAuthorityReceiptShadowTests(unittest.TestCase):
                 vault_id="vault-persona-receipt-a",
                 owner_subject_id="owner-persona-receipt-a",
                 actor_subject_id="owner-persona-receipt-a",
+                resolved_persona_id=_PERSONA_ID,
                 current_persona_version=2,
                 command_origin=OwnerTruthPersonaAuthorityCommandOrigin.PROVIDER,
             ),

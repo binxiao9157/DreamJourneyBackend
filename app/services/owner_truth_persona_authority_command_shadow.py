@@ -27,7 +27,7 @@ OWNER_TRUTH_PERSONA_AUTHORITY_COMMAND_SCHEMA_VERSION = (
     "owner-truth-persona-authority-command-shadow-v1"
 )
 PERSONA_PROFILE_ALLOWED_FIELD_NAMES = frozenset({"birthDate", "displayName", "gender"})
-_COMMAND_FIELD_NAMES = frozenset({"commandId", "expectedVersion", "personaId", "profile"})
+_COMMAND_FIELD_NAMES = frozenset({"commandId", "expectedVersion", "profile"})
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MAX_DISPLAY_NAME_LENGTH = 160
@@ -167,6 +167,7 @@ class OwnerTruthPersonaAuthorityCommandContext:
     vault_id: str
     owner_subject_id: str
     actor_subject_id: str
+    resolved_persona_id: str
     current_persona_version: int
     authority_epoch: int = 0
     subject_kind: OwnerTruthPersonaAuthoritySubjectKind = OwnerTruthPersonaAuthoritySubjectKind.SELF_OWNER
@@ -186,6 +187,11 @@ class OwnerTruthPersonaAuthorityCommandContext:
             self,
             "actor_subject_id",
             _identifier(self.actor_subject_id, field="actor_subject_id"),
+        )
+        object.__setattr__(
+            self,
+            "resolved_persona_id",
+            _uuid(self.resolved_persona_id, field="resolved_persona_id"),
         )
         object.__setattr__(
             self,
@@ -219,11 +225,11 @@ class OwnerTruthPersonaAuthorityCommandContext:
             ) from exc
         object.__setattr__(self, "command_origin", command_origin)
 
-    def scope_hash(self, *, persona_id: str) -> str:
+    def scope_hash(self) -> str:
         return _digest(
             {
                 "ownerSubjectId": self.owner_subject_id,
-                "personaId": persona_id,
+                "personaId": self.resolved_persona_id,
                 "vaultId": self.vault_id,
             }
         )
@@ -234,13 +240,11 @@ class OwnerTruthSelfPersonaAuthorityCommand:
     """A strict payload for an eventual immutable Self PersonaVersion writer."""
 
     command_id: str
-    persona_id: str
     expected_version: int
     profile: Mapping[str, str]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", _identifier(self.command_id, field="command_id"))
-        object.__setattr__(self, "persona_id", _uuid(self.persona_id, field="persona_id"))
         object.__setattr__(
             self,
             "expected_version",
@@ -285,7 +289,6 @@ class OwnerTruthSelfPersonaAuthorityCommand:
             )
         return cls(
             command_id=raw["commandId"],
-            persona_id=raw["personaId"],
             expected_version=raw["expectedVersion"],
             profile=raw["profile"],
         )
@@ -299,7 +302,6 @@ class OwnerTruthSelfPersonaAuthorityCommand:
         return _digest(
             {
                 "expectedVersion": self.expected_version,
-                "personaId": self.persona_id,
                 "profile": dict(self.profile),
             }
         )
@@ -414,7 +416,7 @@ def _result(
         expected_version=command.expected_version if command is not None else None,
         observed_version=context.current_persona_version if command is not None and context is not None else None,
         scope_hash=(
-            context.scope_hash(persona_id=command.persona_id)
+            context.scope_hash()
             if command is not None and context is not None
             else None
         ),

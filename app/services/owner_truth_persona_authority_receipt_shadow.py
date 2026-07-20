@@ -364,20 +364,20 @@ def plan_self_persona_authority_receipt(
     receipt_id = str(
         uuid5(
             _DECISION_RECEIPT_NAMESPACE,
-            f"persona-decision:{context.vault_id}:{command.persona_id}:{command.command_hash}",
+            f"persona-decision:{context.vault_id}:{context.resolved_persona_id}:{command.command_hash}",
         )
     )
     version_id = str(
         uuid5(
             _PERSONA_VERSION_NAMESPACE,
-            f"persona-version:{context.vault_id}:{command.persona_id}:{version_number}:{command.command_hash}",
+            f"persona-version:{context.vault_id}:{context.resolved_persona_id}:{version_number}:{command.command_hash}",
         )
     )
     profile_hash = _digest({"profile": dict(command.profile)})
-    scope_hash = context.scope_hash(persona_id=command.persona_id)
+    scope_hash = context.scope_hash()
     version = OwnerTruthPersonaVersionPlan(
         version_id=version_id,
-        persona_id=command.persona_id,
+        persona_id=context.resolved_persona_id,
         decision_receipt_id=receipt_id,
         version_number=version_number,
         expected_prior_version=command.expected_version,
@@ -390,7 +390,7 @@ def plan_self_persona_authority_receipt(
     )
     receipt = OwnerTruthPersonaDecisionReceiptPlan(
         receipt_id=receipt_id,
-        persona_id=command.persona_id,
+        persona_id=context.resolved_persona_id,
         persona_version_id=version_id,
         command_hash=command.command_hash,
         actor_subject_hash=sha256(context.actor_subject_id.encode("utf-8")).hexdigest(),

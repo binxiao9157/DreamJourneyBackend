@@ -29,6 +29,7 @@ def _context(
         vault_id="vault-persona-command-a",
         owner_subject_id="owner-persona-command-a",
         actor_subject_id=actor_subject_id,
+        resolved_persona_id=_PERSONA_ID,
         current_persona_version=current_persona_version,
         subject_kind=subject_kind,
     )
@@ -38,7 +39,6 @@ def _command(*, expected_version: int = 2) -> dict[str, object]:
     return {
         "commandId": "persona-command-a",
         "expectedVersion": expected_version,
-        "personaId": _PERSONA_ID,
         "profile": {
             "birthDate": "1950-01-01",
             "displayName": "不应出现在公开摘要中的本人称呼",
@@ -127,18 +127,23 @@ class OwnerTruthPersonaAuthorityCommandShadowTests(unittest.TestCase):
                 self.assertFalse(result.persona_version_written)
                 self.assertNotIn("private-untrusted-value", repr(result.value_free_summary()))
 
-    def test_extra_top_level_runtime_field_is_denied(self) -> None:
-        payload = _command()
-        payload["digitalHumanId"] = "private-runtime-asset"
+    def test_extra_top_level_runtime_or_client_persona_id_is_denied(self) -> None:
+        for field, value in (
+            ("digitalHumanId", "private-runtime-asset"),
+            ("personaId", _PERSONA_ID),
+        ):
+            with self.subTest(field=field):
+                payload = _command()
+                payload[field] = value
 
-        result = self._preflight(payload)
+                result = self._preflight(payload)
 
-        self.assertEqual(
-            result.disposition,
-            OwnerTruthPersonaAuthorityCommandDisposition.INVALID_COMMAND,
-        )
-        self.assertFalse(result.command_accepted_for_future_persistence)
-        self.assertNotIn("private-runtime-asset", repr(result.value_free_summary()))
+                self.assertEqual(
+                    result.disposition,
+                    OwnerTruthPersonaAuthorityCommandDisposition.INVALID_COMMAND,
+                )
+                self.assertFalse(result.command_accepted_for_future_persistence)
+                self.assertNotIn(value, repr(result.value_free_summary()))
 
     def test_owner_actor_mismatch_fails_closed_before_payload_is_parsed(self) -> None:
         with patch(
@@ -177,6 +182,7 @@ class OwnerTruthPersonaAuthorityCommandShadowTests(unittest.TestCase):
                             vault_id="vault-persona-command-a",
                             owner_subject_id="owner-persona-command-a",
                             actor_subject_id="owner-persona-command-a",
+                            resolved_persona_id=_PERSONA_ID,
                             current_persona_version=2,
                             command_origin=origin,
                         ),

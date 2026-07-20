@@ -21,9 +21,11 @@ from pathlib import Path
 from app.services.owner_truth_persona_authority_command_shadow import (
     PERSONA_PROFILE_ALLOWED_FIELD_NAMES,
     OwnerTruthPersonaAuthorityCommandOrigin,
+    _COMMAND_FIELD_NAMES,
 )
 
 assert PERSONA_PROFILE_ALLOWED_FIELD_NAMES == {"birthDate", "displayName", "gender"}
+assert _COMMAND_FIELD_NAMES == {"commandId", "expectedVersion", "profile"}
 assert set(OwnerTruthPersonaAuthorityCommandOrigin) == {
     OwnerTruthPersonaAuthorityCommandOrigin.OWNER_INTERACTIVE,
     OwnerTruthPersonaAuthorityCommandOrigin.FAMILY,
