@@ -564,6 +564,103 @@ def _owner_truth_candidate_review_context(
     )
 
 
+def _owner_truth_interview_natural_input_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the M0 natural-input write without opening review QA routes.
+
+    The historical QA caller keeps its explicit header and feature flag. Every
+    other caller must present a current server-authorized ``echoTextInput``
+    release-policy capture. This route-level check remains fail-closed even
+    while the broader command-policy middleware is in observation mode.
+    """
+
+    if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
+        return _owner_truth_candidate_review_context(request, vault_id=vault_id)
+
+    principal = getattr(request.state, "auth_principal", None)
+    owner_subject_id = _request_user_principal_id(request)
+    if not isinstance(principal, RequestPrincipal) or owner_subject_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthInterviewNaturalInputUserSessionRequired"},
+        )
+
+    observed_client_build = _release_policy_int_header(
+        request,
+        "x-dreamjourney-client-build",
+    ) or 1
+    route = f"{request.method.upper()} /v2/vaults/*/interview-sessions"
+    try:
+        captured = RELEASE_POLICY_COMMAND_GATE.capture(
+            feature="echoTextInput",
+            audience=_release_policy_audience(request, principal),
+            cohort=str(
+                request.headers.get("x-dreamjourney-policy-cohort")
+                or "closedPilotAdultSelf"
+            ).strip(),
+            client_build=observed_client_build,
+            client_policy_version=str(
+                request.headers.get("x-dreamjourney-policy-version") or ""
+            ).strip() or None,
+            client_policy_revision=_release_policy_int_header(
+                request,
+                "x-dreamjourney-policy-revision",
+            ),
+            client_account_generation=str(
+                request.headers.get("x-dreamjourney-account-generation") or ""
+            ).strip() or None,
+            client_allowed=_release_policy_bool_header(
+                request,
+                "x-dreamjourney-feature-allowed",
+            ),
+            client_decision_id=str(
+                request.headers.get("x-dreamjourney-feature-decision-id") or ""
+            ).strip() or None,
+            client_feature=str(
+                request.headers.get("x-dreamjourney-feature") or ""
+            ).strip() or None,
+            expected_account_generation=_release_policy_account_generation(principal),
+            require_client_capture=True,
+        )
+        RELEASE_POLICY_COMMAND_GATE.revalidate_effect(captured)
+    except ReleasePolicyFeatureAccessDenied as error:
+        RELEASE_POLICY_DECISION_RECORDER.record(
+            feature="echoTextInput",
+            policy_version=RELEASE_POLICY_SERVICE.POLICY_VERSION,
+            client_build=observed_client_build,
+            decision="deny",
+            reason=error.reason,
+            route=route,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "release_policy_denied",
+                "feature": error.feature,
+                "reason": error.reason,
+                "policyRevision": error.policy_revision,
+                "retryable": False,
+            },
+        ) from error
+
+    RELEASE_POLICY_DECISION_RECORDER.record(
+        feature="echoTextInput",
+        policy_version=captured.policy_version,
+        client_build=observed_client_build,
+        decision="allow",
+        reason=captured.server_reason,
+        route=route,
+    )
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_memory_projection_context(
     request: Request,
     *,
@@ -2666,10 +2763,10 @@ def read_owner_truth_interview_session_state(
     vault_id: str,
     session_id: str,
 ) -> JSONResponse:
-    """QA-only private session state; it exposes no conversation content."""
+    """Value-minimized natural-input session state; it exposes no content."""
 
     try:
-        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
         snapshot = OwnerTruthInterviewSessionReadService(store).read(
             session_id=session_id,
             context=context,
@@ -2695,10 +2792,10 @@ def start_owner_truth_interview_session(
     vault_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """QA-only natural-input session bootstrap; it creates no memory artifact."""
+    """Natural-input session bootstrap; it creates no memory artifact."""
 
     try:
-        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
         command = StartInterviewSessionCommand(
             command_id=str(payload.get("commandId") or ""),
             thread_id=str(payload.get("threadId") or ""),
@@ -2741,10 +2838,10 @@ def append_owner_truth_interview_narrative(
     session_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """QA-only Owner narrative append; response remains content-free."""
+    """Owner narrative append; the response remains content-free."""
 
     try:
-        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
         command = AppendInterviewMessageCommand(
             command_id=str(payload.get("commandId") or ""),
             thread_id=str(payload.get("threadId") or ""),

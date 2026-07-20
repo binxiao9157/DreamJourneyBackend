@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from uuid import uuid4
@@ -39,7 +40,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = self.previous_qa_enabled
 
     @staticmethod
-    def _login(phone: str) -> tuple[str, dict[str, str]]:
+    def _login(phone: str, *, qa: bool = True) -> tuple[str, dict[str, str], str]:
         response = client.post(
             "/auth/login",
             json={
@@ -51,10 +52,12 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         if response.status_code != 200:
             raise AssertionError(response.text)
         payload = response.json()
-        return payload["user"]["id"], {
+        headers = {
             "Authorization": f"Bearer {payload['auth']['accessToken']}",
-            "X-DreamJourney-QA-Owner-Truth": "1",
         }
+        if qa:
+            headers["X-DreamJourney-QA-Owner-Truth"] = "1"
+        return payload["user"]["id"], headers, payload["auth"]["sessionId"]
 
     @staticmethod
     def _start_path(vault_id: str) -> str:
@@ -84,7 +87,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         )
 
     def test_contract_is_default_hidden(self) -> None:
-        _, headers = self._login("13800139601")
+        _, headers, _ = self._login("13800139601")
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = False
 
         response = self._start_session(
@@ -99,7 +102,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         )
 
     def test_owner_can_start_and_append_without_receipt_echoing_message_content(self) -> None:
-        owner_id, headers = self._login("13800139602")
+        owner_id, headers, _ = self._login("13800139602")
         vault_id = "vault-interview-input-owner"
         thread_id = str(uuid4())
         session_id = str(uuid4())
@@ -190,7 +193,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(replay.json()["receipt"]["sessionVersion"], 2)
 
     def test_other_owner_and_stale_versions_cannot_append(self) -> None:
-        owner_id, owner_headers = self._login("13800139603")
+        owner_id, owner_headers, _ = self._login("13800139603")
         vault_id = "vault-interview-input-boundary"
         thread_id = str(uuid4())
         session_id = str(uuid4())
@@ -201,7 +204,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             session_id=session_id,
         )
         self.assertEqual(start.status_code, 201)
-        _, other_headers = self._login("13800139604")
+        _, other_headers, _ = self._login("13800139604")
 
         other = client.post(
             self._append_path(vault_id, session_id),
@@ -239,6 +242,61 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             stale.json()["detail"]["code"],
             "ownerTruthInterviewSessionConflict",
         )
+
+    def test_formal_natural_input_requires_captured_release_policy(self) -> None:
+        _, headers, _ = self._login("13800139605", qa=False)
+
+        response = self._start_session(
+            vault_id="vault-interview-input-policy-denied",
+            headers=headers,
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"]["code"], "release_policy_denied")
+        self.assertEqual(response.json()["detail"]["feature"], "echoTextInput")
+        self.assertEqual(response.json()["detail"]["reason"], "missingCapturedPolicy")
+
+    def test_formal_natural_input_accepts_matching_release_policy_capture(self) -> None:
+        owner_id, headers, session_id = self._login("13800139606", qa=False)
+        headers.update(
+            {
+                "X-DreamJourney-Feature": "echoTextInput",
+                "X-DreamJourney-Feature-Decision-Id": "decision-interview-natural-input",
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": hashlib.sha256(
+                    session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        vault_id = "vault-interview-input-policy-allowed"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+
+        start = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertTrue(owner_id.startswith("user_"))
+        self.assertEqual(start.status_code, 201)
+
+        append = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": "通过正式发布策略写入的自然输入。",
+            },
+        )
+        self.assertEqual(append.status_code, 201)
+        self.assertEqual(append.json()["receipt"]["messageSequence"], 1)
 
 
 if __name__ == "__main__":
