@@ -15,7 +15,9 @@ MACHINE_TOKEN = os.environ.get(
     "BACKEND_API_TOKEN",
     os.environ.get("DREAMJOURNEY_BACKEND_API_TOKEN", ""),
 ).strip()
-EXPECTED_ROUTE_COUNT = 96
+# Keep this explicit so a deployed smoke also proves the expected release
+# inventory, not merely that the server and its local registry agree.
+EXPECTED_ROUTE_COUNT = 98
 
 
 def require(condition, message):

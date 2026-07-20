@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+import runpy
 from types import SimpleNamespace
 
 from app.main import app
@@ -246,6 +248,19 @@ class RouteAuthenticationPolicyTests(unittest.TestCase):
 
 
 class RouteAuthenticationStartupTests(unittest.TestCase):
+    def test_deployed_route_smoke_inventory_matches_registry(self):
+        script_path = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "backend-route-authentication-postgres-smoke.py"
+        )
+        smoke_contract = runpy.run_path(str(script_path))
+
+        self.assertEqual(
+            smoke_contract["EXPECTED_ROUTE_COUNT"],
+            len(RouteOwnershipRegistry().rules),
+        )
+
     def test_current_application_is_complete_in_production_enforce_mode(self):
         summary = validate_route_authentication_startup(
             app,
