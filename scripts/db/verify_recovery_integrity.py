@@ -16,27 +16,6 @@ from app.db.recovery import (
 )
 
 
-OWNER_TABLES = (
-    "auth_sessions",
-    "archive_items",
-    "care_snapshots",
-    "digital_human_sessions",
-    "echo_delayed_replies",
-    "family_members",
-    "kb_change_feed_state",
-    "kb_changes",
-    "kb_operation_receipts",
-    "kb_snapshots",
-    "mailbox_letters",
-    "memories",
-    "password_credentials",
-    "profiles",
-    "push_device_tokens",
-    "voice_clone_slots",
-    "voice_profiles",
-)
-
-
 def fetch_scalar(cursor, query, params=()):
     cursor.execute(query, params)
     row = cursor.fetchone()
@@ -45,6 +24,242 @@ def fetch_scalar(cursor, query, params=()):
     if isinstance(row, dict):
         return next(iter(row.values()))
     return row[0]
+
+
+def qualified_table_name(schema, table):
+    return f"{schema}.{table}"
+
+
+def base_tables(cursor, schema):
+    rows = cursor.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = %s
+          AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+        """,
+        (schema,),
+    ).fetchall()
+    return tuple(str(row["table_name"]) for row in rows)
+
+
+def table_columns(cursor, schema, table):
+    rows = cursor.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = %s
+          AND table_name = %s
+        ORDER BY column_name
+        """,
+        (schema, table),
+    ).fetchall()
+    return frozenset(str(row["column_name"]) for row in rows)
+
+
+def table_count(cursor, sql, schema, table):
+    return int(
+        fetch_scalar(
+            cursor,
+            sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(schema, table)),
+        )
+    )
+
+
+def count_public_owner_orphans(cursor, sql, table):
+    return int(
+        fetch_scalar(
+            cursor,
+            sql.SQL(
+                "SELECT COUNT(*) FROM {table} child "
+                "LEFT JOIN public.users owner ON owner.id = child.user_id "
+                "WHERE child.user_id IS NOT NULL AND owner.id IS NULL"
+            ).format(table=sql.Identifier("public", table)),
+        )
+    )
+
+
+def count_public_purged_owner_violations(cursor, sql, table):
+    return int(
+        fetch_scalar(
+            cursor,
+            sql.SQL(
+                "SELECT COUNT(*) FROM {table} child "
+                "JOIN public.users owner ON owner.id = child.user_id "
+                "WHERE child.user_id IS NOT NULL "
+                "AND owner.payload->>'deletionState' = 'purged'"
+            ).format(table=sql.Identifier("public", table)),
+        )
+    )
+
+
+def audit_public_direct_user_id(cursor, sql):
+    """Audit every legacy public base table that directly stores a user ID."""
+
+    checked = []
+    orphan_counts = {}
+    purged_counts = {}
+    for table in base_tables(cursor, "public"):
+        if "user_id" not in table_columns(cursor, "public", table):
+            continue
+        qualified = qualified_table_name("public", table)
+        checked.append(qualified)
+        orphan_counts[qualified] = count_public_owner_orphans(cursor, sql, table)
+        purged_counts[qualified] = count_public_purged_owner_violations(cursor, sql, table)
+    return {
+        "status": "complete",
+        "checkedTables": checked,
+        "orphanOwnerCountsByTable": orphan_counts,
+        "purgedOwnerViolationCountsByTable": purged_counts,
+    }
+
+
+def audit_owner_truth_vault_scope(cursor, sql):
+    """Audit Owner Truth rows against their Vault root without inspecting values."""
+
+    checked = []
+    missing_vault_counts = {}
+    owner_mismatch_counts = {}
+    unclassified = []
+    for table in base_tables(cursor, "owner_truth"):
+        qualified = qualified_table_name("owner_truth", table)
+        columns = table_columns(cursor, "owner_truth", table)
+        checked.append(qualified)
+        missing_vault_counts[qualified] = 0
+        owner_mismatch_counts[qualified] = 0
+        if table == "vaults":
+            continue
+        if "vault_id" in columns:
+            missing_vault_counts[qualified] = int(
+                fetch_scalar(
+                    cursor,
+                    sql.SQL(
+                        "SELECT COUNT(*) FROM {table} child "
+                        "LEFT JOIN owner_truth.vaults vault ON vault.vault_id = child.vault_id "
+                        "WHERE vault.vault_id IS NULL"
+                    ).format(table=sql.Identifier("owner_truth", table)),
+                )
+            )
+            if "owner_subject_id" in columns:
+                owner_mismatch_counts[qualified] = int(
+                    fetch_scalar(
+                        cursor,
+                        sql.SQL(
+                            "SELECT COUNT(*) FROM {table} child "
+                            "JOIN owner_truth.vaults vault ON vault.vault_id = child.vault_id "
+                            "WHERE child.owner_subject_id IS DISTINCT FROM vault.owner_subject_id"
+                        ).format(table=sql.Identifier("owner_truth", table)),
+                    )
+                )
+            continue
+        if "run_id" in columns:
+            missing_vault_counts[qualified] = int(
+                fetch_scalar(
+                    cursor,
+                    sql.SQL(
+                        "SELECT COUNT(*) FROM {table} child "
+                        "LEFT JOIN owner_truth.legacy_migration_runs run ON run.id = child.run_id "
+                        "LEFT JOIN owner_truth.vaults vault ON vault.vault_id = run.vault_id "
+                        "WHERE run.id IS NULL OR vault.vault_id IS NULL"
+                    ).format(table=sql.Identifier("owner_truth", table)),
+                )
+            )
+            continue
+        unclassified.append(qualified)
+    return {
+        "status": "unverified" if unclassified else "complete",
+        "checkedTables": checked,
+        "missingVaultCountsByTable": missing_vault_counts,
+        "ownerSubjectMismatchCountsByTable": owner_mismatch_counts,
+        "unclassifiedTables": unclassified,
+        # Owner Truth currently has no enforced bridge to the public identity
+        # root. Record that limitation instead of manufacturing a relationship.
+        "identityRootStatus": "unverified",
+    }
+
+
+def audit_async_effects_operation_scope(cursor, sql):
+    """Audit async rows against their operation root and list value-free exemptions."""
+
+    checked = []
+    missing_operation_counts = {}
+    scope_mismatch_counts = {}
+    unclassified = []
+    exemptions = []
+    root_vault_missing_count = 0
+    root_owner_mismatch_count = 0
+    required_child_columns = {"operation_id", "owner_subject_id", "vault_id", "authority_epoch"}
+    for table in base_tables(cursor, "async_effects"):
+        qualified = qualified_table_name("async_effects", table)
+        columns = table_columns(cursor, "async_effects", table)
+        if table == "worker_loss_observations":
+            exemptions.append(
+                {"table": qualified, "reason": "valueFreeRuntimeObservation"}
+            )
+            continue
+        checked.append(qualified)
+        missing_operation_counts[qualified] = 0
+        scope_mismatch_counts[qualified] = 0
+        if table == "operations":
+            root_vault_missing_count = int(
+                fetch_scalar(
+                    cursor,
+                    "SELECT COUNT(*) FROM async_effects.operations operation "
+                    "LEFT JOIN owner_truth.vaults vault ON vault.vault_id = operation.vault_id "
+                    "WHERE vault.vault_id IS NULL",
+                )
+            )
+            root_owner_mismatch_count = int(
+                fetch_scalar(
+                    cursor,
+                    "SELECT COUNT(*) FROM async_effects.operations operation "
+                    "JOIN owner_truth.vaults vault ON vault.vault_id = operation.vault_id "
+                    "WHERE operation.owner_subject_id IS DISTINCT FROM vault.owner_subject_id",
+                )
+            )
+            continue
+        if not required_child_columns.issubset(columns):
+            unclassified.append(qualified)
+            continue
+        missing_operation_counts[qualified] = int(
+            fetch_scalar(
+                cursor,
+                sql.SQL(
+                    "SELECT COUNT(*) FROM {table} child "
+                    "LEFT JOIN async_effects.operations operation "
+                    "ON operation.operation_id = child.operation_id "
+                    "WHERE operation.operation_id IS NULL"
+                ).format(table=sql.Identifier("async_effects", table)),
+            )
+        )
+        scope_mismatch_counts[qualified] = int(
+            fetch_scalar(
+                cursor,
+                sql.SQL(
+                    "SELECT COUNT(*) FROM {table} child "
+                    "JOIN async_effects.operations operation "
+                    "ON operation.operation_id = child.operation_id "
+                    "WHERE child.owner_subject_id IS DISTINCT FROM operation.owner_subject_id "
+                    "OR child.vault_id IS DISTINCT FROM operation.vault_id "
+                    "OR child.authority_epoch IS DISTINCT FROM operation.authority_epoch"
+                ).format(table=sql.Identifier("async_effects", table)),
+            )
+        )
+    return (
+        {
+            "status": "unverified" if unclassified else "complete",
+            "checkedTables": checked,
+            "missingOperationCountsByTable": missing_operation_counts,
+            "scopeMismatchCountsByTable": scope_mismatch_counts,
+            "unclassifiedTables": unclassified,
+            "rootVaultMissingCount": root_vault_missing_count,
+            "rootOwnerSubjectMismatchCount": root_owner_mismatch_count,
+            # Operation epochs have no independent authority ledger yet.
+            "rootAuthorityStatus": "unverified",
+        },
+        exemptions,
+    )
 
 
 def main():
@@ -71,45 +286,25 @@ def main():
         connection = psycopg.connect(args.dsn, row_factory=dict_row)
         try:
             with connection.cursor() as cursor:
-                public_tables = fetch_scalar(
-                    cursor,
-                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'",
-                )
-                existing_rows = cursor.execute(
-                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
-                ).fetchall()
-                existing_tables = {str(row["table_name"]) for row in existing_rows}
+                public_tables = base_tables(cursor, "public")
+                existing_tables = set(public_tables)
                 row_counts = {}
-                orphan_count = 0
-                purged_violation_count = 0
-                for table in sorted(existing_tables):
-                    row_counts[table] = int(
-                        fetch_scalar(cursor, sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(table)))
-                    )
-                for table in OWNER_TABLES:
-                    if table not in existing_tables:
-                        continue
-                    orphan_count += int(
-                        fetch_scalar(
-                            cursor,
-                            sql.SQL(
-                                "SELECT COUNT(*) FROM {table} child "
-                                "LEFT JOIN users owner ON owner.id = child.user_id "
-                                "WHERE child.user_id IS NOT NULL AND owner.id IS NULL"
-                            ).format(table=sql.Identifier(table)),
-                        )
-                    )
-                    purged_violation_count += int(
-                        fetch_scalar(
-                            cursor,
-                            sql.SQL(
-                                "SELECT COUNT(*) FROM {table} child "
-                                "JOIN users owner ON owner.id = child.user_id "
-                                "WHERE child.user_id IS NOT NULL "
-                                "AND owner.payload->>'deletionState' = 'purged'"
-                            ).format(table=sql.Identifier(table)),
-                        )
-                    )
+                for table in public_tables:
+                    row_counts[table] = table_count(cursor, sql, "public", table)
+                public_direct_user_audit = audit_public_direct_user_id(cursor, sql)
+                owner_truth_audit = audit_owner_truth_vault_scope(cursor, sql)
+                async_effects_audit, explicit_exemptions = audit_async_effects_operation_scope(
+                    cursor,
+                    sql,
+                )
+                orphan_count = sum(
+                    public_direct_user_audit["orphanOwnerCountsByTable"].values()
+                )
+                purged_violation_count = sum(
+                    public_direct_user_audit[
+                        "purgedOwnerViolationCountsByTable"
+                    ].values()
+                )
                 invalid_hash_count = 0
                 if "kb_operation_receipts" in existing_tables:
                     invalid_hash_count += int(
@@ -131,14 +326,20 @@ def main():
             connection.close()
 
         metrics = {
-            "schemaVersion": 1,
+            "schemaVersion": 3,
             "schemaHead": migration.get("appliedHead"),
             "targetSchemaHead": migration.get("expectedHead"),
-            "relationCount": int(public_tables),
+            "relationCount": len(public_tables),
             "rowCounts": row_counts,
             "orphanOwnerCount": orphan_count,
             "invalidPayloadHashCount": invalid_hash_count,
             "purgedOwnerViolationCount": purged_violation_count,
+            "auditDomains": {
+                "publicDirectUserId": public_direct_user_audit,
+                "ownerTruthVaultScope": owner_truth_audit,
+                "asyncEffectsOperationScope": async_effects_audit,
+            },
+            "explicitExemptions": explicit_exemptions,
             "migrationState": migration.get("status"),
         }
         report = verify_integrity_metrics(

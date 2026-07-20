@@ -1,3 +1,4 @@
+import copy
 import json
 import unittest
 from datetime import datetime, timezone
@@ -19,7 +20,7 @@ class RecoveryRecordTests(unittest.TestCase):
         self.backup_id = "dj-20260717T010203Z-a1b2c3d4"
         self.cutoff_lsn = "0/16B6A40"
         self.metrics = {
-            "schemaVersion": 1,
+            "schemaVersion": 3,
             "schemaHead": "0001",
             "targetSchemaHead": "0001",
             "relationCount": 19,
@@ -27,6 +28,38 @@ class RecoveryRecordTests(unittest.TestCase):
             "orphanOwnerCount": 0,
             "invalidPayloadHashCount": 0,
             "purgedOwnerViolationCount": 0,
+            "auditDomains": {
+                "publicDirectUserId": {
+                    "status": "complete",
+                    "checkedTables": ["public.archive_items"],
+                    "orphanOwnerCountsByTable": {"public.archive_items": 0},
+                    "purgedOwnerViolationCountsByTable": {"public.archive_items": 0},
+                },
+                "ownerTruthVaultScope": {
+                    "status": "complete",
+                    "checkedTables": ["owner_truth.vaults"],
+                    "missingVaultCountsByTable": {"owner_truth.vaults": 0},
+                    "ownerSubjectMismatchCountsByTable": {"owner_truth.vaults": 0},
+                    "unclassifiedTables": [],
+                    "identityRootStatus": "verified",
+                },
+                "asyncEffectsOperationScope": {
+                    "status": "complete",
+                    "checkedTables": ["async_effects.operations"],
+                    "missingOperationCountsByTable": {"async_effects.operations": 0},
+                    "scopeMismatchCountsByTable": {"async_effects.operations": 0},
+                    "unclassifiedTables": [],
+                    "rootVaultMissingCount": 0,
+                    "rootOwnerSubjectMismatchCount": 0,
+                    "rootAuthorityStatus": "verified",
+                },
+            },
+            "explicitExemptions": [
+                {
+                    "table": "async_effects.worker_loss_observations",
+                    "reason": "valueFreeRuntimeObservation",
+                }
+            ],
             "migrationState": "ready",
         }
 
@@ -88,25 +121,92 @@ class RecoveryRecordTests(unittest.TestCase):
         report = self.verified_integrity()
         self.assertEqual(report["status"], "verified")
         self.assertEqual(report["integrityDigest"].__len__(), 64)
+        self.assertEqual(report["auditCoverageStatus"], "complete")
+        self.assertEqual(report["checkedDirectUserIdTables"], ["public.archive_items"])
 
-        for field in (
-            "orphanOwnerCount",
-            "invalidPayloadHashCount",
-            "purgedOwnerViolationCount",
-        ):
-            invalid = dict(self.metrics)
-            invalid[field] = 1
-            self.assertEqual(
-                self.verified_integrity(metrics=invalid)["status"],
-                "failed",
-            )
+        orphaned = copy.deepcopy(self.metrics)
+        orphaned["orphanOwnerCount"] = 1
+        orphaned["auditDomains"]["publicDirectUserId"]["orphanOwnerCountsByTable"] = {
+            "public.archive_items": 1
+        }
+        self.assertEqual(self.verified_integrity(metrics=orphaned)["status"], "failed")
 
-        stale = dict(self.metrics)
+        purged = copy.deepcopy(self.metrics)
+        purged["purgedOwnerViolationCount"] = 1
+        purged["auditDomains"]["publicDirectUserId"][
+            "purgedOwnerViolationCountsByTable"
+        ] = {"public.archive_items": 1}
+        self.assertEqual(self.verified_integrity(metrics=purged)["status"], "failed")
+
+        hashes = copy.deepcopy(self.metrics)
+        hashes["invalidPayloadHashCount"] = 1
+        self.assertEqual(self.verified_integrity(metrics=hashes)["status"], "failed")
+
+        stale = copy.deepcopy(self.metrics)
         stale["schemaHead"] = "0000"
         self.assertEqual(
             self.verified_integrity(metrics=stale)["status"],
             "failed",
         )
+
+    def test_legacy_or_incomplete_audit_coverage_cannot_verify_integrity(self):
+        legacy = copy.deepcopy(self.metrics)
+        legacy["schemaVersion"] = 1
+        legacy.pop("auditDomains")
+        legacy.pop("explicitExemptions")
+
+        report = self.verified_integrity(metrics=legacy)
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["auditCoverageStatus"], "unverified")
+        self.assertIn("integrityAuditCoverageUnverified", report["blockers"])
+
+        v2 = copy.deepcopy(self.metrics)
+        v2["schemaVersion"] = 2
+        v2.pop("auditDomains")
+        v2.pop("explicitExemptions")
+        v2["checkedDirectUserIdTables"] = ["public.archive_items"]
+        v2["orphanOwnerCountsByTable"] = {"public.archive_items": 0}
+        v2["purgedOwnerViolationCountsByTable"] = {"public.archive_items": 0}
+        v2_report = self.verified_integrity(metrics=v2)
+        self.assertEqual(v2_report["status"], "failed")
+        self.assertIn("integrityAuditCoverageUnverified", v2_report["blockers"])
+
+        incomplete = copy.deepcopy(v2)
+        incomplete.pop("orphanOwnerCountsByTable")
+        with self.assertRaisesRegex(RecoveryContractError, "invalidIntegrityAuditCounts"):
+            self.verified_integrity(metrics=incomplete)
+
+    def test_v3_scope_and_root_authority_gaps_cannot_verify_integrity(self):
+        identity_root_gap = copy.deepcopy(self.metrics)
+        identity_root_gap["auditDomains"]["ownerTruthVaultScope"][
+            "identityRootStatus"
+        ] = "unverified"
+        report = self.verified_integrity(metrics=identity_root_gap)
+        self.assertEqual(report["auditCoverageStatus"], "complete")
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("ownerTruthIdentityRootUnverified", report["blockers"])
+
+        async_scope_gap = copy.deepcopy(self.metrics)
+        async_scope_gap["auditDomains"]["asyncEffectsOperationScope"][
+            "scopeMismatchCountsByTable"
+        ] = {"async_effects.operations": 1}
+        report = self.verified_integrity(metrics=async_scope_gap)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("asyncEffectsOperationScopeViolation", report["blockers"])
+
+        missing_exemption = copy.deepcopy(self.metrics)
+        missing_exemption["explicitExemptions"] = []
+        with self.assertRaisesRegex(RecoveryContractError, "invalidIntegrityAuditExemptions"):
+            self.verified_integrity(metrics=missing_exemption)
+
+        unclassified_owner_truth = copy.deepcopy(self.metrics)
+        unclassified_owner_truth["auditDomains"]["ownerTruthVaultScope"]["status"] = "unverified"
+        unclassified_owner_truth["auditDomains"]["ownerTruthVaultScope"][
+            "unclassifiedTables"
+        ] = ["owner_truth.vaults"]
+        report = self.verified_integrity(metrics=unclassified_owner_truth)
+        self.assertEqual(report["auditCoverageStatus"], "unverified")
+        self.assertIn("integrityAuditCoverageUnverified", report["blockers"])
 
     def verified_integrity(self, *, metrics=None):
         return verify_integrity_metrics(

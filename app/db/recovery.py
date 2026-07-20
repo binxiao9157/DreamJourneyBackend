@@ -17,6 +17,14 @@ SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MACHINE_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$")
 RECEIPT_KINDS = ("command", "outbox", "deletion", "provider")
 TERMINAL_RECEIPT_STATUSES = ("applied", "verified", "terminal")
+LEGACY_INTEGRITY_SCHEMA_VERSION = 1
+DIRECT_USER_ID_AUDIT_SCHEMA_VERSION = 2
+INTEGRITY_SCHEMA_VERSION = 3
+INTEGRITY_AUDIT_DOMAIN_NAMES = (
+    "publicDirectUserId",
+    "ownerTruthVaultScope",
+    "asyncEffectsOperationScope",
+)
 
 
 class RecoveryContractError(RuntimeError):
@@ -415,7 +423,12 @@ def verify_integrity_metrics(
     target_database: str,
     production_database: str,
 ) -> Dict[str, Any]:
-    if int(metrics.get("schemaVersion") or 0) != 1:
+    integrity_schema_version = int(metrics.get("schemaVersion") or 0)
+    if integrity_schema_version not in {
+        LEGACY_INTEGRITY_SCHEMA_VERSION,
+        DIRECT_USER_ID_AUDIT_SCHEMA_VERSION,
+        INTEGRITY_SCHEMA_VERSION,
+    }:
         raise RecoveryContractError("integritySchemaUnsupported")
     expected_head = _machine_value(expected_schema_head, code="invalidExpectedSchemaHead")
     normalized_backup_id = _backup_id(backup_id)
@@ -445,11 +458,18 @@ def verify_integrity_metrics(
     purged_violations = int(metrics.get("purgedOwnerViolationCount") or 0)
     if min(relation_count, owner_orphans, invalid_hashes, purged_violations) < 0:
         raise RecoveryContractError("invalidIntegrityCount")
+    audit = _integrity_owner_audit(
+        metrics,
+        integrity_schema_version=integrity_schema_version,
+        orphan_owner_count=owner_orphans,
+        purged_owner_violation_count=purged_violations,
+    )
     blockers = []
     if schema_head != expected_head or target_head != expected_head or migration_state != "ready":
         blockers.append("schemaHeadMismatch")
     if relation_count < 1:
         blockers.append("restoredSchemaMissing")
+    blockers.extend(audit["blockers"])
     if owner_orphans:
         blockers.append("ownerOrphansPresent")
     if invalid_hashes:
@@ -458,7 +478,7 @@ def verify_integrity_metrics(
         blockers.append("purgedOwnerDataResurrected")
 
     payload = {
-        "schemaVersion": 1,
+        "schemaVersion": integrity_schema_version,
         "status": "verified" if not blockers else "failed",
         "backupId": normalized_backup_id,
         "cutoffLSN": normalized_cutoff,
@@ -469,13 +489,358 @@ def verify_integrity_metrics(
         "relationCount": relation_count,
         "rowCounts": dict(sorted(row_counts.items())),
         "orphanOwnerCount": owner_orphans,
+        "auditCoverageStatus": audit["auditCoverageStatus"],
+        "checkedDirectUserIdTables": audit["checkedDirectUserIdTables"],
+        "orphanOwnerCountsByTable": audit["orphanOwnerCountsByTable"],
         "invalidPayloadHashCount": invalid_hashes,
         "purgedOwnerViolationCount": purged_violations,
+        "purgedOwnerViolationCountsByTable": audit["purgedOwnerViolationCountsByTable"],
+        "auditDomains": audit["auditDomains"],
+        "explicitExemptions": audit["explicitExemptions"],
         "migrationState": migration_state,
         "blockers": blockers,
     }
     payload["integrityDigest"] = _canonical_hash(payload)
     return payload
+
+
+def _integrity_owner_audit(
+    metrics: Mapping[str, Any],
+    *,
+    integrity_schema_version: int,
+    orphan_owner_count: int,
+    purged_owner_violation_count: int,
+) -> Dict[str, Any]:
+    """Validate recovery ownership audit evidence without accepting partial scope.
+
+    V1 predates dynamic discovery. V2 discovered legacy ``public.user_id``
+    tables only. Both remain readable for historical evidence but are never a
+    complete recovery audit. V3 requires the public, Owner Truth, and async
+    effect domains plus an explicit exemption inventory.
+    """
+
+    if integrity_schema_version == LEGACY_INTEGRITY_SCHEMA_VERSION:
+        return _unverified_integrity_audit()
+
+    if integrity_schema_version == DIRECT_USER_ID_AUDIT_SCHEMA_VERSION:
+        public_audit = _validate_public_direct_user_audit(
+            metrics,
+            owner_orphan_count=orphan_owner_count,
+            purged_owner_violation_count=purged_owner_violation_count,
+            source="legacy",
+        )
+        result = _unverified_integrity_audit()
+        result.update(
+            {
+                "checkedDirectUserIdTables": public_audit["checkedTables"],
+                "orphanOwnerCountsByTable": public_audit["orphanOwnerCountsByTable"],
+                "purgedOwnerViolationCountsByTable": public_audit[
+                    "purgedOwnerViolationCountsByTable"
+                ],
+            }
+        )
+        return result
+
+    raw_domains = metrics.get("auditDomains")
+    if not isinstance(raw_domains, Mapping) or set(raw_domains) != set(INTEGRITY_AUDIT_DOMAIN_NAMES):
+        raise RecoveryContractError("invalidIntegrityAuditDomains")
+    public_audit = _validate_public_direct_user_audit(
+        raw_domains.get("publicDirectUserId"),
+        owner_orphan_count=orphan_owner_count,
+        purged_owner_violation_count=purged_owner_violation_count,
+        source="v3",
+    )
+    owner_truth_audit = _validate_owner_truth_audit(raw_domains.get("ownerTruthVaultScope"))
+    async_effects_audit = _validate_async_effects_audit(
+        raw_domains.get("asyncEffectsOperationScope")
+    )
+    exemptions = _validate_explicit_exemptions(metrics.get("explicitExemptions"))
+    audit_domains = {
+        "publicDirectUserId": public_audit,
+        "ownerTruthVaultScope": owner_truth_audit,
+        "asyncEffectsOperationScope": async_effects_audit,
+    }
+    blockers = []
+    if any(domain["status"] != "complete" for domain in audit_domains.values()):
+        blockers.append("integrityAuditCoverageUnverified")
+    if owner_truth_audit["scopeViolationCount"]:
+        blockers.append("ownerTruthVaultScopeViolation")
+    if owner_truth_audit["identityRootStatus"] != "verified":
+        blockers.append("ownerTruthIdentityRootUnverified")
+    if async_effects_audit["scopeViolationCount"]:
+        blockers.append("asyncEffectsOperationScopeViolation")
+    if async_effects_audit["rootAuthorityStatus"] != "verified":
+        blockers.append("asyncEffectsRootAuthorityUnverified")
+    return {
+        "auditCoverageStatus": "complete"
+        if "integrityAuditCoverageUnverified" not in blockers
+        else "unverified",
+        "checkedDirectUserIdTables": public_audit["checkedTables"],
+        "orphanOwnerCountsByTable": public_audit["orphanOwnerCountsByTable"],
+        "purgedOwnerViolationCountsByTable": public_audit[
+            "purgedOwnerViolationCountsByTable"
+        ],
+        "auditDomains": audit_domains,
+        "explicitExemptions": exemptions,
+        "blockers": blockers,
+    }
+
+
+def _unverified_integrity_audit() -> Dict[str, Any]:
+    return {
+        "auditCoverageStatus": "unverified",
+        "checkedDirectUserIdTables": [],
+        "orphanOwnerCountsByTable": {},
+        "purgedOwnerViolationCountsByTable": {},
+        "auditDomains": {},
+        "explicitExemptions": [],
+        "blockers": ["integrityAuditCoverageUnverified"],
+    }
+
+
+def _validate_public_direct_user_audit(
+    value: Any,
+    *,
+    owner_orphan_count: int,
+    purged_owner_violation_count: int,
+    source: str,
+) -> Dict[str, Any]:
+    domain = value if source == "v3" else {
+        "status": "complete",
+        "checkedTables": value.get("checkedDirectUserIdTables") if isinstance(value, Mapping) else None,
+        "orphanOwnerCountsByTable": value.get("orphanOwnerCountsByTable")
+        if isinstance(value, Mapping)
+        else None,
+        "purgedOwnerViolationCountsByTable": value.get("purgedOwnerViolationCountsByTable")
+        if isinstance(value, Mapping)
+        else None,
+    }
+    if not isinstance(domain, Mapping):
+        raise RecoveryContractError("invalidIntegrityPublicAudit")
+    status = _audit_status(domain.get("status"), code="invalidIntegrityPublicAudit")
+    tables = _audit_table_names(
+        domain.get("checkedTables"),
+        schema="public",
+        code="invalidIntegrityAuditTables",
+    )
+    orphan_counts = _integrity_count_map(
+        domain.get("orphanOwnerCountsByTable"),
+        tables=tables,
+        schema="public",
+        code="invalidIntegrityAuditCounts",
+    )
+    purged_counts = _integrity_count_map(
+        domain.get("purgedOwnerViolationCountsByTable"),
+        tables=tables,
+        schema="public",
+        code="invalidIntegrityAuditCounts",
+    )
+    if sum(orphan_counts.values()) != owner_orphan_count:
+        raise RecoveryContractError("integrityAuditCountMismatch")
+    if sum(purged_counts.values()) != purged_owner_violation_count:
+        raise RecoveryContractError("integrityAuditCountMismatch")
+    return {
+        "status": status,
+        "checkedTables": list(tables),
+        "orphanOwnerCountsByTable": orphan_counts,
+        "purgedOwnerViolationCountsByTable": purged_counts,
+    }
+
+
+def _validate_owner_truth_audit(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RecoveryContractError("invalidOwnerTruthAudit")
+    status = _audit_status(value.get("status"), code="invalidOwnerTruthAudit")
+    tables = _audit_table_names(
+        value.get("checkedTables"),
+        schema="owner_truth",
+        code="invalidOwnerTruthAuditTables",
+    )
+    missing_vault_counts = _integrity_count_map(
+        value.get("missingVaultCountsByTable"),
+        tables=tables,
+        schema="owner_truth",
+        code="invalidOwnerTruthAuditCounts",
+    )
+    owner_mismatch_counts = _integrity_count_map(
+        value.get("ownerSubjectMismatchCountsByTable"),
+        tables=tables,
+        schema="owner_truth",
+        code="invalidOwnerTruthAuditCounts",
+    )
+    unclassified_tables = _audit_table_subset(
+        value.get("unclassifiedTables"),
+        tables=tables,
+        schema="owner_truth",
+        code="invalidOwnerTruthUnclassifiedTables",
+    )
+    if bool(unclassified_tables) != (status == "unverified"):
+        raise RecoveryContractError("invalidOwnerTruthAuditStatus")
+    identity_root_status = _root_authority_status(
+        value.get("identityRootStatus"),
+        code="invalidOwnerTruthIdentityRootStatus",
+    )
+    return {
+        "status": status,
+        "checkedTables": list(tables),
+        "missingVaultCountsByTable": missing_vault_counts,
+        "ownerSubjectMismatchCountsByTable": owner_mismatch_counts,
+        "unclassifiedTables": list(unclassified_tables),
+        "identityRootStatus": identity_root_status,
+        "scopeViolationCount": sum(missing_vault_counts.values()) + sum(owner_mismatch_counts.values()),
+    }
+
+
+def _validate_async_effects_audit(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RecoveryContractError("invalidAsyncEffectsAudit")
+    status = _audit_status(value.get("status"), code="invalidAsyncEffectsAudit")
+    tables = _audit_table_names(
+        value.get("checkedTables"),
+        schema="async_effects",
+        code="invalidAsyncEffectsAuditTables",
+    )
+    missing_operation_counts = _integrity_count_map(
+        value.get("missingOperationCountsByTable"),
+        tables=tables,
+        schema="async_effects",
+        code="invalidAsyncEffectsAuditCounts",
+    )
+    scope_mismatch_counts = _integrity_count_map(
+        value.get("scopeMismatchCountsByTable"),
+        tables=tables,
+        schema="async_effects",
+        code="invalidAsyncEffectsAuditCounts",
+    )
+    unclassified_tables = _audit_table_subset(
+        value.get("unclassifiedTables"),
+        tables=tables,
+        schema="async_effects",
+        code="invalidAsyncEffectsUnclassifiedTables",
+    )
+    if bool(unclassified_tables) != (status == "unverified"):
+        raise RecoveryContractError("invalidAsyncEffectsAuditStatus")
+    root_vault_missing_count = _audit_nonnegative_count(
+        value.get("rootVaultMissingCount"),
+        code="invalidAsyncEffectsRootCount",
+    )
+    root_owner_mismatch_count = _audit_nonnegative_count(
+        value.get("rootOwnerSubjectMismatchCount"),
+        code="invalidAsyncEffectsRootCount",
+    )
+    root_authority_status = _root_authority_status(
+        value.get("rootAuthorityStatus"),
+        code="invalidAsyncEffectsRootAuthorityStatus",
+    )
+    return {
+        "status": status,
+        "checkedTables": list(tables),
+        "missingOperationCountsByTable": missing_operation_counts,
+        "scopeMismatchCountsByTable": scope_mismatch_counts,
+        "unclassifiedTables": list(unclassified_tables),
+        "rootVaultMissingCount": root_vault_missing_count,
+        "rootOwnerSubjectMismatchCount": root_owner_mismatch_count,
+        "rootAuthorityStatus": root_authority_status,
+        "scopeViolationCount": (
+            sum(missing_operation_counts.values())
+            + sum(scope_mismatch_counts.values())
+            + root_vault_missing_count
+            + root_owner_mismatch_count
+        ),
+    }
+
+
+def _validate_explicit_exemptions(value: Any) -> list[Dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise RecoveryContractError("invalidIntegrityAuditExemptions")
+    exemptions: list[Dict[str, str]] = []
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) != {"table", "reason"}:
+            raise RecoveryContractError("invalidIntegrityAuditExemptions")
+        table = _qualified_table_name(
+            raw.get("table"),
+            schema="async_effects",
+            code="invalidIntegrityAuditExemptions",
+        )
+        reason = _machine_value(raw.get("reason"), code="invalidIntegrityAuditExemptions")
+        exemptions.append({"table": table, "reason": reason})
+    if exemptions != sorted(exemptions, key=lambda item: (item["table"], item["reason"])):
+        raise RecoveryContractError("invalidIntegrityAuditExemptions")
+    if len({item["table"] for item in exemptions}) != len(exemptions):
+        raise RecoveryContractError("invalidIntegrityAuditExemptions")
+    if not any(item["table"] == "async_effects.worker_loss_observations" for item in exemptions):
+        raise RecoveryContractError("missingWorkerLossObservationExemption")
+    return exemptions
+
+
+def _audit_status(value: Any, *, code: str) -> str:
+    status = _machine_value(value, code=code)
+    if status not in {"complete", "unverified"}:
+        raise RecoveryContractError(code)
+    return status
+
+
+def _root_authority_status(value: Any, *, code: str) -> str:
+    status = _machine_value(value, code=code)
+    if status not in {"verified", "unverified"}:
+        raise RecoveryContractError(code)
+    return status
+
+
+def _audit_table_names(value: Any, *, schema: str, code: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise RecoveryContractError(code)
+    tables = tuple(_qualified_table_name(raw, schema=schema, code=code) for raw in value)
+    if tables != tuple(sorted(set(tables))):
+        raise RecoveryContractError(code)
+    return tables
+
+
+def _audit_table_subset(
+    value: Any,
+    *,
+    tables: tuple[str, ...],
+    schema: str,
+    code: str,
+) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise RecoveryContractError(code)
+    candidates = tuple(_qualified_table_name(raw, schema=schema, code=code) for raw in value)
+    if candidates != tuple(sorted(set(candidates))) or not set(candidates).issubset(tables):
+        raise RecoveryContractError(code)
+    return candidates
+
+
+def _qualified_table_name(value: Any, *, schema: str, code: str) -> str:
+    normalized = _machine_value(value, code=code)
+    prefix = f"{schema}."
+    if not normalized.startswith(prefix) or normalized.count(".") != 1:
+        raise RecoveryContractError(code)
+    return normalized
+
+
+def _integrity_count_map(
+    value: Any,
+    *,
+    tables: tuple[str, ...],
+    schema: str,
+    code: str,
+) -> Dict[str, int]:
+    if not isinstance(value, Mapping):
+        raise RecoveryContractError(code)
+    counts: Dict[str, int] = {}
+    for raw_table, raw_count in value.items():
+        table = _qualified_table_name(raw_table, schema=schema, code=code)
+        counts[table] = _audit_nonnegative_count(raw_count, code=code)
+    if tuple(sorted(counts)) != tables:
+        raise RecoveryContractError(code)
+    return dict(sorted(counts.items()))
+
+
+def _audit_nonnegative_count(value: Any, *, code: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RecoveryContractError(code)
+    return value
 
 
 def build_recovery_record(
@@ -528,7 +893,12 @@ def build_recovery_record(
         raise RecoveryContractError("restoreTimelineMismatch")
     integrity_payload = dict(integrity)
     replay_payload = dict(replay)
-    if int(integrity_payload.get("schemaVersion") or 0) != 1:
+    integrity_schema_version = int(integrity_payload.get("schemaVersion") or 0)
+    if integrity_schema_version not in {
+        LEGACY_INTEGRITY_SCHEMA_VERSION,
+        DIRECT_USER_ID_AUDIT_SCHEMA_VERSION,
+        INTEGRITY_SCHEMA_VERSION,
+    }:
         raise RecoveryContractError("integritySchemaUnsupported")
     _require_digest(
         integrity_payload,
@@ -568,7 +938,11 @@ def build_recovery_record(
             traffic_payload.get("evidenceId"),
             code="invalidTrafficRecoveryEvidenceId",
         )
-    integrity_verified = integrity_payload.get("status") == "verified"
+    integrity_verified = (
+        integrity_payload.get("status") == "verified"
+        and integrity_schema_version == INTEGRITY_SCHEMA_VERSION
+        and integrity_payload.get("auditCoverageStatus") == "complete"
+    )
     replay_complete = (
         replay_payload.get("status") == "complete"
         and replay_payload.get("deletionReplayStatus") == "verified"

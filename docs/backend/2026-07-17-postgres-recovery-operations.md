@@ -13,7 +13,8 @@
 1. backup manifest、artifact size 和 checksum 通过校验；
 2. 目标数据库不是生产数据库，且 DSN 的数据库名与 `RECOVERY_TARGET_DB` 完全一致；
 3. restore 和 versioned migration 成功，schema head/checksum 通过；
-4. owner、payload hash、purged owner 不复活检查通过；
+4. 对 legacy direct-user、Owner Truth Vault scope 和 async operation scope 完成动态
+   owner/authority 审计，并保留任何未验证根的 `NO_GO`；
 5. cutoff 后 command/outbox/deletion/provider receipt coverage 完整；
 6. receipt application evidence 与 backup、cutoff、range、source digest、plan digest 和数量完全一致；
 7. provider unknown、pending deletion、receipt conflict 或流量恢复失败均不存在。
@@ -36,10 +37,13 @@
 cd /srv/dreamjourney-backend
 .venv/bin/python -m unittest \
   tests.test_recovery_record \
+  tests.test_recovery_integrity_audit \
   tests.test_backup_manifest \
   tests.test_db_migrator -v
 
 scripts/db/run-recovery-postgres-smoke.sh
+DATABASE_URL='<isolated-postgres-dsn>' \
+  scripts/db/run-recovery-integrity-audit-postgres-smoke.sh
 bash -n \
   scripts/db/restore_postgres.sh \
   scripts/db/run-recovery-postgres-smoke.sh \
@@ -47,6 +51,35 @@ bash -n \
 ```
 
 `run-recovery-postgres-smoke.sh` 使用 fake Docker 和假 dump，只证明合同与 fail-closed 行为，不关闭 G2。
+
+`run-recovery-integrity-audit-postgres-smoke.sh` 会创建一个临时
+`dj_recovery_audit_*` 数据库，并额外建立一个不在业务迁移名单内、但带
+`user_id` 的孤儿 fixture 表。脚本必须发现该表、把它归因到
+`orphanOwnerCountsByTable`，并输出 `ownerOrphansPresent` 的 `NO_GO`。该脚本
+只允许在可创建临时数据库的隔离 Postgres 环境运行。
+
+### 3.1 Integrity evidence V3
+
+`integrity-evidence.json` 的 V3 版本不再依赖手工维护的 owner 表名单。它通过
+`information_schema` 发现并分别审计以下域：
+
+- `publicDirectUserId`：所有 `public` base table 的直接 `user_id`；
+- `ownerTruthVaultScope`：所有 `owner_truth` 表相对 Vault 根的 scope；
+- `asyncEffectsOperationScope`：所有 `async_effects` 子表相对 operation 根的
+  owner/vault/epoch 一致性；
+- `explicitExemptions`：只有不携带 owner/resource 值的运行时证据才允许显式豁免，
+  当前为 `async_effects.worker_loss_observations`。
+
+V3 必须输出每个域的已检查表、表级计数、未分类表和 root authority 状态。
+任何新表不能被分类、表级计数缺失、aggregate 不一致、Vault/operation scope 不一致，
+都会 fail closed。V1/V2 evidence 仅作历史可读，均会被标为
+`auditCoverageStatus=unverified`，不能促成 `recovery-record.json` 的
+`cutoverDecision=GO`。
+
+V3 当前会显式报告 Owner Truth 身份根和 async operation authority root 尚未获得独立
+验证；这不是扫描器可以猜测补齐的关系。因此即便各表扫描完整，仍保持 `NO_GO`，直到
+对应 identity/authority evidence 有可验证来源。该限制同样不等同于 receipt replay
+authority 已完成。
 
 ## 4. 生产级隔离 G2 演练
 
@@ -121,7 +154,8 @@ export RECOVERY_REPLAY_APPLICATION_EVIDENCE_PATH=/secure/recovery/replay-applica
 - `manifest-verification.json`：backup artifact 校验摘要；
 - `migration-apply.json` / `migration-verify.json`：versioned migration 证据；
 - `restore-evidence.json`：backup、cutoff、目标哈希和恢复时长绑定；
-- `integrity-evidence.json`：schema、owner、hash、purged owner 检查；
+- `integrity-evidence.json`：schema、动态 direct-user、Vault/operation scope、hash、
+  purged owner 检查；
 - `replay-evidence.json`：receipt coverage、range、duplicate/conflict 和 application evidence；
 - `recovery-record.json`：最终 RPO/RTO 观测、GO/NO_GO 和所有证据 ID。
 
@@ -142,3 +176,6 @@ export RECOVERY_REPLAY_APPLICATION_EVIDENCE_PATH=/secure/recovery/replay-applica
 - iOS 已实现 maintenance/read-only/signed-out runtime 合同、中央请求围栏和 epoch 变化失效逻辑；仍需 G3 设备/发布态验证；
 - G2 必须使用真实 Postgres、真实加密 backup 和部署环境执行；
 - Provider receipt replay 还受 G3 约束。
+- Integrity evidence V3 已覆盖 legacy direct-user、Owner Truth Vault scope 和 async
+  operation scope；身份根、async root authority 与可信 replay producer 仍须在各自的
+  Gate 中单独收敛，不能由此推导为可切流。

@@ -129,7 +129,7 @@ else:
 
         integrity = verify_integrity_metrics(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 3,
                 "schemaHead": "0001",
                 "targetSchemaHead": "0001",
                 "relationCount": 19,
@@ -137,6 +137,38 @@ else:
                 "orphanOwnerCount": 0,
                 "invalidPayloadHashCount": 0,
                 "purgedOwnerViolationCount": 0,
+                "auditDomains": {
+                    "publicDirectUserId": {
+                        "status": "complete",
+                        "checkedTables": ["public.archive_items"],
+                        "orphanOwnerCountsByTable": {"public.archive_items": 0},
+                        "purgedOwnerViolationCountsByTable": {"public.archive_items": 0},
+                    },
+                    "ownerTruthVaultScope": {
+                        "status": "complete",
+                        "checkedTables": ["owner_truth.vaults"],
+                        "missingVaultCountsByTable": {"owner_truth.vaults": 0},
+                        "ownerSubjectMismatchCountsByTable": {"owner_truth.vaults": 0},
+                        "unclassifiedTables": [],
+                        "identityRootStatus": "verified",
+                    },
+                    "asyncEffectsOperationScope": {
+                        "status": "complete",
+                        "checkedTables": ["async_effects.operations"],
+                        "missingOperationCountsByTable": {"async_effects.operations": 0},
+                        "scopeMismatchCountsByTable": {"async_effects.operations": 0},
+                        "unclassifiedTables": [],
+                        "rootVaultMissingCount": 0,
+                        "rootOwnerSubjectMismatchCount": 0,
+                        "rootAuthorityStatus": "verified",
+                    },
+                },
+                "explicitExemptions": [
+                    {
+                        "table": "async_effects.worker_loss_observations",
+                        "reason": "valueFreeRuntimeObservation",
+                    }
+                ],
                 "migrationState": "ready",
             },
             expected_schema_head="0001",
