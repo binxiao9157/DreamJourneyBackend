@@ -23,6 +23,21 @@ from .provider_effect_repository import (
     PostgresProviderEffectRepository,
     ProviderEffectPersistenceSummary,
 )
+from .message_notification_effects import (
+    BUSINESS_MESSAGE_NOTIFICATION_SCHEMA_VERSION,
+    BusinessCompletionMessageNotificationPlan,
+    BusinessCompletionMessageSource,
+    BusinessMessageNotificationContractError,
+    InAppMessageKind,
+    InAppMessageProjection,
+    InAppMessageState,
+    NotificationChannel,
+    NotificationDeliveryReceipt,
+    NotificationDeliveryState,
+    NotificationIntent,
+    NotificationIntentReconciliation,
+    build_business_completion_message_notification_plan,
+)
 from .lease_repository import (
     AsyncEffectCancelResult,
     AsyncEffectJobCompletion,
@@ -67,6 +82,10 @@ from .target_admission import (
 
 __all__ = [
     "ASYNC_EFFECT_SCHEMA_VERSION",
+    "BUSINESS_MESSAGE_NOTIFICATION_SCHEMA_VERSION",
+    "BusinessCompletionMessageNotificationPlan",
+    "BusinessCompletionMessageSource",
+    "BusinessMessageNotificationContractError",
     "AsyncEffectContractError",
     "AsyncEffectCancelResult",
     "AsyncEffectConsumerAdmissionDenied",
@@ -103,6 +122,14 @@ __all__ = [
     "InMemoryOwnerTruthSourceTargetAdmissionRepository",
     "InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository",
     "InMemoryAsyncEffectSchedulerLeaseRepository",
+    "InAppMessageKind",
+    "InAppMessageProjection",
+    "InAppMessageState",
+    "NotificationChannel",
+    "NotificationDeliveryReceipt",
+    "NotificationDeliveryState",
+    "NotificationIntent",
+    "NotificationIntentReconciliation",
     "PostgresEffectKernelRepository",
     "PostgresProviderEffectRepository",
     "PostgresAsyncEffectLeaseRepository",
@@ -112,4 +139,5 @@ __all__ = [
     "PostgresAsyncEffectSchedulerLeaseRepository",
     "resolve_async_effect_runtime_status",
     "ProviderEffectPersistenceSummary",
+    "build_business_completion_message_notification_plan",
 ]
