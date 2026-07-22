@@ -850,6 +850,37 @@ class OwnerTruthInterviewSessionSnapshot:
 
 
 @dataclass(frozen=True)
+class OwnerTruthConversationThreadAuthoritySnapshot:
+    """Value-free authority binding for one persisted conversation thread.
+
+    Recommendation policy may refer to a conversation thread only after this
+    private record proves that the thread still belongs to the current Owner
+    Vault and authority epoch.  It intentionally contains no messages,
+    metadata, or recommendation content.
+    """
+
+    thread_id: str
+    vault_id: str
+    owner_subject_id: str
+    authority_epoch: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "thread_id", require_uuid(self.thread_id, field="thread_id"))
+        object.__setattr__(self, "vault_id", require_nonblank(self.vault_id, field="vault_id"))
+        object.__setattr__(
+            self,
+            "owner_subject_id",
+            require_nonblank(self.owner_subject_id, field="owner_subject_id"),
+        )
+        if (
+            not isinstance(self.authority_epoch, int)
+            or isinstance(self.authority_epoch, bool)
+            or self.authority_epoch < 0
+        ):
+            raise OwnerTruthConversationError("authority_epoch must be a non-negative integer")
+
+
+@dataclass(frozen=True)
 class OwnerTruthInterviewReviewBatchSnapshot:
     review_batch_id: str
     vault_id: str
@@ -895,6 +926,7 @@ __all__ = [
     "OwnerTruthConversationConflict",
     "OwnerTruthConversationError",
     "OwnerTruthConversationVersionConflict",
+    "OwnerTruthConversationThreadAuthoritySnapshot",
     "OwnerTruthInterviewSessionResult",
     "OwnerTruthInterviewSessionSnapshot",
     "OwnerTruthInterviewSessionStateConflict",

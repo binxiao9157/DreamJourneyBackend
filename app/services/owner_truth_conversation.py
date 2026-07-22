@@ -11,6 +11,7 @@ from copy import deepcopy
 import json
 from threading import RLock
 from typing import Any, Mapping, Protocol
+from uuid import UUID
 
 from app.domain.owner_truth.conversation import (
     AcknowledgeInterviewReviewBatchCommand,
@@ -27,6 +28,7 @@ from app.domain.owner_truth.conversation import (
     InterviewSessionState,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationConflict,
+    OwnerTruthConversationThreadAuthoritySnapshot,
     OwnerTruthConversationVersionConflict,
     OwnerTruthInterviewReviewBatchResult,
     OwnerTruthInterviewReviewBatchSnapshot,
@@ -113,6 +115,14 @@ class OwnerTruthConversationRepository(Protocol):
     ) -> OwnerTruthInterviewSessionSnapshot:
         ...
 
+    def get_interview_thread_authority(
+        self,
+        *,
+        thread_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthConversationThreadAuthoritySnapshot:
+        ...
+
 
 def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
     if not isinstance(context, OwnerTruthCommandContext):
@@ -121,6 +131,17 @@ def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
         raise OwnerTruthConversationAccessDenied(
             "only the Vault Owner may mutate a guided interview session"
         )
+
+
+def _normalized_thread_id_for_authority_read(value: object) -> str:
+    """Normalize only persisted UUID Thread IDs without exposing lookup detail."""
+
+    try:
+        return str(UUID(str(value)))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise OwnerTruthConversationAccessDenied(
+            "conversation thread does not belong to this active Owner Vault"
+        ) from error
 
 
 def _should_consume_skip_once_after_append(
@@ -242,6 +263,20 @@ class OwnerTruthConversationService:
     ) -> OwnerTruthInterviewSessionSnapshot:
         _assert_owner_context(context)
         return self._repository.get_interview_session(session_id=session_id, context=context)
+
+    def read_thread_authority(
+        self,
+        *,
+        thread_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthConversationThreadAuthoritySnapshot:
+        """Return only the current Owner/Vault/epoch binding for one thread."""
+
+        _assert_owner_context(context)
+        return self._repository.get_interview_thread_authority(
+            thread_id=thread_id,
+            context=context,
+        )
 
 
 class InMemoryOwnerTruthConversationRepository:
@@ -816,6 +851,35 @@ class InMemoryOwnerTruthConversationRepository:
                 pending_review_batch_id=session["pendingReviewBatchId"],
                 fatigue=session["fatigue"],
                 authority_epoch=int(vault["authorityEpoch"]),
+            )
+
+    def get_interview_thread_authority(
+        self,
+        *,
+        thread_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthConversationThreadAuthoritySnapshot:
+        _assert_owner_context(context)
+        normalized_thread_id = _normalized_thread_id_for_authority_read(thread_id)
+        with self._lock:
+            vault = self._ensure_active_vault(
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+            )
+            thread = self._threads.get((context.vault_id, normalized_thread_id))
+            if (
+                thread is None
+                or str(thread["ownerSubjectId"]) != context.owner_subject_id
+                or int(thread["authorityEpoch"]) != int(vault["authorityEpoch"])
+            ):
+                raise OwnerTruthConversationAccessDenied(
+                    "conversation thread does not belong to this active Owner Vault"
+                )
+            return OwnerTruthConversationThreadAuthoritySnapshot(
+                thread_id=str(thread["id"]),
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                authority_epoch=int(thread["authorityEpoch"]),
             )
 
     def snapshot(self, *, vault_id: str) -> Mapping[str, Any]:
@@ -2017,6 +2081,49 @@ class PostgresOwnerTruthConversationRepository:
                 else str(row["pending_review_batch_id"])
             ),
             fatigue=InterviewFatigue(str(row["fatigue"])),
+            authority_epoch=int(row["authority_epoch"]),
+        )
+
+    def get_interview_thread_authority(
+        self,
+        *,
+        thread_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthConversationThreadAuthoritySnapshot:
+        _assert_owner_context(context)
+        normalized_thread_id = _normalized_thread_id_for_authority_read(thread_id)
+        with self._cursor() as cursor:
+            vault = self._active_vault(
+                cursor,
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                lock=False,
+            )
+            cursor.execute(
+                """
+                SELECT id, vault_id, owner_subject_id, authority_epoch
+                FROM owner_truth.conversation_threads
+                WHERE vault_id = %s
+                  AND id = %s
+                  AND owner_subject_id = %s
+                  AND authority_epoch = %s
+                """,
+                (
+                    context.vault_id,
+                    normalized_thread_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise OwnerTruthConversationAccessDenied(
+                "conversation thread does not belong to this active Owner Vault"
+            )
+        return OwnerTruthConversationThreadAuthoritySnapshot(
+            thread_id=str(row["id"]),
+            vault_id=str(row["vault_id"]),
+            owner_subject_id=str(row["owner_subject_id"]),
             authority_epoch=int(row["authority_epoch"]),
         )
 

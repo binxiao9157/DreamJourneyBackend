@@ -12,6 +12,7 @@ from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateReviewCommand,
     OwnerTruthCandidateSnapshot,
 )
+from app.domain.owner_truth.conversation import StartInterviewSessionCommand
 from app.domain.owner_truth.contracts import (
     CandidateDecision,
     EpistemicStatus,
@@ -24,6 +25,7 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
+from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_knowledge_dimension_confirmation import (
     OwnerTruthKnowledgeDimensionConfirmationCommand,
     OwnerTruthKnowledgeDimensionConfirmationService,
@@ -177,6 +179,38 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             ),
         )
 
+    def _seed_thread(
+        self,
+        *,
+        vault_id: str,
+        owner_id: str,
+        command_id: str,
+    ) -> str:
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        with self.store.request_unit_of_work(
+            correlation_id=f"recommendation-read-thread:{vault_id}:{thread_id}",
+            command_id=command_id,
+        ):
+            OwnerTruthConversationService(
+                self.store.owner_truth_conversation_repository()
+            ).start_session(
+                command=StartInterviewSessionCommand(
+                    command_id=command_id,
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    expected_thread_version=0,
+                    entry_mode="recommendation",
+                ),
+                context=context,
+            )
+        return thread_id
+
     @staticmethod
     def _path(vault_id: str) -> str:
         return f"/v2/vaults/{vault_id}/knowledge-recommendations/read"
@@ -252,6 +286,11 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             facets=("priority",),
             command_id="recommendation-api-confirm-002",
         )
+        thread_id = self._seed_thread(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="recommendation-api-thread-001",
+        )
 
         response = client.post(
             self._path(vault_id),
@@ -261,7 +300,7 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
                     self._candidate(
                         candidate_id="api-continuity",
                         slot="continuity",
-                        thread_id="thread-api-continuity",
+                        thread_id=thread_id,
                         dimension="keyDecisions",
                         missing_facet="outcome",
                         memory_version_id=decision_id,
@@ -269,7 +308,7 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
                     self._candidate(
                         candidate_id="api-breadth",
                         slot="breadth",
-                        thread_id="thread-api-breadth",
+                        thread_id=thread_id,
                         dimension="values",
                         missing_facet="reflection",
                         memory_version_id=values_id,
@@ -312,10 +351,15 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             facets=("choice",),
             command_id="recommendation-api-confirm-003",
         )
+        thread_id = self._seed_thread(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="recommendation-api-thread-002",
+        )
         candidate = self._candidate(
             candidate_id="api-owner-boundary",
             slot="continuity",
-            thread_id="thread-api-owner-boundary",
+            thread_id=thread_id,
             dimension="keyDecisions",
             missing_facet="reason",
             memory_version_id=memory_id,
@@ -356,10 +400,15 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             facets=("choice",),
             command_id="recommendation-api-confirm-004",
         )
+        thread_id = self._seed_thread(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="recommendation-api-thread-003",
+        )
         candidate = self._candidate(
             candidate_id="api-strict-envelope",
             slot="continuity",
-            thread_id="thread-api-strict-envelope",
+            thread_id=thread_id,
             dimension="keyDecisions",
             missing_facet="reason",
             memory_version_id=memory_id,
@@ -384,6 +433,48 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         )
         self.assertEqual(
             injected_text.json()["detail"]["code"],
+            "ownerTruthKnowledgeRecommendationReadInvalid",
+        )
+
+    def test_unknown_thread_is_rejected_after_owner_confirmed_coverage_is_ready(self) -> None:
+        owner_id, headers = self._login("13800139426")
+        vault_id = "vault-recommendation-read-thread-boundary"
+        memory_id, content_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "Only a persisted private thread may carry a recommendation."},
+            command_id="recommendation-api-activate-005",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=memory_id,
+            content_hash=content_hash,
+            dimension="keyDecisions",
+            facets=("choice",),
+            command_id="recommendation-api-confirm-005",
+        )
+
+        response = client.post(
+            self._path(vault_id),
+            headers=headers,
+            json={
+                "candidates": [
+                    self._candidate(
+                        candidate_id="api-unknown-thread",
+                        slot="continuity",
+                        thread_id=str(uuid4()),
+                        dimension="keyDecisions",
+                        missing_facet="reason",
+                        memory_version_id=memory_id,
+                    )
+                ]
+            },
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"],
             "ownerTruthKnowledgeRecommendationReadInvalid",
         )
 

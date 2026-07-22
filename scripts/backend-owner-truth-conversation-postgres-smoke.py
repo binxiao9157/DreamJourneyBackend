@@ -222,6 +222,21 @@ def main() -> None:
             operation=lambda service: service.start_session(command=start, context=context),
         )
         require(started.outcome == "created", "start must create one session")
+        thread_authority = invoke(
+            store,
+            command_id="read-conversation-thread-authority",
+            operation=lambda service: service.read_thread_authority(
+                thread_id=thread_id,
+                context=context,
+            ),
+        )
+        require(thread_authority.thread_id == thread_id, "thread authority read must bind the thread ID")
+        require(
+            thread_authority.vault_id == context.vault_id
+            and thread_authority.owner_subject_id == context.owner_subject_id
+            and thread_authority.authority_epoch == 0,
+            "thread authority read must bind the active Owner Vault epoch",
+        )
         replayed_start = invoke(
             store,
             command_id="start-conversation-smoke-replay",
@@ -976,6 +991,41 @@ def main() -> None:
             restored_batches[0].state is InterviewReviewBatchState.ACKNOWLEDGED,
             "acknowledged review state must survive restart",
         )
+        unknown_thread_rejected = False
+        try:
+            invoke(
+                restarted_store,
+                command_id="read-unknown-conversation-thread-authority",
+                operation=lambda service: service.read_thread_authority(
+                    thread_id=str(uuid.uuid4()),
+                    context=context,
+                ),
+            )
+        except OwnerTruthConversationAccessDenied:
+            unknown_thread_rejected = True
+        require(unknown_thread_rejected, "unknown conversation thread authority must be denied")
+
+        # Simulate a later Authority reset after all conversation assertions.
+        # The old thread must no longer be accepted by a current Vault read.
+        with psycopg.connect(test_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE owner_truth.vaults SET authority_epoch = authority_epoch + 1 WHERE vault_id = %s",
+                    (context.vault_id,),
+                )
+        stale_epoch_rejected = False
+        try:
+            invoke(
+                restarted_store,
+                command_id="read-stale-conversation-thread-authority",
+                operation=lambda service: service.read_thread_authority(
+                    thread_id=thread_id,
+                    context=context,
+                ),
+            )
+        except OwnerTruthConversationAccessDenied:
+            stale_epoch_rejected = True
+        require(stale_epoch_rejected, "stale conversation thread authority epoch must be denied")
         print("owner_truth_conversation_postgres_smoke=passed")
     finally:
         if restarted_store is not None:

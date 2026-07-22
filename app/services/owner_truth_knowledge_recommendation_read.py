@@ -14,6 +14,10 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Optional, Protocol
 
 from app.domain.owner_truth.contracts import OwnerTruthContractError
+from app.domain.owner_truth.conversation import (
+    OwnerTruthConversationAccessDenied,
+    OwnerTruthConversationThreadAuthoritySnapshot,
+)
 from app.domain.owner_truth.knowledge_dimension_read import (
     OWNER_TRUTH_KNOWLEDGE_DIMENSION_READ_SCHEMA_VERSION,
     OwnerTruthKnowledgeDimensionReadResult,
@@ -53,6 +57,9 @@ class OwnerTruthKnowledgeRecommendationReadStore(Protocol):
         ...
 
     def owner_truth_knowledge_dimension_confirmation_repository(self) -> Any:
+        ...
+
+    def owner_truth_conversation_repository(self) -> Any:
         ...
 
 
@@ -160,6 +167,11 @@ class OwnerTruthKnowledgeRecommendationReadService:
                     selection=None,
                 )
             assert dimension_read.coverage is not None
+            self._assert_current_owner_thread_authority(
+                candidates=candidate_rows,
+                context=context,
+                authority_epoch=dimension_read.authority_epoch,
+            )
             self._assert_current_owner_confirmed_evidence(
                 candidates=candidate_rows,
                 dimension_read=dimension_read,
@@ -222,6 +234,41 @@ class OwnerTruthKnowledgeRecommendationReadService:
             if not set(candidate.evidence_refs).issubset(dimension_refs):
                 raise OwnerTruthKnowledgeRecommendationReadError(
                     "candidate evidence_refs must confirm the target knowledge dimension"
+                )
+
+    def _assert_current_owner_thread_authority(
+        self,
+        *,
+        candidates: Iterable[RecommendationCandidate],
+        context: OwnerTruthCommandContext,
+        authority_epoch: int,
+    ) -> None:
+        """Reject caller-supplied thread IDs unless a current private Thread owns them."""
+
+        repository = self._store.owner_truth_conversation_repository()
+        seen_thread_ids: set[str] = set()
+        for candidate in candidates:
+            if candidate.thread_id in seen_thread_ids:
+                continue
+            seen_thread_ids.add(candidate.thread_id)
+            try:
+                snapshot = repository.get_interview_thread_authority(
+                    thread_id=candidate.thread_id,
+                    context=context,
+                )
+            except OwnerTruthConversationAccessDenied as error:
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "candidate thread_id must reference a current Owner Truth conversation thread"
+                ) from error
+            if (
+                not isinstance(snapshot, OwnerTruthConversationThreadAuthoritySnapshot)
+                or snapshot.thread_id != candidate.thread_id
+                or snapshot.vault_id != context.vault_id
+                or snapshot.owner_subject_id != context.owner_subject_id
+                or snapshot.authority_epoch != authority_epoch
+            ):
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "candidate thread_id must reference a current Owner Truth conversation thread"
                 )
 
 

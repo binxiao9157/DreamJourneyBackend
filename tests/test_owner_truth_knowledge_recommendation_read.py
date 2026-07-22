@@ -9,6 +9,10 @@ from uuid import uuid4
 from app.domain.owner_truth.knowledge_dimension_read import (
     OwnerTruthKnowledgeDimensionReadState,
 )
+from app.domain.owner_truth.conversation import (
+    OwnerTruthConversationAccessDenied,
+    OwnerTruthConversationThreadAuthoritySnapshot,
+)
 from app.domain.owner_truth.knowledge_recommendations import (
     KnowledgeDimension,
     RecommendationCandidate,
@@ -49,10 +53,60 @@ class _ProjectionReader:
         return self.snapshot
 
 
+class _ConversationThreadAuthorityReader:
+    def __init__(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        authority_epoch: int,
+        thread_ids: tuple[str, ...],
+    ) -> None:
+        self._vault_id = vault_id
+        self._owner_subject_id = owner_subject_id
+        self._authority_epoch = authority_epoch
+        self._thread_ids = frozenset(thread_ids)
+
+    def get_interview_thread_authority(
+        self,
+        *,
+        thread_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthConversationThreadAuthoritySnapshot:
+        if (
+            context.vault_id != self._vault_id
+            or context.owner_subject_id != self._owner_subject_id
+            or thread_id not in self._thread_ids
+        ):
+            raise OwnerTruthConversationAccessDenied(
+                "conversation thread does not belong to this active Owner Vault"
+            )
+        return OwnerTruthConversationThreadAuthoritySnapshot(
+            thread_id=thread_id,
+            vault_id=self._vault_id,
+            owner_subject_id=self._owner_subject_id,
+            authority_epoch=self._authority_epoch,
+        )
+
+
 class _Store:
-    def __init__(self, snapshot: dict[str, object]) -> None:
+    def __init__(
+        self,
+        snapshot: dict[str, object],
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        authority_epoch: int,
+        thread_ids: tuple[str, ...],
+    ) -> None:
         self.reader = _ProjectionReader(snapshot)
         self.repository = InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository()
+        self.conversation_repository = _ConversationThreadAuthorityReader(
+            vault_id=vault_id,
+            owner_subject_id=owner_subject_id,
+            authority_epoch=authority_epoch,
+            thread_ids=thread_ids,
+        )
 
     @contextmanager
     def request_unit_of_work(self, *, correlation_id: str, command_id: str):
@@ -65,6 +119,9 @@ class _Store:
     def owner_truth_knowledge_dimension_confirmation_repository(self):
         return self.repository
 
+    def owner_truth_conversation_repository(self):
+        return self.conversation_repository
+
 
 class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -75,6 +132,8 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
             owner_subject_id=self.owner_id,
             actor_subject_id=self.owner_id,
         )
+        self.thread_id = str(uuid4())
+        self.breadth_thread_id = str(uuid4())
         self.content = {"claim": "I chose to preserve weekday evenings for my family."}
         self.memory = OwnerTruthMemoryProjectionInput(
             memory_id=str(uuid4()),
@@ -114,7 +173,12 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
             evidence_refs=({"sourceId": str(uuid4()), "sourceVersion": 1},),
         )
 
-    def _store(self, *, rebuilding: bool = False) -> _Store:
+    def _store(
+        self,
+        *,
+        rebuilding: bool = False,
+        thread_authority_epoch: int = 5,
+    ) -> _Store:
         if rebuilding:
             snapshot = build_rebuilding_memory_projection(
                 vault_id=self.vault_id,
@@ -128,7 +192,13 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
                 authority_epoch=5,
                 inputs=(self.memory, self.values_memory),
             )
-        return _Store(snapshot)
+        return _Store(
+            snapshot,
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_id,
+            authority_epoch=thread_authority_epoch,
+            thread_ids=(self.thread_id, self.breadth_thread_id),
+        )
 
     def _confirm(self, store: _Store) -> None:
         result = OwnerTruthKnowledgeDimensionConfirmationService(store, enabled=True).confirm(
@@ -160,7 +230,7 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
             "owner_subject_id": self.owner_id,
             "vault_id": self.vault_id,
             "slot": RecommendationSlot.CONTINUITY,
-            "thread_id": "thread-recommendation-read",
+            "thread_id": self.thread_id,
             "target_dimension": KnowledgeDimension.KEY_DECISIONS,
             "missing_facet": "outcome",
             "question_template_id": "continue-key-decision",
@@ -181,7 +251,7 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
                 self._candidate(
                     candidate_id="recommendation-breadth",
                     slot=RecommendationSlot.BREADTH,
-                    thread_id="thread-recommendation-breadth",
+                    thread_id=self.breadth_thread_id,
                     target_dimension=KnowledgeDimension.VALUES,
                     missing_facet="reflection",
                     question_template_id="broaden-values",
@@ -266,6 +336,30 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
                         evidence_refs=(self.values_memory.memory_version_id,),
                     ),
                 ),
+            )
+
+    def test_rejects_unknown_or_stale_candidate_thread_authority(self) -> None:
+        store = self._store()
+        self._confirm(store)
+
+        with self.assertRaisesRegex(
+            OwnerTruthKnowledgeRecommendationReadError,
+            "current Owner Truth conversation thread",
+        ):
+            OwnerTruthKnowledgeRecommendationReadService(store).read(
+                context=self.context,
+                candidates=(self._candidate(thread_id=str(uuid4())),),
+            )
+
+        stale_store = self._store(thread_authority_epoch=4)
+        self._confirm(stale_store)
+        with self.assertRaisesRegex(
+            OwnerTruthKnowledgeRecommendationReadError,
+            "current Owner Truth conversation thread",
+        ):
+            OwnerTruthKnowledgeRecommendationReadService(stale_store).read(
+                context=self.context,
+                candidates=(self._candidate(),),
             )
 
 

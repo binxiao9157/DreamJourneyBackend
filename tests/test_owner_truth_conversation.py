@@ -127,6 +127,30 @@ class OwnerTruthConversationTests(unittest.TestCase):
         with self.assertRaises(OwnerTruthConversationAccessDenied):
             self.service.append_message(command=self.append(), context=other_context)
 
+    def test_thread_authority_read_is_owner_scoped_and_value_free(self) -> None:
+        self.service.start_session(command=self.start(), context=self.context)
+
+        snapshot = self.service.read_thread_authority(
+            thread_id=self.thread_id,
+            context=self.context,
+        )
+
+        self.assertEqual(snapshot.thread_id, self.thread_id)
+        self.assertEqual(snapshot.vault_id, self.context.vault_id)
+        self.assertEqual(snapshot.owner_subject_id, self.context.owner_subject_id)
+        self.assertEqual(snapshot.authority_epoch, 0)
+
+        other_context = OwnerTruthCommandContext(
+            vault_id=self.context.vault_id,
+            owner_subject_id="interview-owner-b",
+            actor_subject_id="interview-owner-b",
+            policy_version="owner-truth-v1",
+        )
+        with self.assertRaises(OwnerTruthConversationAccessDenied):
+            self.service.read_thread_authority(thread_id=self.thread_id, context=other_context)
+        with self.assertRaises(OwnerTruthConversationAccessDenied):
+            self.service.read_thread_authority(thread_id="not-a-uuid", context=self.context)
+
     def test_do_not_ask_pauses_the_session_and_persists_the_boundary(self) -> None:
         self.service.start_session(command=self.start(), context=self.context)
         command = SetInterviewBoundaryCommand(
