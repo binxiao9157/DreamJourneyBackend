@@ -187,6 +187,15 @@ from app.services.owner_truth_saved_continuation import (
     OwnerTruthSavedContinuationCueStale,
     saved_continuation_cue_summary,
 )
+from app.services.owner_truth_thread_preferences import (
+    OwnerTruthThreadPreferenceAccessDenied,
+    OwnerTruthThreadPreferenceConflict,
+    OwnerTruthThreadPreferenceCooldownActive,
+    OwnerTruthThreadPreferenceError,
+    OwnerTruthThreadPreferenceService,
+    OwnerTruthThreadPreferenceUnavailable,
+    RestoreCooldownThreadPreferenceCommand,
+)
 from app.services.owner_truth_correction_request import (
     OwnerTruthCorrectionRequestAccessDenied,
     OwnerTruthCorrectionRequestCommand,
@@ -374,6 +383,10 @@ OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = bool(
 OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = bool(
     settings.owner_truth_saved_continuation_cue_qa_enabled
 )
+OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = bool(
+    settings.owner_truth_thread_preference_qa_enabled
+)
+OWNER_TRUTH_THREAD_COOLDOWN_SECONDS = settings.owner_truth_thread_cooldown_seconds
 AUTH_ACCESS_TTL_SECONDS = max(60, settings.auth_access_ttl_seconds)
 AUTH_REFRESH_TTL_SECONDS = max(AUTH_ACCESS_TTL_SECONDS + 60, settings.auth_refresh_ttl_seconds)
 AUTH_LEGACY_PHONE_LOGIN_ENABLED = legacy_phone_login_enabled(settings)
@@ -574,6 +587,27 @@ def _require_owner_truth_saved_continuation_cue_qa(request: Request) -> str:
         raise HTTPException(
             status_code=401,
             detail={"code": "ownerTruthSavedContinuationCueUserSessionRequired"},
+        )
+    return user_id
+
+
+def _require_owner_truth_thread_preference_qa(request: Request) -> str:
+    """Keep persistent interview-topic controls inside explicit Owner QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthThreadPreferenceUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthThreadPreferenceUserSessionRequired"},
         )
     return user_id
 
@@ -825,6 +859,14 @@ _OWNER_TRUTH_RESTORE_DO_NOT_ASK_PAYLOAD_FIELDS = frozenset(
     }
 )
 
+_OWNER_TRUTH_RESTORE_COOLDOWN_PAYLOAD_FIELDS = frozenset(
+    {
+        "commandId",
+        "threadId",
+        "expectedSessionVersion",
+    }
+)
+
 
 def _owner_truth_restore_do_not_ask_command(
     *,
@@ -858,6 +900,38 @@ def _owner_truth_restore_do_not_ask_command(
         session_id=session_id,
         expected_session_version=expected_session_version,
         confirmed=confirmed,
+    )
+
+
+def _owner_truth_restore_cooldown_command(
+    *,
+    payload: Dict[str, Any],
+    session_id: str,
+) -> RestoreCooldownThreadPreferenceCommand:
+    """Decode explicit, server-clock-gated cooldown restoration."""
+
+    if set(payload) != _OWNER_TRUTH_RESTORE_COOLDOWN_PAYLOAD_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    command_id = payload.get("commandId")
+    thread_id = payload.get("threadId")
+    expected_session_version = payload.get("expectedSessionVersion")
+    if (
+        not isinstance(command_id, str)
+        or not isinstance(thread_id, str)
+        or type(expected_session_version) is not int
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    return RestoreCooldownThreadPreferenceCommand(
+        command_id=command_id,
+        thread_id=thread_id,
+        session_id=session_id,
+        expected_session_version=expected_session_version,
     )
 
 
@@ -999,6 +1073,19 @@ def _owner_truth_saved_continuation_cue_context(
     vault_id: str,
 ) -> OwnerTruthCommandContext:
     owner_subject_id = _require_owner_truth_saved_continuation_cue_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
+def _owner_truth_thread_preference_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_thread_preference_qa(request)
     return OwnerTruthCommandContext(
         vault_id=vault_id,
         owner_subject_id=owner_subject_id,
@@ -1288,6 +1375,20 @@ def _owner_truth_saved_continuation_cue_http_error(
         status_code=400,
         detail={"code": "ownerTruthSavedContinuationCueInvalid"},
     )
+
+
+def _owner_truth_thread_preference_http_error(
+    error: OwnerTruthThreadPreferenceError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthThreadPreferenceAccessDenied):
+        return HTTPException(status_code=403, detail={"code": "ownerTruthThreadPreferenceDenied"})
+    if isinstance(error, OwnerTruthThreadPreferenceUnavailable):
+        return HTTPException(status_code=404, detail={"code": "ownerTruthThreadPreferenceUnavailable"})
+    if isinstance(error, OwnerTruthThreadPreferenceCooldownActive):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthThreadCooldownActive"})
+    if isinstance(error, OwnerTruthThreadPreferenceConflict):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthThreadPreferenceConflict"})
+    return HTTPException(status_code=400, detail={"code": "ownerTruthThreadPreferenceInvalid"})
 
 
 def _owner_truth_correction_request_http_error(
@@ -3380,12 +3481,24 @@ def set_owner_truth_interview_boundary(
             ),
             command_id=command.command_id,
         ):
-            result = OwnerTruthConversationService(
-                store.owner_truth_conversation_repository()
-            ).set_boundary(
-                command=command,
-                context=context,
-            )
+            if (
+                OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED
+                and str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1"
+            ):
+                result = OwnerTruthThreadPreferenceService(
+                    store,
+                    enabled=True,
+                    cooldown_seconds=OWNER_TRUTH_THREAD_COOLDOWN_SECONDS,
+                ).set_boundary(command=command, context=context).session
+            else:
+                result = OwnerTruthConversationService(
+                    store.owner_truth_conversation_repository()
+                ).set_boundary(
+                    command=command,
+                    context=context,
+                )
+    except OwnerTruthThreadPreferenceError as error:
+        raise _owner_truth_thread_preference_http_error(error) from error
     except OwnerTruthContractError as error:
         raise _owner_truth_interview_session_state_http_error(error) from error
     return JSONResponse(
@@ -3428,12 +3541,62 @@ def restore_owner_truth_interview_do_not_ask(
             ),
             command_id=command.command_id,
         ):
-            result = OwnerTruthConversationService(
-                store.owner_truth_conversation_repository()
-            ).restore_do_not_ask_boundary(
-                command=command,
-                context=context,
-            )
+            if (
+                OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED
+                and str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1"
+            ):
+                result = OwnerTruthThreadPreferenceService(
+                    store,
+                    enabled=True,
+                    cooldown_seconds=OWNER_TRUTH_THREAD_COOLDOWN_SECONDS,
+                ).restore_do_not_ask(command=command, context=context).session
+            else:
+                result = OwnerTruthConversationService(
+                    store.owner_truth_conversation_repository()
+                ).restore_do_not_ask_boundary(
+                    command=command,
+                    context=context,
+                )
+    except OwnerTruthThreadPreferenceError as error:
+        raise _owner_truth_thread_preference_http_error(error) from error
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_session_command_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/restore-cooldown",
+    include_in_schema=False,
+)
+def restore_owner_truth_interview_cooldown(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Explicitly reopen an elapsed Owner cooldown in QA only.
+
+    The client cannot provide or shorten ``cooldownUntil``.  A server-clock
+    check and an existing paused session are both required before reopening.
+    """
+
+    try:
+        context = _owner_truth_thread_preference_context(request, vault_id=vault_id)
+        command = _owner_truth_restore_cooldown_command(payload=payload, session_id=session_id)
+        result = OwnerTruthThreadPreferenceService(
+            store,
+            enabled=OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED,
+            cooldown_seconds=OWNER_TRUTH_THREAD_COOLDOWN_SECONDS,
+        ).restore_cooldown(command=command, context=context).session
+    except OwnerTruthThreadPreferenceError as error:
+        raise _owner_truth_thread_preference_http_error(error) from error
     except OwnerTruthContractError as error:
         raise _owner_truth_interview_session_state_http_error(error) from error
     return JSONResponse(

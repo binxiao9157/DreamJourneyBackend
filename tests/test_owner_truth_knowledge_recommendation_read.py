@@ -36,6 +36,11 @@ from app.services.owner_truth_knowledge_dimension_confirmation import (
 from app.services.owner_truth_saved_continuation import (
     InMemoryOwnerTruthSavedContinuationCueRepository,
 )
+from app.services.owner_truth_thread_preferences import (
+    InMemoryOwnerTruthThreadPreferenceRepository,
+    OwnerTruthThreadPreferenceSnapshot,
+    ThreadPreferenceState,
+)
 from app.services.owner_truth_knowledge_recommendation_read import (
     OwnerTruthKnowledgeRecommendationReadError,
     OwnerTruthKnowledgeRecommendationReadService,
@@ -151,6 +156,7 @@ class _Store:
         self.saved_continuation_cue_repository = (
             InMemoryOwnerTruthSavedContinuationCueRepository()
         )
+        self.thread_preference_repository = InMemoryOwnerTruthThreadPreferenceRepository()
         self.conversation_repository = _ConversationThreadAuthorityReader(
             vault_id=vault_id,
             owner_subject_id=owner_subject_id,
@@ -177,6 +183,22 @@ class _Store:
 
     def owner_truth_saved_continuation_cue_repository(self):
         return self.saved_continuation_cue_repository
+
+    def owner_truth_thread_preference_repository(self):
+        return self.thread_preference_repository
+
+
+class _FixedThreadPreferenceRepository:
+    def __init__(self, preference: OwnerTruthThreadPreferenceSnapshot) -> None:
+        self.preference = preference
+
+    def read(self, *, context, thread_id):
+        if (
+            context.vault_id == self.preference.vault_id
+            and thread_id == self.preference.thread_id
+        ):
+            return self.preference
+        return None
 
 
 class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
@@ -360,6 +382,28 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
             session_boundary=InterviewBoundary.DO_NOT_ASK,
         )
         self._confirm(store)
+
+        result = OwnerTruthKnowledgeRecommendationReadService(store).plan(
+            context=self.context,
+        )
+
+        assert result.selection is not None
+        self.assertEqual(result.selection.selected, ())
+
+    def test_server_plan_fail_closes_a_thread_marked_do_not_ask(self) -> None:
+        store = self._store(thread_ids=(self.thread_id,))
+        self._confirm(store)
+        store.thread_preference_repository = _FixedThreadPreferenceRepository(
+            OwnerTruthThreadPreferenceSnapshot(
+                vault_id=self.vault_id,
+                thread_id=self.thread_id,
+                owner_subject_id=self.owner_id,
+                authority_epoch=5,
+                preference=ThreadPreferenceState.DO_NOT_ASK,
+                cooldown_until=None,
+                row_version=1,
+            )
+        )
 
         result = OwnerTruthKnowledgeRecommendationReadService(store).plan(
             context=self.context,

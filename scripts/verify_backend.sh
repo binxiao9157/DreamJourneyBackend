@@ -231,6 +231,14 @@ test -f db/migrations/0039_owner_truth_saved_continuation_cues.json
 test -f tests/test_owner_truth_saved_continuation_migration_contract.py
 test -f scripts/backend-owner-truth-saved-continuation-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-saved-continuation-postgres-smoke.sh
+test -f app/services/owner_truth_thread_preferences.py
+test -f db/migrations/0040_owner_truth_thread_preferences.sql
+test -f db/migrations/0040_owner_truth_thread_preferences.json
+test -f tests/test_owner_truth_thread_preferences.py
+test -f tests/test_owner_truth_thread_preference_api.py
+test -f tests/test_owner_truth_thread_preference_migration_contract.py
+test -f scripts/backend-owner-truth-thread-preference-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-thread-preference-postgres-smoke.sh
 test -f tests/test_owner_truth_knowledge_dimension_confirmation.py
 test -f tests/test_owner_truth_knowledge_dimension_confirmation_api.py
 test -f tests/test_owner_truth_knowledge_dimension_confirmation_migration_contract.py

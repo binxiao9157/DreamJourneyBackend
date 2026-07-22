@@ -295,6 +295,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthInterviewSessionRestoreDoNotAsk",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/restore-cooldown",
+                session,
+                "ownerTruthInterviewSessionRestoreCooldown",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review",
                 session,

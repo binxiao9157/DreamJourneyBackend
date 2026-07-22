@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
+
+cd "$ROOT_DIR"
+PYTHONPATH=. "$PYTHON_BIN" scripts/backend-owner-truth-thread-preference-postgres-smoke.py

@@ -1,0 +1,12 @@
+{
+  "version": "0040",
+  "name": "owner_truth_thread_preferences",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthThreadPreferenceQaOnly",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthInterviewThreadPreferenceQa": false
+  }
+}

@@ -97,6 +97,10 @@ class Settings:
     # Explicit Owner continuation cues remain a fourth, independently closed
     # M0-B QA lane. They do not expose recommendation text or public Echo UI.
     owner_truth_saved_continuation_cue_qa_enabled: bool = False
+    # Thread-scoped cooldown / do-not-ask remains independently default-off.
+    # It never enables a public Echo control by itself.
+    owner_truth_thread_preference_qa_enabled: bool = False
+    owner_truth_thread_cooldown_seconds: int = 7 * 24 * 60 * 60
     evidence_rollout_retention_days: int = 30
     operations_evidence_hmac_key: Optional[str] = None
     incident_ack_timeout_seconds: int = 900
@@ -274,6 +278,14 @@ class Settings:
             owner_truth_saved_continuation_cue_qa_enabled=_env_bool(
                 "OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED",
                 cls.owner_truth_saved_continuation_cue_qa_enabled,
+            ),
+            owner_truth_thread_preference_qa_enabled=_env_bool(
+                "OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED",
+                cls.owner_truth_thread_preference_qa_enabled,
+            ),
+            owner_truth_thread_cooldown_seconds=_env_int(
+                "OWNER_TRUTH_THREAD_COOLDOWN_SECONDS",
+                cls.owner_truth_thread_cooldown_seconds,
             ),
             evidence_rollout_retention_days=_env_int(
                 "EVIDENCE_ROLLOUT_RETENTION_DAYS",

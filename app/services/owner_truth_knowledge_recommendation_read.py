@@ -73,6 +73,9 @@ class OwnerTruthKnowledgeRecommendationReadStore(Protocol):
     def owner_truth_saved_continuation_cue_repository(self) -> Any:
         ...
 
+    def owner_truth_thread_preference_repository(self) -> Any:
+        ...
+
 
 @dataclass(frozen=True)
 class OwnerTruthKnowledgeRecommendationReadResult:
@@ -250,6 +253,14 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 raise OwnerTruthKnowledgeRecommendationReadError(
                     "current Owner Truth interview authority is unavailable for recommendation planning"
                 ) from error
+            thread_authorities = tuple(
+                item
+                for item in thread_authorities
+                if self._thread_preference_permits_recommendation(
+                    context=context,
+                    thread_id=item.thread_id,
+                )
+            )
             continuity_cues = self._current_saved_continuation_cues(
                 cues=self._store.owner_truth_saved_continuation_cue_repository().list_for_recommendation(
                     context=context,
@@ -448,6 +459,25 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 raise OwnerTruthKnowledgeRecommendationReadError(
                     "candidate thread_id must reference a current Owner Truth conversation thread in active state"
                 )
+            if not self._thread_preference_permits_recommendation(
+                context=context,
+                thread_id=candidate.thread_id,
+            ):
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "candidate thread_id is protected by an Owner thread preference"
+                )
+
+    def _thread_preference_permits_recommendation(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        thread_id: str,
+    ) -> bool:
+        preference = self._store.owner_truth_thread_preference_repository().read(
+            context=context,
+            thread_id=thread_id,
+        )
+        return preference is None or preference.is_recommendation_eligible
 
 
 __all__ = [
