@@ -135,6 +135,19 @@ cooldown receipt 幂等、自由文本注入拒绝、到期后的显式 continui
 - 公网 `/ready` 返回 `status=ready`。该 smoke 只创建和删除临时数据库，不读取或写入线上业务
   Vault、档案或会话数据。
 
+### 原子“以后再聊”部署
+
+- 后端提交：`f74f18b feat(m0b): atomically defer saved continuations` 已部署到线上 API 容器；
+- 本次无数据库迁移；`migrate_db.py --verify` 返回 `appliedHead=0041`、`expectedHead=0041`、
+  `status=ready`；
+- 部署容器执行 `backend-owner-truth-saved-continuation-postgres-smoke.py` 已通过，包含
+  `atomicDefer=true`、默认隐藏、双 QA Gate、Owner-only、cue/cooldown 双 receipt 幂等、跨 Owner
+  拒绝、自由文本拒绝、到期恢复和只读边界；
+- 部署容器执行 `backend-route-authentication-postgres-smoke.py` 已通过，`routeCount=110`、
+  `unclassifiedCount=0`，并验证 public/user/machine 三类认证边界；
+- 公网 `/ready` 返回 `status=ready`。两个 smoke 均使用临时或临时测试账号，不读取或写入线上业务
+  Vault、档案或会话数据。
+
 ## 非目标
 
 - 不做公开“稍后继续”入口、推荐文案或 Echo 注入；
