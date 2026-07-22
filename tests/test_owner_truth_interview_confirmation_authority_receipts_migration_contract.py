@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 import unittest
 
 
@@ -25,7 +26,16 @@ class OwnerTruthInterviewConfirmationAuthorityReceiptsMigrationContractTests(uni
         self.assertIn("UNIQUE (vault_id, decision_receipt_id)", sql)
         self.assertIn("candidate_command_id_hash TEXT NOT NULL", sql)
         self.assertIn("CREATE TRIGGER owner_truth_batch_decision_auth_evidence_validate", sql)
-        self.assertLessEqual(len("owner_truth_batch_decision_auth_evidence_validate"), 63)
+        created_names = re.findall(
+            r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|TRIGGER|TABLE|INDEX)\s+([A-Za-z0-9_.]+)",
+            sql,
+            flags=re.IGNORECASE,
+        )
+        self.assertTrue(created_names)
+        self.assertTrue(
+            all(len(name.rsplit(".", 1)[-1]) <= 63 for name in created_names),
+            "Postgres silently truncates identifiers over 63 characters",
+        )
         self.assertIn("authorization evidence is malformed", sql)
         self.assertIn("receipt link does not match root authority", sql)
         self.assertIn("receipt_command_id_hash IS DISTINCT FROM NEW.candidate_command_id_hash", sql)

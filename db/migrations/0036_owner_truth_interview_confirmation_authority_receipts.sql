@@ -12,7 +12,7 @@ ALTER TABLE owner_truth.interview_review_batch_candidate_decisions
     ADD CONSTRAINT owner_truth_interview_batch_decision_authorization_evidence_is_object
         CHECK (jsonb_typeof(authorization_evidence) = 'object');
 
-CREATE OR REPLACE FUNCTION owner_truth.validate_interview_review_batch_candidate_authorization_evidence()
+CREATE OR REPLACE FUNCTION owner_truth.validate_interview_batch_candidate_authorization_evidence()
 RETURNS TRIGGER AS $$
 BEGIN
     -- Legacy QA-only rows remain explicitly empty. Any populated capture is a
@@ -47,7 +47,7 @@ $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER owner_truth_batch_decision_auth_evidence_validate
 BEFORE INSERT ON owner_truth.interview_review_batch_candidate_decisions
-FOR EACH ROW EXECUTE FUNCTION owner_truth.validate_interview_review_batch_candidate_authorization_evidence();
+FOR EACH ROW EXECUTE FUNCTION owner_truth.validate_interview_batch_candidate_authorization_evidence();
 
 CREATE TABLE owner_truth.interview_review_batch_candidate_decision_receipts (
     vault_id TEXT NOT NULL,
@@ -133,15 +133,15 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER owner_truth_interview_review_batch_candidate_decision_receipts_validate
+CREATE TRIGGER owner_truth_batch_decision_receipt_validate
 BEFORE INSERT ON owner_truth.interview_review_batch_candidate_decision_receipts
 FOR EACH ROW EXECUTE FUNCTION owner_truth.validate_interview_review_batch_candidate_decision_receipt();
 
-CREATE TRIGGER owner_truth_interview_review_batch_candidate_decision_receipts_no_update
+CREATE TRIGGER owner_truth_batch_decision_receipt_no_update
 BEFORE UPDATE ON owner_truth.interview_review_batch_candidate_decision_receipts
 FOR EACH ROW EXECUTE FUNCTION owner_truth.conversation_append_only();
 
-CREATE TRIGGER owner_truth_interview_review_batch_candidate_decision_receipts_no_delete
+CREATE TRIGGER owner_truth_batch_decision_receipt_no_delete
 BEFORE DELETE ON owner_truth.interview_review_batch_candidate_decision_receipts
 FOR EACH ROW EXECUTE FUNCTION owner_truth.conversation_append_only();
 
