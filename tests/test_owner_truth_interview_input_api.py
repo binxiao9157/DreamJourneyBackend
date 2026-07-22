@@ -265,6 +265,78 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(replay.json()["receipt"]["threadVersion"], 2)
         self.assertEqual(replay.json()["receipt"]["sessionVersion"], 2)
 
+    def test_crisis_narrative_is_interrupted_before_interview_persistence(self) -> None:
+        _, headers, _ = self._login("13800139614")
+        vault_id = "vault-interview-safety-override"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        start = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(start.status_code, 201, start.text)
+
+        crisis_text = "我真的撑不住了。"
+        interrupted = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": crisis_text,
+            },
+        )
+
+        self.assertEqual(interrupted.status_code, 409, interrupted.text)
+        self.assertEqual(interrupted.headers["cache-control"], "no-store")
+        interruption = interrupted.json()
+        self.assertEqual(
+            interruption["schemaVersion"],
+            "owner-truth-interview-safety-override-v1",
+        )
+        self.assertEqual(interruption["vaultId"], vault_id)
+        self.assertEqual(interruption["status"], "safetyOverride")
+        self.assertFalse(interruption["persisted"])
+        self.assertFalse(interruption["retryable"])
+        decision = interruption["safetyDecision"]
+        self.assertEqual(decision["riskClass"], "highDistress")
+        self.assertEqual(decision["action"], "respondWithNeutralSafetyText")
+        self.assertEqual(
+            decision["neutralResponse"]["message"],
+            "我注意到你可能正处在危险中。请立即联系身边可信任的人；如有紧迫危险，请联系当地紧急服务。",
+        )
+        self.assertFalse(decision["effects"]["providerEffectsAllowed"])
+        self.assertNotIn(crisis_text, interrupted.text)
+
+        state = client.get(
+            f"{self._start_path(vault_id)}/{session_id}/state",
+            headers=headers,
+        )
+        self.assertEqual(state.status_code, 200, state.text)
+        self.assertEqual(state.json()["session"]["ownerTurnCount"], 0)
+        self.assertEqual(state.json()["session"]["threadVersion"], 1)
+        self.assertEqual(state.json()["session"]["rowVersion"], 1)
+
+        normal = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": "我想从小时候在院子里听故事的经历讲起。",
+            },
+        )
+        self.assertEqual(normal.status_code, 201, normal.text)
+        self.assertEqual(normal.json()["receipt"]["messageSequence"], 1)
+
     def test_owner_can_persist_boundary_with_idempotent_value_minimized_receipt(self) -> None:
         owner_id, headers, _ = self._login("13800139608")
         vault_id = "vault-interview-boundary-owner"

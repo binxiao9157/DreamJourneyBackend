@@ -344,6 +344,68 @@ def exercise_formal_natural_input(
             "start must return a content-free active receipt",
         )
 
+        crisis_text = "我真的撑不住了。"
+        crisis_status, crisis_body, crisis_headers = app_request(
+            "POST",
+            f"{start_path}/{session_id}/messages",
+            token=access_token,
+            payload={
+                "commandId": str(uuid.uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid.uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": crisis_text,
+            },
+            policy_headers=policy_headers,
+        )
+        require(
+            crisis_status == 409,
+            "crisis narrative must be interrupted before interview persistence",
+        )
+        require(
+            crisis_headers.get("cache-control") == "no-store",
+            "crisis safety override must not cache",
+        )
+        require(
+            crisis_body.get("schemaVersion")
+            == "owner-truth-interview-safety-override-v1",
+            "crisis override schema must remain typed",
+        )
+        require(
+            crisis_body.get("status") == "safetyOverride"
+            and crisis_body.get("persisted") is False
+            and crisis_body.get("retryable") is False,
+            "crisis override must remain a non-persisted terminal result",
+        )
+        crisis_decision = crisis_body.get("safetyDecision")
+        require(
+            isinstance(crisis_decision, dict)
+            and crisis_decision.get("riskClass") == "highDistress"
+            and crisis_decision.get("action") == "respondWithNeutralSafetyText",
+            "crisis override must carry the existing neutral safety decision",
+        )
+        require(
+            crisis_text not in json.dumps(crisis_body, ensure_ascii=False, sort_keys=True),
+            "crisis override must not echo raw narrative text",
+        )
+
+        pre_append_state_status, pre_append_state_body, _ = app_request(
+            "GET",
+            f"{start_path}/{session_id}/state",
+            token=access_token,
+            policy_headers=policy_headers,
+        )
+        pre_append_session = pre_append_state_body.get("session")
+        require(
+            pre_append_state_status == 200
+            and isinstance(pre_append_session, dict)
+            and pre_append_session.get("ownerTurnCount") == 0
+            and pre_append_session.get("threadVersion") == 1
+            and pre_append_session.get("rowVersion") == 1,
+            "crisis override must leave the interview session unchanged",
+        )
+
         append_status, append_body, append_headers = app_request(
             "POST",
             f"{start_path}/{session_id}/messages",
@@ -706,6 +768,8 @@ def exercise_formal_natural_input(
         return {
             "formalMissingCaptureDenied": True,
             "formalMatchingCaptureStarted": True,
+            "formalCrisisNarrativeSafetyOverridden": True,
+            "formalCrisisNarrativeNotPersisted": True,
             "formalMatchingCaptureAppended": True,
             "formalMatchingCaptureRead": True,
             "formalMatchingCapturePresentation": True,

@@ -1429,6 +1429,33 @@ def _owner_truth_interview_session_command_response(
     }
 
 
+def _owner_truth_interview_safety_override_response(
+    *,
+    vault_id: str,
+    decision: Any,
+) -> JSONResponse:
+    """Stop an unsafe narrative before it can enter the interview ledger.
+
+    The caller gets the existing value-free safety contract, including its
+    neutral response, but never receives a normal interview receipt.  Raw
+    narrative text is deliberately absent from this response and does not
+    reach the conversation writer.
+    """
+
+    return JSONResponse(
+        status_code=409,
+        content={
+            "schemaVersion": "owner-truth-interview-safety-override-v1",
+            "vaultId": vault_id,
+            "status": "safetyOverride",
+            "persisted": False,
+            "retryable": False,
+            "safetyDecision": decision.model_dump(mode="json"),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _owner_truth_interview_candidate_review_receipt_response(review: Any) -> Dict[str, Any]:
     return {
         "receiptId": review.receipt_id,
@@ -3146,10 +3173,17 @@ def append_owner_truth_interview_narrative(
     session_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """Owner narrative append; the response remains content-free."""
+    """Append an owner narrative unless safety must override the interview."""
 
     try:
         context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
+        narrative_text = str(payload.get("text") or "")
+        safety_decision = SAFETY_POLICY.evaluate(narrative_text)
+        if not safety_decision.effects.providerEffectsAllowed:
+            return _owner_truth_interview_safety_override_response(
+                vault_id=context.vault_id,
+                decision=safety_decision,
+            )
         command = AppendInterviewMessageCommand(
             command_id=str(payload.get("commandId") or ""),
             thread_id=str(payload.get("threadId") or ""),
@@ -3159,7 +3193,7 @@ def append_owner_truth_interview_narrative(
             expected_session_version=int(payload.get("expectedSessionVersion") or 0),
             author=ConversationMessageAuthor.OWNER,
             kind=ConversationMessageKind.NARRATIVE,
-            text=str(payload.get("text") or ""),
+            text=narrative_text,
         )
         with store.request_unit_of_work(
             correlation_id=(
