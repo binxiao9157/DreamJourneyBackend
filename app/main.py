@@ -800,6 +800,16 @@ _OWNER_TRUTH_INTERVIEW_BOUNDARY_PAYLOAD_FIELDS = frozenset(
         "boundary",
     }
 )
+_OWNER_TRUTH_DEFER_WITH_CONTINUATION_PAYLOAD_FIELDS = frozenset(
+    {
+        "commandId",
+        "threadId",
+        "expectedSessionVersion",
+        "memoryVersionId",
+        "targetDimension",
+        "missingFacet",
+    }
+)
 _OWNER_TRUTH_FORMAL_INTERVIEW_BOUNDARIES = frozenset(
     {
         InterviewBoundary.SKIP_ONCE.value,
@@ -848,6 +858,52 @@ def _owner_truth_formal_interview_boundary_command(
         expected_session_version=expected_session_version,
         boundary=InterviewBoundary(boundary),
     )
+
+
+def _owner_truth_defer_with_continuation_commands(
+    *,
+    payload: Dict[str, Any],
+    session_id: str,
+) -> tuple[SetInterviewBoundaryCommand, OwnerTruthSavedContinuationCueCommand]:
+    """Decode one value-free ``later`` action into two atomic child commands.
+
+    The caller cannot choose a boundary, pass a child command id, or attach
+    text. The cue's derived command id keeps cue replay distinct from the
+    boundary receipt while preserving one stable caller command id.
+    """
+
+    if set(payload) != _OWNER_TRUTH_DEFER_WITH_CONTINUATION_PAYLOAD_FIELDS:
+        raise OwnerTruthSavedContinuationCueError(
+            "defer with continuation contains unsupported fields"
+        )
+    command_id = payload.get("commandId")
+    thread_id = payload.get("threadId")
+    expected_session_version = payload.get("expectedSessionVersion")
+    if (
+        not isinstance(command_id, str)
+        or not isinstance(thread_id, str)
+        or type(expected_session_version) is not int
+    ):
+        raise OwnerTruthSavedContinuationCueError(
+            "defer with continuation contains invalid command fields"
+        )
+    boundary = SetInterviewBoundaryCommand(
+        command_id=command_id,
+        thread_id=thread_id,
+        session_id=session_id,
+        expected_session_version=expected_session_version,
+        boundary=InterviewBoundary.COOLDOWN,
+    )
+    cue = OwnerTruthSavedContinuationCueCommand(
+        command_id=f"{boundary.command_id}:saved-continuation",
+        thread_id=boundary.thread_id,
+        session_id=boundary.session_id,
+        expected_session_version=boundary.expected_session_version,
+        memory_version_id=str(payload.get("memoryVersionId") or ""),
+        target_dimension=payload.get("targetDimension"),
+        missing_facet=str(payload.get("missingFacet") or ""),
+    )
+    return boundary, cue
 
 
 _OWNER_TRUTH_RESTORE_DO_NOT_ASK_PAYLOAD_FIELDS = frozenset(
@@ -3507,6 +3563,72 @@ def set_owner_truth_interview_boundary(
             vault_id=context.vault_id,
             result=result,
         ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/defer-with-continuation",
+    include_in_schema=False,
+)
+def defer_owner_truth_interview_with_continuation(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Atomically save one explicit continuation pointer and enter cooldown.
+
+    This remains an Owner-only, QA-only contract. It persists no transcript,
+    question text, candidate content, model output, or provider payload, and
+    it does not expose a public Echo action.
+    """
+
+    try:
+        context = _owner_truth_saved_continuation_cue_context(request, vault_id=vault_id)
+        preference_owner_id = _require_owner_truth_thread_preference_qa(request)
+        if preference_owner_id != context.owner_subject_id:
+            raise OwnerTruthSavedContinuationCueAccessDenied(
+                "thread preference owner does not match saved continuation owner"
+            )
+        boundary_command, cue_command = _owner_truth_defer_with_continuation_commands(
+            payload=payload,
+            session_id=session_id,
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-defer-with-continuation:"
+                f"{context.vault_id}:{boundary_command.session_id}"
+            ),
+            command_id=boundary_command.command_id,
+        ):
+            cue = OwnerTruthSavedContinuationCueService(
+                store,
+                enabled=True,
+            ).create(context=context, command=cue_command)
+            session = OwnerTruthThreadPreferenceService(
+                store,
+                enabled=True,
+                cooldown_seconds=OWNER_TRUTH_THREAD_COOLDOWN_SECONDS,
+            ).set_boundary(command=boundary_command, context=context).session
+    except OwnerTruthSavedContinuationCueError as error:
+        raise _owner_truth_saved_continuation_cue_http_error(error) from error
+    except OwnerTruthThreadPreferenceError as error:
+        raise _owner_truth_thread_preference_http_error(error) from error
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    session_response = _owner_truth_interview_session_command_response(
+        vault_id=context.vault_id,
+        result=session,
+    )
+    return JSONResponse(
+        status_code=201 if session.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-defer-with-continuation-response-v1",
+            "vaultId": context.vault_id,
+            "cue": saved_continuation_cue_summary(cue),
+            "receipt": session_response["receipt"],
+        },
         headers={"Cache-Control": "no-store"},
     )
 

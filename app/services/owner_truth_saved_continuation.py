@@ -194,6 +194,15 @@ class OwnerTruthSavedContinuationCueResult:
 
 
 class OwnerTruthSavedContinuationCueRepository(Protocol):
+    def replay(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command: OwnerTruthSavedContinuationCueCommand,
+    ) -> OwnerTruthSavedContinuationCueResult | None:
+        """Return a matching append-only receipt without revalidating live state."""
+        ...
+
     def record(
         self,
         *,
@@ -271,6 +280,24 @@ class InMemoryOwnerTruthSavedContinuationCueRepository:
         self._records_by_command: dict[tuple[str, str], dict[str, Any]] = {}
         self._records_by_session: dict[tuple[str, str], dict[str, Any]] = {}
 
+    def replay(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command: OwnerTruthSavedContinuationCueCommand,
+    ) -> OwnerTruthSavedContinuationCueResult | None:
+        _assert_owner_context(context)
+        command_key = (context.vault_id, command.command_id_hash)
+        with self._lock:
+            existing = self._records_by_command.get(command_key)
+            if existing is None:
+                return None
+            if str(existing.get("payloadHash") or "") != command.payload_hash:
+                raise OwnerTruthSavedContinuationCueConflict(
+                    "commandId cannot be reused with different saved continuation meaning"
+                )
+            return _result_from_record(existing, outcome="deduplicated")
+
     def record(
         self,
         *,
@@ -336,6 +363,42 @@ class PostgresOwnerTruthSavedContinuationCueRepository:
         if connection is None:
             raise ValueError("an active database connection is required")
         self._connection = connection
+
+    def replay(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command: OwnerTruthSavedContinuationCueCommand,
+    ) -> OwnerTruthSavedContinuationCueResult | None:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS locked",
+                (
+                    "owner-truth-saved-continuation-command:"
+                    f"{context.vault_id}:{command.command_id_hash}",
+                ),
+            )
+            cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT id, vault_id, owner_subject_id, actor_subject_id, authority_epoch,
+                    thread_id, session_id, expected_session_version, memory_version_id, target_dimension,
+                    missing_facet, command_id_hash, command_payload_hash
+                FROM owner_truth.saved_continuation_cues
+                WHERE vault_id = %s AND command_id_hash = %s
+                FOR UPDATE
+                """,
+                (context.vault_id, command.command_id_hash),
+            )
+            existing = cursor.fetchone()
+        if existing is None:
+            return None
+        if str(existing["command_payload_hash"]) != command.payload_hash:
+            raise OwnerTruthSavedContinuationCueConflict(
+                "commandId cannot be reused with different saved continuation meaning"
+            )
+        return _result_from_record(self._row_to_record(existing), outcome="deduplicated")
 
     def record(
         self,
@@ -625,6 +688,10 @@ class OwnerTruthSavedContinuationCueService:
             ),
             command_id=command.command_id_hash,
         ):
+            repository = self._store.owner_truth_saved_continuation_cue_repository()
+            replayed = repository.replay(context=context, command=command)
+            if replayed is not None:
+                return replayed
             conversation = self._store.owner_truth_conversation_repository()
             try:
                 session = conversation.get_interview_session(
@@ -713,7 +780,7 @@ class OwnerTruthSavedContinuationCueService:
                 "schemaVersion": OWNER_TRUTH_SAVED_CONTINUATION_CUE_SCHEMA_VERSION,
                 "uiSchemaVersion": OWNER_TRUTH_SAVED_CONTINUATION_CUE_UI_SCHEMA_VERSION,
             }
-            return self._store.owner_truth_saved_continuation_cue_repository().record(
+            return repository.record(
                 context=context,
                 record=record,
             )

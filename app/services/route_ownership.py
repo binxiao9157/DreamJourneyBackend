@@ -290,6 +290,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/defer-with-continuation",
+                session,
+                "ownerTruthInterviewSessionDeferWithContinuation",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/interview-sessions/{session_id}/restore-do-not-ask",
                 session,
                 "ownerTruthInterviewSessionRestoreDoNotAsk",

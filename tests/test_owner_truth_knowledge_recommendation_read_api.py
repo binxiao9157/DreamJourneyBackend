@@ -67,6 +67,7 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         self.previous_saved_continuation_cue_qa = (
             main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED
         )
+        self.previous_thread_preference_qa = main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED
         self.store = InMemoryStore()
         main_module.store = self.store
         main_module.BACKEND_API_TOKEN = ""
@@ -78,6 +79,7 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = True
         main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = False
+        main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = False
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -97,6 +99,9 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         )
         main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = (
             self.previous_saved_continuation_cue_qa
+        )
+        main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = (
+            self.previous_thread_preference_qa
         )
 
     @staticmethod
@@ -323,6 +328,128 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             f"/v2/vaults/{vault_id}/interview-sessions/{session_id}"
             "/saved-continuation-cues"
         )
+
+    @staticmethod
+    def _defer_with_continuation_path(vault_id: str, session_id: str) -> str:
+        return (
+            f"/v2/vaults/{vault_id}/interview-sessions/{session_id}"
+            "/defer-with-continuation"
+        )
+
+    def test_defer_with_continuation_is_hidden_atomic_and_replay_safe(self) -> None:
+        owner_id, headers = self._login("13800139416")
+        vault_id = "vault-recommendation-defer-with-continuation"
+        memory_version_id, content_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "This text must not become a continuation payload."},
+            command_id="defer-with-continuation-activate",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=memory_version_id,
+            content_hash=content_hash,
+            dimension="keyDecisions",
+            facets=("choice", "reason"),
+            command_id="defer-with-continuation-confirm",
+        )
+        thread_id, session_id = self._seed_thread_with_session(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="defer-with-continuation-thread",
+        )
+        path = self._defer_with_continuation_path(vault_id, session_id)
+        payload = {
+            "commandId": "defer-with-continuation-001",
+            "threadId": thread_id,
+            "expectedSessionVersion": 1,
+            "memoryVersionId": memory_version_id,
+            "targetDimension": "keyDecisions",
+            "missingFacet": "outcome",
+        }
+
+        hidden = client.post(path, headers=headers, json=payload)
+        self.assertEqual(hidden.status_code, 404, hidden.text)
+        self.assertEqual(
+            hidden.json()["detail"]["code"],
+            "ownerTruthSavedContinuationCueUnavailable",
+        )
+
+        main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = True
+        main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = True
+        injected = client.post(
+            path,
+            headers=headers,
+            json={**payload, "continuationText": "must be rejected"},
+        )
+        self.assertEqual(injected.status_code, 400, injected.text)
+        self.assertEqual(
+            injected.json()["detail"]["code"],
+            "ownerTruthSavedContinuationCueInvalid",
+        )
+
+        created = client.post(path, headers=headers, json=payload)
+        replayed = client.post(path, headers=headers, json=payload)
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(replayed.status_code, 200, replayed.text)
+        self.assertEqual(created.headers["cache-control"], "no-store")
+        self.assertEqual(created.json()["cue"]["status"], "created")
+        self.assertEqual(created.json()["receipt"]["boundary"], "cooldown")
+        self.assertEqual(replayed.json()["cue"]["status"], "deduplicated")
+        self.assertEqual(replayed.json()["receipt"]["status"], "deduplicated")
+        self.assertEqual(replayed.json()["receipt"]["sessionVersion"], 2)
+        self.assertNotIn("continuation payload", created.text)
+        self.assertNotIn("claim", created.text)
+
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        preference = self.store.owner_truth_thread_preference_repository().read(
+            context=context,
+            thread_id=thread_id,
+        )
+        self.assertIsNotNone(preference)
+        assert preference is not None
+        self.assertEqual(preference.preference.value, "cooldown")
+        self.assertEqual(
+            len(
+                self.store.owner_truth_saved_continuation_cue_repository().list_for_recommendation(
+                    context=context
+                )
+            ),
+            1,
+        )
+        planned = client.post(self._plan_path(vault_id), headers=headers, json={})
+        self.assertEqual(planned.status_code, 200, planned.text)
+        self.assertEqual(planned.json()["recommendations"]["selected"], [])
+
+        invalid_thread_id, invalid_session_id = self._seed_thread_with_session(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="defer-with-continuation-invalid-thread",
+        )
+        invalid = client.post(
+            self._defer_with_continuation_path(vault_id, invalid_session_id),
+            headers=headers,
+            json={
+                "commandId": "defer-with-continuation-invalid-001",
+                "threadId": invalid_thread_id,
+                "expectedSessionVersion": 1,
+                "memoryVersionId": memory_version_id,
+                "targetDimension": "keyDecisions",
+                "missingFacet": "not-a-facet",
+            },
+        )
+        self.assertEqual(invalid.status_code, 400, invalid.text)
+        current = self.store.owner_truth_conversation_repository().get_interview_session(
+            session_id=invalid_session_id,
+            context=context,
+        )
+        self.assertEqual(current.state.value, "active")
+        self.assertEqual(current.boundary.value, "open")
 
     @staticmethod
     def _candidate(

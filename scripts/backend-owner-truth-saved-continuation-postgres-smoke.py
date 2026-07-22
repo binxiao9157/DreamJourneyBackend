@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Exercise explicit, value-free M0-B continuation cues in disposable Postgres.
+"""Exercise the hidden, atomic M0-B ``later`` command in disposable Postgres.
 
 The route is enabled only inside this smoke. It proves that an Owner must
-explicitly save a cue, that the cue never contains conversation or memory text,
-and that only the direct, elapsed cooldown transition can preserve it for
-future server planning without deleting the append-only receipt.
+explicitly defer a value-free cue, that one command saves the cue and starts
+the server-owned cooldown, and that only the direct, elapsed cooldown
+transition can preserve it for future planning without deleting the
+append-only receipt.
 """
 
 from __future__ import annotations
@@ -308,7 +309,7 @@ def main() -> None:
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = True
         main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = False
-        main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = True
+        main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = False
 
         client = TestClient(main_module.app)
         owner_id, owner_headers = login(client, phone="13900000135")
@@ -342,86 +343,62 @@ def main() -> None:
         )
         require(confirmation.status_code == 201, f"confirmation creation failed: {confirmation.text}")
         thread_id, session_id = start_session(store, context=context)
-        cue_path = (
-            f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/saved-continuation-cues"
+        defer_path = (
+            f"/v2/vaults/{vault_id}/interview-sessions/{session_id}"
+            "/defer-with-continuation"
         )
-        cue_payload = {
-            "commandId": "saved-continuation-cue-001",
+        defer_payload = {
+            "commandId": "saved-continuation-defer-001",
             "threadId": thread_id,
             "expectedSessionVersion": 1,
             "memoryVersionId": memory_version_id,
             "targetDimension": "keyDecisions",
             "missingFacet": "outcome",
         }
-        hidden = client.post(cue_path, headers=owner_headers, json=cue_payload)
-        require(hidden.status_code == 404, "saved continuation route must default hidden")
+        hidden = client.post(defer_path, headers=owner_headers, json=defer_payload)
+        require(hidden.status_code == 404, "atomic defer route must default hidden")
         require(
             route_code(hidden) == "ownerTruthSavedContinuationCueUnavailable",
-            "hidden cue route must expose a stable unavailable code",
+            "hidden atomic defer route must expose a stable unavailable code",
         )
 
         main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = True
-        created = client.post(cue_path, headers=owner_headers, json=cue_payload)
-        replay = client.post(cue_path, headers=owner_headers, json=cue_payload)
-        other = client.post(cue_path, headers=other_headers, json=cue_payload)
-        injected = client.post(
-            cue_path,
-            headers=owner_headers,
-            json={**cue_payload, "continuationText": "must never persist"},
+        preference_hidden = client.post(defer_path, headers=owner_headers, json=defer_payload)
+        require(
+            preference_hidden.status_code == 404
+            and route_code(preference_hidden) == "ownerTruthThreadPreferenceUnavailable",
+            "atomic defer route must require the thread preference QA gate",
         )
-        require(created.status_code == 201, f"cue creation failed: {created.text}")
-        require(replay.status_code == 200, f"cue replay failed: {replay.text}")
+        main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = True
+        created = client.post(defer_path, headers=owner_headers, json=defer_payload)
+        replay = client.post(defer_path, headers=owner_headers, json=defer_payload)
+        other = client.post(defer_path, headers=other_headers, json=defer_payload)
+        injected = client.post(
+            defer_path,
+            headers=owner_headers,
+            json={**defer_payload, "continuationText": "must never persist"},
+        )
+        require(created.status_code == 201, f"atomic defer creation failed: {created.text}")
+        require(replay.status_code == 200, f"atomic defer replay failed: {replay.text}")
         require(other.status_code == 403, f"other owner must be denied: {other.text}")
-        require(injected.status_code == 400, "cue route must reject free-form text injection")
+        require(injected.status_code == 400, "atomic defer route must reject free-form text injection")
         require(
             route_code(injected) == "ownerTruthSavedContinuationCueInvalid",
-            "free-form cue injection must have a stable invalid code",
+            "free-form atomic defer injection must have a stable invalid code",
         )
         require(
             created.json()["cue"]["status"] == "created"
-            and replay.json()["cue"]["status"] == "deduplicated",
-            "cue command replay must be idempotent",
+            and created.json()["receipt"]["boundary"] == "cooldown"
+            and replay.json()["cue"]["status"] == "deduplicated"
+            and replay.json()["receipt"]["status"] == "deduplicated",
+            "atomic defer must create one cue and one cooldown receipt with replay safety",
         )
         require(
             "私有知识记忆" not in created.text and "continuationText" not in created.text,
-            "cue response must remain value-free",
+            "atomic defer response must remain value-free",
         )
 
         plan_path = f"/v2/vaults/{vault_id}/knowledge-recommendations/plan"
-        counts_before_plan = counts(test_dsn)
-        planned = client.post(plan_path, headers=owner_headers, json={})
-        repeated = client.post(plan_path, headers=owner_headers, json={})
-        require(planned.status_code == 200, f"continuity plan failed: {planned.text}")
-        require(repeated.status_code == 200, f"continuity plan replay failed: {repeated.text}")
-        selected = (planned.json().get("recommendations") or {}).get("selected") or []
-        require([item.get("slot") for item in selected] == ["continuity"], "explicit cue must plan continuity")
-        require(
-            selected[0].get("questionTemplateId") == "continueSavedOwnerCue"
-            and selected[0].get("reasonCode") == "explicitOwnerSavedContinuation",
-            "continuity plan must identify explicit Owner intent without text",
-        )
-        require(
-            planned.json() == repeated.json(),
-            "unchanged continuation planning must be deterministic",
-        )
-        require(counts_before_plan == counts(test_dsn), "continuation planning must remain read-only")
-        require(
-            "私有知识记忆" not in planned.text and "claim" not in planned.text,
-            "continuity plan must not leak memory text",
-        )
-
-        boundary_path = f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/boundary"
-        cooldown = client.post(
-            boundary_path,
-            headers=owner_headers,
-            json={
-                "commandId": "saved-continuation-set-cooldown",
-                "threadId": thread_id,
-                "expectedSessionVersion": 1,
-                "boundary": "cooldown",
-            },
-        )
-        require(cooldown.status_code == 201, f"cooldown creation failed: {cooldown.text}")
         counts_before_cooldown_plan = counts(test_dsn)
         during_cooldown = client.post(plan_path, headers=owner_headers, json={})
         require(during_cooldown.status_code == 200, f"cooldown plan failed: {during_cooldown.text}")
@@ -476,7 +453,7 @@ def main() -> None:
             "owner truth saved continuation postgres smoke passed "
             f"schemaHead={verified['expectedHead']} defaultHidden=true explicitOwnerOnly=true "
             "deduplicated=true crossOwnerDenied=true clientTextRejected=true "
-            "continuityPlanned=true elapsedCooldownCuePreserved=true "
+            "atomicDefer=true elapsedCooldownCuePreserved=true "
             "sessionVersionSuppressed=true readOnly=true"
         )
     finally:

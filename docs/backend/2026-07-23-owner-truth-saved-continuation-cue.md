@@ -55,6 +55,31 @@ POST /v2/vaults/{vaultId}/interview-sessions/{sessionId}/saved-continuation-cues
 
 同一 `commandId` 的相同语义重试返回 `deduplicated`；一个 Session 最多有一条不可变 cue。
 
+## 原子“以后再聊”接口
+
+产品语义中的“以后再聊”不能依赖客户端先保存 cue、再单独设置 cooldown。为避免网络中断或
+重试造成半完成状态，隐藏 QA 合同新增：
+
+```text
+POST /v2/vaults/{vaultId}/interview-sessions/{sessionId}/defer-with-continuation
+```
+
+它使用和保存 cue 相同的严格 value-free 字段：`commandId`、`threadId`、
+`expectedSessionVersion`、`memoryVersionId`、`targetDimension`、`missingFacet`。调用方不能选择
+边界、传入子命令 ID 或附加文本；服务端固定为 `cooldown`，并从根 `commandId` 派生内部 cue
+命令 ID。
+
+该接口额外要求 `OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED=true`，其余 saved continuation cue
+Gate 与 Owner QA 认证要求不变。它在同一个 Store unit of work 中：
+
+1. 写入或重放 append-only `SavedContinuationCue`；
+2. 将同一 Session 写入 server-owned `cooldown`；
+3. 返回 cue 与 cooldown receipt。
+
+任一步失败时整个事务回滚。相同根 `commandId` 的安全重试会重放 cue 与 cooldown receipt，
+不会因为 Session 已进入 `paused + cooldown` 而误报过期。该接口默认关闭、不出现在 OpenAPI，
+不构成公开 Echo/UI 能力。
+
 ## 计划边界
 
 `POST /v2/vaults/{vaultId}/knowledge-recommendations/plan` 仍是 QA-only、只读的服务端计划接口：
@@ -86,9 +111,9 @@ DATABASE_URL='<admin postgres dsn>' \
   scripts/run-backend-owner-truth-saved-continuation-postgres-smoke.sh
 ```
 
-该脚本创建并删除临时数据库，验证默认隐藏、Owner 边界、命令幂等、自由文本注入拒绝、
-显式 continuity 计划、Session 版本变化后的自动失效和只读计划；不会读取或写入线上业务 Vault、
-档案或会话。
+该脚本创建并删除临时数据库，验证原子“以后再聊”默认隐藏、双 QA Gate、Owner 边界、cue 与
+cooldown receipt 幂等、自由文本注入拒绝、到期后的显式 continuity 恢复、Session 版本变化后的
+自动失效和只读计划；不会读取或写入线上业务 Vault、档案或会话。
 
 ## 部署证据
 
