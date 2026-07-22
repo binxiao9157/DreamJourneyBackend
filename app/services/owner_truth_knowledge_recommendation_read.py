@@ -38,6 +38,10 @@ from app.domain.owner_truth.knowledge_recommendations import (
     ServerPlannedRecommendationCandidateProjector,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.owner_truth_thread_preferences import (
+    OwnerTruthThreadPreferenceSnapshot,
+    ThreadPreferenceState,
+)
 
 
 OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_SCHEMA_VERSION = (
@@ -187,6 +191,7 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 candidates=candidate_rows,
                 context=context,
                 authority_epoch=dimension_read.authority_epoch,
+                now=current_time,
             )
             self._assert_current_owner_confirmed_evidence(
                 candidates=candidate_rows,
@@ -216,8 +221,10 @@ class OwnerTruthKnowledgeRecommendationReadService:
 
         This is a QA-only read path. It deliberately accepts no candidate,
         thread, evidence, ranking, or user-boundary fields from the caller.
-        The planner may return zero candidates when no active/open interview
-        session or no confirmed coverage gap is available.
+        The planner may return zero candidates when no eligible current
+        interview authority or no confirmed coverage gap is available. An
+        elapsed ``cooldown`` is eligible only after a separate server-clock
+        preference check; the read never resumes the paused session.
         """
 
         if not isinstance(context, OwnerTruthCommandContext):
@@ -246,20 +253,17 @@ class OwnerTruthKnowledgeRecommendationReadService:
             assert dimension_read.coverage is not None
             repository = self._store.owner_truth_conversation_repository()
             try:
-                thread_authorities = repository.list_recommendation_eligible_thread_authorities(
+                potential_thread_authorities = repository.list_recommendation_candidate_thread_authorities(
                     context=context,
                 )
             except OwnerTruthConversationAccessDenied as error:
                 raise OwnerTruthKnowledgeRecommendationReadError(
                     "current Owner Truth interview authority is unavailable for recommendation planning"
                 ) from error
-            thread_authorities = tuple(
-                item
-                for item in thread_authorities
-                if self._thread_preference_permits_recommendation(
-                    context=context,
-                    thread_id=item.thread_id,
-                )
+            thread_authorities, elapsed_cooldown_thread_ids = self._plan_thread_authorities(
+                context=context,
+                potential_thread_authorities=potential_thread_authorities,
+                now=current_time,
             )
             continuity_cues = self._current_saved_continuation_cues(
                 cues=self._store.owner_truth_saved_continuation_cue_repository().list_for_recommendation(
@@ -278,11 +282,13 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 coverage=dimension_read.coverage,
                 thread_authorities=thread_authorities,
                 continuity_cues=continuity_cues,
+                elapsed_cooldown_thread_ids=elapsed_cooldown_thread_ids,
             )
             self._assert_current_owner_thread_authority(
                 candidates=candidates,
                 context=context,
                 authority_epoch=dimension_read.authority_epoch,
+                now=current_time,
             )
             self._assert_current_owner_confirmed_evidence(
                 candidates=candidates,
@@ -430,6 +436,7 @@ class OwnerTruthKnowledgeRecommendationReadService:
         candidates: Iterable[RecommendationCandidate],
         context: OwnerTruthCommandContext,
         authority_epoch: int,
+        now: datetime,
     ) -> None:
         """Reject caller-supplied thread IDs unless a current private Thread owns them."""
 
@@ -454,30 +461,94 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 or snapshot.vault_id != context.vault_id
                 or snapshot.owner_subject_id != context.owner_subject_id
                 or snapshot.authority_epoch != authority_epoch
-                or not snapshot.is_recommendation_eligible
             ):
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "candidate thread_id must reference a current Owner Truth conversation thread"
+                )
+            preference = self._store.owner_truth_thread_preference_repository().read(
+                context=context,
+                thread_id=candidate.thread_id,
+            )
+            structurally_due = snapshot.is_elapsed_cooldown_candidate
+            elapsed_due = (
+                structurally_due
+                and preference is not None
+                and preference.is_cooldown_elapsed_at(now=now)
+            )
+            if not snapshot.is_recommendation_eligible and not elapsed_due:
                 raise OwnerTruthKnowledgeRecommendationReadError(
                     "candidate thread_id must reference a current Owner Truth conversation thread in active state"
                 )
-            if not self._thread_preference_permits_recommendation(
-                context=context,
-                thread_id=candidate.thread_id,
+            if not self._thread_authority_permits_recommendation(
+                snapshot=snapshot,
+                preference=preference,
+                now=now,
             ):
                 raise OwnerTruthKnowledgeRecommendationReadError(
                     "candidate thread_id is protected by an Owner thread preference"
                 )
 
-    def _thread_preference_permits_recommendation(
+    def _plan_thread_authorities(
         self,
         *,
         context: OwnerTruthCommandContext,
-        thread_id: str,
+        potential_thread_authorities: Iterable[OwnerTruthConversationThreadAuthoritySnapshot],
+        now: datetime,
+    ) -> tuple[tuple[OwnerTruthConversationThreadAuthoritySnapshot, ...], frozenset[str]]:
+        """Choose one effective authority without writing lifecycle state.
+
+        ``cooldown`` is a higher-priority explicit Owner continuation signal
+        once it has elapsed.  It is selected deterministically by its original
+        expiry, while active/open threads retain the older planner behavior
+        when no elapsed cooldown exists.  ``doNotAsk`` is never returned.
+        """
+
+        try:
+            rows = tuple(potential_thread_authorities)
+        except TypeError as exc:
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "conversation repository returned non-iterable recommendation authorities"
+            ) from exc
+        active_open: list[OwnerTruthConversationThreadAuthoritySnapshot] = []
+        elapsed_cooldown: list[tuple[datetime, str, OwnerTruthConversationThreadAuthoritySnapshot]] = []
+        preferences = self._store.owner_truth_thread_preference_repository()
+        for snapshot in rows:
+            if not isinstance(snapshot, OwnerTruthConversationThreadAuthoritySnapshot):
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "conversation repository returned invalid recommendation authority"
+                )
+            preference = preferences.read(context=context, thread_id=snapshot.thread_id)
+            if snapshot.is_recommendation_eligible:
+                if preference is None or preference.preference is ThreadPreferenceState.OPEN:
+                    active_open.append(snapshot)
+                continue
+            if (
+                snapshot.is_elapsed_cooldown_candidate
+                and preference is not None
+                and preference.is_cooldown_elapsed_at(now=now)
+            ):
+                assert preference.cooldown_until is not None
+                elapsed_cooldown.append((preference.cooldown_until, snapshot.thread_id, snapshot))
+
+        if elapsed_cooldown:
+            _, thread_id, selected = min(elapsed_cooldown, key=lambda item: (item[0], item[1]))
+            return (selected,), frozenset((thread_id,))
+        return tuple(active_open), frozenset()
+
+    @staticmethod
+    def _thread_authority_permits_recommendation(
+        *,
+        snapshot: OwnerTruthConversationThreadAuthoritySnapshot,
+        preference: Optional[OwnerTruthThreadPreferenceSnapshot],
+        now: datetime,
     ) -> bool:
-        preference = self._store.owner_truth_thread_preference_repository().read(
-            context=context,
-            thread_id=thread_id,
+        if snapshot.is_recommendation_eligible:
+            return preference is None or preference.preference is ThreadPreferenceState.OPEN
+        return (
+            snapshot.is_elapsed_cooldown_candidate
+            and preference is not None
+            and preference.is_cooldown_elapsed_at(now=now)
         )
-        return preference is None or preference.is_recommendation_eligible
 
 
 __all__ = [

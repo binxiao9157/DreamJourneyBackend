@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import unittest
@@ -137,6 +138,37 @@ class _ConversationThreadAuthorityReader:
         )
         return tuple(item for item in snapshot_rows if item.is_recommendation_eligible)
 
+    def list_recommendation_candidate_thread_authorities(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthConversationThreadAuthoritySnapshot, ...]:
+        if (
+            context.vault_id != self._vault_id
+            or context.owner_subject_id != self._owner_subject_id
+        ):
+            raise OwnerTruthConversationAccessDenied(
+                "conversation thread does not belong to this active Owner Vault"
+            )
+        snapshot_rows = tuple(
+            OwnerTruthConversationThreadAuthoritySnapshot(
+                thread_id=thread_id,
+                vault_id=self._vault_id,
+                owner_subject_id=self._owner_subject_id,
+                authority_epoch=self._authority_epoch,
+                state=self._state,
+                session_id=self._session_id,
+                session_state=self._session_state,
+                session_boundary=self._session_boundary,
+            )
+            for thread_id in sorted(self._thread_ids)
+        )
+        return tuple(
+            item
+            for item in snapshot_rows
+            if item.is_recommendation_eligible or item.is_elapsed_cooldown_candidate
+        )
+
 
 class _Store:
     def __init__(
@@ -199,6 +231,17 @@ class _FixedThreadPreferenceRepository:
         ):
             return self.preference
         return None
+
+
+class _MappedThreadPreferenceRepository:
+    def __init__(self, preferences: tuple[OwnerTruthThreadPreferenceSnapshot, ...]) -> None:
+        self._preferences = {item.thread_id: item for item in preferences}
+
+    def read(self, *, context, thread_id):
+        preference = self._preferences.get(thread_id)
+        if preference is None or context.vault_id != preference.vault_id:
+            return None
+        return preference
 
 
 class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
@@ -389,6 +432,133 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
 
         assert result.selection is not None
         self.assertEqual(result.selection.selected, ())
+
+    def test_elapsed_cooldown_is_server_clock_continuity_without_resuming_session(self) -> None:
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)
+        store = self._store(
+            thread_ids=(self.thread_id,),
+            thread_state=ConversationThreadState.ACTIVE,
+            session_state=InterviewSessionState.PAUSED,
+            session_boundary=InterviewBoundary.COOLDOWN,
+        )
+        self._confirm(store)
+        store.thread_preference_repository = _FixedThreadPreferenceRepository(
+            OwnerTruthThreadPreferenceSnapshot(
+                vault_id=self.vault_id,
+                thread_id=self.thread_id,
+                owner_subject_id=self.owner_id,
+                authority_epoch=5,
+                preference=ThreadPreferenceState.COOLDOWN,
+                cooldown_until=now + timedelta(seconds=60),
+                row_version=1,
+            )
+        )
+        service = OwnerTruthKnowledgeRecommendationReadService(store)
+
+        before = service.plan(context=self.context, now=now + timedelta(seconds=59))
+        assert before.selection is not None
+        self.assertEqual(before.selection.selected, ())
+        with self.assertRaisesRegex(OwnerTruthKnowledgeRecommendationReadError, "active state"):
+            service.read(
+                context=self.context,
+                candidates=(self._candidate(),),
+                now=now + timedelta(seconds=59),
+            )
+
+        after = service.plan(context=self.context, now=now + timedelta(seconds=60))
+        assert after.selection is not None
+        self.assertEqual([item.slot for item in after.selection.selected], [RecommendationSlot.CONTINUITY])
+        self.assertEqual(after.selection.selected[0].question_template_id, "continueElapsedCooldown")
+        self.assertEqual(after.selection.selected[0].reason_code, "elapsedCooldownContinuation")
+        direct = service.read(
+            context=self.context,
+            candidates=(self._candidate(),),
+            now=now + timedelta(seconds=60),
+        )
+        assert direct.selection is not None
+        self.assertEqual([item.slot for item in direct.selection.selected], [RecommendationSlot.CONTINUITY])
+
+    def test_elapsed_cooldown_outranks_open_thread_and_uses_stable_expiry_order(self) -> None:
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)
+        earlier_thread_id = self.thread_id
+        later_thread_id = self.breadth_thread_id
+        open_thread_id = str(uuid4())
+        store = self._store(thread_ids=(earlier_thread_id, later_thread_id, open_thread_id))
+        store.thread_preference_repository = _MappedThreadPreferenceRepository(
+            (
+                OwnerTruthThreadPreferenceSnapshot(
+                    vault_id=self.vault_id,
+                    thread_id=earlier_thread_id,
+                    owner_subject_id=self.owner_id,
+                    authority_epoch=5,
+                    preference=ThreadPreferenceState.COOLDOWN,
+                    cooldown_until=now - timedelta(seconds=60),
+                    row_version=1,
+                ),
+                OwnerTruthThreadPreferenceSnapshot(
+                    vault_id=self.vault_id,
+                    thread_id=later_thread_id,
+                    owner_subject_id=self.owner_id,
+                    authority_epoch=5,
+                    preference=ThreadPreferenceState.COOLDOWN,
+                    cooldown_until=now - timedelta(seconds=1),
+                    row_version=1,
+                ),
+            )
+        )
+
+        def authority(
+            thread_id: str,
+            *,
+            session_state: InterviewSessionState,
+            session_boundary: InterviewBoundary,
+        ) -> OwnerTruthConversationThreadAuthoritySnapshot:
+            return OwnerTruthConversationThreadAuthoritySnapshot(
+                thread_id=thread_id,
+                vault_id=self.vault_id,
+                owner_subject_id=self.owner_id,
+                authority_epoch=5,
+                state=ConversationThreadState.ACTIVE,
+                session_id=str(uuid4()),
+                session_state=session_state,
+                session_boundary=session_boundary,
+            )
+
+        open_authority = authority(
+            open_thread_id,
+            session_state=InterviewSessionState.ACTIVE,
+            session_boundary=InterviewBoundary.OPEN,
+        )
+        earlier_cooldown = authority(
+            earlier_thread_id,
+            session_state=InterviewSessionState.PAUSED,
+            session_boundary=InterviewBoundary.COOLDOWN,
+        )
+        later_cooldown = authority(
+            later_thread_id,
+            session_state=InterviewSessionState.PAUSED,
+            session_boundary=InterviewBoundary.COOLDOWN,
+        )
+        service = OwnerTruthKnowledgeRecommendationReadService(store)
+
+        selected, elapsed_ids = service._plan_thread_authorities(
+            context=self.context,
+            potential_thread_authorities=(open_authority, later_cooldown, earlier_cooldown),
+            now=now,
+        )
+        replay_selected, replay_elapsed_ids = service._plan_thread_authorities(
+            context=self.context,
+            potential_thread_authorities=(earlier_cooldown, open_authority, later_cooldown),
+            now=now,
+        )
+
+        self.assertEqual([item.thread_id for item in selected], [earlier_thread_id])
+        self.assertEqual(elapsed_ids, frozenset((earlier_thread_id,)))
+        self.assertEqual(
+            [item.thread_id for item in replay_selected],
+            [earlier_thread_id],
+        )
+        self.assertEqual(replay_elapsed_ids, frozenset((earlier_thread_id,)))
 
     def test_server_plan_fail_closes_a_thread_marked_do_not_ask(self) -> None:
         store = self._store(thread_ids=(self.thread_id,))

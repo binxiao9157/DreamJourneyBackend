@@ -142,6 +142,20 @@ class OwnerTruthConversationRepository(Protocol):
     ) -> tuple[OwnerTruthConversationThreadAuthoritySnapshot, ...]:
         ...
 
+    def list_recommendation_candidate_thread_authorities(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthConversationThreadAuthoritySnapshot, ...]:
+        """List active/open plus structurally paused-cooldown thread bindings.
+
+        A paused cooldown is only a *candidate* for a later server-clock
+        policy check.  It is not returned by the older ``eligible`` method and
+        cannot be recommended until ``ThreadPreference`` confirms expiry.
+        """
+
+        ...
+
 
 def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
     if not isinstance(context, OwnerTruthCommandContext):
@@ -320,6 +334,16 @@ class OwnerTruthConversationService:
 
         _assert_owner_context(context)
         return self._repository.list_recommendation_eligible_thread_authorities(context=context)
+
+    def list_recommendation_candidate_thread_authorities(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthConversationThreadAuthoritySnapshot, ...]:
+        """Return current bindings that can be evaluated by recommendation policy."""
+
+        _assert_owner_context(context)
+        return self._repository.list_recommendation_candidate_thread_authorities(context=context)
 
 
 class InMemoryOwnerTruthConversationRepository:
@@ -1027,6 +1051,55 @@ class InMemoryOwnerTruthConversationRepository:
                     )
                 seen_thread_ids.add(snapshot.thread_id)
                 if snapshot.is_recommendation_eligible:
+                    rows.append(snapshot)
+            return tuple(sorted(rows, key=lambda item: (item.thread_id, item.session_id)))
+
+    def list_recommendation_candidate_thread_authorities(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthConversationThreadAuthoritySnapshot, ...]:
+        _assert_owner_context(context)
+        with self._lock:
+            vault = self._ensure_active_vault(
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+            )
+            rows: list[OwnerTruthConversationThreadAuthoritySnapshot] = []
+            seen_thread_ids: set[str] = set()
+            for (stored_vault_id, _), session in self._sessions.items():
+                if (
+                    stored_vault_id != context.vault_id
+                    or str(session["ownerSubjectId"]) != context.owner_subject_id
+                    or int(session["authorityEpoch"]) != int(vault["authorityEpoch"])
+                ):
+                    continue
+                thread_id = str(session["threadId"])
+                thread = self._threads.get((context.vault_id, thread_id))
+                if (
+                    thread is None
+                    or str(thread["ownerSubjectId"]) != context.owner_subject_id
+                    or int(thread["authorityEpoch"]) != int(vault["authorityEpoch"])
+                ):
+                    raise OwnerTruthConversationAccessDenied(
+                        "current interview session does not bind a current Owner Truth conversation thread"
+                    )
+                snapshot = OwnerTruthConversationThreadAuthoritySnapshot(
+                    thread_id=str(thread["id"]),
+                    vault_id=context.vault_id,
+                    owner_subject_id=context.owner_subject_id,
+                    authority_epoch=int(thread["authorityEpoch"]),
+                    state=ConversationThreadState(str(thread["state"])),
+                    session_id=str(session["id"]),
+                    session_state=InterviewSessionState(session["state"]),
+                    session_boundary=InterviewBoundary(session["boundary"]),
+                )
+                if snapshot.thread_id in seen_thread_ids:
+                    raise OwnerTruthConversationAccessDenied(
+                        "current conversation thread must bind exactly one interview session"
+                    )
+                seen_thread_ids.add(snapshot.thread_id)
+                if snapshot.is_recommendation_eligible or snapshot.is_elapsed_cooldown_candidate:
                     rows.append(snapshot)
             return tuple(sorted(rows, key=lambda item: (item.thread_id, item.session_id)))
 
@@ -2412,6 +2485,74 @@ class PostgresOwnerTruthConversationRepository:
                 "current conversation thread must bind exactly one interview session"
             )
         return tuple(item for item in snapshots if item.is_recommendation_eligible)
+
+    def list_recommendation_candidate_thread_authorities(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthConversationThreadAuthoritySnapshot, ...]:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            vault = self._active_vault(
+                cursor,
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                lock=False,
+            )
+            cursor.execute(
+                """
+                SELECT
+                    thread.id AS thread_id,
+                    thread.vault_id,
+                    thread.owner_subject_id,
+                    thread.authority_epoch,
+                    thread.state AS thread_state,
+                    session.id AS session_id,
+                    session.state AS session_state,
+                    session.boundary AS session_boundary
+                FROM owner_truth.interview_sessions AS session
+                JOIN owner_truth.conversation_threads AS thread
+                  ON thread.vault_id = session.vault_id
+                 AND thread.id = session.current_thread_id
+                WHERE session.vault_id = %s
+                  AND session.owner_subject_id = %s
+                  AND session.authority_epoch = %s
+                  AND thread.owner_subject_id = %s
+                  AND thread.authority_epoch = %s
+                ORDER BY thread.id ASC, session.id ASC
+                """,
+                (
+                    context.vault_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            rows = cursor.fetchall()
+        snapshots = tuple(
+            OwnerTruthConversationThreadAuthoritySnapshot(
+                thread_id=str(row["thread_id"]),
+                vault_id=str(row["vault_id"]),
+                owner_subject_id=str(row["owner_subject_id"]),
+                authority_epoch=int(row["authority_epoch"]),
+                state=ConversationThreadState(str(row["thread_state"])),
+                session_id=str(row["session_id"]),
+                session_state=InterviewSessionState(str(row["session_state"])),
+                session_boundary=InterviewBoundary(str(row["session_boundary"])),
+            )
+            for row in rows
+        )
+        thread_ids = tuple(item.thread_id for item in snapshots)
+        if len(thread_ids) != len(set(thread_ids)):
+            raise OwnerTruthConversationAccessDenied(
+                "current conversation thread must bind exactly one interview session"
+            )
+        return tuple(
+            item
+            for item in snapshots
+            if item.is_recommendation_eligible or item.is_elapsed_cooldown_candidate
+        )
 
     def _ensure_active_vault(
         self,

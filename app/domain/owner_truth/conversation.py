@@ -944,6 +944,24 @@ class OwnerTruthConversationThreadAuthoritySnapshot:
             and self.session_boundary is InterviewBoundary.OPEN
         )
 
+    @property
+    def is_elapsed_cooldown_candidate(self) -> bool:
+        """Whether this is structurally eligible for a server-checked cooldown read.
+
+        This deliberately does *not* make the thread recommendation eligible by
+        itself.  The recommendation service must additionally verify the
+        separate Owner ``ThreadPreference`` and its server-clock
+        ``cooldown_until`` value.  Keeping the structural state separate from
+        the time policy prevents a paused cooldown from becoming eligible just
+        because a caller supplied a timestamp.
+        """
+
+        return (
+            self.state is ConversationThreadState.ACTIVE
+            and self.session_state is InterviewSessionState.PAUSED
+            and self.session_boundary is InterviewBoundary.COOLDOWN
+        )
+
 
 @dataclass(frozen=True)
 class OwnerTruthInterviewReviewBatchSnapshot:

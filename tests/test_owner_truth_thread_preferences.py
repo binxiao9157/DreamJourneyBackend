@@ -77,7 +77,7 @@ class OwnerTruthThreadPreferenceServiceTests(unittest.TestCase):
             ),
         )
 
-    def test_cooldown_is_thread_scoped_and_requires_explicit_elapsed_restore(self) -> None:
+    def test_cooldown_is_thread_scoped_and_becomes_effectively_eligible_after_expiry(self) -> None:
         paused = self._set_boundary(
             boundary=InterviewBoundary.COOLDOWN,
             expected_session_version=1,
@@ -124,6 +124,21 @@ class OwnerTruthThreadPreferenceServiceTests(unittest.TestCase):
                 ),
             )
 
+        self.assertFalse(
+            self._service(now=self.now + timedelta(seconds=59)).permits_recommendation(
+                context=self.context,
+                thread_id=self.thread_id,
+            )
+        )
+        self.assertTrue(
+            self._service(now=self.now + timedelta(seconds=60)).permits_recommendation(
+                context=self.context,
+                thread_id=self.thread_id,
+            )
+        )
+
+        # Explicit restore remains available for a later interaction flow. The
+        # elapsed recommendation policy itself must not mutate the session.
         restored = self._service(now=self.now + timedelta(seconds=60)).restore_cooldown(
             context=self.context,
             command=RestoreCooldownThreadPreferenceCommand(

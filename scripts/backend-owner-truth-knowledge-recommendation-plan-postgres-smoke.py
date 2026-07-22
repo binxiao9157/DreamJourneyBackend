@@ -266,6 +266,23 @@ def owner_truth_counts(dsn: str) -> tuple[int, int, int, int]:
     return tuple(int(value) for value in row)
 
 
+def expire_cooldown(dsn: str, *, vault_id: str, thread_id: str) -> None:
+    """Move only disposable smoke data beyond the server-owned cooldown."""
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE owner_truth.thread_preferences
+                SET cooldown_until = NOW() - INTERVAL '1 second', updated_at = NOW()
+                WHERE vault_id = %s AND thread_id = %s AND preference = 'cooldown'
+                """,
+                (vault_id, thread_id),
+            )
+            require(cursor.rowcount == 1, "disposable cooldown expiry must update one preference")
+        connection.commit()
+
+
 def start_recommendation_session(
     store: PostgresStore,
     *,
@@ -311,6 +328,8 @@ def main() -> None:
     previous_confirmation_qa = main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
     previous_recommendation_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED
     previous_plan_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED
+    previous_thread_preference_qa = main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED
+    previous_cooldown_seconds = main_module.OWNER_TRUTH_THREAD_COOLDOWN_SECONDS
 
     try:
         create_database(admin_dsn, database_name)
@@ -336,6 +355,8 @@ def main() -> None:
         main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = False
+        main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = True
+        main_module.OWNER_TRUTH_THREAD_COOLDOWN_SECONDS = 60
 
         client = TestClient(main_module.app)
         owner_id, owner_headers = login(client, phone="13900000136")
@@ -434,6 +455,55 @@ def main() -> None:
             "injected plan fields must have a typed invalid code",
         )
 
+        # "Later" remains unavailable during the server-owned cooldown, then
+        # becomes a read-only continuity recommendation when the same server
+        # clock says it has elapsed.  Planning itself must not resume the
+        # paused session or write any additional records.
+        boundary_path = f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/boundary"
+        cooldown = client.post(
+            boundary_path,
+            headers=owner_headers,
+            json={
+                "commandId": "recommendation-plan-set-cooldown",
+                "threadId": thread_id,
+                "expectedSessionVersion": 1,
+                "boundary": "cooldown",
+            },
+        )
+        require(cooldown.status_code == 201, f"cooldown creation failed: {cooldown.text}")
+        counts_before_cooldown_plan = owner_truth_counts(test_dsn)
+        during_cooldown = client.post(plan_path, headers=owner_headers, json={})
+        require(during_cooldown.status_code == 200, f"cooldown plan failed: {during_cooldown.text}")
+        require(
+            not ((during_cooldown.json().get("recommendations") or {}).get("selected") or []),
+            "unexpired cooldown must suppress server planning",
+        )
+        require(
+            counts_before_cooldown_plan == owner_truth_counts(test_dsn),
+            "unexpired cooldown plan must remain read-only",
+        )
+
+        expire_cooldown(test_dsn, vault_id=vault_id, thread_id=thread_id)
+        counts_before_elapsed_plan = owner_truth_counts(test_dsn)
+        elapsed = client.post(plan_path, headers=owner_headers, json={})
+        elapsed_replay = client.post(plan_path, headers=owner_headers, json={})
+        require(elapsed.status_code == 200, f"elapsed cooldown plan failed: {elapsed.text}")
+        elapsed_selected = (elapsed.json().get("recommendations") or {}).get("selected") or []
+        require(
+            [item.get("slot") for item in elapsed_selected] == ["continuity"],
+            "elapsed cooldown must become the only continuity recommendation",
+        )
+        require(
+            elapsed_selected[0].get("questionTemplateId") == "continueElapsedCooldown"
+            and elapsed_selected[0].get("reasonCode") == "elapsedCooldownContinuation",
+            "elapsed cooldown recommendation source changed",
+        )
+        require(elapsed.json() == elapsed_replay.json(), "elapsed cooldown plan must be deterministic")
+        require(
+            counts_before_elapsed_plan == owner_truth_counts(test_dsn),
+            "elapsed cooldown plan must not resume or write owner truth records",
+        )
+
         boundary = invoke_conversation(
             store,
             command_id="recommendation-plan-set-do-not-ask",
@@ -442,7 +512,7 @@ def main() -> None:
                     command_id="recommendation-plan-set-do-not-ask",
                     thread_id=thread_id,
                     session_id=session_id,
-                    expected_session_version=1,
+                    expected_session_version=2,
                     boundary=InterviewBoundary.DO_NOT_ASK,
                 ),
                 context=context,
@@ -484,7 +554,8 @@ def main() -> None:
             "owner truth knowledge recommendation plan postgres smoke passed "
             f"schemaHead={verified['expectedHead']} defaultHidden=true serverPlanned=true "
             "breadthOnly=true deterministic=true clientInjectionRejected=true "
-            "doNotAskSuppressed=true supersededEvidenceExcluded=true readOnly=true"
+            "elapsedCooldownContinuity=true doNotAskSuppressed=true "
+            "supersededEvidenceExcluded=true readOnly=true"
         )
     finally:
         main_module.store = previous_store
@@ -496,6 +567,8 @@ def main() -> None:
         main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = previous_confirmation_qa
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = previous_recommendation_qa
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = previous_plan_qa
+        main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = previous_thread_preference_qa
+        main_module.OWNER_TRUTH_THREAD_COOLDOWN_SECONDS = previous_cooldown_seconds
         if store is not None:
             store.close_pool()
         try:

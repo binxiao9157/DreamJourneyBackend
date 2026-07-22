@@ -152,9 +152,36 @@ class OwnerTruthThreadPreferenceSnapshot:
 
     @property
     def is_recommendation_eligible(self) -> bool:
-        """Expiry does not auto-resume a thread; only explicit OPEN may plan."""
+        """Whether the stored preference is explicitly open.
+
+        This is intentionally a state predicate, not the effective policy at a
+        particular point in time.  Recommendation reads that want to consider
+        an elapsed cooldown must call :meth:`permits_recommendation_at` with a
+        server-clock timestamp and must still validate the paused session.
+        """
 
         return self.preference is ThreadPreferenceState.OPEN
+
+    def is_cooldown_elapsed_at(self, *, now: datetime) -> bool:
+        """Return true only when a server-clock cooldown has elapsed."""
+
+        current_time = _utc(now, field="now")
+        return (
+            self.preference is ThreadPreferenceState.COOLDOWN
+            and self.cooldown_until is not None
+            and current_time >= self.cooldown_until
+        )
+
+    def permits_recommendation_at(self, *, now: datetime) -> bool:
+        """Apply the product policy without mutating the preference record.
+
+        ``doNotAsk`` never becomes eligible by elapsed time.  ``cooldown`` is
+        blocked until its server-calculated expiry and then becomes an
+        effective recommendation candidate; the conversation session remains
+        paused until a later explicit resume flow consumes that suggestion.
+        """
+
+        return self.is_recommendation_eligible or self.is_cooldown_elapsed_at(now=now)
 
     def value_free_summary(self) -> dict[str, object]:
         return {
@@ -1029,10 +1056,14 @@ class OwnerTruthThreadPreferenceService:
         *,
         context: OwnerTruthCommandContext,
         thread_id: str,
+        now: Optional[datetime] = None,
     ) -> bool:
         _assert_owner_context(context)
         preference = self._repository().read(context=context, thread_id=thread_id)
-        return preference is None or preference.is_recommendation_eligible
+        if preference is None:
+            return True
+        current_time = _utc(self._now() if now is None else now, field="now")
+        return preference.permits_recommendation_at(now=current_time)
 
     def _conversation(self) -> OwnerTruthConversationService:
         return OwnerTruthConversationService(self._store.owner_truth_conversation_repository())

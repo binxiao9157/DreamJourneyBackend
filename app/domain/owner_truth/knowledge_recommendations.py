@@ -737,9 +737,11 @@ class ServerPlannedRecommendationCandidateProjector:
 
     This is deliberately narrower than a conversational recommendation engine:
     it has no natural-language input, provider output, message text, or write
-    path.  It can only use an active/open private interview thread and current
-    Owner-confirmed coverage.  When either prerequisite is unavailable, it
-    returns no candidates rather than guessing a topic.
+    path.  It can use an active/open private interview thread, or one paused
+    cooldown thread that a caller has already proven elapsed from a
+    server-owned ThreadPreference clock.  It never evaluates client time or
+    mutates the session.  When current authority or confirmed coverage is
+    unavailable, it returns no candidates rather than guessing a topic.
     """
 
     def project(
@@ -752,6 +754,7 @@ class ServerPlannedRecommendationCandidateProjector:
         coverage: DimensionProjection,
         thread_authorities: Iterable[OwnerTruthConversationThreadAuthoritySnapshot],
         continuity_cues: Iterable[ServerPlannedContinuationCue] = (),
+        elapsed_cooldown_thread_ids: Iterable[str] = (),
     ) -> Tuple[RecommendationCandidate, ...]:
         owner = require_nonblank(owner_subject_id, field="owner_subject_id")
         vault = require_nonblank(vault_id, field="vault_id")
@@ -766,20 +769,66 @@ class ServerPlannedRecommendationCandidateProjector:
             raise TypeError("coverage must be a DimensionProjection")
         if coverage.owner_subject_id != owner or coverage.vault_id != vault:
             raise KnowledgeRecommendationError("coverage scope does not match recommendation scope")
+        try:
+            elapsed_cooldown_ids = frozenset(
+                require_nonblank(str(thread_id), field="elapsed_cooldown_thread_id")
+                for thread_id in elapsed_cooldown_thread_ids
+            )
+        except TypeError as exc:
+            raise KnowledgeRecommendationError("elapsed_cooldown_thread_ids must be iterable") from exc
 
         eligible = self._eligible_thread(
             thread_authorities=thread_authorities,
             owner_subject_id=owner,
             vault_id=vault,
             authority_epoch=authority_epoch,
+            elapsed_cooldown_thread_ids=elapsed_cooldown_ids,
         )
         if eligible is None:
             return ()
+        thread_authority, is_elapsed_cooldown = eligible
 
         candidates: list[RecommendationCandidate] = []
+        breadth_coverage = tuple(
+            item
+            for item in coverage.coverage
+            if item.memory_version_ids and item.missing_facets
+        )
+        if is_elapsed_cooldown:
+            # The owner explicitly chose "later".  After the server-owned
+            # cooldown expires, that intent is the highest-priority continuity
+            # source.  We intentionally do not revive an old saved cue or
+            # session version: the candidate is bound only to current,
+            # confirmed coverage and the still-current paused authority.
+            if not breadth_coverage:
+                return ()
+            selected_coverage = max(
+                breadth_coverage,
+                key=lambda item: (
+                    len(item.missing_facets),
+                    len(item.memory_version_ids),
+                    item.dimension.value,
+                ),
+            )
+            return (
+                self._candidate(
+                    slot=RecommendationSlot.CONTINUITY,
+                    thread_authority=thread_authority,
+                    authority_epoch=authority_epoch,
+                    checkpoint=normalized_checkpoint,
+                    coverage=selected_coverage,
+                    missing_facet=selected_coverage.missing_facets[0],
+                    question_template_id="continueElapsedCooldown",
+                    reason_code="elapsedCooldownContinuation",
+                    explicit_intent_priority=2,
+                    continuity_score=2,
+                    importance_score=len(selected_coverage.missing_facets),
+                ),
+            )
+
         continuity_cue = self._eligible_continuity_cue(
             continuity_cues=continuity_cues,
-            thread_authority=eligible,
+            thread_authority=thread_authority,
             owner_subject_id=owner,
             vault_id=vault,
             authority_epoch=authority_epoch,
@@ -789,7 +838,7 @@ class ServerPlannedRecommendationCandidateProjector:
             candidates.append(
                 self._candidate(
                     slot=RecommendationSlot.CONTINUITY,
-                    thread_authority=eligible,
+                    thread_authority=thread_authority,
                     authority_epoch=authority_epoch,
                     checkpoint=normalized_checkpoint,
                     coverage=continuity_coverage,
@@ -804,11 +853,6 @@ class ServerPlannedRecommendationCandidateProjector:
                 )
             )
 
-        breadth_coverage = tuple(
-            item
-            for item in coverage.coverage
-            if item.memory_version_ids and item.missing_facets
-        )
         if not breadth_coverage:
             return tuple(candidates)
         selected_coverage = max(
@@ -821,7 +865,7 @@ class ServerPlannedRecommendationCandidateProjector:
         )
         breadth = self._candidate(
             slot=RecommendationSlot.BREADTH,
-            thread_authority=eligible,
+            thread_authority=thread_authority,
             authority_epoch=authority_epoch,
             checkpoint=normalized_checkpoint,
             coverage=selected_coverage,
@@ -877,12 +921,13 @@ class ServerPlannedRecommendationCandidateProjector:
         owner_subject_id: str,
         vault_id: str,
         authority_epoch: int,
-    ) -> Optional[OwnerTruthConversationThreadAuthoritySnapshot]:
+        elapsed_cooldown_thread_ids: frozenset[str],
+    ) -> Optional[tuple[OwnerTruthConversationThreadAuthoritySnapshot, bool]]:
         try:
             rows = tuple(thread_authorities)
         except TypeError as exc:
             raise KnowledgeRecommendationError("thread_authorities must be iterable") from exc
-        eligible: list[OwnerTruthConversationThreadAuthoritySnapshot] = []
+        eligible: list[tuple[OwnerTruthConversationThreadAuthoritySnapshot, bool]] = []
         seen_thread_ids: set[str] = set()
         for item in rows:
             if not isinstance(item, OwnerTruthConversationThreadAuthoritySnapshot):
@@ -900,15 +945,24 @@ class ServerPlannedRecommendationCandidateProjector:
             if item.thread_id in seen_thread_ids:
                 raise KnowledgeRecommendationError("thread_authorities must not duplicate a thread")
             seen_thread_ids.add(item.thread_id)
-            if not item.is_recommendation_eligible:
+            if item.is_recommendation_eligible:
+                eligible.append((item, False))
+                continue
+            if (
+                item.thread_id in elapsed_cooldown_thread_ids
+                and item.is_elapsed_cooldown_candidate
+            ):
+                eligible.append((item, True))
+                continue
+            if item.is_elapsed_cooldown_candidate:
                 raise KnowledgeRecommendationError(
-                    "thread_authorities must contain only active open interview sessions"
+                    "elapsed cooldown thread requires a server-verified eligibility marker"
                 )
-            eligible.append(item)
-        if len(eligible) > 1:
             raise KnowledgeRecommendationError(
-                "multiple active open interview threads cannot plan recommendations"
+                "thread_authorities must contain only active open interview sessions"
             )
+        if len(eligible) > 1:
+            raise KnowledgeRecommendationError("multiple active open interview threads cannot plan recommendations")
         return eligible[0] if eligible else None
 
     @staticmethod

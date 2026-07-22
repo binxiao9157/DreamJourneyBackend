@@ -10,8 +10,10 @@
 1. `skipOnce` 保持既有 Session-only 语义，不创建 ThreadPreference；
 2. `cooldown`（“以后再聊”）由服务端计算 `cooldownUntil`，到期前仍不可重新推荐；
 3. `doNotAsk`（“不再问”）持久禁止推荐，且只能走既有显式确认恢复命令；
-4. cooldown 到期后仍要求 Owner 的显式恢复，不能因时钟流逝自动重新打开；
-5. 推荐规划和调用方提供的候选读取都会对 `cooldown`、`doNotAsk`、`stale` 偏好 fail closed。
+4. cooldown 到期后可作为“接着聊”的服务端连续性候选，但不会因时钟流逝自动写回
+   `open` 或恢复已暂停的 Session；
+5. 显式 `restore-cooldown` 保留给后续用户点击候选后的实际恢复交互，不再是推荐资格的前置条件；
+6. 推荐规划和调用方提供的候选读取都会对未到期 `cooldown`、`doNotAsk`、`stale` 偏好 fail closed。
 
 它不保存题目、话术、对话正文、模型摘要、Provider 输出或用户自定义 cooldown 时间。
 公开 Echo 视觉、公开 API 和推荐文案不变。
@@ -59,10 +61,14 @@ POST /v2/vaults/{vaultId}/interview-sessions/{sessionId}/restore-cooldown
 ThreadPreference：
 
 - `open` 或没有记录：可继续经过既有 Owner、authority、Thread/Session 资格校验；
-- `cooldown`、`doNotAsk` 或 `stale`：不进入推荐，调用方指定该 Thread 时统一拒绝；
-- cooldown 到期但未显式恢复：仍不可推荐。
+- 未到期 `cooldown`、`doNotAsk` 或 `stale`：不进入推荐，调用方指定该 Thread 时统一拒绝；
+- 已到期 `cooldown`：只有同时满足当前 Thread 仍属 Owner/Vault/epoch、Session 仍为
+  `paused + cooldown`、且服务端时钟晚于 `cooldownUntil` 时，才生成一条
+  `continueElapsedCooldown` 连续性候选；
+- 此读取不会修改 `thread_preferences`、Session、Candidate、Memory 或 Provider 状态。
 
-因此，时间到期不会绕过用户边界，也不能靠客户端提交的 cooldown 或候选数据越过服务端决策。
+因此，时间到期不会绕过用户边界，也不能靠客户端提交的 cooldown 或候选数据越过服务端决策；
+它仅使 Owner 先前明确保存的“以后再聊”意愿重新进入推荐池。
 
 ## 验证
 
@@ -90,16 +96,22 @@ git diff --check
 DATABASE_URL='<admin postgres dsn>' \
   PYTHON_BIN=.venv/bin/python \
   scripts/run-backend-owner-truth-thread-preference-postgres-smoke.sh
+
+DATABASE_URL='<admin postgres dsn>' \
+  PYTHON_BIN=.venv/bin/python \
+  scripts/run-backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.sh
 ```
 
 脚本创建并删除临时数据库，覆盖默认隐藏、服务端 cooldown、幂等重放、跨 Owner 拒绝、
 客户端时间注入拒绝、到期前恢复拒绝、到期后显式恢复、`doNotAsk` 显式恢复和 receipt
-数量；不会读取或写入线上业务 Vault、档案或对话内容。
+数量。`scripts/run-backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.sh` 另覆盖
+到期 cooldown 的连续性候选、确定性重放及计划读取零写入；两个脚本均不会读取或写入线上业务
+Vault、档案或对话内容。
 
 ## 非目标
 
 - 不开放用户可见的“以后再聊/不再问/恢复”界面；
-- 不做自动恢复、自动 Topic 合并、VAD 或 Provider 调用；
+- 不做自动 Session 恢复、自动 Topic 合并、VAD 或 Provider 调用；
 - 不把 ThreadPreference 作为跨账号、家庭成员或 Visitor 权限；
 - 不代表完整自然输入访谈、双推荐或公开知识地图已经完成。
 

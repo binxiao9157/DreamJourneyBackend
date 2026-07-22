@@ -248,6 +248,23 @@ class ServerPlannedRecommendationCandidateProjectorTests(unittest.TestCase):
             (),
         )
 
+    def test_projects_server_verified_elapsed_cooldown_as_high_priority_continuity(self) -> None:
+        paused_cooldown = self._authority(
+            state=ConversationThreadState.ACTIVE,
+            session_state=InterviewSessionState.PAUSED,
+            session_boundary=InterviewBoundary.COOLDOWN,
+        )
+
+        rows = self._project(
+            (paused_cooldown,),
+            elapsed_cooldown_thread_ids=(self.thread_id,),
+        )
+
+        self.assertEqual([item.slot for item in rows], [RecommendationSlot.CONTINUITY])
+        self.assertEqual(rows[0].question_template_id, "continueElapsedCooldown")
+        self.assertEqual(rows[0].reason_code, "elapsedCooldownContinuation")
+        self.assertEqual(rows[0].evidence_kind, RecommendationEvidenceKind.CONFIRMED_MEMORY)
+
     def test_rejects_multiple_eligible_threads_or_scope_drift(self) -> None:
         other_thread = self._authority(
             thread_id=str(UUID("00000000-0000-4000-8000-000000000103")),

@@ -180,6 +180,11 @@ class OwnerTruthConversationTests(unittest.TestCase):
             self.service.list_recommendation_eligible_thread_authorities(context=self.context),
             (),
         )
+        cooldown_candidates = self.service.list_recommendation_candidate_thread_authorities(
+            context=self.context,
+        )
+        self.assertEqual([item.thread_id for item in cooldown_candidates], [self.thread_id])
+        self.assertTrue(cooldown_candidates[0].is_elapsed_cooldown_candidate)
 
     def test_do_not_ask_pauses_the_session_and_persists_the_boundary(self) -> None:
         self.service.start_session(command=self.start(), context=self.context)
