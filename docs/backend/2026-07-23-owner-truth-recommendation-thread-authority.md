@@ -87,3 +87,21 @@ curl -fsS https://dreamjourney-api.liftora.cn/ready
 结果：迁移账本头为 `0038` 且无待执行迁移；隔离 Postgres smoke 通过；公网
 `/ready` 返回数据库读写、迁移头、认证配置均为 `ready`。本次没有对线上业务
 Vault、档案或会话记录执行读取、写入或迁移。
+
+## 生命周期资格部署验收
+
+`main@79987bb` 已部署到 API 容器。本次无数据库迁移，部署后执行：
+
+```bash
+python scripts/migrate_db.py --apply --build-id 79987bb
+python scripts/migrate_db.py --verify
+scripts/run-backend-owner-truth-conversation-postgres-smoke.sh
+python scripts/backend-owner-truth-knowledge-dimension-confirmation-postgres-smoke.py
+curl -fsS https://dreamjourney-api.liftora.cn/ready
+```
+
+结果：schema head 仍为 `0038`、无待执行迁移；两个一次性 Postgres 数据库 smoke
+均通过。推荐 smoke 明确输出 `activeThreadSelected=true` 和
+`pausedThreadRejected=true`，证明真实路由不会把已暂停的旧会话带入新的推荐选择。
+公网 `/ready` 为 `ready`。本次没有读取、写入或迁移线上业务 Vault、档案、会话或
+推荐数据。
