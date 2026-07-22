@@ -81,6 +81,16 @@ DATABASE_URL='<admin postgres dsn>' \
 显式 continuity 计划、Session 版本变化后的自动失效和只读计划；不会读取或写入线上业务 Vault、
 档案或会话。
 
+## 部署证据
+
+- 后端提交：`adc57cd feat(m0b): add explicit saved continuation cues`；
+- 部署环境：线上 API 容器与 Postgres；
+- 迁移：`0039_owner_truth_saved_continuation_cues` 已应用，`migrate_db.py --verify` 返回
+  `appliedHead=0039`、`expectedHead=0039`、`status=ready`；
+- 部署后 smoke：`backend-owner-truth-saved-continuation-postgres-smoke.py` 已通过，覆盖默认隐藏、
+  Owner-only、幂等、跨 Owner 拒绝、自由文本拒绝、continuity 计划、Session 版本失效和只读边界；
+- 公网 `/ready` 返回 `status=ready`。
+
 ## 非目标
 
 - 不做公开“稍后继续”入口、推荐文案或 Echo 注入；
