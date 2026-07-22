@@ -286,6 +286,71 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(replay.json()["receipt"]["status"], "deduplicated")
         self.assertEqual(replay.json()["receipt"]["sessionVersion"], 2)
 
+    def test_skip_once_is_consumed_by_the_next_owner_narrative(self) -> None:
+        _, headers, _ = self._login("13800139612")
+        vault_id = "vault-interview-boundary-skip-once-consumed"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        start = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(start.status_code, 201, start.text)
+
+        boundary = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=1,
+            boundary="skipOnce",
+            headers=headers,
+        )
+        self.assertEqual(boundary.status_code, 201, boundary.text)
+        self.assertEqual(boundary.json()["receipt"]["boundary"], "skipOnce")
+        self.assertEqual(boundary.json()["receipt"]["sessionVersion"], 2)
+
+        command_id = str(uuid4())
+        message_id = str(uuid4())
+        append_payload = {
+            "commandId": command_id,
+            "threadId": thread_id,
+            "messageId": message_id,
+            "expectedThreadVersion": 1,
+            "expectedSessionVersion": 2,
+            "text": "本轮不需要继续追问，我先补充这一段私人叙述。",
+        }
+        append = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json=append_payload,
+        )
+
+        self.assertEqual(append.status_code, 201, append.text)
+        self.assertEqual(append.json()["receipt"]["state"], "active")
+        self.assertEqual(append.json()["receipt"]["boundary"], "open")
+        self.assertEqual(append.json()["receipt"]["sessionVersion"], 3)
+        self.assertEqual(append.json()["receipt"]["messageSequence"], 1)
+
+        replay = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json=append_payload,
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["receipt"]["status"], "deduplicated")
+        self.assertEqual(replay.json()["receipt"]["boundary"], "open")
+        self.assertEqual(replay.json()["receipt"]["sessionVersion"], 3)
+
+        presentation = client.get(
+            self._presentation_path(vault_id, session_id),
+            headers=headers,
+        )
+        self.assertEqual(presentation.status_code, 200, presentation.text)
+        self.assertEqual(presentation.json()["presentation"]["state"], "narrativeRecorded")
+        self.assertTrue(presentation.json()["presentation"]["canContinue"])
+
     def test_boundary_requires_owner_current_version_and_supported_control(self) -> None:
         owner_id, owner_headers, _ = self._login("13800139609")
         vault_id = "vault-interview-boundary-controls"

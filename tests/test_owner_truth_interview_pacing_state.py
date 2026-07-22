@@ -162,6 +162,58 @@ class OwnerTruthInterviewPacingStateTests(unittest.TestCase):
         self.assertEqual(self.repository.snapshot(vault_id=self.context.vault_id)["candidateCount"], 0)
         self.assertEqual(self.repository.snapshot(vault_id=self.context.vault_id)["memoryVersionCount"], 0)
 
+    def test_next_owner_narrative_consumes_skip_once_without_a_second_boundary_command(self) -> None:
+        boundary = self.service.set_boundary(
+            command=SetInterviewBoundaryCommand(
+                command_id="pacing-skip-once-owner-narrative",
+                thread_id=self.thread_id,
+                session_id=self.session_id,
+                expected_session_version=self.session_version,
+                boundary=InterviewBoundary.SKIP_ONCE,
+            ),
+            context=self.context,
+        )
+        self.session_version = boundary.session_version
+
+        self._append_owner_message()
+
+        snapshot = self.service.read_session(session_id=self.session_id, context=self.context)
+        self.assertEqual(snapshot.boundary, InterviewBoundary.OPEN)
+        self.assertEqual(snapshot.turn_count, 1)
+        self.assertEqual(self.repository.snapshot(vault_id=self.context.vault_id)["authorityEffects"], ())
+
+    def test_non_owner_narrative_does_not_consume_skip_once(self) -> None:
+        boundary = self.service.set_boundary(
+            command=SetInterviewBoundaryCommand(
+                command_id="pacing-skip-once-assistant-narrative",
+                thread_id=self.thread_id,
+                session_id=self.session_id,
+                expected_session_version=self.session_version,
+                boundary=InterviewBoundary.SKIP_ONCE,
+            ),
+            context=self.context,
+        )
+        self.session_version = boundary.session_version
+
+        result = self.service.append_message(
+            command=AppendInterviewMessageCommand(
+                command_id="pacing-assistant-message",
+                thread_id=self.thread_id,
+                session_id=self.session_id,
+                message_id=str(uuid4()),
+                expected_thread_version=self.thread_version,
+                expected_session_version=self.session_version,
+                author=ConversationMessageAuthor.ASSISTANT,
+                kind=ConversationMessageKind.QUESTION,
+                text="这条系统问题不能替用户消费跳过选择。",
+            ),
+            context=self.context,
+        )
+
+        self.assertEqual(result.boundary, InterviewBoundary.SKIP_ONCE)
+        snapshot = self.service.read_session(session_id=self.session_id, context=self.context)
+        self.assertEqual(snapshot.boundary, InterviewBoundary.SKIP_ONCE)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -424,10 +424,77 @@ def exercise_formal_natural_input(
             )
 
         boundary_path = f"{start_path}/{session_id}/boundary"
-        boundary_payload = {
+        skip_once_payload = {
             "commandId": str(uuid.uuid4()),
             "threadId": thread_id,
             "expectedSessionVersion": 2,
+            "boundary": "skipOnce",
+        }
+        skip_once_status, skip_once_body, _ = app_request(
+            "POST",
+            boundary_path,
+            token=access_token,
+            payload=skip_once_payload,
+            policy_headers=policy_headers,
+        )
+        skip_once_receipt = skip_once_body.get("receipt")
+        require(skip_once_status == 201, "matching policy capture must persist skipOnce")
+        require(
+            isinstance(skip_once_receipt, dict)
+            and skip_once_receipt.get("state") == "active"
+            and skip_once_receipt.get("boundary") == "skipOnce"
+            and skip_once_receipt.get("sessionVersion") == 3,
+            "skipOnce must remain active while the current opportunity awaits owner input",
+        )
+
+        skip_once_append_payload = {
+            "commandId": str(uuid.uuid4()),
+            "threadId": thread_id,
+            "messageId": str(uuid.uuid4()),
+            "expectedThreadVersion": 2,
+            "expectedSessionVersion": 3,
+            "text": "这段输入完成后，本轮跳过应只影响此前的一次机会。",
+        }
+        skip_once_append_status, skip_once_append_body, _ = app_request(
+            "POST",
+            f"{start_path}/{session_id}/messages",
+            token=access_token,
+            payload=skip_once_append_payload,
+            policy_headers=policy_headers,
+        )
+        skip_once_append_receipt = skip_once_append_body.get("receipt")
+        require(
+            skip_once_append_status == 201,
+            "next owner narrative must be accepted after skipOnce",
+        )
+        require(
+            isinstance(skip_once_append_receipt, dict)
+            and skip_once_append_receipt.get("state") == "active"
+            and skip_once_append_receipt.get("boundary") == "open"
+            and skip_once_append_receipt.get("sessionVersion") == 4,
+            "next owner narrative must consume skipOnce without a public reopen command",
+        )
+        skip_once_replay_status, skip_once_replay_body, _ = app_request(
+            "POST",
+            f"{start_path}/{session_id}/messages",
+            token=access_token,
+            payload=skip_once_append_payload,
+            policy_headers=policy_headers,
+        )
+        skip_once_replay_receipt = skip_once_replay_body.get("receipt")
+        require(skip_once_replay_status == 200, "skipOnce owner append must deduplicate")
+        require(
+            isinstance(skip_once_replay_receipt, dict)
+            and skip_once_replay_receipt.get("status") == "deduplicated"
+            and skip_once_replay_receipt.get("boundary") == "open"
+            and skip_once_replay_receipt.get("sessionVersion") == 4,
+            "skipOnce owner append replay must preserve the consumed boundary",
+        )
+
+        boundary_payload = {
+            "commandId": str(uuid.uuid4()),
+            "threadId": thread_id,
+            "expectedSessionVersion": 4,
             "boundary": "cooldown",
         }
         boundary_status, boundary_body, boundary_headers = app_request(
@@ -450,7 +517,7 @@ def exercise_formal_natural_input(
                 "threadId": thread_id,
                 "sessionId": session_id,
                 "threadVersion": 2,
-                "sessionVersion": 3,
+                "sessionVersion": 5,
                 "state": "paused",
                 "boundary": "cooldown",
             },
@@ -474,7 +541,7 @@ def exercise_formal_natural_input(
         require(
             isinstance(replay_receipt, dict)
             and replay_receipt.get("status") == "deduplicated"
-            and replay_receipt.get("sessionVersion") == 3,
+            and replay_receipt.get("sessionVersion") == 5,
             "deduplicated boundary must retain the committed session version",
         )
 
@@ -519,6 +586,8 @@ def exercise_formal_natural_input(
             "formalMatchingCaptureAppended": True,
             "formalMatchingCaptureRead": True,
             "formalMatchingCapturePresentation": True,
+            "formalSkipOnceConsumedByNextOwnerNarrative": True,
+            "formalSkipOnceOwnerNarrativeDeduplicated": True,
             "formalBoundaryPersisted": True,
             "formalBoundaryDeduplicated": True,
             "formalBoundaryPausedStateVerified": True,

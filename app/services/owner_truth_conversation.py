@@ -115,6 +115,21 @@ def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
         )
 
 
+def _should_consume_skip_once_after_append(
+    *,
+    boundary: InterviewBoundary | str,
+    record: AppendInterviewMessageWriteRecord,
+) -> bool:
+    current_boundary = (
+        boundary if isinstance(boundary, InterviewBoundary) else InterviewBoundary(boundary)
+    )
+    return (
+        current_boundary is InterviewBoundary.SKIP_ONCE
+        and record.author.value == "owner"
+        and record.kind.value == "narrative"
+    )
+
+
 class OwnerTruthConversationService:
     """Applies typed M0-A commands through an isolated persistence port."""
 
@@ -537,6 +552,11 @@ class InMemoryOwnerTruthConversationRepository:
             if record.author.value == "owner":
                 session["turnCount"] += 1
                 session["candidateBatchTurnCount"] += 1
+            if _should_consume_skip_once_after_append(
+                boundary=session["boundary"],
+                record=record,
+            ):
+                session["boundary"] = InterviewBoundary.OPEN
             result = OwnerTruthInterviewSessionResult(
                 outcome="created",
                 receipt_id=record.receipt_id,
@@ -1103,6 +1123,14 @@ class PostgresOwnerTruthConversationRepository:
                 current=int(session["row_version"]),
             )
             self._assert_message_absent(cursor, record=record)
+            next_boundary = (
+                InterviewBoundary.OPEN.value
+                if _should_consume_skip_once_after_append(
+                    boundary=str(session["boundary"]),
+                    record=record,
+                )
+                else str(session["boundary"])
+            )
             cursor.execute(
                 """
                 SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next_sequence
@@ -1131,13 +1159,15 @@ class PostgresOwnerTruthConversationRepository:
             cursor.execute(
                 """
                 UPDATE owner_truth.interview_sessions
-                SET turn_count = turn_count + %s,
+                SET boundary = %s,
+                    turn_count = turn_count + %s,
                     candidate_batch_turn_count = candidate_batch_turn_count + %s,
                     updated_at = NOW()
                 WHERE vault_id = %s AND id = %s AND row_version = %s
                 RETURNING row_version, state, boundary
                 """,
                 (
+                    next_boundary,
                     1 if record.author.value == "owner" else 0,
                     1 if record.author.value == "owner" else 0,
                     record.vault_id,
