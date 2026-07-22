@@ -516,7 +516,7 @@ def exercise_formal_natural_input(
                 "status": "created",
                 "threadId": thread_id,
                 "sessionId": session_id,
-                "threadVersion": 2,
+                "threadVersion": 3,
                 "sessionVersion": 5,
                 "state": "paused",
                 "boundary": "cooldown",
