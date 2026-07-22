@@ -239,6 +239,13 @@ test -f tests/test_owner_truth_thread_preference_api.py
 test -f tests/test_owner_truth_thread_preference_migration_contract.py
 test -f scripts/backend-owner-truth-thread-preference-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-thread-preference-postgres-smoke.sh
+test -f app/services/owner_truth_interview_decision_audit.py
+test -f db/migrations/0041_owner_truth_interview_decision_audits.sql
+test -f db/migrations/0041_owner_truth_interview_decision_audits.json
+test -f tests/test_owner_truth_interview_decision_audit.py
+test -f tests/test_owner_truth_interview_decision_audit_migration_contract.py
+test -f scripts/backend-owner-truth-interview-decision-audit-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-interview-decision-audit-postgres-smoke.sh
 test -f tests/test_owner_truth_knowledge_dimension_confirmation.py
 test -f tests/test_owner_truth_knowledge_dimension_confirmation_api.py
 test -f tests/test_owner_truth_knowledge_dimension_confirmation_migration_contract.py

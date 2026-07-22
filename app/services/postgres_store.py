@@ -119,6 +119,9 @@ from app.services.owner_truth_saved_continuation import (
 from app.services.owner_truth_thread_preferences import (
     PostgresOwnerTruthThreadPreferenceRepository,
 )
+from app.services.owner_truth_interview_decision_audit import (
+    PostgresOwnerTruthInterviewDecisionAuditRepository,
+)
 from app.services.owner_truth_correction_request import (
     PostgresOwnerTruthCorrectionRequestRepository,
 )
@@ -396,6 +399,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("thread preference persistence requires an active unit of work")
         return PostgresOwnerTruthThreadPreferenceRepository(active.connection)
+
+    def owner_truth_interview_decision_audit_repository(
+        self,
+    ) -> PostgresOwnerTruthInterviewDecisionAuditRepository:
+        """Return private value-free interview decision audit persistence in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("interview decision audit requires an active unit of work")
+        return PostgresOwnerTruthInterviewDecisionAuditRepository(active.connection)
 
     def owner_truth_correction_request_repository(
         self,

@@ -18,6 +18,8 @@ from app.domain.owner_truth.conversation import (
     AcknowledgeInterviewReviewBatchWriteRecord,
     AppendInterviewMessageCommand,
     AppendInterviewMessageWriteRecord,
+    ConversationMessageAuthor,
+    ConversationMessageKind,
     ConversationThreadState,
     CreateInterviewReviewBatchCommand,
     CreateInterviewReviewBatchWriteRecord,
@@ -28,6 +30,7 @@ from app.domain.owner_truth.conversation import (
     InterviewReviewBatchTrigger,
     InterviewSessionState,
     OwnerTruthConversationAccessDenied,
+    OwnerTruthConversationMessageAuthoritySnapshot,
     OwnerTruthConversationConflict,
     OwnerTruthConversationThreadAuthoritySnapshot,
     OwnerTruthConversationVersionConflict,
@@ -114,6 +117,14 @@ class OwnerTruthConversationRepository(Protocol):
         session_id: str,
         context: OwnerTruthCommandContext,
     ) -> OwnerTruthInterviewSessionSnapshot:
+        ...
+
+    def get_interview_message_authority(
+        self,
+        *,
+        message_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthConversationMessageAuthoritySnapshot:
         ...
 
     def get_interview_thread_authority(
@@ -271,6 +282,20 @@ class OwnerTruthConversationService:
     ) -> OwnerTruthInterviewSessionSnapshot:
         _assert_owner_context(context)
         return self._repository.get_interview_session(session_id=session_id, context=context)
+
+    def read_message_authority(
+        self,
+        *,
+        message_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthConversationMessageAuthoritySnapshot:
+        """Read one message's authority binding without exposing its content."""
+
+        _assert_owner_context(context)
+        return self._repository.get_interview_message_authority(
+            message_id=message_id,
+            context=context,
+        )
 
     def read_thread_authority(
         self,
@@ -869,6 +894,45 @@ class InMemoryOwnerTruthConversationRepository:
                 pending_review_batch_id=session["pendingReviewBatchId"],
                 fatigue=session["fatigue"],
                 authority_epoch=int(vault["authorityEpoch"]),
+            )
+
+    def get_interview_message_authority(
+        self,
+        *,
+        message_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthConversationMessageAuthoritySnapshot:
+        _assert_owner_context(context)
+        try:
+            normalized_message_id = str(UUID(str(message_id)))
+        except (TypeError, ValueError, AttributeError) as error:
+            raise OwnerTruthConversationAccessDenied(
+                "conversation message does not belong to this active Owner Vault"
+            ) from error
+        with self._lock:
+            vault = self._ensure_active_vault(
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+            )
+            message = self._messages.get((context.vault_id, normalized_message_id))
+            if (
+                message is None
+                or str(message["ownerSubjectId"]) != context.owner_subject_id
+                or int(message["authorityEpoch"]) != int(vault["authorityEpoch"])
+            ):
+                raise OwnerTruthConversationAccessDenied(
+                    "conversation message does not belong to this active Owner Vault"
+                )
+            return OwnerTruthConversationMessageAuthoritySnapshot(
+                message_id=str(message["id"]),
+                vault_id=str(message["vaultId"]),
+                owner_subject_id=str(message["ownerSubjectId"]),
+                thread_id=str(message["threadId"]),
+                session_id=str(message["sessionId"]),
+                author=ConversationMessageAuthor(message["author"]),
+                kind=ConversationMessageKind(message["kind"]),
+                sequence_number=int(message["sequence"]),
+                authority_epoch=int(message["authorityEpoch"]),
             )
 
     def get_interview_thread_authority(
@@ -2165,6 +2229,60 @@ class PostgresOwnerTruthConversationRepository:
                 else str(row["pending_review_batch_id"])
             ),
             fatigue=InterviewFatigue(str(row["fatigue"])),
+            authority_epoch=int(row["authority_epoch"]),
+        )
+
+    def get_interview_message_authority(
+        self,
+        *,
+        message_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthConversationMessageAuthoritySnapshot:
+        _assert_owner_context(context)
+        try:
+            normalized_message_id = str(UUID(str(message_id)))
+        except (TypeError, ValueError, AttributeError) as error:
+            raise OwnerTruthConversationAccessDenied(
+                "conversation message does not belong to this active Owner Vault"
+            ) from error
+        with self._cursor() as cursor:
+            vault = self._active_vault(
+                cursor,
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                lock=False,
+            )
+            cursor.execute(
+                """
+                SELECT id, vault_id, owner_subject_id, thread_id, session_id,
+                    author, kind, sequence_number, authority_epoch
+                FROM owner_truth.conversation_messages
+                WHERE vault_id = %s
+                  AND id = %s
+                  AND owner_subject_id = %s
+                  AND authority_epoch = %s
+                """,
+                (
+                    context.vault_id,
+                    normalized_message_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise OwnerTruthConversationAccessDenied(
+                "conversation message does not belong to this active Owner Vault"
+            )
+        return OwnerTruthConversationMessageAuthoritySnapshot(
+            message_id=str(row["id"]),
+            vault_id=str(row["vault_id"]),
+            owner_subject_id=str(row["owner_subject_id"]),
+            thread_id=str(row["thread_id"]),
+            session_id=str(row["session_id"]),
+            author=ConversationMessageAuthor(str(row["author"])),
+            kind=ConversationMessageKind(str(row["kind"])),
+            sequence_number=int(row["sequence_number"]),
             authority_epoch=int(row["authority_epoch"]),
         )
 

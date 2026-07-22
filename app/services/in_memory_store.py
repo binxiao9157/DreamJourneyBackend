@@ -77,6 +77,9 @@ from app.services.owner_truth_saved_continuation import (
 from app.services.owner_truth_thread_preferences import (
     InMemoryOwnerTruthThreadPreferenceRepository,
 )
+from app.services.owner_truth_interview_decision_audit import (
+    InMemoryOwnerTruthInterviewDecisionAuditRepository,
+)
 from app.services.owner_truth_correction_request import (
     InMemoryOwnerTruthCorrectionRequestRepository,
 )
@@ -155,6 +158,9 @@ class InMemoryStore:
         )
         self._owner_truth_thread_preference_repository = (
             InMemoryOwnerTruthThreadPreferenceRepository()
+        )
+        self._owner_truth_interview_decision_audit_repository = (
+            InMemoryOwnerTruthInterviewDecisionAuditRepository()
         )
         self._owner_truth_correction_request_repository = (
             InMemoryOwnerTruthCorrectionRequestRepository(
@@ -272,6 +278,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthThreadPreferenceRepository:
         return self._owner_truth_thread_preference_repository
+
+    def owner_truth_interview_decision_audit_repository(
+        self,
+    ) -> InMemoryOwnerTruthInterviewDecisionAuditRepository:
+        return self._owner_truth_interview_decision_audit_repository
 
     def owner_truth_correction_request_repository(
         self,

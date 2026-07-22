@@ -862,6 +862,26 @@ class OwnerTruthInterviewSessionSnapshot:
 
 
 @dataclass(frozen=True)
+class OwnerTruthConversationMessageAuthoritySnapshot:
+    """Value-free ownership binding for one persisted interview message.
+
+    Decision audit can bind to an Owner narrative without reading its content
+    payload or content hash.  This is intentionally a narrow private control
+    record, not a conversation read model.
+    """
+
+    message_id: str
+    vault_id: str
+    owner_subject_id: str
+    thread_id: str
+    session_id: str
+    author: ConversationMessageAuthor
+    kind: ConversationMessageKind
+    sequence_number: int
+    authority_epoch: int
+
+
+@dataclass(frozen=True)
 class OwnerTruthConversationThreadAuthoritySnapshot:
     """Value-free authority binding for one persisted conversation thread.
 
@@ -968,6 +988,7 @@ __all__ = [
     "InterviewSessionState",
     "OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION",
     "OwnerTruthConversationAccessDenied",
+    "OwnerTruthConversationMessageAuthoritySnapshot",
     "OwnerTruthConversationConflict",
     "OwnerTruthConversationError",
     "OwnerTruthConversationVersionConflict",

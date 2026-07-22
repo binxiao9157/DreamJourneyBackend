@@ -1,0 +1,12 @@
+{
+  "version": "0041",
+  "name": "owner_truth_interview_decision_audits",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthInterviewDecisionAuditDefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthInterviewDecisionAudit": false
+  }
+}
