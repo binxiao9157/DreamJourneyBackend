@@ -464,9 +464,18 @@ class PostgresOwnerTruthSavedContinuationCueRepository:
                   AND session.owner_subject_id = vault.owner_subject_id
                   AND session.authority_epoch = vault.authority_epoch
                   AND session.current_thread_id = cue.thread_id
-                  AND session.state = 'active'
-                  AND session.boundary = 'open'
-                  AND session.row_version = cue.expected_session_version
+                  AND (
+                    (
+                      session.state = 'active'
+                      AND session.boundary = 'open'
+                      AND session.row_version = cue.expected_session_version
+                    )
+                    OR (
+                      session.state = 'paused'
+                      AND session.boundary = 'cooldown'
+                      AND session.row_version = cue.expected_session_version + 1
+                    )
+                  )
                 ORDER BY cue.id ASC
                 """,
                 (

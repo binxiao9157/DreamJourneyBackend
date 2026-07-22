@@ -20,12 +20,20 @@ M0-B 的“接着聊”不能从活跃会话、覆盖缺口、对话摘要或模
 4. 当前 Owner-confirmed 的一个 MemoryVersion 与相同知识维度；
 5. 该维度仍未覆盖的一个 facet。
 
-记录是 append-only。任何一个绑定条件失效时，历史 receipt 保留，但不会再参与计划：
+记录是 append-only。任何一个绑定条件失效时，历史 receipt 保留，但不会再参与计划。唯一的
+受控例外是：同一 Session 从 cue 绑定的 `active + open` 版本 `N` 直接进入 `paused + cooldown`
+版本 `N + 1`，并且服务端时钟确认冷却期已经结束；此时可优先恢复同一条 value-free cue，但
+不会恢复 Session 状态或写入新的偏好记录。除此以外，以下变化均使 cue 失效：
 
-- Session 版本变化、暂停、结束或边界变为 `cooldown`/`doNotAsk`/`skipOnce`；
+- Session 版本变化（不含上述唯一的 `N -> N + 1` cooldown 过渡）、结束或边界变为
+ `doNotAsk`/`skipOnce`；
 - Vault/Thread/Memory authority epoch 漂移；
 - MemoryVersion 被替换或不再 current；
 - 目标 facet 已被另一条当前 Owner-confirmed 证据覆盖。
+
+该例外只适用于**之前已显式保存**的 cue。单独选择 `cooldown` 不会从会话、对话正文、
+模型摘要或 coverage 自动推导/创建 cue；没有仍有效 cue 时，服务端才保留泛化的
+`elapsedCooldownContinuation` 回退。
 
 ## 隐藏接口
 
@@ -53,7 +61,8 @@ POST /v2/vaults/{vaultId}/interview-sessions/{sessionId}/saved-continuation-cues
 
 - 没有合法 cue 时，保持原有 breadth-only 行为；
 - 有合法 cue 时，可额外生成一条 `continuity`，其 `reasonCode` 为
-  `explicitOwnerSavedContinuation`；
+  `explicitOwnerSavedContinuation`；若它通过已到期的直接 cooldown 过渡恢复，则为
+  `elapsedCooldownSavedContinuation`；
 - 返回只含 opaque 标识、维度/facet、template ID 与 reason code；
 - 客户端 `/knowledge-recommendations/read` 仍拒绝调用方伪造的 `savedContinuation` evidence。
 

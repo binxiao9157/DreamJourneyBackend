@@ -265,6 +265,38 @@ class ServerPlannedRecommendationCandidateProjectorTests(unittest.TestCase):
         self.assertEqual(rows[0].reason_code, "elapsedCooldownContinuation")
         self.assertEqual(rows[0].evidence_kind, RecommendationEvidenceKind.CONFIRMED_MEMORY)
 
+    def test_projects_saved_continuation_before_elapsed_cooldown_fallback(self) -> None:
+        paused_cooldown = self._authority(
+            state=ConversationThreadState.ACTIVE,
+            session_state=InterviewSessionState.PAUSED,
+            session_boundary=InterviewBoundary.COOLDOWN,
+        )
+        cue = ServerPlannedContinuationCue(
+            cue_id=str(UUID("00000000-0000-4000-8000-000000000105")),
+            owner_subject_id=OWNER,
+            vault_id=VAULT,
+            authority_epoch=7,
+            thread_id=self.thread_id,
+            session_id=self.session_id,
+            expected_session_version=1,
+            memory_version_id="memory-version-decision",
+            target_dimension=KnowledgeDimension.KEY_DECISIONS,
+            missing_facet="outcome",
+        )
+
+        rows = self._project(
+            (paused_cooldown,),
+            continuity_cues=(cue,),
+            elapsed_cooldown_thread_ids=(self.thread_id,),
+        )
+
+        self.assertEqual([item.slot for item in rows], [RecommendationSlot.CONTINUITY])
+        continuity = rows[0]
+        self.assertEqual(continuity.question_template_id, "continueSavedOwnerCue")
+        self.assertEqual(continuity.reason_code, "elapsedCooldownSavedContinuation")
+        self.assertEqual(continuity.evidence_kind, RecommendationEvidenceKind.SAVED_CONTINUATION)
+        self.assertEqual(continuity.evidence_refs, ("memory-version-decision",))
+
     def test_rejects_multiple_eligible_threads_or_scope_drift(self) -> None:
         other_thread = self._authority(
             thread_id=str(UUID("00000000-0000-4000-8000-000000000103")),

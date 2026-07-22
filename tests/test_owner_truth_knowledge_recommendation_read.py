@@ -13,9 +13,11 @@ from app.domain.owner_truth.knowledge_dimension_read import (
 from app.domain.owner_truth.conversation import (
     ConversationThreadState,
     InterviewBoundary,
+    InterviewFatigue,
     InterviewSessionState,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationThreadAuthoritySnapshot,
+    OwnerTruthInterviewSessionSnapshot,
 )
 from app.domain.owner_truth.knowledge_recommendations import (
     KnowledgeDimension,
@@ -76,6 +78,7 @@ class _ConversationThreadAuthorityReader:
         state: ConversationThreadState = ConversationThreadState.ACTIVE,
         session_state: InterviewSessionState = InterviewSessionState.ACTIVE,
         session_boundary: InterviewBoundary = InterviewBoundary.OPEN,
+        session_row_version: int = 1,
     ) -> None:
         self._vault_id = vault_id
         self._owner_subject_id = owner_subject_id
@@ -85,6 +88,42 @@ class _ConversationThreadAuthorityReader:
         self._session_id = str(uuid4())
         self._session_state = session_state
         self._session_boundary = session_boundary
+        self._session_row_version = session_row_version
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    def get_interview_session(
+        self,
+        *,
+        session_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewSessionSnapshot:
+        if (
+            context.vault_id != self._vault_id
+            or context.owner_subject_id != self._owner_subject_id
+            or session_id != self._session_id
+        ):
+            raise OwnerTruthConversationAccessDenied(
+                "interview session does not belong to this active Owner Vault"
+            )
+        return OwnerTruthInterviewSessionSnapshot(
+            session_id=self._session_id,
+            vault_id=self._vault_id,
+            owner_subject_id=self._owner_subject_id,
+            thread_id=sorted(self._thread_ids)[0],
+            state=self._session_state,
+            boundary=self._session_boundary,
+            row_version=self._session_row_version,
+            thread_version=1,
+            turn_count=0,
+            deepening_turn_count=0,
+            candidate_batch_turn_count=0,
+            pending_review_batch_id=None,
+            fatigue=InterviewFatigue.NORMAL,
+            authority_epoch=self._authority_epoch,
+        )
 
     def get_interview_thread_authority(
         self,
@@ -182,6 +221,7 @@ class _Store:
         thread_state: ConversationThreadState = ConversationThreadState.ACTIVE,
         session_state: InterviewSessionState = InterviewSessionState.ACTIVE,
         session_boundary: InterviewBoundary = InterviewBoundary.OPEN,
+        session_row_version: int = 1,
     ) -> None:
         self.reader = _ProjectionReader(snapshot)
         self.repository = InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository()
@@ -197,6 +237,7 @@ class _Store:
             state=thread_state,
             session_state=session_state,
             session_boundary=session_boundary,
+            session_row_version=session_row_version,
         )
 
     @contextmanager
@@ -303,6 +344,7 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
         thread_state: ConversationThreadState = ConversationThreadState.ACTIVE,
         session_state: InterviewSessionState = InterviewSessionState.ACTIVE,
         session_boundary: InterviewBoundary = InterviewBoundary.OPEN,
+        session_row_version: int = 1,
     ) -> _Store:
         if rebuilding:
             snapshot = build_rebuilding_memory_projection(
@@ -326,6 +368,7 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
             thread_state=thread_state,
             session_state=session_state,
             session_boundary=session_boundary,
+            session_row_version=session_row_version,
         )
 
     def _confirm(self, store: _Store) -> None:
@@ -368,6 +411,36 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
         }
         values.update(overrides)
         return RecommendationCandidate(**values)
+
+    def _record_saved_continuation_cue(self, store: _Store, *, expected_session_version: int) -> str:
+        cue_id = str(uuid4())
+        command_hash = _hash({"command": "saved-continuation-cue"})
+        payload_hash = _hash(
+            {
+                "cueId": cue_id,
+                "sessionId": store.conversation_repository.session_id,
+                "expectedSessionVersion": expected_session_version,
+            }
+        )
+        store.saved_continuation_cue_repository.record(
+            context=self.context,
+            record={
+                "cueId": cue_id,
+                "vaultId": self.vault_id,
+                "ownerSubjectId": self.owner_id,
+                "actorSubjectId": self.owner_id,
+                "authorityEpoch": 5,
+                "threadId": self.thread_id,
+                "sessionId": store.conversation_repository.session_id,
+                "expectedSessionVersion": expected_session_version,
+                "memoryVersionId": self.memory.memory_version_id,
+                "targetDimension": KnowledgeDimension.KEY_DECISIONS.value,
+                "missingFacet": "outcome",
+                "commandIdHash": command_hash,
+                "payloadHash": payload_hash,
+            },
+        )
+        return cue_id
 
     def test_reads_current_owner_confirmed_coverage_and_returns_value_free_selection(self) -> None:
         store = self._store()
@@ -477,6 +550,111 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
         )
         assert direct.selection is not None
         self.assertEqual([item.slot for item in direct.selection.selected], [RecommendationSlot.CONTINUITY])
+
+    def test_elapsed_cooldown_prefers_current_saved_continuation_cue_without_resuming(self) -> None:
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)
+        store = self._store(
+            thread_ids=(self.thread_id,),
+            thread_state=ConversationThreadState.ACTIVE,
+            session_state=InterviewSessionState.PAUSED,
+            session_boundary=InterviewBoundary.COOLDOWN,
+            session_row_version=2,
+        )
+        self._confirm(store)
+        self._record_saved_continuation_cue(store, expected_session_version=1)
+        store.thread_preference_repository = _FixedThreadPreferenceRepository(
+            OwnerTruthThreadPreferenceSnapshot(
+                vault_id=self.vault_id,
+                thread_id=self.thread_id,
+                owner_subject_id=self.owner_id,
+                authority_epoch=5,
+                preference=ThreadPreferenceState.COOLDOWN,
+                cooldown_until=now - timedelta(seconds=1),
+                row_version=1,
+            )
+        )
+
+        result = OwnerTruthKnowledgeRecommendationReadService(store).plan(
+            context=self.context,
+            now=now,
+        )
+
+        assert result.selection is not None
+        self.assertEqual([item.slot for item in result.selection.selected], [RecommendationSlot.CONTINUITY])
+        selected = result.selection.selected[0]
+        self.assertEqual(selected.question_template_id, "continueSavedOwnerCue")
+        self.assertEqual(selected.reason_code, "elapsedCooldownSavedContinuation")
+        self.assertEqual(selected.evidence_refs, (self.memory.memory_version_id,))
+        session = store.conversation_repository.get_interview_session(
+            session_id=store.conversation_repository.session_id,
+            context=self.context,
+        )
+        self.assertEqual(session.state, InterviewSessionState.PAUSED)
+        self.assertEqual(session.boundary, InterviewBoundary.COOLDOWN)
+        self.assertEqual(session.row_version, 2)
+
+    def test_elapsed_cooldown_does_not_revive_saved_cue_after_more_than_one_version_change(self) -> None:
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)
+        store = self._store(
+            thread_ids=(self.thread_id,),
+            thread_state=ConversationThreadState.ACTIVE,
+            session_state=InterviewSessionState.PAUSED,
+            session_boundary=InterviewBoundary.COOLDOWN,
+            session_row_version=3,
+        )
+        self._confirm(store)
+        self._record_saved_continuation_cue(store, expected_session_version=1)
+        store.thread_preference_repository = _FixedThreadPreferenceRepository(
+            OwnerTruthThreadPreferenceSnapshot(
+                vault_id=self.vault_id,
+                thread_id=self.thread_id,
+                owner_subject_id=self.owner_id,
+                authority_epoch=5,
+                preference=ThreadPreferenceState.COOLDOWN,
+                cooldown_until=now - timedelta(seconds=1),
+                row_version=1,
+            )
+        )
+
+        result = OwnerTruthKnowledgeRecommendationReadService(store).plan(
+            context=self.context,
+            now=now,
+        )
+
+        assert result.selection is not None
+        self.assertEqual([item.slot for item in result.selection.selected], [RecommendationSlot.CONTINUITY])
+        selected = result.selection.selected[0]
+        self.assertEqual(selected.question_template_id, "continueElapsedCooldown")
+        self.assertEqual(selected.reason_code, "elapsedCooldownContinuation")
+
+    def test_do_not_ask_never_revives_historical_saved_continuation(self) -> None:
+        store = self._store(
+            thread_ids=(self.thread_id,),
+            thread_state=ConversationThreadState.ACTIVE,
+            session_state=InterviewSessionState.PAUSED,
+            session_boundary=InterviewBoundary.DO_NOT_ASK,
+            session_row_version=2,
+        )
+        self._confirm(store)
+        self._record_saved_continuation_cue(store, expected_session_version=1)
+        store.thread_preference_repository = _FixedThreadPreferenceRepository(
+            OwnerTruthThreadPreferenceSnapshot(
+                vault_id=self.vault_id,
+                thread_id=self.thread_id,
+                owner_subject_id=self.owner_id,
+                authority_epoch=5,
+                preference=ThreadPreferenceState.DO_NOT_ASK,
+                cooldown_until=None,
+                row_version=1,
+            )
+        )
+
+        result = OwnerTruthKnowledgeRecommendationReadService(store).plan(
+            context=self.context,
+        )
+
+        assert result.selection is not None
+        self.assertEqual(result.selection.selected, ())
 
     def test_elapsed_cooldown_outranks_open_thread_and_uses_stable_expiry_order(self) -> None:
         now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)

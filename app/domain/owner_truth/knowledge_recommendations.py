@@ -794,12 +794,38 @@ class ServerPlannedRecommendationCandidateProjector:
             for item in coverage.coverage
             if item.memory_version_ids and item.missing_facets
         )
+        continuity_cue = self._eligible_continuity_cue(
+            continuity_cues=continuity_cues,
+            thread_authority=thread_authority,
+            owner_subject_id=owner,
+            vault_id=vault,
+            authority_epoch=authority_epoch,
+        )
         if is_elapsed_cooldown:
             # The owner explicitly chose "later".  After the server-owned
-            # cooldown expires, that intent is the highest-priority continuity
-            # source.  We intentionally do not revive an old saved cue or
-            # session version: the candidate is bound only to current,
-            # confirmed coverage and the still-current paused authority.
+            # cooldown expires, a still-current explicit cue is the highest
+            # priority continuity source. It may span exactly the direct
+            # ``open/N -> paused-cooldown/N+1`` transition after the separate
+            # server-clock check; anything older is filtered before projection.
+            if continuity_cue is not None:
+                continuity_coverage = coverage.for_dimension(continuity_cue.target_dimension)
+                return (
+                    self._candidate(
+                        slot=RecommendationSlot.CONTINUITY,
+                        thread_authority=thread_authority,
+                        authority_epoch=authority_epoch,
+                        checkpoint=normalized_checkpoint,
+                        coverage=continuity_coverage,
+                        missing_facet=continuity_cue.missing_facet,
+                        question_template_id="continueSavedOwnerCue",
+                        reason_code="elapsedCooldownSavedContinuation",
+                        explicit_intent_priority=3,
+                        continuity_score=2,
+                        evidence_kind=RecommendationEvidenceKind.SAVED_CONTINUATION,
+                        evidence_refs=(continuity_cue.memory_version_id,),
+                        cue_id=continuity_cue.cue_id,
+                    ),
+                )
             if not breadth_coverage:
                 return ()
             selected_coverage = max(
@@ -826,13 +852,6 @@ class ServerPlannedRecommendationCandidateProjector:
                 ),
             )
 
-        continuity_cue = self._eligible_continuity_cue(
-            continuity_cues=continuity_cues,
-            thread_authority=thread_authority,
-            owner_subject_id=owner,
-            vault_id=vault,
-            authority_epoch=authority_epoch,
-        )
         if continuity_cue is not None:
             continuity_coverage = coverage.for_dimension(continuity_cue.target_dimension)
             candidates.append(

@@ -3,8 +3,8 @@
 
 The route is enabled only inside this smoke. It proves that an Owner must
 explicitly save a cue, that the cue never contains conversation or memory text,
-and that a session-version change removes it from future server planning
-without deleting the append-only receipt.
+and that only the direct, elapsed cooldown transition can preserve it for
+future server planning without deleting the append-only receipt.
 """
 
 from __future__ import annotations
@@ -209,7 +209,7 @@ def start_session(
     return thread_id, session_id
 
 
-def counts(dsn: str) -> tuple[int, int, int, int, int]:
+def counts(dsn: str) -> tuple[int, int, int, int, int, int, int]:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -219,7 +219,9 @@ def counts(dsn: str) -> tuple[int, int, int, int, int]:
                     (SELECT count(*) FROM owner_truth.interview_sessions),
                     (SELECT count(*) FROM owner_truth.memory_versions),
                     (SELECT count(*) FROM owner_truth.knowledge_dimension_confirmation_receipts),
-                    (SELECT count(*) FROM owner_truth.saved_continuation_cues)
+                    (SELECT count(*) FROM owner_truth.saved_continuation_cues),
+                    (SELECT count(*) FROM owner_truth.thread_preferences),
+                    (SELECT count(*) FROM owner_truth.thread_preference_receipts)
                 """
             )
             row = cursor.fetchone()
@@ -239,6 +241,23 @@ def bump_session_version(dsn: str, *, vault_id: str, session_id: str) -> None:
                 (vault_id, session_id),
             )
             require(cursor.rowcount == 1, "session version bump must target exactly one session")
+        connection.commit()
+
+
+def expire_cooldown(dsn: str, *, vault_id: str, thread_id: str) -> None:
+    """Advance only the disposable smoke preference beyond the server clock."""
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE owner_truth.thread_preferences
+                SET cooldown_until = NOW() - INTERVAL '1 second'
+                WHERE vault_id = %s AND thread_id = %s AND preference = 'cooldown'
+                """,
+                (vault_id, thread_id),
+            )
+            require(cursor.rowcount == 1, "cooldown expiry must target exactly one current preference")
         connection.commit()
 
 
@@ -262,6 +281,7 @@ def main() -> None:
     previous_recommendation_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED
     previous_plan_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED
     previous_saved_cue_qa = main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED
+    previous_thread_preference_qa = main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED
 
     try:
         create_database(admin_dsn, database_name)
@@ -288,6 +308,7 @@ def main() -> None:
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = True
         main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = False
+        main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = True
 
         client = TestClient(main_module.app)
         owner_id, owner_headers = login(client, phone="13900000135")
@@ -389,16 +410,65 @@ def main() -> None:
             "continuity plan must not leak memory text",
         )
 
+        boundary_path = f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/boundary"
+        cooldown = client.post(
+            boundary_path,
+            headers=owner_headers,
+            json={
+                "commandId": "saved-continuation-set-cooldown",
+                "threadId": thread_id,
+                "expectedSessionVersion": 1,
+                "boundary": "cooldown",
+            },
+        )
+        require(cooldown.status_code == 201, f"cooldown creation failed: {cooldown.text}")
+        counts_before_cooldown_plan = counts(test_dsn)
+        during_cooldown = client.post(plan_path, headers=owner_headers, json={})
+        require(during_cooldown.status_code == 200, f"cooldown plan failed: {during_cooldown.text}")
+        require(
+            not ((during_cooldown.json().get("recommendations") or {}).get("selected") or []),
+            "unexpired cooldown must suppress the saved continuation cue",
+        )
+        require(
+            counts_before_cooldown_plan == counts(test_dsn),
+            "unexpired cooldown plan must remain read-only",
+        )
+
+        expire_cooldown(test_dsn, vault_id=vault_id, thread_id=thread_id)
+        counts_before_elapsed_plan = counts(test_dsn)
+        elapsed = client.post(plan_path, headers=owner_headers, json={})
+        elapsed_replay = client.post(plan_path, headers=owner_headers, json={})
+        elapsed_selected = (elapsed.json().get("recommendations") or {}).get("selected") or []
+        require(elapsed.status_code == 200, f"elapsed cooldown plan failed: {elapsed.text}")
+        require(
+            [item.get("slot") for item in elapsed_selected] == ["continuity"],
+            "elapsed cooldown must select one continuity recommendation",
+        )
+        require(
+            elapsed_selected[0].get("questionTemplateId") == "continueSavedOwnerCue"
+            and elapsed_selected[0].get("reasonCode") == "elapsedCooldownSavedContinuation"
+            and elapsed_selected[0].get("targetDimension") == "keyDecisions"
+            and elapsed_selected[0].get("missingFacet") == "outcome",
+            "elapsed cooldown must preserve the explicit Owner cue rather than broaden generically",
+        )
+        require(elapsed.json() == elapsed_replay.json(), "elapsed cue planning must be deterministic")
+        require(
+            counts_before_elapsed_plan == counts(test_dsn),
+            "elapsed cue planning must not resume or write Owner Truth records",
+        )
+
         bump_session_version(test_dsn, vault_id=vault_id, session_id=session_id)
         version_stale = client.post(plan_path, headers=owner_headers, json={})
         stale_selected = (version_stale.json().get("recommendations") or {}).get("selected") or []
         require(version_stale.status_code == 200, f"version-stale plan failed: {version_stale.text}")
         require(
-            [item.get("slot") for item in stale_selected] == ["breadth"],
-            "session-version mismatch must suppress continuity while preserving safe breadth planning",
+            [item.get("slot") for item in stale_selected] == ["continuity"]
+            and stale_selected[0].get("questionTemplateId") == "continueElapsedCooldown"
+            and stale_selected[0].get("reasonCode") == "elapsedCooldownContinuation",
+            "session-version mismatch must suppress the saved cue and retain only generic elapsed fallback",
         )
         require(
-            counts(test_dsn)[-1] == 1,
+            counts(test_dsn)[4] == 1,
             "stale cue receipt must remain append-only rather than being deleted",
         )
 
@@ -406,7 +476,8 @@ def main() -> None:
             "owner truth saved continuation postgres smoke passed "
             f"schemaHead={verified['expectedHead']} defaultHidden=true explicitOwnerOnly=true "
             "deduplicated=true crossOwnerDenied=true clientTextRejected=true "
-            "continuityPlanned=true sessionVersionSuppressed=true readOnly=true"
+            "continuityPlanned=true elapsedCooldownCuePreserved=true "
+            "sessionVersionSuppressed=true readOnly=true"
         )
     finally:
         main_module.store = previous_store
@@ -419,6 +490,7 @@ def main() -> None:
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = previous_recommendation_qa
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = previous_plan_qa
         main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = previous_saved_cue_qa
+        main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = previous_thread_preference_qa
         if store is not None:
             store.close_pool()
         try:

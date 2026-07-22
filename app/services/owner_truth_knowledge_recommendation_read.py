@@ -270,6 +270,7 @@ class OwnerTruthKnowledgeRecommendationReadService:
                     context=context,
                 ),
                 thread_authorities=thread_authorities,
+                elapsed_cooldown_thread_ids=elapsed_cooldown_thread_ids,
                 dimension_read=dimension_read,
                 context=context,
                 conversation_repository=repository,
@@ -369,6 +370,7 @@ class OwnerTruthKnowledgeRecommendationReadService:
         *,
         cues: Iterable[ServerPlannedContinuationCue],
         thread_authorities: Iterable[OwnerTruthConversationThreadAuthoritySnapshot],
+        elapsed_cooldown_thread_ids: frozenset[str],
         dimension_read: OwnerTruthKnowledgeDimensionReadResult,
         context: OwnerTruthCommandContext,
         conversation_repository: Any,
@@ -377,7 +379,11 @@ class OwnerTruthKnowledgeRecommendationReadService:
 
         Historical cue receipts are intentionally append-only. A stale session,
         authority epoch, replaced MemoryVersion, or newly covered facet simply
-        yields no continuity candidate; it is never silently revived.
+        yields no continuity candidate; it is never silently revived. The one
+        narrow exception is an immediately following, server-verified
+        ``cooldown`` transition: version ``N`` may remain tied to version
+        ``N + 1`` while the Owner's cooldown has elapsed. This preserves the
+        explicit cue without resuming the session or accepting a caller clock.
         """
 
         assert dimension_read.coverage is not None
@@ -394,6 +400,13 @@ class OwnerTruthKnowledgeRecommendationReadService:
             if isinstance(item, OwnerTruthConversationThreadAuthoritySnapshot)
             and item.is_recommendation_eligible
         }
+        elapsed_cooldown_sessions = {
+            (item.thread_id, item.session_id)
+            for item in authority_rows
+            if isinstance(item, OwnerTruthConversationThreadAuthoritySnapshot)
+            and item.thread_id in elapsed_cooldown_thread_ids
+            and item.is_elapsed_cooldown_candidate
+        }
         current: list[ServerPlannedContinuationCue] = []
         for cue in cue_rows:
             if not isinstance(cue, ServerPlannedContinuationCue):
@@ -404,7 +417,10 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 cue.owner_subject_id != dimension_read.owner_subject_id
                 or cue.vault_id != dimension_read.vault_id
                 or cue.authority_epoch != dimension_read.authority_epoch
-                or (cue.thread_id, cue.session_id) not in active_sessions
+                or (
+                    (cue.thread_id, cue.session_id) not in active_sessions
+                    and (cue.thread_id, cue.session_id) not in elapsed_cooldown_sessions
+                )
             ):
                 continue
             try:
@@ -416,10 +432,21 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 continue
             if (
                 session.thread_id != cue.thread_id
-                or session.row_version != cue.expected_session_version
-                or session.state is not InterviewSessionState.ACTIVE
-                or session.boundary is not InterviewBoundary.OPEN
             ):
+                continue
+            is_active_open = (
+                (cue.thread_id, cue.session_id) in active_sessions
+                and session.row_version == cue.expected_session_version
+                and session.state is InterviewSessionState.ACTIVE
+                and session.boundary is InterviewBoundary.OPEN
+            )
+            is_elapsed_cooldown = (
+                (cue.thread_id, cue.session_id) in elapsed_cooldown_sessions
+                and session.row_version == cue.expected_session_version + 1
+                and session.state is InterviewSessionState.PAUSED
+                and session.boundary is InterviewBoundary.COOLDOWN
+            )
+            if not is_active_open and not is_elapsed_cooldown:
                 continue
             coverage = dimension_read.coverage.for_dimension(cue.target_dimension)
             if (
