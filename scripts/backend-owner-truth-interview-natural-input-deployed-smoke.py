@@ -580,6 +580,129 @@ def exercise_formal_natural_input(
             "cooldown must project only bounded paused guidance",
         )
 
+        restore_path = f"{start_path}/{session_id}/restore-do-not-ask"
+        cooldown_restore_status, cooldown_restore_body, _ = app_request(
+            "POST",
+            restore_path,
+            token=access_token,
+            payload={
+                "commandId": str(uuid.uuid4()),
+                "threadId": thread_id,
+                "expectedSessionVersion": 5,
+                "confirmed": True,
+            },
+            policy_headers=policy_headers,
+        )
+        require(
+            cooldown_restore_status == 409
+            and detail_code(cooldown_restore_body) == "ownerTruthInterviewSessionConflict",
+            "restore route must reject cooldown rather than reopening a different boundary",
+        )
+
+        do_not_ask_thread_id = str(uuid.uuid4())
+        do_not_ask_session_id = str(uuid.uuid4())
+        do_not_ask_start_status, _, _ = app_request(
+            "POST",
+            start_path,
+            token=access_token,
+            payload={
+                "commandId": str(uuid.uuid4()),
+                "threadId": do_not_ask_thread_id,
+                "sessionId": do_not_ask_session_id,
+            },
+            policy_headers=policy_headers,
+        )
+        require(do_not_ask_start_status == 201, "doNotAsk restore smoke must start a separate session")
+        do_not_ask_boundary_path = f"{start_path}/{do_not_ask_session_id}/boundary"
+        do_not_ask_status, do_not_ask_body, _ = app_request(
+            "POST",
+            do_not_ask_boundary_path,
+            token=access_token,
+            payload={
+                "commandId": str(uuid.uuid4()),
+                "threadId": do_not_ask_thread_id,
+                "expectedSessionVersion": 1,
+                "boundary": "doNotAsk",
+            },
+            policy_headers=policy_headers,
+        )
+        do_not_ask_receipt = do_not_ask_body.get("receipt")
+        require(
+            do_not_ask_status == 201
+            and isinstance(do_not_ask_receipt, dict)
+            and do_not_ask_receipt.get("state") == "paused"
+            and do_not_ask_receipt.get("boundary") == "doNotAsk"
+            and do_not_ask_receipt.get("sessionVersion") == 2,
+            "doNotAsk must persist before an explicit restore can be evaluated",
+        )
+
+        do_not_ask_restore_path = f"{start_path}/{do_not_ask_session_id}/restore-do-not-ask"
+        unconfirmed_status, unconfirmed_body, _ = app_request(
+            "POST",
+            do_not_ask_restore_path,
+            token=access_token,
+            payload={
+                "commandId": str(uuid.uuid4()),
+                "threadId": do_not_ask_thread_id,
+                "expectedSessionVersion": 2,
+                "confirmed": False,
+            },
+            policy_headers=policy_headers,
+        )
+        require(
+            unconfirmed_status == 400
+            and detail_code(unconfirmed_body) == "ownerTruthInterviewSessionInvalid",
+            "doNotAsk restore must require explicit confirmation",
+        )
+
+        restore_command_id = str(uuid.uuid4())
+        restore_payload = {
+            "commandId": restore_command_id,
+            "threadId": do_not_ask_thread_id,
+            "expectedSessionVersion": 2,
+            "confirmed": True,
+        }
+        restored_status, restored_body, restored_headers = app_request(
+            "POST",
+            do_not_ask_restore_path,
+            token=access_token,
+            payload=restore_payload,
+            policy_headers=policy_headers,
+        )
+        restored_receipt = restored_body.get("receipt")
+        require(
+            restored_status == 201
+            and restored_headers.get("cache-control") == "no-store"
+            and isinstance(restored_receipt, dict)
+            and restored_receipt == {
+                "status": "created",
+                "threadId": do_not_ask_thread_id,
+                "sessionId": do_not_ask_session_id,
+                "threadVersion": 1,
+                "sessionVersion": 3,
+                "state": "active",
+                "boundary": "open",
+            },
+            "confirmed doNotAsk restore must produce only an active/open receipt",
+        )
+        restore_replay_status, restore_replay_body, _ = app_request(
+            "POST",
+            do_not_ask_restore_path,
+            token=access_token,
+            payload=restore_payload,
+            policy_headers=policy_headers,
+        )
+        restore_replay_receipt = restore_replay_body.get("receipt")
+        require(
+            restore_replay_status == 200
+            and isinstance(restore_replay_receipt, dict)
+            and restore_replay_receipt.get("status") == "deduplicated"
+            and restore_replay_receipt.get("state") == "active"
+            and restore_replay_receipt.get("boundary") == "open"
+            and restore_replay_receipt.get("sessionVersion") == 3,
+            "doNotAsk restore replay must preserve the original active/open result",
+        )
+
         return {
             "formalMissingCaptureDenied": True,
             "formalMatchingCaptureStarted": True,
@@ -592,6 +715,10 @@ def exercise_formal_natural_input(
             "formalBoundaryDeduplicated": True,
             "formalBoundaryPausedStateVerified": True,
             "formalBoundaryPausedPresentationVerified": True,
+            "formalCooldownRestoreRejected": True,
+            "formalDoNotAskRestoreRequiresConfirmation": True,
+            "formalDoNotAskRestoreConfirmed": True,
+            "formalDoNotAskRestoreDeduplicated": True,
             "contentFreeStateVerified": True,
             "contentFreePresentationVerified": True,
             "deployedCandidateReviewPolicyDefaultClosed": True,

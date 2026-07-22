@@ -115,6 +115,7 @@ from app.domain.owner_truth.conversation import (
     OwnerTruthConversationError,
     OwnerTruthConversationVersionConflict,
     OwnerTruthInterviewSessionStateConflict,
+    RestoreDoNotAskInterviewBoundaryCommand,
     SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
 )
@@ -751,6 +752,51 @@ def _owner_truth_formal_interview_boundary_command(
         session_id=session_id,
         expected_session_version=expected_session_version,
         boundary=InterviewBoundary(boundary),
+    )
+
+
+_OWNER_TRUTH_RESTORE_DO_NOT_ASK_PAYLOAD_FIELDS = frozenset(
+    {
+        "commandId",
+        "threadId",
+        "expectedSessionVersion",
+        "confirmed",
+    }
+)
+
+
+def _owner_truth_restore_do_not_ask_command(
+    *,
+    payload: Dict[str, Any],
+    session_id: str,
+) -> RestoreDoNotAskInterviewBoundaryCommand:
+    """Decode the separately reviewed, explicitly confirmed reopen command."""
+
+    if set(payload) != _OWNER_TRUTH_RESTORE_DO_NOT_ASK_PAYLOAD_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    command_id = payload.get("commandId")
+    thread_id = payload.get("threadId")
+    expected_session_version = payload.get("expectedSessionVersion")
+    confirmed = payload.get("confirmed")
+    if (
+        not isinstance(command_id, str)
+        or not isinstance(thread_id, str)
+        or type(expected_session_version) is not int
+        or confirmed is not True
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    return RestoreDoNotAskInterviewBoundaryCommand(
+        command_id=command_id,
+        thread_id=thread_id,
+        session_id=session_id,
+        expected_session_version=expected_session_version,
+        confirmed=confirmed,
     )
 
 
@@ -3178,6 +3224,54 @@ def set_owner_truth_interview_boundary(
             result = OwnerTruthConversationService(
                 store.owner_truth_conversation_repository()
             ).set_boundary(
+                command=command,
+                context=context,
+            )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_session_command_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/restore-do-not-ask",
+    include_in_schema=False,
+)
+def restore_owner_truth_interview_do_not_ask(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Restore only a confirmed ``doNotAsk`` boundary for the Vault Owner.
+
+    The product UI must ask for confirmation before reaching this route. The
+    route remains default-off with the natural-input contract and cannot reopen
+    cooldown, skip-once, or ended sessions.
+    """
+
+    try:
+        context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
+        command = _owner_truth_restore_do_not_ask_command(
+            payload=payload,
+            session_id=session_id,
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-restore-do-not-ask:"
+                f"{context.vault_id}:{command.session_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = OwnerTruthConversationService(
+                store.owner_truth_conversation_repository()
+            ).restore_do_not_ask_boundary(
                 command=command,
                 context=context,
             )

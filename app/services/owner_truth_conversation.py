@@ -37,6 +37,8 @@ from app.domain.owner_truth.conversation import (
     PauseInterviewForTopicSwitchWriteRecord,
     RecordInterviewPacingCommand,
     RecordInterviewPacingWriteRecord,
+    RestoreDoNotAskInterviewBoundaryCommand,
+    RestoreDoNotAskInterviewBoundaryWriteRecord,
     SetInterviewBoundaryCommand,
     SetInterviewBoundaryWriteRecord,
     StartInterviewSessionCommand,
@@ -62,6 +64,12 @@ class OwnerTruthConversationRepository(Protocol):
     def set_interview_boundary(
         self,
         record: SetInterviewBoundaryWriteRecord,
+    ) -> OwnerTruthInterviewSessionResult:
+        ...
+
+    def restore_do_not_ask_interview_boundary(
+        self,
+        record: RestoreDoNotAskInterviewBoundaryWriteRecord,
     ) -> OwnerTruthInterviewSessionResult:
         ...
 
@@ -162,6 +170,17 @@ class OwnerTruthConversationService:
     ) -> OwnerTruthInterviewSessionResult:
         _assert_owner_context(context)
         return self._repository.set_interview_boundary(command.write_record(context=context))
+
+    def restore_do_not_ask_boundary(
+        self,
+        *,
+        command: RestoreDoNotAskInterviewBoundaryCommand,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewSessionResult:
+        _assert_owner_context(context)
+        return self._repository.restore_do_not_ask_interview_boundary(
+            command.write_record(context=context)
+        )
 
     def pause_for_topic_switch(
         self,
@@ -613,6 +632,52 @@ class InMemoryOwnerTruthConversationRepository:
             self._store_receipt(record, result)
             return result
 
+    def restore_do_not_ask_interview_boundary(
+        self,
+        record: RestoreDoNotAskInterviewBoundaryWriteRecord,
+    ) -> OwnerTruthInterviewSessionResult:
+        with self._lock:
+            self._ensure_active_vault(
+                vault_id=record.vault_id,
+                owner_subject_id=record.owner_subject_id,
+            )
+            existing = self._existing_receipt(record)
+            if existing is not None:
+                return self._replay_result(existing, record=record)
+            session, thread = self._live_session_and_thread(
+                vault_id=record.vault_id,
+                session_id=record.session_id,
+                thread_id=record.thread_id,
+                owner_subject_id=record.owner_subject_id,
+            )
+            self._assert_version(
+                resource="interview session",
+                expected=record.expected_session_version,
+                current=int(session["rowVersion"]),
+            )
+            if (
+                session["state"] is not InterviewSessionState.PAUSED
+                or session["boundary"] is not record.previous_boundary
+            ):
+                raise OwnerTruthInterviewSessionStateConflict(
+                    "only a paused doNotAsk interview session can be restored"
+                )
+            session["boundary"] = record.boundary
+            session["state"] = record.state
+            session["rowVersion"] += 1
+            result = OwnerTruthInterviewSessionResult(
+                outcome="created",
+                receipt_id=record.receipt_id,
+                thread_id=record.thread_id,
+                session_id=record.session_id,
+                thread_version=int(thread["rowVersion"]),
+                session_version=int(session["rowVersion"]),
+                state=session["state"],
+                boundary=session["boundary"],
+            )
+            self._store_receipt(record, result)
+            return result
+
     def pause_interview_for_topic_switch(
         self,
         record: PauseInterviewForTopicSwitchWriteRecord,
@@ -919,6 +984,8 @@ class InMemoryOwnerTruthConversationRepository:
             return "appendInterviewMessage"
         if isinstance(record, SetInterviewBoundaryWriteRecord):
             return "setInterviewBoundary"
+        if isinstance(record, RestoreDoNotAskInterviewBoundaryWriteRecord):
+            return "restoreDoNotAskInterviewBoundary"
         if isinstance(record, PauseInterviewForTopicSwitchWriteRecord):
             return "pauseInterviewForTopicSwitch"
         if isinstance(record, RecordInterviewPacingWriteRecord):
@@ -1285,6 +1352,87 @@ class PostgresOwnerTruthConversationRepository:
                     resource="interview session",
                     expected_version=record.expected_session_version,
                     current_version=int(session["row_version"]),
+                )
+            self._insert_receipt(
+                cursor,
+                record=record,
+                authority_epoch=int(vault["authority_epoch"]),
+                result_message_id=None,
+                expected_thread_version=None,
+                expected_session_version=record.expected_session_version,
+            )
+        return OwnerTruthInterviewSessionResult(
+            outcome="created",
+            receipt_id=record.receipt_id,
+            thread_id=record.thread_id,
+            session_id=record.session_id,
+            thread_version=int(thread["row_version"]),
+            session_version=int(updated_session["row_version"]),
+            state=InterviewSessionState(str(updated_session["state"])),
+            boundary=InterviewBoundary(str(updated_session["boundary"])),
+        )
+
+    def restore_do_not_ask_interview_boundary(
+        self,
+        record: RestoreDoNotAskInterviewBoundaryWriteRecord,
+    ) -> OwnerTruthInterviewSessionResult:
+        with self._cursor() as cursor:
+            self._lock(cursor, f"owner-truth-conversation-command:{record.vault_id}:{record.command_id_hash}")
+            self._lock(cursor, f"owner-truth-conversation-session:{record.vault_id}:{record.session_id}")
+            vault = self._active_vault(
+                cursor,
+                vault_id=record.vault_id,
+                owner_subject_id=record.owner_subject_id,
+                lock=True,
+            )
+            existing = self._receipt_by_command(
+                cursor,
+                vault_id=record.vault_id,
+                command_id_hash=record.command_id_hash,
+            )
+            if existing is not None:
+                return self._deduplicated_result(cursor, existing=existing, record=record)
+            session, thread = self._locked_session_and_thread(cursor, record=record)
+            self._assert_live_session(
+                session=session,
+                thread=thread,
+                record=record,
+                authority_epoch=int(vault["authority_epoch"]),
+            )
+            self._assert_version(
+                resource="interview session",
+                expected=record.expected_session_version,
+                current=int(session["row_version"]),
+            )
+            if (
+                str(session["state"]) != InterviewSessionState.PAUSED.value
+                or str(session["boundary"]) != record.previous_boundary.value
+            ):
+                raise OwnerTruthInterviewSessionStateConflict(
+                    "only a paused doNotAsk interview session can be restored"
+                )
+            cursor.execute(
+                """
+                UPDATE owner_truth.interview_sessions
+                SET boundary = %s, state = %s, updated_at = NOW()
+                WHERE vault_id = %s AND id = %s AND row_version = %s
+                  AND boundary = %s AND state = %s
+                RETURNING row_version, state, boundary
+                """,
+                (
+                    record.boundary.value,
+                    record.state.value,
+                    record.vault_id,
+                    record.session_id,
+                    record.expected_session_version,
+                    record.previous_boundary.value,
+                    InterviewSessionState.PAUSED.value,
+                ),
+            )
+            updated_session = cursor.fetchone()
+            if updated_session is None:
+                raise OwnerTruthInterviewSessionStateConflict(
+                    "doNotAsk interview session changed before restore could commit"
                 )
             self._insert_receipt(
                 cursor,
@@ -1935,6 +2083,8 @@ class PostgresOwnerTruthConversationRepository:
             return "appendInterviewMessage"
         if isinstance(record, SetInterviewBoundaryWriteRecord):
             return "setInterviewBoundary"
+        if isinstance(record, RestoreDoNotAskInterviewBoundaryWriteRecord):
+            return "restoreDoNotAskInterviewBoundary"
         if isinstance(record, PauseInterviewForTopicSwitchWriteRecord):
             return "pauseInterviewForTopicSwitch"
         if isinstance(record, RecordInterviewPacingWriteRecord):

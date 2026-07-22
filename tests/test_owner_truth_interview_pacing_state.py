@@ -11,7 +11,9 @@ from app.domain.owner_truth.conversation import (
     InterviewFatigue,
     InterviewPacingEvent,
     OwnerTruthConversationConflict,
+    OwnerTruthInterviewSessionStateConflict,
     RecordInterviewPacingCommand,
+    RestoreDoNotAskInterviewBoundaryCommand,
     SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
 )
@@ -213,6 +215,55 @@ class OwnerTruthInterviewPacingStateTests(unittest.TestCase):
         self.assertEqual(result.boundary, InterviewBoundary.SKIP_ONCE)
         snapshot = self.service.read_session(session_id=self.session_id, context=self.context)
         self.assertEqual(snapshot.boundary, InterviewBoundary.SKIP_ONCE)
+
+    def test_only_do_not_ask_can_be_restored_after_explicit_confirmation(self) -> None:
+        cooldown = self.service.set_boundary(
+            command=SetInterviewBoundaryCommand(
+                command_id="pacing-cooldown",
+                thread_id=self.thread_id,
+                session_id=self.session_id,
+                expected_session_version=self.session_version,
+                boundary=InterviewBoundary.COOLDOWN,
+            ),
+            context=self.context,
+        )
+
+        with self.assertRaises(OwnerTruthInterviewSessionStateConflict):
+            self.service.restore_do_not_ask_boundary(
+                command=RestoreDoNotAskInterviewBoundaryCommand(
+                    command_id="pacing-cooldown-restore-attempt",
+                    thread_id=self.thread_id,
+                    session_id=self.session_id,
+                    expected_session_version=cooldown.session_version,
+                    confirmed=True,
+                ),
+                context=self.context,
+            )
+
+        do_not_ask = self.service.set_boundary(
+            command=SetInterviewBoundaryCommand(
+                command_id="pacing-do-not-ask",
+                thread_id=self.thread_id,
+                session_id=self.session_id,
+                expected_session_version=cooldown.session_version,
+                boundary=InterviewBoundary.DO_NOT_ASK,
+            ),
+            context=self.context,
+        )
+        restored = self.service.restore_do_not_ask_boundary(
+            command=RestoreDoNotAskInterviewBoundaryCommand(
+                command_id="pacing-do-not-ask-restore",
+                thread_id=self.thread_id,
+                session_id=self.session_id,
+                expected_session_version=do_not_ask.session_version,
+                confirmed=True,
+            ),
+            context=self.context,
+        )
+
+        self.assertEqual(restored.state.value, "active")
+        self.assertEqual(restored.boundary, InterviewBoundary.OPEN)
+        self.assertEqual(restored.session_version, do_not_ask.session_version + 1)
 
 
 if __name__ == "__main__":

@@ -277,6 +277,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthInterviewSessionBoundary",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/restore-do-not-ask",
+                session,
+                "ownerTruthInterviewSessionRestoreDoNotAsk",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review",
                 session,

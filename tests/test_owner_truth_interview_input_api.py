@@ -72,6 +72,10 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/boundary"
 
     @staticmethod
+    def _restore_do_not_ask_path(vault_id: str, session_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/restore-do-not-ask"
+
+    @staticmethod
     def _presentation_path(vault_id: str, session_id: str) -> str:
         return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/presentation"
 
@@ -120,6 +124,28 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             json=payload,
         )
 
+    def _restore_do_not_ask(
+        self,
+        *,
+        vault_id: str,
+        session_id: str,
+        thread_id: str,
+        expected_session_version: int,
+        headers: dict[str, str],
+        command_id: str | None = None,
+        confirmed: bool = True,
+    ):
+        return client.post(
+            self._restore_do_not_ask_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": command_id or str(uuid4()),
+                "threadId": thread_id,
+                "expectedSessionVersion": expected_session_version,
+                "confirmed": confirmed,
+            },
+        )
+
     def test_contract_is_default_hidden(self) -> None:
         _, headers, _ = self._login("13800139601")
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = False
@@ -132,6 +158,19 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(
             response.json()["detail"]["code"],
+            "ownerTruthCandidateReviewUnavailable",
+        )
+
+        restore = self._restore_do_not_ask(
+            vault_id="vault-interview-input-hidden",
+            session_id=str(uuid4()),
+            thread_id=str(uuid4()),
+            expected_session_version=1,
+            headers=headers,
+        )
+        self.assertEqual(restore.status_code, 404)
+        self.assertEqual(
+            restore.json()["detail"]["code"],
             "ownerTruthCandidateReviewUnavailable",
         )
 
@@ -350,6 +389,82 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(presentation.status_code, 200, presentation.text)
         self.assertEqual(presentation.json()["presentation"]["state"], "narrativeRecorded")
         self.assertTrue(presentation.json()["presentation"]["canContinue"])
+
+    def test_do_not_ask_requires_explicit_confirmation_before_the_owner_can_restore(self) -> None:
+        _, headers, _ = self._login("13800139613")
+        vault_id = "vault-interview-do-not-ask-restore"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        start = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(start.status_code, 201, start.text)
+
+        paused = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=1,
+            boundary="doNotAsk",
+            headers=headers,
+        )
+        self.assertEqual(paused.status_code, 201, paused.text)
+        self.assertEqual(paused.json()["receipt"]["state"], "paused")
+        self.assertEqual(paused.json()["receipt"]["boundary"], "doNotAsk")
+
+        unconfirmed = self._restore_do_not_ask(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=2,
+            headers=headers,
+            confirmed=False,
+        )
+        self.assertEqual(unconfirmed.status_code, 400, unconfirmed.text)
+        self.assertEqual(
+            unconfirmed.json()["detail"]["code"],
+            "ownerTruthInterviewSessionInvalid",
+        )
+
+        command_id = str(uuid4())
+        restored = self._restore_do_not_ask(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=2,
+            headers=headers,
+            command_id=command_id,
+        )
+        self.assertEqual(restored.status_code, 201, restored.text)
+        self.assertEqual(restored.headers["cache-control"], "no-store")
+        self.assertEqual(
+            restored.json()["receipt"],
+            {
+                "status": "created",
+                "threadId": thread_id,
+                "sessionId": session_id,
+                "threadVersion": 1,
+                "sessionVersion": 3,
+                "state": "active",
+                "boundary": "open",
+            },
+        )
+
+        replay = self._restore_do_not_ask(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=2,
+            headers=headers,
+            command_id=command_id,
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["receipt"]["status"], "deduplicated")
+        self.assertEqual(replay.json()["receipt"]["boundary"], "open")
+        self.assertEqual(replay.json()["receipt"]["sessionVersion"], 3)
 
     def test_boundary_requires_owner_current_version_and_supported_control(self) -> None:
         owner_id, owner_headers, _ = self._login("13800139609")

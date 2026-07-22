@@ -418,6 +418,63 @@ class SetInterviewBoundaryCommand:
 
 
 @dataclass(frozen=True)
+class RestoreDoNotAskInterviewBoundaryCommand:
+    """Explicitly reopen a ``doNotAsk`` session after owner confirmation.
+
+    This is intentionally a separate command from the generic boundary write.
+    A client cannot accidentally reopen a paused interview by submitting
+    ``boundary=open`` through the regular owner-control route.
+    """
+
+    command_id: str
+    thread_id: str
+    session_id: str
+    expected_session_version: int
+    confirmed: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
+        object.__setattr__(self, "thread_id", require_uuid(self.thread_id, field="thread_id"))
+        object.__setattr__(self, "session_id", require_uuid(self.session_id, field="session_id"))
+        _positive_version(self.expected_session_version, field="expected_session_version")
+        if self.confirmed is not True:
+            raise OwnerTruthConversationError("doNotAsk restore requires explicit confirmation")
+
+    def write_record(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> "RestoreDoNotAskInterviewBoundaryWriteRecord":
+        command_id_hash = _sha256(self.command_id)
+        payload = {
+            "schemaVersion": OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION,
+            "commandType": "restoreDoNotAskInterviewBoundary",
+            "threadId": self.thread_id,
+            "sessionId": self.session_id,
+            "expectedSessionVersion": self.expected_session_version,
+            "confirmed": True,
+            "previousBoundary": InterviewBoundary.DO_NOT_ASK.value,
+            "boundary": InterviewBoundary.OPEN.value,
+            "state": InterviewSessionState.ACTIVE.value,
+        }
+        return RestoreDoNotAskInterviewBoundaryWriteRecord(
+            receipt_id=_receipt_id(context=context, command_id_hash=command_id_hash),
+            command_id_hash=command_id_hash,
+            payload_hash=_sha256(_canonical_json(payload)),
+            thread_id=self.thread_id,
+            session_id=self.session_id,
+            expected_session_version=self.expected_session_version,
+            previous_boundary=InterviewBoundary.DO_NOT_ASK,
+            boundary=InterviewBoundary.OPEN,
+            state=InterviewSessionState.ACTIVE,
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            actor_subject_id=context.actor_subject_id,
+            policy_version=context.policy_version,
+        )
+
+
+@dataclass(frozen=True)
 class PauseInterviewForTopicSwitchCommand:
     """Pause the current private thread when the Owner explicitly changes topic.
 
@@ -652,6 +709,23 @@ class SetInterviewBoundaryWriteRecord:
     thread_id: str
     session_id: str
     expected_session_version: int
+    boundary: InterviewBoundary
+    state: InterviewSessionState
+    vault_id: str
+    owner_subject_id: str
+    actor_subject_id: str
+    policy_version: str
+
+
+@dataclass(frozen=True)
+class RestoreDoNotAskInterviewBoundaryWriteRecord:
+    receipt_id: str
+    command_id_hash: str
+    payload_hash: str
+    thread_id: str
+    session_id: str
+    expected_session_version: int
+    previous_boundary: InterviewBoundary
     boundary: InterviewBoundary
     state: InterviewSessionState
     vault_id: str
