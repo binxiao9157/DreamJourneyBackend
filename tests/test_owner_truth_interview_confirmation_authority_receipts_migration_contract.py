@@ -24,6 +24,8 @@ class OwnerTruthInterviewConfirmationAuthorityReceiptsMigrationContractTests(uni
         )
         self.assertIn("UNIQUE (vault_id, decision_receipt_id)", sql)
         self.assertIn("candidate_command_id_hash TEXT NOT NULL", sql)
+        self.assertIn("CREATE TRIGGER owner_truth_batch_decision_auth_evidence_validate", sql)
+        self.assertLessEqual(len("owner_truth_batch_decision_auth_evidence_validate"), 63)
         self.assertIn("authorization evidence is malformed", sql)
         self.assertIn("receipt link does not match root authority", sql)
         self.assertIn("receipt_command_id_hash IS DISTINCT FROM NEW.candidate_command_id_hash", sql)

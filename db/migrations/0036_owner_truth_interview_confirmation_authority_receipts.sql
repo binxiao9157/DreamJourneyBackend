@@ -45,7 +45,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER owner_truth_interview_review_batch_candidate_decisions_validate_authorization_evidence
+CREATE TRIGGER owner_truth_batch_decision_auth_evidence_validate
 BEFORE INSERT ON owner_truth.interview_review_batch_candidate_decisions
 FOR EACH ROW EXECUTE FUNCTION owner_truth.validate_interview_review_batch_candidate_authorization_evidence();
 
