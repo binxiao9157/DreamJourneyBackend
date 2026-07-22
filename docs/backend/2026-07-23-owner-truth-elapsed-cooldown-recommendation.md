@@ -46,6 +46,19 @@ scripts/run-backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.sh
 脚本只创建并删除一次性 Postgres 数据库，验证未到期抑制、到期连续性候选、确定性重放、
 `doNotAsk` 抑制和计划零写入，不读取或修改生产业务数据。
 
+## 部署证据
+
+后端提交 53cab30（fix(m0b): prioritize elapsed cooldown continuations）已部署到 API 容器。
+
+    python scripts/migrate_db.py --apply --build-id 53cab30
+    python scripts/migrate_db.py --verify
+    python scripts/backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.py
+    curl -fsS https://dreamjourney-api.liftora.cn/ready
+
+结果：迁移账本 appliedHead=0041、expectedHead=0041、status=ready；隔离 Postgres smoke 输出
+elapsedCooldownContinuity=true、doNotAskSuppressed=true 和 readOnly=true。公网 /ready 返回 ready。
+本次未读取或修改线上业务 Vault、档案或会话数据。
+
 ## 非目标
 
 - 不自动恢复麦克风、Echo、访谈 Session 或公开 UI；
