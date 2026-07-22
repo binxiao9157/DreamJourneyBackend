@@ -100,6 +100,16 @@ DATABASE_URL='<admin postgres dsn>' \
   Owner-only、幂等、跨 Owner 拒绝、自由文本拒绝、continuity 计划、Session 版本失效和只读边界；
 - 公网 `/ready` 返回 `status=ready`。
 
+### 冷却期恢复补充部署
+
+- 后端提交：`082abf3 fix(m0b): preserve saved cues after elapsed cooldown` 已部署到线上 API 容器；
+- 本次无数据库迁移；`migrate_db.py --verify` 返回 `appliedHead=0041`、`expectedHead=0041`、
+  `status=ready`；
+- 隔离 Postgres smoke 已通过，额外断言 `elapsedCooldownCuePreserved=true`，并同时确认
+  `sessionVersionSuppressed=true` 与 `readOnly=true`；
+- 公网 `/ready` 返回 `status=ready`。该 smoke 只创建和删除临时数据库，不读取或写入线上业务
+  Vault、档案或会话数据。
+
 ## 非目标
 
 - 不做公开“稍后继续”入口、推荐文案或 Echo 注入；
