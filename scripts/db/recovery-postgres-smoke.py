@@ -12,12 +12,15 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.db.backup import build_completed_manifest, write_manifest_atomic
+from app.db.migrator import default_migrations_dir, load_migrations
 from app.db.recovery import build_replay_plan, verify_integrity_metrics, write_recovery_record_atomic
 
 
 RESTORE_SCRIPT = ROOT_DIR / "scripts/db/restore_postgres.sh"
 REPLAY_SCRIPT = ROOT_DIR / "scripts/db/replay_recovery.py"
 DEPLOYED_SMOKE = ROOT_DIR / "scripts/db/recovery-deployed-smoke.py"
+LEGACY_BACKUP_SCHEMA_HEAD = "0001"
+CURRENT_SCHEMA_HEAD = load_migrations(default_migrations_dir())[-1].version
 
 
 def require(condition, message):
@@ -53,7 +56,7 @@ def main():
             backup_id="dj-20260717T010203Z-a1b2c3d4",
             created_at=now - timedelta(minutes=3),
             completed_at=now - timedelta(minutes=2),
-            schema_head="0001",
+            schema_head=LEGACY_BACKUP_SCHEMA_HEAD,
             lsn="0/16B6A40",
             artifact_path=artifact,
             encryption_ref="smoke-only:v1",
@@ -66,6 +69,7 @@ def main():
         fake_docker.write_text(
             """#!/usr/bin/env python3
 import json
+import os
 import sys
 
 args = sys.argv[1:]
@@ -83,8 +87,8 @@ elif "run" in args and "scripts/migrate_db.py" in args:
     print(json.dumps({
         "schemaVersion": 1,
         "status": "ready",
-        "expectedHead": "0001",
-        "appliedHead": "0001",
+        "expectedHead": os.environ["FAKE_RESTORED_SCHEMA_HEAD"],
+        "appliedHead": os.environ["FAKE_RESTORED_SCHEMA_HEAD"],
         "mode": "verify" if "--verify" in args else "apply"
     }))
 else:
@@ -107,11 +111,14 @@ else:
                 "RECOVERY_DATABASE_URL": f"postgresql://smoke:smoke@postgres:5432/{target}",
                 "RECOVERY_OUTPUT_DIR": str(output_dir),
                 "RECOVERY_ALLOW_UNENCRYPTED": "1",
+                "FAKE_RESTORED_SCHEMA_HEAD": CURRENT_SCHEMA_HEAD,
             }
         )
         restore_result = run(["bash", str(RESTORE_SCRIPT)], env=env)
         restore = json.loads((output_dir / "restore-evidence.json").read_text(encoding="utf-8"))
         require(restore["status"] == "restored", "restore evidence status")
+        require(restore["backupSchemaHead"] == LEGACY_BACKUP_SCHEMA_HEAD, "backup schema head retained")
+        require(restore["restoredSchemaHead"] == CURRENT_SCHEMA_HEAD, "restored schema head retained")
         require(target not in restore_result.stdout, "target database must not leak in output")
 
         unsafe_env = dict(env)
@@ -130,8 +137,8 @@ else:
         integrity = verify_integrity_metrics(
             {
                 "schemaVersion": 3,
-                "schemaHead": "0001",
-                "targetSchemaHead": "0001",
+                "schemaHead": CURRENT_SCHEMA_HEAD,
+                "targetSchemaHead": CURRENT_SCHEMA_HEAD,
                 "relationCount": 19,
                 "rowCounts": {"users": 1, "archive_items": 1},
                 "orphanOwnerCount": 0,
@@ -171,7 +178,7 @@ else:
                 ],
                 "migrationState": "ready",
             },
-            expected_schema_head="0001",
+            expected_schema_head=CURRENT_SCHEMA_HEAD,
             backup_id=manifest["backupId"],
             cutoff_lsn=manifest["lsn"],
             target_database=target,
@@ -288,6 +295,8 @@ else:
         record = json.loads(recovery_record_path.read_text(encoding="utf-8"))
         require(deployed_payload["cutoverDecision"] == "GO", "bound recovery evidence can decide GO")
         require(record["restoreEvidenceId"] == restore["evidenceId"], "record binds restore evidence")
+        require(record["backupSchemaHead"] == LEGACY_BACKUP_SCHEMA_HEAD, "record keeps backup schema lineage")
+        require(record["restoredSchemaHead"] == CURRENT_SCHEMA_HEAD, "record keeps restored schema lineage")
         require(target not in json.dumps(record), "record must remain value-free")
 
         print(
@@ -300,6 +309,7 @@ else:
                     "missingReceiptAuthorityNoGo": True,
                     "receiptReplayBinding": True,
                     "integrityBinding": True,
+                    "schemaLineageBinding": True,
                     "valueFreeRecoveryRecord": True,
                 },
                 sort_keys=True,

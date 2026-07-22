@@ -9,6 +9,7 @@ Owner：Backend / Operations
 - 生成独立于 Compose volume 的 PostgreSQL custom-format backup。
 - artifact 完成后加密，并通过流式解密到 `pg_restore --list` 验证可访问性。
 - manifest 记录 `backupId/createdAt/schemaHead/LSN/checksum/size/encryptionRef/retentionClass/status`，不记录 DSN、密码、用户正文或业务 payload。
+- 写入 artifact 前会比较运行库 `schema_migrations` 的已应用 head 与当前代码迁移 head；两者不一致时写入 `schemaHeadMismatch` failure receipt，不生成可验证 backup。
 - 失败写 machine-safe receipt，systemd `OnFailure` 再写 owner 明确的 alert receipt。
 - retention 仅生成 `auditOnly` 计划，不自动删除；任何流程都不得删除最后一份有效 backup。
 - backup 成功不等于 restore 成功。隔离 restore、receipt replay、RPO/RTO 实测属于 `WI-S0-04-05`。
@@ -64,10 +65,16 @@ sudo find /var/backups/dreamjourney/postgres -maxdepth 1 -name '*.manifest.json'
 验证指定 manifest：
 
 ```bash
-sudo /opt/services/dreamjourney/DreamJourneyBackend/.venv/bin/python \
-  scripts/db/verify_backup_manifest.py \
+cd /opt/services/dreamjourney/DreamJourneyBackend
+CURRENT_SCHEMA_HEAD="$(
+  .venv/bin/python - <<'PY'
+from app.db.migrator import default_migrations_dir, load_migrations
+print(load_migrations(default_migrations_dir())[-1].version)
+PY
+)"
+sudo .venv/bin/python scripts/db/verify_backup_manifest.py \
   /var/backups/dreamjourney/postgres/<backup-id>.manifest.json \
-  --expected-schema-head 0001
+  --expected-schema-head "$CURRENT_SCHEMA_HEAD"
 ```
 
 验证通过只输出 value-free 摘要。checksum、size、schema head、过期时间或 artifact 任一不匹配都会非零退出。
@@ -75,9 +82,9 @@ sudo /opt/services/dreamjourney/DreamJourneyBackend/.venv/bin/python \
 authority cutover 或 contract migration 前必须额外验证最新备份不超过 36 小时：
 
 ```bash
-sudo /usr/bin/python3 scripts/db/verify_latest_backup.py \
+sudo .venv/bin/python scripts/db/verify_latest_backup.py \
   /var/backups/dreamjourney/postgres \
-  --expected-schema-head 0001 \
+  --expected-schema-head "$CURRENT_SCHEMA_HEAD" \
   --max-age-hours 36
 ```
 

@@ -11,6 +11,11 @@ from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from app.db.migrator import default_migrations_dir, load_migrations
+
 BACKUP_SCRIPT = ROOT_DIR / "scripts/db/backup_postgres.sh"
 VERIFY_SCRIPT = ROOT_DIR / "scripts/db/verify_backup_manifest.py"
 VERIFY_LATEST_SCRIPT = ROOT_DIR / "scripts/db/verify_latest_backup.py"
@@ -18,6 +23,7 @@ RETENTION_SCRIPT = ROOT_DIR / "scripts/db/audit_backup_retention.py"
 ALERT_SCRIPT = ROOT_DIR / "scripts/db/backup_alert.sh"
 DEPLOYED_SMOKE = ROOT_DIR / "scripts/db/backup-deployed-smoke.py"
 BACKUP_SHELL = "/bin/bash" if Path("/bin/bash").is_file() else shutil.which("bash")
+CURRENT_SCHEMA_HEAD = load_migrations(default_migrations_dir())[-1].version
 
 
 def require(condition, message):
@@ -62,7 +68,7 @@ args = sys.argv[1:]
 if "psql" in args:
     query = args[-1]
     if "schema_migrations" in query:
-        print("0001")
+        print(os.environ["FAKE_SCHEMA_HEAD"])
     elif "pg_current_wal_lsn" in query:
         print("0/16B6A40")
     elif "pg_database_size" in query:
@@ -97,6 +103,7 @@ else:
                 "BACKUP_RETENTION_DAYS": "35",
                 "BACKUP_MIN_FREE_BYTES": "1",
                 "BACKUP_ALERT_OWNER": "backup-smoke-owner",
+                "FAKE_SCHEMA_HEAD": CURRENT_SCHEMA_HEAD,
             }
         )
 
@@ -109,7 +116,7 @@ else:
         require(len(manifests) == 2, "two consecutive backup manifests")
         for manifest in manifests:
             report = run(
-                [sys.executable, str(VERIFY_SCRIPT), str(manifest), "--expected-schema-head", "0001"],
+                [sys.executable, str(VERIFY_SCRIPT), str(manifest), "--expected-schema-head", CURRENT_SCHEMA_HEAD],
                 env=env,
             )
             require(json.loads(report.stdout)["status"] == "verified", "manifest verification")
@@ -119,13 +126,29 @@ else:
                 str(VERIFY_LATEST_SCRIPT),
                 str(backup_root),
                 "--expected-schema-head",
-                "0001",
+                CURRENT_SCHEMA_HEAD,
                 "--max-age-hours",
                 "36",
             ],
             env=env,
         )
         require(json.loads(latest.stdout)["freshnessGate"] == "passed", "latest backup gate")
+
+        mismatch_env = dict(env)
+        mismatch_env["FAKE_SCHEMA_HEAD"] = "0000" if CURRENT_SCHEMA_HEAD != "0000" else "0001"
+        mismatched = subprocess.run(
+            [BACKUP_SHELL, str(BACKUP_SCRIPT)],
+            cwd=ROOT_DIR,
+            env=mismatch_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        require(mismatched.returncode != 0, "schema head mismatch must fail")
+        mismatch_failures = sorted((backup_root / "failures").glob("*.failure.json"))
+        require(mismatch_failures, "schema head mismatch failure receipt")
+        mismatch_payload = json.loads(mismatch_failures[-1].read_text(encoding="utf-8"))
+        require(mismatch_payload["errorCode"] == "schemaHeadMismatch", "schema head mismatch code")
 
         retention = run(
             [
@@ -212,7 +235,7 @@ else:
         require(alert_payload["owner"] == "backup-smoke-owner", "alert owner")
 
         deployed_env = dict(env)
-        deployed_env["EXPECTED_SCHEMA_HEAD"] = "0001"
+        deployed_env["EXPECTED_SCHEMA_HEAD"] = CURRENT_SCHEMA_HEAD
         deployed_env["BACKUP_TIMER_VERIFIED"] = "1"
         deployed = run([sys.executable, str(DEPLOYED_SMOKE)], env=deployed_env)
         require(json.loads(deployed.stdout)["status"] == "passed", "deployed evidence smoke")
@@ -221,7 +244,7 @@ else:
         artifact = backup_root / first_payload["artifactFile"]
         artifact.write_bytes(artifact.read_bytes() + b"corrupt")
         corrupt = subprocess.run(
-            [sys.executable, str(VERIFY_SCRIPT), str(manifests[0]), "--expected-schema-head", "0001"],
+            [sys.executable, str(VERIFY_SCRIPT), str(manifests[0]), "--expected-schema-head", CURRENT_SCHEMA_HEAD],
             cwd=ROOT_DIR,
             env=env,
             text=True,
@@ -245,6 +268,7 @@ else:
                     "alertReceipt": True,
                     "freshnessGate": True,
                     "retentionAuditOnly": True,
+                    "schemaHeadMismatchFailClosed": True,
                 },
                 sort_keys=True,
             )

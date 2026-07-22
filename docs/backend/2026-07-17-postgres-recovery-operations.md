@@ -12,7 +12,7 @@
 
 1. backup manifest、artifact size 和 checksum 通过校验；
 2. 目标数据库不是生产数据库，且 DSN 的数据库名与 `RECOVERY_TARGET_DB` 完全一致；
-3. restore 和 versioned migration 成功，schema head/checksum 通过；
+3. restore 和 versioned migration 成功；证据必须同时保留 backup 的来源 head 与恢复后迁移到的目标 head，完整性审计绑定目标 head；
 4. 对 legacy direct-user、Owner Truth Vault scope 和 async operation scope 完成动态
    owner/authority 审计，并保留任何未验证根的 `NO_GO`；
 5. cutoff 后 command/outbox/deletion/provider receipt coverage 完整；
@@ -153,8 +153,8 @@ export RECOVERY_REPLAY_APPLICATION_EVIDENCE_PATH=/secure/recovery/replay-applica
 
 - `manifest-verification.json`：backup artifact 校验摘要；
 - `migration-apply.json` / `migration-verify.json`：versioned migration 证据；
-- `restore-evidence.json`：backup、cutoff、目标哈希和恢复时长绑定；
-- `integrity-evidence.json`：schema、动态 direct-user、Vault/operation scope、hash、
+- `restore-evidence.json`：backup、cutoff、目标哈希和恢复时长绑定；其中 `backupSchemaHead` 是 manifest 的来源版本，`restoredSchemaHead` 是 restore 后 migration verify 的目标版本；
+- `integrity-evidence.json`：绑定 `restoredSchemaHead` 的 schema、动态 direct-user、Vault/operation scope、hash、
   purged owner 检查；
 - `replay-evidence.json`：receipt coverage、range、duplicate/conflict 和 application evidence；
 - `recovery-record.json`：最终 RPO/RTO 观测、GO/NO_GO 和所有证据 ID。
@@ -163,7 +163,7 @@ export RECOVERY_REPLAY_APPLICATION_EVIDENCE_PATH=/secure/recovery/replay-applica
 
 ## 6. 人工复核与清理
 
-1. 比对 `backupId`、`cutoffLSN`、`schemaHead` 和所有 evidence ID。
+1. 比对 `backupId`、`cutoffLSN`、`backupSchemaHead`、`restoredSchemaHead` 和所有 evidence ID。旧 backup 恢复后迁移到当前 head 是允许路径；仅当 migration verify 或 integrity evidence 与 `restoredSchemaHead` 不一致时 fail closed。
 2. 在隔离数据库执行抽样只读查询，确认 owner 数量、删除 tombstone 与业务表数量合理。
 3. 若结果为 `NO_GO`，保持生产流量不变，记录 blockers 和 owner。
 4. 若未来结果为 `GO`，仍需单独的切流审批；本脚本不会自动切流。

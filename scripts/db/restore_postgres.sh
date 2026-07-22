@@ -162,6 +162,7 @@ payload = build_restore_evidence(
     backup_checksum=artifact_checksum,
     backup_completed_at=backup_completed_at,
     schema_head=schema_head,
+    restored_schema_head=migration.get("expectedHead"),
     cutoff_lsn=cutoff_lsn,
     started_at=started_at,
     completed_at=completed_at,

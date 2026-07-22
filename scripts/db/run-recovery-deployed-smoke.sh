@@ -22,7 +22,20 @@ scripts/db/restore_postgres.sh >/dev/null
 
 backup_id="$($PYTHON_BIN -c 'import json,sys; print(json.load(open(sys.argv[1]))["backupId"])' "$RECOVERY_MANIFEST_PATH")"
 cutoff_lsn="$($PYTHON_BIN -c 'import json,sys; print(json.load(open(sys.argv[1]))["lsn"])' "$RECOVERY_MANIFEST_PATH")"
-schema_head="$($PYTHON_BIN -c 'import json,sys; print(json.load(open(sys.argv[1]))["schemaHead"])' "$RECOVERY_MANIFEST_PATH")"
+restored_schema_head="$($PYTHON_BIN - "$RECOVERY_OUTPUT_DIR/migration-verify.json" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = str(payload.get("expectedHead") or "")
+applied = str(payload.get("appliedHead") or "")
+if payload.get("status") != "ready" or expected != applied or re.fullmatch(r"[0-9]{4,}", expected) is None:
+    raise SystemExit("migrationHeadNotReady")
+print(expected)
+PY
+)"
 
 integrity_evidence="$RECOVERY_OUTPUT_DIR/integrity-evidence.json"
 integrity_evidence_tmp="$integrity_evidence.tmp"
@@ -32,7 +45,7 @@ RECOVERY_BACKUP_ID="$backup_id" \
 RECOVERY_CUTOFF_LSN="$cutoff_lsn" \
 RECOVERY_TARGET_DB="$RECOVERY_TARGET_DB" \
 RECOVERY_PRODUCTION_DB="$RECOVERY_PRODUCTION_DB" \
-RECOVERY_EXPECTED_SCHEMA_HEAD="$schema_head" \
+RECOVERY_EXPECTED_SCHEMA_HEAD="$restored_schema_head" \
 "$DOCKER_BIN" compose run --rm -T \
   -e DATABASE_URL \
   -e RECOVERY_BACKUP_ID \

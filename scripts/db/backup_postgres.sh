@@ -73,8 +73,19 @@ psql_value() {
 }
 
 failure_code="databaseMetadataUnavailable"
+expected_schema_head="$($PYTHON_BIN - <<'PY'
+from app.db.migrator import default_migrations_dir, load_migrations
+
+print(load_migrations(default_migrations_dir())[-1].version)
+PY
+)"
+[[ "$expected_schema_head" =~ ^[0-9]{4,}$ ]]
 schema_head="$(psql_value "SELECT version FROM schema_migrations WHERE state = 'applied' ORDER BY version DESC LIMIT 1")"
 [[ "$schema_head" =~ ^[0-9]{4,}$ ]]
+if [[ "$schema_head" != "$expected_schema_head" ]]; then
+  failure_code="schemaHeadMismatch"
+  false
+fi
 lsn="$(psql_value "SELECT pg_current_wal_lsn()")"
 [[ "$lsn" =~ ^[0-9A-F]+/[0-9A-F]+$ ]]
 database_size="$(psql_value "SELECT pg_database_size(current_database())")"

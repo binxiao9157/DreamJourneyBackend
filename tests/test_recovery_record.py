@@ -208,10 +208,10 @@ class RecoveryRecordTests(unittest.TestCase):
         self.assertEqual(report["auditCoverageStatus"], "unverified")
         self.assertIn("integrityAuditCoverageUnverified", report["blockers"])
 
-    def verified_integrity(self, *, metrics=None):
+    def verified_integrity(self, *, metrics=None, expected_schema_head="0001"):
         return verify_integrity_metrics(
             metrics or self.metrics,
-            expected_schema_head="0001",
+            expected_schema_head=expected_schema_head,
             backup_id=self.backup_id,
             cutoff_lsn=self.cutoff_lsn,
             target_database="dj_recovery_drill_1234",
@@ -236,12 +236,14 @@ class RecoveryRecordTests(unittest.TestCase):
             },
         }
 
-    def restore_evidence(self):
+    def restore_evidence(self, *, backup_schema_head="0001", restored_schema_head=None):
+        restored_schema_head = restored_schema_head or backup_schema_head
         return build_restore_evidence(
             backup_id=self.backup_id,
             backup_checksum="1" * 64,
             backup_completed_at="2026-07-17T01:02:04+00:00",
-            schema_head="0001",
+            schema_head=backup_schema_head,
+            restored_schema_head=restored_schema_head,
             cutoff_lsn=self.cutoff_lsn,
             started_at="2026-07-17T02:03:04+00:00",
             completed_at="2026-07-17T02:04:34+00:00",
@@ -386,6 +388,69 @@ class RecoveryRecordTests(unittest.TestCase):
         )
         self.assertEqual(no_go["cutoverDecision"], "NO_GO")
         self.assertEqual(no_go["status"], "replayPending")
+
+    def test_record_preserves_backup_and_migrated_schema_lineage(self):
+        backup_schema_head = "0001"
+        restored_schema_head = "0040"
+        migrated_metrics = copy.deepcopy(self.metrics)
+        migrated_metrics["schemaHead"] = restored_schema_head
+        migrated_metrics["targetSchemaHead"] = restored_schema_head
+        integrity = self.verified_integrity(
+            metrics=migrated_metrics,
+            expected_schema_head=restored_schema_head,
+        )
+        ready = build_replay_plan(
+            self.complete_bundle(),
+            backup_id=self.backup_id,
+            cutoff_lsn=self.cutoff_lsn,
+        )
+        replay = finalize_replay_plan(
+            ready,
+            application_evidence=self.application_evidence(ready),
+        )
+        restore = self.restore_evidence(
+            backup_schema_head=backup_schema_head,
+            restored_schema_head=restored_schema_head,
+        )
+        record = build_recovery_record(
+            recovery_id="recovery-20260717T020304Z-a1b2c3d4",
+            backup_id=self.backup_id,
+            cutoff_lsn=self.cutoff_lsn,
+            backup_completed_at="2026-07-17T01:02:04+00:00",
+            started_at="2026-07-17T02:03:04+00:00",
+            completed_at="2026-07-17T02:04:34+00:00",
+            target_database="dj_recovery_drill_1234",
+            production_database="dreamjourney",
+            backup_checksum="1" * 64,
+            schema_head=backup_schema_head,
+            restore=restore,
+            integrity=integrity,
+            replay=replay,
+        )
+        self.assertEqual(record["cutoverDecision"], "GO")
+        self.assertEqual(record["schemaHead"], backup_schema_head)
+        self.assertEqual(record["backupSchemaHead"], backup_schema_head)
+        self.assertEqual(record["restoredSchemaHead"], restored_schema_head)
+
+        legacy_integrity = self.verified_integrity(
+            expected_schema_head=backup_schema_head,
+        )
+        with self.assertRaisesRegex(RecoveryContractError, "integrityEvidenceMismatch"):
+            build_recovery_record(
+                recovery_id="recovery-20260717T020304Z-a1b2c3d4",
+                backup_id=self.backup_id,
+                cutoff_lsn=self.cutoff_lsn,
+                backup_completed_at="2026-07-17T01:02:04+00:00",
+                started_at="2026-07-17T02:03:04+00:00",
+                completed_at="2026-07-17T02:04:34+00:00",
+                target_database="dj_recovery_drill_1234",
+                production_database="dreamjourney",
+                backup_checksum="1" * 64,
+                schema_head=backup_schema_head,
+                restore=restore,
+                integrity=legacy_integrity,
+                replay=replay,
+            )
 
     def test_fabricated_or_mismatched_evidence_cannot_produce_go(self):
         ready = build_replay_plan(

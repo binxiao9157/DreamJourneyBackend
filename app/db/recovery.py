@@ -20,6 +20,7 @@ TERMINAL_RECEIPT_STATUSES = ("applied", "verified", "terminal")
 LEGACY_INTEGRITY_SCHEMA_VERSION = 1
 DIRECT_USER_ID_AUDIT_SCHEMA_VERSION = 2
 INTEGRITY_SCHEMA_VERSION = 3
+RESTORE_EVIDENCE_SCHEMA_VERSION = 2
 INTEGRITY_AUDIT_DOMAIN_NAMES = (
     "publicDirectUserId",
     "ownerTruthVaultScope",
@@ -327,6 +328,7 @@ def build_restore_evidence(
     backup_checksum: str,
     backup_completed_at: Any,
     schema_head: str,
+    restored_schema_head: str,
     cutoff_lsn: str,
     started_at: Any,
     completed_at: Any,
@@ -337,7 +339,11 @@ def build_restore_evidence(
 ) -> Dict[str, Any]:
     normalized_backup_id = _backup_id(backup_id)
     normalized_checksum = _sha256(backup_checksum, code="invalidBackupChecksum")
-    normalized_schema_head = _machine_value(schema_head, code="invalidSchemaHead")
+    normalized_schema_head = _machine_value(schema_head, code="invalidBackupSchemaHead")
+    normalized_restored_schema_head = _machine_value(
+        restored_schema_head,
+        code="invalidRestoredSchemaHead",
+    )
     normalized_cutoff = _known_lsn(
         cutoff_lsn,
         code="invalidCutoffLSN",
@@ -350,12 +356,14 @@ def build_restore_evidence(
         raise RecoveryContractError("invalidRecoveryTimeline")
     target = validate_recovery_target(target_database, production_database)
     payload = {
-        "schemaVersion": 1,
+        "schemaVersion": RESTORE_EVIDENCE_SCHEMA_VERSION,
         "status": "restored",
         "backupId": normalized_backup_id,
         "backupChecksum": normalized_checksum,
         "backupCompletedAt": _iso(backup_completed),
         "schemaHead": normalized_schema_head,
+        "backupSchemaHead": normalized_schema_head,
+        "restoredSchemaHead": normalized_restored_schema_head,
         "cutoffLSN": normalized_cutoff,
         "startedAt": _iso(started),
         "completedAt": _iso(completed),
@@ -385,7 +393,7 @@ def verify_restore_evidence(
     production_database: str,
 ) -> Dict[str, Any]:
     payload = dict(evidence)
-    if int(payload.get("schemaVersion") or 0) != 1:
+    if int(payload.get("schemaVersion") or 0) != RESTORE_EVIDENCE_SCHEMA_VERSION:
         raise RecoveryContractError("restoreEvidenceSchemaUnsupported")
     if payload.get("status") != "restored" or payload.get("targetIsolation") != "ephemeralDatabase":
         raise RecoveryContractError("restoreEvidenceIncomplete")
@@ -395,6 +403,7 @@ def verify_restore_evidence(
         "backupId": _backup_id(backup_id),
         "backupChecksum": _sha256(backup_checksum, code="invalidBackupChecksum"),
         "schemaHead": _machine_value(schema_head, code="invalidSchemaHead"),
+        "backupSchemaHead": _machine_value(schema_head, code="invalidSchemaHead"),
         "cutoffLSN": _known_lsn(
             cutoff_lsn,
             code="invalidCutoffLSN",
@@ -404,6 +413,10 @@ def verify_restore_evidence(
     }
     if any(payload.get(key) != value for key, value in expected.items()):
         raise RecoveryContractError("restoreEvidenceMismatch")
+    _machine_value(
+        payload.get("restoredSchemaHead"),
+        code="invalidRestoredSchemaHead",
+    )
     _sha256(payload.get("sourceManifestDigest"), code="invalidSourceManifestDigest")
     _sha256(payload.get("migrationEvidenceId"), code="invalidMigrationEvidenceId")
     backup_completed = _timestamp(payload.get("backupCompletedAt"), code="invalidBackupCompletedAt")
@@ -891,6 +904,10 @@ def build_recovery_record(
         or restore_payload.get("completedAt") != _iso(completed)
     ):
         raise RecoveryContractError("restoreTimelineMismatch")
+    restored_schema_head = _machine_value(
+        restore_payload.get("restoredSchemaHead"),
+        code="invalidRestoredSchemaHead",
+    )
     integrity_payload = dict(integrity)
     replay_payload = dict(replay)
     integrity_schema_version = int(integrity_payload.get("schemaVersion") or 0)
@@ -909,7 +926,7 @@ def build_recovery_record(
         "backupId": normalized_backup_id,
         "cutoffLSN": normalized_lsn,
         "targetDatabaseHash": target_hash,
-        "expectedSchemaHead": normalized_schema_head,
+        "expectedSchemaHead": restored_schema_head,
     }
     if any(integrity_payload.get(key) != value for key, value in integrity_binding.items()):
         raise RecoveryContractError("integrityEvidenceMismatch")
@@ -963,6 +980,8 @@ def build_recovery_record(
         "backupChecksum": normalized_checksum,
         "cutoffLSN": normalized_lsn,
         "schemaHead": normalized_schema_head,
+        "backupSchemaHead": normalized_schema_head,
+        "restoredSchemaHead": restored_schema_head,
         "startedAt": _iso(started),
         "completedAt": _iso(completed),
         "targetIsolation": "ephemeralDatabase",
