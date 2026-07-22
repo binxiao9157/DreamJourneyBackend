@@ -10,6 +10,7 @@ from app.domain.owner_truth.knowledge_dimension_read import (
     OwnerTruthKnowledgeDimensionReadState,
 )
 from app.domain.owner_truth.conversation import (
+    ConversationThreadState,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationThreadAuthoritySnapshot,
 )
@@ -61,11 +62,13 @@ class _ConversationThreadAuthorityReader:
         owner_subject_id: str,
         authority_epoch: int,
         thread_ids: tuple[str, ...],
+        state: ConversationThreadState = ConversationThreadState.ACTIVE,
     ) -> None:
         self._vault_id = vault_id
         self._owner_subject_id = owner_subject_id
         self._authority_epoch = authority_epoch
         self._thread_ids = frozenset(thread_ids)
+        self._state = state
 
     def get_interview_thread_authority(
         self,
@@ -86,6 +89,7 @@ class _ConversationThreadAuthorityReader:
             vault_id=self._vault_id,
             owner_subject_id=self._owner_subject_id,
             authority_epoch=self._authority_epoch,
+            state=self._state,
         )
 
 
@@ -98,6 +102,7 @@ class _Store:
         owner_subject_id: str,
         authority_epoch: int,
         thread_ids: tuple[str, ...],
+        thread_state: ConversationThreadState = ConversationThreadState.ACTIVE,
     ) -> None:
         self.reader = _ProjectionReader(snapshot)
         self.repository = InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository()
@@ -106,6 +111,7 @@ class _Store:
             owner_subject_id=owner_subject_id,
             authority_epoch=authority_epoch,
             thread_ids=thread_ids,
+            state=thread_state,
         )
 
     @contextmanager
@@ -178,6 +184,7 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
         *,
         rebuilding: bool = False,
         thread_authority_epoch: int = 5,
+        thread_state: ConversationThreadState = ConversationThreadState.ACTIVE,
     ) -> _Store:
         if rebuilding:
             snapshot = build_rebuilding_memory_projection(
@@ -198,6 +205,7 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
             owner_subject_id=self.owner_id,
             authority_epoch=thread_authority_epoch,
             thread_ids=(self.thread_id, self.breadth_thread_id),
+            thread_state=thread_state,
         )
 
     def _confirm(self, store: _Store) -> None:
@@ -358,6 +366,19 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
             "current Owner Truth conversation thread",
         ):
             OwnerTruthKnowledgeRecommendationReadService(stale_store).read(
+                context=self.context,
+                candidates=(self._candidate(),),
+            )
+
+    def test_rejects_paused_candidate_thread_before_selection(self) -> None:
+        store = self._store(thread_state=ConversationThreadState.PAUSED)
+        self._confirm(store)
+
+        with self.assertRaisesRegex(
+            OwnerTruthKnowledgeRecommendationReadError,
+            "current Owner Truth conversation thread in active state",
+        ):
+            OwnerTruthKnowledgeRecommendationReadService(store).read(
                 context=self.context,
                 candidates=(self._candidate(),),
             )

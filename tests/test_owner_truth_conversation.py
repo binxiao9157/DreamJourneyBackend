@@ -6,6 +6,7 @@ from app.domain.owner_truth.conversation import (
     AppendInterviewMessageCommand,
     ConversationMessageAuthor,
     ConversationMessageKind,
+    ConversationThreadState,
     InterviewBoundary,
     InterviewSessionState,
     OwnerTruthConversationAccessDenied,
@@ -139,6 +140,7 @@ class OwnerTruthConversationTests(unittest.TestCase):
         self.assertEqual(snapshot.vault_id, self.context.vault_id)
         self.assertEqual(snapshot.owner_subject_id, self.context.owner_subject_id)
         self.assertEqual(snapshot.authority_epoch, 0)
+        self.assertEqual(snapshot.state, ConversationThreadState.ACTIVE)
 
         other_context = OwnerTruthCommandContext(
             vault_id=self.context.vault_id,

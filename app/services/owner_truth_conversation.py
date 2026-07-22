@@ -18,6 +18,7 @@ from app.domain.owner_truth.conversation import (
     AcknowledgeInterviewReviewBatchWriteRecord,
     AppendInterviewMessageCommand,
     AppendInterviewMessageWriteRecord,
+    ConversationThreadState,
     CreateInterviewReviewBatchCommand,
     CreateInterviewReviewBatchWriteRecord,
     InterviewBoundary,
@@ -880,6 +881,7 @@ class InMemoryOwnerTruthConversationRepository:
                 vault_id=context.vault_id,
                 owner_subject_id=context.owner_subject_id,
                 authority_epoch=int(thread["authorityEpoch"]),
+                state=ConversationThreadState(str(thread["state"])),
             )
 
     def snapshot(self, *, vault_id: str) -> Mapping[str, Any]:
@@ -2101,7 +2103,7 @@ class PostgresOwnerTruthConversationRepository:
             )
             cursor.execute(
                 """
-                SELECT id, vault_id, owner_subject_id, authority_epoch
+                SELECT id, vault_id, owner_subject_id, authority_epoch, state
                 FROM owner_truth.conversation_threads
                 WHERE vault_id = %s
                   AND id = %s
@@ -2125,6 +2127,7 @@ class PostgresOwnerTruthConversationRepository:
             vault_id=str(row["vault_id"]),
             owner_subject_id=str(row["owner_subject_id"]),
             authority_epoch=int(row["authority_epoch"]),
+            state=ConversationThreadState(str(row["state"])),
         )
 
     def _ensure_active_vault(

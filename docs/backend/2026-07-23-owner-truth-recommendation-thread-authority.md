@@ -19,6 +19,21 @@
 未知、跨 Vault、跨 Owner、非 UUID 或 authority epoch 已过期的 Thread 都统一以
 无值的推荐读取无效错误拒绝，不泄露 Thread 是否存在、消息内容或元数据。
 
+## 生命周期资格补充
+
+同一条私有 Thread 在 Owner 明确切换话题后会进入 `paused`。此前权威快照只证明
+它曾属于当前 Owner/Vault，仍可能让一个已经暂停的旧话题参与新的推荐读取。
+
+现在快照还包含无内容的 `state`，且推荐读取只接受 `active` Thread：
+
+1. 活跃 Thread 可以参与现有 value-free QA 推荐选择；
+2. `paused` 或 `ended` Thread 与未知/越权 Thread 一样，统一拒绝；
+3. 暂停必须经过既有 `PauseInterviewForTopicSwitchCommand`，没有为推荐路径增加
+   直接状态写入或公开路由。
+
+这只是推荐资格围栏，不实现 `cooldownUntil`、ThreadPreference、自动恢复或完整
+主题合并策略；这些仍属于后续 M0-A/M0-B 产品切片。
+
 ## 保持不变的边界
 
 - 没有新增公开路由、公开 Echo 入口、Provider 调用、Candidate/Memory 写入或数据库迁移；
@@ -45,13 +60,15 @@ git diff --check
 
 - 有效 Owner/Vault/epoch Thread 可参与 value-free 推荐选择；
 - 未知 Thread、跨 Owner 和 authority epoch 漂移被拒绝；
-- 隔离 Postgres smoke 在部署后验证真实 `conversation_threads` 查询、未知 Thread 拒绝和
-  Vault authority epoch 前移后的旧 Thread 拒绝。
+- 活跃 Thread 经既有 topic switch 变为 `paused` 后，推荐读取路由拒绝同一候选；
+- 隔离 Postgres smoke 在部署后验证真实 `conversation_threads` 查询、活跃 Thread 选择和
+  暂停 Thread 拒绝，且不读取或写入生产业务数据。
 
 部署后使用：
 
 ```bash
 scripts/run-backend-owner-truth-conversation-postgres-smoke.sh
+python scripts/backend-owner-truth-knowledge-dimension-confirmation-postgres-smoke.py
 ```
 
 该脚本会创建并删除临时数据库，不读取或写入生产业务数据。

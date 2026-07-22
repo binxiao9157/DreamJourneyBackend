@@ -33,6 +33,7 @@ from app.domain.owner_truth.conversation import (
     AppendInterviewMessageCommand,
     ConversationMessageAuthor,
     ConversationMessageKind,
+    ConversationThreadState,
     CreateInterviewReviewBatchCommand,
     InterviewBoundary,
     InterviewPacingEvent,
@@ -375,6 +376,18 @@ def main() -> None:
         require(paused.state.value == "paused", "topic switch must pause the interview session")
         require(paused.thread_version == 3, "topic switch must advance the thread version")
         require(paused.session_version == 4, "topic switch must advance the session version")
+        paused_thread_authority = invoke(
+            store,
+            command_id="read-paused-conversation-thread-authority",
+            operation=lambda service: service.read_thread_authority(
+                thread_id=thread_id,
+                context=context,
+            ),
+        )
+        require(
+            paused_thread_authority.state is ConversationThreadState.PAUSED,
+            "topic-switched thread must not remain recommendation-eligible",
+        )
         replayed_topic_switch = invoke(
             store,
             command_id="pause-conversation-topic-switch-smoke-replay",

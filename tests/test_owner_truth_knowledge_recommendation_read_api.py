@@ -12,7 +12,10 @@ from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateReviewCommand,
     OwnerTruthCandidateSnapshot,
 )
-from app.domain.owner_truth.conversation import StartInterviewSessionCommand
+from app.domain.owner_truth.conversation import (
+    PauseInterviewForTopicSwitchCommand,
+    StartInterviewSessionCommand,
+)
 from app.domain.owner_truth.contracts import (
     CandidateDecision,
     EpistemicStatus,
@@ -179,13 +182,13 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             ),
         )
 
-    def _seed_thread(
+    def _seed_thread_with_session(
         self,
         *,
         vault_id: str,
         owner_id: str,
         command_id: str,
-    ) -> str:
+    ) -> tuple[str, str]:
         thread_id = str(uuid4())
         session_id = str(uuid4())
         context = OwnerTruthCommandContext(
@@ -209,7 +212,53 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
                 ),
                 context=context,
             )
+        return thread_id, session_id
+
+    def _seed_thread(
+        self,
+        *,
+        vault_id: str,
+        owner_id: str,
+        command_id: str,
+    ) -> str:
+        thread_id, _session_id = self._seed_thread_with_session(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id=command_id,
+        )
         return thread_id
+
+    def _pause_thread(
+        self,
+        *,
+        vault_id: str,
+        owner_id: str,
+        thread_id: str,
+        session_id: str,
+        command_id: str,
+    ) -> None:
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        with self.store.request_unit_of_work(
+            correlation_id=f"recommendation-read-thread-pause:{vault_id}:{thread_id}",
+            command_id=command_id,
+        ):
+            result = OwnerTruthConversationService(
+                self.store.owner_truth_conversation_repository()
+            ).pause_for_topic_switch(
+                command=PauseInterviewForTopicSwitchCommand(
+                    command_id=command_id,
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    expected_thread_version=1,
+                    expected_session_version=1,
+                ),
+                context=context,
+            )
+        self.assertEqual(result.state.value, "paused")
 
     @staticmethod
     def _path(vault_id: str) -> str:
@@ -464,6 +513,60 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
                         candidate_id="api-unknown-thread",
                         slot="continuity",
                         thread_id=str(uuid4()),
+                        dimension="keyDecisions",
+                        missing_facet="reason",
+                        memory_version_id=memory_id,
+                    )
+                ]
+            },
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "ownerTruthKnowledgeRecommendationReadInvalid",
+        )
+
+    def test_paused_thread_is_rejected_after_owner_confirmed_coverage_is_ready(self) -> None:
+        owner_id, headers = self._login("13800139427")
+        vault_id = "vault-recommendation-read-paused-thread"
+        memory_id, content_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "A paused private thread must not receive a new recommendation."},
+            command_id="recommendation-api-activate-006",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=memory_id,
+            content_hash=content_hash,
+            dimension="keyDecisions",
+            facets=("choice",),
+            command_id="recommendation-api-confirm-006",
+        )
+        thread_id, session_id = self._seed_thread_with_session(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="recommendation-api-thread-004",
+        )
+        self._pause_thread(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            thread_id=thread_id,
+            session_id=session_id,
+            command_id="recommendation-api-thread-pause-004",
+        )
+
+        response = client.post(
+            self._path(vault_id),
+            headers=headers,
+            json={
+                "candidates": [
+                    self._candidate(
+                        candidate_id="api-paused-thread",
+                        slot="continuity",
+                        thread_id=thread_id,
                         dimension="keyDecisions",
                         missing_facet="reason",
                         memory_version_id=memory_id,

@@ -69,6 +69,18 @@ class ConversationMessageKind(str, Enum):
     SUMMARY = "summary"
 
 
+class ConversationThreadState(str, Enum):
+    """Lifecycle state for a private ConversationThread.
+
+    Recommendation reads may only continue a currently active Thread.  The
+    value deliberately carries no message, title, or other private content.
+    """
+
+    ACTIVE = "active"
+    PAUSED = "paused"
+    ENDED = "ended"
+
+
 class InterviewBoundary(str, Enum):
     OPEN = "open"
     SKIP_ONCE = "skipOnce"
@@ -863,6 +875,7 @@ class OwnerTruthConversationThreadAuthoritySnapshot:
     vault_id: str
     owner_subject_id: str
     authority_epoch: int
+    state: ConversationThreadState
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", require_uuid(self.thread_id, field="thread_id"))
@@ -872,6 +885,10 @@ class OwnerTruthConversationThreadAuthoritySnapshot:
             "owner_subject_id",
             require_nonblank(self.owner_subject_id, field="owner_subject_id"),
         )
+        try:
+            object.__setattr__(self, "state", ConversationThreadState(self.state))
+        except (TypeError, ValueError) as exc:
+            raise OwnerTruthConversationError("conversation thread state is not supported") from exc
         if (
             not isinstance(self.authority_epoch, int)
             or isinstance(self.authority_epoch, bool)

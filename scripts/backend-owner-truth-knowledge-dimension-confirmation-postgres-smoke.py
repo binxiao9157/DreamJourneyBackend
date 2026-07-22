@@ -33,7 +33,12 @@ from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.domain.owner_truth.knowledge_dimension_read import (
     OwnerTruthKnowledgeDimensionReadService,
 )
+from app.domain.owner_truth.conversation import (
+    PauseInterviewForTopicSwitchCommand,
+    StartInterviewSessionCommand,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.postgres_store import PostgresStore
 
@@ -99,6 +104,19 @@ def login(client: TestClient, *, phone: str) -> tuple[str, dict[str, str]]:
 def route_code(response: Any) -> str:
     detail = response.json().get("detail") if response.content else None
     return str(detail.get("code") or "") if isinstance(detail, dict) else ""
+
+
+def invoke_conversation(
+    store: PostgresStore,
+    *,
+    command_id: str,
+    operation,
+) -> Any:
+    with store.request_unit_of_work(
+        correlation_id=f"dimension-confirmation-conversation-smoke:{command_id}",
+        command_id=command_id,
+    ):
+        return operation(OwnerTruthConversationService(store.owner_truth_conversation_repository()))
 
 
 def seed_current_knowledge_memory(
@@ -278,7 +296,10 @@ def main() -> None:
         migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(verified["expectedHead"] == "0035", "confirmation migration must be applied")
+        require(
+            int(str(verified["expectedHead"])) >= 35,
+            "confirmation migration must be applied",
+        )
 
         store = PostgresStore(dsn=test_dsn, pool_min_size=1, pool_max_size=3)
         store.open_pool(wait=True)
@@ -365,13 +386,34 @@ def main() -> None:
             "only the explicit receipt may contribute dimension coverage",
         )
 
+        recommendation_thread_id = str(uuid.uuid4())
+        recommendation_session_id = str(uuid.uuid4())
+        started_recommendation_thread = invoke_conversation(
+            store,
+            command_id="dimension-confirmation-recommendation-thread-start",
+            operation=lambda service: service.start_session(
+                command=StartInterviewSessionCommand(
+                    command_id="dimension-confirmation-recommendation-thread-start",
+                    thread_id=recommendation_thread_id,
+                    session_id=recommendation_session_id,
+                    expected_thread_version=0,
+                    entry_mode="recommendation",
+                ),
+                context=owner_context,
+            ),
+        )
+        require(
+            started_recommendation_thread.state.value == "active",
+            "recommendation smoke must create an active private thread",
+        )
+
         recommendation_path = f"/v2/vaults/{vault_id}/knowledge-recommendations/read"
         recommendation_payload = {
             "candidates": [
                 {
                     "candidateId": "confirmation-smoke-continuity",
                     "slot": "continuity",
-                    "threadId": "confirmation-smoke-thread",
+                    "threadId": recommendation_thread_id,
                     "targetDimension": "keyDecisions",
                     "missingFacet": "outcome",
                     "questionTemplateId": "confirmation-smoke-template",
@@ -415,6 +457,38 @@ def main() -> None:
         require(
             "只用于隔离" not in recommendation_read.text and "claim" not in recommendation_read.text,
             "recommendation read response leaked memory text",
+        )
+
+        paused_recommendation_thread = invoke_conversation(
+            store,
+            command_id="dimension-confirmation-recommendation-thread-pause",
+            operation=lambda service: service.pause_for_topic_switch(
+                command=PauseInterviewForTopicSwitchCommand(
+                    command_id="dimension-confirmation-recommendation-thread-pause",
+                    thread_id=recommendation_thread_id,
+                    session_id=recommendation_session_id,
+                    expected_thread_version=1,
+                    expected_session_version=1,
+                ),
+                context=owner_context,
+            ),
+        )
+        require(
+            paused_recommendation_thread.state.value == "paused",
+            "topic switch must pause the recommendation thread",
+        )
+        paused_recommendation_read = client.post(
+            recommendation_path,
+            headers=owner_headers,
+            json=recommendation_payload,
+        )
+        require(
+            paused_recommendation_read.status_code == 400,
+            "a paused private thread must be rejected by recommendation reads",
+        )
+        require(
+            route_code(paused_recommendation_read) == "ownerTruthKnowledgeRecommendationReadInvalid",
+            "paused recommendation thread must use the typed invalid code",
         )
 
         stale = client.post(
@@ -462,6 +536,7 @@ def main() -> None:
             "owner truth knowledge dimension confirmation postgres smoke passed "
             f"schemaHead={verified['expectedHead']} defaultHidden=true receiptCreated=true "
             "receiptReplay=true hashBound=true appendOnly=true recommendationRead=true "
+            "activeThreadSelected=true pausedThreadRejected=true "
             "supersededReceiptExcluded=true"
         )
     finally:
