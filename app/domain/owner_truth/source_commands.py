@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import re
 from typing import Any, Mapping
 from uuid import UUID, uuid5
 
@@ -18,8 +19,13 @@ from .ontology import OWNER_TRUTH_SCHEMA_VERSION
 
 
 OWNER_TRUTH_CREATE_SOURCE_SCHEMA_VERSION = "owner-truth-create-source-v1"
+OWNER_TRUTH_COMMAND_AUTHORIZATION_CAPTURE_SCHEMA_VERSION = (
+    "owner-truth-command-authorization-capture-v1"
+)
 _RECEIPT_NAMESPACE = UUID("c9ebd77d-1e48-4a21-bb64-d5f6e98601d4")
 _MAX_TEXT_CHARACTERS = 20_000
+_ACCOUNT_GENERATION_HASH_PATTERN = re.compile(r"^[a-f0-9]{24,64}$")
+_SHA256_HEX_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 
 
 class OwnerTruthSourceCommandConflict(OwnerTruthContractError):
@@ -56,11 +62,98 @@ def _normalized_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
+class OwnerTruthCommandAuthorizationCapture:
+    """Value-minimized evidence for one server-authorized command effect.
+
+    This deliberately records no bearer token, raw session ID, or raw client
+    decision ID. It is an immutable audit attachment for write ledgers that
+    need to prove the release-policy and account-generation boundary in force
+    when a command was admitted.
+    """
+
+    feature: str
+    policy_version: str
+    policy_revision: int
+    emergency_revision: int
+    account_generation_hash: str
+    decision_id_hash: str
+    audience: str
+    cohort: str
+    client_build: int
+    expires_at: str
+    schema_version: str = OWNER_TRUTH_COMMAND_AUTHORIZATION_CAPTURE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        for field in (
+            "feature",
+            "policy_version",
+            "account_generation_hash",
+            "decision_id_hash",
+            "audience",
+            "cohort",
+            "expires_at",
+            "schema_version",
+        ):
+            object.__setattr__(self, field, require_nonblank(getattr(self, field), field=field))
+        if self.schema_version != OWNER_TRUTH_COMMAND_AUTHORIZATION_CAPTURE_SCHEMA_VERSION:
+            raise OwnerTruthContractError("unsupported command authorization capture schema")
+        for field in ("policy_revision", "emergency_revision", "client_build"):
+            value = getattr(self, field)
+            if not isinstance(value, int) or value < 0:
+                raise OwnerTruthContractError(f"{field} must be a non-negative integer")
+        if not _ACCOUNT_GENERATION_HASH_PATTERN.fullmatch(self.account_generation_hash):
+            raise OwnerTruthContractError(
+                "account_generation_hash must be a lowercase opaque hash"
+            )
+        if not _SHA256_HEX_PATTERN.fullmatch(self.decision_id_hash):
+            raise OwnerTruthContractError(
+                "decision_id_hash must be a lowercase SHA-256 digest"
+            )
+
+    def value_minimized_payload(self) -> dict[str, object]:
+        return {
+            "schemaVersion": self.schema_version,
+            "feature": self.feature,
+            "policyVersion": self.policy_version,
+            "policyRevision": self.policy_revision,
+            "emergencyRevision": self.emergency_revision,
+            "accountGenerationHash": self.account_generation_hash,
+            "decisionIdHash": self.decision_id_hash,
+            "audience": self.audience,
+            "cohort": self.cohort,
+            "clientBuild": self.client_build,
+            "expiresAt": self.expires_at,
+        }
+
+    @classmethod
+    def from_value_minimized_payload(
+        cls,
+        value: Mapping[str, Any],
+    ) -> "OwnerTruthCommandAuthorizationCapture":
+        if not isinstance(value, Mapping):
+            raise OwnerTruthContractError("command authorization capture must be an object")
+        return cls(
+            feature=str(value.get("feature") or ""),
+            policy_version=str(value.get("policyVersion") or ""),
+            policy_revision=value.get("policyRevision"),
+            emergency_revision=value.get("emergencyRevision"),
+            account_generation_hash=str(value.get("accountGenerationHash") or ""),
+            decision_id_hash=str(value.get("decisionIdHash") or ""),
+            audience=str(value.get("audience") or ""),
+            cohort=str(value.get("cohort") or ""),
+            client_build=value.get("clientBuild"),
+            expires_at=str(value.get("expiresAt") or ""),
+            schema_version=str(value.get("schemaVersion") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class OwnerTruthCommandContext:
     vault_id: str
     owner_subject_id: str
     actor_subject_id: str
     policy_version: str = OWNER_TRUTH_SCHEMA_VERSION
+    authorization_capture: OwnerTruthCommandAuthorizationCapture | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "vault_id", require_nonblank(self.vault_id, field="vault_id"))
@@ -79,6 +172,13 @@ class OwnerTruthCommandContext:
             "policy_version",
             require_nonblank(self.policy_version, field="policy_version"),
         )
+        if self.authorization_capture is not None:
+            if not isinstance(self.authorization_capture, OwnerTruthCommandAuthorizationCapture):
+                raise OwnerTruthContractError("authorization_capture has an invalid type")
+            # ``policy_version`` describes the Owner Truth write schema that
+            # Candidate/receipt invariants use. The capture records a separate
+            # release-policy decision which authorized this command. They may
+            # intentionally evolve on different version lines.
 
 
 @dataclass(frozen=True)
@@ -200,7 +300,9 @@ class OwnerTruthSourceCommandResult:
 
 __all__ = [
     "CreateTextSourceCommand",
+    "OWNER_TRUTH_COMMAND_AUTHORIZATION_CAPTURE_SCHEMA_VERSION",
     "OWNER_TRUTH_CREATE_SOURCE_SCHEMA_VERSION",
+    "OwnerTruthCommandAuthorizationCapture",
     "OwnerTruthCommandContext",
     "OwnerTruthSourceCommandConflict",
     "OwnerTruthSourceCommandResult",

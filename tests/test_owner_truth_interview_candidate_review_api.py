@@ -446,6 +446,67 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
         finally:
             policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 
+    def test_product_confirmation_records_value_minimized_authority_capture(self) -> None:
+        owner_id, owner_headers, owner_session_id = self._login_release_policy("13800139415")
+        vault_id = "vault-interview-confirmation-authority-capture"
+        review_batch_id, standard, _ = self._seed_review_batch(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        decision_id = "candidate-confirmation-authority-capture-owner"
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthCandidateReview"
+        }
+        try:
+            response = client.post(
+                self._confirmation_batch_accept_path(vault_id, review_batch_id),
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id=decision_id,
+                ),
+                json={
+                    "commandId": "candidate-confirmation-authority-capture-command",
+                    "selections": [
+                        {
+                            "candidateId": standard.candidate_id,
+                            "expectedCandidateVersion": 1,
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(response.status_code, 201)
+
+            records = self.store.owner_truth_interview_candidate_batch_decision_repository().snapshot()
+            self.assertEqual(len(records), 1)
+            record = next(iter(records.values()))
+            capture = record.authorization_capture
+            self.assertIsNotNone(capture)
+            self.assertEqual(capture.policy_version, "release-policy-v1")
+            self.assertEqual(capture.policy_revision, 1)
+            self.assertEqual(capture.feature, "ownerTruthCandidateReview")
+            self.assertEqual(
+                capture.account_generation_hash,
+                sha256(owner_session_id.encode("utf-8")).hexdigest()[:24],
+            )
+            self.assertEqual(
+                capture.decision_id_hash,
+                sha256(decision_id.encode("utf-8")).hexdigest(),
+            )
+            receipts = self.store.owner_truth_candidate_review_repository().snapshot()["receipts"]
+            self.assertEqual(len(receipts), 1)
+            self.assertEqual(
+                next(iter(receipts.values()))["policyVersion"],
+                OWNER_TRUTH_SCHEMA_VERSION,
+            )
+            serialized = str(capture.value_minimized_payload())
+            self.assertNotIn(owner_session_id, serialized)
+            self.assertNotIn(decision_id, serialized)
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
     def test_owner_can_partially_accept_standard_and_individually_reject_sensitive_without_memory_activation(self) -> None:
         owner_id, headers = self._login("13800139402")
         vault_id = "vault-interview-review-api"

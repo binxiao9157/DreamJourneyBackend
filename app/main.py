@@ -123,7 +123,10 @@ from app.domain.owner_truth.memory_projection import (
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.domain.owner_truth.knowledge_recommendations import RecommendationCandidate
-from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.domain.owner_truth.source_commands import (
+    OwnerTruthCommandAuthorizationCapture,
+    OwnerTruthCommandContext,
+)
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.owner_truth_interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchDecisionService,
@@ -656,6 +659,20 @@ def _owner_truth_captured_release_policy_context(
         vault_id=vault_id,
         owner_subject_id=owner_subject_id,
         actor_subject_id=owner_subject_id,
+        authorization_capture=OwnerTruthCommandAuthorizationCapture(
+            feature=captured.feature,
+            policy_version=captured.policy_version,
+            policy_revision=captured.policy_revision,
+            emergency_revision=captured.emergency_revision,
+            account_generation_hash=captured.account_generation,
+            decision_id_hash=hashlib.sha256(captured.decision_id.encode("utf-8")).hexdigest(),
+            # ReleaseAudience is a Literal[str], not an enum. Persist the
+            # captured value directly in the value-minimized audit attachment.
+            audience=str(captured.audience),
+            cohort=captured.cohort,
+            client_build=captured.client_build,
+            expires_at=captured.expires_at.isoformat(),
+        ),
     )
 
 

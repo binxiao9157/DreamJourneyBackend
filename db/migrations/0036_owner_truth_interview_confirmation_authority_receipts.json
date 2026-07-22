@@ -1,0 +1,13 @@
+{
+  "version": "0036",
+  "name": "owner_truth_interview_confirmation_authority_receipts",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthInterviewConfirmationAuthorityEvidence",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthInterviewCandidateBatchDecisionM0A": false,
+    "ownerTruthInterviewConfirmation": false
+  }
+}

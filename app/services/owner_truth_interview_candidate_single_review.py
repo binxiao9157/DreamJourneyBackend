@@ -114,8 +114,17 @@ class OwnerTruthInterviewCandidateSingleReviewService:
                 context=context,
                 authority_epoch=authority_epoch,
             )
+            child_command = command.child_command()
             review = self._store.owner_truth_candidate_review_repository().decide(
-                command=command.child_command(),
+                command=child_command,
+                context=context,
+            )
+            ledger.link_receipts(
+                record=record,
+                candidate_results=(review,),
+                candidate_command_id_hashes={
+                    child_command.candidate_id: child_command.command_id_hash
+                },
                 context=context,
             )
         return OwnerTruthInterviewCandidateSingleReviewResult(

@@ -33,7 +33,10 @@ from app.domain.owner_truth.interview_candidate_review import (
     OwnerTruthInterviewCandidateReviewComposition,
     OwnerTruthInterviewReviewCandidateItem,
 )
-from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.domain.owner_truth.source_commands import (
+    OwnerTruthCommandAuthorizationCapture,
+    OwnerTruthCommandContext,
+)
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
 )
@@ -217,6 +220,26 @@ class OwnerTruthInterviewCandidateBatchDecisionTests(TestCase):
             reason_code="ownerReviewed",
         )
 
+    def _formal_context(self, *, decision_hash_character: str) -> OwnerTruthCommandContext:
+        return OwnerTruthCommandContext(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            actor_subject_id=self.owner_subject_id,
+            policy_version="owner-truth-v1",
+            authorization_capture=OwnerTruthCommandAuthorizationCapture(
+                feature="ownerTruthCandidateReview",
+                policy_version="release-policy-v1",
+                policy_revision=1,
+                emergency_revision=0,
+                account_generation_hash="a" * 24,
+                decision_id_hash=decision_hash_character * 64,
+                audience="owner",
+                cohort="closedPilotAdultSelf",
+                client_build=1,
+                expires_at="2026-07-22T00:00:00+00:00",
+            ),
+        )
+
     def test_partially_accepts_selected_standard_candidates_without_memory_activation(self) -> None:
         first = self._candidate(summary="第一条普通候选。")
         second = self._candidate(summary="第二条普通候选。")
@@ -242,6 +265,20 @@ class OwnerTruthInterviewCandidateBatchDecisionTests(TestCase):
         self.assertEqual(snapshot["memoryActivations"], {})
         self.assertEqual(len(snapshot["receipts"]), 1)
         self.assertEqual(len(store.ledger_repository.snapshot()), 1)
+        links = store.ledger_repository.receipt_links_snapshot()
+        self.assertEqual(len(links), 1)
+        link = next(iter(links.values()))
+        self.assertEqual(link.candidate_id, first.candidate_id)
+        self.assertEqual(link.receipt_id, result.candidate_results[0].receipt_id)
+        self.assertEqual(
+            link.candidate_command_id_hash,
+            self._command(first).child_command(
+                selection=OwnerTruthInterviewCandidateBatchSelection(
+                    candidate_id=first.candidate_id,
+                    expected_candidate_version=first.row_version,
+                )
+            ).command_id_hash,
+        )
         self.assertEqual(result.public_summary()["acceptedCandidateCount"], 1)
 
     def test_replay_is_idempotent_without_recomposing_terminal_candidate(self) -> None:
@@ -256,6 +293,45 @@ class OwnerTruthInterviewCandidateBatchDecisionTests(TestCase):
         self.assertEqual(replayed.outcome, "deduplicated")
         self.assertEqual(replayed.candidate_results[0].outcome, "deduplicated")
         self.assertEqual(store.composition_repository.calls, 1)
+        self.assertEqual(len(store.review_repository.snapshot()["receipts"]), 1)
+        self.assertEqual(len(store.ledger_repository.receipt_links_snapshot()), 1)
+
+    def test_formal_confirmation_cannot_replay_a_qa_only_root(self) -> None:
+        candidate = self._candidate(summary="QA 根命令不能被正式确认复用。")
+        service, store = self._service(candidate)
+        command = self._command(candidate)
+
+        service.accept_selected(command=command, context=self.context)
+
+        with self.assertRaisesRegex(
+            OwnerTruthInterviewCandidateBatchDecisionConflict,
+            "QA-only and formally authorized",
+        ):
+            service.accept_selected(
+                command=command,
+                context=self._formal_context(decision_hash_character="b"),
+            )
+
+        self.assertEqual(len(store.ledger_repository.snapshot()), 1)
+        self.assertEqual(len(store.review_repository.snapshot()["receipts"]), 1)
+
+    def test_formal_confirmation_replay_allows_a_fresh_policy_decision(self) -> None:
+        candidate = self._candidate(summary="正式确认可使用新策略凭据重试。")
+        service, store = self._service(candidate)
+        command = self._command(candidate)
+
+        created = service.accept_selected(
+            command=command,
+            context=self._formal_context(decision_hash_character="c"),
+        )
+        replayed = service.accept_selected(
+            command=command,
+            context=self._formal_context(decision_hash_character="d"),
+        )
+
+        self.assertEqual(created.outcome, "created")
+        self.assertEqual(replayed.outcome, "deduplicated")
+        self.assertEqual(len(store.ledger_repository.snapshot()), 1)
         self.assertEqual(len(store.review_repository.snapshot()["receipts"]), 1)
 
     def test_sensitive_or_single_candidate_cannot_enter_batch_acceptance(self) -> None:

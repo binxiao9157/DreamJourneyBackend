@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import json
 from threading import RLock
 from typing import Any, ContextManager, Mapping, Protocol
 
@@ -16,6 +17,7 @@ from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateReviewAccessDenied,
     OwnerTruthCandidateVersionConflict,
 )
+from app.domain.owner_truth.contracts import OwnerTruthContractError
 from app.domain.owner_truth.interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchAcceptCommand,
     OwnerTruthInterviewCandidateBatchDecisionConflict,
@@ -27,7 +29,10 @@ from app.domain.owner_truth.interview_candidate_review import (
     InterviewCandidateReviewReadiness,
     OwnerTruthInterviewCandidateReviewComposition,
 )
-from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.domain.owner_truth.source_commands import (
+    OwnerTruthCommandAuthorizationCapture,
+    OwnerTruthCommandContext,
+)
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewResult
 
 
@@ -40,6 +45,18 @@ class OwnerTruthInterviewCandidateBatchDecisionLedgerRecord:
     owner_subject_id: str
     authority_epoch: int
     selection_count: int
+    authorization_capture: OwnerTruthCommandAuthorizationCapture | None = None
+
+
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateBatchDecisionReceiptLink:
+    """One immutable association between a root command and a terminal receipt."""
+
+    vault_id: str
+    batch_decision_id: str
+    receipt_id: str
+    candidate_id: str
+    candidate_command_id_hash: str
 
 
 @dataclass(frozen=True)
@@ -113,6 +130,9 @@ class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
     def __init__(self) -> None:
         self._lock = RLock()
         self._records: dict[tuple[str, str], OwnerTruthInterviewCandidateBatchDecisionLedgerRecord] = {}
+        self._receipt_links: dict[
+            tuple[str, str], OwnerTruthInterviewCandidateBatchDecisionReceiptLink
+        ] = {}
 
     @contextmanager
     def transaction(self):
@@ -135,6 +155,7 @@ class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
             owner_subject_id=context.owner_subject_id,
             authority_epoch=authority_epoch,
             selection_count=command.selection_count,
+            authorization_capture=context.authorization_capture,
         )
         with self._lock:
             existing = self._records.get(key)
@@ -168,6 +189,40 @@ class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
                 for (vault_id, command_hash), record in self._records.items()
             }
 
+    def link_receipts(
+        self,
+        *,
+        record: OwnerTruthInterviewCandidateBatchDecisionLedgerRecord,
+        candidate_results: tuple[OwnerTruthCandidateReviewResult, ...],
+        candidate_command_id_hashes: Mapping[str, str],
+        context: OwnerTruthCommandContext,
+    ) -> None:
+        expected_links = _receipt_links_for_results(
+            record=record,
+            candidate_results=candidate_results,
+            candidate_command_id_hashes=candidate_command_id_hashes,
+            context=context,
+        )
+        with self._lock:
+            for link in expected_links:
+                key = (link.vault_id, link.receipt_id)
+                existing = self._receipt_links.get(key)
+                if existing is None:
+                    self._receipt_links[key] = link
+                elif existing != link:
+                    raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+                        "DecisionReceipt cannot be linked to a different root command"
+                    )
+
+    def receipt_links_snapshot(
+        self,
+    ) -> dict[str, OwnerTruthInterviewCandidateBatchDecisionReceiptLink]:
+        with self._lock:
+            return {
+                f"{vault_id}:{receipt_id}": link
+                for (vault_id, receipt_id), link in self._receipt_links.items()
+            }
+
 
 class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
     """Persist value-minimized root command idempotency in one active UoW."""
@@ -192,6 +247,7 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
             owner_subject_id=context.owner_subject_id,
             authority_epoch=authority_epoch,
             selection_count=command.selection_count,
+            authorization_capture=context.authorization_capture,
         )
         with self._cursor() as cursor:
             cursor.execute(
@@ -225,7 +281,8 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
             cursor.execute(
                 """
                 SELECT id, review_batch_id, command_id_hash, payload_hash,
-                       owner_subject_id, authority_epoch, selection_count
+                       owner_subject_id, authority_epoch, selection_count,
+                       authorization_evidence
                 FROM owner_truth.interview_review_batch_candidate_decisions
                 WHERE vault_id = %s AND command_id_hash = %s
                 FOR UPDATE
@@ -242,6 +299,9 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
                     owner_subject_id=str(row["owner_subject_id"]),
                     authority_epoch=int(row["authority_epoch"]),
                     selection_count=int(row["selection_count"]),
+                    authorization_capture=_authorization_capture_from_database(
+                        row.get("authorization_evidence")
+                    ),
                 )
                 _assert_ledger_replay(existing=existing, expected=expected)
                 return "deduplicated", existing
@@ -250,8 +310,9 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
                 INSERT INTO owner_truth.interview_review_batch_candidate_decisions (
                     id, vault_id, owner_subject_id, review_batch_id,
                     command_id_hash, payload_hash, selection_count,
-                    actor_subject_id, policy_version, authority_epoch
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    actor_subject_id, policy_version, authority_epoch,
+                    authorization_evidence
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     expected.batch_decision_id,
@@ -264,9 +325,65 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
                     context.actor_subject_id,
                     context.policy_version,
                     expected.authority_epoch,
+                    _authorization_capture_json(expected.authorization_capture),
                 ),
             )
         return "created", expected
+
+    def link_receipts(
+        self,
+        *,
+        record: OwnerTruthInterviewCandidateBatchDecisionLedgerRecord,
+        candidate_results: tuple[OwnerTruthCandidateReviewResult, ...],
+        candidate_command_id_hashes: Mapping[str, str],
+        context: OwnerTruthCommandContext,
+    ) -> None:
+        expected_links = _receipt_links_for_results(
+            record=record,
+            candidate_results=candidate_results,
+            candidate_command_id_hashes=candidate_command_id_hashes,
+            context=context,
+        )
+        with self._cursor() as cursor:
+            for link in expected_links:
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.interview_review_batch_candidate_decision_receipts (
+                        vault_id, batch_decision_id, decision_receipt_id, candidate_id,
+                        candidate_command_id_hash
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (vault_id, decision_receipt_id) DO NOTHING
+                    RETURNING batch_decision_id, candidate_id
+                    """,
+                    (
+                        link.vault_id,
+                        link.batch_decision_id,
+                        link.receipt_id,
+                        link.candidate_id,
+                        link.candidate_command_id_hash,
+                    ),
+                )
+                inserted = cursor.fetchone()
+                if inserted is not None:
+                    continue
+                cursor.execute(
+                    """
+                    SELECT batch_decision_id, candidate_id
+                    FROM owner_truth.interview_review_batch_candidate_decision_receipts
+                    WHERE vault_id = %s AND decision_receipt_id = %s
+                    FOR UPDATE
+                    """,
+                    (link.vault_id, link.receipt_id),
+                )
+                existing = cursor.fetchone()
+                if (
+                    existing is None
+                    or str(existing["batch_decision_id"]) != link.batch_decision_id
+                    or str(existing["candidate_id"]) != link.candidate_id
+                ):
+                    raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+                        "DecisionReceipt cannot be linked to a different root command"
+                    )
 
     def lookup(
         self,
@@ -278,7 +395,8 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
             cursor.execute(
                 """
                 SELECT id, review_batch_id, command_id_hash, payload_hash,
-                       owner_subject_id, authority_epoch, selection_count
+                       owner_subject_id, authority_epoch, selection_count,
+                       authorization_evidence
                 FROM owner_truth.interview_review_batch_candidate_decisions
                 WHERE vault_id = %s AND command_id_hash = %s
                 """,
@@ -295,6 +413,9 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
             owner_subject_id=str(row["owner_subject_id"]),
             authority_epoch=int(row["authority_epoch"]),
             selection_count=int(row["selection_count"]),
+            authorization_capture=_authorization_capture_from_database(
+                row.get("authorization_evidence")
+            ),
         )
         _assert_ledger_command_identity(
             existing=existing,
@@ -313,6 +434,93 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
             yield cursor
 
 
+def _authorization_capture_json(
+    capture: OwnerTruthCommandAuthorizationCapture | None,
+) -> Any:
+    payload = {} if capture is None else capture.value_minimized_payload()
+    try:
+        from psycopg.types.json import Jsonb
+    except ImportError:  # pragma: no cover - production dependency
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return Jsonb(payload)
+
+
+def _authorization_capture_from_database(
+    value: object,
+) -> OwnerTruthCommandAuthorizationCapture | None:
+    if value is None or value == {}:
+        return None
+    payload = value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+                "stored authorization evidence is not valid JSON"
+            ) from exc
+    if not isinstance(payload, Mapping):
+        raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+            "stored authorization evidence must be an object"
+        )
+    try:
+        return OwnerTruthCommandAuthorizationCapture.from_value_minimized_payload(payload)
+    except OwnerTruthContractError as exc:
+        raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+            "stored authorization evidence is malformed"
+        ) from exc
+
+
+def _receipt_links_for_results(
+    *,
+    record: OwnerTruthInterviewCandidateBatchDecisionLedgerRecord,
+    candidate_results: tuple[OwnerTruthCandidateReviewResult, ...],
+    candidate_command_id_hashes: Mapping[str, str],
+    context: OwnerTruthCommandContext,
+) -> tuple[OwnerTruthInterviewCandidateBatchDecisionReceiptLink, ...]:
+    if not candidate_results:
+        raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+            "root command must link at least one DecisionReceipt"
+        )
+    if record.owner_subject_id != context.owner_subject_id:
+        raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+            "root command does not belong to this Owner"
+        )
+    result_candidate_ids = {result.candidate_id for result in candidate_results}
+    if set(candidate_command_id_hashes) != result_candidate_ids:
+        raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+            "root command receipt links must bind exactly the selected Candidates"
+        )
+    links: list[OwnerTruthInterviewCandidateBatchDecisionReceiptLink] = []
+    receipt_ids: set[str] = set()
+    candidate_ids: set[str] = set()
+    for result in candidate_results:
+        if result.receipt_id in receipt_ids or result.candidate_id in candidate_ids:
+            raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+                "root command cannot link duplicate Candidate receipts"
+            )
+        receipt_ids.add(result.receipt_id)
+        candidate_ids.add(result.candidate_id)
+        candidate_command_id_hash = str(
+            candidate_command_id_hashes.get(result.candidate_id) or ""
+        ).strip().lower()
+        if len(candidate_command_id_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in candidate_command_id_hash
+        ):
+            raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+                "root command receipt link requires a SHA-256 child command hash"
+            )
+        links.append(
+            OwnerTruthInterviewCandidateBatchDecisionReceiptLink(
+                vault_id=context.vault_id,
+                batch_decision_id=record.batch_decision_id,
+                receipt_id=result.receipt_id,
+                candidate_id=result.candidate_id,
+                candidate_command_id_hash=candidate_command_id_hash,
+            )
+        )
+    return tuple(links)
+
+
 def _assert_ledger_replay(
     *,
     existing: OwnerTruthInterviewCandidateBatchDecisionLedgerRecord,
@@ -328,6 +536,35 @@ def _assert_ledger_replay(
     ):
         raise OwnerTruthInterviewCandidateBatchDecisionConflict(
             "commandId cannot be reused with a different interview batch decision"
+        )
+    _assert_replay_authorization_capture(existing=existing, expected=expected)
+
+
+def _assert_replay_authorization_capture(
+    *,
+    existing: OwnerTruthInterviewCandidateBatchDecisionLedgerRecord,
+    expected: OwnerTruthInterviewCandidateBatchDecisionLedgerRecord,
+) -> None:
+    """Keep QA-only roots and formal release-policy roots non-interchangeable.
+
+    A later formal retry may carry a new policy decision ID or expiry, so those
+    fields are intentionally not compared. The immutable root only needs to
+    prove that it was originally formally authorized for the same feature.
+    """
+
+    existing_capture = existing.authorization_capture
+    expected_capture = expected.authorization_capture
+    if (existing_capture is None) != (expected_capture is None):
+        raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+            "commandId cannot replay between QA-only and formally authorized confirmation"
+        )
+    if (
+        existing_capture is not None
+        and expected_capture is not None
+        and existing_capture.feature != expected_capture.feature
+    ):
+        raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+            "commandId cannot replay under a different authorization feature"
         )
 
 
@@ -347,6 +584,19 @@ def _assert_ledger_command_identity(
         raise OwnerTruthInterviewCandidateBatchDecisionConflict(
             "commandId cannot be reused with a different interview batch decision"
         )
+    _assert_replay_authorization_capture(
+        existing=existing,
+        expected=OwnerTruthInterviewCandidateBatchDecisionLedgerRecord(
+            batch_decision_id=command.batch_decision_id(vault_id=context.vault_id),
+            review_batch_id=command.review_batch_id,
+            command_id_hash=command.command_id_hash,
+            payload_hash=command.payload_hash,
+            owner_subject_id=context.owner_subject_id,
+            authority_epoch=existing.authority_epoch,
+            selection_count=command.selection_count,
+            authorization_capture=context.authorization_capture,
+        ),
+    )
 
 
 class OwnerTruthInterviewCandidateBatchDecisionService:
@@ -393,12 +643,21 @@ class OwnerTruthInterviewCandidateBatchDecisionService:
                 authority_epoch=authority_epoch,
             )
             review_repository = self._store.owner_truth_candidate_review_repository()
+            child_commands = tuple(
+                command.child_command(selection=selection) for selection in command.selections
+            )
             results = tuple(
-                review_repository.decide(
-                    command=command.child_command(selection=selection),
-                    context=context,
-                )
-                for selection in command.selections
+                review_repository.decide(command=child_command, context=context)
+                for child_command in child_commands
+            )
+            ledger.link_receipts(
+                record=record,
+                candidate_results=results,
+                candidate_command_id_hashes={
+                    child_command.candidate_id: child_command.command_id_hash
+                    for child_command in child_commands
+                },
+                context=context,
             )
         return OwnerTruthInterviewCandidateBatchAcceptResult(
             outcome=outcome,
@@ -472,6 +731,7 @@ __all__ = [
     "InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository",
     "OwnerTruthInterviewCandidateBatchAcceptResult",
     "OwnerTruthInterviewCandidateBatchDecisionLedgerRecord",
+    "OwnerTruthInterviewCandidateBatchDecisionReceiptLink",
     "OwnerTruthInterviewCandidateBatchDecisionService",
     "OwnerTruthInterviewCandidateDecisionLedgerCommand",
     "OwnerTruthInterviewCandidateBatchDecisionStore",
