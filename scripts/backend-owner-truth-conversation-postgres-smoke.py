@@ -39,6 +39,7 @@ from app.domain.owner_truth.conversation import (
     InterviewPacingEvent,
     InterviewReviewBatchState,
     InterviewReviewBatchTrigger,
+    InterviewSessionState,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationVersionConflict,
     PauseInterviewForTopicSwitchCommand,
@@ -238,6 +239,13 @@ def main() -> None:
             and thread_authority.authority_epoch == 0,
             "thread authority read must bind the active Owner Vault epoch",
         )
+        require(
+            thread_authority.session_id == session_id
+            and thread_authority.session_state is InterviewSessionState.ACTIVE
+            and thread_authority.session_boundary is InterviewBoundary.OPEN
+            and thread_authority.is_recommendation_eligible,
+            "active open interview session must remain recommendation-eligible",
+        )
         replayed_start = invoke(
             store,
             command_id="start-conversation-smoke-replay",
@@ -387,6 +395,11 @@ def main() -> None:
         require(
             paused_thread_authority.state is ConversationThreadState.PAUSED,
             "topic-switched thread must not remain recommendation-eligible",
+        )
+        require(
+            paused_thread_authority.session_state is InterviewSessionState.PAUSED
+            and not paused_thread_authority.is_recommendation_eligible,
+            "paused topic-switched session must not remain recommendation-eligible",
         )
         replayed_topic_switch = invoke(
             store,

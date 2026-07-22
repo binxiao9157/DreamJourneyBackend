@@ -11,6 +11,8 @@ from app.domain.owner_truth.knowledge_dimension_read import (
 )
 from app.domain.owner_truth.conversation import (
     ConversationThreadState,
+    InterviewBoundary,
+    InterviewSessionState,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationThreadAuthoritySnapshot,
 )
@@ -63,12 +65,17 @@ class _ConversationThreadAuthorityReader:
         authority_epoch: int,
         thread_ids: tuple[str, ...],
         state: ConversationThreadState = ConversationThreadState.ACTIVE,
+        session_state: InterviewSessionState = InterviewSessionState.ACTIVE,
+        session_boundary: InterviewBoundary = InterviewBoundary.OPEN,
     ) -> None:
         self._vault_id = vault_id
         self._owner_subject_id = owner_subject_id
         self._authority_epoch = authority_epoch
         self._thread_ids = frozenset(thread_ids)
         self._state = state
+        self._session_id = str(uuid4())
+        self._session_state = session_state
+        self._session_boundary = session_boundary
 
     def get_interview_thread_authority(
         self,
@@ -90,6 +97,9 @@ class _ConversationThreadAuthorityReader:
             owner_subject_id=self._owner_subject_id,
             authority_epoch=self._authority_epoch,
             state=self._state,
+            session_id=self._session_id,
+            session_state=self._session_state,
+            session_boundary=self._session_boundary,
         )
 
 
@@ -103,6 +113,8 @@ class _Store:
         authority_epoch: int,
         thread_ids: tuple[str, ...],
         thread_state: ConversationThreadState = ConversationThreadState.ACTIVE,
+        session_state: InterviewSessionState = InterviewSessionState.ACTIVE,
+        session_boundary: InterviewBoundary = InterviewBoundary.OPEN,
     ) -> None:
         self.reader = _ProjectionReader(snapshot)
         self.repository = InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository()
@@ -112,6 +124,8 @@ class _Store:
             authority_epoch=authority_epoch,
             thread_ids=thread_ids,
             state=thread_state,
+            session_state=session_state,
+            session_boundary=session_boundary,
         )
 
     @contextmanager
@@ -185,6 +199,8 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
         rebuilding: bool = False,
         thread_authority_epoch: int = 5,
         thread_state: ConversationThreadState = ConversationThreadState.ACTIVE,
+        session_state: InterviewSessionState = InterviewSessionState.ACTIVE,
+        session_boundary: InterviewBoundary = InterviewBoundary.OPEN,
     ) -> _Store:
         if rebuilding:
             snapshot = build_rebuilding_memory_projection(
@@ -206,6 +222,8 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
             authority_epoch=thread_authority_epoch,
             thread_ids=(self.thread_id, self.breadth_thread_id),
             thread_state=thread_state,
+            session_state=session_state,
+            session_boundary=session_boundary,
         )
 
     def _confirm(self, store: _Store) -> None:
@@ -382,6 +400,32 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
                 context=self.context,
                 candidates=(self._candidate(),),
             )
+
+    def test_rejects_candidate_when_linked_session_is_not_open_and_active(self) -> None:
+        cases = (
+            (InterviewSessionState.PAUSED, InterviewBoundary.COOLDOWN),
+            (InterviewSessionState.PAUSED, InterviewBoundary.DO_NOT_ASK),
+            (InterviewSessionState.ACTIVE, InterviewBoundary.SKIP_ONCE),
+        )
+        for session_state, session_boundary in cases:
+            with self.subTest(
+                session_state=session_state.value,
+                session_boundary=session_boundary.value,
+            ):
+                store = self._store(
+                    session_state=session_state,
+                    session_boundary=session_boundary,
+                )
+                self._confirm(store)
+
+                with self.assertRaisesRegex(
+                    OwnerTruthKnowledgeRecommendationReadError,
+                    "current Owner Truth conversation thread in active state",
+                ):
+                    OwnerTruthKnowledgeRecommendationReadService(store).read(
+                        context=self.context,
+                        candidates=(self._candidate(),),
+                    )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -34,7 +34,9 @@ from app.domain.owner_truth.knowledge_dimension_read import (
     OwnerTruthKnowledgeDimensionReadService,
 )
 from app.domain.owner_truth.conversation import (
+    InterviewBoundary,
     PauseInterviewForTopicSwitchCommand,
+    SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
@@ -386,26 +388,30 @@ def main() -> None:
             "only the explicit receipt may contribute dimension coverage",
         )
 
-        recommendation_thread_id = str(uuid.uuid4())
-        recommendation_session_id = str(uuid.uuid4())
-        started_recommendation_thread = invoke_conversation(
-            store,
-            command_id="dimension-confirmation-recommendation-thread-start",
-            operation=lambda service: service.start_session(
-                command=StartInterviewSessionCommand(
-                    command_id="dimension-confirmation-recommendation-thread-start",
-                    thread_id=recommendation_thread_id,
-                    session_id=recommendation_session_id,
-                    expected_thread_version=0,
-                    entry_mode="recommendation",
+        def start_recommendation_session(label: str) -> tuple[str, str]:
+            thread_id = str(uuid.uuid4())
+            session_id = str(uuid.uuid4())
+            started = invoke_conversation(
+                store,
+                command_id=f"dimension-confirmation-recommendation-thread-start-{label}",
+                operation=lambda service: service.start_session(
+                    command=StartInterviewSessionCommand(
+                        command_id=f"dimension-confirmation-recommendation-thread-start-{label}",
+                        thread_id=thread_id,
+                        session_id=session_id,
+                        expected_thread_version=0,
+                        entry_mode="recommendation",
+                    ),
+                    context=owner_context,
                 ),
-                context=owner_context,
-            ),
-        )
-        require(
-            started_recommendation_thread.state.value == "active",
-            "recommendation smoke must create an active private thread",
-        )
+            )
+            require(
+                started.state.value == "active",
+                "recommendation smoke must create an active private thread",
+            )
+            return thread_id, session_id
+
+        recommendation_thread_id, recommendation_session_id = start_recommendation_session("active")
 
         recommendation_path = f"/v2/vaults/{vault_id}/knowledge-recommendations/read"
         recommendation_payload = {
@@ -491,6 +497,51 @@ def main() -> None:
             "paused recommendation thread must use the typed invalid code",
         )
 
+        def recommendation_payload_for_thread(thread_id: str, suffix: str) -> dict[str, object]:
+            candidate = dict(recommendation_payload["candidates"][0])
+            candidate["candidateId"] = f"confirmation-smoke-{suffix}"
+            candidate["threadId"] = thread_id
+            return {"candidates": [candidate]}
+
+        for suffix, boundary in (
+            ("cooldown", InterviewBoundary.COOLDOWN),
+            ("do-not-ask", InterviewBoundary.DO_NOT_ASK),
+            ("skip-once", InterviewBoundary.SKIP_ONCE),
+        ):
+            boundary_thread_id, boundary_session_id = start_recommendation_session(suffix)
+            boundary_result = invoke_conversation(
+                store,
+                command_id=f"dimension-confirmation-recommendation-boundary-{suffix}",
+                operation=lambda service: service.set_boundary(
+                    command=SetInterviewBoundaryCommand(
+                        command_id=f"dimension-confirmation-recommendation-boundary-{suffix}",
+                        thread_id=boundary_thread_id,
+                        session_id=boundary_session_id,
+                        expected_session_version=1,
+                        boundary=boundary,
+                    ),
+                    context=owner_context,
+                ),
+            )
+            require(
+                boundary_result.boundary is boundary,
+                f"{suffix} boundary must persist before recommendation validation",
+            )
+            boundary_recommendation_read = client.post(
+                recommendation_path,
+                headers=owner_headers,
+                json=recommendation_payload_for_thread(boundary_thread_id, suffix),
+            )
+            require(
+                boundary_recommendation_read.status_code == 400,
+                f"{suffix} session must be rejected by recommendation reads",
+            )
+            require(
+                route_code(boundary_recommendation_read)
+                == "ownerTruthKnowledgeRecommendationReadInvalid",
+                f"{suffix} session must use the typed invalid code",
+            )
+
         stale = client.post(
             path,
             headers=owner_headers,
@@ -537,6 +588,8 @@ def main() -> None:
             f"schemaHead={verified['expectedHead']} defaultHidden=true receiptCreated=true "
             "receiptReplay=true hashBound=true appendOnly=true recommendationRead=true "
             "activeThreadSelected=true pausedThreadRejected=true "
+            "cooldownSessionRejected=true doNotAskSessionRejected=true "
+            "skipOnceSessionRejected=true "
             "supersededReceiptExcluded=true"
         )
     finally:

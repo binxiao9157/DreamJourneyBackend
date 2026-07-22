@@ -13,7 +13,9 @@ from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateSnapshot,
 )
 from app.domain.owner_truth.conversation import (
+    InterviewBoundary,
     PauseInterviewForTopicSwitchCommand,
+    SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
 )
 from app.domain.owner_truth.contracts import (
@@ -259,6 +261,39 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
                 context=context,
             )
         self.assertEqual(result.state.value, "paused")
+
+    def _set_thread_boundary(
+        self,
+        *,
+        vault_id: str,
+        owner_id: str,
+        thread_id: str,
+        session_id: str,
+        boundary: InterviewBoundary,
+        command_id: str,
+    ) -> None:
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        with self.store.request_unit_of_work(
+            correlation_id=f"recommendation-read-thread-boundary:{vault_id}:{thread_id}",
+            command_id=command_id,
+        ):
+            result = OwnerTruthConversationService(
+                self.store.owner_truth_conversation_repository()
+            ).set_boundary(
+                command=SetInterviewBoundaryCommand(
+                    command_id=command_id,
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    expected_session_version=1,
+                    boundary=boundary,
+                ),
+                context=context,
+            )
+        self.assertEqual(result.boundary, boundary)
 
     @staticmethod
     def _path(vault_id: str) -> str:
@@ -580,6 +615,68 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             response.json()["detail"]["code"],
             "ownerTruthKnowledgeRecommendationReadInvalid",
         )
+
+    def test_paused_or_non_open_session_rejects_owner_confirmed_candidate(self) -> None:
+        cases = (
+            ("cooldown", InterviewBoundary.COOLDOWN, "13800139431"),
+            ("do-not-ask", InterviewBoundary.DO_NOT_ASK, "13800139432"),
+            ("skip-once", InterviewBoundary.SKIP_ONCE, "13800139433"),
+        )
+        for suffix, boundary, phone in cases:
+            with self.subTest(boundary=boundary.value):
+                owner_id, headers = self._login(phone)
+                vault_id = f"vault-recommendation-read-{suffix}"
+                memory_id, content_hash = self._activate_memory(
+                    vault_id=vault_id,
+                    owner_id=owner_id,
+                    content={"claim": f"The {suffix} boundary blocks recommendation reuse."},
+                    command_id=f"recommendation-api-activate-{suffix}",
+                )
+                self._confirm(
+                    vault_id=vault_id,
+                    owner_id=owner_id,
+                    memory_version_id=memory_id,
+                    content_hash=content_hash,
+                    dimension="keyDecisions",
+                    facets=("choice",),
+                    command_id=f"recommendation-api-confirm-{suffix}",
+                )
+                thread_id, session_id = self._seed_thread_with_session(
+                    vault_id=vault_id,
+                    owner_id=owner_id,
+                    command_id=f"recommendation-api-thread-{suffix}",
+                )
+                self._set_thread_boundary(
+                    vault_id=vault_id,
+                    owner_id=owner_id,
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    boundary=boundary,
+                    command_id=f"recommendation-api-boundary-{suffix}",
+                )
+
+                response = client.post(
+                    self._path(vault_id),
+                    headers=headers,
+                    json={
+                        "candidates": [
+                            self._candidate(
+                                candidate_id=f"api-{suffix}-thread",
+                                slot="continuity",
+                                thread_id=thread_id,
+                                dimension="keyDecisions",
+                                missing_facet="reason",
+                                memory_version_id=memory_id,
+                            )
+                        ]
+                    },
+                )
+
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(
+                    response.json()["detail"]["code"],
+                    "ownerTruthKnowledgeRecommendationReadInvalid",
+                )
 
 
 if __name__ == "__main__":  # pragma: no cover

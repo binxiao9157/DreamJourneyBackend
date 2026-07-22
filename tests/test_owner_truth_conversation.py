@@ -141,6 +141,10 @@ class OwnerTruthConversationTests(unittest.TestCase):
         self.assertEqual(snapshot.owner_subject_id, self.context.owner_subject_id)
         self.assertEqual(snapshot.authority_epoch, 0)
         self.assertEqual(snapshot.state, ConversationThreadState.ACTIVE)
+        self.assertEqual(snapshot.session_id, self.session_id)
+        self.assertEqual(snapshot.session_state, InterviewSessionState.ACTIVE)
+        self.assertEqual(snapshot.session_boundary, InterviewBoundary.OPEN)
+        self.assertTrue(snapshot.is_recommendation_eligible)
 
         other_context = OwnerTruthCommandContext(
             vault_id=self.context.vault_id,
@@ -171,6 +175,14 @@ class OwnerTruthConversationTests(unittest.TestCase):
         session = self.service.read_session(session_id=self.session_id, context=self.context)
         self.assertEqual(session.state, InterviewSessionState.PAUSED)
         self.assertEqual(session.boundary, InterviewBoundary.DO_NOT_ASK)
+        authority = self.service.read_thread_authority(
+            thread_id=self.thread_id,
+            context=self.context,
+        )
+        self.assertEqual(authority.state, ConversationThreadState.ACTIVE)
+        self.assertEqual(authority.session_state, InterviewSessionState.PAUSED)
+        self.assertEqual(authority.session_boundary, InterviewBoundary.DO_NOT_ASK)
+        self.assertFalse(authority.is_recommendation_eligible)
         with self.assertRaises(OwnerTruthInterviewSessionStateConflict):
             self.service.append_message(
                 command=self.append(

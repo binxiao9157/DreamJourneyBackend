@@ -15,7 +15,6 @@ from typing import Any, Iterable, Optional, Protocol
 
 from app.domain.owner_truth.contracts import OwnerTruthContractError
 from app.domain.owner_truth.conversation import (
-    ConversationThreadState,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationThreadAuthoritySnapshot,
 )
@@ -267,7 +266,7 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 or snapshot.vault_id != context.vault_id
                 or snapshot.owner_subject_id != context.owner_subject_id
                 or snapshot.authority_epoch != authority_epoch
-                or snapshot.state is not ConversationThreadState.ACTIVE
+                or not snapshot.is_recommendation_eligible
             ):
                 raise OwnerTruthKnowledgeRecommendationReadError(
                     "candidate thread_id must reference a current Owner Truth conversation thread in active state"

@@ -876,6 +876,9 @@ class OwnerTruthConversationThreadAuthoritySnapshot:
     owner_subject_id: str
     authority_epoch: int
     state: ConversationThreadState
+    session_id: str
+    session_state: InterviewSessionState
+    session_boundary: InterviewBoundary
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", require_uuid(self.thread_id, field="thread_id"))
@@ -889,12 +892,37 @@ class OwnerTruthConversationThreadAuthoritySnapshot:
             object.__setattr__(self, "state", ConversationThreadState(self.state))
         except (TypeError, ValueError) as exc:
             raise OwnerTruthConversationError("conversation thread state is not supported") from exc
+        object.__setattr__(self, "session_id", require_uuid(self.session_id, field="session_id"))
+        try:
+            object.__setattr__(self, "session_state", InterviewSessionState(self.session_state))
+        except (TypeError, ValueError) as exc:
+            raise OwnerTruthConversationError("interview session state is not supported") from exc
+        try:
+            object.__setattr__(self, "session_boundary", InterviewBoundary(self.session_boundary))
+        except (TypeError, ValueError) as exc:
+            raise OwnerTruthConversationError("interview session boundary is not supported") from exc
         if (
             not isinstance(self.authority_epoch, int)
             or isinstance(self.authority_epoch, bool)
             or self.authority_epoch < 0
         ):
             raise OwnerTruthConversationError("authority_epoch must be a non-negative integer")
+
+    @property
+    def is_recommendation_eligible(self) -> bool:
+        """Whether this private thread may supply a recommendation candidate.
+
+        Candidate eligibility is stricter than thread ownership: an active
+        thread must also have exactly one active interview session with an open
+        boundary.  A paused, cooldown, do-not-ask, or skip-once session must
+        fail closed even when its historical thread remains active.
+        """
+
+        return (
+            self.state is ConversationThreadState.ACTIVE
+            and self.session_state is InterviewSessionState.ACTIVE
+            and self.session_boundary is InterviewBoundary.OPEN
+        )
 
 
 @dataclass(frozen=True)

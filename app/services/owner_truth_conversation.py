@@ -876,12 +876,28 @@ class InMemoryOwnerTruthConversationRepository:
                 raise OwnerTruthConversationAccessDenied(
                     "conversation thread does not belong to this active Owner Vault"
                 )
+            matching_sessions = tuple(
+                session
+                for (stored_vault_id, _), session in self._sessions.items()
+                if stored_vault_id == context.vault_id
+                and str(session["threadId"]) == normalized_thread_id
+                and str(session["ownerSubjectId"]) == context.owner_subject_id
+                and int(session["authorityEpoch"]) == int(vault["authorityEpoch"])
+            )
+            if len(matching_sessions) != 1:
+                raise OwnerTruthConversationAccessDenied(
+                    "conversation thread must bind exactly one current interview session"
+                )
+            session = matching_sessions[0]
             return OwnerTruthConversationThreadAuthoritySnapshot(
                 thread_id=str(thread["id"]),
                 vault_id=context.vault_id,
                 owner_subject_id=context.owner_subject_id,
                 authority_epoch=int(thread["authorityEpoch"]),
                 state=ConversationThreadState(str(thread["state"])),
+                session_id=str(session["id"]),
+                session_state=InterviewSessionState(session["state"]),
+                session_boundary=InterviewBoundary(session["boundary"]),
             )
 
     def snapshot(self, *, vault_id: str) -> Mapping[str, Any]:
@@ -2103,31 +2119,50 @@ class PostgresOwnerTruthConversationRepository:
             )
             cursor.execute(
                 """
-                SELECT id, vault_id, owner_subject_id, authority_epoch, state
-                FROM owner_truth.conversation_threads
-                WHERE vault_id = %s
-                  AND id = %s
-                  AND owner_subject_id = %s
-                  AND authority_epoch = %s
+                SELECT
+                    thread.id AS thread_id,
+                    thread.vault_id,
+                    thread.owner_subject_id,
+                    thread.authority_epoch,
+                    thread.state AS thread_state,
+                    session.id AS session_id,
+                    session.state AS session_state,
+                    session.boundary AS session_boundary
+                FROM owner_truth.conversation_threads AS thread
+                JOIN owner_truth.interview_sessions AS session
+                  ON session.vault_id = thread.vault_id
+                 AND session.current_thread_id = thread.id
+                WHERE thread.vault_id = %s
+                  AND thread.id = %s
+                  AND thread.owner_subject_id = %s
+                  AND thread.authority_epoch = %s
+                  AND session.owner_subject_id = %s
+                  AND session.authority_epoch = %s
                 """,
                 (
                     context.vault_id,
                     normalized_thread_id,
                     context.owner_subject_id,
                     int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
                 ),
             )
-            row = cursor.fetchone()
-        if row is None:
+            rows = cursor.fetchall()
+        if len(rows) != 1:
             raise OwnerTruthConversationAccessDenied(
-                "conversation thread does not belong to this active Owner Vault"
+                "conversation thread must bind exactly one current interview session"
             )
+        row = rows[0]
         return OwnerTruthConversationThreadAuthoritySnapshot(
-            thread_id=str(row["id"]),
+            thread_id=str(row["thread_id"]),
             vault_id=str(row["vault_id"]),
             owner_subject_id=str(row["owner_subject_id"]),
             authority_epoch=int(row["authority_epoch"]),
-            state=ConversationThreadState(str(row["state"])),
+            state=ConversationThreadState(str(row["thread_state"])),
+            session_id=str(row["session_id"]),
+            session_state=InterviewSessionState(str(row["session_state"])),
+            session_boundary=InterviewBoundary(str(row["session_boundary"])),
         )
 
     def _ensure_active_vault(
