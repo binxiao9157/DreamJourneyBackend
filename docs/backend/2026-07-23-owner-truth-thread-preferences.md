@@ -102,3 +102,20 @@ DATABASE_URL='<admin postgres dsn>' \
 - 不做自动恢复、自动 Topic 合并、VAD 或 Provider 调用；
 - 不把 ThreadPreference 作为跨账号、家庭成员或 Visitor 权限；
 - 不代表完整自然输入访谈、双推荐或公开知识地图已经完成。
+
+## 部署证据
+
+后端提交 `b52e4b8 feat(m0a): add owner thread preference controls` 已部署到 API 容器：
+
+```bash
+python scripts/migrate_db.py --apply --build-id b52e4b8
+python scripts/migrate_db.py --verify
+python scripts/backend-owner-truth-thread-preference-postgres-smoke.py
+curl -fsS https://dreamjourney-api.liftora.cn/ready
+```
+
+结果：迁移账本 `appliedHead=0040`、`expectedHead=0040`、`status=ready`；一次性 Postgres
+smoke 输出 `defaultHidden=true`、`serverExpiry=true`、`deduplicated=true`、
+`crossOwnerDenied=true`、`cooldownExplicitRestore=true`、`doNotAskConfirmedRestore=true` 和
+`receiptsAppendOnly=true`。公网 `/ready` 为 `ready`。smoke 仅创建并删除临时数据库，未读取或
+写入线上业务 Vault、档案或对话内容。
