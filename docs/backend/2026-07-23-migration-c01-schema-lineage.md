@@ -18,6 +18,8 @@
 
 备份脚本还会在 dump 前比较数据库 ledger head 与当前代码迁移 head。两者不同会写入 `schemaHeadMismatch` failure receipt，避免生成无法与当前恢复流程对齐的 backup。
 
+归档验证不再使用 `decrypt | pg_restore --list`。后者的 list 模式可能提前关闭输入，配合 `pipefail` 会把上游的 broken pipe 误报为 archive 无效。现在解密到 root-only 临时文件后再检查，并在任一路径清理该文件。
+
 ## 已验证
 
 ```bash

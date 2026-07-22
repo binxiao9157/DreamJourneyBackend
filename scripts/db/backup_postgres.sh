@@ -37,13 +37,14 @@ lsn="unknown"
 failure_code="backupCommandFailed"
 plain_partial="$BACKUP_ROOT/.${backup_id}.dump.partial"
 encrypted_partial="$BACKUP_ROOT/.${backup_id}.dump.enc.partial"
+verify_plain_partial="$BACKUP_ROOT/.${backup_id}.verify.dump.partial"
 artifact_path=""
 manifest_path=""
 
 write_failure() {
   local status="${1:-1}"
   trap - ERR INT TERM
-  rm -f "$plain_partial" "$encrypted_partial"
+  rm -f "$plain_partial" "$encrypted_partial" "$verify_plain_partial"
   [[ -z "$artifact_path" ]] || rm -f "$artifact_path"
   [[ -z "$manifest_path" ]] || rm -f "$manifest_path"
   "$PYTHON_BIN" "$ROOT_DIR/scripts/db/backup_manifest.py" failed \
@@ -128,10 +129,16 @@ chmod 600 "$artifact_path"
 
 failure_code="backupArchiveVerificationFailed"
 if [[ "$artifact_path" == *.enc ]]; then
+  # pg_restore --list stops after it has read the custom-format directory.  A
+  # direct decrypt pipe therefore gives OpenSSL a broken pipe under pipefail.
+  # Keep the decrypted verification file root-only and remove it immediately.
   "$OPENSSL_BIN" enc -d -aes-256-cbc -pbkdf2 \
     -pass "file:$BACKUP_ENCRYPTION_KEY_FILE" \
-    -in "$artifact_path" \
-    | "$DOCKER_BIN" compose exec -T "$BACKUP_DB_SERVICE" pg_restore --list >/dev/null
+    -in "$artifact_path" -out "$verify_plain_partial"
+  chmod 600 "$verify_plain_partial"
+  "$DOCKER_BIN" compose exec -T "$BACKUP_DB_SERVICE" pg_restore --list \
+    < "$verify_plain_partial" >/dev/null
+  rm -f "$verify_plain_partial"
 else
   "$DOCKER_BIN" compose exec -T "$BACKUP_DB_SERVICE" pg_restore --list \
     < "$artifact_path" >/dev/null

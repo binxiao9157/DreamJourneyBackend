@@ -7,7 +7,7 @@ Owner：Backend / Operations
 ## 目标与边界
 
 - 生成独立于 Compose volume 的 PostgreSQL custom-format backup。
-- artifact 完成后加密，并通过流式解密到 `pg_restore --list` 验证可访问性。
+- artifact 完成后加密，并通过 root-only 的短生命周期解密验证文件交给 `pg_restore --list` 验证可访问性；验证结束立即删除明文临时文件。
 - manifest 记录 `backupId/createdAt/schemaHead/LSN/checksum/size/encryptionRef/retentionClass/status`，不记录 DSN、密码、用户正文或业务 payload。
 - 写入 artifact 前会比较运行库 `schema_migrations` 的已应用 head 与当前代码迁移 head；两者不一致时写入 `schemaHeadMismatch` failure receipt，不生成可验证 backup。
 - 失败写 machine-safe receipt，systemd `OnFailure` 再写 owner 明确的 alert receipt。

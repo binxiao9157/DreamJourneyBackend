@@ -48,6 +48,19 @@ def run(command, *, env, expected=0):
     return result
 
 
+def failure_receipts(backup_root):
+    return set((backup_root / "failures").glob("*.failure.json"))
+
+
+def new_failure_receipt(*, before, backup_root, expectation):
+    created = failure_receipts(backup_root) - before
+    require(
+        len(created) == 1,
+        f"{expectation} receipt count: found={len(created)} paths={sorted(map(str, created))}",
+    )
+    return json.loads(next(iter(created)).read_text(encoding="utf-8"))
+
+
 def main():
     openssl = shutil.which("openssl")
     require(openssl, "openssl is required for backup smoke")
@@ -108,6 +121,9 @@ else:
         )
 
         require(BACKUP_SHELL, "bash is required for backup smoke")
+        backup_script = BACKUP_SCRIPT.read_text(encoding="utf-8")
+        require("verify_plain_partial" in backup_script, "encrypted verification uses a bounded plain temp file")
+        require("-in \"$artifact_path\" -out \"$verify_plain_partial\"" in backup_script, "decrypt is not a pipe")
         first = run([BACKUP_SHELL, str(BACKUP_SCRIPT)], env=env)
         second = run([BACKUP_SHELL, str(BACKUP_SCRIPT)], env=env)
         require('"status":"verified"' in first.stdout, "first verified backup")
@@ -136,6 +152,7 @@ else:
 
         mismatch_env = dict(env)
         mismatch_env["FAKE_SCHEMA_HEAD"] = "0000" if CURRENT_SCHEMA_HEAD != "0000" else "0001"
+        failures_before_mismatch = failure_receipts(backup_root)
         mismatched = subprocess.run(
             [BACKUP_SHELL, str(BACKUP_SCRIPT)],
             cwd=ROOT_DIR,
@@ -145,9 +162,11 @@ else:
             stderr=subprocess.PIPE,
         )
         require(mismatched.returncode != 0, "schema head mismatch must fail")
-        mismatch_failures = sorted((backup_root / "failures").glob("*.failure.json"))
-        require(mismatch_failures, "schema head mismatch failure receipt")
-        mismatch_payload = json.loads(mismatch_failures[-1].read_text(encoding="utf-8"))
+        mismatch_payload = new_failure_receipt(
+            before=failures_before_mismatch,
+            backup_root=backup_root,
+            expectation="schema head mismatch",
+        )
         require(mismatch_payload["errorCode"] == "schemaHeadMismatch", "schema head mismatch code")
 
         retention = run(
@@ -169,6 +188,7 @@ else:
 
         failure_env = dict(env)
         failure_env["BACKUP_MIN_FREE_BYTES"] = "1000000000000000"
+        failures_before_space_check = failure_receipts(backup_root)
         failed = subprocess.run(
             [BACKUP_SHELL, str(BACKUP_SCRIPT)],
             cwd=ROOT_DIR,
@@ -182,9 +202,11 @@ else:
             "insufficient space must fail: "
             f"stdout={failed.stdout[-500:]} stderr={failed.stderr[-500:]}",
         )
-        failure_manifests = sorted((backup_root / "failures").glob("*.failure.json"))
-        require(failure_manifests, "failure manifest")
-        failure_payload = json.loads(failure_manifests[-1].read_text(encoding="utf-8"))
+        failure_payload = new_failure_receipt(
+            before=failures_before_space_check,
+            backup_root=backup_root,
+            expectation="insufficient space",
+        )
         require(failure_payload["errorCode"] == "insufficientSpace", "failure machine code")
         require(failure_payload["status"] == "failed", "failure status")
 
@@ -253,6 +275,7 @@ else:
         )
         require(corrupt.returncode != 0, "corrupt backup must fail verification")
         require(not list(backup_root.glob("*.partial")), "partial backup files must be cleaned")
+        require(not list(backup_root.glob("*.verify.dump.partial")), "plain verification file must be cleaned")
         require(not (backup_root / ".backup.lock.d").exists(), "backup lock must be released")
 
         print(
