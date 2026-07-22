@@ -398,8 +398,12 @@ def main() -> None:
         require(summary.get("candidateSource") == "serverPlanned", "plan must identify server planning")
         require([item.get("slot") for item in selected] == ["breadth"], "only breadth may be planned")
         require(
-            selected[0].get("threadId") == thread_id,
-            "server plan must bind the current eligible session thread",
+            str(selected[0].get("candidateId") or "").startswith("server-plan-breadth-"),
+            "server plan must return its internally authority-bound candidate identifier",
+        )
+        require(
+            "threadId" not in selected[0],
+            "value-free plan summaries must not expose a private thread identifier",
         )
         require(
             selected[0].get("targetDimension") == "keyDecisions"
