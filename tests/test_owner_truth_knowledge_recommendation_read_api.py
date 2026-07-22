@@ -61,6 +61,9 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         self.previous_recommendation_qa = (
             main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED
         )
+        self.previous_recommendation_plan_qa = (
+            main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED
+        )
         self.store = InMemoryStore()
         main_module.store = self.store
         main_module.BACKEND_API_TOKEN = ""
@@ -70,6 +73,7 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = True
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = True
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -83,6 +87,9 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         )
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = (
             self.previous_recommendation_qa
+        )
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = (
+            self.previous_recommendation_plan_qa
         )
 
     @staticmethod
@@ -300,6 +307,10 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         return f"/v2/vaults/{vault_id}/knowledge-recommendations/read"
 
     @staticmethod
+    def _plan_path(vault_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/knowledge-recommendations/plan"
+
+    @staticmethod
     def _candidate(
         *,
         candidate_id: str,
@@ -336,6 +347,126 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             response.json()["detail"]["code"],
             "ownerTruthKnowledgeRecommendationReadUnavailable",
         )
+
+    def test_server_planned_contract_has_its_own_default_off_gate(self) -> None:
+        _owner_id, headers = self._login("13800139420")
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = False
+
+        response = client.post(
+            self._plan_path("vault-hidden-recommendation-plan"),
+            headers=headers,
+            json={},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "ownerTruthKnowledgeRecommendationPlanUnavailable",
+        )
+
+    def test_owner_can_read_server_planned_value_free_breadth_without_candidate_input(self) -> None:
+        owner_id, headers = self._login("13800139419")
+        vault_id = "vault-recommendation-plan-api"
+        decision_id, decision_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "I left a role to spend more time with family."},
+            command_id="recommendation-plan-activate-001",
+        )
+        values_id, values_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "I value taking time to reflect before commitments."},
+            command_id="recommendation-plan-activate-002",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=decision_id,
+            content_hash=decision_hash,
+            dimension="keyDecisions",
+            facets=("choice", "reason"),
+            command_id="recommendation-plan-confirm-001",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=values_id,
+            content_hash=values_hash,
+            dimension="values",
+            facets=("priority",),
+            command_id="recommendation-plan-confirm-002",
+        )
+        self._seed_thread(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="recommendation-plan-thread-001",
+        )
+
+        response = client.post(self._plan_path(vault_id), headers=headers, json={})
+        injected = client.post(
+            self._plan_path(vault_id),
+            headers=headers,
+            json={"candidates": []},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        body = response.json()
+        self.assertEqual(
+            body["schemaVersion"],
+            "owner-truth-knowledge-recommendation-plan-response-v1",
+        )
+        self.assertEqual(body["recommendations"]["candidateSource"], "serverPlanned")
+        self.assertEqual(
+            [item["slot"] for item in body["recommendations"]["selected"]],
+            ["breadth"],
+        )
+        self.assertNotIn("spend more time", response.text)
+        self.assertNotIn("taking time to reflect", response.text)
+        self.assertNotIn("claim", response.text)
+        self.assertEqual(injected.status_code, 400, injected.text)
+        self.assertEqual(
+            injected.json()["detail"]["code"],
+            "ownerTruthKnowledgeRecommendationPlanInvalid",
+        )
+
+    def test_server_plan_returns_empty_after_session_boundary_blocks_recommendations(self) -> None:
+        owner_id, headers = self._login("13800139418")
+        vault_id = "vault-recommendation-plan-boundary"
+        memory_id, content_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "This gap must not be planned after a user boundary."},
+            command_id="recommendation-plan-activate-boundary",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=memory_id,
+            content_hash=content_hash,
+            dimension="keyDecisions",
+            facets=("choice",),
+            command_id="recommendation-plan-confirm-boundary",
+        )
+        thread_id, session_id = self._seed_thread_with_session(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="recommendation-plan-thread-boundary",
+        )
+        self._set_thread_boundary(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            thread_id=thread_id,
+            session_id=session_id,
+            boundary=InterviewBoundary.DO_NOT_ASK,
+            command_id="recommendation-plan-boundary-do-not-ask",
+        )
+
+        response = client.post(self._plan_path(vault_id), headers=headers, json={})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["recommendations"]["selected"], [])
 
     def test_owner_can_read_value_free_selection_only_from_confirmed_memory(self) -> None:
         owner_id, headers = self._login("13800139422")

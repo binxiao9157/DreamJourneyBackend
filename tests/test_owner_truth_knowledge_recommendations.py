@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import unittest
+from uuid import UUID
 
+from app.domain.owner_truth.conversation import (
+    ConversationThreadState,
+    InterviewBoundary,
+    InterviewSessionState,
+    OwnerTruthConversationThreadAuthoritySnapshot,
+)
 from app.domain.owner_truth.knowledge_recommendations import (
     ConfirmedMemoryDimensionEvidence,
     KnowledgeDimension,
@@ -11,6 +18,7 @@ from app.domain.owner_truth.knowledge_recommendations import (
     RecommendationEvidenceKind,
     RecommendationSelector,
     RecommendationSlot,
+    ServerPlannedRecommendationCandidateProjector,
 )
 
 
@@ -107,6 +115,123 @@ class KnowledgeDimensionProjectionTests(unittest.TestCase):
     def test_projection_rejects_unknown_facets_instead_of_counting_unversioned_data(self) -> None:
         with self.assertRaisesRegex(Exception, "unsupported"):
             evidence(covered_facets=("unknownFacet",))
+
+
+class ServerPlannedRecommendationCandidateProjectorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.projector = KnowledgeDimensionProjector()
+        self.planner = ServerPlannedRecommendationCandidateProjector()
+        self.thread_id = str(UUID("00000000-0000-4000-8000-000000000101"))
+        self.session_id = str(UUID("00000000-0000-4000-8000-000000000102"))
+        self.coverage = self.projector.project(
+            owner_subject_id=OWNER,
+            vault_id=VAULT,
+            evidence=(
+                evidence(
+                    memory_version_id="memory-version-decision",
+                    source_id="source-decision",
+                    dimension=KnowledgeDimension.KEY_DECISIONS,
+                    covered_facets=("choice", "reason"),
+                ),
+                evidence(
+                    memory_version_id="memory-version-values",
+                    source_id="source-values",
+                    dimension=KnowledgeDimension.VALUES,
+                    covered_facets=("priority",),
+                ),
+            ),
+        )
+
+    def _authority(
+        self,
+        **overrides: object,
+    ) -> OwnerTruthConversationThreadAuthoritySnapshot:
+        values: dict[str, object] = {
+            "thread_id": self.thread_id,
+            "vault_id": VAULT,
+            "owner_subject_id": OWNER,
+            "authority_epoch": 7,
+            "state": ConversationThreadState.ACTIVE,
+            "session_id": self.session_id,
+            "session_state": InterviewSessionState.ACTIVE,
+            "session_boundary": InterviewBoundary.OPEN,
+        }
+        values.update(overrides)
+        return OwnerTruthConversationThreadAuthoritySnapshot(**values)
+
+    def _project(
+        self,
+        thread_authorities: tuple[OwnerTruthConversationThreadAuthoritySnapshot, ...],
+        **overrides: object,
+    ) -> tuple[RecommendationCandidate, ...]:
+        values: dict[str, object] = {
+            "owner_subject_id": OWNER,
+            "vault_id": VAULT,
+            "authority_epoch": 7,
+            "checkpoint": "coverage-checkpoint-a",
+            "coverage": self.coverage,
+            "thread_authorities": thread_authorities,
+        }
+        values.update(overrides)
+        return self.planner.project(**values)
+
+    def test_projects_only_one_breadth_candidate_from_current_confirmed_gap(self) -> None:
+        rows = self._project((self._authority(),))
+
+        self.assertEqual(len(rows), 1)
+        candidate = rows[0]
+        self.assertEqual(candidate.slot, RecommendationSlot.BREADTH)
+        self.assertEqual(candidate.question_template_id, "broadenConfirmedGap")
+        self.assertEqual(candidate.reason_code, "confirmedDimensionGap")
+        self.assertEqual(candidate.thread_id, self.thread_id)
+        self.assertTrue(candidate.evidence_refs)
+        self.assertNotIn("claim", str(candidate))
+        self.assertNotIn("今天", str(candidate))
+
+    def test_candidate_identifier_changes_when_authority_or_coverage_checkpoint_changes(self) -> None:
+        baseline = self._project((self._authority(),))[0]
+        changed_epoch = self._project((self._authority(authority_epoch=8),), authority_epoch=8)[0]
+        changed_checkpoint = self._project((self._authority(),), checkpoint="coverage-checkpoint-b")[0]
+
+        self.assertNotEqual(baseline.candidate_id, changed_epoch.candidate_id)
+        self.assertNotEqual(baseline.candidate_id, changed_checkpoint.candidate_id)
+
+    def test_returns_empty_when_no_active_open_thread_or_confirmed_gap_exists(self) -> None:
+        paused = self._authority(
+            state=ConversationThreadState.PAUSED,
+            session_state=InterviewSessionState.PAUSED,
+            session_boundary=InterviewBoundary.COOLDOWN,
+        )
+        self.assertEqual(self._project((),), ())
+        with self.assertRaisesRegex(Exception, "active open"):
+            self._project((paused,))
+
+        complete_coverage = self.projector.project(
+            owner_subject_id=OWNER,
+            vault_id=VAULT,
+            evidence=(
+                evidence(
+                    memory_version_id="memory-version-complete",
+                    source_id="source-complete",
+                    dimension=KnowledgeDimension.KEY_DECISIONS,
+                    covered_facets=("choice", "reason", "outcome"),
+                ),
+            ),
+        )
+        self.assertEqual(
+            self._project((self._authority(),), coverage=complete_coverage),
+            (),
+        )
+
+    def test_rejects_multiple_eligible_threads_or_scope_drift(self) -> None:
+        other_thread = self._authority(
+            thread_id=str(UUID("00000000-0000-4000-8000-000000000103")),
+            session_id=str(UUID("00000000-0000-4000-8000-000000000104")),
+        )
+        with self.assertRaisesRegex(Exception, "multiple active open"):
+            self._project((self._authority(), other_thread))
+        with self.assertRaisesRegex(Exception, "scope"):
+            self._project((self._authority(vault_id="vault-other"),))
 
 
 class RecommendationSelectorTests(unittest.TestCase):

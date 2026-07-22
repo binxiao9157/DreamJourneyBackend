@@ -247,6 +247,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthKnowledgeRecommendationRead",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/knowledge-recommendations/plan",
+                session,
+                "ownerTruthKnowledgeRecommendationPlan",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/interview-sessions/{session_id}/state",
                 session,

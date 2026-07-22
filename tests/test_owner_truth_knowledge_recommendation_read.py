@@ -102,6 +102,33 @@ class _ConversationThreadAuthorityReader:
             session_boundary=self._session_boundary,
         )
 
+    def list_recommendation_eligible_thread_authorities(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthConversationThreadAuthoritySnapshot, ...]:
+        if (
+            context.vault_id != self._vault_id
+            or context.owner_subject_id != self._owner_subject_id
+        ):
+            raise OwnerTruthConversationAccessDenied(
+                "conversation thread does not belong to this active Owner Vault"
+            )
+        snapshot_rows = tuple(
+            OwnerTruthConversationThreadAuthoritySnapshot(
+                thread_id=thread_id,
+                vault_id=self._vault_id,
+                owner_subject_id=self._owner_subject_id,
+                authority_epoch=self._authority_epoch,
+                state=self._state,
+                session_id=self._session_id,
+                session_state=self._session_state,
+                session_boundary=self._session_boundary,
+            )
+            for thread_id in sorted(self._thread_ids)
+        )
+        return tuple(item for item in snapshot_rows if item.is_recommendation_eligible)
+
 
 class _Store:
     def __init__(
@@ -197,6 +224,7 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
         self,
         *,
         rebuilding: bool = False,
+        thread_ids: tuple[str, ...] | None = None,
         thread_authority_epoch: int = 5,
         thread_state: ConversationThreadState = ConversationThreadState.ACTIVE,
         session_state: InterviewSessionState = InterviewSessionState.ACTIVE,
@@ -220,7 +248,7 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
             vault_id=self.vault_id,
             owner_subject_id=self.owner_id,
             authority_epoch=thread_authority_epoch,
-            thread_ids=(self.thread_id, self.breadth_thread_id),
+            thread_ids=thread_ids or (self.thread_id, self.breadth_thread_id),
             thread_state=thread_state,
             session_state=session_state,
             session_boundary=session_boundary,
@@ -299,6 +327,37 @@ class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):
         self.assertNotIn("claim", rendered)
         self.assertEqual(summary["selectionState"], "ready")
         self.assertEqual(store.reader.read_count, 3)
+
+    def test_server_plans_only_value_free_breadth_from_current_authority(self) -> None:
+        store = self._store(thread_ids=(self.thread_id,))
+        self._confirm(store)
+
+        result = OwnerTruthKnowledgeRecommendationReadService(store).plan(
+            context=self.context,
+        )
+
+        self.assertEqual(result.state, OwnerTruthKnowledgeDimensionReadState.READY)
+        assert result.selection is not None
+        self.assertEqual([item.slot for item in result.selection.selected], [RecommendationSlot.BREADTH])
+        summary = result.value_free_summary()
+        self.assertNotIn("weekday evenings", str(summary))
+        self.assertNotIn("claim", str(summary))
+
+    def test_server_plan_returns_empty_selection_when_session_is_not_eligible(self) -> None:
+        store = self._store(
+            thread_ids=(self.thread_id,),
+            thread_state=ConversationThreadState.PAUSED,
+            session_state=InterviewSessionState.PAUSED,
+            session_boundary=InterviewBoundary.DO_NOT_ASK,
+        )
+        self._confirm(store)
+
+        result = OwnerTruthKnowledgeRecommendationReadService(store).plan(
+            context=self.context,
+        )
+
+        assert result.selection is not None
+        self.assertEqual(result.selection.selected, ())
 
     def test_rejects_unconfirmed_or_unbound_candidate_evidence(self) -> None:
         store = self._store()

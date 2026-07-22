@@ -157,6 +157,30 @@ class OwnerTruthConversationTests(unittest.TestCase):
         with self.assertRaises(OwnerTruthConversationAccessDenied):
             self.service.read_thread_authority(thread_id="not-a-uuid", context=self.context)
 
+    def test_recommendation_authority_list_returns_only_active_open_session(self) -> None:
+        self.service.start_session(command=self.start(), context=self.context)
+
+        eligible = self.service.list_recommendation_eligible_thread_authorities(
+            context=self.context,
+        )
+        self.assertEqual([item.thread_id for item in eligible], [self.thread_id])
+        self.assertTrue(eligible[0].is_recommendation_eligible)
+
+        self.service.set_boundary(
+            command=SetInterviewBoundaryCommand(
+                command_id="boundary-list-cooldown-1",
+                thread_id=self.thread_id,
+                session_id=self.session_id,
+                expected_session_version=1,
+                boundary=InterviewBoundary.COOLDOWN,
+            ),
+            context=self.context,
+        )
+        self.assertEqual(
+            self.service.list_recommendation_eligible_thread_authorities(context=self.context),
+            (),
+        )
+
     def test_do_not_ask_pauses_the_session_and_persists_the_boundary(self) -> None:
         self.service.start_session(command=self.start(), context=self.context)
         command = SetInterviewBoundaryCommand(

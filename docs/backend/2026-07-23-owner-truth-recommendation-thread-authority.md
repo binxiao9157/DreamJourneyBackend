@@ -50,10 +50,41 @@ Thread：
 fail closed。此处不定义 `cooldownUntil`、自动恢复或新的 Session 生命周期；只是把既有
 生命周期的不可推荐状态收进同一条读取资格围栏。
 
+## 服务端 breadth 规划补充
+
+此前的 `POST /v2/vaults/{vaultId}/knowledge-recommendations/read` 是一个由 QA 调用方提供
+无值候选、再由服务端做授权和证据校验的读取路径。它不能证明候选本身来自当前服务端状态。
+
+新增的 `POST /v2/vaults/{vaultId}/knowledge-recommendations/plan` 仅用于补这个缺口：
+
+1. 路由默认关闭，需同时具备 Candidate QA、维度确认 QA、推荐读取 QA、规划 QA 四个开关、
+   用户会话和显式 QA header；不进入公开 OpenAPI 或 Echo UI；
+2. 调用方只能传 `crisisActive`，不能传 Candidate、Thread、Session、evidence、ranking、
+   用户边界或问题正文；
+3. 服务端只从当前 Owner-confirmed `DimensionProjection` 与唯一 `active + open` 的
+   InterviewSession/ConversationThread 生成候选；不写入 Candidate、Memory、Conversation 或
+   Provider 状态；
+4. 当前版本只生成一条 `breadth` 候选，表示已经确认但未完整覆盖的维度缺口；不从覆盖量
+   推断用户当前话题或意图，因此不生成 `continuity`；
+5. 候选 ID 绑定 authority epoch、projection checkpoint、当前 thread/session、维度和证据引用。
+   会话边界、生效证据替换或 authority 漂移后都会 fail closed；
+6. 返回仍是 value-free 摘要，不含 Owner 原文、问题正文或 Provider 输出。
+
+独立的临时 Postgres smoke：
+
+```bash
+scripts/run-backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.sh
+```
+
+脚本创建并销毁临时数据库，覆盖默认隐藏、服务端 breadth 生成、重复读取确定性、无写入副作用、
+客户端候选/Thread 注入拒绝、`doNotAsk` 抑制以及 superseded confirmation 排除。
+
 ## 保持不变的边界
 
 - 没有新增公开路由、公开 Echo 入口、Provider 调用、Candidate/Memory 写入或数据库迁移；
 - `POST /v2/vaults/{vaultId}/knowledge-recommendations/read` 仍是默认关闭的 QA-only 路径；
+- `POST /v2/vaults/{vaultId}/knowledge-recommendations/plan` 同样默认关闭，仅为 QA 的
+  服务端 breadth 规划合同，不代表连续性推荐或公开知识地图已完成；
 - 返回值不增加消息、Thread metadata 或推荐问题正文；
 - 此变更只补 Phase 4 M0-B 的 G0 授权前置条件，不代表双推荐、知识地图、自动 Thread 合并、
   cooldown 生命周期、G1 UIQA、G2 长期持久化验收或 G4 公开发布已经完成。

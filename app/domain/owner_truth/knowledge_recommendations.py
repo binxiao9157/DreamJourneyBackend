@@ -17,11 +17,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from hashlib import sha256
+import json
 import re
 from typing import Iterable, Mapping, Optional, Tuple
 from uuid import UUID
 
 from .contracts import OwnerTruthContractError, require_nonblank
+from .conversation import OwnerTruthConversationThreadAuthoritySnapshot
 
 
 KNOWLEDGE_DIMENSION_PROJECTION_SCHEMA_VERSION = "owner-truth-dimension-projection-v1"
@@ -680,6 +683,188 @@ class RecommendationSelector:
         )
 
 
+class ServerPlannedRecommendationCandidateProjector:
+    """Derive value-free M0-B candidates from current private authority.
+
+    This is deliberately narrower than a conversational recommendation engine:
+    it has no natural-language input, provider output, message text, or write
+    path.  It can only use an active/open private interview thread and current
+    Owner-confirmed coverage.  When either prerequisite is unavailable, it
+    returns no candidates rather than guessing a topic.
+    """
+
+    def project(
+        self,
+        *,
+        owner_subject_id: str,
+        vault_id: str,
+        authority_epoch: int,
+        checkpoint: str,
+        coverage: DimensionProjection,
+        thread_authorities: Iterable[OwnerTruthConversationThreadAuthoritySnapshot],
+    ) -> Tuple[RecommendationCandidate, ...]:
+        owner = require_nonblank(owner_subject_id, field="owner_subject_id")
+        vault = require_nonblank(vault_id, field="vault_id")
+        if (
+            not isinstance(authority_epoch, int)
+            or isinstance(authority_epoch, bool)
+            or authority_epoch < 0
+        ):
+            raise KnowledgeRecommendationError("authority_epoch must be a non-negative integer")
+        normalized_checkpoint = require_nonblank(checkpoint, field="checkpoint")
+        if not isinstance(coverage, DimensionProjection):
+            raise TypeError("coverage must be a DimensionProjection")
+        if coverage.owner_subject_id != owner or coverage.vault_id != vault:
+            raise KnowledgeRecommendationError("coverage scope does not match recommendation scope")
+
+        eligible = self._eligible_thread(
+            thread_authorities=thread_authorities,
+            owner_subject_id=owner,
+            vault_id=vault,
+            authority_epoch=authority_epoch,
+        )
+        if eligible is None:
+            return ()
+
+        breadth_coverage = tuple(
+            item
+            for item in coverage.coverage
+            if item.memory_version_ids and item.missing_facets
+        )
+        if not breadth_coverage:
+            return ()
+        selected_coverage = max(
+            breadth_coverage,
+            key=lambda item: (
+                len(item.missing_facets),
+                len(item.memory_version_ids),
+                item.dimension.value,
+            ),
+        )
+        breadth = self._candidate(
+            slot=RecommendationSlot.BREADTH,
+            thread_authority=eligible,
+            authority_epoch=authority_epoch,
+            checkpoint=normalized_checkpoint,
+            coverage=selected_coverage,
+            missing_facet=selected_coverage.missing_facets[0],
+            question_template_id="broadenConfirmedGap",
+            reason_code="confirmedDimensionGap",
+            importance_score=len(selected_coverage.missing_facets),
+        )
+        return (breadth,)
+
+    @staticmethod
+    def _eligible_thread(
+        *,
+        thread_authorities: Iterable[OwnerTruthConversationThreadAuthoritySnapshot],
+        owner_subject_id: str,
+        vault_id: str,
+        authority_epoch: int,
+    ) -> Optional[OwnerTruthConversationThreadAuthoritySnapshot]:
+        try:
+            rows = tuple(thread_authorities)
+        except TypeError as exc:
+            raise KnowledgeRecommendationError("thread_authorities must be iterable") from exc
+        eligible: list[OwnerTruthConversationThreadAuthoritySnapshot] = []
+        seen_thread_ids: set[str] = set()
+        for item in rows:
+            if not isinstance(item, OwnerTruthConversationThreadAuthoritySnapshot):
+                raise KnowledgeRecommendationError(
+                    "thread_authorities must contain OwnerTruthConversationThreadAuthoritySnapshot"
+                )
+            if (
+                item.owner_subject_id != owner_subject_id
+                or item.vault_id != vault_id
+                or item.authority_epoch != authority_epoch
+            ):
+                raise KnowledgeRecommendationError(
+                    "thread authority scope does not match recommendation scope"
+                )
+            if item.thread_id in seen_thread_ids:
+                raise KnowledgeRecommendationError("thread_authorities must not duplicate a thread")
+            seen_thread_ids.add(item.thread_id)
+            if not item.is_recommendation_eligible:
+                raise KnowledgeRecommendationError(
+                    "thread_authorities must contain only active open interview sessions"
+                )
+            eligible.append(item)
+        if len(eligible) > 1:
+            raise KnowledgeRecommendationError(
+                "multiple active open interview threads cannot plan recommendations"
+            )
+        return eligible[0] if eligible else None
+
+    @staticmethod
+    def _candidate(
+        *,
+        slot: RecommendationSlot,
+        thread_authority: OwnerTruthConversationThreadAuthoritySnapshot,
+        authority_epoch: int,
+        checkpoint: str,
+        coverage: DimensionCoverage,
+        missing_facet: str,
+        question_template_id: str,
+        reason_code: str,
+        explicit_intent_priority: int = 0,
+        continuity_score: int = 0,
+        importance_score: int = 0,
+    ) -> RecommendationCandidate:
+        candidate_id = ServerPlannedRecommendationCandidateProjector._candidate_id(
+            slot=slot,
+            thread_id=thread_authority.thread_id,
+            session_id=thread_authority.session_id,
+            authority_epoch=authority_epoch,
+            checkpoint=checkpoint,
+            dimension=coverage.dimension,
+            missing_facet=missing_facet,
+            evidence_refs=coverage.memory_version_ids,
+        )
+        return RecommendationCandidate(
+            candidate_id=candidate_id,
+            owner_subject_id=thread_authority.owner_subject_id,
+            vault_id=thread_authority.vault_id,
+            slot=slot,
+            thread_id=thread_authority.thread_id,
+            target_dimension=coverage.dimension,
+            missing_facet=missing_facet,
+            question_template_id=question_template_id,
+            evidence_kind=RecommendationEvidenceKind.CONFIRMED_MEMORY,
+            evidence_refs=coverage.memory_version_ids,
+            reason_code=reason_code,
+            explicit_intent_priority=explicit_intent_priority,
+            continuity_score=continuity_score,
+            importance_score=importance_score,
+        )
+
+    @staticmethod
+    def _candidate_id(
+        *,
+        slot: RecommendationSlot,
+        thread_id: str,
+        session_id: str,
+        authority_epoch: int,
+        checkpoint: str,
+        dimension: KnowledgeDimension,
+        missing_facet: str,
+        evidence_refs: Tuple[str, ...],
+    ) -> str:
+        payload = {
+            "dimension": dimension.value,
+            "evidenceRefs": list(evidence_refs),
+            "authorityEpoch": authority_epoch,
+            "checkpoint": checkpoint,
+            "missingFacet": missing_facet,
+            "sessionId": session_id,
+            "slot": slot.value,
+            "threadId": thread_id,
+        }
+        digest = sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:24]
+        return f"server-plan-{slot.value}-{digest}"
+
+
 __all__ = [
     "ConfirmedMemoryDimensionEvidence",
     "DimensionCoverage",
@@ -698,4 +883,5 @@ __all__ = [
     "RecommendationSelector",
     "RecommendationSlot",
     "RECOMMENDATION_SELECTION_SCHEMA_VERSION",
+    "ServerPlannedRecommendationCandidateProjector",
 ]

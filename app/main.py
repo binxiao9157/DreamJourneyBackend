@@ -174,6 +174,7 @@ from app.services.owner_truth_knowledge_dimension_confirmation import (
     confirmation_summary as knowledge_dimension_confirmation_summary,
 )
 from app.services.owner_truth_knowledge_recommendation_read import (
+    OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_SCHEMA_VERSION,
     OwnerTruthKnowledgeRecommendationReadError,
     OwnerTruthKnowledgeRecommendationReadService,
 )
@@ -358,6 +359,9 @@ OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = bool(
 OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = bool(
     settings.owner_truth_knowledge_recommendation_read_qa_enabled
 )
+OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = bool(
+    settings.owner_truth_knowledge_recommendation_plan_qa_enabled
+)
 AUTH_ACCESS_TTL_SECONDS = max(60, settings.auth_access_ttl_seconds)
 AUTH_REFRESH_TTL_SECONDS = max(AUTH_ACCESS_TTL_SECONDS + 60, settings.auth_refresh_ttl_seconds)
 AUTH_LEGACY_PHONE_LOGIN_ENABLED = legacy_phone_login_enabled(settings)
@@ -495,18 +499,24 @@ def _require_owner_truth_knowledge_dimension_confirmation_qa(request: Request) -
     return user_id
 
 
-def _require_owner_truth_knowledge_recommendation_read_qa(request: Request) -> str:
-    """Keep M0-B recommendation QA unavailable outside a separate gate."""
+def _require_owner_truth_knowledge_recommendation_qa(
+    request: Request,
+    *,
+    unavailable_code: str,
+    require_plan_gate: bool = False,
+) -> str:
+    """Keep M0-B recommendation QA reads unavailable outside one gate."""
 
     if (
         not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
         or not OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
         or not OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED
+        or (require_plan_gate and not OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED)
         or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
     ):
         raise HTTPException(
             status_code=404,
-            detail={"code": "ownerTruthKnowledgeRecommendationReadUnavailable"},
+            detail={"code": unavailable_code},
         )
     user_id = _request_user_principal_id(request)
     if user_id is None:
@@ -515,6 +525,21 @@ def _require_owner_truth_knowledge_recommendation_read_qa(request: Request) -> s
             detail={"code": "ownerTruthKnowledgeRecommendationReadUserSessionRequired"},
         )
     return user_id
+
+
+def _require_owner_truth_knowledge_recommendation_read_qa(request: Request) -> str:
+    return _require_owner_truth_knowledge_recommendation_qa(
+        request,
+        unavailable_code="ownerTruthKnowledgeRecommendationReadUnavailable",
+    )
+
+
+def _require_owner_truth_knowledge_recommendation_plan_qa(request: Request) -> str:
+    return _require_owner_truth_knowledge_recommendation_qa(
+        request,
+        unavailable_code="ownerTruthKnowledgeRecommendationPlanUnavailable",
+        require_plan_gate=True,
+    )
 
 
 def _require_owner_truth_correction_request_qa(request: Request) -> str:
@@ -919,6 +944,19 @@ def _owner_truth_knowledge_recommendation_read_context(
     )
 
 
+def _owner_truth_knowledge_recommendation_plan_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_knowledge_recommendation_plan_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_correction_request_context(
     request: Request,
     *,
@@ -1162,6 +1200,20 @@ def _owner_truth_knowledge_recommendation_read_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthKnowledgeRecommendationReadInvalid"},
+    )
+
+
+def _owner_truth_knowledge_recommendation_plan_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthMemoryProjectionAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthKnowledgeRecommendationPlanDenied"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthKnowledgeRecommendationPlanInvalid"},
     )
 
 
@@ -3785,6 +3837,7 @@ _OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_FIELDS = frozenset(
         "crisisActive",
     }
 )
+_OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_FIELDS = frozenset({"crisisActive"})
 
 
 def _owner_truth_knowledge_recommendation_candidate(
@@ -3905,6 +3958,54 @@ def read_owner_truth_knowledge_recommendations(
             "schemaVersion": "owner-truth-knowledge-recommendation-read-response-v1",
             "vaultId": context.vault_id,
             "recommendations": result.value_free_summary(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/knowledge-recommendations/plan",
+    include_in_schema=False,
+)
+def plan_owner_truth_knowledge_recommendations(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only server-planned M0-B recommendations with no caller candidates.
+
+    This route is default-off and value-free. It reads only the current Owner
+    Truth coverage plus active/open interview authority; it does not expose
+    question text, persist recommendations, call a provider, or change Echo.
+    """
+
+    try:
+        context = _owner_truth_knowledge_recommendation_plan_context(
+            request,
+            vault_id=vault_id,
+        )
+        unsupported = sorted(
+            set(payload).difference(_OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_FIELDS)
+        )
+        if unsupported:
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "knowledge recommendation plan contains unsupported fields"
+            )
+        result = OwnerTruthKnowledgeRecommendationReadService(store).plan(
+            context=context,
+            crisis_active=payload.get("crisisActive", False),
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_knowledge_recommendation_plan_http_error(error) from error
+    summary = result.value_free_summary()
+    summary["candidateSource"] = "serverPlanned"
+    summary["plannerSchemaVersion"] = OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_SCHEMA_VERSION
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-knowledge-recommendation-plan-response-v1",
+            "vaultId": context.vault_id,
+            "recommendations": summary,
         },
         headers={"Cache-Control": "no-store"},
     )

@@ -31,12 +31,16 @@ from app.domain.owner_truth.knowledge_recommendations import (
     RecommendationEvidenceKind,
     RecommendationSelection,
     RecommendationSelector,
+    ServerPlannedRecommendationCandidateProjector,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 
 
 OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_SCHEMA_VERSION = (
     "owner-truth-knowledge-recommendation-read-v1"
+)
+OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_SCHEMA_VERSION = (
+    "owner-truth-knowledge-recommendation-plan-v1"
 )
 
 
@@ -130,9 +134,11 @@ class OwnerTruthKnowledgeRecommendationReadService:
         store: OwnerTruthKnowledgeRecommendationReadStore,
         *,
         selector: RecommendationSelector | None = None,
+        planner: ServerPlannedRecommendationCandidateProjector | None = None,
     ) -> None:
         self._store = store
         self._selector = selector or RecommendationSelector()
+        self._planner = planner or ServerPlannedRecommendationCandidateProjector()
 
     def read(
         self,
@@ -181,6 +187,84 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 vault_id=context.vault_id,
                 coverage=dimension_read.coverage,
                 candidates=candidate_rows,
+                now=current_time,
+                crisis_active=crisis_active,
+            )
+            return OwnerTruthKnowledgeRecommendationReadResult(
+                dimension_read=dimension_read,
+                selection=selection,
+            )
+
+    def plan(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        now: Optional[datetime] = None,
+        crisis_active: bool = False,
+    ) -> OwnerTruthKnowledgeRecommendationReadResult:
+        """Plan candidates only from current server-side authority.
+
+        This is a QA-only read path. It deliberately accepts no candidate,
+        thread, evidence, ranking, or user-boundary fields from the caller.
+        The planner may return zero candidates when no active/open interview
+        session or no confirmed coverage gap is available.
+        """
+
+        if not isinstance(context, OwnerTruthCommandContext):
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "owner truth command context is required"
+            )
+        if not isinstance(crisis_active, bool):
+            raise OwnerTruthKnowledgeRecommendationReadError("crisis_active must be a boolean")
+        current_time = self._current_time(now)
+        with self._store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-knowledge-recommendation-plan-"
+                f"{context.vault_id}:{context.owner_subject_id}"
+            ),
+            command_id="ownerTruthKnowledgeRecommendationPlan",
+        ):
+            dimension_read = OwnerTruthKnowledgeDimensionReadService(
+                self._store.owner_truth_memory_projection_repository(),
+                self._store.owner_truth_knowledge_dimension_confirmation_repository(),
+            ).read(context=context)
+            if dimension_read.state is not OwnerTruthKnowledgeDimensionReadState.READY:
+                return OwnerTruthKnowledgeRecommendationReadResult(
+                    dimension_read=dimension_read,
+                    selection=None,
+                )
+            assert dimension_read.coverage is not None
+            repository = self._store.owner_truth_conversation_repository()
+            try:
+                thread_authorities = repository.list_recommendation_eligible_thread_authorities(
+                    context=context,
+                )
+            except OwnerTruthConversationAccessDenied as error:
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "current Owner Truth interview authority is unavailable for recommendation planning"
+                ) from error
+            candidates = self._planner.project(
+                owner_subject_id=context.owner_subject_id,
+                vault_id=context.vault_id,
+                authority_epoch=dimension_read.authority_epoch,
+                checkpoint=dimension_read.checkpoint or "",
+                coverage=dimension_read.coverage,
+                thread_authorities=thread_authorities,
+            )
+            self._assert_current_owner_thread_authority(
+                candidates=candidates,
+                context=context,
+                authority_epoch=dimension_read.authority_epoch,
+            )
+            self._assert_current_owner_confirmed_evidence(
+                candidates=candidates,
+                dimension_read=dimension_read,
+            )
+            selection = self._selector.select(
+                owner_subject_id=context.owner_subject_id,
+                vault_id=context.vault_id,
+                coverage=dimension_read.coverage,
+                candidates=candidates,
                 now=current_time,
                 crisis_active=crisis_active,
             )
@@ -274,6 +358,7 @@ class OwnerTruthKnowledgeRecommendationReadService:
 
 
 __all__ = [
+    "OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_SCHEMA_VERSION",
     "OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_SCHEMA_VERSION",
     "OwnerTruthKnowledgeRecommendationReadError",
     "OwnerTruthKnowledgeRecommendationReadResult",

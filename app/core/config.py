@@ -90,6 +90,10 @@ class Settings:
     # A third, independent QA gate for the value-free M0-B recommendation
     # reader. It does not expose a released Echo recommendation surface.
     owner_truth_knowledge_recommendation_read_qa_enabled: bool = False
+    # An independent gate for server-planned, value-free M0-B recommendation
+    # candidates. It must not become reachable when the caller-supplied QA
+    # reader alone is enabled.
+    owner_truth_knowledge_recommendation_plan_qa_enabled: bool = False
     evidence_rollout_retention_days: int = 30
     operations_evidence_hmac_key: Optional[str] = None
     incident_ack_timeout_seconds: int = 900
@@ -259,6 +263,10 @@ class Settings:
             owner_truth_knowledge_recommendation_read_qa_enabled=_env_bool(
                 "OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED",
                 cls.owner_truth_knowledge_recommendation_read_qa_enabled,
+            ),
+            owner_truth_knowledge_recommendation_plan_qa_enabled=_env_bool(
+                "OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED",
+                cls.owner_truth_knowledge_recommendation_plan_qa_enabled,
             ),
             evidence_rollout_retention_days=_env_int(
                 "EVIDENCE_ROLLOUT_RETENTION_DAYS",

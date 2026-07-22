@@ -223,6 +223,8 @@ test -f app/domain/owner_truth/knowledge_dimension_read.py
 test -f app/services/owner_truth_knowledge_recommendation_read.py
 test -f scripts/backend-owner-truth-knowledge-dimension-confirmation-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-knowledge-dimension-confirmation-postgres-smoke.sh
+test -f scripts/backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.sh
 test -f tests/test_owner_truth_knowledge_dimension_confirmation.py
 test -f tests/test_owner_truth_knowledge_dimension_confirmation_api.py
 test -f tests/test_owner_truth_knowledge_dimension_confirmation_migration_contract.py
