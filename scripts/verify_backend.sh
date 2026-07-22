@@ -22,6 +22,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-credential-response-boundary-smoke.sh
 echo "== Owner Truth knowledge dimension confirmation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-knowledge-recommendation-gate.sh
 
+echo "== Migration identity promotion preflight G0 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-migration-identity-promotion-gate.sh
+
 echo "== Backend py_compile =="
 "$PYTHON_BIN" -m compileall -q app tests
 "$PYTHON_BIN" -m py_compile scripts/*.py
