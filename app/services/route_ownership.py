@@ -271,6 +271,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthInterviewSessionAppendMessage",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/boundary",
+                session,
+                "ownerTruthInterviewSessionBoundary",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review",
                 session,

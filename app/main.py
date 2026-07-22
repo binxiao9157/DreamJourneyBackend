@@ -109,11 +109,13 @@ from app.domain.owner_truth.conversation import (
     AppendInterviewMessageCommand,
     ConversationMessageAuthor,
     ConversationMessageKind,
+    InterviewBoundary,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationConflict,
     OwnerTruthConversationError,
     OwnerTruthConversationVersionConflict,
     OwnerTruthInterviewSessionStateConflict,
+    SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
 )
 from app.domain.owner_truth.memory_projection import (
@@ -691,6 +693,64 @@ def _owner_truth_interview_natural_input_context(
         feature="echoTextInput",
         route=f"{request.method.upper()} /v2/vaults/*/interview-sessions",
         user_session_required_code="ownerTruthInterviewNaturalInputUserSessionRequired",
+    )
+
+
+_OWNER_TRUTH_INTERVIEW_BOUNDARY_PAYLOAD_FIELDS = frozenset(
+    {
+        "commandId",
+        "threadId",
+        "expectedSessionVersion",
+        "boundary",
+    }
+)
+_OWNER_TRUTH_FORMAL_INTERVIEW_BOUNDARIES = frozenset(
+    {
+        InterviewBoundary.SKIP_ONCE.value,
+        InterviewBoundary.COOLDOWN.value,
+        InterviewBoundary.DO_NOT_ASK.value,
+    }
+)
+
+
+def _owner_truth_formal_interview_boundary_command(
+    *,
+    payload: Dict[str, Any],
+    session_id: str,
+) -> SetInterviewBoundaryCommand:
+    """Decode the bounded owner-control command without accepting free text.
+
+    Reopening a paused interview is intentionally not part of this route.  It
+    needs a separately reviewed product action rather than an accidental
+    boundary write from a generic client payload.
+    """
+
+    if set(payload) != _OWNER_TRUTH_INTERVIEW_BOUNDARY_PAYLOAD_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    command_id = payload.get("commandId")
+    thread_id = payload.get("threadId")
+    expected_session_version = payload.get("expectedSessionVersion")
+    boundary = payload.get("boundary")
+    if (
+        not isinstance(command_id, str)
+        or not isinstance(thread_id, str)
+        or type(expected_session_version) is not int
+        or not isinstance(boundary, str)
+        or boundary not in _OWNER_TRUTH_FORMAL_INTERVIEW_BOUNDARIES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    return SetInterviewBoundaryCommand(
+        command_id=command_id,
+        thread_id=thread_id,
+        session_id=session_id,
+        expected_session_version=expected_session_version,
+        boundary=InterviewBoundary(boundary),
     )
 
 
@@ -3075,6 +3135,54 @@ def append_owner_truth_interview_narrative(
             status_code=400,
             detail={"code": "ownerTruthInterviewSessionInvalid"},
         ) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_session_command_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/boundary",
+    include_in_schema=False,
+)
+def set_owner_truth_interview_boundary(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Persist one explicit owner-control boundary for a private interview.
+
+    The route accepts only skip-once, cooldown and do-not-ask.  It remains
+    default-off outside QA because it shares the captured ``echoTextInput``
+    release-policy boundary with the natural-input commands.
+    """
+
+    try:
+        context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
+        command = _owner_truth_formal_interview_boundary_command(
+            payload=payload,
+            session_id=session_id,
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-boundary:"
+                f"{context.vault_id}:{command.session_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = OwnerTruthConversationService(
+                store.owner_truth_conversation_repository()
+            ).set_boundary(
+                command=command,
+                context=context,
+            )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
         content=_owner_truth_interview_session_command_response(

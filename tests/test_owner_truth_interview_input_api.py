@@ -68,6 +68,10 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/messages"
 
     @staticmethod
+    def _boundary_path(vault_id: str, session_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/boundary"
+
+    @staticmethod
     def _presentation_path(vault_id: str, session_id: str) -> str:
         return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/presentation"
 
@@ -88,6 +92,32 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
                 "threadId": thread_id or str(uuid4()),
                 "sessionId": session_id or str(uuid4()),
             },
+        )
+
+    def _set_boundary(
+        self,
+        *,
+        vault_id: str,
+        session_id: str,
+        thread_id: str,
+        expected_session_version: int,
+        boundary: str,
+        headers: dict[str, str],
+        command_id: str | None = None,
+        extra: dict[str, object] | None = None,
+    ):
+        payload: dict[str, object] = {
+            "commandId": command_id or str(uuid4()),
+            "threadId": thread_id,
+            "expectedSessionVersion": expected_session_version,
+            "boundary": boundary,
+        }
+        if extra:
+            payload.update(extra)
+        return client.post(
+            self._boundary_path(vault_id, session_id),
+            headers=headers,
+            json=payload,
         )
 
     def test_contract_is_default_hidden(self) -> None:
@@ -196,6 +226,124 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(replay.json()["receipt"]["threadVersion"], 2)
         self.assertEqual(replay.json()["receipt"]["sessionVersion"], 2)
 
+    def test_owner_can_persist_boundary_with_idempotent_value_minimized_receipt(self) -> None:
+        owner_id, headers, _ = self._login("13800139608")
+        vault_id = "vault-interview-boundary-owner"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        start = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(start.status_code, 201)
+
+        command_id = str(uuid4())
+        response = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=1,
+            boundary="cooldown",
+            headers=headers,
+            command_id=command_id,
+        )
+
+        self.assertTrue(owner_id.startswith("user_"))
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(
+            response.json(),
+            {
+                "schemaVersion": "owner-truth-interview-session-command-v1",
+                "vaultId": vault_id,
+                "receipt": {
+                    "status": "created",
+                    "threadId": thread_id,
+                    "sessionId": session_id,
+                    "threadVersion": 1,
+                    "sessionVersion": 2,
+                    "state": "paused",
+                    "boundary": "cooldown",
+                },
+            },
+        )
+        serialized = json.dumps(response.json(), ensure_ascii=False, sort_keys=True)
+        for forbidden in ("message", "source", "candidate", "memory", "fatigue", "text"):
+            self.assertNotIn(forbidden, serialized)
+
+        replay = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=1,
+            boundary="cooldown",
+            headers=headers,
+            command_id=command_id,
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["receipt"]["status"], "deduplicated")
+        self.assertEqual(replay.json()["receipt"]["sessionVersion"], 2)
+
+    def test_boundary_requires_owner_current_version_and_supported_control(self) -> None:
+        owner_id, owner_headers, _ = self._login("13800139609")
+        vault_id = "vault-interview-boundary-controls"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        start = self._start_session(
+            vault_id=vault_id,
+            headers=owner_headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(start.status_code, 201)
+        _, other_headers, _ = self._login("13800139610")
+
+        other = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=1,
+            boundary="doNotAsk",
+            headers=other_headers,
+        )
+        stale = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=9,
+            boundary="doNotAsk",
+            headers=owner_headers,
+        )
+        unsupported = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=1,
+            boundary="open",
+            headers=owner_headers,
+        )
+        unexpected = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=1,
+            boundary="skipOnce",
+            headers=owner_headers,
+            extra={"reason": "do not accept free-form policy reasons"},
+        )
+
+        self.assertTrue(owner_id.startswith("user_"))
+        self.assertEqual(other.status_code, 403, other.text)
+        self.assertEqual(other.json()["detail"]["code"], "ownerTruthInterviewSessionDenied")
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(stale.json()["detail"]["code"], "ownerTruthInterviewSessionConflict")
+        self.assertEqual(unsupported.status_code, 400, unsupported.text)
+        self.assertEqual(unsupported.json()["detail"]["code"], "ownerTruthInterviewSessionInvalid")
+        self.assertEqual(unexpected.status_code, 400, unexpected.text)
+        self.assertEqual(unexpected.json()["detail"]["code"], "ownerTruthInterviewSessionInvalid")
+
     def test_other_owner_and_stale_versions_cannot_append(self) -> None:
         owner_id, owner_headers, _ = self._login("13800139603")
         vault_id = "vault-interview-input-boundary"
@@ -301,6 +449,56 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         )
         self.assertEqual(append.status_code, 201)
         self.assertEqual(append.json()["receipt"]["messageSequence"], 1)
+
+    def test_formal_boundary_requires_captured_echo_policy(self) -> None:
+        _, headers, auth_session_id = self._login("13800139611", qa=False)
+        vault_id = "vault-interview-boundary-policy"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+
+        missing_capture = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=1,
+            boundary="doNotAsk",
+            headers=headers,
+        )
+        self.assertEqual(missing_capture.status_code, 403)
+        self.assertEqual(missing_capture.json()["detail"]["code"], "release_policy_denied")
+        self.assertEqual(missing_capture.json()["detail"]["reason"], "missingCapturedPolicy")
+
+        headers.update(
+            {
+                "X-DreamJourney-Feature": "echoTextInput",
+                "X-DreamJourney-Feature-Decision-Id": "decision-interview-boundary",
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": hashlib.sha256(
+                    auth_session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        start = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(start.status_code, 201, start.text)
+
+        allowed = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=1,
+            boundary="doNotAsk",
+            headers=headers,
+        )
+        self.assertEqual(allowed.status_code, 201, allowed.text)
+        self.assertEqual(allowed.json()["receipt"]["boundary"], "doNotAsk")
+        self.assertEqual(allowed.json()["receipt"]["state"], "paused")
 
     def test_formal_presentation_is_policy_bound_and_content_free(self) -> None:
         _, headers, auth_session_id = self._login("13800139607", qa=False)

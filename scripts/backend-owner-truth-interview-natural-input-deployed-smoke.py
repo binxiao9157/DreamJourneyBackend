@@ -423,12 +423,106 @@ def exercise_formal_natural_input(
                 "presentation must remain content and internals free",
             )
 
+        boundary_path = f"{start_path}/{session_id}/boundary"
+        boundary_payload = {
+            "commandId": str(uuid.uuid4()),
+            "threadId": thread_id,
+            "expectedSessionVersion": 2,
+            "boundary": "cooldown",
+        }
+        boundary_status, boundary_body, boundary_headers = app_request(
+            "POST",
+            boundary_path,
+            token=access_token,
+            payload=boundary_payload,
+            policy_headers=policy_headers,
+        )
+        require(boundary_status == 201, "matching policy capture must persist cooldown")
+        require(
+            boundary_headers.get("cache-control") == "no-store",
+            "boundary receipt must not cache",
+        )
+        boundary_receipt = boundary_body.get("receipt")
+        require(
+            isinstance(boundary_receipt, dict)
+            and boundary_receipt == {
+                "status": "created",
+                "threadId": thread_id,
+                "sessionId": session_id,
+                "threadVersion": 2,
+                "sessionVersion": 3,
+                "state": "paused",
+                "boundary": "cooldown",
+            },
+            "boundary must return only a value-minimized paused receipt",
+        )
+        boundary_serialized = json.dumps(boundary_body, ensure_ascii=False, sort_keys=True)
+        require(
+            "仅用于隔离 smoke" not in boundary_serialized,
+            "boundary receipt must not echo narrative content",
+        )
+
+        replay_status, replay_body, _ = app_request(
+            "POST",
+            boundary_path,
+            token=access_token,
+            payload=boundary_payload,
+            policy_headers=policy_headers,
+        )
+        replay_receipt = replay_body.get("receipt")
+        require(replay_status == 200, "same boundary command must deduplicate")
+        require(
+            isinstance(replay_receipt, dict)
+            and replay_receipt.get("status") == "deduplicated"
+            and replay_receipt.get("sessionVersion") == 3,
+            "deduplicated boundary must retain the committed session version",
+        )
+
+        paused_state_status, paused_state_body, _ = app_request(
+            "GET",
+            f"{start_path}/{session_id}/state",
+            token=access_token,
+            policy_headers=policy_headers,
+        )
+        paused_session = paused_state_body.get("session")
+        require(paused_state_status == 200, "paused state must remain readable")
+        require(
+            isinstance(paused_session, dict)
+            and paused_session.get("state") == "paused"
+            and paused_session.get("boundary") == "cooldown",
+            "cooldown must persist a paused state",
+        )
+
+        paused_presentation_status, paused_presentation_body, _ = app_request(
+            "GET",
+            f"{start_path}/{session_id}/presentation",
+            token=access_token,
+            policy_headers=policy_headers,
+        )
+        require(paused_presentation_status == 200, "paused presentation must remain readable")
+        require(
+            paused_presentation_body == {
+                "schemaVersion": "owner-truth-interview-session-presentation-v1",
+                "vaultId": vault_id,
+                "presentation": {
+                    "state": "paused",
+                    "canContinue": False,
+                    "canContinueLater": True,
+                },
+            },
+            "cooldown must project only bounded paused guidance",
+        )
+
         return {
             "formalMissingCaptureDenied": True,
             "formalMatchingCaptureStarted": True,
             "formalMatchingCaptureAppended": True,
             "formalMatchingCaptureRead": True,
             "formalMatchingCapturePresentation": True,
+            "formalBoundaryPersisted": True,
+            "formalBoundaryDeduplicated": True,
+            "formalBoundaryPausedStateVerified": True,
+            "formalBoundaryPausedPresentationVerified": True,
             "contentFreeStateVerified": True,
             "contentFreePresentationVerified": True,
             "deployedCandidateReviewPolicyDefaultClosed": True,
