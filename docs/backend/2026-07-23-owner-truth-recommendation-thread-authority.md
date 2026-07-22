@@ -55,3 +55,18 @@ scripts/run-backend-owner-truth-conversation-postgres-smoke.sh
 ```
 
 该脚本会创建并删除临时数据库，不读取或写入生产业务数据。
+
+## 部署验收记录
+
+本次代码已部署到服务器 `main@aed7db8`，并在 API 容器中完成以下验证：
+
+```bash
+python scripts/migrate_db.py --apply --build-id aed7db8
+python scripts/migrate_db.py --verify
+scripts/run-backend-owner-truth-conversation-postgres-smoke.sh
+curl -fsS https://dreamjourney-api.liftora.cn/ready
+```
+
+结果：迁移账本头为 `0038` 且无待执行迁移；隔离 Postgres smoke 通过；公网
+`/ready` 返回数据库读写、迁移头、认证配置均为 `ready`。本次没有对线上业务
+Vault、档案或会话记录执行读取、写入或迁移。
