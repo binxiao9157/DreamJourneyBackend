@@ -220,14 +220,19 @@ class OwnerTruthInterviewCandidateBatchDecisionTests(TestCase):
             reason_code="ownerReviewed",
         )
 
-    def _formal_context(self, *, decision_hash_character: str) -> OwnerTruthCommandContext:
+    def _formal_context(
+        self,
+        *,
+        decision_hash_character: str,
+        feature: str = "ownerTruthCandidateReview",
+    ) -> OwnerTruthCommandContext:
         return OwnerTruthCommandContext(
             vault_id=self.vault_id,
             owner_subject_id=self.owner_subject_id,
             actor_subject_id=self.owner_subject_id,
             policy_version="owner-truth-v1",
             authorization_capture=OwnerTruthCommandAuthorizationCapture(
-                feature="ownerTruthCandidateReview",
+                feature=feature,
                 policy_version="release-policy-v1",
                 policy_revision=1,
                 emergency_revision=0,
@@ -314,6 +319,28 @@ class OwnerTruthInterviewCandidateBatchDecisionTests(TestCase):
 
         self.assertEqual(len(store.ledger_repository.snapshot()), 1)
         self.assertEqual(len(store.review_repository.snapshot()["receipts"]), 1)
+
+    def test_formal_confirmation_rejects_capture_from_another_feature_before_write(self) -> None:
+        candidate = self._candidate(summary="不允许借用其他功能的正式授权。")
+        service, store = self._service(candidate)
+
+        with self.assertRaisesRegex(
+            OwnerTruthInterviewCandidateBatchDecisionConflict,
+            "requires ownerTruthCandidateReview authorization",
+        ):
+            service.accept_selected(
+                command=self._command(candidate),
+                context=self._formal_context(
+                    decision_hash_character="e",
+                    feature="echoTextInput",
+                ),
+            )
+
+        self.assertEqual(store.ledger_repository.snapshot(), {})
+        self.assertEqual(store.ledger_repository.receipt_links_snapshot(), {})
+        snapshot = store.review_repository.snapshot()
+        self.assertEqual(snapshot["receipts"], {})
+        self.assertEqual(snapshot["candidates"][candidate.candidate_id]["decision"], "pending")
 
     def test_formal_confirmation_replay_allows_a_fresh_policy_decision(self) -> None:
         candidate = self._candidate(summary="正式确认可使用新策略凭据重试。")

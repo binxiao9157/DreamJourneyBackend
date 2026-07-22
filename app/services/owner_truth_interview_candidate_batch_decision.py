@@ -36,6 +36,9 @@ from app.domain.owner_truth.source_commands import (
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewResult
 
 
+FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE = "ownerTruthCandidateReview"
+
+
 @dataclass(frozen=True)
 class OwnerTruthInterviewCandidateBatchDecisionLedgerRecord:
     batch_decision_id: str
@@ -121,6 +124,25 @@ def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
     if context.actor_subject_id != context.owner_subject_id:
         raise OwnerTruthCandidateReviewAccessDenied(
             "only the Vault Owner may accept an interview Candidate batch"
+        )
+
+
+def _assert_formal_confirmation_authorization_capture(
+    context: OwnerTruthCommandContext,
+) -> None:
+    """Bind a formal batch-confirmation root to its one release-policy feature.
+
+    Empty capture remains the legacy QA-only path. Any populated capture is a
+    formal confirmation receipt and cannot be borrowed from another feature.
+    """
+
+    capture = context.authorization_capture
+    if (
+        capture is not None
+        and capture.feature != FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE
+    ):
+        raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+            "formal interview Candidate confirmation requires ownerTruthCandidateReview authorization"
         )
 
 
@@ -612,6 +634,7 @@ class OwnerTruthInterviewCandidateBatchDecisionService:
         context: OwnerTruthCommandContext,
     ) -> OwnerTruthInterviewCandidateBatchAcceptResult:
         _assert_owner_context(context)
+        _assert_formal_confirmation_authorization_capture(context)
         with self._store.request_unit_of_work(
             correlation_id=(
                 "owner-truth-interview-candidate-batch-accept-"

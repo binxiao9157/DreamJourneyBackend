@@ -635,6 +635,62 @@ def assert_legacy_qa_root_survives_upgrade(
     require(link_count == 0, "0036 must not fabricate receipt links for a legacy QA root")
 
 
+def assert_non_confirmation_feature_evidence_is_rejected(
+    dsn: str,
+    *,
+    vault_id: str,
+    owner_subject_id: str,
+    review_batch_id: str,
+) -> None:
+    """The DB boundary must reject a well-formed capture from another feature."""
+
+    evidence = {
+        "schemaVersion": "owner-truth-command-authorization-capture-v1",
+        "feature": "echoTextInput",
+        "policyVersion": "release-policy-v1",
+        "policyRevision": 1,
+        "emergencyRevision": 0,
+        "accountGenerationHash": "a" * 24,
+        "decisionIdHash": "b" * 64,
+        "audience": "owner",
+        "cohort": "closedPilotAdultSelf",
+        "clientBuild": 1,
+        "expiresAt": "2026-07-22T00:00:00+00:00",
+    }
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.interview_review_batch_candidate_decisions (
+                        id, vault_id, owner_subject_id, review_batch_id,
+                        command_id_hash, payload_hash, selection_count,
+                        actor_subject_id, policy_version, authority_epoch,
+                        authorization_evidence
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        vault_id,
+                        owner_subject_id,
+                        review_batch_id,
+                        canonical_hash({"command": "wrong-formal-feature"}),
+                        canonical_hash({"selection": "wrong-formal-feature"}),
+                        1,
+                        owner_subject_id,
+                        OWNER_TRUTH_SCHEMA_VERSION,
+                        0,
+                        Jsonb(evidence),
+                    ),
+                )
+            except psycopg.Error:
+                connection.rollback()
+            else:
+                raise AssertionError(
+                    "non-confirmation authorization feature unexpectedly passed DB constraint"
+                )
+
+
 def assert_persisted_authority_evidence(
     dsn: str,
     *,
@@ -793,10 +849,16 @@ def main() -> None:
             statement_timeout_ms=15000,
         )
         upgrade = migrator.apply()
-        require(upgrade["appliedVersions"] == ["0036"], "upgrade must only apply authority receipts")
+        require(
+            upgrade["appliedVersions"] == ["0036", "0037"],
+            "upgrade must apply authority receipts and the feature constraint",
+        )
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(verified["expectedHead"] == "0036", "authority receipt migration must be present")
+        require(
+            verified["expectedHead"] == "0037",
+            "authority receipt feature-constraint migration must be present",
+        )
         assert_legacy_qa_root_survives_upgrade(
             test_dsn,
             vault_id=legacy_vault_id,
@@ -821,6 +883,12 @@ def main() -> None:
             test_dsn,
             vault_id=vault_id,
             owner_subject_id=owner_id,
+        )
+        assert_non_confirmation_feature_evidence_is_rejected(
+            test_dsn,
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            review_batch_id=review_batch_id,
         )
         path = (
             f"/v2/vaults/{vault_id}/interview-review-batches/"
@@ -936,7 +1004,8 @@ def main() -> None:
 
         print(
             "formal interview confirmation postgres smoke passed "
-            "migration0036=true legacyQaUpgradeCompatible=true qaBypassDenied=true "
+            "migration0037=true legacyQaUpgradeCompatible=true "
+            "wrongFeatureAuthorityRejected=true qaBypassDenied=true "
             "authorityCapturePersisted=true "
             "receiptLinkPersisted=true receiptLinkTamperDenied=true "
             "replayDeduplicated=true concurrentCommandDeduplicated=true "

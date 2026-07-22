@@ -1,0 +1,13 @@
+{
+  "version": "0037",
+  "name": "owner_truth_interview_confirmation_feature_constraint",
+  "phase": "contract",
+  "compatibility": "backwardCompatible",
+  "runtimeCompatibility": "ownerTruthInterviewConfirmationFeatureConstraint",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthInterviewCandidateBatchDecisionM0A": false,
+    "ownerTruthInterviewConfirmation": false
+  }
+}
