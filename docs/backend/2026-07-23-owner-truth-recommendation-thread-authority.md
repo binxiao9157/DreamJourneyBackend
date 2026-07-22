@@ -172,3 +172,22 @@ curl -fsS https://dreamjourney-api.liftora.cn/ready
 `doNotAskSessionRejected=true` 和 `skipOnceSessionRejected=true`。这证明推荐读取的真实
 持久化查询会同时校验 Thread 与关联 Session 的状态/边界；测试数据库在运行后删除，未读取
 或写入线上业务 Vault、档案、会话或推荐数据。
+
+## 服务端 breadth 规划部署验收
+
+`main@426c7bb` 已部署到 API 容器。本次无数据库迁移，部署后执行：
+
+```bash
+python scripts/migrate_db.py --apply --build-id 426c7bb
+python scripts/migrate_db.py --verify
+scripts/run-backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.sh
+curl -fsS https://dreamjourney-api.liftora.cn/ready
+```
+
+结果：schema head 保持 `0038`、无待执行迁移；隔离 Postgres smoke 输出
+`defaultHidden=true`、`serverPlanned=true`、`breadthOnly=true`、
+`clientInjectionRejected=true`、`doNotAskSuppressed=true`、
+`supersededEvidenceExcluded=true` 和 `readOnly=true`。这证明实际持久化查询只在当前
+Owner-confirmed 覆盖和 active/open Session 同时成立时生成一条 value-free breadth 候选；
+它不会接受客户端 Candidate/Thread 注入，也不会写入产品数据。测试数据库在运行后删除，
+公网 `/ready` 为 `ready`。
