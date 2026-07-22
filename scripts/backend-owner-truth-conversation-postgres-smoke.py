@@ -889,9 +889,19 @@ def main() -> None:
                 ),
             ),
         )
-        refreshed_extraction = OwnerTruthCandidateExtractionService(restarted_store).record(
-            refreshed_extraction_command
-        )
+        # The production async consumer intentionally completes a Source effect
+        # only once.  Persist a historical processor revision directly through
+        # the repository so this smoke targets the read-side invariant: existing
+        # immutable ExtractionResults must never be merged into one review.
+        with restarted_store.request_unit_of_work(
+            correlation_id="owner-truth-conversation-smoke-refresh-baseline",
+            command_id=refreshed_extraction_command.extraction_id,
+        ):
+            refreshed_extraction = (
+                restarted_store.owner_truth_candidate_extraction_repository().persist(
+                    refreshed_extraction_command.write_record()
+                )
+            )
         require(
             refreshed_extraction.outcome == "created",
             "new processor revision must persist one independent ExtractionResult",
@@ -925,9 +935,13 @@ def main() -> None:
             failure_code="fixtureTransientFailure",
             retryable=True,
         )
-        failed_refresh = OwnerTruthCandidateExtractionService(restarted_store).record(
-            failed_refresh_command
-        )
+        with restarted_store.request_unit_of_work(
+            correlation_id="owner-truth-conversation-smoke-failed-refresh",
+            command_id=failed_refresh_command.extraction_id,
+        ):
+            failed_refresh = restarted_store.owner_truth_candidate_extraction_repository().persist(
+                failed_refresh_command.write_record()
+            )
         require(
             failed_refresh.outcome == "created"
             and failed_refresh.status is ExtractionResultStatus.FAILED,
