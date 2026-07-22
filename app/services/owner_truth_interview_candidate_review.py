@@ -253,9 +253,11 @@ class InMemoryOwnerTruthInterviewCandidateReviewRepository:
                 and extraction.source_version == admission.source_version
             )
             latest = max(matching_extractions, key=lambda item: (item.order, item.extraction_id), default=None)
-            successful_ids = {
-                item.extraction_id for item in matching_extractions if item.status == "succeeded"
-            }
+            selected = max(
+                (item for item in matching_extractions if item.status == "succeeded"),
+                key=lambda item: (item.order, item.extraction_id),
+                default=None,
+            )
             items: list[OwnerTruthInterviewReviewCandidateItem] = []
             for stored in self._candidates.values():
                 candidate = (
@@ -266,7 +268,8 @@ class InMemoryOwnerTruthInterviewCandidateReviewRepository:
                 if candidate is None:
                     continue
                 if (
-                    stored.extraction_id not in successful_ids
+                    selected is None
+                    or stored.extraction_id != selected.extraction_id
                     or stored.source_version != admission.source_version
                     or candidate.vault_id != context.vault_id
                     or candidate.owner_subject_id != context.owner_subject_id
@@ -312,6 +315,7 @@ class InMemoryOwnerTruthInterviewCandidateReviewRepository:
                 has_candidates=bool(ordered),
             ),
             latest_extraction_status=latest_status,
+            selected_extraction_id=(selected.extraction_id if selected is not None else None),
             batch_candidates=batch_candidates,
             single_candidates=single_candidates,
         )
@@ -376,32 +380,50 @@ class PostgresOwnerTruthInterviewCandidateReviewRepository:
             latest_extraction = cursor.fetchone()
             cursor.execute(
                 """
-                SELECT c.id, c.extraction_result_id, c.candidate_kind, c.sensitivity,
-                    c.row_version, c.payload, c.created_at
-                FROM owner_truth.memory_candidates AS c
-                JOIN owner_truth.extraction_results AS e
-                  ON e.vault_id = c.vault_id
-                 AND e.id = c.extraction_result_id
-                WHERE c.vault_id = %s
-                  AND c.owner_subject_id = %s
-                  AND c.source_id = %s
-                  AND c.decision_status = 'pending'
-                  AND c.authority_epoch = %s
-                  AND e.source_id = %s
-                  AND e.source_version = %s
-                  AND e.status = 'succeeded'
-                ORDER BY c.created_at ASC, c.id ASC
+                SELECT id
+                FROM owner_truth.extraction_results
+                WHERE vault_id = %s
+                  AND source_id = %s
+                  AND source_version = %s
+                  AND status = 'succeeded'
+                ORDER BY completed_at DESC NULLS LAST, created_at DESC, id DESC
+                LIMIT 1
                 """,
-                (
-                    context.vault_id,
-                    context.owner_subject_id,
-                    admission["source_id"],
-                    int(admission["vault_authority_epoch"]),
-                    admission["source_id"],
-                    int(admission["source_version"]),
-                ),
+                (context.vault_id, admission["source_id"], int(admission["source_version"])),
             )
-            rows = cursor.fetchall()
+            selected_extraction = cursor.fetchone()
+            rows: list[Mapping[str, Any]] = []
+            if selected_extraction is not None:
+                cursor.execute(
+                    """
+                    SELECT c.id, c.extraction_result_id, c.candidate_kind, c.sensitivity,
+                        c.row_version, c.payload, c.created_at
+                    FROM owner_truth.memory_candidates AS c
+                    JOIN owner_truth.extraction_results AS e
+                      ON e.vault_id = c.vault_id
+                     AND e.id = c.extraction_result_id
+                    WHERE c.vault_id = %s
+                      AND c.owner_subject_id = %s
+                      AND c.source_id = %s
+                      AND c.decision_status = 'pending'
+                      AND c.authority_epoch = %s
+                      AND c.extraction_result_id = %s
+                      AND e.source_id = %s
+                      AND e.source_version = %s
+                      AND e.status = 'succeeded'
+                    ORDER BY c.created_at ASC, c.id ASC
+                    """,
+                    (
+                        context.vault_id,
+                        context.owner_subject_id,
+                        admission["source_id"],
+                        int(admission["vault_authority_epoch"]),
+                        selected_extraction["id"],
+                        admission["source_id"],
+                        int(admission["source_version"]),
+                    ),
+                )
+                rows = cursor.fetchall()
         items = tuple(self._candidate_item_from_row(row) for row in rows)
         batch_candidates = tuple(
             item for item in items if item.review_path is InterviewCandidateReviewPath.BATCH
@@ -423,6 +445,11 @@ class PostgresOwnerTruthInterviewCandidateReviewRepository:
                 has_candidates=bool(items),
             ),
             latest_extraction_status=latest_status,
+            selected_extraction_id=(
+                str(selected_extraction["id"])
+                if selected_extraction is not None
+                else None
+            ),
             batch_candidates=batch_candidates,
             single_candidates=single_candidates,
         )

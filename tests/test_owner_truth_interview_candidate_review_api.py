@@ -525,6 +525,10 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
         )
         self.assertEqual(initial.json()["review"]["readiness"], "reviewReady")
         self.assertEqual(
+            initial.json()["review"]["selectedExtractionId"],
+            initial.json()["batchCandidates"][0]["extractionId"],
+        )
+        self.assertEqual(
             initial.json()["batchCandidates"][0]["candidateId"], standard.candidate_id
         )
         self.assertEqual(initial.json()["batchCandidates"][0]["reviewPath"], "batch")

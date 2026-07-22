@@ -97,6 +97,7 @@ class OwnerTruthInterviewCandidateReviewComposition:
     authority_epoch: int
     readiness: InterviewCandidateReviewReadiness
     latest_extraction_status: str | None
+    selected_extraction_id: str | None
     batch_candidates: tuple[OwnerTruthInterviewReviewCandidateItem, ...]
     single_candidates: tuple[OwnerTruthInterviewReviewCandidateItem, ...]
 
@@ -121,6 +122,12 @@ class OwnerTruthInterviewCandidateReviewComposition:
                 "latest_extraction_status",
                 require_nonblank(self.latest_extraction_status, field="latest_extraction_status"),
             )
+        if self.selected_extraction_id is not None:
+            object.__setattr__(
+                self,
+                "selected_extraction_id",
+                require_uuid(self.selected_extraction_id, field="selected_extraction_id"),
+            )
         object.__setattr__(self, "batch_candidates", tuple(self.batch_candidates))
         object.__setattr__(self, "single_candidates", tuple(self.single_candidates))
         all_items = self.batch_candidates + self.single_candidates
@@ -143,6 +150,16 @@ class OwnerTruthInterviewCandidateReviewComposition:
             raise OwnerTruthInterviewCandidateReviewError(
                 "non-ready composition cannot expose pending Candidates"
             )
+        if all_items and self.selected_extraction_id is None:
+            raise OwnerTruthInterviewCandidateReviewError(
+                "reviewable Candidates require one selected ExtractionResult"
+            )
+        if self.selected_extraction_id is not None and any(
+            item.extraction_id != self.selected_extraction_id for item in all_items
+        ):
+            raise OwnerTruthInterviewCandidateReviewError(
+                "review composition cannot mix Candidate ExtractionResult baselines"
+            )
 
     @property
     def candidate_count(self) -> int:
@@ -160,6 +177,7 @@ class OwnerTruthInterviewCandidateReviewComposition:
             "authorityEpoch": self.authority_epoch,
             "readiness": self.readiness.value,
             "latestExtractionStatus": self.latest_extraction_status,
+            "selectedExtractionId": self.selected_extraction_id,
             "batchCandidateCount": len(self.batch_candidates),
             "singleCandidateCount": len(self.single_candidates),
         }

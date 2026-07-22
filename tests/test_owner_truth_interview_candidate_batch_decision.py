@@ -181,6 +181,7 @@ class OwnerTruthInterviewCandidateBatchDecisionTests(TestCase):
             authority_epoch=0,
             readiness=InterviewCandidateReviewReadiness.REVIEW_READY,
             latest_extraction_status="succeeded",
+            selected_extraction_id=self.extraction_id,
             batch_candidates=tuple(
                 item for item in items if item.review_path is InterviewCandidateReviewPath.BATCH
             ),

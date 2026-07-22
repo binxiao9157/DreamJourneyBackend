@@ -85,6 +85,7 @@ class OwnerTruthInterviewCandidateReviewCompositionTests(TestCase):
     def _candidate(
         self,
         *,
+        extraction_id: str | None = None,
         sensitivity: SensitivityLevel = SensitivityLevel.STANDARD,
         review_mode: CandidateReviewMode = CandidateReviewMode.BATCH,
         decision: CandidateDecision = CandidateDecision.PENDING,
@@ -101,7 +102,7 @@ class OwnerTruthInterviewCandidateReviewCompositionTests(TestCase):
             review_mode=review_mode,
         )
         record = proposal.write_record(
-            extraction_id=self.extraction_id,
+            extraction_id=extraction_id or self.extraction_id,
             source_ref=SourceRef(
                 vault_id=self.vault_id,
                 source_id=self.source_id,
@@ -126,10 +127,15 @@ class OwnerTruthInterviewCandidateReviewCompositionTests(TestCase):
             payload=record.payload,
         )
 
-    def _seed_candidate(self, candidate: OwnerTruthCandidateSnapshot) -> None:
+    def _seed_candidate(
+        self,
+        candidate: OwnerTruthCandidateSnapshot,
+        *,
+        extraction_id: str | None = None,
+    ) -> None:
         self.repository.seed_candidate(
             candidate=candidate,
-            extraction_id=self.extraction_id,
+            extraction_id=extraction_id or self.extraction_id,
             source_version=1,
         )
 
@@ -178,6 +184,72 @@ class OwnerTruthInterviewCandidateReviewCompositionTests(TestCase):
         self.assertEqual(summary["batchCandidateCount"], 1)
         self.assertEqual(summary["singleCandidateCount"], 2)
         self.assertNotIn("需要逐条确认的敏感候选。", str(summary))
+
+    def test_composition_exposes_only_the_latest_successful_extraction_after_processor_drift(self) -> None:
+        latest_extraction_id = str(uuid4())
+        self.repository.seed_extraction(
+            extraction_id=latest_extraction_id,
+            vault_id=self.vault_id,
+            source_id=self.source_id,
+            source_version=1,
+            status="succeeded",
+            order=2,
+        )
+        prior_candidate = self._candidate(
+            extraction_id=self.extraction_id,
+            summary="旧模型生成的候选，不应与新版候选混入同一审核批次。",
+        )
+        latest_candidate = self._candidate(
+            extraction_id=latest_extraction_id,
+            summary="新版模型生成的候选，是当前审核基线。",
+        )
+        self._seed_candidate(prior_candidate, extraction_id=self.extraction_id)
+        self._seed_candidate(latest_candidate, extraction_id=latest_extraction_id)
+
+        composition = self.service.compose(
+            review_batch_id=self.review_batch_id,
+            context=self.context,
+        )
+
+        self.assertEqual(composition.selected_extraction_id, latest_extraction_id)
+        self.assertEqual(composition.latest_extraction_status, "succeeded")
+        self.assertEqual(
+            tuple(item.candidate_id for item in composition.batch_candidates),
+            (latest_candidate.candidate_id,),
+        )
+        self.assertNotIn(
+            prior_candidate.candidate_id,
+            tuple(item.candidate_id for item in composition.batch_candidates),
+        )
+
+    def test_failed_new_attempt_keeps_the_latest_successful_candidate_baseline(self) -> None:
+        prior_candidate = self._candidate(
+            extraction_id=self.extraction_id,
+            summary="已成功生成且仍待审核的候选不能因后续失败而消失。",
+        )
+        self._seed_candidate(prior_candidate, extraction_id=self.extraction_id)
+        failed_extraction_id = str(uuid4())
+        self.repository.seed_extraction(
+            extraction_id=failed_extraction_id,
+            vault_id=self.vault_id,
+            source_id=self.source_id,
+            source_version=1,
+            status="failed",
+            order=2,
+        )
+
+        composition = self.service.compose(
+            review_batch_id=self.review_batch_id,
+            context=self.context,
+        )
+
+        self.assertEqual(composition.selected_extraction_id, self.extraction_id)
+        self.assertEqual(composition.latest_extraction_status, "failed")
+        self.assertEqual(composition.readiness, InterviewCandidateReviewReadiness.REVIEW_READY)
+        self.assertEqual(
+            tuple(item.candidate_id for item in composition.batch_candidates),
+            (prior_candidate.candidate_id,),
+        )
 
     def test_failed_or_pending_extraction_exposes_no_reviewable_candidate(self) -> None:
         failed_repository = InMemoryOwnerTruthInterviewCandidateReviewRepository()

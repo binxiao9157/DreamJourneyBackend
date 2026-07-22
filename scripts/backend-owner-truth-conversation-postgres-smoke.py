@@ -863,6 +863,92 @@ def main() -> None:
             and restored_read.boundary is InterviewBoundary.OPEN,
             "session-state read adapter must remain value-minimized after restart",
         )
+
+        # A processor/model revision creates a new immutable ExtractionResult for
+        # the same admitted Source.  The review must use exactly that newest
+        # successful baseline, rather than mixing its Candidate with historical
+        # pending Candidates from an earlier extraction.
+        refreshed_extraction_command = SyntheticCandidateExtractionCommand(
+            intent=source_effect_intent,
+            extractor_id="deterministicInterviewFixtureV2",
+            model_id="fixture-v2",
+            prompt_version="interview-candidate-review-v2",
+            policy_version=context.policy_version,
+            source_content_hash=candidate_proposal.source_content_hash,
+            status=ExtractionResultStatus.SUCCEEDED,
+            proposals=(
+                CandidateProposal(
+                    memory_kind=MemoryKind.EXPERIENCE,
+                    perspective_type=PerspectiveType.FIRST_PERSON,
+                    epistemic_status=EpistemicStatus.RECALLED,
+                    sensitivity=SensitivityLevel.STANDARD,
+                    content={"summary": "新版提取的唯一当前审核候选。"},
+                    evidence_span=CandidateEvidenceSpan(start=0, end=5),
+                    confidence=0.81,
+                    review_mode=CandidateReviewMode.BATCH,
+                ),
+            ),
+        )
+        refreshed_extraction = OwnerTruthCandidateExtractionService(restarted_store).record(
+            refreshed_extraction_command
+        )
+        require(
+            refreshed_extraction.outcome == "created",
+            "new processor revision must persist one independent ExtractionResult",
+        )
+        refreshed_composition = OwnerTruthInterviewCandidateReviewCompositionService(
+            restarted_store
+        ).compose(
+            review_batch_id=review_batch.review_batch.review_batch_id,
+            context=context,
+        )
+        require(
+            refreshed_composition.selected_extraction_id == refreshed_extraction.extraction_id,
+            "review composition must select the newest successful ExtractionResult",
+        )
+        require(
+            tuple(item.candidate_id for item in refreshed_composition.batch_candidates)
+            == refreshed_extraction.candidate_ids
+            and not refreshed_composition.single_candidates,
+            "review composition must not mix historical Candidate baselines",
+        )
+
+        failed_refresh_command = SyntheticCandidateExtractionCommand(
+            intent=source_effect_intent,
+            extractor_id="deterministicInterviewFixtureV3",
+            model_id="fixture-v3",
+            prompt_version="interview-candidate-review-v3",
+            policy_version=context.policy_version,
+            source_content_hash=candidate_proposal.source_content_hash,
+            status=ExtractionResultStatus.FAILED,
+            proposals=(),
+            failure_code="fixtureTransientFailure",
+            retryable=True,
+        )
+        failed_refresh = OwnerTruthCandidateExtractionService(restarted_store).record(
+            failed_refresh_command
+        )
+        require(
+            failed_refresh.outcome == "created"
+            and failed_refresh.status is ExtractionResultStatus.FAILED,
+            "a later failed ExtractionResult must persist without Candidates",
+        )
+        failed_refresh_composition = OwnerTruthInterviewCandidateReviewCompositionService(
+            restarted_store
+        ).compose(
+            review_batch_id=review_batch.review_batch.review_batch_id,
+            context=context,
+        )
+        require(
+            failed_refresh_composition.latest_extraction_status == "failed"
+            and failed_refresh_composition.selected_extraction_id == refreshed_extraction.extraction_id,
+            "a later failed retry must retain the latest successful review baseline",
+        )
+        require(
+            tuple(item.candidate_id for item in failed_refresh_composition.batch_candidates)
+            == refreshed_extraction.candidate_ids,
+            "a failed retry must not hide the prior reviewable Candidate",
+        )
         restored_batches = invoke(
             restarted_store,
             command_id="list-conversation-review-batch-after-restart",
