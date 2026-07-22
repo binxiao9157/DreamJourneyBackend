@@ -1,0 +1,14 @@
+{
+  "version": "0038",
+  "name": "owner_truth_interview_do_not_ask_restore_receipts",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthInterviewDoNotAskRestoreReceipt",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthConversationV1": false,
+    "guidedInterviewM0A": false,
+    "ownerTruthInterviewBoundaryM0A": false,
+    "ownerTruthInterviewDoNotAskRestoreM0A": false
+  }
+}
