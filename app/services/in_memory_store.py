@@ -71,6 +71,9 @@ from app.services.owner_truth_answer_citation import (
 from app.services.owner_truth_knowledge_dimension_confirmation import (
     InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository,
 )
+from app.services.owner_truth_saved_continuation import (
+    InMemoryOwnerTruthSavedContinuationCueRepository,
+)
 from app.services.owner_truth_correction_request import (
     InMemoryOwnerTruthCorrectionRequestRepository,
 )
@@ -143,6 +146,9 @@ class InMemoryStore:
         )
         self._owner_truth_knowledge_dimension_confirmation_repository = (
             InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository()
+        )
+        self._owner_truth_saved_continuation_cue_repository = (
+            InMemoryOwnerTruthSavedContinuationCueRepository()
         )
         self._owner_truth_correction_request_repository = (
             InMemoryOwnerTruthCorrectionRequestRepository(
@@ -250,6 +256,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository:
         return self._owner_truth_knowledge_dimension_confirmation_repository
+
+    def owner_truth_saved_continuation_cue_repository(
+        self,
+    ) -> InMemoryOwnerTruthSavedContinuationCueRepository:
+        return self._owner_truth_saved_continuation_cue_repository
 
     def owner_truth_correction_request_repository(
         self,

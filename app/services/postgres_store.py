@@ -113,6 +113,9 @@ from app.services.owner_truth_answer_citation import (
 from app.services.owner_truth_knowledge_dimension_confirmation import (
     PostgresOwnerTruthKnowledgeDimensionConfirmationRepository,
 )
+from app.services.owner_truth_saved_continuation import (
+    PostgresOwnerTruthSavedContinuationCueRepository,
+)
 from app.services.owner_truth_correction_request import (
     PostgresOwnerTruthCorrectionRequestRepository,
 )
@@ -370,6 +373,16 @@ class PostgresStore:
                 "knowledge dimension confirmation requires an active unit of work"
             )
         return PostgresOwnerTruthKnowledgeDimensionConfirmationRepository(active.connection)
+
+    def owner_truth_saved_continuation_cue_repository(
+        self,
+    ) -> PostgresOwnerTruthSavedContinuationCueRepository:
+        """Return QA-only saved continuation cue persistence in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("saved continuation cue requires an active unit of work")
+        return PostgresOwnerTruthSavedContinuationCueRepository(active.connection)
 
     def owner_truth_correction_request_repository(
         self,

@@ -15,6 +15,8 @@ from typing import Any, Iterable, Optional, Protocol
 
 from app.domain.owner_truth.contracts import OwnerTruthContractError
 from app.domain.owner_truth.conversation import (
+    InterviewBoundary,
+    InterviewSessionState,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationThreadAuthoritySnapshot,
 )
@@ -31,6 +33,8 @@ from app.domain.owner_truth.knowledge_recommendations import (
     RecommendationEvidenceKind,
     RecommendationSelection,
     RecommendationSelector,
+    RecommendationSlot,
+    ServerPlannedContinuationCue,
     ServerPlannedRecommendationCandidateProjector,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
@@ -64,6 +68,9 @@ class OwnerTruthKnowledgeRecommendationReadStore(Protocol):
         ...
 
     def owner_truth_conversation_repository(self) -> Any:
+        ...
+
+    def owner_truth_saved_continuation_cue_repository(self) -> Any:
         ...
 
 
@@ -243,6 +250,15 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 raise OwnerTruthKnowledgeRecommendationReadError(
                     "current Owner Truth interview authority is unavailable for recommendation planning"
                 ) from error
+            continuity_cues = self._current_saved_continuation_cues(
+                cues=self._store.owner_truth_saved_continuation_cue_repository().list_for_recommendation(
+                    context=context,
+                ),
+                thread_authorities=thread_authorities,
+                dimension_read=dimension_read,
+                context=context,
+                conversation_repository=repository,
+            )
             candidates = self._planner.project(
                 owner_subject_id=context.owner_subject_id,
                 vault_id=context.vault_id,
@@ -250,6 +266,7 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 checkpoint=dimension_read.checkpoint or "",
                 coverage=dimension_read.coverage,
                 thread_authorities=thread_authorities,
+                continuity_cues=continuity_cues,
             )
             self._assert_current_owner_thread_authority(
                 candidates=candidates,
@@ -259,6 +276,7 @@ class OwnerTruthKnowledgeRecommendationReadService:
             self._assert_current_owner_confirmed_evidence(
                 candidates=candidates,
                 dimension_read=dimension_read,
+                allow_saved_continuation=True,
             )
             selection = self._selector.select(
                 owner_subject_id=context.owner_subject_id,
@@ -300,11 +318,20 @@ class OwnerTruthKnowledgeRecommendationReadService:
         *,
         candidates: Iterable[RecommendationCandidate],
         dimension_read: OwnerTruthKnowledgeDimensionReadResult,
+        allow_saved_continuation: bool = False,
     ) -> None:
         assert dimension_read.coverage is not None
         allowed = frozenset(dimension_read.included_memory_version_ids)
         for candidate in candidates:
-            if candidate.evidence_kind is not RecommendationEvidenceKind.CONFIRMED_MEMORY:
+            if candidate.evidence_kind is RecommendationEvidenceKind.CONFIRMED_MEMORY:
+                pass
+            elif (
+                allow_saved_continuation
+                and candidate.evidence_kind is RecommendationEvidenceKind.SAVED_CONTINUATION
+                and candidate.slot is RecommendationSlot.CONTINUITY
+            ):
+                pass
+            else:
                 raise OwnerTruthKnowledgeRecommendationReadError(
                     "QA recommendation candidates must use confirmedMemory evidence"
                 )
@@ -319,6 +346,72 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 raise OwnerTruthKnowledgeRecommendationReadError(
                     "candidate evidence_refs must confirm the target knowledge dimension"
                 )
+
+    @staticmethod
+    def _current_saved_continuation_cues(
+        *,
+        cues: Iterable[ServerPlannedContinuationCue],
+        thread_authorities: Iterable[OwnerTruthConversationThreadAuthoritySnapshot],
+        dimension_read: OwnerTruthKnowledgeDimensionReadResult,
+        context: OwnerTruthCommandContext,
+        conversation_repository: Any,
+    ) -> tuple[ServerPlannedContinuationCue, ...]:
+        """Keep only explicit cues still bound to the current private state.
+
+        Historical cue receipts are intentionally append-only. A stale session,
+        authority epoch, replaced MemoryVersion, or newly covered facet simply
+        yields no continuity candidate; it is never silently revived.
+        """
+
+        assert dimension_read.coverage is not None
+        try:
+            cue_rows = tuple(cues)
+            authority_rows = tuple(thread_authorities)
+        except TypeError as exc:
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "saved continuation cue repository returned a non-iterable value"
+            ) from exc
+        active_sessions = {
+            (item.thread_id, item.session_id)
+            for item in authority_rows
+            if isinstance(item, OwnerTruthConversationThreadAuthoritySnapshot)
+            and item.is_recommendation_eligible
+        }
+        current: list[ServerPlannedContinuationCue] = []
+        for cue in cue_rows:
+            if not isinstance(cue, ServerPlannedContinuationCue):
+                raise OwnerTruthKnowledgeRecommendationReadError(
+                    "saved continuation cue repository returned an invalid cue"
+                )
+            if (
+                cue.owner_subject_id != dimension_read.owner_subject_id
+                or cue.vault_id != dimension_read.vault_id
+                or cue.authority_epoch != dimension_read.authority_epoch
+                or (cue.thread_id, cue.session_id) not in active_sessions
+            ):
+                continue
+            try:
+                session = conversation_repository.get_interview_session(
+                    session_id=cue.session_id,
+                    context=context,
+                )
+            except OwnerTruthConversationAccessDenied:
+                continue
+            if (
+                session.thread_id != cue.thread_id
+                or session.row_version != cue.expected_session_version
+                or session.state is not InterviewSessionState.ACTIVE
+                or session.boundary is not InterviewBoundary.OPEN
+            ):
+                continue
+            coverage = dimension_read.coverage.for_dimension(cue.target_dimension)
+            if (
+                cue.memory_version_id not in coverage.memory_version_ids
+                or cue.missing_facet not in coverage.missing_facets
+            ):
+                continue
+            current.append(cue)
+        return tuple(sorted(current, key=lambda item: item.cue_id))
 
     def _assert_current_owner_thread_authority(
         self,

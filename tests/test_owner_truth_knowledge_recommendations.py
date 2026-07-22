@@ -18,6 +18,7 @@ from app.domain.owner_truth.knowledge_recommendations import (
     RecommendationEvidenceKind,
     RecommendationSelector,
     RecommendationSlot,
+    ServerPlannedContinuationCue,
     ServerPlannedRecommendationCandidateProjector,
 )
 
@@ -187,6 +188,30 @@ class ServerPlannedRecommendationCandidateProjectorTests(unittest.TestCase):
         self.assertTrue(candidate.evidence_refs)
         self.assertNotIn("claim", str(candidate))
         self.assertNotIn("今天", str(candidate))
+
+    def test_projects_explicit_saved_continuation_without_inferring_topic_text(self) -> None:
+        cue = ServerPlannedContinuationCue(
+            cue_id=str(UUID("00000000-0000-4000-8000-000000000103")),
+            owner_subject_id=OWNER,
+            vault_id=VAULT,
+            authority_epoch=7,
+            thread_id=self.thread_id,
+            session_id=self.session_id,
+            expected_session_version=1,
+            memory_version_id="memory-version-decision",
+            target_dimension=KnowledgeDimension.KEY_DECISIONS,
+            missing_facet="outcome",
+        )
+
+        rows = self._project((self._authority(),), continuity_cues=(cue,))
+
+        self.assertEqual([item.slot for item in rows], [RecommendationSlot.CONTINUITY, RecommendationSlot.BREADTH])
+        continuity = rows[0]
+        self.assertEqual(continuity.evidence_kind, RecommendationEvidenceKind.SAVED_CONTINUATION)
+        self.assertEqual(continuity.evidence_refs, ("memory-version-decision",))
+        self.assertEqual(continuity.question_template_id, "continueSavedOwnerCue")
+        self.assertEqual(continuity.reason_code, "explicitOwnerSavedContinuation")
+        self.assertNotIn("claim", str(continuity))
 
     def test_candidate_identifier_changes_when_authority_or_coverage_checkpoint_changes(self) -> None:
         baseline = self._project((self._authority(),))[0]

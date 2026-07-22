@@ -33,6 +33,9 @@ from app.services.owner_truth_knowledge_dimension_confirmation import (
     OwnerTruthKnowledgeDimensionConfirmationCommand,
     OwnerTruthKnowledgeDimensionConfirmationService,
 )
+from app.services.owner_truth_saved_continuation import (
+    InMemoryOwnerTruthSavedContinuationCueRepository,
+)
 from app.services.owner_truth_knowledge_recommendation_read import (
     OwnerTruthKnowledgeRecommendationReadError,
     OwnerTruthKnowledgeRecommendationReadService,
@@ -145,6 +148,9 @@ class _Store:
     ) -> None:
         self.reader = _ProjectionReader(snapshot)
         self.repository = InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository()
+        self.saved_continuation_cue_repository = (
+            InMemoryOwnerTruthSavedContinuationCueRepository()
+        )
         self.conversation_repository = _ConversationThreadAuthorityReader(
             vault_id=vault_id,
             owner_subject_id=owner_subject_id,
@@ -168,6 +174,9 @@ class _Store:
 
     def owner_truth_conversation_repository(self):
         return self.conversation_repository
+
+    def owner_truth_saved_continuation_cue_repository(self):
+        return self.saved_continuation_cue_repository
 
 
 class OwnerTruthKnowledgeRecommendationReadTests(unittest.TestCase):

@@ -1,0 +1,15 @@
+{
+  "version": "0039",
+  "name": "owner_truth_saved_continuation_cues",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthSavedContinuationCueQaOnly",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthKnowledgeDimensionConfirmationQa": false,
+    "ownerTruthKnowledgeRecommendationReadQa": false,
+    "ownerTruthKnowledgeRecommendationPlanQa": false,
+    "ownerTruthSavedContinuationCueQa": false
+  }
+}

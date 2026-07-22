@@ -500,6 +500,55 @@ class RecommendationSelection:
         }
 
 
+@dataclass(frozen=True)
+class ServerPlannedContinuationCue:
+    """One explicit Owner continuation pointer eligible for server planning.
+
+    This is not a topic classifier or a transcript summary. A cue is created
+    only by an explicit Owner action and points at one current, confirmed
+    MemoryVersion plus a still-missing facet in the same private interview
+    session. It carries no question text or message content.
+    """
+
+    cue_id: str
+    owner_subject_id: str
+    vault_id: str
+    authority_epoch: int
+    thread_id: str
+    session_id: str
+    expected_session_version: int
+    memory_version_id: str
+    target_dimension: KnowledgeDimension
+    missing_facet: str
+
+    def __post_init__(self) -> None:
+        for field in ("cue_id", "thread_id", "session_id", "memory_version_id"):
+            object.__setattr__(self, field, _opaque_identifier(getattr(self, field), field=field))
+        object.__setattr__(self, "owner_subject_id", require_nonblank(self.owner_subject_id, field="owner_subject_id"))
+        object.__setattr__(self, "vault_id", require_nonblank(self.vault_id, field="vault_id"))
+        try:
+            object.__setattr__(self, "target_dimension", KnowledgeDimension(self.target_dimension))
+        except (TypeError, ValueError) as exc:
+            raise KnowledgeRecommendationError("saved continuation cue contains an unsupported dimension") from exc
+        object.__setattr__(self, "missing_facet", _opaque_identifier(self.missing_facet, field="missing_facet"))
+        if self.missing_facet not in _DIMENSION_FACETS[self.target_dimension]:
+            raise KnowledgeRecommendationError("saved continuation cue missing_facet is not valid")
+        if (
+            not isinstance(self.expected_session_version, int)
+            or isinstance(self.expected_session_version, bool)
+            or self.expected_session_version < 1
+        ):
+            raise KnowledgeRecommendationError(
+                "saved continuation cue expected_session_version must be a positive integer"
+            )
+        if (
+            not isinstance(self.authority_epoch, int)
+            or isinstance(self.authority_epoch, bool)
+            or self.authority_epoch < 0
+        ):
+            raise KnowledgeRecommendationError("saved continuation cue authority_epoch must be a non-negative integer")
+
+
 class RecommendationSelector:
     """Choose at most one continuity and one breadth recommendation.
 
@@ -702,6 +751,7 @@ class ServerPlannedRecommendationCandidateProjector:
         checkpoint: str,
         coverage: DimensionProjection,
         thread_authorities: Iterable[OwnerTruthConversationThreadAuthoritySnapshot],
+        continuity_cues: Iterable[ServerPlannedContinuationCue] = (),
     ) -> Tuple[RecommendationCandidate, ...]:
         owner = require_nonblank(owner_subject_id, field="owner_subject_id")
         vault = require_nonblank(vault_id, field="vault_id")
@@ -726,13 +776,41 @@ class ServerPlannedRecommendationCandidateProjector:
         if eligible is None:
             return ()
 
+        candidates: list[RecommendationCandidate] = []
+        continuity_cue = self._eligible_continuity_cue(
+            continuity_cues=continuity_cues,
+            thread_authority=eligible,
+            owner_subject_id=owner,
+            vault_id=vault,
+            authority_epoch=authority_epoch,
+        )
+        if continuity_cue is not None:
+            continuity_coverage = coverage.for_dimension(continuity_cue.target_dimension)
+            candidates.append(
+                self._candidate(
+                    slot=RecommendationSlot.CONTINUITY,
+                    thread_authority=eligible,
+                    authority_epoch=authority_epoch,
+                    checkpoint=normalized_checkpoint,
+                    coverage=continuity_coverage,
+                    missing_facet=continuity_cue.missing_facet,
+                    question_template_id="continueSavedOwnerCue",
+                    reason_code="explicitOwnerSavedContinuation",
+                    explicit_intent_priority=1,
+                    continuity_score=1,
+                    evidence_kind=RecommendationEvidenceKind.SAVED_CONTINUATION,
+                    evidence_refs=(continuity_cue.memory_version_id,),
+                    cue_id=continuity_cue.cue_id,
+                )
+            )
+
         breadth_coverage = tuple(
             item
             for item in coverage.coverage
             if item.memory_version_ids and item.missing_facets
         )
         if not breadth_coverage:
-            return ()
+            return tuple(candidates)
         selected_coverage = max(
             breadth_coverage,
             key=lambda item: (
@@ -752,7 +830,45 @@ class ServerPlannedRecommendationCandidateProjector:
             reason_code="confirmedDimensionGap",
             importance_score=len(selected_coverage.missing_facets),
         )
-        return (breadth,)
+        candidates.append(breadth)
+        return tuple(candidates)
+
+    @staticmethod
+    def _eligible_continuity_cue(
+        *,
+        continuity_cues: Iterable[ServerPlannedContinuationCue],
+        thread_authority: OwnerTruthConversationThreadAuthoritySnapshot,
+        owner_subject_id: str,
+        vault_id: str,
+        authority_epoch: int,
+    ) -> Optional[ServerPlannedContinuationCue]:
+        try:
+            rows = tuple(continuity_cues)
+        except TypeError as exc:
+            raise KnowledgeRecommendationError("continuity_cues must be iterable") from exc
+        matches: list[ServerPlannedContinuationCue] = []
+        for cue in rows:
+            if not isinstance(cue, ServerPlannedContinuationCue):
+                raise KnowledgeRecommendationError(
+                    "continuity_cues must contain ServerPlannedContinuationCue"
+                )
+            # A persisted cue becomes ineligible rather than being revived when
+            # its authority/session binding is no longer current. This keeps
+            # historical receipts intact while making the plan fail closed.
+            if (
+                cue.owner_subject_id != owner_subject_id
+                or cue.vault_id != vault_id
+                or cue.authority_epoch != authority_epoch
+                or cue.thread_id != thread_authority.thread_id
+                or cue.session_id != thread_authority.session_id
+            ):
+                continue
+            matches.append(cue)
+        if len(matches) > 1:
+            raise KnowledgeRecommendationError(
+                "multiple current saved continuation cues cannot plan one continuity recommendation"
+            )
+        return matches[0] if matches else None
 
     @staticmethod
     def _eligible_thread(
@@ -809,7 +925,11 @@ class ServerPlannedRecommendationCandidateProjector:
         explicit_intent_priority: int = 0,
         continuity_score: int = 0,
         importance_score: int = 0,
+        evidence_kind: RecommendationEvidenceKind = RecommendationEvidenceKind.CONFIRMED_MEMORY,
+        evidence_refs: Optional[Tuple[str, ...]] = None,
+        cue_id: Optional[str] = None,
     ) -> RecommendationCandidate:
+        resolved_evidence_refs = coverage.memory_version_ids if evidence_refs is None else evidence_refs
         candidate_id = ServerPlannedRecommendationCandidateProjector._candidate_id(
             slot=slot,
             thread_id=thread_authority.thread_id,
@@ -818,7 +938,8 @@ class ServerPlannedRecommendationCandidateProjector:
             checkpoint=checkpoint,
             dimension=coverage.dimension,
             missing_facet=missing_facet,
-            evidence_refs=coverage.memory_version_ids,
+            evidence_refs=resolved_evidence_refs,
+            cue_id=cue_id,
         )
         return RecommendationCandidate(
             candidate_id=candidate_id,
@@ -829,8 +950,8 @@ class ServerPlannedRecommendationCandidateProjector:
             target_dimension=coverage.dimension,
             missing_facet=missing_facet,
             question_template_id=question_template_id,
-            evidence_kind=RecommendationEvidenceKind.CONFIRMED_MEMORY,
-            evidence_refs=coverage.memory_version_ids,
+            evidence_kind=evidence_kind,
+            evidence_refs=resolved_evidence_refs,
             reason_code=reason_code,
             explicit_intent_priority=explicit_intent_priority,
             continuity_score=continuity_score,
@@ -848,6 +969,7 @@ class ServerPlannedRecommendationCandidateProjector:
         dimension: KnowledgeDimension,
         missing_facet: str,
         evidence_refs: Tuple[str, ...],
+        cue_id: Optional[str] = None,
     ) -> str:
         payload = {
             "dimension": dimension.value,
@@ -859,6 +981,8 @@ class ServerPlannedRecommendationCandidateProjector:
             "slot": slot.value,
             "threadId": thread_id,
         }
+        if cue_id is not None:
+            payload["cueId"] = _opaque_identifier(cue_id, field="cue_id")
         digest = sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()[:24]
@@ -883,5 +1007,6 @@ __all__ = [
     "RecommendationSelector",
     "RecommendationSlot",
     "RECOMMENDATION_SELECTION_SCHEMA_VERSION",
+    "ServerPlannedContinuationCue",
     "ServerPlannedRecommendationCandidateProjector",
 ]

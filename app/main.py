@@ -178,6 +178,15 @@ from app.services.owner_truth_knowledge_recommendation_read import (
     OwnerTruthKnowledgeRecommendationReadError,
     OwnerTruthKnowledgeRecommendationReadService,
 )
+from app.services.owner_truth_saved_continuation import (
+    OwnerTruthSavedContinuationCueAccessDenied,
+    OwnerTruthSavedContinuationCueCommand,
+    OwnerTruthSavedContinuationCueConflict,
+    OwnerTruthSavedContinuationCueError,
+    OwnerTruthSavedContinuationCueService,
+    OwnerTruthSavedContinuationCueStale,
+    saved_continuation_cue_summary,
+)
 from app.services.owner_truth_correction_request import (
     OwnerTruthCorrectionRequestAccessDenied,
     OwnerTruthCorrectionRequestCommand,
@@ -362,6 +371,9 @@ OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = bool(
 OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = bool(
     settings.owner_truth_knowledge_recommendation_plan_qa_enabled
 )
+OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = bool(
+    settings.owner_truth_saved_continuation_cue_qa_enabled
+)
 AUTH_ACCESS_TTL_SECONDS = max(60, settings.auth_access_ttl_seconds)
 AUTH_REFRESH_TTL_SECONDS = max(AUTH_ACCESS_TTL_SECONDS + 60, settings.auth_refresh_ttl_seconds)
 AUTH_LEGACY_PHONE_LOGIN_ENABLED = legacy_phone_login_enabled(settings)
@@ -540,6 +552,30 @@ def _require_owner_truth_knowledge_recommendation_plan_qa(request: Request) -> s
         unavailable_code="ownerTruthKnowledgeRecommendationPlanUnavailable",
         require_plan_gate=True,
     )
+
+
+def _require_owner_truth_saved_continuation_cue_qa(request: Request) -> str:
+    """Keep explicit M0-B continuity intent unavailable outside QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED
+        or not OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthSavedContinuationCueUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthSavedContinuationCueUserSessionRequired"},
+        )
+    return user_id
 
 
 def _require_owner_truth_correction_request_qa(request: Request) -> str:
@@ -957,6 +993,19 @@ def _owner_truth_knowledge_recommendation_plan_context(
     )
 
 
+def _owner_truth_saved_continuation_cue_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_saved_continuation_cue_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_correction_request_context(
     request: Request,
     *,
@@ -1214,6 +1263,30 @@ def _owner_truth_knowledge_recommendation_plan_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthKnowledgeRecommendationPlanInvalid"},
+    )
+
+
+def _owner_truth_saved_continuation_cue_http_error(
+    error: OwnerTruthSavedContinuationCueError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthSavedContinuationCueAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthSavedContinuationCueDenied"},
+        )
+    if isinstance(error, OwnerTruthSavedContinuationCueStale):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthSavedContinuationCueStale"},
+        )
+    if isinstance(error, OwnerTruthSavedContinuationCueConflict):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthSavedContinuationCueConflict"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthSavedContinuationCueInvalid"},
     )
 
 
@@ -3838,6 +3911,16 @@ _OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_FIELDS = frozenset(
     }
 )
 _OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_FIELDS = frozenset({"crisisActive"})
+_OWNER_TRUTH_SAVED_CONTINUATION_CUE_FIELDS = frozenset(
+    {
+        "commandId",
+        "threadId",
+        "expectedSessionVersion",
+        "memoryVersionId",
+        "targetDimension",
+        "missingFacet",
+    }
+)
 
 
 def _owner_truth_knowledge_recommendation_candidate(
@@ -4006,6 +4089,56 @@ def plan_owner_truth_knowledge_recommendations(
             "schemaVersion": "owner-truth-knowledge-recommendation-plan-response-v1",
             "vaultId": context.vault_id,
             "recommendations": summary,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/saved-continuation-cues",
+    include_in_schema=False,
+)
+def create_owner_truth_saved_continuation_cue(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Save one explicit, value-free Owner continuity pointer in QA only.
+
+    The route accepts no transcript text, generated question, candidate, or
+    client-provided authority state. A persisted cue becomes ineligible when
+    its session, authority epoch, confirmation, or covered facet changes.
+    """
+
+    try:
+        context = _owner_truth_saved_continuation_cue_context(request, vault_id=vault_id)
+        unsupported = sorted(set(payload).difference(_OWNER_TRUTH_SAVED_CONTINUATION_CUE_FIELDS))
+        if unsupported:
+            raise OwnerTruthSavedContinuationCueError(
+                "saved continuation cue contains unsupported fields"
+            )
+        command = OwnerTruthSavedContinuationCueCommand(
+            command_id=str(payload.get("commandId") or ""),
+            thread_id=str(payload.get("threadId") or ""),
+            session_id=session_id,
+            expected_session_version=payload.get("expectedSessionVersion"),
+            memory_version_id=str(payload.get("memoryVersionId") or ""),
+            target_dimension=payload.get("targetDimension"),
+            missing_facet=str(payload.get("missingFacet") or ""),
+        )
+        result = OwnerTruthSavedContinuationCueService(
+            store,
+            enabled=OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED,
+        ).create(context=context, command=command)
+    except OwnerTruthSavedContinuationCueError as error:
+        raise _owner_truth_saved_continuation_cue_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-saved-continuation-cue-response-v1",
+            "vaultId": context.vault_id,
+            "cue": saved_continuation_cue_summary(result),
         },
         headers={"Cache-Control": "no-store"},
     )

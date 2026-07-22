@@ -64,6 +64,9 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         self.previous_recommendation_plan_qa = (
             main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED
         )
+        self.previous_saved_continuation_cue_qa = (
+            main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED
+        )
         self.store = InMemoryStore()
         main_module.store = self.store
         main_module.BACKEND_API_TOKEN = ""
@@ -74,6 +77,7 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = True
+        main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = False
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -90,6 +94,9 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         )
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = (
             self.previous_recommendation_plan_qa
+        )
+        main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = (
+            self.previous_saved_continuation_cue_qa
         )
 
     @staticmethod
@@ -311,6 +318,13 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         return f"/v2/vaults/{vault_id}/knowledge-recommendations/plan"
 
     @staticmethod
+    def _saved_continuation_cue_path(vault_id: str, session_id: str) -> str:
+        return (
+            f"/v2/vaults/{vault_id}/interview-sessions/{session_id}"
+            "/saved-continuation-cues"
+        )
+
+    @staticmethod
     def _candidate(
         *,
         candidate_id: str,
@@ -363,6 +377,102 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             response.json()["detail"]["code"],
             "ownerTruthKnowledgeRecommendationPlanUnavailable",
         )
+
+    def test_explicit_saved_continuation_cue_is_hidden_then_plans_only_current_private_state(self) -> None:
+        owner_id, headers = self._login("13800139417")
+        vault_id = "vault-recommendation-saved-continuation"
+        decision_id, decision_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "This text must never become an inferred continuation topic."},
+            command_id="saved-continuation-activate-decision",
+        )
+        values_id, values_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "A second confirmed gap provides a breadth recommendation."},
+            command_id="saved-continuation-activate-values",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=decision_id,
+            content_hash=decision_hash,
+            dimension="keyDecisions",
+            facets=("choice", "reason"),
+            command_id="saved-continuation-confirm-decision",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=values_id,
+            content_hash=values_hash,
+            dimension="values",
+            facets=("priority",),
+            command_id="saved-continuation-confirm-values",
+        )
+        thread_id, session_id = self._seed_thread_with_session(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="saved-continuation-thread",
+        )
+        cue_path = self._saved_continuation_cue_path(vault_id, session_id)
+        payload = {
+            "commandId": "saved-continuation-cue-001",
+            "threadId": thread_id,
+            "expectedSessionVersion": 1,
+            "memoryVersionId": decision_id,
+            "targetDimension": "keyDecisions",
+            "missingFacet": "outcome",
+        }
+
+        hidden = client.post(cue_path, headers=headers, json=payload)
+        self.assertEqual(hidden.status_code, 404, hidden.text)
+        self.assertEqual(
+            hidden.json()["detail"]["code"],
+            "ownerTruthSavedContinuationCueUnavailable",
+        )
+
+        main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = True
+        created = client.post(cue_path, headers=headers, json=payload)
+        replay = client.post(cue_path, headers=headers, json=payload)
+        plan = client.post(self._plan_path(vault_id), headers=headers, json={})
+        injected = client.post(
+            cue_path,
+            headers=headers,
+            json={**payload, "continuationText": "must be rejected"},
+        )
+
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(created.headers["cache-control"], "no-store")
+        self.assertEqual(created.json()["cue"]["status"], "created")
+        self.assertEqual(replay.json()["cue"]["status"], "deduplicated")
+        self.assertNotIn("inferred continuation", created.text)
+        self.assertEqual(injected.status_code, 400, injected.text)
+        self.assertEqual(
+            injected.json()["detail"]["code"],
+            "ownerTruthSavedContinuationCueInvalid",
+        )
+        self.assertEqual(plan.status_code, 200, plan.text)
+        selected = plan.json()["recommendations"]["selected"]
+        self.assertEqual([item["slot"] for item in selected], ["continuity", "breadth"])
+        self.assertEqual(selected[0]["questionTemplateId"], "continueSavedOwnerCue")
+        self.assertEqual(selected[0]["reasonCode"], "explicitOwnerSavedContinuation")
+        self.assertNotIn("inferred continuation", plan.text)
+        self.assertNotIn("claim", plan.text)
+
+        self._set_thread_boundary(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            thread_id=thread_id,
+            session_id=session_id,
+            boundary=InterviewBoundary.DO_NOT_ASK,
+            command_id="saved-continuation-do-not-ask",
+        )
+        stale_plan = client.post(self._plan_path(vault_id), headers=headers, json={})
+        self.assertEqual(stale_plan.status_code, 200, stale_plan.text)
+        self.assertEqual(stale_plan.json()["recommendations"]["selected"], [])
 
     def test_owner_can_read_server_planned_value_free_breadth_without_candidate_input(self) -> None:
         owner_id, headers = self._login("13800139419")

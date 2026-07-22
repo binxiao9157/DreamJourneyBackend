@@ -225,6 +225,12 @@ test -f scripts/backend-owner-truth-knowledge-dimension-confirmation-postgres-sm
 test -f scripts/run-backend-owner-truth-knowledge-dimension-confirmation-postgres-smoke.sh
 test -f scripts/backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.sh
+test -f app/services/owner_truth_saved_continuation.py
+test -f db/migrations/0039_owner_truth_saved_continuation_cues.sql
+test -f db/migrations/0039_owner_truth_saved_continuation_cues.json
+test -f tests/test_owner_truth_saved_continuation_migration_contract.py
+test -f scripts/backend-owner-truth-saved-continuation-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-saved-continuation-postgres-smoke.sh
 test -f tests/test_owner_truth_knowledge_dimension_confirmation.py
 test -f tests/test_owner_truth_knowledge_dimension_confirmation_api.py
 test -f tests/test_owner_truth_knowledge_dimension_confirmation_migration_contract.py
