@@ -10,6 +10,7 @@ account or business record is read or written.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 import json
 import os
@@ -17,6 +18,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+from threading import Barrier
 from typing import Any
 import uuid
 
@@ -318,6 +320,74 @@ def seed_reviewable_batch(
     return review_batch_id, candidate_id
 
 
+def seed_two_reviewable_candidates(
+    dsn: str,
+    *,
+    vault_id: str,
+    owner_subject_id: str,
+) -> tuple[str, tuple[str, str]]:
+    """Seed a two-Candidate batch used only to prove transactional rollback."""
+
+    review_batch_id, first_candidate_id = seed_reviewable_batch(
+        dsn,
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+    )
+    second_candidate_id = str(uuid.uuid4())
+    with psycopg.connect(dsn, row_factory=psycopg.rows.dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT owner_subject_id, source_id, extraction_result_id,
+                       candidate_kind, perspective_type, epistemic_status,
+                       sensitivity, policy_version, payload_schema_version, payload
+                FROM owner_truth.memory_candidates
+                WHERE id = %s AND vault_id = %s
+                FOR UPDATE
+                """,
+                (first_candidate_id, vault_id),
+            )
+            first = cursor.fetchone()
+            require(first is not None, "first rollback Candidate must be seeded")
+            payload = first["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            require(isinstance(payload, dict), "seed Candidate payload must be an object")
+            second_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+            content = second_payload.get("content")
+            require(isinstance(content, dict), "seed Candidate content must be an object")
+            second_payload["content"] = {
+                **content,
+                "summary": "Synthetic second Candidate for formal rollback confirmation.",
+            }
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.memory_candidates (
+                    id, vault_id, owner_subject_id, source_id, extraction_result_id,
+                    candidate_kind, perspective_type, epistemic_status, sensitivity,
+                    policy_version, content_hash, payload_schema_version, payload
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    second_candidate_id,
+                    vault_id,
+                    first["owner_subject_id"],
+                    first["source_id"],
+                    first["extraction_result_id"],
+                    first["candidate_kind"],
+                    first["perspective_type"],
+                    first["epistemic_status"],
+                    first["sensitivity"],
+                    first["policy_version"],
+                    canonical_hash(second_payload["content"]),
+                    first["payload_schema_version"],
+                    Jsonb(second_payload),
+                ),
+            )
+        connection.commit()
+    return review_batch_id, (first_candidate_id, second_candidate_id)
+
+
 def seed_legacy_qa_root(
     dsn: str,
     *,
@@ -388,6 +458,147 @@ def counts(dsn: str, *, vault_id: str) -> tuple[int, int, int]:
             )
             links = int(cursor.fetchone()[0])
     return ledgers, receipts, links
+
+
+def candidate_decisions(dsn: str, *, vault_id: str) -> dict[str, str]:
+    with psycopg.connect(dsn, row_factory=psycopg.rows.dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id::text AS id, decision
+                FROM owner_truth.memory_candidates
+                WHERE vault_id = %s
+                ORDER BY id
+                """,
+                (vault_id,),
+            )
+            rows = cursor.fetchall()
+    return {str(row["id"]): str(row["decision"]) for row in rows}
+
+
+def install_second_receipt_link_rejection(dsn: str) -> None:
+    """Inject one disposable DB failure after the first receipt link is written."""
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE OR REPLACE FUNCTION owner_truth.formal_smoke_reject_second_link()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    IF (
+                        SELECT COUNT(*)
+                        FROM owner_truth.interview_review_batch_candidate_decision_receipts
+                        WHERE vault_id = NEW.vault_id
+                          AND batch_decision_id = NEW.batch_decision_id
+                    ) >= 1 THEN
+                        RAISE EXCEPTION 'formal smoke rejects second receipt link';
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+
+                CREATE TRIGGER formal_smoke_reject_second_link
+                BEFORE INSERT ON owner_truth.interview_review_batch_candidate_decision_receipts
+                FOR EACH ROW EXECUTE FUNCTION owner_truth.formal_smoke_reject_second_link();
+                """
+            )
+        connection.commit()
+
+
+def remove_second_receipt_link_rejection(dsn: str) -> None:
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                DROP TRIGGER IF EXISTS formal_smoke_reject_second_link
+                    ON owner_truth.interview_review_batch_candidate_decision_receipts;
+                DROP FUNCTION IF EXISTS owner_truth.formal_smoke_reject_second_link();
+                """
+            )
+        connection.commit()
+
+
+def assert_concurrent_formal_replay_is_idempotent(
+    *,
+    path: str,
+    headers: dict[str, str],
+    session_id: str,
+    payload: dict[str, object],
+) -> None:
+    """Run two independent formal requests through the real Postgres lock path."""
+
+    barrier = Barrier(2)
+
+    def post_once(decision_id: str) -> Any:
+        with TestClient(main_module.app, raise_server_exceptions=False) as concurrent_client:
+            barrier.wait(timeout=10)
+            return concurrent_client.post(
+                path,
+                headers=formal_headers(
+                    headers,
+                    session_id=session_id,
+                    decision_id=decision_id,
+                ),
+                json=payload,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(
+            executor.map(
+                post_once,
+                (
+                    "formal-confirmation-postgres-smoke-concurrent-a",
+                    "formal-confirmation-postgres-smoke-concurrent-b",
+                ),
+            )
+        )
+    statuses = sorted(response.status_code for response in responses)
+    require(statuses == [200, 201], f"concurrent formal replay statuses mismatch: {statuses}")
+    outcomes = sorted(str(response.json().get("status") or "") for response in responses)
+    require(outcomes == ["created", "deduplicated"], "concurrent formal replay must create once")
+
+
+def assert_second_receipt_link_failure_rolls_back(
+    *,
+    dsn: str,
+    path: str,
+    headers: dict[str, str],
+    session_id: str,
+    vault_id: str,
+    candidate_ids: tuple[str, str],
+) -> None:
+    """The root, receipts and Candidate decisions must commit as one transaction."""
+
+    payload = {
+        "commandId": "formal-confirmation-postgres-smoke-rollback",
+        "selections": [
+            {"candidateId": candidate_id, "expectedCandidateVersion": 1}
+            for candidate_id in candidate_ids
+        ],
+    }
+    install_second_receipt_link_rejection(dsn)
+    try:
+        with TestClient(main_module.app, raise_server_exceptions=False) as failure_client:
+            response = failure_client.post(
+                path,
+                headers=formal_headers(
+                    headers,
+                    session_id=session_id,
+                    decision_id="formal-confirmation-postgres-smoke-rollback",
+                ),
+                json=payload,
+            )
+        require(response.status_code == 500, "injected second receipt-link failure must reach the error boundary")
+    finally:
+        remove_second_receipt_link_rejection(dsn)
+    require(counts(dsn, vault_id=vault_id) == (0, 0, 0), "failed batch must roll back root, receipts and links")
+    decisions = candidate_decisions(dsn, vault_id=vault_id)
+    require(
+        {candidate_id: decisions.get(candidate_id) for candidate_id in candidate_ids}
+        == {candidate_id: "pending" for candidate_id in candidate_ids},
+        "failed batch must leave every Candidate pending",
+    )
 
 
 def assert_legacy_qa_root_survives_upgrade(
@@ -661,6 +872,33 @@ def main() -> None:
         require(replay.json().get("status") == "deduplicated", "formal replay must deduplicate")
         require(counts(test_dsn, vault_id=vault_id) == (1, 1, 1), "replay must not duplicate root, receipt or link")
 
+        concurrent_vault_id = "vault-formal-confirmation-concurrent-smoke"
+        concurrent_review_batch_id, concurrent_candidate_id = seed_reviewable_batch(
+            test_dsn,
+            vault_id=concurrent_vault_id,
+            owner_subject_id=owner_id,
+        )
+        concurrent_path = (
+            f"/v2/vaults/{concurrent_vault_id}/interview-review-batches/"
+            f"{concurrent_review_batch_id}/confirmation/batch-accept"
+        )
+        concurrent_payload = {
+            "commandId": "formal-confirmation-postgres-smoke-concurrent",
+            "selections": [
+                {"candidateId": concurrent_candidate_id, "expectedCandidateVersion": 1}
+            ],
+        }
+        assert_concurrent_formal_replay_is_idempotent(
+            path=concurrent_path,
+            headers=owner_headers,
+            session_id=session_id,
+            payload=concurrent_payload,
+        )
+        require(
+            counts(test_dsn, vault_id=concurrent_vault_id) == (1, 1, 1),
+            "concurrent formal command must produce one root, receipt and link",
+        )
+
         stale_generation = client.post(
             path,
             headers={
@@ -677,12 +915,32 @@ def main() -> None:
         require(route_code(stale_generation) == "release_policy_denied", "account denial must stay typed")
         require(counts(test_dsn, vault_id=vault_id) == (1, 1, 1), "denied capture must write nothing")
 
+        rollback_vault_id = "vault-formal-confirmation-rollback-smoke"
+        rollback_review_batch_id, rollback_candidate_ids = seed_two_reviewable_candidates(
+            test_dsn,
+            vault_id=rollback_vault_id,
+            owner_subject_id=owner_id,
+        )
+        rollback_path = (
+            f"/v2/vaults/{rollback_vault_id}/interview-review-batches/"
+            f"{rollback_review_batch_id}/confirmation/batch-accept"
+        )
+        assert_second_receipt_link_failure_rolls_back(
+            dsn=test_dsn,
+            path=rollback_path,
+            headers=owner_headers,
+            session_id=session_id,
+            vault_id=rollback_vault_id,
+            candidate_ids=rollback_candidate_ids,
+        )
+
         print(
             "formal interview confirmation postgres smoke passed "
             "migration0036=true legacyQaUpgradeCompatible=true qaBypassDenied=true "
             "authorityCapturePersisted=true "
             "receiptLinkPersisted=true receiptLinkTamperDenied=true "
-            "replayDeduplicated=true accountCaptureDenied=true"
+            "replayDeduplicated=true concurrentCommandDeduplicated=true "
+            "batchLinkFailureRolledBack=true accountCaptureDenied=true"
         )
     finally:
         main_module.store = previous_store
