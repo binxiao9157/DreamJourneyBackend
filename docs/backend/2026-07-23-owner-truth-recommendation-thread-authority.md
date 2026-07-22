@@ -34,6 +34,22 @@
 这只是推荐资格围栏，不实现 `cooldownUntil`、ThreadPreference、自动恢复或完整
 主题合并策略；这些仍属于后续 M0-A/M0-B 产品切片。
 
+## 会话资格补充
+
+仅检查 Thread 为 `active` 仍不够：`cooldown`、`doNotAsk` 和 `skipOnce` 都可能保留
+同一条历史 Thread，但其关联 InterviewSession 已不应再作为新的推荐上下文。
+
+现在权威快照还绑定唯一的无内容 Session 记录，推荐读取只接受同时满足以下条件的候选
+Thread：
+
+1. Thread 为 `active`；
+2. 当前 Owner/Vault/authority epoch 下恰好存在一个关联 Session；
+3. Session 为 `active` 且 boundary 为 `open`。
+
+`cooldown`、`doNotAsk`、`skipOnce`、暂停/结束 Session、缺失 Session 或多 Session 关联均
+fail closed。此处不定义 `cooldownUntil`、自动恢复或新的 Session 生命周期；只是把既有
+生命周期的不可推荐状态收进同一条读取资格围栏。
+
 ## 保持不变的边界
 
 - 没有新增公开路由、公开 Echo 入口、Provider 调用、Candidate/Memory 写入或数据库迁移；
@@ -61,8 +77,9 @@ git diff --check
 - 有效 Owner/Vault/epoch Thread 可参与 value-free 推荐选择；
 - 未知 Thread、跨 Owner 和 authority epoch 漂移被拒绝；
 - 活跃 Thread 经既有 topic switch 变为 `paused` 后，推荐读取路由拒绝同一候选；
+- `cooldown`、`doNotAsk`、`skipOnce` 关联 Session 即使保留 active Thread，也会被推荐读取拒绝；
 - 隔离 Postgres smoke 在部署后验证真实 `conversation_threads` 查询、活跃 Thread 选择和
-  暂停 Thread 拒绝，且不读取或写入生产业务数据。
+  Thread/Session 不可推荐状态拒绝，且不读取或写入生产业务数据。
 
 部署后使用：
 
@@ -105,3 +122,22 @@ curl -fsS https://dreamjourney-api.liftora.cn/ready
 `pausedThreadRejected=true`，证明真实路由不会把已暂停的旧会话带入新的推荐选择。
 公网 `/ready` 为 `ready`。本次没有读取、写入或迁移线上业务 Vault、档案、会话或
 推荐数据。
+
+## 会话资格部署验收
+
+`main@6ad2005` 已部署到 API 容器。本次无数据库迁移，部署后执行：
+
+```bash
+python scripts/migrate_db.py --apply --build-id 6ad2005
+python scripts/migrate_db.py --verify
+scripts/run-backend-owner-truth-conversation-postgres-smoke.sh
+python scripts/backend-owner-truth-knowledge-dimension-confirmation-postgres-smoke.py
+curl -fsS https://dreamjourney-api.liftora.cn/ready
+```
+
+结果：schema head 仍为 `0038`、无待执行迁移，公网 `/ready` 为 `ready`。一次性 Postgres
+推荐 smoke 输出 `activeThreadSelected=true`，并分别输出
+`pausedThreadRejected=true`、`cooldownSessionRejected=true`、
+`doNotAskSessionRejected=true` 和 `skipOnceSessionRejected=true`。这证明推荐读取的真实
+持久化查询会同时校验 Thread 与关联 Session 的状态/边界；测试数据库在运行后删除，未读取
+或写入线上业务 Vault、档案、会话或推荐数据。
