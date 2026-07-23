@@ -247,6 +247,65 @@ def main() -> None:
                 "server must persist cooldown and server-calculated expiry",
             )
 
+            # The first session is now paused. The vault still has one active
+            # session limit, but a subsequent thread must not inherit the
+            # first thread's persisted preference.
+            second_thread_id, second_session_id = start_session(
+                client,
+                vault_id=vault_id,
+                headers=owner_headers,
+            )
+            second_boundary_path = (
+                f"/v2/vaults/{vault_id}/interview-sessions/{second_session_id}/boundary"
+            )
+            second_restore_cooldown_path = (
+                f"/v2/vaults/{vault_id}/interview-sessions/{second_session_id}/restore-cooldown"
+            )
+
+            # Both threads belong to one Owner Vault, but each preference and
+            # receipt must stay bound to its own thread/session pair.
+            cross_thread_set = client.post(
+                second_boundary_path,
+                headers=owner_headers,
+                json={
+                    "commandId": "thread-preference-cross-thread-set-001",
+                    "threadId": thread_id,
+                    "expectedSessionVersion": 1,
+                    "boundary": "doNotAsk",
+                },
+            )
+            require(cross_thread_set.status_code == 409, "cross-thread boundary must be rejected")
+            require(
+                route_code(cross_thread_set) == "ownerTruthThreadPreferenceConflict",
+                "cross-thread boundary conflict code changed",
+            )
+            require(
+                receipt_count(test_dsn) == 1,
+                "cross-thread rejection must not append a preference receipt",
+            )
+
+            second_do_not_ask = client.post(
+                second_boundary_path,
+                headers=owner_headers,
+                json={
+                    "commandId": "thread-preference-second-thread-do-not-ask-001",
+                    "threadId": second_thread_id,
+                    "expectedSessionVersion": 1,
+                    "boundary": "doNotAsk",
+                },
+            )
+            require(
+                second_do_not_ask.status_code == 201,
+                f"second-thread doNotAsk creation failed: {second_do_not_ask.text}",
+            )
+            require(
+                current_preference(test_dsn, vault_id=vault_id, thread_id=thread_id)[:2]
+                == ("cooldown", True)
+                and current_preference(test_dsn, vault_id=vault_id, thread_id=second_thread_id)[:2]
+                == ("doNotAsk", False),
+                "same-vault thread preferences must remain isolated",
+            )
+
             early = client.post(
                 restore_cooldown_path,
                 headers=owner_headers,
@@ -260,6 +319,24 @@ def main() -> None:
             require(route_code(early) == "ownerTruthThreadCooldownActive", "early cooldown code changed")
 
             expire_cooldown(test_dsn, vault_id=vault_id, thread_id=thread_id)
+            cross_thread_restore = client.post(
+                second_restore_cooldown_path,
+                headers=owner_headers,
+                json={
+                    "commandId": "thread-preference-cross-thread-restore-001",
+                    "threadId": thread_id,
+                    "expectedSessionVersion": 2,
+                },
+            )
+            require(cross_thread_restore.status_code == 409, "cross-thread restore must be rejected")
+            require(
+                route_code(cross_thread_restore) == "ownerTruthThreadPreferenceConflict",
+                "cross-thread restore conflict code changed",
+            )
+            require(
+                receipt_count(test_dsn) == 2,
+                "cross-thread restore must not append a preference receipt",
+            )
             restored = client.post(
                 restore_cooldown_path,
                 headers=owner_headers,
@@ -274,6 +351,11 @@ def main() -> None:
                 current_preference(test_dsn, vault_id=vault_id, thread_id=thread_id)[:2]
                 == ("open", False),
                 "elapsed cooldown must remain blocked until explicit restore, then reopen",
+            )
+            require(
+                current_preference(test_dsn, vault_id=vault_id, thread_id=second_thread_id)[:2]
+                == ("doNotAsk", False),
+                "restoring the first thread must not reopen the second thread",
             )
 
             do_not_ask = client.post(
@@ -306,13 +388,13 @@ def main() -> None:
                 == ("open", False),
                 "confirmed doNotAsk restore must clear the same thread preference",
             )
-            require(receipt_count(test_dsn) == 4, "each persistent mutation needs one receipt")
+            require(receipt_count(test_dsn) == 5, "each persistent mutation needs one receipt")
 
         print(
             "owner truth thread preference postgres smoke passed "
             f"schemaHead={verified['expectedHead']} defaultHidden=true serverExpiry=true "
             "deduplicated=true crossOwnerDenied=true cooldownExplicitRestore=true "
-            "doNotAskConfirmedRestore=true receiptsAppendOnly=true"
+            "doNotAskConfirmedRestore=true sameVaultThreadIsolation=true receiptsAppendOnly=true"
         )
     finally:
         if store is not None:

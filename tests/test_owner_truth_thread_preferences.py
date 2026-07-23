@@ -14,6 +14,7 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.in_memory_store import InMemoryStore
 from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_thread_preferences import (
+    OwnerTruthThreadPreferenceConflict,
     OwnerTruthThreadPreferenceCooldownActive,
     OwnerTruthThreadPreferenceService,
     RestoreCooldownThreadPreferenceCommand,
@@ -76,6 +77,28 @@ class OwnerTruthThreadPreferenceServiceTests(unittest.TestCase):
                 boundary=boundary,
             ),
         )
+
+    def _start_same_vault_thread(self, *, command_id: str) -> tuple[str, str]:
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        with self.store.request_unit_of_work(
+            correlation_id=command_id,
+            command_id=command_id,
+        ):
+            started = OwnerTruthConversationService(
+                self.store.owner_truth_conversation_repository()
+            ).start_session(
+                command=StartInterviewSessionCommand(
+                    command_id=command_id,
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    expected_thread_version=0,
+                    entry_mode="naturalInput",
+                ),
+                context=self.context,
+            )
+        self.assertEqual(started.session_version, 1)
+        return thread_id, session_id
 
     def test_cooldown_is_thread_scoped_and_becomes_effectively_eligible_after_expiry(self) -> None:
         paused = self._set_boundary(
@@ -156,6 +179,106 @@ class OwnerTruthThreadPreferenceServiceTests(unittest.TestCase):
                 context=self.context,
                 thread_id=self.thread_id,
             )
+        )
+
+    def test_same_vault_thread_preferences_do_not_leak_or_accept_cross_thread_sessions(self) -> None:
+        service = self._service()
+
+        first_paused = self._set_boundary(
+            boundary=InterviewBoundary.COOLDOWN,
+            expected_session_version=1,
+            command_id="thread-preference-first-thread-cooldown",
+        )
+        self.assertFalse(
+            service.permits_recommendation(context=self.context, thread_id=self.thread_id)
+        )
+        # The conversation service permits one active session per Vault. Once
+        # the first session is paused by its own preference, a later thread in
+        # that same Vault can begin without inheriting the first preference.
+        second_thread_id, second_session_id = self._start_same_vault_thread(
+            command_id="thread-preference-second-thread-start"
+        )
+        self.assertTrue(
+            service.permits_recommendation(context=self.context, thread_id=second_thread_id)
+        )
+        repository = self.store.owner_truth_thread_preference_repository()
+        self.assertEqual(
+            repository.read(context=self.context, thread_id=self.thread_id).preference,
+            ThreadPreferenceState.COOLDOWN,
+        )
+        self.assertIsNone(repository.read(context=self.context, thread_id=second_thread_id))
+
+        # A session belongs to exactly one opaque ConversationThread.  Reusing
+        # the second thread's active session to mutate the first thread must
+        # fail before any preference record is changed.
+        with self.assertRaises(OwnerTruthThreadPreferenceConflict):
+            service.set_boundary(
+                context=self.context,
+                command=SetInterviewBoundaryCommand(
+                    command_id="thread-preference-cross-thread-set",
+                    thread_id=self.thread_id,
+                    session_id=second_session_id,
+                    expected_session_version=1,
+                    boundary=InterviewBoundary.DO_NOT_ASK,
+                ),
+            )
+        self.assertEqual(
+            repository.read(context=self.context, thread_id=self.thread_id).preference,
+            ThreadPreferenceState.COOLDOWN,
+        )
+        self.assertIsNone(repository.read(context=self.context, thread_id=second_thread_id))
+
+        second_paused = service.set_boundary(
+            context=self.context,
+            command=SetInterviewBoundaryCommand(
+                command_id="thread-preference-second-thread-do-not-ask",
+                thread_id=second_thread_id,
+                session_id=second_session_id,
+                expected_session_version=1,
+                boundary=InterviewBoundary.DO_NOT_ASK,
+            ),
+        )
+        assert first_paused.preference is not None
+        assert second_paused.preference is not None
+        self.assertEqual(
+            first_paused.preference.preference.preference,
+            ThreadPreferenceState.COOLDOWN,
+        )
+        self.assertEqual(
+            second_paused.preference.preference.preference,
+            ThreadPreferenceState.DO_NOT_ASK,
+        )
+        self.assertFalse(
+            service.permits_recommendation(context=self.context, thread_id=second_thread_id)
+        )
+
+        # Once the first thread's cooldown elapsed, the second thread's paused
+        # session still cannot restore it.  This proves restore is bound to the
+        # same thread/session pair instead of only the shared Owner Vault.
+        elapsed_service = self._service(now=self.now + timedelta(seconds=60))
+        with self.assertRaises(OwnerTruthThreadPreferenceConflict):
+            elapsed_service.restore_cooldown(
+                context=self.context,
+                command=RestoreCooldownThreadPreferenceCommand(
+                    command_id="thread-preference-cross-thread-restore",
+                    thread_id=self.thread_id,
+                    session_id=second_session_id,
+                    expected_session_version=2,
+                ),
+            )
+        self.assertEqual(
+            repository.read(context=self.context, thread_id=self.thread_id).preference,
+            ThreadPreferenceState.COOLDOWN,
+        )
+        self.assertEqual(
+            repository.read(context=self.context, thread_id=second_thread_id).preference,
+            ThreadPreferenceState.DO_NOT_ASK,
+        )
+        self.assertFalse(
+            service.permits_recommendation(context=self.context, thread_id=second_thread_id)
+        )
+        self.assertTrue(
+            elapsed_service.permits_recommendation(context=self.context, thread_id=self.thread_id)
         )
 
     def test_do_not_ask_requires_confirmed_explicit_restore_and_skip_once_stays_session_only(self) -> None:
