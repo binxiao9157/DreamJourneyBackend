@@ -31,6 +31,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-consent-policy-gate.sh
 echo "== Voice/DH Authority schema G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-authority-g0-gate.sh
 
+echo "== Voice training preflight G0 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-training-preflight-g0-gate.sh
+
 echo "== Publication/visitor default-deny G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-visitor-policy-gate.sh
 
@@ -266,6 +269,9 @@ test -f tests/test_voice_dh_authority.py
 test -f tests/test_voice_dh_authority_migration_contract.py
 test -f scripts/backend-voice-dh-authority-postgres-smoke.py
 test -f scripts/run-backend-voice-dh-authority-g0-gate.sh
+test -f app/services/voice_training_preflight_shadow.py
+test -f tests/test_voice_training_preflight_shadow.py
+test -f scripts/run-backend-voice-training-preflight-g0-gate.sh
 test -f scripts/backend-owner-truth-interview-decision-audit-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-interview-decision-audit-postgres-smoke.sh
 test -f tests/test_owner_truth_knowledge_dimension_confirmation.py
