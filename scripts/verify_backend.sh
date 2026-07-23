@@ -28,6 +28,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-migration-identity-promotion-gate.s
 echo "== Voice/DH purpose consent G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-consent-policy-gate.sh
 
+echo "== Publication/visitor default-deny G0 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-visitor-policy-gate.sh
+
 echo "== Backend py_compile =="
 "$PYTHON_BIN" -m compileall -q app tests
 "$PYTHON_BIN" -m py_compile scripts/*.py

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Callable, Deque, Iterable, Literal, Mapping, Optional, Set
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.observability.events import map_release_policy_operation_event
 
@@ -299,6 +299,69 @@ class ReleasePolicyFeatureDecision(BaseModel):
     reason: str
 
 
+class PublicationDefaultClosedPolicy(BaseModel):
+    """The non-promotable publication half of the M2 policy contract."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: Literal[False] = False
+    livingPublisherRequired: Literal[True] = True
+    minorHardDeny: Literal[True] = True
+    allowedContent: tuple[str, ...] = ()
+    thirdPartyContentMode: Literal["deny"] = "deny"
+    ownerQuestionBodyVisibility: Literal["deny"] = "deny"
+    aiDisclosureMode: Literal["required"] = "required"
+    withdrawalMode: Literal["requiredBeforeEnable"] = "requiredBeforeEnable"
+    decisionReceiptMode: Literal["requiredBeforeEnable"] = "requiredBeforeEnable"
+    safetyAssessmentMode: Literal["requiredBeforeEnable"] = "requiredBeforeEnable"
+    algorithmFilingMode: Literal["requiredBeforeEnable"] = "requiredBeforeEnable"
+
+    @field_validator("allowedContent")
+    @classmethod
+    def allowed_content_must_remain_empty(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value:
+            raise ValueError("G0 publication policy must not allow any content type")
+        return value
+
+
+class VisitorDefaultClosedPolicy(BaseModel):
+    """The non-promotable visitor half of the M2 policy contract."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: Literal[False] = False
+    adultVisitorRequired: Literal[True] = True
+    minorHardDeny: Literal[True] = True
+    visitorIdentityMode: Literal["required"] = "required"
+    sessionTTLSeconds: Literal[604800] = 7 * 24 * 60 * 60
+    offlineAccessMode: Literal["deny"] = "deny"
+    emergencyContactMode: Literal["required"] = "required"
+    continuousUseLimitSeconds: Literal[7200] = 2 * 60 * 60
+    dependencyReminderAfterSeconds: Literal[7200] = 2 * 60 * 60
+    exitMode: Literal["deterministic"] = "deterministic"
+    reportingMode: Literal["required"] = "required"
+    forwardingMode: Literal["deny"] = "deny"
+
+
+class PublicationVisitorReleasePolicy(BaseModel):
+    """Versioned M2 policy metadata; it cannot enable publication or visitors."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schemaVersion: Literal[1] = 1
+    policyVersion: Literal["publication-visitor-policy-v1"] = (
+        "publication-visitor-policy-v1"
+    )
+    policyRevision: int
+    effectiveAt: datetime
+    status: Literal["externalBlocked"] = "externalBlocked"
+    requiredApprovers: tuple[
+        Literal["product", "privacy", "legal", "security", "operations"], ...
+    ] = ("product", "privacy", "legal", "security", "operations")
+    publication: PublicationDefaultClosedPolicy = PublicationDefaultClosedPolicy()
+    visitor: VisitorDefaultClosedPolicy = VisitorDefaultClosedPolicy()
+
+
 class ReleasePolicySnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -314,6 +377,7 @@ class ReleasePolicySnapshot(BaseModel):
     source: Literal["server"]
     shadowMode: bool
     snapshotDecision: str
+    publicationVisitorPolicy: PublicationVisitorReleasePolicy
     features: tuple[ReleasePolicyFeatureDecision, ...]
 
     def is_expired(self, now: Optional[datetime] = None) -> bool:
@@ -337,6 +401,13 @@ class ReleasePolicyService:
     SCHEMA_VERSION = 1
     POLICY_VERSION = "release-policy-v1"
     DEFAULT_TTL_SECONDS = 300
+    PUBLICATION_VISITOR_POLICY_EFFECTIVE_AT = datetime(
+        2026,
+        7,
+        23,
+        tzinfo=timezone.utc,
+    )
+    _PUBLICATION_VISITOR_FEATURES = {"publication", "visitorAccess"}
 
     _FEATURE_GATES: dict[str, tuple[Gate, ...]] = {
         "echoTextInput": ("G0", "G1"),
@@ -358,6 +429,8 @@ class ReleasePolicyService:
         "careDoctorContact": ("G0", "G1", "G2", "G4"),
         "voiceCloneShell": ("G0", "G1", "G2", "G3", "G4"),
         "digitalHumanLivePanel": ("G0", "G1", "G2", "G3", "G4"),
+        "publication": ("G0", "G1", "G4"),
+        "visitorAccess": ("G0", "G1", "G4"),
         "digitalInheritance": ("G0", "G1", "G2", "G3", "G4"),
         "knowledgeLicensing": ("G0", "G1", "G2", "G3", "G4"),
         "beneficiarySettlement": ("G0", "G1", "G2", "G3", "G4"),
@@ -368,6 +441,8 @@ class ReleasePolicyService:
         "personaSettings": "M2",
         "digitalHumanLivePanel": "M2",
         "familySpace": "M2",
+        "publication": "M2",
+        "visitorAccess": "M2",
         "careDashboard": "M3",
         "careDoctorContact": "M3",
         "digitalInheritance": "M4",
@@ -447,7 +522,18 @@ class ReleasePolicyService:
             "killSwitchFeatures": sorted(self.emergency_disabled_features),
             "defaultClosedStages": ["M1", "M2", "M3", "M4"],
             "defaultClosedStageEffectsEnforced": self.enforce_default_closed_stages,
+            "publicationVisitorPolicy": self.publication_visitor_policy().model_dump(
+                mode="json"
+            ),
         }
+
+    def publication_visitor_policy(self) -> PublicationVisitorReleasePolicy:
+        """Return fixed M2 requirements without creating a publication authority."""
+
+        return PublicationVisitorReleasePolicy(
+            policyRevision=self.policy_revision,
+            effectiveAt=self.PUBLICATION_VISITOR_POLICY_EFFECTIVE_AT,
+        )
 
     def _descriptor_command_mode(self) -> str:
         if not self.shadow_mode:
@@ -508,6 +594,7 @@ class ReleasePolicyService:
                 if client_below_minimum
                 else ("shadowAllowlist" if self.shadow_mode else "enforcedAllowlist")
             ),
+            publicationVisitorPolicy=self.publication_visitor_policy(),
             features=decisions,
         )
 
@@ -544,6 +631,9 @@ class ReleasePolicyService:
         ):
             reason = "closedPilotOwnerCore"
             allowed = True
+        elif feature in self._PUBLICATION_VISITOR_FEATURES:
+            reason = "publicationVisitorNotApproved"
+            allowed = False
         else:
             reason = "notApprovedForClosedPilot"
             allowed = False

@@ -10,6 +10,7 @@ import app.main as main_module
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
 from app.services.release_policy import (
+    PublicationVisitorReleasePolicy,
     ReleasePolicyCommandGate,
     ReleasePolicyDecisionRecorder,
     ReleasePolicyFeatureAccessDenied,
@@ -142,6 +143,8 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         for feature in [
             "voiceCloneShell",
             "digitalHumanLivePanel",
+            "publication",
+            "visitorAccess",
             "careDashboard",
             "digitalInheritance",
         ]:
@@ -162,6 +165,87 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertTrue(
             service.public_descriptor()["defaultClosedStageEffectsEnforced"]
         )
+
+    def test_publication_visitor_policy_is_versioned_frozen_and_default_deny(self):
+        now = datetime(2026, 7, 23, 8, 0, tzinfo=timezone.utc)
+        service = ReleasePolicyService(policy_revision=12)
+        snapshot = service.build_snapshot(
+            audience="owner",
+            cohort="closedPilotAdultSelf",
+            client_build=1,
+            now=now,
+        )
+        policy = snapshot.publicationVisitorPolicy
+
+        self.assertEqual(policy.schemaVersion, 1)
+        self.assertEqual(policy.policyVersion, "publication-visitor-policy-v1")
+        self.assertEqual(policy.policyRevision, 12)
+        self.assertEqual(
+            policy.effectiveAt,
+            datetime(2026, 7, 23, tzinfo=timezone.utc),
+        )
+        self.assertEqual(policy.status, "externalBlocked")
+        self.assertFalse(policy.publication.enabled)
+        self.assertTrue(policy.publication.livingPublisherRequired)
+        self.assertTrue(policy.publication.minorHardDeny)
+        self.assertEqual(policy.publication.allowedContent, ())
+        self.assertEqual(policy.publication.thirdPartyContentMode, "deny")
+        self.assertEqual(policy.publication.ownerQuestionBodyVisibility, "deny")
+        self.assertFalse(policy.visitor.enabled)
+        self.assertTrue(policy.visitor.adultVisitorRequired)
+        self.assertTrue(policy.visitor.minorHardDeny)
+        self.assertEqual(policy.visitor.visitorIdentityMode, "required")
+        self.assertEqual(policy.visitor.sessionTTLSeconds, 7 * 24 * 60 * 60)
+        self.assertEqual(policy.visitor.offlineAccessMode, "deny")
+        self.assertEqual(policy.visitor.continuousUseLimitSeconds, 2 * 60 * 60)
+        self.assertEqual(policy.visitor.dependencyReminderAfterSeconds, 2 * 60 * 60)
+        self.assertEqual(policy.visitor.forwardingMode, "deny")
+
+        payload = policy.model_dump(mode="json")
+        payload["unexpected"] = "must fail"
+        with self.assertRaises(ValidationError):
+            PublicationVisitorReleasePolicy.model_validate(payload)
+
+        payload = policy.model_dump(mode="json")
+        payload["publication"]["enabled"] = True
+        with self.assertRaises(ValidationError):
+            PublicationVisitorReleasePolicy.model_validate(payload)
+
+        payload = policy.model_dump(mode="json")
+        payload["publication"]["allowedContent"] = ["text"]
+        with self.assertRaises(ValidationError):
+            PublicationVisitorReleasePolicy.model_validate(payload)
+
+    def test_publication_and_visitor_features_are_independently_enforced_off(self):
+        service = ReleasePolicyService()
+        for feature in ("publication", "visitorAccess"):
+            with self.subTest(feature=feature):
+                decision = service.build_snapshot(
+                    audience="visitor" if feature == "visitorAccess" else "owner",
+                    cohort="closedPilotAdultSelf",
+                    client_build=1,
+                    requested_feature=feature,
+                ).features[0]
+                self.assertFalse(decision.enabled)
+                self.assertFalse(decision.releaseVisible)
+                self.assertEqual(decision.releaseStage, "M2")
+                self.assertEqual(decision.requiredGates, ("G0", "G1", "G4"))
+                self.assertEqual(decision.reason, "publicationVisitorNotApproved")
+                self.assertEqual(service.command_mode_for(feature), "enforce")
+
+                with self.assertRaises(ReleasePolicyFeatureAccessDenied) as raised:
+                    ReleasePolicyCommandGate(service).capture(
+                        feature=feature,
+                        audience="visitor" if feature == "visitorAccess" else "owner",
+                        cohort="closedPilotAdultSelf",
+                        client_build=1,
+                        client_policy_version=None,
+                        client_policy_revision=None,
+                        client_account_generation=None,
+                        client_allowed=None,
+                        require_client_capture=False,
+                    )
+                self.assertEqual(raised.exception.reason, "publicationVisitorNotApproved")
 
     def test_unknown_feature_is_returned_as_explicit_fail_closed_decision(self):
         snapshot = ReleasePolicyService().build_snapshot(
@@ -260,6 +344,12 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
         self.assertEqual(payload["schemaVersion"], 1)
         self.assertEqual(payload["source"], "server")
         self.assertTrue(payload["shadowMode"])
+        self.assertEqual(
+            payload["publicationVisitorPolicy"]["policyVersion"],
+            "publication-visitor-policy-v1",
+        )
+        self.assertFalse(payload["publicationVisitorPolicy"]["publication"]["enabled"])
+        self.assertFalse(payload["publicationVisitorPolicy"]["visitor"]["enabled"])
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertNotIn("token", str(payload).lower())
         self.assertNotIn("credential", str(payload).lower())
