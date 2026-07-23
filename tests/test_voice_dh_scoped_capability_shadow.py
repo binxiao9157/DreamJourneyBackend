@@ -177,6 +177,7 @@ class ScopedCapabilityAdmissionShadowTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("must run inside the deployed API container", source)
         self.assertIn("ScopedCapabilityAdmissionShadow", source)
+        self.assertIn("sys.path.insert(0, str(ROOT_DIR))", source)
         for forbidden in (
             "requests",
             "httpx",

@@ -13,6 +13,12 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
+import sys
+
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from app.services.voice_dh_authority import VoiceDHProvider, VoiceDHPurpose
 from app.services.voice_dh_scoped_capability_shadow import (
