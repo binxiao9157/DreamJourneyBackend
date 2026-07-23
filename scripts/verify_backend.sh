@@ -25,6 +25,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-knowledge-recommendatio
 echo "== Migration identity promotion preflight G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-migration-identity-promotion-gate.sh
 
+echo "== Voice/DH purpose consent G0 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-consent-policy-gate.sh
+
 echo "== Backend py_compile =="
 "$PYTHON_BIN" -m compileall -q app tests
 "$PYTHON_BIN" -m py_compile scripts/*.py
