@@ -170,6 +170,24 @@ class ScopedCapabilityAdmissionShadowTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, source)
 
+    def test_deployed_smoke_remains_container_only_and_side_effect_free(self) -> None:
+        source = (
+            Path(__file__).parents[1]
+            / "scripts/backend-voice-dh-scoped-capability-shadow-deployed-smoke.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("must run inside the deployed API container", source)
+        self.assertIn("ScopedCapabilityAdmissionShadow", source)
+        for forbidden in (
+            "requests",
+            "httpx",
+            "boto3",
+            "urllib.request",
+            "psycopg",
+            "sqlite3",
+            "VoiceDHAuthorityService",
+        ):
+            self.assertNotIn(forbidden, source)
+
 
 if __name__ == "__main__":
     unittest.main()

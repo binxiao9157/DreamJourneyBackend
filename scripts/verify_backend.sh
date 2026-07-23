@@ -283,6 +283,8 @@ test -f scripts/run-backend-voice-dh-blocked-sample-intent-g0-gate.sh
 test -f app/services/voice_dh_scoped_capability_shadow.py
 test -f tests/test_voice_dh_scoped_capability_shadow.py
 test -f scripts/run-backend-voice-dh-scoped-capability-shadow-g0-gate.sh
+test -f scripts/backend-voice-dh-scoped-capability-shadow-deployed-smoke.py
+test -f scripts/run-backend-voice-dh-scoped-capability-shadow-deployed-smoke.sh
 test -f app/services/voice_training_preflight_shadow.py
 test -f tests/test_voice_training_preflight_shadow.py
 test -f scripts/run-backend-voice-training-preflight-g0-gate.sh

@@ -52,3 +52,17 @@ The first command runs seven focused default-deny tests and verifies that the
 module has no network or persistence client imports. The full backend verifier
 also invokes the G0 gate. This validation is static/unit evidence only; it is
 not a Provider, device, or production broker acceptance result.
+
+After deployment, run the container-safe smoke rather than trying to run the
+unit-test package in the production image:
+
+```bash
+cd /opt/services/dreamjourney/DreamJourneyBackend
+sudo docker compose exec -T api \
+  bash scripts/run-backend-voice-dh-scoped-capability-shadow-deployed-smoke.sh
+```
+
+The deployed smoke imports the installed module and checks a synthetic,
+value-free request. It must print `status=blocked`,
+`capabilityIssued=false`, `providerEffectPerformed=false`, and
+`replayProtectionPersistent=false`.
