@@ -1,5 +1,6 @@
 # Voice / Digital Human Authority G0 Slice
 
+Work Item: `WI-V0-01-02`
 Backend revision: `cf77def`
 Deployment target: `miao-server`
 Migration head: `0042`
