@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import json
 import os
-import time
 import urllib.error
 import urllib.request
 
@@ -10,6 +9,8 @@ BASE_URL = os.environ.get(
     "BACKEND_BASE_URL",
     os.environ.get("DREAMJOURNEY_BACKEND_BASE_URL", "http://127.0.0.1:3100"),
 ).rstrip("/")
+SMOKE_ACCESS_TOKEN = os.environ.get("BACKEND_CREDENTIAL_RESPONSE_SMOKE_ACCESS_TOKEN", "").strip()
+SMOKE_USER_ID = os.environ.get("BACKEND_CREDENTIAL_RESPONSE_SMOKE_USER_ID", "").strip()
 FORBIDDEN_PROVIDER_FIELDS = {
     "appkey",
     "accesstoken",
@@ -78,22 +79,30 @@ def request_json(method, path, payload=None, expected=200, access_token=None):
 
 
 def main():
-    suffix = str(int(time.time()))[-8:]
-    login = request_json(
+    require(
+        bool(SMOKE_ACCESS_TOKEN) == bool(SMOKE_USER_ID),
+        "provide both BACKEND_CREDENTIAL_RESPONSE_SMOKE_ACCESS_TOKEN and BACKEND_CREDENTIAL_RESPONSE_SMOKE_USER_ID or neither",
+    )
+
+    legacy_login = request_json(
         "POST",
         "/auth/login",
         {
-            "phone": f"137{suffix}",
+            "phone": "13700009999",
             "nickname": "credential boundary smoke",
             "password": "credential-boundary-smoke-123",
         },
+        expected=426,
     )
-    access_token = str((login.get("auth") or {}).get("accessToken") or "")
-    user_id = str((login.get("user") or {}).get("id") or "")
-    require(access_token.startswith("dja_"), "login must return an opaque user access token")
-    require(user_id, "login must return user id")
+    legacy_detail = legacy_login.get("detail") or {}
+    require(legacy_detail.get("code") == "upgrade_required", "legacy login must remain retired")
+    require(
+        legacy_detail.get("reason") == "legacyIdentityFlowRetired",
+        "legacy login retirement reason drift",
+    )
+    assert_no_provider_credentials(legacy_login)
 
-    runtime = request_json("GET", "/config/runtime", access_token=access_token)
+    runtime = request_json("GET", "/config/runtime", access_token=SMOKE_ACCESS_TOKEN or None)
     assert_no_provider_credentials(runtime)
     require(runtime.get("capabilities", {}).get("realtimeToken") is False, "realtime token capability must be disabled")
     require(runtime.get("capabilities", {}).get("digitalHumanSession") is False, "digital-human session capability must be disabled")
@@ -108,13 +117,19 @@ def main():
     require(runtime_digital_human.get("brokerStatus") == "providerContractNotVerified", "digital-human broker status must remain unverified")
     require((runtime_digital_human.get("decisionReceipt") or {}).get("decision") == "keepDirectMobileClosed", "runtime must expose the digital-human denial receipt")
 
+    protected_expected_status = 200 if SMOKE_ACCESS_TOKEN else 401
     voice = request_json(
         "POST",
         "/voice/realtime-token",
-        {"userId": user_id},
-        access_token=access_token,
+        {"userId": SMOKE_USER_ID or "credential-boundary-smoke"},
+        expected=protected_expected_status,
+        access_token=SMOKE_ACCESS_TOKEN or None,
     )
     assert_no_provider_credentials(voice)
+    if not SMOKE_ACCESS_TOKEN:
+        print("Backend credential response deployed smoke passed: runtime + unauthenticated fail-closed boundary")
+        return
+
     require(voice.get("status") == "blocked", "realtime voice must return blocked")
     require(voice.get("providerReady") is False, "realtime voice Provider must not be ready")
     require(voice.get("accessPath") == "backendProxyOrText", "realtime voice must select backendProxyOrText")
@@ -132,14 +147,14 @@ def main():
         "POST",
         "/digital-human/sessions",
         {
-            "userId": user_id,
-            "personaId": user_id,
+            "userId": SMOKE_USER_ID,
+            "personaId": SMOKE_USER_ID,
             "scene": "echo",
             "deviceId": "credential-boundary-smoke",
             "lifecycleMode": "sunlight",
         },
         expected=503,
-        access_token=access_token,
+        access_token=SMOKE_ACCESS_TOKEN,
     )
     assert_no_provider_credentials(digital_human)
     detail = digital_human.get("detail") or {}
