@@ -1,0 +1,14 @@
+{
+  "version": "0043",
+  "name": "voice_dh_blocked_sample_intent_receipts",
+  "phase": "expand",
+  "compatibility": "backwardCompatible",
+  "runtimeCompatibility": "voiceDhBlockedSampleIntentDefaultDeny",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "voiceDhAuthorityAdmission": false,
+    "voiceDhBlockedSampleIntent": false,
+    "voiceClone": false,
+    "digitalHuman": false
+  }
+}

@@ -31,6 +31,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-consent-policy-gate.sh
 echo "== Voice/DH Authority schema G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-authority-g0-gate.sh
 
+echo "== Voice/DH blocked sample intent G0 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-blocked-sample-intent-g0-gate.sh
+
 echo "== Voice training preflight G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-training-preflight-g0-gate.sh
 
@@ -264,11 +267,16 @@ test -f tests/test_owner_truth_interview_decision_audit.py
 test -f tests/test_owner_truth_interview_decision_audit_migration_contract.py
 test -f db/migrations/0042_voice_dh_authority_schema.sql
 test -f db/migrations/0042_voice_dh_authority_schema.json
+test -f db/migrations/0043_voice_dh_blocked_sample_intent_receipts.sql
+test -f db/migrations/0043_voice_dh_blocked_sample_intent_receipts.json
 test -f app/services/voice_dh_authority.py
 test -f tests/test_voice_dh_authority.py
 test -f tests/test_voice_dh_authority_migration_contract.py
+test -f tests/test_voice_dh_blocked_sample_intent_migration_contract.py
 test -f scripts/backend-voice-dh-authority-postgres-smoke.py
 test -f scripts/run-backend-voice-dh-authority-g0-gate.sh
+test -f scripts/backend-voice-dh-blocked-sample-intent-postgres-smoke.py
+test -f scripts/run-backend-voice-dh-blocked-sample-intent-g0-gate.sh
 test -f app/services/voice_training_preflight_shadow.py
 test -f tests/test_voice_training_preflight_shadow.py
 test -f scripts/run-backend-voice-training-preflight-g0-gate.sh
