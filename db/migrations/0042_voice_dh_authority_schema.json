@@ -1,0 +1,13 @@
+{
+  "version": "0042",
+  "name": "voice_dh_authority_schema",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "voiceDhAuthoritySchemaDefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "voiceDhAuthorityAdmission": false,
+    "voiceClone": false,
+    "digitalHuman": false
+  }
+}

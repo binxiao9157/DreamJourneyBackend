@@ -28,6 +28,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-migration-identity-promotion-gate.s
 echo "== Voice/DH purpose consent G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-consent-policy-gate.sh
 
+echo "== Voice/DH Authority schema G0 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-authority-g0-gate.sh
+
 echo "== Publication/visitor default-deny G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-visitor-policy-gate.sh
 
@@ -256,6 +259,13 @@ test -f db/migrations/0041_owner_truth_interview_decision_audits.sql
 test -f db/migrations/0041_owner_truth_interview_decision_audits.json
 test -f tests/test_owner_truth_interview_decision_audit.py
 test -f tests/test_owner_truth_interview_decision_audit_migration_contract.py
+test -f db/migrations/0042_voice_dh_authority_schema.sql
+test -f db/migrations/0042_voice_dh_authority_schema.json
+test -f app/services/voice_dh_authority.py
+test -f tests/test_voice_dh_authority.py
+test -f tests/test_voice_dh_authority_migration_contract.py
+test -f scripts/backend-voice-dh-authority-postgres-smoke.py
+test -f scripts/run-backend-voice-dh-authority-g0-gate.sh
 test -f scripts/backend-owner-truth-interview-decision-audit-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-interview-decision-audit-postgres-smoke.sh
 test -f tests/test_owner_truth_knowledge_dimension_confirmation.py
