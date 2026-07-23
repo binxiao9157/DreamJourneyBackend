@@ -196,6 +196,11 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
                 "logid": "raw-provider-log-id",
                 "data": "U09VTkQ=",
                 "appkey": "raw-provider-app-key",
+                "metadata": {
+                    "authorization": "Bearer raw-provider-authorization",
+                    "credential": {"accessToken": "raw-provider-access-token"},
+                },
+                "nestedAudio": {"data": "unexpected-nested-provider-payload"},
             }
             response = client.post(
                 "/tts",
@@ -211,8 +216,14 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
         self.assertTrue(body["providerRequestIdHash"].startswith("sha256:"))
         self.assertTrue(body["providerLogIdHash"].startswith("sha256:"))
         self.assertNotIn("providerMessageHash", body)
+        self.assertEqual(
+            set(body),
+            {"code", "data", "providerRequestIdHash", "providerLogIdHash"},
+        )
         self.assertNotIn("raw-provider", response.text)
         self.assertNotIn("appkey", response.text.lower())
+        self.assertNotIn("authorization", response.text.lower())
+        self.assertNotIn("credential", response.text.lower())
 
 
 if __name__ == "__main__":

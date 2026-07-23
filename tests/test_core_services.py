@@ -568,6 +568,52 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
         self.assertTrue(result["providerRequestId"])
         self.assertEqual(result["voiceProfileId"], "S_voice_001")
 
+    def test_voice_clone_tts_proxy_redacts_upstream_error_bodies_from_exceptions(self):
+        settings = Settings(
+            volcengine_voice_clone_tts_api_key="voice-clone-tts-secret",
+            volcengine_voice_clone_tts_url="https://example.com/api/v1/tts",
+        )
+        proxy = VolcVoiceCloneTTSProxy(settings)
+        upstream_detail = '{"message":"credential=provider-secret-value"}'
+        http_error = urllib.error.HTTPError(
+            url="https://example.com/api/v1/tts",
+            code=503,
+            msg="Service Unavailable",
+            hdrs={"X-Tt-Logid": "tts-logid-503"},
+            fp=BytesIO(upstream_detail.encode("utf-8")),
+        )
+
+        with patch("urllib.request.urlopen", side_effect=http_error):
+            with self.assertRaises(ValueError) as context:
+                proxy.synthesize(
+                    text="你好，欢迎回家。",
+                    user_id="u1",
+                    voice_profile_id="S_voice_001",
+                )
+
+        self.assertEqual(str(context.exception), "voice clone TTS provider HTTP 503")
+        self.assertNotIn("provider-secret-value", str(context.exception))
+        self.assertEqual(getattr(context.exception, "provider_log_id", None), "tts-logid-503")
+        self.assertTrue(getattr(context.exception, "provider_request_id", ""))
+
+    def test_voice_clone_tts_proxy_redacts_provider_messages_from_parse_errors(self):
+        proxy = VolcVoiceCloneTTSProxy(
+            Settings(volcengine_voice_clone_tts_api_key="voice-clone-tts-secret")
+        )
+        sensitive_message = "authorization=provider-secret-value"
+
+        with self.assertRaises(ValueError) as response_error:
+            proxy.parse_tts_response({"code": 500, "message": sensitive_message})
+        with self.assertRaises(ValueError) as chunk_error:
+            proxy.parse_chunked_audio_response(
+                '{"code":500,"message":"authorization=provider-secret-value"}'
+            )
+
+        self.assertEqual(str(response_error.exception), "voice clone TTS provider error 500")
+        self.assertEqual(str(chunk_error.exception), "voice clone TTS provider error 500")
+        self.assertNotIn("provider-secret-value", str(response_error.exception))
+        self.assertNotIn("provider-secret-value", str(chunk_error.exception))
+
     def test_voice_clone_synthesis_endpoint_returns_base64_audio_without_exposing_provider_key(self):
         class FakeVoiceCloneTTSProvider:
             provider_mode = "volcengineVoiceCloneV1TTS"

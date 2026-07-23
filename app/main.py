@@ -5691,25 +5691,29 @@ def _provider_reference_hash(value: Any) -> str:
 
 
 def _provider_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    public_payload = dict(payload)
+    # Legacy provider responses are untrusted transport data.  Only expose the
+    # small compatibility surface this endpoint actually needs; shallow key
+    # removal is insufficient because provider payloads may nest credentials.
     provider_request_id = str(
-        public_payload.pop("providerRequestId", "")
-        or public_payload.pop("request_id", "")
-        or public_payload.pop("reqid", "")
+        payload.get("providerRequestId", "")
+        or payload.get("request_id", "")
+        or payload.get("reqid", "")
         or ""
     ).strip()
     provider_log_id = str(
-        public_payload.pop("providerLogId", "")
-        or public_payload.pop("log_id", "")
-        or public_payload.pop("logid", "")
+        payload.get("providerLogId", "")
+        or payload.get("log_id", "")
+        or payload.get("logid", "")
         or ""
     ).strip()
-    public_payload.pop("providerMessage", None)
-    public_payload.pop("message", None)
-    for key in tuple(public_payload):
-        normalized_key = "".join(character for character in key.lower() if character.isalnum())
-        if normalized_key in {"appkey", "accesstoken", "apptoken", "apikey", "secretkey"}:
-            public_payload.pop(key, None)
+
+    public_payload: Dict[str, Any] = {}
+    code = payload.get("code")
+    if isinstance(code, (int, float, str)) and not isinstance(code, bool):
+        public_payload["code"] = code
+    data = payload.get("data")
+    if isinstance(data, str) and data:
+        public_payload["data"] = data
     if provider_request_id:
         public_payload["providerRequestIdHash"] = _provider_reference_hash(provider_request_id)
     if provider_log_id:

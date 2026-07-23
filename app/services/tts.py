@@ -306,15 +306,17 @@ class VolcVoiceCloneTTSProxy:
                 payload = response.read().decode("utf-8")
                 provider_log_id = self._header_value(response.headers, "X-Tt-Logid")
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            error = ValueError(f"voice clone TTS provider HTTP {exc.code}: {detail[:200]}")
+            # Consume the response body so the underlying connection can close,
+            # but never copy untrusted provider content into API errors/logs.
+            exc.read()
+            error = ValueError(f"voice clone TTS provider HTTP {exc.code}")
             setattr(error, "provider_request_id", provider_request_id)
             setattr(error, "provider_log_id", self._header_value(exc.headers, "X-Tt-Logid"))
-            raise error from exc
-        except urllib.error.URLError as exc:
-            error = ValueError(f"voice clone TTS provider network error: {exc.reason}")
+            raise error from None
+        except urllib.error.URLError:
+            error = ValueError("voice clone TTS provider network error")
             setattr(error, "provider_request_id", provider_request_id)
-            raise error from exc
+            raise error from None
 
         try:
             response_json = json.loads(payload)
@@ -363,8 +365,7 @@ class VolcVoiceCloneTTSProxy:
     def parse_tts_response(self, payload: Dict[str, Any]) -> bytes:
         code = payload.get("code")
         if code is not None and int(code) not in {0, 3000, 20000000}:
-            message = str(payload.get("message") or payload.get("msg") or "unknown error")
-            raise ValueError(f"voice clone TTS provider error {code}: {message}")
+            raise ValueError(f"voice clone TTS provider error {code}")
 
         data = payload.get("data")
         if not data:
@@ -440,8 +441,7 @@ class VolcVoiceCloneTTSProxy:
             if code == 20000000:
                 break
             if code != 0:
-                message = str(item.get("message") or item.get("msg") or "unknown error")
-                raise ValueError(f"voice clone TTS provider error {code}: {message}")
+                raise ValueError(f"voice clone TTS provider error {code}")
             data = item.get("data")
             if data:
                 audio.extend(base64.b64decode(str(data)))
