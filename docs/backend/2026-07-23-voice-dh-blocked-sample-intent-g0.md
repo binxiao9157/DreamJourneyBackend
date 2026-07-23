@@ -43,10 +43,19 @@ RUN_VOICE_DH_BLOCKED_SAMPLE_INTENT_POSTGRES_SMOKE=1 \
 PYTHON_BIN=.venv/bin/python ./scripts/verify_backend.sh
 ```
 
-本地静态 gate 和完整 `verify_backend.sh` 已通过。第二条命令需要一个能创建
-disposable Postgres database 的 `DATABASE_URL`；部署后应在 API 容器环境中运行，
-并确认输出 `sampleStatus=blocked`、`receiptCount=2` 且所有 Provider/SampleObject/
-training effect 均为 false。
+本地静态 gate 和完整 `verify_backend.sh` 已通过（1170 个 unit tests）。本机默认
+`DATABASE_URL` 的主机不可解析，因此没有把本机 DNS 失败误记为 smoke 成功。
+
+已部署至 `main@be0153e`：服务器已应用并验证迁移 `0043`，`/ready` 返回
+`status=ready`。在 API 容器环境运行 disposable Postgres smoke，输出：
+
+```text
+voiceDhBlockedSampleIntentG0=true sampleStatus=blocked receiptCount=2
+providerEffectPerformed=false sampleObjectCreated=false trainingCommandCreated=false
+```
+
+这只证明 default-deny 的数据库边界和幂等回执正常，不是 Provider 或真实声音训练
+验收。
 
 ## 剩余 Gate
 
