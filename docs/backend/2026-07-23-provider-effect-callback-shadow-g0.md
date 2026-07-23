@@ -50,6 +50,19 @@ It always returns `blocked`. It rejects or marks all of the following:
   synthetic value-free data and asserts that callback acceptance, reconciliation
   and Provider execution remain false.
 
+## Deployment evidence
+
+- Backend source: `main@181e1a1` (`feat(effects): add callback reconciliation
+  shadow`).
+- Deployment: the `api` container was rebuilt and recreated from that revision;
+  `/ready` reported `status=ready`.
+- Deployed smoke passed with:
+  `providerEffectCallbackShadowG0=true`, `status=blocked`,
+  `callbackAccepted=false`, `providerEffectReconciled=false`, and
+  `replayProtectionPersistent=false`.
+- The smoke is value-free and local to the container. It does not invoke a
+  callback route, contact a Provider, accept a callback, or mutate an effect.
+
 ## Remaining gates
 
 G2 still requires durable effect lookup and persistent replay protection. G3
