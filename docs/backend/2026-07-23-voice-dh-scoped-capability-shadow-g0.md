@@ -66,3 +66,19 @@ The deployed smoke imports the installed module and checks a synthetic,
 value-free request. It must print `status=blocked`,
 `capabilityIssued=false`, `providerEffectPerformed=false`, and
 `replayProtectionPersistent=false`.
+
+## Deployment evidence
+
+The implementation was deployed from `main@4478dec` on 2026-07-23. The API
+container was rebuilt and `/ready` returned `status=ready` with database,
+schema, auth, and incident components all ready. The container-safe smoke
+printed:
+
+```text
+voiceDhScopedCapabilityShadowG0=true status=blocked capabilityIssued=False
+providerEffectPerformed=False replayProtectionPersistent=False
+```
+
+This is runtime evidence that the deployed artifact imports and stays
+fail-closed. It does not create a durable replay ledger, capability issuer,
+Provider effect, or release approval.
