@@ -59,6 +59,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-effect-contract-gate.sh
 echo "== Provider effect G2 reconciliation contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-effect-reconciliation-contract-gate.sh
 
+echo "== Provider effect callback reconciliation shadow G0 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-effect-callback-shadow-g0-gate.sh
+
 echo "== Provider-query operations G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-query-operations-contract-gate.sh
 
