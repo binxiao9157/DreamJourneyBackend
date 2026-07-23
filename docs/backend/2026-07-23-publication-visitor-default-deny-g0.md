@@ -28,3 +28,11 @@ PYTHON_BIN=.venv/bin/python ./scripts/verify_backend.sh
 ```
 
 通过 G0 gate 仅证明政策默认拒绝、离线拒绝和没有新增公开 route。`G1` 仍需 Release/隐藏入口复核；`G4` 仍需 Product、Privacy、Legal、Security、Operations 的签字。后续 `WI-S3-01-02` 才能在这些前提下考虑独立公开副本与 Grant schema。
+
+## 部署证据
+
+- 后端 `main@0fdd55f` 已于 2026-07-23 部署到 `miao-server`，仅重建 `api` 容器；没有修改 `.env` 或打开任何 feature。
+- `/ready` 返回 `ready`，API 容器处于 healthy。
+- 匿名 `GET /v2/release-policy?audience=visitor&cohort=closedPilotAdultSelf&clientBuild=1&feature=visitorAccess` 返回 `enabled=false`、`releaseVisible=false`、`releaseStage=M2`、`reason=publicationVisitorNotApproved`、`requiredGates=[G0,G1,G4]`。
+- 容器内以已有运行时凭据读取 `/config/runtime`，确认 `releasePolicy.publicationVisitorPolicy` 返回同一 `publication-visitor-policy-v1`，并保持 publication/visitor 全部 false、Visitor TTL 为 604800 秒、offline mode 为 deny。
+- 本次不运行任何写入、迁移、Provider、公开 URL 或 Visitor 会话操作；G1/G4 保持未完成。
