@@ -37,8 +37,18 @@ upstream error text to the client-facing response or normal error path.
 - Focused credential-response and Voice Clone exception tests.
 - `scripts/verify_backend.sh`, including credential boundary smoke, FastAPI
   smoke, static G0 gates, and `git diff --check`.
-- Deployed verification must exercise the existing credential-response smoke
-  after the container is rebuilt.
+- Deployed verification after API-container rebuild:
+  - response minimization: `main@117a79d`;
+  - smoke compatibility repair: `main@0f6dff3`;
+  - `/ready` reported `status=ready`;
+  - `run-backend-credential-response-deployed-smoke.sh` passed its runtime and
+    unauthenticated fail-closed boundary without minting a synthetic user
+    session.
+
+The production identity challenge is intentionally unavailable at this stage,
+so the smoke does not fabricate an authenticated principal. If a dedicated QA
+user session is explicitly supplied through both documented smoke environment
+variables, it additionally covers the authenticated blocked responses.
 
 ## Follow-up
 
