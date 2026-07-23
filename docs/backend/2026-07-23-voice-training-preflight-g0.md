@@ -33,9 +33,11 @@ and G2/G3/G4 before a training command could exist.
   passed: 7 focused tests plus static import boundary.
 - `PYTHON_BIN=.venv/bin/python ./scripts/verify_backend.sh` passed: 1163 unit
   tests and all existing contract/smoke gates.
-- Deployment verification is intentionally limited to the packaged
-  `scripts/backend-voice-training-preflight-runtime-smoke.py` container-local
-  G0 smoke: no migration or public runtime route is added by this slice.
+- Deployed at `main@fc01a00`: `/ready` returned `status=ready`; the packaged
+  `scripts/backend-voice-training-preflight-runtime-smoke.py` and the same G0
+  gate both returned `voiceTrainingPreflight=blocked`, with provider effect,
+  SampleObject creation and training-command creation all false. No migration
+  or public runtime route is added by this slice.
 
 ## Remaining Gates
 
