@@ -33,8 +33,9 @@ and G2/G3/G4 before a training command could exist.
   passed: 7 focused tests plus static import boundary.
 - `PYTHON_BIN=.venv/bin/python ./scripts/verify_backend.sh` passed: 1163 unit
   tests and all existing contract/smoke gates.
-- Deployment verification is intentionally limited to container-local G0 smoke:
-  no migration or public runtime route is added by this slice.
+- Deployment verification is intentionally limited to the packaged
+  `scripts/backend-voice-training-preflight-runtime-smoke.py` container-local
+  G0 smoke: no migration or public runtime route is added by this slice.
 
 ## Remaining Gates
 

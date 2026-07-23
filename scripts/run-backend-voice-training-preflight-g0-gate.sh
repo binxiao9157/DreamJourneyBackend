@@ -13,7 +13,11 @@ if [[ -z "$PYTHON_BIN" ]]; then
   fi
 fi
 
-PYTHONPATH=. "$PYTHON_BIN" -m unittest tests.test_voice_training_preflight_shadow
+if [[ -f tests/test_voice_training_preflight_shadow.py ]]; then
+  PYTHONPATH=. "$PYTHON_BIN" -m unittest tests.test_voice_training_preflight_shadow
+else
+  PYTHONPATH=. "$PYTHON_BIN" scripts/backend-voice-training-preflight-runtime-smoke.py
+fi
 
 "$PYTHON_BIN" - <<'PY'
 from pathlib import Path

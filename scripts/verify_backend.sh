@@ -272,6 +272,7 @@ test -f scripts/run-backend-voice-dh-authority-g0-gate.sh
 test -f app/services/voice_training_preflight_shadow.py
 test -f tests/test_voice_training_preflight_shadow.py
 test -f scripts/run-backend-voice-training-preflight-g0-gate.sh
+test -f scripts/backend-voice-training-preflight-runtime-smoke.py
 test -f scripts/backend-owner-truth-interview-decision-audit-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-interview-decision-audit-postgres-smoke.sh
 test -f tests/test_owner_truth_knowledge_dimension_confirmation.py
