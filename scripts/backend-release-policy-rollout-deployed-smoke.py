@@ -96,6 +96,50 @@ def assert_enforced(feature, path, payload):
     )
 
 
+def assert_voice_digital_human_readiness(observations):
+    readiness = observations.get("voiceDigitalHumanReadiness") or {}
+    require(
+        readiness.get("schemaVersion") == 1,
+        "Voice/Digital Human lane-readiness schema must be available",
+    )
+    require(
+        readiness.get("policyVersion") == "voiceDigitalHumanLaneReadiness-v1",
+        "Voice/Digital Human lane-readiness policy must be available",
+    )
+    require(
+        readiness.get("promotionAllowed") is False,
+        "deployed readiness must never auto-promote Voice/Digital Human lanes",
+    )
+    lanes = readiness.get("lanes") or {}
+    expected_lanes = {
+        "M1SelfVoice",
+        "M2LivingDigitalHuman",
+        "M3AdultMemorialPilot",
+    }
+    require(set(lanes) == expected_lanes, "Voice/Digital Human lane set")
+    for lane_id in expected_lanes:
+        lane = lanes.get(lane_id) or {}
+        require(lane.get("status") == "blocked", f"{lane_id} must remain blocked")
+        require(
+            lane.get("promotionAllowed") is False,
+            f"{lane_id} must not be auto-promoted",
+        )
+        require(
+            "manualPromotionRequired" in (lane.get("blockers") or []),
+            f"{lane_id} requires an explicit human promotion",
+        )
+    require(
+        "memorialPilotNotApproved"
+        in (lanes["M3AdultMemorialPilot"].get("blockers") or []),
+        "M3 must remain explicitly unapproved",
+    )
+    return {
+        "policyVersion": readiness.get("policyVersion"),
+        "blockedLaneCount": len(expected_lanes),
+        "promotionAllowed": False,
+    }
+
+
 def main():
     require(BASE_URL, "BACKEND_BASE_URL is required")
     require(API_TOKEN, "BACKEND_API_TOKEN is required")
@@ -170,6 +214,7 @@ def main():
         all(event.get("principalHash") is None for event in operation_events),
         "rollout operation events must not bind a principal",
     )
+    voice_digital_human_readiness = assert_voice_digital_human_readiness(observations)
     serialized = json.dumps(observations, ensure_ascii=False).lower()
     for forbidden in ("userid", "phone", "token", "authorization", "requestbody"):
         require(forbidden not in serialized, f"observation summary leaked {forbidden}")
@@ -193,6 +238,7 @@ def main():
         "operationEventCount": len(operation_events),
         "evidenceSource": observations.get("evidenceSource"),
         "sinkFailureCount": observations.get("sinkFailureCount"),
+        "voiceDigitalHumanReadiness": voice_digital_human_readiness,
     }
     if OUTPUT_PATH:
         with open(OUTPUT_PATH, "w", encoding="utf-8") as handle:
