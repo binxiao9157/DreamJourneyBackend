@@ -282,6 +282,7 @@ def main() -> None:
     previous_recommendation_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED
     previous_plan_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED
     previous_saved_cue_qa = main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED
+    previous_thread_summary_qa = main_module.OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED
     previous_thread_preference_qa = main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED
 
     try:
@@ -309,6 +310,7 @@ def main() -> None:
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = True
         main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = False
+        main_module.OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED = False
         main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = False
 
         client = TestClient(main_module.app)
@@ -342,6 +344,24 @@ def main() -> None:
             },
         )
         require(confirmation.status_code == 201, f"confirmation creation failed: {confirmation.text}")
+
+        thread_summary_path = f"/v2/vaults/{vault_id}/thread-summaries/read"
+        summary_hidden = client.post(thread_summary_path, headers=owner_headers, json={})
+        require(summary_hidden.status_code == 404, "thread summary route must default hidden")
+        require(
+            route_code(summary_hidden) == "ownerTruthThreadSummaryReadUnavailable",
+            "hidden thread summary route must expose a stable unavailable code",
+        )
+        main_module.OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED = True
+        empty_summary = client.post(thread_summary_path, headers=owner_headers, json={})
+        require(empty_summary.status_code == 200, f"empty thread summary failed: {empty_summary.text}")
+        empty_projection = (empty_summary.json().get("threadSummaries") or {}).get("projection") or {}
+        require(
+            (empty_summary.json().get("threadSummaries") or {}).get("state") == "ready"
+            and empty_projection.get("threadCount") == 0
+            and empty_projection.get("associationCount") == 0,
+            "ready thread summary must be empty before interview creation",
+        )
         thread_id, session_id = start_session(store, context=context)
         defer_path = (
             f"/v2/vaults/{vault_id}/interview-sessions/{session_id}"
@@ -396,6 +416,24 @@ def main() -> None:
         require(
             "私有知识记忆" not in created.text and "continuationText" not in created.text,
             "atomic defer response must remain value-free",
+        )
+
+        thread_summary = client.post(thread_summary_path, headers=owner_headers, json={})
+        require(thread_summary.status_code == 200, f"thread summary read failed: {thread_summary.text}")
+        projection = (thread_summary.json().get("threadSummaries") or {}).get("projection") or {}
+        summaries = projection.get("threads") or []
+        require(
+            projection.get("threadCount") == 1
+            and projection.get("associationCount") == 0
+            and len(summaries) == 1
+            and summaries[0].get("threadId") == thread_id
+            and summaries[0].get("anchorCount") == 1
+            and summaries[0].get("anchors", [{}])[0].get("memoryVersionId") == memory_version_id,
+            "thread summary must retain only current Owner cue metadata",
+        )
+        require(
+            "私有知识记忆" not in thread_summary.text and "continuationText" not in thread_summary.text,
+            "thread summary response must remain value-free",
         )
 
         plan_path = f"/v2/vaults/{vault_id}/knowledge-recommendations/plan"
@@ -454,7 +492,7 @@ def main() -> None:
             f"schemaHead={verified['expectedHead']} defaultHidden=true explicitOwnerOnly=true "
             "deduplicated=true crossOwnerDenied=true clientTextRejected=true "
             "atomicDefer=true elapsedCooldownCuePreserved=true "
-            "sessionVersionSuppressed=true readOnly=true"
+            "sessionVersionSuppressed=true threadSummaryRead=true readOnly=true"
         )
     finally:
         main_module.store = previous_store
@@ -467,6 +505,7 @@ def main() -> None:
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = previous_recommendation_qa
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = previous_plan_qa
         main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = previous_saved_cue_qa
+        main_module.OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED = previous_thread_summary_qa
         main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = previous_thread_preference_qa
         if store is not None:
             store.close_pool()

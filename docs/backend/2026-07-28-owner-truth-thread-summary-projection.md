@@ -74,10 +74,24 @@ PYTHON_BIN=.venv/bin/python \
 本轮结果：81 项单测通过，部署镜像可运行的 dependency-free policy smoke 通过，
 `git diff --check` 与 Python compileall 通过。
 
+### Postgres smoke
+
+Thread Summary 已接入现有的 `saved continuation` 临时数据库 smoke。它会创建
+独立测试库，验证 route 默认 `404`、显式开关后的空 Projection、Owner 创建
+“以后再聊”后当前锚点可读，以及响应不含正文：
+
+```bash
+DATABASE_URL='postgresql://...' \
+  .venv/bin/python scripts/backend-owner-truth-saved-continuation-postgres-smoke.py
+```
+
+该命令需要数据库账号拥有创建和删除临时数据库的权限。当前本机未配置这类
+Postgres 环境，因此本轮仅完成脚本编译；真实 Postgres 证据待部署/CI 环境执行。
+
 ## Gate 结论
 
 - G0：已覆盖，属于纯后端 read projection 合同。
 - G1：未开始；没有公开 UI 或模拟器交互。
-- G2：不要求 migration。若需要在部署环境调用该 read service，随下一次后端常规
-  发布一起部署即可；本轮未部署。
+- G2：不要求 migration；Postgres smoke 已具备但尚未在真实数据库环境执行。若需要
+  在部署环境调用该 read service，随下一次后端常规发布一起部署即可；本轮未部署。
 - G3/G4：不适用；本切片没有 Provider 和真机能力。
