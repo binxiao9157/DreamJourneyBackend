@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# WI-S3-01-01 G0 only. This gate protects a value-free, default-deny policy
-# contract. It must not create a public content route, grant, session, index,
-# database table, provider call, or client-visible entry.
+# WI-S3-01-01 policy guard. It protects a value-free, default-deny release
+# contract. Later additive schema work may exist, but this gate must still fail
+# if a public content route, grant/session writer, index, provider call, or
+# client-visible entry becomes reachable.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 

@@ -1,0 +1,13 @@
+{
+  "version": "0050",
+  "name": "publication_visitor_schema",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationSchemaDefaultDeny",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publicationSchemaV1": false,
+    "publicationWriterV1": false,
+    "visitorGatewayV1": false
+  }
+}
