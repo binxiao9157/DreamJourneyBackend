@@ -1,0 +1,15 @@
+{
+  "version": "0045",
+  "name": "owner_truth_knowledge_recommendation_feedback_receipts",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthKnowledgeRecommendationFeedbackQaOnly",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthKnowledgeDimensionConfirmationQa": false,
+    "ownerTruthKnowledgeRecommendationReadQa": false,
+    "ownerTruthKnowledgeRecommendationPlanQa": false,
+    "ownerTruthKnowledgeRecommendationFeedbackQa": false
+  }
+}

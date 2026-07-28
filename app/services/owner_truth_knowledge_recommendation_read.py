@@ -42,6 +42,9 @@ from app.services.owner_truth_thread_preferences import (
     OwnerTruthThreadPreferenceSnapshot,
     ThreadPreferenceState,
 )
+from app.services.owner_truth_knowledge_recommendation_feedback import (
+    OwnerTruthKnowledgeRecommendationFeedbackPolicy,
+)
 
 
 OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_SCHEMA_VERSION = (
@@ -81,6 +84,9 @@ class OwnerTruthKnowledgeRecommendationReadStore(Protocol):
         ...
 
     def owner_truth_knowledge_recommendation_activation_repository(self) -> Any:
+        ...
+
+    def owner_truth_knowledge_recommendation_feedback_repository(self) -> Any:
         ...
 
 
@@ -190,6 +196,10 @@ class OwnerTruthKnowledgeRecommendationReadService:
                     selection=None,
                 )
             assert dimension_read.coverage is not None
+            feedback_policy = self._current_feedback_policy(
+                context=context,
+                authority_epoch=dimension_read.authority_epoch,
+            )
             self._assert_current_owner_thread_authority(
                 candidates=candidate_rows,
                 context=context,
@@ -207,6 +217,11 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 candidates=candidate_rows,
                 now=current_time,
                 crisis_active=crisis_active,
+                excluded_candidate_ids=feedback_policy.replaced_candidate_ids,
+                feedback_dimension_penalty_counts=feedback_policy.dimension_penalty_counts,
+                feedback_question_template_penalty_counts=(
+                    feedback_policy.question_template_penalty_counts
+                ),
             )
             return OwnerTruthKnowledgeRecommendationReadResult(
                 dimension_read=dimension_read,
@@ -254,6 +269,10 @@ class OwnerTruthKnowledgeRecommendationReadService:
                     selection=None,
                 )
             assert dimension_read.coverage is not None
+            feedback_policy = self._current_feedback_policy(
+                context=context,
+                authority_epoch=dimension_read.authority_epoch,
+            )
             repository = self._store.owner_truth_conversation_repository()
             try:
                 potential_thread_authorities = repository.list_recommendation_candidate_thread_authorities(
@@ -314,6 +333,11 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 now=current_time,
                 crisis_active=crisis_active,
                 accepted_candidate_ids=accepted_candidate_ids,
+                excluded_candidate_ids=feedback_policy.replaced_candidate_ids,
+                feedback_dimension_penalty_counts=feedback_policy.dimension_penalty_counts,
+                feedback_question_template_penalty_counts=(
+                    feedback_policy.question_template_penalty_counts
+                ),
             )
             return OwnerTruthKnowledgeRecommendationReadResult(
                 dimension_read=dimension_read,
@@ -341,6 +365,31 @@ class OwnerTruthKnowledgeRecommendationReadService:
         if not isinstance(now, datetime) or now.tzinfo is None:
             raise OwnerTruthKnowledgeRecommendationReadError("now must be timezone-aware")
         return now.astimezone(timezone.utc)
+
+    def _current_feedback_policy(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        authority_epoch: int,
+    ) -> OwnerTruthKnowledgeRecommendationFeedbackPolicy:
+        repository_factory = getattr(
+            self._store,
+            "owner_truth_knowledge_recommendation_feedback_repository",
+            None,
+        )
+        if not callable(repository_factory):
+            # Compatibility doubles created before M0-B feedback remain safe:
+            # they have no feedback receipts and therefore no policy effect.
+            return OwnerTruthKnowledgeRecommendationFeedbackPolicy.empty()
+        policy = repository_factory().current_policy(
+            context=context,
+            authority_epoch=authority_epoch,
+        )
+        if not isinstance(policy, OwnerTruthKnowledgeRecommendationFeedbackPolicy):
+            raise OwnerTruthKnowledgeRecommendationReadError(
+                "recommendation feedback policy has an unsupported shape"
+            )
+        return policy
 
     @staticmethod
     def _assert_current_owner_confirmed_evidence(

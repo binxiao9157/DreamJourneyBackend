@@ -716,6 +716,8 @@ class RecommendationSelector:
         policy_version: str = KNOWLEDGE_DIMENSION_POLICY_VERSION,
         accepted_candidate_ids: Iterable[str] = (),
         excluded_candidate_ids: Iterable[str] = (),
+        feedback_dimension_penalty_counts: Mapping[KnowledgeDimension | str, int] | None = None,
+        feedback_question_template_penalty_counts: Mapping[str, int] | None = None,
     ) -> RecommendationSelection:
         owner = require_nonblank(owner_subject_id, field="owner_subject_id")
         vault = require_nonblank(vault_id, field="vault_id")
@@ -743,6 +745,12 @@ class RecommendationSelector:
             )
         except TypeError as exc:
             raise KnowledgeRecommendationError("excluded_candidate_ids must be iterable") from exc
+        dimension_penalties = self._dimension_penalty_counts(
+            feedback_dimension_penalty_counts,
+        )
+        question_template_penalties = self._question_template_penalty_counts(
+            feedback_question_template_penalty_counts,
+        )
 
         eligible: dict[RecommendationSlot, list[RecommendationCandidate]] = {
             RecommendationSlot.CONTINUITY: [],
@@ -793,7 +801,10 @@ class RecommendationSelector:
             eligible[candidate.slot].append(candidate)
 
         selected: list[RecommendationDecision] = []
-        continuity = self._best_continuity(eligible[RecommendationSlot.CONTINUITY])
+        continuity = self._best_continuity(
+            eligible[RecommendationSlot.CONTINUITY],
+            question_template_penalties=question_template_penalties,
+        )
         if continuity is not None:
             selected.append(self._decision(continuity, policy_version=policy))
 
@@ -810,7 +821,12 @@ class RecommendationSelector:
                 )
                 continue
             breadth_candidates.append(candidate)
-        breadth = self._best_breadth(breadth_candidates, coverage=coverage)
+        breadth = self._best_breadth(
+            breadth_candidates,
+            coverage=coverage,
+            dimension_penalties=dimension_penalties,
+            question_template_penalties=question_template_penalties,
+        )
         if breadth is not None:
             selected.append(self._decision(breadth, policy_version=policy))
 
@@ -868,13 +884,18 @@ class RecommendationSelector:
         return None
 
     @staticmethod
-    def _best_continuity(candidates: Iterable[RecommendationCandidate]) -> Optional[RecommendationCandidate]:
+    def _best_continuity(
+        candidates: Iterable[RecommendationCandidate],
+        *,
+        question_template_penalties: Mapping[str, int],
+    ) -> Optional[RecommendationCandidate]:
         rows = tuple(candidates)
         if not rows:
             return None
         return max(
             rows,
             key=lambda candidate: (
+                -question_template_penalties.get(candidate.question_template_id, 0),
                 candidate.explicit_intent_priority,
                 candidate.continuity_score,
                 candidate.importance_score,
@@ -887,6 +908,8 @@ class RecommendationSelector:
         candidates: Iterable[RecommendationCandidate],
         *,
         coverage: DimensionProjection,
+        dimension_penalties: Mapping[KnowledgeDimension, int],
+        question_template_penalties: Mapping[str, int],
     ) -> Optional[RecommendationCandidate]:
         rows = tuple(candidates)
         if not rows:
@@ -894,6 +917,8 @@ class RecommendationSelector:
         return max(
             rows,
             key=lambda candidate: (
+                -dimension_penalties.get(candidate.target_dimension, 0),
+                -question_template_penalties.get(candidate.question_template_id, 0),
                 coverage.for_dimension(candidate.target_dimension).missing_facet_count,
                 candidate.importance_score,
                 candidate.explicit_intent_priority,
@@ -906,6 +931,62 @@ class RecommendationSelector:
                 candidate.candidate_id,
             ),
         )
+
+    @staticmethod
+    def _dimension_penalty_counts(
+        values: Mapping[KnowledgeDimension | str, int] | None,
+    ) -> Mapping[KnowledgeDimension, int]:
+        if values is None:
+            return {}
+        if not isinstance(values, Mapping):
+            raise KnowledgeRecommendationError(
+                "feedback_dimension_penalty_counts must be a mapping"
+            )
+        normalized: dict[KnowledgeDimension, int] = {}
+        for raw_dimension, raw_count in values.items():
+            try:
+                dimension = KnowledgeDimension(raw_dimension)
+            except (TypeError, ValueError) as exc:
+                raise KnowledgeRecommendationError(
+                    "feedback dimension penalty contains an unsupported dimension"
+                ) from exc
+            if (
+                not isinstance(raw_count, int)
+                or isinstance(raw_count, bool)
+                or raw_count < 0
+            ):
+                raise KnowledgeRecommendationError(
+                    "feedback dimension penalty count must be a non-negative integer"
+                )
+            normalized[dimension] = raw_count
+        return normalized
+
+    @staticmethod
+    def _question_template_penalty_counts(
+        values: Mapping[str, int] | None,
+    ) -> Mapping[str, int]:
+        if values is None:
+            return {}
+        if not isinstance(values, Mapping):
+            raise KnowledgeRecommendationError(
+                "feedback_question_template_penalty_counts must be a mapping"
+            )
+        normalized: dict[str, int] = {}
+        for raw_template, raw_count in values.items():
+            template = _opaque_identifier(
+                raw_template,
+                field="feedback_question_template_penalty",
+            )
+            if (
+                not isinstance(raw_count, int)
+                or isinstance(raw_count, bool)
+                or raw_count < 0
+            ):
+                raise KnowledgeRecommendationError(
+                    "feedback question template penalty count must be a non-negative integer"
+                )
+            normalized[template] = raw_count
+        return normalized
 
     @staticmethod
     def _decision(candidate: RecommendationCandidate, *, policy_version: str) -> RecommendationDecision:

@@ -187,6 +187,15 @@ from app.services.owner_truth_knowledge_recommendation_activation import (
     OwnerTruthKnowledgeRecommendationActivationStale,
     knowledge_recommendation_activation_summary,
 )
+from app.services.owner_truth_knowledge_recommendation_feedback import (
+    OwnerTruthKnowledgeRecommendationFeedbackAccessDenied,
+    OwnerTruthKnowledgeRecommendationFeedbackCommand,
+    OwnerTruthKnowledgeRecommendationFeedbackConflict,
+    OwnerTruthKnowledgeRecommendationFeedbackError,
+    OwnerTruthKnowledgeRecommendationFeedbackService,
+    OwnerTruthKnowledgeRecommendationFeedbackStale,
+    knowledge_recommendation_feedback_summary,
+)
 from app.services.owner_truth_saved_continuation import (
     OwnerTruthSavedContinuationCueAccessDenied,
     OwnerTruthSavedContinuationCueCommand,
@@ -392,6 +401,9 @@ OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = bool(
 )
 OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED = bool(
     settings.owner_truth_knowledge_recommendation_activation_qa_enabled
+)
+OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_QA_ENABLED = bool(
+    settings.owner_truth_knowledge_recommendation_feedback_qa_enabled
 )
 OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = bool(
     settings.owner_truth_saved_continuation_cue_qa_enabled
@@ -600,6 +612,30 @@ def _require_owner_truth_knowledge_recommendation_activation_qa(request: Request
         raise HTTPException(
             status_code=401,
             detail={"code": "ownerTruthKnowledgeRecommendationActivationUserSessionRequired"},
+        )
+    return user_id
+
+
+def _require_owner_truth_knowledge_recommendation_feedback_qa(request: Request) -> str:
+    """Keep server-verified recommendation feedback inside explicit QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthKnowledgeRecommendationFeedbackUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthKnowledgeRecommendationFeedbackUserSessionRequired"},
         )
     return user_id
 
@@ -1173,6 +1209,19 @@ def _owner_truth_knowledge_recommendation_activation_context(
     )
 
 
+def _owner_truth_knowledge_recommendation_feedback_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_knowledge_recommendation_feedback_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_saved_continuation_cue_context(
     request: Request,
     *,
@@ -1480,6 +1529,30 @@ def _owner_truth_knowledge_recommendation_activation_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthKnowledgeRecommendationActivationInvalid"},
+    )
+
+
+def _owner_truth_knowledge_recommendation_feedback_http_error(
+    error: OwnerTruthKnowledgeRecommendationFeedbackError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthKnowledgeRecommendationFeedbackAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthKnowledgeRecommendationFeedbackDenied"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeRecommendationFeedbackStale):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthKnowledgeRecommendationFeedbackStale"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeRecommendationFeedbackConflict):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthKnowledgeRecommendationFeedbackConflict"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthKnowledgeRecommendationFeedbackInvalid"},
     )
 
 
@@ -4356,6 +4429,15 @@ _OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_FIELDS = frozenset(
         "expectedSessionVersion",
     }
 )
+_OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_FIELDS = frozenset(
+    {
+        "commandId",
+        "expectedCandidateId",
+        "feedbackAction",
+        "feedbackReason",
+        "expectedSessionVersion",
+    }
+)
 _OWNER_TRUTH_SAVED_CONTINUATION_CUE_FIELDS = frozenset(
     {
         "commandId",
@@ -4588,6 +4670,58 @@ def activate_owner_truth_knowledge_recommendation(
             "schemaVersion": "owner-truth-knowledge-recommendation-activation-response-v1",
             "vaultId": context.vault_id,
             "activation": knowledge_recommendation_activation_summary(result),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/knowledge-recommendations/feedback",
+    include_in_schema=False,
+)
+def submit_owner_truth_knowledge_recommendation_feedback(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Persist QA-only replacement or interest feedback for one selected plan.
+
+    The route accepts no question text, topic title, evidence reference,
+    Thread, provider output, or free-form reason. Existing cooldown and
+    do-not-ask commands remain the only timing/long-term boundary writers.
+    """
+
+    try:
+        context = _owner_truth_knowledge_recommendation_feedback_context(
+            request,
+            vault_id=vault_id,
+        )
+        unsupported = sorted(
+            set(payload).difference(_OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_FIELDS)
+        )
+        if unsupported:
+            raise OwnerTruthKnowledgeRecommendationFeedbackError(
+                "knowledge recommendation feedback contains unsupported fields"
+            )
+        command = OwnerTruthKnowledgeRecommendationFeedbackCommand(
+            command_id=str(payload.get("commandId") or ""),
+            expected_candidate_id=str(payload.get("expectedCandidateId") or ""),
+            feedback_action=payload.get("feedbackAction"),
+            feedback_reason=payload.get("feedbackReason"),
+            expected_session_version=payload.get("expectedSessionVersion"),
+        )
+        result = OwnerTruthKnowledgeRecommendationFeedbackService(
+            store,
+            enabled=True,
+        ).submit(context=context, command=command)
+    except OwnerTruthKnowledgeRecommendationFeedbackError as error:
+        raise _owner_truth_knowledge_recommendation_feedback_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-knowledge-recommendation-feedback-response-v1",
+            "vaultId": context.vault_id,
+            "feedback": knowledge_recommendation_feedback_summary(result),
         },
         headers={"Cache-Control": "no-store"},
     )

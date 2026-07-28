@@ -97,6 +97,9 @@ class Settings:
     # Accepting a server-planned recommendation persists only a minimal,
     # append-only QA receipt. It is independently default-off from planning.
     owner_truth_knowledge_recommendation_activation_qa_enabled: bool = False
+    # Recommendation feedback records only value-free replacement or ranking
+    # signals. It remains independently default-off from planning/activation.
+    owner_truth_knowledge_recommendation_feedback_qa_enabled: bool = False
     # Explicit Owner continuation cues remain a fourth, independently closed
     # M0-B QA lane. They do not expose recommendation text or public Echo UI.
     owner_truth_saved_continuation_cue_qa_enabled: bool = False
