@@ -98,6 +98,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-role-selection-g0-gate.sh
 echo "== Digital Human session lifecycle G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-digital-human-session-lifecycle-g0-gate.sh
 
+echo "== Voice/DH rights exit G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-exit-g0-gate.sh
+
 echo "== Backend deployment files =="
 test -f Dockerfile
 test -f docker-compose.yml
