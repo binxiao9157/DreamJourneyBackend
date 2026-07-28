@@ -428,6 +428,51 @@ def exercise_formal_natural_input(
             "append must return the first content-free message receipt",
         )
 
+        current_path = f"{start_path}/current"
+        current_status, current_body, current_headers = app_request(
+            "GET",
+            current_path,
+            token=access_token,
+            policy_headers=policy_headers,
+        )
+        require(current_status == 200, "matching policy capture must read one active session")
+        require(
+            current_headers.get("cache-control") == "no-store",
+            "current-session response must not cache",
+        )
+        require(
+            current_body == {
+                "schemaVersion": "owner-truth-interview-current-session-v1",
+                "vaultId": vault_id,
+                "currentSession": {
+                    "status": "resumed",
+                    "threadId": thread_id,
+                    "sessionId": session_id,
+                    "threadVersion": 2,
+                    "sessionVersion": 2,
+                    "state": "active",
+                    "boundary": "open",
+                },
+            },
+            "current session must expose only the active resume handle",
+        )
+        current_serialized = json.dumps(current_body, ensure_ascii=False, sort_keys=True)
+        for forbidden in (
+            "仅用于隔离 smoke",
+            "candidate",
+            "memory",
+            "review",
+            "ownerSubjectId",
+            "authorityEpoch",
+            "fatigue",
+            "turnCount",
+            "messageSequence",
+        ):
+            require(
+                forbidden not in current_serialized,
+                "current session must remain content and internals free",
+            )
+
         state_status, state_body, state_headers = app_request(
             "GET",
             f"{start_path}/{session_id}/state",
@@ -622,6 +667,22 @@ def exercise_formal_natural_input(
             "cooldown must persist a paused state",
         )
 
+        paused_current_status, paused_current_body, _ = app_request(
+            "GET",
+            current_path,
+            token=access_token,
+            policy_headers=policy_headers,
+        )
+        require(
+            paused_current_status == 200
+            and paused_current_body == {
+                "schemaVersion": "owner-truth-interview-current-session-v1",
+                "vaultId": vault_id,
+                "currentSession": None,
+            },
+            "paused history must not be returned as a resumable current session",
+        )
+
         paused_presentation_status, paused_presentation_body, _ = app_request(
             "GET",
             f"{start_path}/{session_id}/presentation",
@@ -771,6 +832,8 @@ def exercise_formal_natural_input(
             "formalCrisisNarrativeSafetyOverridden": True,
             "formalCrisisNarrativeNotPersisted": True,
             "formalMatchingCaptureAppended": True,
+            "formalCurrentSessionResumeHandleVerified": True,
+            "formalPausedSessionNotResumable": True,
             "formalMatchingCaptureRead": True,
             "formalMatchingCapturePresentation": True,
             "formalSkipOnceConsumedByNextOwnerNarrative": True,
