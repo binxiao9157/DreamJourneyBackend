@@ -1,0 +1,13 @@
+{
+  "version": "0051",
+  "name": "publication_draft_snapshot",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationDraftSnapshotDefaultDeny",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publicationDraftSnapshotV1": false,
+    "publicationDraftPreviewV1": false,
+    "publicationDraftWriterV1": false
+  }
+}
