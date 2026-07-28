@@ -674,6 +674,10 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         self.assertEqual(presentation["label"], "换个角度")
         self.assertTrue(str(presentation["question"]).endswith("？"))
         self.assertEqual(presentation["questionSource"], "policyTemplate")
+        self.assertRegex(
+            str(body["recommendations"]["selected"][0]["expiresAt"]),
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$",
+        )
         self.assertNotIn("spend more time", response.text)
         self.assertNotIn("taking time to reflect", response.text)
         self.assertNotIn("claim", response.text)

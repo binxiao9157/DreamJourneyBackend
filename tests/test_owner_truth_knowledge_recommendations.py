@@ -173,6 +173,7 @@ class ServerPlannedRecommendationCandidateProjectorTests(unittest.TestCase):
             "checkpoint": "coverage-checkpoint-a",
             "coverage": self.coverage,
             "thread_authorities": thread_authorities,
+            "now": NOW,
         }
         values.update(overrides)
         return self.planner.project(**values)
@@ -221,6 +222,26 @@ class ServerPlannedRecommendationCandidateProjectorTests(unittest.TestCase):
 
         self.assertNotEqual(baseline.candidate_id, changed_epoch.candidate_id)
         self.assertNotEqual(baseline.candidate_id, changed_checkpoint.candidate_id)
+
+    def test_server_planned_candidate_has_a_bounded_expiration_and_rotates_after_it(self) -> None:
+        baseline = self._project((self._authority(),))[0]
+        assert baseline.expires_at is not None
+
+        still_current = self._project(
+            (self._authority(),),
+            now=baseline.expires_at - timedelta(seconds=1),
+        )[0]
+        after_expiry = self._project(
+            (self._authority(),),
+            now=baseline.expires_at,
+        )[0]
+
+        self.assertGreater(baseline.expires_at, NOW)
+        self.assertEqual(still_current.candidate_id, baseline.candidate_id)
+        self.assertEqual(still_current.expires_at, baseline.expires_at)
+        self.assertNotEqual(after_expiry.candidate_id, baseline.candidate_id)
+        assert after_expiry.expires_at is not None
+        self.assertGreater(after_expiry.expires_at, baseline.expires_at)
 
     def test_returns_empty_when_no_active_open_thread_or_confirmed_gap_exists(self) -> None:
         paused = self._authority(
@@ -574,6 +595,7 @@ class RecommendationSelectorTests(unittest.TestCase):
             evidence_refs=("memory-version-a",),
             reason_code="safePolicyQuestion",
             policy_version="m0-knowledge-dimension-v1",
+            expires_at=NOW + timedelta(minutes=10),
         )
 
         presentation = decision.value_free_summary()["presentation"]
@@ -586,6 +608,7 @@ class RecommendationSelectorTests(unittest.TestCase):
             "owner-truth-recommendation-question-presentation-v1",
         )
         self.assertNotIn("memory-version-a", str(presentation))
+        self.assertEqual(decision.value_free_summary()["expiresAt"], "2026-07-21T12:10:00+00:00")
 
 
 if __name__ == "__main__":

@@ -283,6 +283,7 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 vault_id=context.vault_id,
                 authority_epoch=dimension_read.authority_epoch,
                 checkpoint=dimension_read.checkpoint or "",
+                now=current_time,
                 coverage=dimension_read.coverage,
                 thread_authorities=thread_authorities,
                 continuity_cues=continuity_cues,

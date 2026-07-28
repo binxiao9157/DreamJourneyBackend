@@ -34,6 +34,7 @@ RECOMMENDATION_SELECTION_SCHEMA_VERSION = "owner-truth-recommendation-selection-
 RECOMMENDATION_QUESTION_PRESENTATION_SCHEMA_VERSION = (
     "owner-truth-recommendation-question-presentation-v1"
 )
+RECOMMENDATION_CANDIDATE_TTL_SECONDS = 15 * 60
 KNOWLEDGE_DIMENSION_POLICY_VERSION = "m0-knowledge-dimension-v1"
 
 _OPAQUE_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
@@ -453,6 +454,7 @@ class RecommendationDecision:
     evidence_refs: Tuple[str, ...]
     reason_code: str
     policy_version: str
+    expires_at: Optional[datetime] = None
 
     def __post_init__(self) -> None:
         try:
@@ -466,6 +468,7 @@ class RecommendationDecision:
             raise KnowledgeRecommendationError("missing_facet is not valid for target_dimension")
         object.__setattr__(self, "evidence_refs", _identifier_tuple(self.evidence_refs, field="evidence_refs"))
         object.__setattr__(self, "policy_version", require_nonblank(self.policy_version, field="policy_version"))
+        object.__setattr__(self, "expires_at", _normalize_datetime(self.expires_at, field="expires_at"))
 
     def presentation(self) -> "RecommendationQuestionPresentation":
         """Render a safe display prompt from policy fields only.
@@ -492,6 +495,7 @@ class RecommendationDecision:
         return {
             "candidateId": self.candidate_id,
             "evidenceRefCount": len(self.evidence_refs),
+            "expiresAt": None if self.expires_at is None else self.expires_at.isoformat(),
             "missingFacet": self.missing_facet,
             "policyVersion": self.policy_version,
             "presentation": self.presentation().value_free_summary(),
@@ -824,6 +828,7 @@ class RecommendationSelector:
             evidence_refs=candidate.evidence_refs,
             reason_code=candidate.reason_code,
             policy_version=policy_version,
+            expires_at=candidate.expires_at,
         )
 
 
@@ -846,6 +851,7 @@ class ServerPlannedRecommendationCandidateProjector:
         vault_id: str,
         authority_epoch: int,
         checkpoint: str,
+        now: datetime,
         coverage: DimensionProjection,
         thread_authorities: Iterable[OwnerTruthConversationThreadAuthoritySnapshot],
         continuity_cues: Iterable[ServerPlannedContinuationCue] = (),
@@ -860,6 +866,10 @@ class ServerPlannedRecommendationCandidateProjector:
         ):
             raise KnowledgeRecommendationError("authority_epoch must be a non-negative integer")
         normalized_checkpoint = require_nonblank(checkpoint, field="checkpoint")
+        current_time = _normalize_datetime(now, field="now")
+        if current_time is None:
+            raise KnowledgeRecommendationError("now is required")
+        expires_at = self._expires_at(current_time)
         if not isinstance(coverage, DimensionProjection):
             raise TypeError("coverage must be a DimensionProjection")
         if coverage.owner_subject_id != owner or coverage.vault_id != vault:
@@ -910,6 +920,7 @@ class ServerPlannedRecommendationCandidateProjector:
                         thread_authority=thread_authority,
                         authority_epoch=authority_epoch,
                         checkpoint=normalized_checkpoint,
+                        expires_at=expires_at,
                         coverage=continuity_coverage,
                         missing_facet=continuity_cue.missing_facet,
                         question_template_id="continueSavedOwnerCue",
@@ -937,6 +948,7 @@ class ServerPlannedRecommendationCandidateProjector:
                     thread_authority=thread_authority,
                     authority_epoch=authority_epoch,
                     checkpoint=normalized_checkpoint,
+                    expires_at=expires_at,
                     coverage=selected_coverage,
                     missing_facet=selected_coverage.missing_facets[0],
                     question_template_id="continueElapsedCooldown",
@@ -955,6 +967,7 @@ class ServerPlannedRecommendationCandidateProjector:
                     thread_authority=thread_authority,
                     authority_epoch=authority_epoch,
                     checkpoint=normalized_checkpoint,
+                    expires_at=expires_at,
                     coverage=continuity_coverage,
                     missing_facet=continuity_cue.missing_facet,
                     question_template_id="continueSavedOwnerCue",
@@ -982,6 +995,7 @@ class ServerPlannedRecommendationCandidateProjector:
             thread_authority=thread_authority,
             authority_epoch=authority_epoch,
             checkpoint=normalized_checkpoint,
+            expires_at=expires_at,
             coverage=selected_coverage,
             missing_facet=selected_coverage.missing_facets[0],
             question_template_id="broadenConfirmedGap",
@@ -1086,6 +1100,7 @@ class ServerPlannedRecommendationCandidateProjector:
         thread_authority: OwnerTruthConversationThreadAuthoritySnapshot,
         authority_epoch: int,
         checkpoint: str,
+        expires_at: datetime,
         coverage: DimensionCoverage,
         missing_facet: str,
         question_template_id: str,
@@ -1104,6 +1119,7 @@ class ServerPlannedRecommendationCandidateProjector:
             session_id=thread_authority.session_id,
             authority_epoch=authority_epoch,
             checkpoint=checkpoint,
+            expires_at=expires_at,
             dimension=coverage.dimension,
             missing_facet=missing_facet,
             evidence_refs=resolved_evidence_refs,
@@ -1124,6 +1140,7 @@ class ServerPlannedRecommendationCandidateProjector:
             explicit_intent_priority=explicit_intent_priority,
             continuity_score=continuity_score,
             importance_score=importance_score,
+            expires_at=expires_at,
         )
 
     @staticmethod
@@ -1134,16 +1151,21 @@ class ServerPlannedRecommendationCandidateProjector:
         session_id: str,
         authority_epoch: int,
         checkpoint: str,
+        expires_at: datetime,
         dimension: KnowledgeDimension,
         missing_facet: str,
         evidence_refs: Tuple[str, ...],
         cue_id: Optional[str] = None,
     ) -> str:
+        normalized_expires_at = _normalize_datetime(expires_at, field="expires_at")
+        if normalized_expires_at is None:
+            raise KnowledgeRecommendationError("expires_at is required for server-planned recommendation")
         payload = {
             "dimension": dimension.value,
             "evidenceRefs": list(evidence_refs),
             "authorityEpoch": authority_epoch,
             "checkpoint": checkpoint,
+            "expiresAt": normalized_expires_at.isoformat(),
             "missingFacet": missing_facet,
             "sessionId": session_id,
             "slot": slot.value,
@@ -1155,6 +1177,19 @@ class ServerPlannedRecommendationCandidateProjector:
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()[:24]
         return f"server-plan-{slot.value}-{digest}"
+
+    @staticmethod
+    def _expires_at(now: datetime) -> datetime:
+        """Issue deterministic, short-lived candidate IDs on server time only."""
+
+        current_time = _normalize_datetime(now, field="now")
+        if current_time is None:
+            raise KnowledgeRecommendationError("now is required")
+        timestamp = int(current_time.timestamp())
+        next_window = (
+            (timestamp // RECOMMENDATION_CANDIDATE_TTL_SECONDS) + 1
+        ) * RECOMMENDATION_CANDIDATE_TTL_SECONDS
+        return datetime.fromtimestamp(next_window, tz=timezone.utc)
 
 
 __all__ = [
@@ -1176,6 +1211,7 @@ __all__ = [
     "RecommendationSelector",
     "RecommendationSlot",
     "RECOMMENDATION_QUESTION_PRESENTATION_SCHEMA_VERSION",
+    "RECOMMENDATION_CANDIDATE_TTL_SECONDS",
     "RECOMMENDATION_SELECTION_SCHEMA_VERSION",
     "ServerPlannedContinuationCue",
     "ServerPlannedRecommendationCandidateProjector",

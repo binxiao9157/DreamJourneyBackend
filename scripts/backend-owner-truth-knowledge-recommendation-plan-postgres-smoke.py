@@ -422,6 +422,17 @@ def main() -> None:
             str(selected[0].get("candidateId") or "").startswith("server-plan-breadth-"),
             "server plan must return its internally authority-bound candidate identifier",
         )
+        presentation = selected[0].get("presentation") or {}
+        require(
+            presentation.get("label") == "换个角度"
+            and str(presentation.get("question") or "").endswith("？")
+            and presentation.get("questionSource") == "policyTemplate",
+            "server plan must return a safe concrete policy question",
+        )
+        require(
+            str(selected[0].get("expiresAt") or "").endswith("+00:00"),
+            "server plan must issue a bounded UTC recommendation expiration",
+        )
         require(
             "threadId" not in selected[0],
             "value-free plan summaries must not expose a private thread identifier",
