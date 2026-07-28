@@ -92,6 +92,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-verified-media-processor-shadow-gat
 echo "== Voice GeneratedAudio binding G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-generated-audio-binding-g0-gate.sh
 
+echo "== Voice role selection G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-role-selection-g0-gate.sh
+
 echo "== Backend deployment files =="
 test -f Dockerfile
 test -f docker-compose.yml
@@ -291,6 +294,9 @@ test -f tests/test_voice_dh_scoped_capability_shadow.py
 test -f scripts/run-backend-voice-dh-scoped-capability-shadow-g0-gate.sh
 test -f scripts/backend-voice-dh-scoped-capability-shadow-deployed-smoke.py
 test -f scripts/run-backend-voice-dh-scoped-capability-shadow-deployed-smoke.sh
+test -f app/services/voice_role_selection_shadow.py
+test -f tests/test_voice_role_selection_shadow.py
+test -f scripts/run-backend-voice-role-selection-g0-gate.sh
 test -f app/services/voice_training_preflight_shadow.py
 test -f tests/test_voice_training_preflight_shadow.py
 test -f scripts/run-backend-voice-training-preflight-g0-gate.sh
