@@ -112,6 +112,9 @@ class Settings:
     # Life-map reads are a separate Phase 4C QA lane. They expose only stable
     # dimension coverage, thread state and reversible associations.
     owner_truth_life_map_read_qa_enabled: bool = False
+    # SearchDocument reads are a separate Phase 4C QA lane. The first read
+    # uses deterministic text fallback only and never enables public search.
+    owner_truth_memory_search_read_qa_enabled: bool = False
     # Thread-scoped cooldown / do-not-ask remains independently default-off.
     # It never enables a public Echo control by itself.
     owner_truth_thread_preference_qa_enabled: bool = False
@@ -309,6 +312,10 @@ class Settings:
             owner_truth_life_map_read_qa_enabled=_env_bool(
                 "OWNER_TRUTH_LIFE_MAP_READ_QA_ENABLED",
                 cls.owner_truth_life_map_read_qa_enabled,
+            ),
+            owner_truth_memory_search_read_qa_enabled=_env_bool(
+                "OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED",
+                cls.owner_truth_memory_search_read_qa_enabled,
             ),
             owner_truth_thread_preference_qa_enabled=_env_bool(
                 "OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED",

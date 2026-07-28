@@ -127,6 +127,7 @@ from app.domain.owner_truth.memory_projection import (
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.domain.owner_truth.knowledge_recommendations import RecommendationCandidate
 from app.domain.owner_truth.life_map import OwnerTruthLifeMapError
+from app.domain.owner_truth.search_documents import OwnerTruthMemorySearchReadError
 from app.domain.owner_truth.thread_summary import OwnerTruthThreadSummaryError
 from app.domain.owner_truth.source_commands import (
     OwnerTruthCommandAuthorizationCapture,
@@ -150,6 +151,10 @@ from app.services.owner_truth_interview_session_outcome_read import (
 from app.services.owner_truth_life_map_read import (
     OwnerTruthLifeMapReadAccessDenied,
     OwnerTruthLifeMapReadService,
+)
+from app.services.owner_truth_memory_search_read import (
+    OwnerTruthMemorySearchReadAccessDenied,
+    OwnerTruthMemorySearchReadService,
 )
 from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_interview_candidate_single_review import (
@@ -427,6 +432,9 @@ OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED = bool(
     settings.owner_truth_interview_session_outcome_read_qa_enabled
 )
 OWNER_TRUTH_LIFE_MAP_READ_QA_ENABLED = bool(settings.owner_truth_life_map_read_qa_enabled)
+OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED = bool(
+    settings.owner_truth_memory_search_read_qa_enabled
+)
 OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = bool(
     settings.owner_truth_thread_preference_qa_enabled
 )
@@ -665,6 +673,27 @@ def _require_owner_truth_life_map_read_qa(request: Request) -> str:
         raise HTTPException(
             status_code=401,
             detail={"code": "ownerTruthLifeMapReadUserSessionRequired"},
+        )
+    return user_id
+
+
+def _require_owner_truth_memory_search_read_qa(request: Request) -> str:
+    """Keep Owner-confirmed SearchDocument reads inside explicit QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthMemorySearchReadUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthMemorySearchReadUserSessionRequired"},
         )
     return user_id
 
@@ -1307,6 +1336,19 @@ def _owner_truth_life_map_read_context(
     )
 
 
+def _owner_truth_memory_search_read_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_memory_search_read_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_knowledge_recommendation_plan_context(
     request: Request,
     *,
@@ -1665,6 +1707,18 @@ def _owner_truth_life_map_read_http_error(error: OwnerTruthContractError) -> HTT
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthLifeMapReadInvalid"},
+    )
+
+
+def _owner_truth_memory_search_read_http_error(error: OwnerTruthContractError) -> HTTPException:
+    if isinstance(error, OwnerTruthMemorySearchReadAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthMemorySearchReadDenied"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthMemorySearchReadInvalid"},
     )
 
 
@@ -4893,6 +4947,53 @@ def read_owner_truth_life_map(
             "schemaVersion": "owner-truth-life-map-read-response-v1",
             "vaultId": context.vault_id,
             "lifeMap": result.value_free_summary(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+_OWNER_TRUTH_MEMORY_SEARCH_READ_FIELDS = frozenset({"query", "limit"})
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memory-search/read",
+    include_in_schema=False,
+)
+def read_owner_truth_memory_search(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only current Owner search using a non-semantic text fallback.
+
+    The route is not a public search feature and does not promise embeddings or
+    semantic ranking. It reads only current Owner-confirmed MemoryVersions and
+    returns value-free citations, never memory text, Source fields, or query
+    content.
+    """
+
+    try:
+        context = _owner_truth_memory_search_read_context(request, vault_id=vault_id)
+        unsupported = sorted(set(payload).difference(_OWNER_TRUTH_MEMORY_SEARCH_READ_FIELDS))
+        if unsupported:
+            raise OwnerTruthMemorySearchReadError(
+                "memory-search read contains unsupported fields"
+            )
+        if "query" not in payload:
+            raise OwnerTruthMemorySearchReadError("memory-search query is required")
+        result = OwnerTruthMemorySearchReadService(store).read(
+            context=context,
+            query=payload["query"],
+            limit=payload.get("limit", 20),
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_memory_search_read_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-memory-search-read-response-v1",
+            "vaultId": context.vault_id,
+            "search": result.value_free_summary(),
         },
         headers={"Cache-Control": "no-store"},
     )

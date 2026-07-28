@@ -25,6 +25,8 @@ if [[ -f tests/test_owner_truth_knowledge_recommendations.py && -f tests/test_ow
     tests.test_owner_truth_interview_session_outcome_read_api \
     tests.test_owner_truth_life_map \
     tests.test_owner_truth_life_map_read_api \
+    tests.test_owner_truth_memory_search \
+    tests.test_owner_truth_memory_search_read_api \
     tests.test_owner_truth_knowledge_recommendation_read \
     tests.test_owner_truth_knowledge_recommendation_read_api \
     tests.test_owner_truth_knowledge_recommendation_activation \
@@ -55,6 +57,11 @@ from app.domain.owner_truth.knowledge_recommendations import (
 from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionInput,
     build_ready_memory_projection,
+)
+from app.domain.owner_truth.search_documents import (
+    build_owner_truth_memory_search_query_plan,
+    build_owner_truth_search_document_projection,
+    search_owner_truth_documents,
 )
 
 owner = "owner-deployed-smoke"
@@ -169,6 +176,22 @@ dimension_result = read_owner_confirmed_dimension_coverage(
 assert dimension_result.state.value == "ready"
 assert dimension_result.included_memory_version_ids
 assert dimension_result.coverage.for_dimension("keyDecisions").covered_facets == ("choice",)
+search_projection = build_owner_truth_search_document_projection(
+    memory_projection=dimension_snapshot,
+)
+assert search_projection is not None
+search_plan = build_owner_truth_memory_search_query_plan(
+    projection=search_projection,
+    query="new direction",
+    limit=1,
+)
+search_hits = search_owner_truth_documents(
+    projection=search_projection,
+    query_plan=search_plan,
+)
+assert len(search_hits) == 1
+assert search_hits[0].document.memory_version_id == memory_version_id
+assert "new direction" not in str(search_hits[0].value_free_summary())
 print("Owner Truth knowledge recommendation deployed policy smoke passed")
 PY
 
@@ -227,6 +250,16 @@ for required in (
     "memory store",
 ):
     assert required in life_map_source, f"missing Phase 4C life-map invariant: {required}"
+search_document_source = Path("app/domain/owner_truth/search_documents.py").read_text(encoding="utf-8")
+for required in (
+    "OwnerTruthSearchDocumentProjection",
+    "current Owner-confirmed",
+    "deterministic text fallback",
+    "semanticRankingAvailable",
+    "never returns memory text",
+    "MemoryVersion",
+):
+    assert required in search_document_source, f"missing Phase 4C search-document invariant: {required}"
 main_source = Path("app/main.py").read_text(encoding="utf-8")
 for required in (
     '"/v2/vaults/{vault_id}/thread-summaries/read"',
@@ -241,6 +274,10 @@ for required in (
     "OWNER_TRUTH_LIFE_MAP_READ_QA_ENABLED",
     "ownerTruthLifeMapReadUnavailable",
     "owner-truth-life-map-read-response-v1",
+    '"/v2/vaults/{vault_id}/memory-search/read"',
+    "OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED",
+    "ownerTruthMemorySearchReadUnavailable",
+    "owner-truth-memory-search-read-response-v1",
 ):
     assert required in main_source, f"missing M0-B thread summary QA contract: {required}"
 print("Owner Truth knowledge recommendation G0 gate passed")

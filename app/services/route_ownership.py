@@ -272,6 +272,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/memory-search/read",
+                session,
+                "ownerTruthMemorySearchRead",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/knowledge-recommendations/activate",
                 session,
                 "ownerTruthKnowledgeRecommendationActivation",
