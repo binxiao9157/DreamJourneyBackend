@@ -20,7 +20,11 @@ if [[ -f tests/test_owner_truth_knowledge_recommendations.py && -f tests/test_ow
     tests.test_owner_truth_knowledge_dimension_confirmation \
     tests.test_owner_truth_knowledge_dimension_confirmation_migration_contract \
     tests.test_owner_truth_knowledge_recommendation_read \
-    tests.test_owner_truth_knowledge_recommendation_read_api
+    tests.test_owner_truth_knowledge_recommendation_read_api \
+    tests.test_owner_truth_knowledge_recommendation_activation \
+    tests.test_owner_truth_knowledge_recommendation_activation_migration_contract \
+    tests.test_owner_truth_knowledge_recommendation_feedback \
+    tests.test_owner_truth_knowledge_recommendation_feedback_migration_contract
 else
   echo "Owner Truth knowledge recommendation unit tests unavailable in this image; running deployed policy smoke"
 fi
