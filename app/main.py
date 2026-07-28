@@ -1969,7 +1969,7 @@ ARCHIVE_MEDIA_UPLOAD_LIMITS = {
     "video": ARCHIVE_VIDEO_UPLOAD_LIMIT_BYTES,
 }
 VOICE_CLONE_SAMPLE_STATUSES = {"notProvided", "pending", "ready", "disabled", "deleted", "failed"}
-VOICE_CLONE_CONTRACT_VERSION = 3
+VOICE_CLONE_CONTRACT_VERSION = 4
 VOICE_CLONE_PROVIDER_MODE = "mockContract"
 VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE = "echo"
 VOICE_CLONE_QUALITY_PREVIEW_PURPOSE = "qualityPreview"
@@ -1980,11 +1980,11 @@ VOICE_CLONE_AUTHORIZATION_COPY = (
 )
 VOICE_CLONE_DISABLE_CONTRACT = (
     "disableVoiceProfile(profileId:) 应撤销该 voiceProfileId 的合成权限，"
-    "当前后端仅保存 mock 禁用状态。"
+    "当前后端仅保存本地禁用状态，尚未产生 Provider 停用或删除回执。"
 )
 VOICE_CLONE_DELETE_CONTRACT = (
-    "deleteVoiceProfile(profileId:) 应删除样本、训练产物和关联授权记录，"
-    "当前后端保存 deleted tombstone 以便验收生命周期。"
+    "deleteVoiceProfile(profileId:) 会立即撤销本地合成权限并保存 deleted tombstone；"
+    "当前后端尚未产生样本、训练产物或 Provider 资产的删除回执，不能宣称第三方清理已完成。"
 )
 FAMILY_PERSONA_CONTRACT_VERSION = 1
 FAMILY_PERSONA_CONTRACT_MODE = "mockFamilyPersona"
@@ -5693,7 +5693,36 @@ def _voice_clone_public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
         else "unassigned",
     )
     public_profile.setdefault("providerSlotManaged", public_profile.get("providerBindingMode") == "exclusiveSlot")
+    public_profile.update(_voice_clone_exit_disclosure(public_profile))
     return public_profile
+
+
+def _voice_clone_exit_disclosure(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """Describe the proven cleanup boundary without fabricating Provider receipts."""
+    sample_status = str(profile.get("sampleStatus") or "notProvided").strip()
+    if sample_status == "disabled":
+        return {
+            "exitState": "accessRevoked",
+            "accessRevoked": True,
+            "localCleanupState": "retained",
+            "providerCleanupState": "notRequested",
+            "providerCleanupReceiptAvailable": False,
+        }
+    if sample_status == "deleted":
+        return {
+            "exitState": "partial",
+            "accessRevoked": True,
+            "localCleanupState": "tombstoned",
+            "providerCleanupState": "unsupported",
+            "providerCleanupReceiptAvailable": False,
+        }
+    return {
+        "exitState": "active",
+        "accessRevoked": False,
+        "localCleanupState": "notRequested",
+        "providerCleanupState": "notRequested",
+        "providerCleanupReceiptAvailable": False,
+    }
 
 
 def _provider_reference_hash(value: Any) -> str:
