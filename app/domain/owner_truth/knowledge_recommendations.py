@@ -2,14 +2,16 @@
 
 This module is intentionally a read-only projection.  It derives stable
 knowledge-dimension coverage from admissible confirmed memory evidence and
-selects at most one continuity and one breadth recommendation.  It neither
-generates natural-language questions nor mutates Source, Candidate,
-DecisionReceipt, MemoryVersion, ConversationThread, or provider state.
+selects at most one continuity and one breadth recommendation.  It never uses
+raw memory text, provider output, or AI-only inference to decide a
+recommendation, and it never mutates Source, Candidate, DecisionReceipt,
+MemoryVersion, ConversationThread, or provider state.
 
-Keeping the selector content-free is deliberate: a later phrasing layer may
-turn an approved ``question_template_id`` plus authorized evidence into a
-specific question, but it must not use this projection to smuggle private text
-or AI-only inference into an active recommendation.
+The narrow presentation helper below turns only policy-owned dimension and
+facet identifiers into a safe, concrete Chinese question.  It is a
+deterministic display fallback, not a rewrite of an Owner's words; a future
+authorized phrasing layer may improve wording only after the same policy and
+authority checks have selected the candidate.
 """
 
 from __future__ import annotations
@@ -29,6 +31,9 @@ from .conversation import OwnerTruthConversationThreadAuthoritySnapshot
 
 KNOWLEDGE_DIMENSION_PROJECTION_SCHEMA_VERSION = "owner-truth-dimension-projection-v1"
 RECOMMENDATION_SELECTION_SCHEMA_VERSION = "owner-truth-recommendation-selection-v1"
+RECOMMENDATION_QUESTION_PRESENTATION_SCHEMA_VERSION = (
+    "owner-truth-recommendation-question-presentation-v1"
+)
 KNOWLEDGE_DIMENSION_POLICY_VERSION = "m0-knowledge-dimension-v1"
 
 _OPAQUE_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
@@ -65,6 +70,31 @@ _DIMENSION_FACETS: Mapping[KnowledgeDimension, Tuple[str, ...]] = {
     KnowledgeDimension.PROFESSIONAL_EXPERIENCE: ("practice", "judgment"),
     KnowledgeDimension.VALUES: ("priority", "reflection"),
     KnowledgeDimension.ASPIRATIONS_AND_BOUNDARIES: ("aspiration", "boundary"),
+}
+
+_RECOMMENDATION_SLOT_LABELS: Mapping[RecommendationSlot, str] = {
+    RecommendationSlot.CONTINUITY: "接着聊",
+    RecommendationSlot.BREADTH: "换个角度",
+}
+
+# These prompts contain no Owner-provided words and no inferred facts.  They
+# are deliberately keyed by the versioned policy dimensions/facets so the
+# public surface can show a direct question without sending private text to a
+# separate phrasing provider.
+_RECOMMENDATION_QUESTIONS: Mapping[tuple[KnowledgeDimension, str], str] = {
+    (KnowledgeDimension.LIFE_STAGE, "timeContext"): "这段经历大约发生在你人生的哪个阶段？",
+    (KnowledgeDimension.LIFE_STAGE, "experience"): "这段经历后来给你留下了什么？",
+    (KnowledgeDimension.IMPORTANT_PEOPLE, "person"): "那位对你很重要的人是谁？",
+    (KnowledgeDimension.IMPORTANT_PEOPLE, "relationshipChange"): "你们的关系后来有什么变化？",
+    (KnowledgeDimension.KEY_DECISIONS, "choice"): "当时你面前有哪些选择？",
+    (KnowledgeDimension.KEY_DECISIONS, "reason"): "当时是什么让你作出这个决定？",
+    (KnowledgeDimension.KEY_DECISIONS, "outcome"): "这个决定后来带来了什么结果？",
+    (KnowledgeDimension.PROFESSIONAL_EXPERIENCE, "practice"): "这段经历后来沉淀成了你怎样的做事方法？",
+    (KnowledgeDimension.PROFESSIONAL_EXPERIENCE, "judgment"): "遇到类似情况时，你通常怎样判断？",
+    (KnowledgeDimension.VALUES, "priority"): "在这件事里，你最看重的是什么？",
+    (KnowledgeDimension.VALUES, "reflection"): "回头看这段经历，你有什么新的理解？",
+    (KnowledgeDimension.ASPIRATIONS_AND_BOUNDARIES, "aspiration"): "接下来你还想实现什么？",
+    (KnowledgeDimension.ASPIRATIONS_AND_BOUNDARIES, "boundary"): "有哪些边界是你希望被尊重的？",
 }
 
 
@@ -437,16 +467,64 @@ class RecommendationDecision:
         object.__setattr__(self, "evidence_refs", _identifier_tuple(self.evidence_refs, field="evidence_refs"))
         object.__setattr__(self, "policy_version", require_nonblank(self.policy_version, field="policy_version"))
 
+    def presentation(self) -> "RecommendationQuestionPresentation":
+        """Render a safe display prompt from policy fields only.
+
+        The presentation intentionally does not inspect ``evidence_refs`` or
+        ``question_template_id``.  Those fields remain audit and future
+        authorized-phrasing inputs, while this fallback cannot echo private
+        content or provider-generated wording.
+        """
+
+        question = _RECOMMENDATION_QUESTIONS.get(
+            (self.target_dimension, self.missing_facet)
+        )
+        if question is None:  # Defensive fail-closed guard for future policy edits.
+            raise KnowledgeRecommendationError(
+                "recommendation question mapping is missing for policy facet"
+            )
+        return RecommendationQuestionPresentation(
+            label=_RECOMMENDATION_SLOT_LABELS[self.slot],
+            question=question,
+        )
+
     def value_free_summary(self) -> dict[str, object]:
         return {
             "candidateId": self.candidate_id,
             "evidenceRefCount": len(self.evidence_refs),
             "missingFacet": self.missing_facet,
             "policyVersion": self.policy_version,
+            "presentation": self.presentation().value_free_summary(),
             "questionTemplateId": self.question_template_id,
             "reasonCode": self.reason_code,
             "slot": self.slot.value,
             "targetDimension": self.target_dimension.value,
+        }
+
+
+@dataclass(frozen=True)
+class RecommendationQuestionPresentation:
+    """A value-free, directly displayable recommendation prompt."""
+
+    label: str
+    question: str
+    question_source: str = "policyTemplate"
+    schema_version: str = RECOMMENDATION_QUESTION_PRESENTATION_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "label", require_nonblank(self.label, field="label"))
+        object.__setattr__(self, "question", require_nonblank(self.question, field="question"))
+        if self.question_source != "policyTemplate":
+            raise KnowledgeRecommendationError("question_source is not supported")
+        if self.schema_version != RECOMMENDATION_QUESTION_PRESENTATION_SCHEMA_VERSION:
+            raise KnowledgeRecommendationError("question presentation schema_version is not supported")
+
+    def value_free_summary(self) -> dict[str, str]:
+        return {
+            "label": self.label,
+            "question": self.question,
+            "questionSource": self.question_source,
+            "schemaVersion": self.schema_version,
         }
 
 
@@ -1093,9 +1171,11 @@ __all__ = [
     "RecommendationDecision",
     "RecommendationEvidenceKind",
     "RecommendationFilteredCandidate",
+    "RecommendationQuestionPresentation",
     "RecommendationSelection",
     "RecommendationSelector",
     "RecommendationSlot",
+    "RECOMMENDATION_QUESTION_PRESENTATION_SCHEMA_VERSION",
     "RECOMMENDATION_SELECTION_SCHEMA_VERSION",
     "ServerPlannedContinuationCue",
     "ServerPlannedRecommendationCandidateProjector",

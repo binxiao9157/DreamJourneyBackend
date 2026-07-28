@@ -670,6 +670,10 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             [item["slot"] for item in body["recommendations"]["selected"]],
             ["breadth"],
         )
+        presentation = body["recommendations"]["selected"][0]["presentation"]
+        self.assertEqual(presentation["label"], "换个角度")
+        self.assertTrue(str(presentation["question"]).endswith("？"))
+        self.assertEqual(presentation["questionSource"], "policyTemplate")
         self.assertNotIn("spend more time", response.text)
         self.assertNotIn("taking time to reflect", response.text)
         self.assertNotIn("claim", response.text)

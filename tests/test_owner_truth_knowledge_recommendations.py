@@ -15,6 +15,7 @@ from app.domain.owner_truth.knowledge_recommendations import (
     KnowledgeDimension,
     KnowledgeDimensionProjector,
     RecommendationCandidate,
+    RecommendationDecision,
     RecommendationEvidenceKind,
     RecommendationSelector,
     RecommendationSlot,
@@ -561,6 +562,30 @@ class RecommendationSelectorTests(unittest.TestCase):
         self.assertNotIn("今天想聊", rendered)
         self.assertNotIn("我小时候", rendered)
         self.assertEqual(summary["schemaVersion"], "owner-truth-recommendation-selection-v1")
+
+    def test_decision_summary_renders_a_safe_concrete_question_from_policy_fields(self) -> None:
+        decision = RecommendationDecision(
+            slot=RecommendationSlot.CONTINUITY,
+            candidate_id="safe-question",
+            thread_id="thread-safe-question",
+            target_dimension=KnowledgeDimension.KEY_DECISIONS,
+            missing_facet="reason",
+            question_template_id="continue-policy-template",
+            evidence_refs=("memory-version-a",),
+            reason_code="safePolicyQuestion",
+            policy_version="m0-knowledge-dimension-v1",
+        )
+
+        presentation = decision.value_free_summary()["presentation"]
+
+        self.assertEqual(presentation["label"], "接着聊")
+        self.assertEqual(presentation["question"], "当时是什么让你作出这个决定？")
+        self.assertEqual(presentation["questionSource"], "policyTemplate")
+        self.assertEqual(
+            presentation["schemaVersion"],
+            "owner-truth-recommendation-question-presentation-v1",
+        )
+        self.assertNotIn("memory-version-a", str(presentation))
 
 
 if __name__ == "__main__":

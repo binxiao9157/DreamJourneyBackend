@@ -4445,8 +4445,9 @@ def read_owner_truth_knowledge_recommendations(
 ) -> JSONResponse:
     """Read receipt-bound M0-B selection policy without exposing Echo UI.
 
-    This is a default-off QA adapter. It does not generate question text, write
-    a recommendation record, call a provider, or alter a ConversationThread,
+    This is a default-off QA adapter. It only renders a deterministic,
+    policy-owned question template; it does not read private text, write a
+    recommendation record, call a provider, or alter a ConversationThread,
     Candidate, DecisionReceipt, MemoryVersion, or projection.
     """
 
@@ -4503,8 +4504,9 @@ def plan_owner_truth_knowledge_recommendations(
     """QA-only server-planned M0-B recommendations with no caller candidates.
 
     This route is default-off and value-free. It reads only the current Owner
-    Truth coverage plus active/open interview authority; it does not expose
-    question text, persist recommendations, call a provider, or change Echo.
+    Truth coverage plus active/open interview authority and renders a static
+    policy question; it does not expose private text, persist recommendations,
+    call a provider, or change Echo.
     """
 
     try:
