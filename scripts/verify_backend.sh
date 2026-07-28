@@ -22,6 +22,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-credential-response-boundary-smoke.sh
 echo "== Owner Truth knowledge dimension confirmation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-knowledge-recommendation-gate.sh
 
+echo "== Owner Truth recommendation offline evaluation gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-recommendation-offline-evaluation-gate.sh
+
 echo "== Migration identity promotion preflight G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-migration-identity-promotion-gate.sh
 
@@ -274,6 +277,10 @@ test -f tests/test_owner_truth_memory_search_projection.py
 test -f tests/test_owner_truth_memory_search_projection_migration_contract.py
 test -f scripts/backend-owner-truth-memory-search-projection-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-memory-search-projection-postgres-smoke.sh
+test -f app/services/owner_truth_recommendation_offline_evaluation.py
+test -f tests/test_owner_truth_recommendation_offline_evaluation.py
+test -f tests/fixtures/owner_truth/recommendation_offline_evaluation_v1.json
+test -f scripts/run-backend-owner-truth-recommendation-offline-evaluation-gate.sh
 test -f app/services/owner_truth_saved_continuation.py
 test -f db/migrations/0039_owner_truth_saved_continuation_cues.sql
 test -f db/migrations/0039_owner_truth_saved_continuation_cues.json

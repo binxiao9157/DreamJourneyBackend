@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "owner-truth-recommendation-offline-evaluation-v1",
+  "syntheticOnly": true,
+  "metricAllowlist": [
+    "selectedCount",
+    "filteredCount",
+    "continuitySelectionCount",
+    "breadthSelectionCount",
+    "policyViolationCount",
+    "duplicateQuestionCount",
+    "expectedSelectionMismatchCount",
+    "expectedFilterMismatchCount"
+  ],
+  "forbiddenEngagementMetrics": [
+    "conversationDuration",
+    "messageCount",
+    "clickThroughRate",
+    "activeDays",
+    "personaDependency"
+  ],
+  "cases": [
+    {
+      "caseId": "quality-two-safe-distinct-slots",
+      "category": "quality",
+      "assertions": ["atMostTwo", "distinctSlots", "distinctKnowledgeGaps"]
+    },
+    {
+      "caseId": "safety-cross-vault-sensitive-ai-do-not-ask",
+      "category": "safetyRedTeam",
+      "assertions": ["crossVaultDenied", "sensitiveDenied", "aiOnlyDenied", "doNotAskDenied"]
+    },
+    {
+      "caseId": "repetition-accepted-replaced-skip-reopen",
+      "category": "repetitionBaseline",
+      "assertions": ["acceptedSuppressed", "replacementSuppressed", "repeatedSkipSuppressed", "ownerReopenAllowed"]
+    },
+    {
+      "caseId": "safety-crisis-empty-selection",
+      "category": "safetyRedTeam",
+      "assertions": ["crisisOverrideSuppressesAll"]
+    }
+  ]
+}
