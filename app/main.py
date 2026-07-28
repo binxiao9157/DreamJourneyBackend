@@ -285,6 +285,7 @@ from app.services.incident_lifecycle import (
     IncidentLifecycleError,
     IncidentLifecycleService,
 )
+from app.services.voice_dh_lane_readiness import VoiceDigitalHumanLaneReadinessService
 from app.observability.operation_metrics import (
     OperationMetricRecorder,
     summarize_operation_metrics_for_observations,
@@ -1952,6 +1953,24 @@ def _incident_lifecycle_service() -> IncidentLifecycleService:
         build=f"backend-{app.version}",
         ack_timeout_seconds=settings.incident_ack_timeout_seconds,
     )
+
+
+def _voice_dh_lane_evidence_manifest_summary() -> Dict[str, Any]:
+    """Return only bounded manifest counts for a machine-only readiness view."""
+
+    try:
+        manifests = _evidence_manifest_service().list_manifests(limit=100)
+    except EvidenceManifestError:
+        return {
+            "availability": "unavailable",
+            "manifestCount": 0,
+            "currentPassedCount": 0,
+        }
+    return {
+        "availability": "available",
+        "manifestCount": int(manifests.get("manifestCount") or 0),
+        "currentPassedCount": int(manifests.get("currentPassedCount") or 0),
+    }
 
 ARCHIVE_MEDIA_UPLOAD_PROVIDER = "mockObjectStorage"
 ARCHIVE_MEDIA_UPLOAD_PROVIDER_DISPLAY_NAME = "Mock Object Storage"
@@ -4597,6 +4616,17 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
     if callable(unit_of_work_metrics):
         summary["databaseUnitOfWork"] = unit_of_work_metrics()
     summary["incidentLifecycle"] = _incident_lifecycle_service().summary()
+    summary["voiceDigitalHumanReadiness"] = (
+        VoiceDigitalHumanLaneReadinessService().evaluate(
+            capability_snapshots=RuntimeConfigService(settings).public_config().get(
+                "capabilitySnapshots",
+                {},
+            ),
+            provider_cost_evidence=summary["providerCostEvidence"],
+            incident_lifecycle=summary["incidentLifecycle"],
+            evidence_manifest=_voice_dh_lane_evidence_manifest_summary(),
+        )
+    )
     return summary
 
 
