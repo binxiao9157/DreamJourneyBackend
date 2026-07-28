@@ -19,6 +19,7 @@ if [[ -f tests/test_owner_truth_knowledge_recommendations.py && -f tests/test_ow
     tests.test_owner_truth_knowledge_dimension_read \
     tests.test_owner_truth_knowledge_dimension_confirmation \
     tests.test_owner_truth_knowledge_dimension_confirmation_migration_contract \
+    tests.test_owner_truth_thread_summary \
     tests.test_owner_truth_knowledge_recommendation_read \
     tests.test_owner_truth_knowledge_recommendation_read_api \
     tests.test_owner_truth_knowledge_recommendation_activation \
@@ -193,5 +194,13 @@ for required in (
 ):
     assert required in dimension_source, f"missing M0-B dimension read invariant: {required}"
 assert "knowledgeDimensionEvidence" not in dimension_source, "inline payload annotations must not count"
+thread_summary_source = Path("app/domain/owner_truth/thread_summary.py").read_text(encoding="utf-8")
+for required in (
+    "sharedConfirmedMemoryVersion",
+    "associatedOnly",
+    "A reversible association, never a destructive Thread merge.",
+    "continuation cue does not match current Owner dimension scope",
+):
+    assert required in thread_summary_source, f"missing M0-B thread summary invariant: {required}"
 print("Owner Truth knowledge recommendation G0 gate passed")
 PY
