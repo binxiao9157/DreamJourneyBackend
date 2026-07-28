@@ -1,0 +1,13 @@
+{
+  "version": "0052",
+  "name": "publication_public_projector",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationPublicProjectorDefaultDeny",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publicProjectorV1": false,
+    "publicStoreQueryV1": false,
+    "publicIndexProviderV1": false
+  }
+}

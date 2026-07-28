@@ -88,6 +88,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-schema-authz-g0-gate.sh
 echo "== Publication draft snapshot G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-draft-snapshot-g0-gate.sh
 
+echo "== Publication public projector G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-public-projector-g0-gate.sh
+
 echo "== Operation metric coverage G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-operation-metric-coverage-gate.sh
 
