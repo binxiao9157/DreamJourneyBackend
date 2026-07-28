@@ -103,6 +103,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-lifecycle-propagation-g
 echo "== Publication release-guard/ViewState G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-release-guard-viewstate-g0-gate.sh
 
+echo "== Publication canary/exit-readiness G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-canary-exit-readiness-g0-gate.sh
+
 echo "== Operation metric coverage G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-operation-metric-coverage-gate.sh
 

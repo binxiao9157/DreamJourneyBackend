@@ -1,0 +1,13 @@
+{
+  "version": "0057",
+  "name": "publication_canary_exit_readiness",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationCanaryExitReadinessDefaultBlocked",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publicationAdultCanaryV1": false,
+    "publicationRegulatoryExitV1": false,
+    "publicationVisitorReleaseV1": false
+  }
+}
