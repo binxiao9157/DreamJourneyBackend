@@ -144,6 +144,9 @@ from app.services.owner_truth_legacy_migration import (
 from app.services.owner_truth_legacy_backfill import (
     PostgresOwnerTruthLegacyBackfillRepository,
 )
+from app.services.owner_truth_legacy_tail_shadow import (
+    PostgresOwnerTruthLegacyTailShadowRepository,
+)
 from app.services.owner_truth_conversation import (
     PostgresOwnerTruthConversationRepository,
 )
@@ -490,6 +493,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth legacy backfill planning requires an active unit of work")
         return PostgresOwnerTruthLegacyBackfillRepository(active.connection)
+
+    def owner_truth_legacy_tail_shadow_repository(
+        self,
+    ) -> PostgresOwnerTruthLegacyTailShadowRepository:
+        """Return C04's append-only shadow writer in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth legacy tail shadow requires an active unit of work")
+        return PostgresOwnerTruthLegacyTailShadowRepository(active.connection)
 
     def owner_truth_conversation_repository(
         self,

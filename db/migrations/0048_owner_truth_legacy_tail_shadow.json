@@ -1,0 +1,11 @@
+{
+  "version": "0048",
+  "name": "owner_truth_legacy_tail_shadow",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthLegacyTailShadowQaOnly",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "legacyMigrationTailShadowV1": false
+  }
+}

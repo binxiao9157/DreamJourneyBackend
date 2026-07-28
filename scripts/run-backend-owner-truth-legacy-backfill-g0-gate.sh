@@ -25,8 +25,8 @@ from app.domain.owner_truth.legacy_backfill import (
 )
 
 migrations = load_migrations(default_migrations_dir())
-assert migrations[-1].version == "0047"
-assert migrations[-1].name == "owner_truth_legacy_backfill_admission_plan"
+migration_by_version = {item.version: item for item in migrations}
+assert migration_by_version["0047"].name == "owner_truth_legacy_backfill_admission_plan"
 assert OWNER_TRUTH_LEGACY_BACKFILL_PLAN_SCHEMA_VERSION == (
     "owner-truth-legacy-backfill-admission-plan-v1"
 )

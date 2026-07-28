@@ -59,14 +59,29 @@ scripts/run-backend-owner-truth-legacy-tail-shadow-g0-gate.sh
 
 The gate proves deterministic replay, exact-duplicate handling, immutable
 rebind conflicts, gap reporting, quarantine/exclusion rejection, catalog and
-callback-fixture requirements, and absence of persistence/network/provider
-imports. It is included in `scripts/verify_backend.sh`.
+callback-fixture requirements, C04's append-only schema contract, and absence
+of persistence/network/provider imports from the pure mapping module. It is
+included in `scripts/verify_backend.sh`.
+
+## Additive Persistence Contract
+
+Migration `0048_owner_truth_legacy_tail_shadow` and
+`PostgresOwnerTruthLegacyTailShadowRepository` add an append-only report ledger
+plus mapping rows. They bind every report to its C03 plan, vault, owner and
+Authority epoch. The schema persists only report/mapping hashes, counters and
+catalog keys; its database checks keep every real side-effect counter at zero,
+require `shadow_only=true`, and prohibit cutover or legacy-writer retirement.
+
+This is a local contract implementation, not a passed G2 claim: no migration
+has been applied to a real Postgres environment and no real tail/checkpoint
+smoke has run yet.
 
 ## Deliberately Deferred
 
 This does not close C04 or authorize a worker. Remaining work includes:
 
-1. G2 append-only persistence and a real Postgres tail/checkpoint smoke.
+1. A real Postgres migration plus tail/checkpoint smoke for the additive
+   persistence contract.
 2. Real legacy operation/object/provider inventory adapters under approved
    value-minimization and credential controls.
 3. A deployment shadow window with side-effect count proven zero.
