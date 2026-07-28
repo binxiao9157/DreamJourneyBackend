@@ -113,6 +113,26 @@ class KnowledgeDimensionProjectionTests(unittest.TestCase):
             projection.for_dimension(KnowledgeDimension.VALUES).missing_facet_count,
             2,
         )
+        gaps = projection.knowledge_gaps()
+        self.assertEqual(
+            [
+                (item.dimension, item.missing_facet, item.evidence_ref_count)
+                for item in gaps
+            ],
+            [(KnowledgeDimension.KEY_DECISIONS, "outcome", 1)],
+        )
+        self.assertEqual(
+            projection.value_free_summary()["knowledgeGaps"],
+            [
+                {
+                    "dimension": "keyDecisions",
+                    "missingFacet": "outcome",
+                    "evidenceRefCount": 1,
+                    "reasonCode": "confirmedDimensionIncomplete",
+                    "schemaVersion": "owner-truth-knowledge-gap-projection-v1",
+                }
+            ],
+        )
 
     def test_projection_rejects_unknown_facets_instead_of_counting_unversioned_data(self) -> None:
         with self.assertRaisesRegex(Exception, "unsupported"):

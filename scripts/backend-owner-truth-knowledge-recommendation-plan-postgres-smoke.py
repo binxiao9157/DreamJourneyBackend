@@ -418,6 +418,17 @@ def main() -> None:
         )
         require(summary.get("candidateSource") == "serverPlanned", "plan must identify server planning")
         require([item.get("slot") for item in selected] == ["breadth"], "only breadth may be planned")
+        coverage = ((summary.get("dimensionRead") or {}).get("coverage") or {})
+        knowledge_gaps = coverage.get("knowledgeGaps") or []
+        require(
+            coverage.get("knowledgeGapCount") == len(knowledge_gaps)
+            and all(
+                item.get("reasonCode") == "confirmedDimensionIncomplete"
+                and int(item.get("evidenceRefCount") or 0) > 0
+                for item in knowledge_gaps
+            ),
+            "knowledge gaps must be confirmed-evidence-backed and value-free",
+        )
         require(
             str(selected[0].get("candidateId") or "").startswith("server-plan-breadth-"),
             "server plan must return its internally authority-bound candidate identifier",

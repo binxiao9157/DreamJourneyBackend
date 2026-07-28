@@ -678,6 +678,16 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             str(body["recommendations"]["selected"][0]["expiresAt"]),
             r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$",
         )
+        coverage = body["recommendations"]["dimensionRead"]["coverage"]
+        self.assertEqual(coverage["knowledgeGapCount"], len(coverage["knowledgeGaps"]))
+        self.assertTrue(coverage["knowledgeGaps"])
+        self.assertTrue(
+            all(
+                item["reasonCode"] == "confirmedDimensionIncomplete"
+                and item["evidenceRefCount"] > 0
+                for item in coverage["knowledgeGaps"]
+            )
+        )
         self.assertNotIn("spend more time", response.text)
         self.assertNotIn("taking time to reflect", response.text)
         self.assertNotIn("claim", response.text)

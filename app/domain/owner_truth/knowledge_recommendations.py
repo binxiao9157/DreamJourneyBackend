@@ -30,6 +30,7 @@ from .conversation import OwnerTruthConversationThreadAuthoritySnapshot
 
 
 KNOWLEDGE_DIMENSION_PROJECTION_SCHEMA_VERSION = "owner-truth-dimension-projection-v1"
+KNOWLEDGE_GAP_PROJECTION_SCHEMA_VERSION = "owner-truth-knowledge-gap-projection-v1"
 RECOMMENDATION_SELECTION_SCHEMA_VERSION = "owner-truth-recommendation-selection-v1"
 RECOMMENDATION_QUESTION_PRESENTATION_SCHEMA_VERSION = (
     "owner-truth-recommendation-question-presentation-v1"
@@ -281,6 +282,53 @@ class DimensionCoverage:
 
 
 @dataclass(frozen=True)
+class KnowledgeGap:
+    """An evidence-backed missing facet, not a claim about the Owner.
+
+    A gap is actionable only when at least one current, explicit Owner
+    confirmation already anchors the dimension.  Completely blank dimensions
+    remain coverage information; they must not be turned into an inferred
+    subject for proactive questioning.
+    """
+
+    dimension: KnowledgeDimension
+    missing_facet: str
+    evidence_ref_count: int
+    reason_code: str = "confirmedDimensionIncomplete"
+    schema_version: str = KNOWLEDGE_GAP_PROJECTION_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        try:
+            dimension = KnowledgeDimension(self.dimension)
+        except (TypeError, ValueError) as exc:
+            raise KnowledgeRecommendationError("knowledge gap dimension is not supported") from exc
+        object.__setattr__(self, "dimension", dimension)
+        missing_facet = _opaque_identifier(self.missing_facet, field="missing_facet")
+        if missing_facet not in _DIMENSION_FACETS[dimension]:
+            raise KnowledgeRecommendationError("knowledge gap missing_facet is not valid for dimension")
+        object.__setattr__(self, "missing_facet", missing_facet)
+        if (
+            not isinstance(self.evidence_ref_count, int)
+            or isinstance(self.evidence_ref_count, bool)
+            or self.evidence_ref_count < 1
+        ):
+            raise KnowledgeRecommendationError("knowledge gap evidence_ref_count must be positive")
+        if self.reason_code != "confirmedDimensionIncomplete":
+            raise KnowledgeRecommendationError("knowledge gap reason_code is not supported")
+        if self.schema_version != KNOWLEDGE_GAP_PROJECTION_SCHEMA_VERSION:
+            raise KnowledgeRecommendationError("knowledge gap schema_version is not supported")
+
+    def value_free_summary(self) -> dict[str, object]:
+        return {
+            "dimension": self.dimension.value,
+            "missingFacet": self.missing_facet,
+            "evidenceRefCount": self.evidence_ref_count,
+            "reasonCode": self.reason_code,
+            "schemaVersion": self.schema_version,
+        }
+
+
+@dataclass(frozen=True)
 class DimensionProjection:
     """A complete six-dimension projection for one owner and Vault scope."""
 
@@ -303,10 +351,27 @@ class DimensionProjection:
         normalized = KnowledgeDimension(dimension)
         return next(item for item in self.coverage if item.dimension is normalized)
 
+    def knowledge_gaps(self) -> Tuple[KnowledgeGap, ...]:
+        """Return only confirmed-evidence-backed gaps in stable policy order."""
+
+        return tuple(
+            KnowledgeGap(
+                dimension=item.dimension,
+                missing_facet=missing_facet,
+                evidence_ref_count=len(item.memory_version_ids),
+            )
+            for item in self.coverage
+            if item.memory_version_ids
+            for missing_facet in item.missing_facets
+        )
+
     def value_free_summary(self) -> dict[str, object]:
+        knowledge_gaps = self.knowledge_gaps()
         return {
             "dimensions": [item.value_free_summary() for item in self.coverage],
             "excludedEvidenceCount": self.excluded_evidence_count,
+            "knowledgeGapCount": len(knowledge_gaps),
+            "knowledgeGaps": [item.value_free_summary() for item in knowledge_gaps],
             "policyVersion": self.policy_version,
             "schemaVersion": KNOWLEDGE_DIMENSION_PROJECTION_SCHEMA_VERSION,
         }
@@ -1199,6 +1264,8 @@ __all__ = [
     "KnowledgeDimension",
     "knowledge_dimension_facets",
     "KnowledgeDimensionProjector",
+    "KnowledgeGap",
+    "KNOWLEDGE_GAP_PROJECTION_SCHEMA_VERSION",
     "KnowledgeRecommendationError",
     "KNOWLEDGE_DIMENSION_POLICY_VERSION",
     "KNOWLEDGE_DIMENSION_PROJECTION_SCHEMA_VERSION",
