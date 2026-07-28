@@ -21,6 +21,7 @@ from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
 OWNER_TRUTH_MIGRATION_PARITY_SHADOW_SCHEMA_VERSION = "owner-truth-migration-parity-shadow-v1"
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _REASON_CODE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
+_SCOPE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
 class OwnerTruthMigrationParityShadowError(ValueError):
@@ -186,6 +187,15 @@ def _reason_code(value: object, *, field: str) -> str:
     return normalized
 
 
+def _scope_identifier(value: object, *, field: str) -> str:
+    normalized = str(value or "").strip()
+    if not _SCOPE_IDENTIFIER_PATTERN.fullmatch(normalized):
+        raise OwnerTruthMigrationParityShadowError(
+            "%s must be an opaque scope identifier" % field
+        )
+    return normalized
+
+
 def _positive_int(value: object, *, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise OwnerTruthMigrationParityShadowError("%s must be a positive integer" % field)
@@ -215,6 +225,31 @@ def _utc_datetime(value: object, *, field: str) -> datetime:
 
 def _utc_timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def build_migration_parity_scope_hash(
+    *,
+    vault_id: str,
+    owner_subject_id: str,
+    authority_epoch: int,
+) -> str:
+    """Bind a report window to one active Owner/Vault/epoch without exporting it."""
+
+    normalized_vault_id = _scope_identifier(vault_id, field="vault_id")
+    normalized_owner_subject_id = _scope_identifier(
+        owner_subject_id, field="owner_subject_id"
+    )
+    if isinstance(authority_epoch, bool) or not isinstance(authority_epoch, int):
+        raise OwnerTruthMigrationParityShadowError("authority_epoch must be an integer")
+    if authority_epoch < 0:
+        raise OwnerTruthMigrationParityShadowError("authority_epoch must be non-negative")
+    return _digest(
+        {
+            "authorityEpoch": authority_epoch,
+            "ownerSubjectId": normalized_owner_subject_id,
+            "vaultId": normalized_vault_id,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -673,5 +708,6 @@ __all__ = [
     "OWNER_TRUTH_MIGRATION_PARITY_SHADOW_SCHEMA_VERSION",
     "OwnerTruthMigrationParityShadowConflict",
     "OwnerTruthMigrationParityShadowError",
+    "build_migration_parity_scope_hash",
     "build_migration_parity_shadow_report",
 ]

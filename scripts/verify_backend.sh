@@ -43,6 +43,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-legacy-tail-shadow-g0-g
 echo "== Owner Truth migration parity C05 G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-migration-parity-shadow-g0-gate.sh
 
+echo "== Owner Truth migration parity C05 persistence gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-migration-parity-shadow-persistence-gate.sh
+
 echo "== Voice/DH purpose consent G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-consent-policy-gate.sh
 
@@ -215,6 +218,12 @@ test -f db/migrations/0048_owner_truth_legacy_tail_shadow.json
 test -f app/domain/owner_truth/migration_parity_shadow.py
 test -f tests/test_owner_truth_migration_parity_shadow.py
 test -f scripts/run-backend-owner-truth-migration-parity-shadow-g0-gate.sh
+test -f app/services/owner_truth_migration_parity_shadow.py
+test -f tests/test_owner_truth_migration_parity_shadow_service.py
+test -f tests/test_owner_truth_migration_parity_shadow_migration_contract.py
+test -f scripts/run-backend-owner-truth-migration-parity-shadow-persistence-gate.sh
+test -f db/migrations/0049_owner_truth_migration_parity_shadow.sql
+test -f db/migrations/0049_owner_truth_migration_parity_shadow.json
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.sql
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.json
 test -f app/services/echo_delayed_reply_effects.py

@@ -71,11 +71,34 @@ This report cannot be used as an Authority-cutover decision. It is a C05 G0
 synthetic corpus gate and it does not replace the C04 tail/effect mapping
 report.
 
+## Additive evidence persistence
+
+`app/services/owner_truth_migration_parity_shadow.py` adds a separate,
+default-off append-only ledger behind the existing store/UoW seam. Migration
+`0049_owner_truth_migration_parity_shadow` persists only report hashes, sample
+hashes, enum values, aggregate counts and an optional hashed M08 approval
+reference. It never persists raw legacy/V4 values, identifiers, content,
+Provider credentials or object locators.
+
+The write path is fenced twice:
+
+1. the service reads the active `vault_id + owner_subject_id + authority_epoch`
+   and verifies the report's hash-only scope; and
+2. the memory/Postgres repository reads that same authority again immediately
+   before an append-only insert. Any owner, Vault or epoch change rejects the
+   report rather than attempting a reverse lookup from `scopeHash`.
+
+The SQL schema enforces active Vault ownership, the M01-M08 dimension/severity
+taxonomy, M08-only approval fields, M08's `read/projection/context` surface
+limit, exact mismatch counts, immutable rows and all zero-side-effect fields.
+It contains no public route and no cutover switch.
+
 ## Verification
 
 ```bash
 cd /Users/yxj/Documents/Codex/Video/DreamJourneyBackend
 scripts/run-backend-owner-truth-migration-parity-shadow-g0-gate.sh
+scripts/run-backend-owner-truth-migration-parity-shadow-persistence-gate.sh
 ```
 
 The gate exercises all M01–M08 codes, match/mismatch determinism, exact
@@ -89,6 +112,7 @@ the no-network/no-persistence import boundary. It is included in
 1. Adapters that collect legacy and V4 results from a real production-shaped
    Postgres dataset.
 2. iOS ViewState parity (C05 G1).
-3. Persistent comparison evidence and an approved real shadow window (C05 G2).
+3. Real Postgres persistence and an approved production-shaped shadow window
+   (C05 G2). The new ledger has only G0 contract coverage until that smoke runs.
 4. Any object copy, Provider request/query, command execution, Authority
    cutover, or legacy-writer retirement.

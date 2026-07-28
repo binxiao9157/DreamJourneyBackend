@@ -102,6 +102,9 @@ from app.services.owner_truth_legacy_backfill import (
 from app.services.owner_truth_legacy_tail_shadow import (
     InMemoryOwnerTruthLegacyTailShadowRepository,
 )
+from app.services.owner_truth_migration_parity_shadow import (
+    InMemoryOwnerTruthMigrationParityShadowRepository,
+)
 from app.services.user_identity import stable_user_id
 from app.services.echo_delayed_reply_effects import ECHO_DELAYED_REPLY_SCHEMA_VERSION
 from app.observability.events import (
@@ -206,6 +209,11 @@ class InMemoryStore:
         )
         self._owner_truth_legacy_tail_shadow_repository = (
             InMemoryOwnerTruthLegacyTailShadowRepository(
+                authority_supplier=self._owner_truth_legacy_backfill_authority,
+            )
+        )
+        self._owner_truth_migration_parity_shadow_repository = (
+            InMemoryOwnerTruthMigrationParityShadowRepository(
                 authority_supplier=self._owner_truth_legacy_backfill_authority,
             )
         )
@@ -354,6 +362,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthLegacyTailShadowRepository:
         return self._owner_truth_legacy_tail_shadow_repository
+
+    def owner_truth_migration_parity_shadow_repository(
+        self,
+    ) -> InMemoryOwnerTruthMigrationParityShadowRepository:
+        return self._owner_truth_migration_parity_shadow_repository
 
     def _owner_truth_legacy_backfill_authority(
         self,

@@ -14,6 +14,7 @@ from app.domain.owner_truth.migration_parity_shadow import (
     MigrationParitySurface,
     OwnerTruthMigrationParityShadowConflict,
     OwnerTruthMigrationParityShadowError,
+    build_migration_parity_scope_hash,
     build_migration_parity_shadow_report,
 )
 
@@ -29,7 +30,9 @@ class OwnerTruthMigrationParityShadowTests(unittest.TestCase):
     def _window(self, sample_count: int) -> MigrationParityComparisonWindow:
         return MigrationParityComparisonWindow(
             window_reference_hash=_digest("approved-window"),
-            scope_hash=_digest("owner-vault-authority-scope"),
+            scope_hash=build_migration_parity_scope_hash(
+                vault_id="vault-parity", owner_subject_id="owner-parity", authority_epoch=4
+            ),
             denominator_source_hash=_digest("synthetic-denominator"),
             threshold_source_hash=_digest("approved-threshold-source"),
             expected_sample_count=sample_count,
@@ -254,6 +257,25 @@ class OwnerTruthMigrationParityShadowTests(unittest.TestCase):
             observation = self._observation("dimension-%d" % index, dimension)
             codes.add(observation.mismatch_code)
         self.assertEqual(codes, set(MigrationParityMismatchCode))
+
+    def test_scope_hash_is_deterministic_and_rejects_ambiguous_scope_values(self) -> None:
+        first = build_migration_parity_scope_hash(
+            vault_id="vault-parity", owner_subject_id="owner-parity", authority_epoch=4
+        )
+        second = build_migration_parity_scope_hash(
+            vault_id="vault-parity", owner_subject_id="owner-parity", authority_epoch=4
+        )
+        self.assertEqual(first, second)
+        self.assertNotEqual(
+            first,
+            build_migration_parity_scope_hash(
+                vault_id="vault-parity", owner_subject_id="owner-parity", authority_epoch=5
+            ),
+        )
+        with self.assertRaises(OwnerTruthMigrationParityShadowError):
+            build_migration_parity_scope_hash(
+                vault_id="", owner_subject_id="owner-parity", authority_epoch=4
+            )
 
 
 if __name__ == "__main__":

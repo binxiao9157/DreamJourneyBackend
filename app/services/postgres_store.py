@@ -147,6 +147,9 @@ from app.services.owner_truth_legacy_backfill import (
 from app.services.owner_truth_legacy_tail_shadow import (
     PostgresOwnerTruthLegacyTailShadowRepository,
 )
+from app.services.owner_truth_migration_parity_shadow import (
+    PostgresOwnerTruthMigrationParityShadowRepository,
+)
 from app.services.owner_truth_conversation import (
     PostgresOwnerTruthConversationRepository,
 )
@@ -503,6 +506,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth legacy tail shadow requires an active unit of work")
         return PostgresOwnerTruthLegacyTailShadowRepository(active.connection)
+
+    def owner_truth_migration_parity_shadow_repository(
+        self,
+    ) -> PostgresOwnerTruthMigrationParityShadowRepository:
+        """Return C05's append-only parity evidence writer in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth migration parity shadow requires an active unit of work")
+        return PostgresOwnerTruthMigrationParityShadowRepository(active.connection)
 
     def owner_truth_conversation_repository(
         self,
