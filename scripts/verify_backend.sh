@@ -97,6 +97,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-share-grant-session-g0-
 echo "== Publication Visitor answer safety G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-visitor-answer-safety-g0-gate.sh
 
+echo "== Publication lifecycle/propagation G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-lifecycle-propagation-g0-gate.sh
+
 echo "== Operation metric coverage G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-operation-metric-coverage-gate.sh
 

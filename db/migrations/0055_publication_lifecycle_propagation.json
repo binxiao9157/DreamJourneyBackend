@@ -1,0 +1,13 @@
+{
+  "version": "0055",
+  "name": "publication_lifecycle_propagation",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationLifecyclePropagationDefaultDeny",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publicationExternalCleanupV1": false,
+    "publicationLifecycleCommandV1": false,
+    "publicationRevokePropagationV1": false
+  }
+}
