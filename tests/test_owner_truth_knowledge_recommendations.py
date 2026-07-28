@@ -17,6 +17,7 @@ from app.domain.owner_truth.knowledge_recommendations import (
     RecommendationCandidate,
     RecommendationDecision,
     RecommendationEvidenceKind,
+    RecommendationSelection,
     RecommendationSelector,
     RecommendationSlot,
     ServerPlannedContinuationCue,
@@ -596,7 +597,7 @@ class RecommendationSelectorTests(unittest.TestCase):
             },
         )
 
-    def test_duplicate_thread_facet_cannot_fill_both_recommendation_slots(self) -> None:
+    def test_duplicate_knowledge_gap_cannot_fill_both_recommendation_slots(self) -> None:
         result = self.select(
             (
                 candidate(
@@ -609,7 +610,9 @@ class RecommendationSelectorTests(unittest.TestCase):
                 candidate(
                     candidate_id="breadth-duplicate",
                     slot=RecommendationSlot.BREADTH,
-                    thread_id="thread-startup",
+                    # A separate Thread must not make the same underlying
+                    # dimension/facet eligible for both visible slots.
+                    thread_id="thread-other-story",
                     target_dimension=KnowledgeDimension.VALUES,
                     missing_facet="priority",
                 ),
@@ -619,8 +622,41 @@ class RecommendationSelectorTests(unittest.TestCase):
         self.assertEqual([item.candidate_id for item in result.selected], ["continuity"])
         self.assertEqual(
             [(item.candidate_id, item.reason_code) for item in result.filtered],
-            [("breadth-duplicate", "duplicateThreadFacet")],
+            [("breadth-duplicate", "duplicateKnowledgeGap")],
         )
+
+    def test_selection_rejects_duplicate_knowledge_gap_even_when_threads_differ(self) -> None:
+        with self.assertRaisesRegex(Exception, "duplicate a knowledge gap"):
+            RecommendationSelection(
+                owner_subject_id=OWNER,
+                vault_id=VAULT,
+                policy_version="m0-knowledge-dimension-v1",
+                selected=(
+                    RecommendationDecision(
+                        slot=RecommendationSlot.CONTINUITY,
+                        candidate_id="continuity-gap",
+                        thread_id="thread-one",
+                        target_dimension=KnowledgeDimension.VALUES,
+                        missing_facet="priority",
+                        question_template_id="continue-policy-template",
+                        evidence_refs=("memory-version-a",),
+                        reason_code="safePolicyQuestion",
+                        policy_version="m0-knowledge-dimension-v1",
+                    ),
+                    RecommendationDecision(
+                        slot=RecommendationSlot.BREADTH,
+                        candidate_id="breadth-gap",
+                        thread_id="thread-two",
+                        target_dimension=KnowledgeDimension.VALUES,
+                        missing_facet="priority",
+                        question_template_id="broaden-policy-template",
+                        evidence_refs=("memory-version-a",),
+                        reason_code="confirmedDimensionGap",
+                        policy_version="m0-knowledge-dimension-v1",
+                    ),
+                ),
+                filtered=(),
+            )
 
     def test_crisis_safety_override_allows_no_recommendation(self) -> None:
         result = self.select(

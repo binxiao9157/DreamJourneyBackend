@@ -505,7 +505,16 @@ class RecommendationCandidate:
 
     @property
     def dedupe_key(self) -> tuple[str, str]:
-        return (self.thread_id, self.missing_facet)
+        """Return the policy identity for one knowledge gap.
+
+        A continuity candidate and a breadth candidate may be associated with
+        different conversation Threads, but they still cannot fill both
+        recommendation slots when they ask for the same missing facet of the
+        same knowledge dimension.  Thread identity is an authority/audit
+        binding, not the identity of the gap presented to the Owner.
+        """
+
+        return (self.target_dimension.value, self.missing_facet)
 
 
 @dataclass(frozen=True)
@@ -635,8 +644,8 @@ class RecommendationSelection:
             raise KnowledgeRecommendationError("recommendation selection must not contain more than two decisions")
         if len({decision.slot for decision in self.selected}) != len(self.selected):
             raise KnowledgeRecommendationError("recommendation selection must not duplicate a slot")
-        if len({(decision.thread_id, decision.missing_facet) for decision in self.selected}) != len(self.selected):
-            raise KnowledgeRecommendationError("recommendation selection must not duplicate a thread facet")
+        if len({(decision.target_dimension, decision.missing_facet) for decision in self.selected}) != len(self.selected):
+            raise KnowledgeRecommendationError("recommendation selection must not duplicate a knowledge gap")
 
     def value_free_summary(self) -> dict[str, object]:
         return {
@@ -816,7 +825,7 @@ class RecommendationSelector:
                     RecommendationFilteredCandidate(
                         candidate_id=candidate.candidate_id,
                         slot=candidate.slot,
-                        reason_code="duplicateThreadFacet",
+                        reason_code="duplicateKnowledgeGap",
                     )
                 )
                 continue
