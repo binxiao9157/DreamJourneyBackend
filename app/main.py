@@ -141,6 +141,11 @@ from app.services.owner_truth_interview_candidate_review import (
 from app.services.owner_truth_interview_session_read import (
     OwnerTruthInterviewSessionReadService,
 )
+from app.services.owner_truth_interview_session_outcome_read import (
+    OwnerTruthInterviewSessionOutcomeReadAccessDenied,
+    OwnerTruthInterviewSessionOutcomeReadError,
+    OwnerTruthInterviewSessionOutcomeReadService,
+)
 from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_interview_candidate_single_review import (
     OwnerTruthInterviewCandidateSingleReviewService,
@@ -413,6 +418,9 @@ OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = bool(
 OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED = bool(
     settings.owner_truth_thread_summary_read_qa_enabled
 )
+OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED = bool(
+    settings.owner_truth_interview_session_outcome_read_qa_enabled
+)
 OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = bool(
     settings.owner_truth_thread_preference_qa_enabled
 )
@@ -607,6 +615,28 @@ def _require_owner_truth_thread_summary_read_qa(request: Request) -> str:
         raise HTTPException(
             status_code=401,
             detail={"code": "ownerTruthThreadSummaryReadUserSessionRequired"},
+        )
+    return user_id
+
+
+def _require_owner_truth_interview_session_outcome_read_qa(request: Request) -> str:
+    """Keep the value-free Phase 4C session outcome inside explicit QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
+        or not OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthInterviewSessionOutcomeReadUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthInterviewSessionOutcomeReadUserSessionRequired"},
         )
     return user_id
 
@@ -1223,6 +1253,19 @@ def _owner_truth_thread_summary_read_context(
     )
 
 
+def _owner_truth_interview_session_outcome_read_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_interview_session_outcome_read_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_knowledge_recommendation_plan_context(
     request: Request,
     *,
@@ -1550,6 +1593,25 @@ def _owner_truth_thread_summary_read_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthThreadSummaryReadInvalid"},
+    )
+
+
+def _owner_truth_interview_session_outcome_read_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthInterviewSessionOutcomeReadAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthInterviewSessionOutcomeReadDenied"},
+        )
+    if isinstance(error, OwnerTruthInterviewSessionOutcomeReadError):
+        return HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionOutcomeReadInvalid"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthInterviewSessionOutcomeReadInvalid"},
     )
 
 
@@ -4711,6 +4773,44 @@ def read_owner_truth_thread_summaries(
             "schemaVersion": "owner-truth-thread-summary-read-response-v1",
             "vaultId": context.vault_id,
             "threadSummaries": result.value_free_summary(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/outcome/read",
+    include_in_schema=False,
+)
+def read_owner_truth_interview_session_outcome(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Read a value-free Phase 4C session result without changing Echo UI."""
+
+    try:
+        context = _owner_truth_interview_session_outcome_read_context(
+            request,
+            vault_id=vault_id,
+        )
+        if payload:
+            raise OwnerTruthInterviewSessionOutcomeReadError(
+                "session outcome read contains unsupported fields"
+            )
+        result = OwnerTruthInterviewSessionOutcomeReadService(store).read(
+            session_id=session_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_outcome_read_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-interview-session-outcome-read-response-v1",
+            "vaultId": context.vault_id,
+            "sessionOutcome": result.value_free_summary(),
         },
         headers={"Cache-Control": "no-store"},
     )

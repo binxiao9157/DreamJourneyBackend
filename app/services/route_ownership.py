@@ -260,6 +260,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/outcome/read",
+                session,
+                "ownerTruthInterviewSessionOutcomeRead",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/knowledge-recommendations/activate",
                 session,
                 "ownerTruthKnowledgeRecommendationActivation",

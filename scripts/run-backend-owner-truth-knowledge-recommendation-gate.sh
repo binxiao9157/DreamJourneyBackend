@@ -21,6 +21,8 @@ if [[ -f tests/test_owner_truth_knowledge_recommendations.py && -f tests/test_ow
     tests.test_owner_truth_knowledge_dimension_confirmation_migration_contract \
     tests.test_owner_truth_thread_summary \
     tests.test_owner_truth_thread_summary_read_api \
+    tests.test_owner_truth_interview_session_outcome_read \
+    tests.test_owner_truth_interview_session_outcome_read_api \
     tests.test_owner_truth_knowledge_recommendation_read \
     tests.test_owner_truth_knowledge_recommendation_read_api \
     tests.test_owner_truth_knowledge_recommendation_activation \
@@ -203,12 +205,26 @@ for required in (
     "continuation cue does not match current Owner dimension scope",
 ):
     assert required in thread_summary_source, f"missing M0-B thread summary invariant: {required}"
+session_outcome_source = Path("app/services/owner_truth_interview_session_outcome_read.py").read_text(encoding="utf-8")
+for required in (
+    "confirmedMemoryVersionCount",
+    "eligibleSavedContinuationCueCount",
+    "InterviewReviewBatchState.ACKNOWLEDGED",
+    "OwnerTruthKnowledgeDimensionReadState.READY",
+    "admitted_source_versions",
+    "Candidate payloads, MemoryVersion content",
+):
+    assert required in session_outcome_source, f"missing Phase 4C session outcome invariant: {required}"
 main_source = Path("app/main.py").read_text(encoding="utf-8")
 for required in (
     '"/v2/vaults/{vault_id}/thread-summaries/read"',
     "OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED",
     "ownerTruthThreadSummaryReadUnavailable",
     "owner-truth-thread-summary-read-response-v1",
+    '"/v2/vaults/{vault_id}/interview-sessions/{session_id}/outcome/read"',
+    "OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED",
+    "ownerTruthInterviewSessionOutcomeReadUnavailable",
+    "owner-truth-interview-session-outcome-read-response-v1",
 ):
     assert required in main_source, f"missing M0-B thread summary QA contract: {required}"
 print("Owner Truth knowledge recommendation G0 gate passed")

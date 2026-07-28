@@ -106,6 +106,9 @@ class Settings:
     # Thread summary/map reads are independently default-off. They only expose
     # value-free current Owner thread anchors and reversible associations.
     owner_truth_thread_summary_read_qa_enabled: bool = False
+    # Session outcome reads remain a separate Phase 4C QA lane. They report
+    # only current confirmation-derived counts and continuation eligibility.
+    owner_truth_interview_session_outcome_read_qa_enabled: bool = False
     # Thread-scoped cooldown / do-not-ask remains independently default-off.
     # It never enables a public Echo control by itself.
     owner_truth_thread_preference_qa_enabled: bool = False
@@ -295,6 +298,10 @@ class Settings:
             owner_truth_thread_summary_read_qa_enabled=_env_bool(
                 "OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED",
                 cls.owner_truth_thread_summary_read_qa_enabled,
+            ),
+            owner_truth_interview_session_outcome_read_qa_enabled=_env_bool(
+                "OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED",
+                cls.owner_truth_interview_session_outcome_read_qa_enabled,
             ),
             owner_truth_thread_preference_qa_enabled=_env_bool(
                 "OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED",
