@@ -266,6 +266,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/life-map/read",
+                session,
+                "ownerTruthLifeMapRead",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/knowledge-recommendations/activate",
                 session,
                 "ownerTruthKnowledgeRecommendationActivation",

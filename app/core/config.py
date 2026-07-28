@@ -109,6 +109,9 @@ class Settings:
     # Session outcome reads remain a separate Phase 4C QA lane. They report
     # only current confirmation-derived counts and continuation eligibility.
     owner_truth_interview_session_outcome_read_qa_enabled: bool = False
+    # Life-map reads are a separate Phase 4C QA lane. They expose only stable
+    # dimension coverage, thread state and reversible associations.
+    owner_truth_life_map_read_qa_enabled: bool = False
     # Thread-scoped cooldown / do-not-ask remains independently default-off.
     # It never enables a public Echo control by itself.
     owner_truth_thread_preference_qa_enabled: bool = False
@@ -302,6 +305,10 @@ class Settings:
             owner_truth_interview_session_outcome_read_qa_enabled=_env_bool(
                 "OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED",
                 cls.owner_truth_interview_session_outcome_read_qa_enabled,
+            ),
+            owner_truth_life_map_read_qa_enabled=_env_bool(
+                "OWNER_TRUTH_LIFE_MAP_READ_QA_ENABLED",
+                cls.owner_truth_life_map_read_qa_enabled,
             ),
             owner_truth_thread_preference_qa_enabled=_env_bool(
                 "OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED",

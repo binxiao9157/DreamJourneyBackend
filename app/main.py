@@ -126,6 +126,7 @@ from app.domain.owner_truth.memory_projection import (
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.domain.owner_truth.knowledge_recommendations import RecommendationCandidate
+from app.domain.owner_truth.life_map import OwnerTruthLifeMapError
 from app.domain.owner_truth.thread_summary import OwnerTruthThreadSummaryError
 from app.domain.owner_truth.source_commands import (
     OwnerTruthCommandAuthorizationCapture,
@@ -145,6 +146,10 @@ from app.services.owner_truth_interview_session_outcome_read import (
     OwnerTruthInterviewSessionOutcomeReadAccessDenied,
     OwnerTruthInterviewSessionOutcomeReadError,
     OwnerTruthInterviewSessionOutcomeReadService,
+)
+from app.services.owner_truth_life_map_read import (
+    OwnerTruthLifeMapReadAccessDenied,
+    OwnerTruthLifeMapReadService,
 )
 from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_interview_candidate_single_review import (
@@ -421,6 +426,7 @@ OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED = bool(
 OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED = bool(
     settings.owner_truth_interview_session_outcome_read_qa_enabled
 )
+OWNER_TRUTH_LIFE_MAP_READ_QA_ENABLED = bool(settings.owner_truth_life_map_read_qa_enabled)
 OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = bool(
     settings.owner_truth_thread_preference_qa_enabled
 )
@@ -637,6 +643,28 @@ def _require_owner_truth_interview_session_outcome_read_qa(request: Request) -> 
         raise HTTPException(
             status_code=401,
             detail={"code": "ownerTruthInterviewSessionOutcomeReadUserSessionRequired"},
+        )
+    return user_id
+
+
+def _require_owner_truth_life_map_read_qa(request: Request) -> str:
+    """Keep the rebuildable Phase 4C life map inside explicit Owner QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
+        or not OWNER_TRUTH_LIFE_MAP_READ_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthLifeMapReadUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthLifeMapReadUserSessionRequired"},
         )
     return user_id
 
@@ -1266,6 +1294,19 @@ def _owner_truth_interview_session_outcome_read_context(
     )
 
 
+def _owner_truth_life_map_read_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_life_map_read_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_knowledge_recommendation_plan_context(
     request: Request,
     *,
@@ -1612,6 +1653,18 @@ def _owner_truth_interview_session_outcome_read_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthInterviewSessionOutcomeReadInvalid"},
+    )
+
+
+def _owner_truth_life_map_read_http_error(error: OwnerTruthContractError) -> HTTPException:
+    if isinstance(error, OwnerTruthLifeMapReadAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthLifeMapReadDenied"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthLifeMapReadInvalid"},
     )
 
 
@@ -4811,6 +4864,35 @@ def read_owner_truth_interview_session_outcome(
             "schemaVersion": "owner-truth-interview-session-outcome-read-response-v1",
             "vaultId": context.vault_id,
             "sessionOutcome": result.value_free_summary(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/life-map/read",
+    include_in_schema=False,
+)
+def read_owner_truth_life_map(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Read the current Phase 4C life map without changing public product UI."""
+
+    try:
+        context = _owner_truth_life_map_read_context(request, vault_id=vault_id)
+        if payload:
+            raise OwnerTruthLifeMapError("life-map read contains unsupported fields")
+        result = OwnerTruthLifeMapReadService(store).read(context=context)
+    except OwnerTruthContractError as error:
+        raise _owner_truth_life_map_read_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-life-map-read-response-v1",
+            "vaultId": context.vault_id,
+            "lifeMap": result.value_free_summary(),
         },
         headers={"Cache-Control": "no-store"},
     )

@@ -23,6 +23,8 @@ if [[ -f tests/test_owner_truth_knowledge_recommendations.py && -f tests/test_ow
     tests.test_owner_truth_thread_summary_read_api \
     tests.test_owner_truth_interview_session_outcome_read \
     tests.test_owner_truth_interview_session_outcome_read_api \
+    tests.test_owner_truth_life_map \
+    tests.test_owner_truth_life_map_read_api \
     tests.test_owner_truth_knowledge_recommendation_read \
     tests.test_owner_truth_knowledge_recommendation_read_api \
     tests.test_owner_truth_knowledge_recommendation_activation \
@@ -215,6 +217,16 @@ for required in (
     "Candidate payloads, MemoryVersion content",
 ):
     assert required in session_outcome_source, f"missing Phase 4C session outcome invariant: {required}"
+life_map_source = Path("app/domain/owner_truth/life_map.py").read_text(encoding="utf-8")
+for required in (
+    "OwnerTruthLifeMapProjection",
+    "stable knowledge dimensions",
+    "reversible Thread association",
+    "memory-version anchor",
+    "not a second",
+    "memory store",
+):
+    assert required in life_map_source, f"missing Phase 4C life-map invariant: {required}"
 main_source = Path("app/main.py").read_text(encoding="utf-8")
 for required in (
     '"/v2/vaults/{vault_id}/thread-summaries/read"',
@@ -225,6 +237,10 @@ for required in (
     "OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED",
     "ownerTruthInterviewSessionOutcomeReadUnavailable",
     "owner-truth-interview-session-outcome-read-response-v1",
+    '"/v2/vaults/{vault_id}/life-map/read"',
+    "OWNER_TRUTH_LIFE_MAP_READ_QA_ENABLED",
+    "ownerTruthLifeMapReadUnavailable",
+    "owner-truth-life-map-read-response-v1",
 ):
     assert required in main_source, f"missing M0-B thread summary QA contract: {required}"
 print("Owner Truth knowledge recommendation G0 gate passed")
