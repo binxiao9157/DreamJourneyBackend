@@ -128,6 +128,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-recovery-evidence-cont
 echo "== Verified media processor admission G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-verified-media-processor-shadow-gate.sh
 
+echo "== External cleanup adapter G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-external-cleanup-adapter-g0-gate.sh
+
 echo "== Voice GeneratedAudio binding G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-generated-audio-binding-g0-gate.sh
 
