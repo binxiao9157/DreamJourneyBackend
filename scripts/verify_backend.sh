@@ -61,6 +61,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-migration-rights-restor
 echo "== Owner Truth migration C10 retirement-candidate gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-migration-retirement-candidate-g0-gate.sh
 
+echo "== Owner Truth migration C11 removal-authorization gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-migration-removal-authorization-g0-gate.sh
+
 echo "== Voice/DH purpose consent G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-consent-policy-gate.sh
 
@@ -260,6 +263,10 @@ test -f app/domain/owner_truth/migration_retirement_candidate_shadow.py
 test -f tests/test_owner_truth_migration_retirement_candidate_shadow.py
 test -f scripts/run-backend-owner-truth-migration-retirement-candidate-g0-gate.sh
 test -f docs/backend/2026-07-29-owner-truth-c10-retirement-candidate-g0.md
+test -f app/domain/owner_truth/migration_removal_authorization_shadow.py
+test -f tests/test_owner_truth_migration_removal_authorization_shadow.py
+test -f scripts/run-backend-owner-truth-migration-removal-authorization-g0-gate.sh
+test -f docs/backend/2026-07-29-owner-truth-c11-removal-authorization-g0.md
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.sql
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.json
 test -f app/services/echo_delayed_reply_effects.py
