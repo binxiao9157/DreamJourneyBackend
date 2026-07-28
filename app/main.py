@@ -256,6 +256,10 @@ from app.services.owner_truth_legacy_migration import (
     OwnerTruthLegacyMigrationUnavailable,
     legacy_migration_summary,
 )
+from app.services.owner_truth_legacy_backfill import (
+    OwnerTruthLegacyBackfillPlanService,
+    legacy_backfill_plan_summary,
+)
 from app.services.owner_truth_legacy_shadow_parity import (
     OwnerTruthLegacyShadowParityService,
     legacy_shadow_parity_summary,
@@ -5357,6 +5361,28 @@ def inventory_owner_truth_legacy_evidence(
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
         content=legacy_migration_summary(result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/legacy-migration/backfill-plan",
+    include_in_schema=False,
+)
+def plan_owner_truth_legacy_backfill(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """QA-only C03 plan; it persists no Owner Truth migration target."""
+
+    try:
+        context = _owner_truth_legacy_migration_context(request, vault_id=vault_id)
+        result = OwnerTruthLegacyBackfillPlanService(store, enabled=True).plan(context=context)
+    except OwnerTruthLegacyMigrationError as error:
+        raise _owner_truth_legacy_migration_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=legacy_backfill_plan_summary(result),
         headers={"Cache-Control": "no-store"},
     )
 

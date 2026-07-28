@@ -94,11 +94,11 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
 
         self.assertEqual(development["mode"], "shadow")
         self.assertEqual(production["mode"], "enforce")
-        self.assertEqual(production["routeCount"], 118)
+        self.assertEqual(production["routeCount"], 119)
         self.assertEqual(production["unclassifiedCount"], 0)
         self.assertEqual(
             production["authModeCounts"],
-            {"machine": 15, "public": 10, "user": 93},
+            {"machine": 15, "public": 10, "user": 94},
         )
         self.assertTrue(production["productionEnforceReady"])
 

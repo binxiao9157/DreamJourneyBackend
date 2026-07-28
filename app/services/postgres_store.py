@@ -141,6 +141,9 @@ from app.services.owner_truth_correction_request import (
 from app.services.owner_truth_legacy_migration import (
     PostgresOwnerTruthLegacyMigrationRepository,
 )
+from app.services.owner_truth_legacy_backfill import (
+    PostgresOwnerTruthLegacyBackfillRepository,
+)
 from app.services.owner_truth_conversation import (
     PostgresOwnerTruthConversationRepository,
 )
@@ -477,6 +480,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth legacy migration requires an active unit of work")
         return PostgresOwnerTruthLegacyMigrationRepository(active.connection)
+
+    def owner_truth_legacy_backfill_repository(
+        self,
+    ) -> PostgresOwnerTruthLegacyBackfillRepository:
+        """Return C03's append-only admission-plan writer in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth legacy backfill planning requires an active unit of work")
+        return PostgresOwnerTruthLegacyBackfillRepository(active.connection)
 
     def owner_truth_conversation_repository(
         self,

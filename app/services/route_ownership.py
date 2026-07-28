@@ -446,6 +446,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/legacy-migration/backfill-plan",
+                session,
+                "ownerTruthLegacyBackfillPlan",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/legacy-migration/shadow-parity",
                 session,
                 "ownerTruthLegacyShadowParity",

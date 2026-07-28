@@ -96,6 +96,9 @@ from app.services.owner_truth_legacy_migration import (
     InMemoryOwnerTruthLegacyMigrationRepository,
     LegacyMigrationLegacyRows,
 )
+from app.services.owner_truth_legacy_backfill import (
+    InMemoryOwnerTruthLegacyBackfillRepository,
+)
 from app.services.user_identity import stable_user_id
 from app.services.echo_delayed_reply_effects import ECHO_DELAYED_REPLY_SCHEMA_VERSION
 from app.observability.events import (
@@ -191,6 +194,11 @@ class InMemoryStore:
         self._owner_truth_legacy_migration_repository = (
             InMemoryOwnerTruthLegacyMigrationRepository(
                 row_supplier=self._owner_truth_legacy_migration_rows,
+            )
+        )
+        self._owner_truth_legacy_backfill_repository = (
+            InMemoryOwnerTruthLegacyBackfillRepository(
+                authority_supplier=self._owner_truth_legacy_backfill_authority,
             )
         )
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
@@ -328,6 +336,22 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthLegacyMigrationRepository:
         return self._owner_truth_legacy_migration_repository
+
+    def owner_truth_legacy_backfill_repository(
+        self,
+    ) -> InMemoryOwnerTruthLegacyBackfillRepository:
+        return self._owner_truth_legacy_backfill_repository
+
+    def _owner_truth_legacy_backfill_authority(
+        self,
+        vault_id: str,
+        _owner_subject_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return only active-Vault fence fields for C03's value-free plan."""
+
+        with self._owner_truth_lock:
+            vault = self._owner_truth_vaults.get(vault_id)
+            return None if vault is None else deepcopy(vault)
 
     def _owner_truth_legacy_migration_rows(self, owner_subject_id: str) -> LegacyMigrationLegacyRows:
         """Return raw legacy rows only to the hash-only V4 inventory collector."""

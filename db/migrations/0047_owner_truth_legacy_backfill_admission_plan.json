@@ -1,0 +1,11 @@
+{
+  "version": "0047",
+  "name": "owner_truth_legacy_backfill_admission_plan",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthLegacyBackfillAdmissionPlanQaOnly",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "legacyMigrationBackfillAdmissionV1": false
+  }
+}
