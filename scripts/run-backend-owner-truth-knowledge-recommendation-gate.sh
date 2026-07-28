@@ -29,6 +29,7 @@ if [[ -f tests/test_owner_truth_knowledge_recommendations.py && -f tests/test_ow
     tests.test_owner_truth_memory_search_projection \
     tests.test_owner_truth_memory_search_read_api \
     tests.test_owner_truth_memory_search_projection_migration_contract \
+    tests.test_owner_truth_memory_search_offline_evaluation \
     tests.test_owner_truth_knowledge_recommendation_read \
     tests.test_owner_truth_knowledge_recommendation_read_api \
     tests.test_owner_truth_knowledge_recommendation_activation \

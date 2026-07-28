@@ -25,6 +25,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-knowledge-recommendatio
 echo "== Owner Truth SearchDocument projection worker gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-memory-search-projection-worker-gate.sh
 
+echo "== Owner Truth memory-search offline evaluation gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-memory-search-offline-evaluation-gate.sh
+
 echo "== Owner Truth recommendation offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-recommendation-offline-evaluation-gate.sh
 
@@ -280,6 +283,9 @@ test -f tests/test_owner_truth_memory_search_projection.py
 test -f tests/test_owner_truth_memory_search_projection_migration_contract.py
 test -f scripts/backend-owner-truth-memory-search-projection-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-memory-search-projection-postgres-smoke.sh
+test -f app/services/owner_truth_memory_search_offline_evaluation.py
+test -f tests/test_owner_truth_memory_search_offline_evaluation.py
+test -f scripts/run-backend-owner-truth-memory-search-offline-evaluation-gate.sh
 test -f app/services/owner_truth_recommendation_offline_evaluation.py
 test -f tests/test_owner_truth_recommendation_offline_evaluation.py
 test -f tests/fixtures/owner_truth/recommendation_offline_evaluation_v1.json
