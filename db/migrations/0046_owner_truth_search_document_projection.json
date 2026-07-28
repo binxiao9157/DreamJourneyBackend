@@ -1,0 +1,13 @@
+{
+  "version": "0046",
+  "name": "owner_truth_search_document_projection",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthSearchDocumentProjectionQaOnly",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthMemorySearchProjectionQa": false,
+    "ownerTruthMemorySearchReadQa": false
+  }
+}

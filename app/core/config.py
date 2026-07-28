@@ -115,6 +115,9 @@ class Settings:
     # SearchDocument reads are a separate Phase 4C QA lane. The first read
     # uses deterministic text fallback only and never enables public search.
     owner_truth_memory_search_read_qa_enabled: bool = False
+    # Rebuilding the persisted SearchDocument index is independently closed.
+    # It never enables public search, embeddings, or a Vector/Provider lane.
+    owner_truth_memory_search_projection_qa_enabled: bool = False
     # Thread-scoped cooldown / do-not-ask remains independently default-off.
     # It never enables a public Echo control by itself.
     owner_truth_thread_preference_qa_enabled: bool = False
@@ -316,6 +319,10 @@ class Settings:
             owner_truth_memory_search_read_qa_enabled=_env_bool(
                 "OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED",
                 cls.owner_truth_memory_search_read_qa_enabled,
+            ),
+            owner_truth_memory_search_projection_qa_enabled=_env_bool(
+                "OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_QA_ENABLED",
+                cls.owner_truth_memory_search_projection_qa_enabled,
             ),
             owner_truth_thread_preference_qa_enabled=_env_bool(
                 "OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED",

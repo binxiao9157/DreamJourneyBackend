@@ -8,12 +8,13 @@ from uuid import uuid4
 
 from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionInput,
-    build_rebuilding_memory_projection,
     build_ready_memory_projection,
 )
 from app.domain.owner_truth.search_documents import (
     OWNER_TRUTH_MEMORY_SEARCH_MAX_QUERY_CHARACTERS,
     OwnerTruthMemorySearchReadError,
+    OwnerTruthSearchDocumentProjection,
+    build_owner_truth_search_document_projection,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_memory_search_read import (
@@ -28,25 +29,29 @@ def _hash(value: object) -> str:
     ).hexdigest()
 
 
-class _ProjectionReader:
-    def __init__(self, snapshot: dict[str, object]) -> None:
-        self.snapshot = snapshot
+class _SearchDocumentProjectionReader:
+    def __init__(self, projection: OwnerTruthSearchDocumentProjection | None) -> None:
+        self.projection = projection
 
-    def read(self, *, context: OwnerTruthCommandContext) -> dict[str, object]:
+    def read(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthSearchDocumentProjection | None:
         del context
-        return self.snapshot
+        return self.projection
 
 
 class _Store:
-    def __init__(self, snapshot: dict[str, object]) -> None:
-        self.reader = _ProjectionReader(snapshot)
+    def __init__(self, projection: OwnerTruthSearchDocumentProjection | None) -> None:
+        self.reader = _SearchDocumentProjectionReader(projection)
 
     @contextmanager
     def request_unit_of_work(self, *, correlation_id: str, command_id: str):
         del correlation_id, command_id
         yield
 
-    def owner_truth_memory_projection_repository(self):
+    def owner_truth_memory_search_document_projection_repository(self):
         return self.reader
 
 
@@ -87,9 +92,13 @@ class OwnerTruthMemorySearchTests(unittest.TestCase):
             authority_epoch=4,
             inputs=(self.memory,),
         )
+        self.search_projection = build_owner_truth_search_document_projection(
+            memory_projection=self.snapshot
+        )
+        assert self.search_projection is not None
 
     def test_owner_searches_current_confirmed_memory_without_returning_text_or_source(self) -> None:
-        result = OwnerTruthMemorySearchReadService(_Store(self.snapshot)).read(
+        result = OwnerTruthMemorySearchReadService(_Store(self.search_projection)).read(
             context=self.context,
             query="职业选择",
             limit=5,
@@ -109,7 +118,7 @@ class OwnerTruthMemorySearchTests(unittest.TestCase):
         self.assertNotIn("structuredTerms", rendered)
 
     def test_search_normalizes_full_width_and_case_without_claiming_vector_semantics(self) -> None:
-        result = OwnerTruthMemorySearchReadService(_Store(self.snapshot)).read(
+        result = OwnerTruthMemorySearchReadService(_Store(self.search_projection)).read(
             context=self.context,
             query="PRIVATE　SEARCH",
             limit=1,
@@ -118,13 +127,8 @@ class OwnerTruthMemorySearchTests(unittest.TestCase):
         self.assertEqual(len(result.hits), 1)
         self.assertEqual(result.hits[0].match_kind, "structuredTerm")
 
-    def test_rebuilding_projection_returns_no_search_state_or_stale_hits(self) -> None:
-        rebuilding = build_rebuilding_memory_projection(
-            vault_id=self.vault_id,
-            owner_subject_id=self.owner_id,
-            authority_epoch=4,
-        )
-        result = OwnerTruthMemorySearchReadService(_Store(rebuilding)).read(
+    def test_missing_or_rebuilding_search_index_returns_no_search_state_or_stale_hits(self) -> None:
+        result = OwnerTruthMemorySearchReadService(_Store(None)).read(
             context=self.context,
             query="职业",
         )
@@ -135,7 +139,7 @@ class OwnerTruthMemorySearchTests(unittest.TestCase):
         self.assertEqual(result.hits, ())
 
     def test_cross_owner_and_oversized_query_fail_closed(self) -> None:
-        service = OwnerTruthMemorySearchReadService(_Store(self.snapshot))
+        service = OwnerTruthMemorySearchReadService(_Store(self.search_projection))
         denied_context = OwnerTruthCommandContext(
             vault_id=self.vault_id,
             owner_subject_id=self.owner_id,

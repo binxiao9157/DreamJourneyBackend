@@ -156,6 +156,10 @@ from app.services.owner_truth_memory_search_read import (
     OwnerTruthMemorySearchReadAccessDenied,
     OwnerTruthMemorySearchReadService,
 )
+from app.services.owner_truth_memory_search_projection import (
+    OwnerTruthMemorySearchDocumentProjectionService,
+    OwnerTruthMemorySearchProjectionAccessDenied,
+)
 from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_interview_candidate_single_review import (
     OwnerTruthInterviewCandidateSingleReviewService,
@@ -435,6 +439,9 @@ OWNER_TRUTH_LIFE_MAP_READ_QA_ENABLED = bool(settings.owner_truth_life_map_read_q
 OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED = bool(
     settings.owner_truth_memory_search_read_qa_enabled
 )
+OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_QA_ENABLED = bool(
+    settings.owner_truth_memory_search_projection_qa_enabled
+)
 OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = bool(
     settings.owner_truth_thread_preference_qa_enabled
 )
@@ -694,6 +701,27 @@ def _require_owner_truth_memory_search_read_qa(request: Request) -> str:
         raise HTTPException(
             status_code=401,
             detail={"code": "ownerTruthMemorySearchReadUserSessionRequired"},
+        )
+    return user_id
+
+
+def _require_owner_truth_memory_search_projection_qa(request: Request) -> str:
+    """Keep private SearchDocument rebuilds unavailable outside explicit QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthMemorySearchProjectionUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthMemorySearchProjectionUserSessionRequired"},
         )
     return user_id
 
@@ -1349,6 +1377,19 @@ def _owner_truth_memory_search_read_context(
     )
 
 
+def _owner_truth_memory_search_projection_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_memory_search_projection_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_knowledge_recommendation_plan_context(
     request: Request,
     *,
@@ -1719,6 +1760,20 @@ def _owner_truth_memory_search_read_http_error(error: OwnerTruthContractError) -
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthMemorySearchReadInvalid"},
+    )
+
+
+def _owner_truth_memory_search_projection_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthMemorySearchProjectionAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthMemorySearchProjectionDenied"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthMemorySearchProjectionInvalid"},
     )
 
 
@@ -4953,6 +5008,43 @@ def read_owner_truth_life_map(
 
 
 _OWNER_TRUTH_MEMORY_SEARCH_READ_FIELDS = frozenset({"query", "limit"})
+_OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_REBUILD_FIELDS = frozenset()
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memory-search/projection/rebuild",
+    include_in_schema=False,
+)
+def rebuild_owner_truth_memory_search_projection(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Explicit QA rebuild for the private checkpoint-bound SearchDocument index."""
+
+    try:
+        context = _owner_truth_memory_search_projection_context(request, vault_id=vault_id)
+        unsupported = sorted(
+            set(payload).difference(_OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_REBUILD_FIELDS)
+        )
+        if unsupported:
+            raise OwnerTruthMemorySearchReadError(
+                "memory-search projection rebuild contains unsupported fields"
+            )
+        result = OwnerTruthMemorySearchDocumentProjectionService(store).rebuild(
+            context=context
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_memory_search_projection_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-memory-search-projection-rebuild-response-v1",
+            "vaultId": context.vault_id,
+            "searchProjection": result.value_free_summary(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post(

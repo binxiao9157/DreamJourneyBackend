@@ -11,6 +11,8 @@ string in its value-free QA result.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 from typing import Any, Iterable, Mapping
 import unicodedata
 
@@ -20,6 +22,9 @@ from .memory_projection import OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION
 
 OWNER_TRUTH_SEARCH_DOCUMENT_PROJECTION_SCHEMA_VERSION = (
     "owner-truth-search-document-projection-v1"
+)
+OWNER_TRUTH_SEARCH_DOCUMENT_REBUILD_SCHEMA_VERSION = (
+    "owner-truth-search-document-rebuild-v1"
 )
 OWNER_TRUTH_MEMORY_SEARCH_READ_SCHEMA_VERSION = "owner-truth-memory-search-read-v1"
 OWNER_TRUTH_MEMORY_SEARCH_RETRIEVAL_MODE = "deterministicTextFallback"
@@ -289,6 +294,46 @@ class OwnerTruthSearchDocumentProjection:
             ),
         }
 
+    def document_digest(self) -> str:
+        """Return an internal integrity digest without exposing search text."""
+
+        return search_document_projection_digest(self)
+
+
+@dataclass(frozen=True)
+class OwnerTruthSearchDocumentProjectionRebuildResult:
+    """Result of rebuilding the private, derived SearchDocument index."""
+
+    outcome: str
+    projection: OwnerTruthSearchDocumentProjection | None
+
+    def __post_init__(self) -> None:
+        outcome = require_nonblank(self.outcome, field="outcome")
+        if outcome not in {"rebuilt", "unchanged", "sourceRebuilding"}:
+            raise OwnerTruthSearchDocumentProjectionError(
+                "search document rebuild outcome is unsupported"
+            )
+        if outcome == "sourceRebuilding":
+            if self.projection is not None:
+                raise OwnerTruthSearchDocumentProjectionError(
+                    "source-rebuilding search document result must not retain a projection"
+                )
+        elif self.projection is None:
+            raise OwnerTruthSearchDocumentProjectionError(
+                "ready search document rebuild result requires a projection"
+            )
+        object.__setattr__(self, "outcome", outcome)
+
+    def value_free_summary(self) -> dict[str, object]:
+        summary: dict[str, object] = {
+            "schemaVersion": OWNER_TRUTH_SEARCH_DOCUMENT_REBUILD_SCHEMA_VERSION,
+            "state": "rebuilding" if self.projection is None else "ready",
+            "outcome": self.outcome,
+        }
+        if self.projection is not None:
+            summary["projection"] = self.projection.value_free_summary()
+        return summary
+
 
 @dataclass(frozen=True)
 class OwnerTruthMemorySearchReadResult:
@@ -412,6 +457,44 @@ def build_owner_truth_memory_search_query_plan(
     )
 
 
+def search_document_projection_digest(
+    projection: OwnerTruthSearchDocumentProjection,
+) -> str:
+    """Hash exact private index material for repository integrity checks.
+
+    The digest binds current citation metadata and private search fields without
+    rendering those fields in an API result.  It is a rebuildable projection
+    checksum, never an Owner Truth authority record.
+    """
+
+    if not isinstance(projection, OwnerTruthSearchDocumentProjection):
+        raise TypeError("projection must be an OwnerTruthSearchDocumentProjection")
+    payload = {
+        "schemaVersion": OWNER_TRUTH_SEARCH_DOCUMENT_PROJECTION_SCHEMA_VERSION,
+        "vaultId": projection.vault_id,
+        "ownerSubjectId": projection.owner_subject_id,
+        "authorityEpoch": projection.authority_epoch,
+        "sourceCheckpoint": projection.checkpoint,
+        "documents": [
+            {
+                "memoryId": document.memory_id,
+                "memoryVersionId": document.memory_version_id,
+                "contentHash": document.content_hash,
+                "memoryKind": document.memory_kind,
+                "perspectiveType": document.perspective_type,
+                "sensitivity": document.sensitivity,
+                "searchText": document.search_text,
+                "structuredTerms": list(document.structured_terms),
+                "textWasTruncated": document.text_was_truncated,
+            }
+            for document in projection.documents
+        ],
+    }
+    return sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def search_owner_truth_documents(
     *,
     projection: OwnerTruthSearchDocumentProjection,
@@ -495,6 +578,7 @@ __all__ = [
     "OWNER_TRUTH_MEMORY_SEARCH_READ_SCHEMA_VERSION",
     "OWNER_TRUTH_MEMORY_SEARCH_RETRIEVAL_MODE",
     "OWNER_TRUTH_SEARCH_DOCUMENT_PROJECTION_SCHEMA_VERSION",
+    "OWNER_TRUTH_SEARCH_DOCUMENT_REBUILD_SCHEMA_VERSION",
     "OwnerTruthMemorySearchHit",
     "OwnerTruthMemorySearchQueryPlan",
     "OwnerTruthMemorySearchReadError",
@@ -502,7 +586,9 @@ __all__ = [
     "OwnerTruthSearchDocument",
     "OwnerTruthSearchDocumentProjection",
     "OwnerTruthSearchDocumentProjectionError",
+    "OwnerTruthSearchDocumentProjectionRebuildResult",
     "build_owner_truth_memory_search_query_plan",
     "build_owner_truth_search_document_projection",
+    "search_document_projection_digest",
     "search_owner_truth_documents",
 ]

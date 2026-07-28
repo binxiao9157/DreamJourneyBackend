@@ -267,6 +267,13 @@ test -f scripts/backend-owner-truth-knowledge-dimension-confirmation-postgres-sm
 test -f scripts/run-backend-owner-truth-knowledge-dimension-confirmation-postgres-smoke.sh
 test -f scripts/backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.sh
+test -f db/migrations/0046_owner_truth_search_document_projection.sql
+test -f db/migrations/0046_owner_truth_search_document_projection.json
+test -f app/services/owner_truth_memory_search_projection.py
+test -f tests/test_owner_truth_memory_search_projection.py
+test -f tests/test_owner_truth_memory_search_projection_migration_contract.py
+test -f scripts/backend-owner-truth-memory-search-projection-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-memory-search-projection-postgres-smoke.sh
 test -f app/services/owner_truth_saved_continuation.py
 test -f db/migrations/0039_owner_truth_saved_continuation_cues.sql
 test -f db/migrations/0039_owner_truth_saved_continuation_cues.json

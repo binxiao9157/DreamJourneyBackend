@@ -26,6 +26,9 @@ from app.main import app
 from app.services.in_memory_store import InMemoryStore
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
+from app.services.owner_truth_memory_search_projection import (
+    OwnerTruthMemorySearchDocumentProjectionService,
+)
 
 
 client = TestClient(app)
@@ -46,6 +49,9 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
         self.previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
         self.previous_candidate_qa = main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
         self.previous_memory_search_qa = main_module.OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED
+        self.previous_memory_search_projection_qa = (
+            main_module.OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_QA_ENABLED
+        )
         self.store = InMemoryStore()
         main_module.store = self.store
         main_module.BACKEND_API_TOKEN = ""
@@ -54,6 +60,7 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
         main_module.OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED = True
+        main_module.OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_QA_ENABLED = True
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -63,6 +70,9 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = self.previous_candidate_qa
         main_module.OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED = self.previous_memory_search_qa
+        main_module.OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_QA_ENABLED = (
+            self.previous_memory_search_projection_qa
+        )
 
     @staticmethod
     def _login(phone: str) -> tuple[str, dict[str, str]]:
@@ -78,7 +88,13 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
             "X-DreamJourney-QA-Owner-Truth": "1",
         }
 
-    def _activate_memory(self, *, vault_id: str, owner_id: str) -> str:
+    def _activate_memory(
+        self,
+        *,
+        vault_id: str,
+        owner_id: str,
+        rebuild_search_projection: bool = True,
+    ) -> str:
         source_id = str(uuid4())
         content = {
             "claim": "private memory search API evidence about a career choice",
@@ -126,6 +142,8 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
             context=context,
         )
         OwnerTruthMemoryProjectionService(self.store).rebuild(context=context)
+        if rebuild_search_projection:
+            OwnerTruthMemorySearchDocumentProjectionService(self.store).rebuild(context=context)
         snapshot = self.store.owner_truth_memory_projection_repository().read(context=context)
         return str(snapshot["entries"][0]["citation"]["memoryVersionId"])
 
@@ -168,6 +186,47 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
         self.assertNotIn("sourceId", rendered)
         self.assertNotIn('"searchText":', rendered)
         self.assertNotIn("structuredTerms", rendered)
+
+    def test_projection_rebuild_is_independently_gated_and_required_before_search(self) -> None:
+        owner_id, headers = self._login("13800139705")
+        vault_id = "vault-memory-search-projection-api"
+        self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            rebuild_search_projection=False,
+        )
+
+        before = client.post(
+            f"/v2/vaults/{vault_id}/memory-search/read",
+            headers=headers,
+            json={"query": "career"},
+        )
+        self.assertEqual(before.status_code, 200)
+        self.assertEqual(before.json()["search"]["state"], "rebuilding")
+
+        rebuilt = client.post(
+            f"/v2/vaults/{vault_id}/memory-search/projection/rebuild",
+            headers=headers,
+            json={},
+        )
+        self.assertEqual(rebuilt.status_code, 200, rebuilt.text)
+        self.assertEqual(rebuilt.headers["cache-control"], "no-store")
+        summary = rebuilt.json()["searchProjection"]
+        self.assertEqual(summary["state"], "ready")
+        self.assertEqual(summary["projection"]["documentCount"], 1)
+        self.assertNotIn("private memory search API evidence", json.dumps(rebuilt.json()))
+
+        main_module.OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_QA_ENABLED = False
+        hidden = client.post(
+            f"/v2/vaults/{vault_id}/memory-search/projection/rebuild",
+            headers=headers,
+            json={},
+        )
+        self.assertEqual(hidden.status_code, 404)
+        self.assertEqual(
+            hidden.json()["detail"]["code"],
+            "ownerTruthMemorySearchProjectionUnavailable",
+        )
 
     def test_invalid_payload_and_cross_owner_access_fail_closed(self) -> None:
         owner_id, headers = self._login("13800139703")

@@ -1,9 +1,8 @@
-"""Owner-scoped SearchDocument read service for Phase 4C QA.
+"""Owner-scoped persisted SearchDocument read service for Phase 4C QA.
 
-The service intentionally leaves embedding/vector/provider work disabled.  It
-proves the first safe retrieval step: current, confirmed MemoryVersion data is
-bound to the requesting Owner and converted to an ephemeral SearchDocument set
-before a deterministic text fallback runs.
+The service intentionally leaves embedding/vector/provider work disabled. It
+reads only a current, checkpoint-bound SearchDocument projection and runs the
+deterministic text fallback over that private derived index.
 """
 
 from __future__ import annotations
@@ -19,10 +18,12 @@ from app.domain.owner_truth.search_documents import (
     OwnerTruthMemorySearchReadResult,
     OwnerTruthSearchDocumentProjectionError,
     build_owner_truth_memory_search_query_plan,
-    build_owner_truth_search_document_projection,
     search_owner_truth_documents,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.owner_truth_memory_search_projection import (
+    OwnerTruthMemorySearchProjectionAccessDenied,
+)
 
 
 class OwnerTruthMemorySearchReadAccessDenied(OwnerTruthMemorySearchReadError):
@@ -38,12 +39,12 @@ class OwnerTruthMemorySearchReadStore(Protocol):
     ) -> AbstractContextManager[Any]:
         ...
 
-    def owner_truth_memory_projection_repository(self) -> Any:
+    def owner_truth_memory_search_document_projection_repository(self) -> Any:
         ...
 
 
 class OwnerTruthMemorySearchReadService:
-    """Build and query ephemeral SearchDocuments from current Owner authority."""
+    """Query the current Owner's persisted, rebuildable SearchDocuments."""
 
     def __init__(self, store: OwnerTruthMemorySearchReadStore) -> None:
         self._store = store
@@ -66,15 +67,14 @@ class OwnerTruthMemorySearchReadService:
                 correlation_id=f"owner-truth-memory-search-read-{context.vault_id}",
                 command_id="ownerTruthMemorySearchRead",
             ):
-                memory_projection = self._store.owner_truth_memory_projection_repository().read(
-                    context=context
-                )
-                projection = build_owner_truth_search_document_projection(
-                    memory_projection=memory_projection
+                projection = (
+                    self._store.owner_truth_memory_search_document_projection_repository().read(
+                        context=context
+                    )
                 )
                 if projection is None:
                     return OwnerTruthMemorySearchReadResult(
-                        state=str(memory_projection.get("state") or "rebuilding"),
+                        state="rebuilding",
                         projection=None,
                         query_plan=None,
                         hits=(),
@@ -96,6 +96,7 @@ class OwnerTruthMemorySearchReadService:
         except (
             OwnerTruthMemoryProjectionAccessDenied,
             OwnerTruthCandidateReviewAccessDenied,
+            OwnerTruthMemorySearchProjectionAccessDenied,
         ) as error:
             raise OwnerTruthMemorySearchReadAccessDenied(str(error)) from error
         except OwnerTruthSearchDocumentProjectionError as error:

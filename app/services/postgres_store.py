@@ -107,6 +107,9 @@ from app.services.owner_truth_candidate_review import (
 from app.services.owner_truth_memory_projection import (
     PostgresOwnerTruthMemoryProjectionRepository,
 )
+from app.services.owner_truth_memory_search_projection import (
+    PostgresOwnerTruthMemorySearchDocumentProjectionRepository,
+)
 from app.services.owner_truth_answer_citation import (
     PostgresOwnerTruthAnswerCitationRepository,
 )
@@ -363,6 +366,21 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth memory projection requires an active unit of work")
         return PostgresOwnerTruthMemoryProjectionRepository(active.connection)
+
+    def owner_truth_memory_search_document_projection_repository(
+        self,
+    ) -> PostgresOwnerTruthMemorySearchDocumentProjectionRepository:
+        """Return private SearchDocument projection persistence in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError(
+                "owner truth memory search document projection requires an active unit of work"
+            )
+        return PostgresOwnerTruthMemorySearchDocumentProjectionRepository(
+            active.connection,
+            PostgresOwnerTruthMemoryProjectionRepository(active.connection),
+        )
 
     def owner_truth_answer_citation_repository(
         self,

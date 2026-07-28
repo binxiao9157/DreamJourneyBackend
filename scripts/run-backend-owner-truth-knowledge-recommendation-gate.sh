@@ -26,7 +26,9 @@ if [[ -f tests/test_owner_truth_knowledge_recommendations.py && -f tests/test_ow
     tests.test_owner_truth_life_map \
     tests.test_owner_truth_life_map_read_api \
     tests.test_owner_truth_memory_search \
+    tests.test_owner_truth_memory_search_projection \
     tests.test_owner_truth_memory_search_read_api \
+    tests.test_owner_truth_memory_search_projection_migration_contract \
     tests.test_owner_truth_knowledge_recommendation_read \
     tests.test_owner_truth_knowledge_recommendation_read_api \
     tests.test_owner_truth_knowledge_recommendation_activation \
@@ -260,6 +262,18 @@ for required in (
     "MemoryVersion",
 ):
     assert required in search_document_source, f"missing Phase 4C search-document invariant: {required}"
+search_projection_source = Path(
+    "app/services/owner_truth_memory_search_projection.py"
+).read_text(encoding="utf-8")
+for required in (
+    "SearchDocument projector",
+    "sourceRebuilding",
+    "document_digest",
+    "_stored_projection",
+):
+    assert required in search_projection_source, (
+        f"missing persisted Phase 4C search-document invariant: {required}"
+    )
 main_source = Path("app/main.py").read_text(encoding="utf-8")
 for required in (
     '"/v2/vaults/{vault_id}/thread-summaries/read"',
@@ -278,6 +292,10 @@ for required in (
     "OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED",
     "ownerTruthMemorySearchReadUnavailable",
     "owner-truth-memory-search-read-response-v1",
+    '"/v2/vaults/{vault_id}/memory-search/projection/rebuild"',
+    "OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_QA_ENABLED",
+    "ownerTruthMemorySearchProjectionUnavailable",
+    "owner-truth-memory-search-projection-rebuild-response-v1",
 ):
     assert required in main_source, f"missing M0-B thread summary QA contract: {required}"
 print("Owner Truth knowledge recommendation G0 gate passed")

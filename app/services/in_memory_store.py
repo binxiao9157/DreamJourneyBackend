@@ -65,6 +65,9 @@ from app.services.owner_truth_interview_candidate_review import (
 from app.services.owner_truth_memory_projection import (
     InMemoryOwnerTruthMemoryProjectionRepository,
 )
+from app.services.owner_truth_memory_search_projection import (
+    InMemoryOwnerTruthMemorySearchDocumentProjectionRepository,
+)
 from app.services.owner_truth_answer_citation import (
     InMemoryOwnerTruthAnswerCitationRepository,
 )
@@ -151,6 +154,11 @@ class InMemoryStore:
         self._owner_truth_memory_projection_repository = (
             InMemoryOwnerTruthMemoryProjectionRepository(
                 self._owner_truth_candidate_review_repository
+            )
+        )
+        self._owner_truth_memory_search_document_projection_repository = (
+            InMemoryOwnerTruthMemorySearchDocumentProjectionRepository(
+                self._owner_truth_memory_projection_repository
             )
         )
         self._owner_truth_answer_citation_repository = (
@@ -270,6 +278,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthMemoryProjectionRepository:
         return self._owner_truth_memory_projection_repository
+
+    def owner_truth_memory_search_document_projection_repository(
+        self,
+    ) -> InMemoryOwnerTruthMemorySearchDocumentProjectionRepository:
+        return self._owner_truth_memory_search_document_projection_repository
 
     def owner_truth_answer_citation_repository(
         self,
