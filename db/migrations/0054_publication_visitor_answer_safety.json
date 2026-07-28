@@ -1,0 +1,14 @@
+{
+  "version": "0054",
+  "name": "publication_visitor_answer_safety",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationVisitorAnswerSafetyDefaultDeny",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "visitorCrisisFallbackV1": false,
+    "visitorDurationGuardV1": false,
+    "visitorReportV1": false,
+    "visitorTextQAV1": false
+  }
+}
