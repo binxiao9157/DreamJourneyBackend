@@ -100,6 +100,7 @@ def build_module_owned_data_export(
             _as_list(_call_optional(store, "list_care_snapshots", subject_id, limit=1000)),
         ),
     ]
+    module_records.extend(_owner_truth_module_records(store, subject_id))
     status_summary = _status_summary(module_records)
     external_boundaries = [
         {
@@ -155,7 +156,7 @@ def build_module_owned_data_export(
         "ownerUserId": subject_id,
         "humanReadable": {
             "title": "寻梦环游个人数据副本",
-            "summary": "此副本包含本应用可直接导出的个人数据与元数据，不包含凭据、会话令牌、媒体二进制文件或第三方服务留存的数据。",
+            "summary": "此副本包含本应用可直接导出的个人数据、Owner Truth 当前数据副本与元数据，不包含凭据、会话令牌、媒体二进制文件或第三方服务留存的数据。不可变权威账本仍受专用保留与权利清理流程约束。",
             "moduleSummaries": module_summaries,
         },
         "machineReadable": {
@@ -308,6 +309,20 @@ _LOCAL_CLEANUP_MODULES = (
     ("voice", "voiceProfile", ("voiceProfile", "voiceCloneSlotRetired"), "completed"),
     ("digitalHuman", "sessionLease", ("digitalHumanSession",), "completed"),
     ("auth", "sessionFamily", ("authSession", "authTokenFamily", "authSessionEvent"), "completed"),
+    (
+        "ownerTruth",
+        "appendOnlyAuthorityLedger",
+        (
+            "ownerTruthVault",
+            "ownerTruthSource",
+            "ownerTruthCandidate",
+            "ownerTruthDecisionReceipt",
+            "ownerTruthMemoryVersion",
+            "ownerTruthAnswerCitation",
+            "ownerTruthCorrection",
+        ),
+        "pending",
+    ),
 )
 
 _EXTERNAL_CLEANUP_MODULES = (
@@ -340,6 +355,78 @@ def _module_record(
     if reason_code:
         record["reasonCode"] = reason_code
     return record
+
+
+def _owner_truth_module_records(store: Any, subject_id: str) -> List[Dict[str, Any]]:
+    """Append the Owner Truth data-copy boundary without overstating deletion.
+
+    Canonical Source/Candidate/MemoryVersion/Citation/Correction values are
+    owner-readable.  The broader immutable ledger, conversation transcript and
+    rebuildable derived projections intentionally remain a partial boundary
+    until their own rights reconciler is implemented.
+    """
+
+    raw_records = _call_optional(store, "list_owner_truth_data_rights_records", subject_id)
+    records = raw_records if isinstance(raw_records, Mapping) else {}
+    method_available = callable(getattr(store, "list_owner_truth_data_rights_records", None))
+    raw_counts = _call_optional(store, "owner_truth_data_rights_counts", subject_id)
+    counts = raw_counts if isinstance(raw_counts, Mapping) else {}
+    count_method_available = callable(getattr(store, "owner_truth_data_rights_counts", None))
+    unavailable_reason = "ownerTruthExportPortUnavailable"
+    specifications = (
+        ("ownerTruthVault", "owner_truth.vaults", "vault"),
+        ("ownerTruthSource", "owner_truth.sources", "source"),
+        ("ownerTruthCandidate", "owner_truth.memory_candidates", "candidate"),
+        ("ownerTruthDecisionReceipt", "owner_truth.decision_receipts", "decisionReceipt"),
+        ("ownerTruthMemoryVersion", "owner_truth.memory_versions", "memoryVersion"),
+        ("ownerTruthAnswerCitation", "owner_truth.answers", "answerCitation"),
+        ("ownerTruthCorrection", "owner_truth.correction_requests", "correction"),
+    )
+    module_records = []
+    for resource_type, source, record_key in specifications:
+        items = _as_list(records.get(record_key))
+        total_count = _nonnegative_count(counts.get(resource_type)) if count_method_available else None
+        is_bounded = total_count is not None and total_count > len(items)
+        if not method_available:
+            status = "partial"
+            reason_code = unavailable_reason
+        elif is_bounded:
+            status = "partial"
+            reason_code = "ownerTruthExportBoundedAt1000"
+        else:
+            status = "completed"
+            reason_code = None
+        record = _module_record(
+            "ownerTruth",
+            resource_type,
+            source,
+            items,
+            status=status,
+            reason_code=reason_code,
+        )
+        if total_count is not None:
+            record["totalItemCount"] = total_count
+        module_records.append(record)
+    module_records.append(
+        _module_record(
+            "ownerTruth",
+            "appendOnlyAuthorityLedgerBoundary",
+            "owner_truth",
+            [
+                {
+                    "includedResourceTypes": [item[0] for item in specifications],
+                    "excludedResourceTypes": [
+                        "conversationTranscript",
+                        "derivedSearchDocument",
+                        "immutableOperationReceipt",
+                    ],
+                }
+            ],
+            status="partial",
+            reason_code="appendOnlyAuthorityLedgerRequiresDedicatedRightsReconciler",
+        )
+    )
+    return module_records
 
 
 def _status_summary(records: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
@@ -436,6 +523,13 @@ def _as_items(value: Any) -> List[Any]:
 
 def _as_list(value: Any) -> List[Any]:
     return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _nonnegative_count(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _redact_export_value(value: Any, *, key: str = "", depth: int = 0) -> Any:

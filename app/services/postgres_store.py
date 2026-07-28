@@ -68,6 +68,10 @@ from app.services.account_deletion_receipts import (
     build_account_purge_receipt,
 )
 from app.services.data_rights_module_inventory import record_terminal_cleanup_plan
+from app.services.owner_truth_data_rights import (
+    count_owner_truth_data_rights_records,
+    read_owner_truth_data_rights_records,
+)
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -2746,6 +2750,7 @@ class PostgresStore:
             "authTokenFamily": count_query("SELECT COUNT(*) AS count FROM token_families WHERE user_id = %s", (user_id,)),
             "authSessionEvent": count_query("SELECT COUNT(*) AS count FROM session_events WHERE user_id = %s", (user_id,)),
         }
+        counts.update(self.owner_truth_data_rights_counts(user_id))
         return counts
 
     def _record_account_purge_receipt(
@@ -4945,6 +4950,18 @@ class PostgresStore:
             source_version=int(source["source_version"]),
             authority_epoch=int(source["authority_epoch"]),
             content_hash=str(source["content_hash"]),
+        )
+
+    def list_owner_truth_data_rights_records(self, user_id: str) -> Dict[str, List[Dict[str, Any]]]:
+        return read_owner_truth_data_rights_records(
+            subject_id=user_id,
+            fetchall=self._fetchall,
+        )
+
+    def owner_truth_data_rights_counts(self, user_id: str) -> Dict[str, int]:
+        return count_owner_truth_data_rights_records(
+            subject_id=user_id,
+            fetchone=self._fetchone,
         )
 
     def list_archive_items(self, user_id: str) -> List[Dict[str, Any]]:

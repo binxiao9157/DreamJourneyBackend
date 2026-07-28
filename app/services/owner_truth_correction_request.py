@@ -640,6 +640,31 @@ class InMemoryOwnerTruthCorrectionRequestRepository:
                 return record
         return None
 
+    def snapshot(self) -> dict[str, Any]:
+        """Return test-double state for bounded Owner-scoped export reads.
+
+        The production export path reads the canonical Postgres tables.  The
+        semantic double includes the Vault identifier here so the shared store
+        can apply the same owner/Vault filter without reaching into private
+        repository fields.
+        """
+
+        with self._lock:
+            return {
+                "requests": [
+                    {"vaultId": vault_id, **deepcopy(record)}
+                    for (vault_id, _command_id_hash), record in self._records.items()
+                ],
+                "resolutions": [
+                    {"vaultId": vault_id, **deepcopy(resolution)}
+                    for (vault_id, _command_id_hash), resolution in self._resolutions.items()
+                ],
+                "outdatedEvents": [
+                    {"vaultId": vault_id, **deepcopy(event)}
+                    for (vault_id, _event_id), event in self._outdated_events.items()
+                ],
+            }
+
     def _assert_current_target(
         self,
         *,

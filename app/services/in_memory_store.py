@@ -1704,7 +1704,7 @@ class InMemoryStore:
                 grant.get("granteeSubjectId"),
             }
         }
-        return {
+        counts = {
             "profile": int(user_id in self._profiles),
             "passwordCredential": int(user_id in self._password_credentials),
             "knowledgeSnapshot": int(user_id in self._kb_snapshots),
@@ -1750,6 +1750,8 @@ class InMemoryStore:
                 if event.get("userId") == user_id
             ),
         }
+        counts.update(self.owner_truth_data_rights_counts(user_id))
+        return counts
 
     def _purge_expired_deleted_users_locked(self, cutoff_iso: str) -> List[Dict[str, Any]]:
         cutoff = self._parse_iso_datetime(cutoff_iso)
@@ -2359,7 +2361,7 @@ class InMemoryStore:
                 "id": record.source_id,
                 "vaultId": record.vault_id,
                 "ownerSubjectId": record.owner_subject_id,
-                "sourceKind": "text",
+                "sourceKind": record.source_kind.value,
                 "state": "active",
                 "sourceVersion": 1,
                 "contentHash": record.content_hash,
@@ -2393,6 +2395,183 @@ class InMemoryStore:
     def owner_truth_source_count(self, vault_id: str) -> int:
         with self._owner_truth_lock:
             return sum(1 for key in self._owner_truth_sources if key[0] == vault_id)
+
+    def list_owner_truth_data_rights_records(self, user_id: str) -> Dict[str, List[Dict[str, Any]]]:
+        """Return a bounded, owner-filtered Owner Truth export projection.
+
+        This is a data-rights read port, not a public Owner Truth query API.
+        It intentionally returns only canonical user data and value-minimized
+        evidence needed to explain it.  Append-only audit surfaces that do not
+        have a dedicated rights reconciler remain outside this projection and
+        are disclosed by ``data_rights_module_inventory`` as partial.
+        """
+
+        subject_id = str(user_id or "").strip()
+        if not subject_id:
+            return self._empty_owner_truth_data_rights_records()
+
+        with self._owner_truth_lock:
+            vaults = [
+                deepcopy(vault)
+                for vault in self._owner_truth_vaults.values()
+                if str(vault.get("ownerSubjectId") or "") == subject_id
+            ]
+            sources = [
+                deepcopy(source)
+                for source in self._owner_truth_sources.values()
+                if str(source.get("ownerSubjectId") or "") == subject_id
+            ]
+
+        review_snapshot = self._owner_truth_candidate_review_repository.snapshot()
+        candidates = [
+            deepcopy(candidate)
+            for candidate in review_snapshot.get("candidates", {}).values()
+            if str(candidate.get("ownerSubjectId") or "") == subject_id
+        ]
+        vault_ids = {
+            str(vault.get("vaultId") or "")
+            for vault in vaults
+            if str(vault.get("vaultId") or "")
+        }
+        vault_ids.update(
+            str(candidate.get("vaultId") or "")
+            for candidate in candidates
+            if str(candidate.get("vaultId") or "")
+        )
+        vault_by_id = {
+            str(vault.get("vaultId") or ""): vault
+            for vault in vaults
+            if str(vault.get("vaultId") or "")
+        }
+        for candidate in candidates:
+            vault_id = str(candidate.get("vaultId") or "")
+            if not vault_id or vault_id in vault_by_id:
+                continue
+            vault_by_id[vault_id] = {
+                "vaultId": vault_id,
+                "ownerSubjectId": subject_id,
+                "authorityEpoch": int(candidate.get("authorityEpoch") or 0),
+                "status": "active",
+                "projectionSource": "inMemoryCandidateReview",
+            }
+
+        candidates_by_id = {
+            str(candidate.get("candidateId") or candidate_id): candidate
+            for candidate_id, candidate in review_snapshot.get("candidates", {}).items()
+            if str(candidate.get("ownerSubjectId") or "") == subject_id
+        }
+        decision_receipts = []
+        for receipt in review_snapshot.get("receipts", {}).values():
+            candidate = candidates_by_id.get(str(receipt.get("candidateId") or ""))
+            if candidate is None:
+                continue
+            decision_receipts.append(
+                {
+                    "vaultId": candidate["vaultId"],
+                    "ownerSubjectId": subject_id,
+                    **deepcopy(receipt),
+                }
+            )
+        memory_versions = []
+        for activation in review_snapshot.get("memoryActivations", {}).values():
+            candidate = candidates_by_id.get(str(activation.get("candidateId") or ""))
+            if candidate is None:
+                continue
+            memory_versions.append(
+                {
+                    "vaultId": candidate["vaultId"],
+                    "ownerSubjectId": subject_id,
+                    "memoryKind": candidate["memoryKind"],
+                    "perspectiveType": candidate["perspectiveType"],
+                    "epistemicStatus": candidate["epistemicStatus"],
+                    "sensitivity": candidate["sensitivity"],
+                    **deepcopy(activation),
+                }
+            )
+
+        answer_snapshot = self._owner_truth_answer_citation_repository.snapshot()
+        answer_citations = [
+            deepcopy(record)
+            for record in answer_snapshot.get("records", [])
+            if str(record.get("ownerSubjectId") or "") == subject_id
+            and str(record.get("vaultId") or "") in vault_ids
+        ]
+        correction_snapshot = self._owner_truth_correction_request_repository.snapshot()
+        corrections_by_id = {
+            str(record.get("correctionRequestId") or ""): deepcopy(record)
+            for record in correction_snapshot.get("requests", [])
+            if str(record.get("vaultId") or "") in vault_ids
+        }
+        corrections = []
+        for correction_id, record in corrections_by_id.items():
+            if not correction_id:
+                continue
+            resolution = next(
+                (
+                    deepcopy(item)
+                    for item in correction_snapshot.get("resolutions", [])
+                    if str(item.get("vaultId") or "") == str(record.get("vaultId") or "")
+                    and str(item.get("correctionRequestId") or "") == correction_id
+                ),
+                None,
+            )
+            item = {**record}
+            if resolution is not None:
+                item["resolution"] = resolution
+            corrections.append(item)
+
+        return {
+            "vault": self._sorted_owner_truth_data_rights_records(vault_by_id.values()),
+            "source": self._sorted_owner_truth_data_rights_records(sources),
+            "candidate": self._sorted_owner_truth_data_rights_records(candidates),
+            "decisionReceipt": self._sorted_owner_truth_data_rights_records(decision_receipts),
+            "memoryVersion": self._sorted_owner_truth_data_rights_records(memory_versions),
+            "answerCitation": self._sorted_owner_truth_data_rights_records(answer_citations),
+            "correction": self._sorted_owner_truth_data_rights_records(corrections),
+        }
+
+    def owner_truth_data_rights_counts(self, user_id: str) -> Dict[str, int]:
+        records = self.list_owner_truth_data_rights_records(user_id)
+        return {
+            "ownerTruthVault": len(records["vault"]),
+            "ownerTruthSource": len(records["source"]),
+            "ownerTruthCandidate": len(records["candidate"]),
+            "ownerTruthDecisionReceipt": len(records["decisionReceipt"]),
+            "ownerTruthMemoryVersion": len(records["memoryVersion"]),
+            "ownerTruthAnswerCitation": len(records["answerCitation"]),
+            "ownerTruthCorrection": len(records["correction"]),
+        }
+
+    @staticmethod
+    def _empty_owner_truth_data_rights_records() -> Dict[str, List[Dict[str, Any]]]:
+        return {
+            "vault": [],
+            "source": [],
+            "candidate": [],
+            "decisionReceipt": [],
+            "memoryVersion": [],
+            "answerCitation": [],
+            "correction": [],
+        }
+
+    @staticmethod
+    def _sorted_owner_truth_data_rights_records(
+        records: Iterable[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        return sorted(
+            (deepcopy(dict(record)) for record in records),
+            key=lambda record: (
+                str(record.get("vaultId") or ""),
+                str(
+                    record.get("id")
+                    or record.get("candidateId")
+                    or record.get("memoryVersionId")
+                    or record.get("answerId")
+                    or record.get("correctionRequestId")
+                    or ""
+                ),
+            ),
+        )
 
     def list_archive_items(self, user_id: str) -> List[Dict[str, Any]]:
         with self._archive_lock:

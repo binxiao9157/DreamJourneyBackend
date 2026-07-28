@@ -668,9 +668,22 @@ class InMemoryOwnerTruthCandidateReviewRepository:
             return {
                 "candidates": {
                     candidate_id: {
+                        "candidateId": candidate.candidate_id,
+                        "vaultId": candidate.vault_id,
+                        "ownerSubjectId": candidate.owner_subject_id,
+                        "sourceId": candidate.source_id,
+                        "memoryKind": candidate.memory_kind.value,
+                        "perspectiveType": candidate.perspective_type.value,
+                        "epistemicStatus": candidate.epistemic_status.value,
+                        "sensitivity": candidate.sensitivity.value,
                         "decision": candidate.decision.value,
                         "payload": deepcopy(dict(candidate.payload)),
+                        "policyVersion": candidate.policy_version,
+                        "authorityEpoch": candidate.authority_epoch,
                         "rowVersion": candidate.row_version,
+                        "contentHash": candidate.content_hash,
+                        "contentSchemaVersion": candidate.content_schema_version,
+                        "createdAt": self._candidate_created_at.get(candidate_id),
                     }
                     for candidate_id, candidate in self._candidates.items()
                 },

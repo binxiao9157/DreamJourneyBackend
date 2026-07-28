@@ -1,11 +1,23 @@
 import json
 import unittest
+from hashlib import sha256
 from unittest.mock import patch
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from app import main as main_module
 from app.main import app
+from app.domain.owner_truth.candidate_decisions import OwnerTruthCandidateSnapshot
+from app.domain.owner_truth.contracts import (
+    CandidateDecision,
+    EpistemicStatus,
+    MemoryKind,
+    PerspectiveType,
+    SensitivityLevel,
+)
+from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.source_commands import OwnerTruthSourceWriteRecord
 from app.services.data_rights_module_inventory import build_module_owned_data_export
 from app.services.in_memory_store import InMemoryStore
 from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
@@ -51,6 +63,66 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
+
+    @staticmethod
+    def _hash(value):
+        return sha256(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _seed_owner_truth_candidate(self, user_id: str, *, summary: str) -> None:
+        vault_id = f"vault-rights-{uuid4()}"
+        source_id = str(uuid4())
+        candidate_id = str(uuid4())
+        source_payload = {"text": summary}
+        self.store.create_owner_truth_source(
+            OwnerTruthSourceWriteRecord(
+                receipt_id=str(uuid4()),
+                command_id_hash=self._hash({"command": source_id}),
+                payload_hash=self._hash(source_payload),
+                source_id=source_id,
+                expected_version=0,
+                vault_id=vault_id,
+                owner_subject_id=user_id,
+                actor_subject_id=user_id,
+                policy_version=OWNER_TRUTH_SCHEMA_VERSION,
+                content_hash=self._hash(source_payload),
+                content_payload=source_payload,
+                metadata={"origin": "dataRightsTest"},
+            )
+        )
+        candidate_payload = {
+            "content": {"summary": summary},
+            "contentSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION,
+            "evidenceRefs": [
+                {
+                    "sourceId": source_id,
+                    "sourceVersion": 1,
+                    "span": {"start": 0, "end": len(summary)},
+                }
+            ],
+            "reviewMode": "single",
+            "schemaVersion": "owner-truth-candidate-proposal-v1",
+        }
+        self.store.owner_truth_candidate_review_repository().seed(
+            OwnerTruthCandidateSnapshot(
+                candidate_id=candidate_id,
+                vault_id=vault_id,
+                owner_subject_id=user_id,
+                source_id=source_id,
+                memory_kind=MemoryKind.EXPERIENCE,
+                perspective_type=PerspectiveType.FIRST_PERSON,
+                epistemic_status=EpistemicStatus.RECALLED,
+                sensitivity=SensitivityLevel.STANDARD,
+                decision=CandidateDecision.PENDING,
+                policy_version=OWNER_TRUTH_SCHEMA_VERSION,
+                authority_epoch=0,
+                row_version=1,
+                content_hash=self._hash(candidate_payload["content"]),
+                content_schema_version=OWNER_TRUTH_SCHEMA_VERSION,
+                payload=candidate_payload,
+            )
+        )
 
     def test_owner_export_contains_module_data_but_redacts_credentials_and_media_boundary(self):
         login = self._login()
@@ -108,6 +180,74 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
         self.assertEqual(boundary_by_module["objectStorage"], "unsupported")
         self.assertEqual(boundary_by_module["backupRetention"], "pending")
 
+    def test_owner_truth_export_is_owner_scoped_and_discloses_append_only_cleanup_boundary(self):
+        owner_login = self._login("13900007774")
+        other_login = self._login("13900007775")
+        owner_id = owner_login["user"]["id"]
+        other_id = other_login["user"]["id"]
+        self._seed_owner_truth_candidate(owner_id, summary="仅导出给本人的一段确认前记忆")
+        self._seed_owner_truth_candidate(other_id, summary="不得出现在本人导出中的其他用户记忆")
+
+        export = build_module_owned_data_export(
+            self.store,
+            user_id=owner_id,
+            generated_at="2026-07-29T12:00:00+00:00",
+        )
+        serialized = json.dumps(export, ensure_ascii=False, sort_keys=True)
+        owner_truth_records = {
+            item["resourceType"]: item
+            for item in export["machineReadable"]["objects"]
+            if item["moduleId"] == "ownerTruth"
+        }
+
+        self.assertEqual(owner_truth_records["ownerTruthVault"]["itemCount"], 1)
+        self.assertEqual(owner_truth_records["ownerTruthSource"]["itemCount"], 1)
+        self.assertEqual(owner_truth_records["ownerTruthCandidate"]["itemCount"], 1)
+        self.assertEqual(
+            owner_truth_records["appendOnlyAuthorityLedgerBoundary"]["status"],
+            "partial",
+        )
+        self.assertEqual(
+            owner_truth_records["appendOnlyAuthorityLedgerBoundary"]["reasonCode"],
+            "appendOnlyAuthorityLedgerRequiresDedicatedRightsReconciler",
+        )
+        self.assertIn("仅导出给本人的一段确认前记忆", serialized)
+        self.assertNotIn("不得出现在本人导出中的其他用户记忆", serialized)
+
+    def test_owner_truth_export_discloses_when_a_bounded_read_omits_records(self):
+        login = self._login("13900007776")
+        user_id = login["user"]["id"]
+        self._seed_owner_truth_candidate(user_id, summary="当前导出窗口中的 Owner Truth 数据")
+
+        with patch.object(
+            self.store,
+            "owner_truth_data_rights_counts",
+            return_value={
+                "ownerTruthVault": 1,
+                "ownerTruthSource": 1001,
+                "ownerTruthCandidate": 1,
+                "ownerTruthDecisionReceipt": 0,
+                "ownerTruthMemoryVersion": 0,
+                "ownerTruthAnswerCitation": 0,
+                "ownerTruthCorrection": 0,
+            },
+        ):
+            export = build_module_owned_data_export(
+                self.store,
+                user_id=user_id,
+                generated_at="2026-07-29T12:00:00+00:00",
+            )
+
+        source_record = next(
+            item
+            for item in export["machineReadable"]["objects"]
+            if item["resourceType"] == "ownerTruthSource"
+        )
+        self.assertEqual(source_record["status"], "partial")
+        self.assertEqual(source_record["reasonCode"], "ownerTruthExportBoundedAt1000")
+        self.assertEqual(source_record["itemCount"], 1)
+        self.assertEqual(source_record["totalItemCount"], 1001)
+
     def test_export_route_requires_active_owner_session_and_disables_response_caching(self):
         login = self._login("13900007772")
         token = login["auth"]["accessToken"]
@@ -135,6 +275,7 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
             user_id,
             {"id": "voice_cleanup_1", "voiceProfileId": "voice_cleanup_1", "status": "ready"},
         )
+        self._seed_owner_truth_candidate(user_id, summary="终端清理前需要如实披露的 Owner Truth 数据")
         delete = self.client.post(
             "/auth/delete",
             headers={"Authorization": f"Bearer {login['auth']['accessToken']}"},
@@ -174,9 +315,11 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
         serialized = json.dumps(summary, ensure_ascii=False, sort_keys=True)
 
         self.assertEqual(executions["archive"], "completed")
+        self.assertEqual(executions["ownerTruth"], "pending")
         self.assertEqual(executions["providerVoice"], "pending")
         self.assertEqual(executions["backupRetention"], "pending")
         self.assertEqual(receipts["objectStorage"], "unsupported")
+        self.assertNotIn("ownerTruth", receipts)
         self.assertNotIn("13900007773", serialized)
         self.assertNotIn(user_id, serialized)
 
