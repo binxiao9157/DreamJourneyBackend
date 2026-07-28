@@ -103,6 +103,9 @@ class Settings:
     # Explicit Owner continuation cues remain a fourth, independently closed
     # M0-B QA lane. They do not expose recommendation text or public Echo UI.
     owner_truth_saved_continuation_cue_qa_enabled: bool = False
+    # Thread summary/map reads are independently default-off. They only expose
+    # value-free current Owner thread anchors and reversible associations.
+    owner_truth_thread_summary_read_qa_enabled: bool = False
     # Thread-scoped cooldown / do-not-ask remains independently default-off.
     # It never enables a public Echo control by itself.
     owner_truth_thread_preference_qa_enabled: bool = False
@@ -288,6 +291,10 @@ class Settings:
             owner_truth_saved_continuation_cue_qa_enabled=_env_bool(
                 "OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED",
                 cls.owner_truth_saved_continuation_cue_qa_enabled,
+            ),
+            owner_truth_thread_summary_read_qa_enabled=_env_bool(
+                "OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED",
+                cls.owner_truth_thread_summary_read_qa_enabled,
             ),
             owner_truth_thread_preference_qa_enabled=_env_bool(
                 "OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED",

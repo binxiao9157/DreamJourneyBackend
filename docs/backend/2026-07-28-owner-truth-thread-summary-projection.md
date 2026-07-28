@@ -8,7 +8,23 @@
 
 它不创建第二事实库，不写入 `Source`、`Candidate`、`DecisionReceipt`、
 `MemoryVersion` 或 `ConversationThread`，也不新增公开路由、iOS UI、Provider
-调用或数据库 migration。
+调用或数据库 migration。随后增加的 QA-only read route 也不改变这一边界。
+
+## QA 读取合同
+
+`POST /v2/vaults/{vault_id}/thread-summaries/read` 是默认关闭的只读 QA
+适配器。请求体必须是空对象；响应只包含当前 Thread/session 状态、已确认
+`MemoryVersion` 锚点和 `associatedOnly` 关联摘要。
+
+它要求以下条件同时成立：
+
+1. `OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED=true`；
+2. `OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED=true`；
+3. `OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED=true`；
+4. 认证后的 Owner 用户会话和 `X-DreamJourney-QA-Owner-Truth: 1`。
+
+缺少任一条件时路由返回稳定的 `404`，因此它不会随着公开 Echo 或普通
+推荐读取被意外暴露。
 
 ## 关联规则
 
@@ -39,9 +55,14 @@ Thread B -- explicit saved-continuation cue -- current confirmed MemoryVersion X
 - `app/domain/owner_truth/thread_summary.py`
   - typed summary、anchor、association 和 checkpoint 合同。
 - `app/services/owner_truth_thread_summary_read.py`
-  - owner-scoped composition seam；当前无 HTTP route。
+  - owner-scoped composition seam。
+- `app/main.py`
+  - 默认关闭的 `POST /v2/vaults/{vault_id}/thread-summaries/read` QA-only
+    适配器；不接入公开 UI。
 - `tests/test_owner_truth_thread_summary.py`
   - 关联、stale cue、跨 Owner fail-closed 和 rebuilding coverage 回归。
+- `tests/test_owner_truth_thread_summary_read_api.py`
+  - 独立开关、认证、空请求体和值无关响应回归。
 
 ## 验证
 
@@ -50,7 +71,7 @@ PYTHON_BIN=.venv/bin/python \
   scripts/run-backend-owner-truth-knowledge-recommendation-gate.sh
 ```
 
-本轮结果：78 项单测通过，部署镜像可运行的 dependency-free policy smoke 通过，
+本轮结果：81 项单测通过，部署镜像可运行的 dependency-free policy smoke 通过，
 `git diff --check` 与 Python compileall 通过。
 
 ## Gate 结论

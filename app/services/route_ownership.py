@@ -254,6 +254,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/thread-summaries/read",
+                session,
+                "ownerTruthThreadSummaryRead",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/knowledge-recommendations/activate",
                 session,
                 "ownerTruthKnowledgeRecommendationActivation",

@@ -126,6 +126,7 @@ from app.domain.owner_truth.memory_projection import (
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.domain.owner_truth.knowledge_recommendations import RecommendationCandidate
+from app.domain.owner_truth.thread_summary import OwnerTruthThreadSummaryError
 from app.domain.owner_truth.source_commands import (
     OwnerTruthCommandAuthorizationCapture,
     OwnerTruthCommandContext,
@@ -196,6 +197,7 @@ from app.services.owner_truth_knowledge_recommendation_feedback import (
     OwnerTruthKnowledgeRecommendationFeedbackStale,
     knowledge_recommendation_feedback_summary,
 )
+from app.services.owner_truth_thread_summary_read import OwnerTruthThreadSummaryReadService
 from app.services.owner_truth_saved_continuation import (
     OwnerTruthSavedContinuationCueAccessDenied,
     OwnerTruthSavedContinuationCueCommand,
@@ -408,6 +410,9 @@ OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_QA_ENABLED = bool(
 OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = bool(
     settings.owner_truth_saved_continuation_cue_qa_enabled
 )
+OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED = bool(
+    settings.owner_truth_thread_summary_read_qa_enabled
+)
 OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = bool(
     settings.owner_truth_thread_preference_qa_enabled
 )
@@ -582,6 +587,28 @@ def _require_owner_truth_knowledge_recommendation_read_qa(request: Request) -> s
         request,
         unavailable_code="ownerTruthKnowledgeRecommendationReadUnavailable",
     )
+
+
+def _require_owner_truth_thread_summary_read_qa(request: Request) -> str:
+    """Keep the value-free Phase 4A map projection inside explicit QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
+        or not OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthThreadSummaryReadUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthThreadSummaryReadUserSessionRequired"},
+        )
+    return user_id
 
 
 def _require_owner_truth_knowledge_recommendation_plan_qa(request: Request) -> str:
@@ -1183,6 +1210,19 @@ def _owner_truth_knowledge_recommendation_read_context(
     )
 
 
+def _owner_truth_thread_summary_read_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_thread_summary_read_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_knowledge_recommendation_plan_context(
     request: Request,
     *,
@@ -1491,6 +1531,25 @@ def _owner_truth_knowledge_recommendation_read_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthKnowledgeRecommendationReadInvalid"},
+    )
+
+
+def _owner_truth_thread_summary_read_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthMemoryProjectionAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthThreadSummaryReadDenied"},
+        )
+    if isinstance(error, OwnerTruthThreadSummaryError):
+        return HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthThreadSummaryReadInvalid"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthThreadSummaryReadInvalid"},
     )
 
 
@@ -4618,6 +4677,40 @@ def plan_owner_truth_knowledge_recommendations(
             "schemaVersion": "owner-truth-knowledge-recommendation-plan-response-v1",
             "vaultId": context.vault_id,
             "recommendations": summary,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/thread-summaries/read",
+    include_in_schema=False,
+)
+def read_owner_truth_thread_summaries(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Read the value-free Phase 4A thread map without exposing product UI.
+
+    The projection is rebuildable and never merges or writes Owner Truth
+    records. It only returns current Thread/session state, confirmed-memory
+    anchors, and conservative reversible associations for explicit QA.
+    """
+
+    try:
+        context = _owner_truth_thread_summary_read_context(request, vault_id=vault_id)
+        if payload:
+            raise OwnerTruthThreadSummaryError("thread summary read contains unsupported fields")
+        result = OwnerTruthThreadSummaryReadService(store).read(context=context)
+    except OwnerTruthContractError as error:
+        raise _owner_truth_thread_summary_read_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-thread-summary-read-response-v1",
+            "vaultId": context.vault_id,
+            "threadSummaries": result.value_free_summary(),
         },
         headers={"Cache-Control": "no-store"},
     )

@@ -20,6 +20,7 @@ if [[ -f tests/test_owner_truth_knowledge_recommendations.py && -f tests/test_ow
     tests.test_owner_truth_knowledge_dimension_confirmation \
     tests.test_owner_truth_knowledge_dimension_confirmation_migration_contract \
     tests.test_owner_truth_thread_summary \
+    tests.test_owner_truth_thread_summary_read_api \
     tests.test_owner_truth_knowledge_recommendation_read \
     tests.test_owner_truth_knowledge_recommendation_read_api \
     tests.test_owner_truth_knowledge_recommendation_activation \
@@ -202,5 +203,13 @@ for required in (
     "continuation cue does not match current Owner dimension scope",
 ):
     assert required in thread_summary_source, f"missing M0-B thread summary invariant: {required}"
+main_source = Path("app/main.py").read_text(encoding="utf-8")
+for required in (
+    '"/v2/vaults/{vault_id}/thread-summaries/read"',
+    "OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED",
+    "ownerTruthThreadSummaryReadUnavailable",
+    "owner-truth-thread-summary-read-response-v1",
+):
+    assert required in main_source, f"missing M0-B thread summary QA contract: {required}"
 print("Owner Truth knowledge recommendation G0 gate passed")
 PY
