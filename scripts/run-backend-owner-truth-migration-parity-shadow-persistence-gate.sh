@@ -68,3 +68,7 @@ for forbidden in (
 
 print("Owner Truth migration parity C05 persistence gate passed")
 PY
+
+if [[ "${RUN_OWNER_TRUTH_MIGRATION_PARITY_SHADOW_POSTGRES_SMOKE:-0}" == "1" ]]; then
+  "$ROOT_DIR/scripts/run-backend-owner-truth-migration-parity-shadow-postgres-smoke.sh"
+fi

@@ -101,6 +101,15 @@ scripts/run-backend-owner-truth-migration-parity-shadow-g0-gate.sh
 scripts/run-backend-owner-truth-migration-parity-shadow-persistence-gate.sh
 ```
 
+For the optional G2 disposable-Postgres smoke, provide a database role allowed
+to create and drop a temporary database. It never uses the configured
+application database directly:
+
+```bash
+RUN_OWNER_TRUTH_MIGRATION_PARITY_SHADOW_POSTGRES_SMOKE=1 \
+  scripts/run-backend-owner-truth-migration-parity-shadow-persistence-gate.sh
+```
+
 The gate exercises all M01–M08 codes, match/mismatch determinism, exact
 duplicate handling, immutable rebind rejection, denominator enforcement,
 current/expired/missing M08 allowances, prohibition of M01–M07 waivers, and
@@ -112,7 +121,8 @@ the no-network/no-persistence import boundary. It is included in
 1. Adapters that collect legacy and V4 results from a real production-shaped
    Postgres dataset.
 2. iOS ViewState parity (C05 G1).
-3. Real Postgres persistence and an approved production-shaped shadow window
-   (C05 G2). The new ledger has only G0 contract coverage until that smoke runs.
+3. An approved production-shaped shadow window (C05 G2). The disposable
+   Postgres smoke is available, but it has not been run against a real
+   Postgres environment in this branch yet.
 4. Any object copy, Provider request/query, command execution, Authority
    cutover, or legacy-writer retirement.

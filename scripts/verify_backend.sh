@@ -224,6 +224,9 @@ test -f tests/test_owner_truth_migration_parity_shadow_migration_contract.py
 test -f scripts/run-backend-owner-truth-migration-parity-shadow-persistence-gate.sh
 test -f db/migrations/0049_owner_truth_migration_parity_shadow.sql
 test -f db/migrations/0049_owner_truth_migration_parity_shadow.json
+test -f tests/test_owner_truth_migration_parity_shadow_postgres_smoke_contract.py
+test -f scripts/backend-owner-truth-migration-parity-shadow-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-migration-parity-shadow-postgres-smoke.sh
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.sql
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.json
 test -f app/services/echo_delayed_reply_effects.py
