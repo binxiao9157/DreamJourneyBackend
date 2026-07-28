@@ -15,7 +15,8 @@ cd "$ROOT_DIR"
 PYTHONPATH=. "$PYTHON_BIN" -m unittest -q \
   tests.test_owner_truth_legacy_tail_shadow \
   tests.test_owner_truth_legacy_tail_shadow_service \
-  tests.test_owner_truth_legacy_tail_shadow_migration_contract
+  tests.test_owner_truth_legacy_tail_shadow_migration_contract \
+  tests.test_owner_truth_legacy_tail_shadow_postgres_smoke_contract
 "$PYTHON_BIN" -m py_compile app/domain/owner_truth/legacy_tail_shadow.py
 "$PYTHON_BIN" -m py_compile app/services/owner_truth_legacy_tail_shadow.py
 
@@ -61,3 +62,7 @@ for forbidden in (
 
 print("Owner Truth legacy tail C04 G0 gate passed")
 PY
+
+if [[ "${RUN_OWNER_TRUTH_LEGACY_TAIL_SHADOW_POSTGRES_SMOKE:-0}" == "1" ]]; then
+  "$ROOT_DIR/scripts/run-backend-owner-truth-legacy-tail-shadow-postgres-smoke.sh"
+fi

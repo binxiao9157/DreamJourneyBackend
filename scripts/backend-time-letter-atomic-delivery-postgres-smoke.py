@@ -220,7 +220,11 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(applied["appliedVersions"][-1] == "0024", "unexpected migration head")
+        require("0024" in applied["appliedVersions"], "time-letter dependency must apply")
+        require(
+            applied["appliedVersions"][-1] == verified["expectedHead"],
+            "unexpected migration head",
+        )
 
         store = PostgresStore(dsn=test_dsn, pool_min_size=1, pool_max_size=4)
         store.open_pool(wait=True)

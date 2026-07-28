@@ -121,8 +121,9 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
+        require("0024" in applied["appliedVersions"], "parity dependency must apply")
         require(
-            applied["appliedVersions"][-1] == "0024",
+            applied["appliedVersions"][-1] == verified["expectedHead"],
             "current migration head must be present before parity observation",
         )
 

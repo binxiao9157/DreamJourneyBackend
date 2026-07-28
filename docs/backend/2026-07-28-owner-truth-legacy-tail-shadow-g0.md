@@ -76,12 +76,32 @@ This is a local contract implementation, not a passed G2 claim: no migration
 has been applied to a real Postgres environment and no real tail/checkpoint
 smoke has run yet.
 
+## G2 Disposable-Postgres Smoke
+
+When a controlled `DATABASE_URL` with permission to create a temporary
+database is available, run:
+
+```bash
+cd /Users/yxj/Documents/Codex/Video/DreamJourneyBackend
+RUN_OWNER_TRUTH_LEGACY_TAIL_SHADOW_POSTGRES_SMOKE=1 \
+  scripts/run-backend-owner-truth-legacy-tail-shadow-g0-gate.sh
+```
+
+The smoke creates a randomly named `dj_owner_truth_tail_shadow_*` database,
+applies the current migration head, creates only synthetic Owner/legacy rows,
+and drops that database in `finally`. It verifies C03-plan binding, report
+replay, mapping checkpoint parity, append-only rejection, value minimization,
+and zero rows in `async_effects.operations`, `outbox_events`, `jobs` and
+`provider_effects`. It never contacts object storage or a Provider. A passing
+run is G2 evidence for the disposable environment only; it is not deployment
+or cutover approval.
+
 ## Deliberately Deferred
 
 This does not close C04 or authorize a worker. Remaining work includes:
 
-1. A real Postgres migration plus tail/checkpoint smoke for the additive
-   persistence contract.
+1. Run the disposable Postgres smoke and retain its evidence before claiming
+   the C04 persistence/checkpoint G2 gate.
 2. Real legacy operation/object/provider inventory adapters under approved
    value-minimization and credential controls.
 3. A deployment shadow window with side-effect count proven zero.

@@ -203,7 +203,10 @@ test -f app/services/owner_truth_legacy_tail_shadow.py
 test -f tests/test_owner_truth_legacy_tail_shadow.py
 test -f tests/test_owner_truth_legacy_tail_shadow_service.py
 test -f tests/test_owner_truth_legacy_tail_shadow_migration_contract.py
+test -f tests/test_owner_truth_legacy_tail_shadow_postgres_smoke_contract.py
 test -f scripts/run-backend-owner-truth-legacy-tail-shadow-g0-gate.sh
+test -f scripts/backend-owner-truth-legacy-tail-shadow-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-legacy-tail-shadow-postgres-smoke.sh
 test -f db/migrations/0048_owner_truth_legacy_tail_shadow.sql
 test -f db/migrations/0048_owner_truth_legacy_tail_shadow.json
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.sql
