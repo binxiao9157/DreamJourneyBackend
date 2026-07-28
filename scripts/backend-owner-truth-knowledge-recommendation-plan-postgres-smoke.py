@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Exercise server-planned M0-B breadth recommendations in a disposable Postgres DB.
+"""Exercise the QA-only M0-B recommendation lifecycle in disposable Postgres.
 
 The smoke enables the hidden route only in-process. It proves that planning is
 derived from current Owner-confirmed coverage plus one active/open interview
 session, accepts no client-supplied candidate state, and writes no product
-records. The temporary database is dropped after the run.
+records while it plans. It also proves the additive QA-only lifecycle from a
+server plan through replacement feedback to a server-revalidated activation.
+The temporary database is dropped after the run.
 """
 
 from __future__ import annotations
@@ -111,11 +113,13 @@ def seed_current_knowledge_memory(
     *,
     vault_id: str,
     owner_subject_id: str,
+    create_vault: bool = True,
+    source_label: str = "recommendation-plan-smoke",
 ) -> tuple[str, str, str]:
     source_id = str(uuid.uuid4())
     memory_id = str(uuid.uuid4())
     memory_version_id = str(uuid.uuid4())
-    content = {"claim": "这是一条仅用于隔离服务端推荐规划验证的知识记忆。"}
+    content = {"claim": f"这是一条仅用于隔离服务端{source_label}验证的知识记忆。"}
     content_hash = canonical_hash(content)
     payload = {
         "content": content,
@@ -124,10 +128,11 @@ def seed_current_knowledge_memory(
     }
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO owner_truth.vaults (vault_id, owner_subject_id) VALUES (%s, %s)",
-                (vault_id, owner_subject_id),
-            )
+            if create_vault:
+                cursor.execute(
+                    "INSERT INTO owner_truth.vaults (vault_id, owner_subject_id) VALUES (%s, %s)",
+                    (vault_id, owner_subject_id),
+                )
             cursor.execute(
                 """
                 INSERT INTO owner_truth.sources (
@@ -140,7 +145,7 @@ def seed_current_knowledge_memory(
                     vault_id,
                     owner_subject_id,
                     "text",
-                    canonical_hash({"source": "recommendation-plan-smoke"}),
+                    canonical_hash({"source": source_label}),
                     "owner-truth-v1",
                     0,
                 ),
@@ -266,6 +271,32 @@ def owner_truth_counts(dsn: str) -> tuple[int, int, int, int]:
     return tuple(int(value) for value in row)
 
 
+def recommendation_receipt_counts(dsn: str, *, vault_id: str) -> tuple[int, int]:
+    """Return only value-free feedback and activation receipt counts."""
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    (
+                        SELECT count(*)
+                        FROM owner_truth.knowledge_recommendation_feedback_receipts
+                        WHERE vault_id = %s
+                    ),
+                    (
+                        SELECT count(*)
+                        FROM owner_truth.knowledge_recommendation_activation_receipts
+                        WHERE vault_id = %s
+                    )
+                """,
+                (vault_id, vault_id),
+            )
+            row = cursor.fetchone()
+    require(row is not None, "recommendation receipt counts are unavailable")
+    return tuple(int(value) for value in row)
+
+
 def expire_cooldown(dsn: str, *, vault_id: str, thread_id: str) -> None:
     """Move only disposable smoke data beyond the server-owned cooldown."""
 
@@ -328,6 +359,8 @@ def main() -> None:
     previous_confirmation_qa = main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
     previous_recommendation_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED
     previous_plan_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED
+    previous_activation_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED
+    previous_feedback_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_QA_ENABLED
     previous_thread_preference_qa = main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED
     previous_cooldown_seconds = main_module.OWNER_TRUTH_THREAD_COOLDOWN_SECONDS
 
@@ -355,6 +388,8 @@ def main() -> None:
         main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = False
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED = False
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_QA_ENABLED = False
         main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = True
         main_module.OWNER_TRUTH_THREAD_COOLDOWN_SECONDS = 60
 
@@ -572,12 +607,189 @@ def main() -> None:
             "superseded evidence plan must remain read-only",
         )
 
+        # A separate Vault keeps the original planning/cooldown assertions
+        # independent while proving the write-only QA lifecycle. Two distinct
+        # confirmed gaps make a replacement meaningful: the first candidate is
+        # suppressed and the other safe gap is selected without client input.
+        lifecycle_vault_id = "vault-knowledge-recommendation-lifecycle-smoke"
+        _, key_memory_version_id, key_content_hash = seed_current_knowledge_memory(
+            test_dsn,
+            vault_id=lifecycle_vault_id,
+            owner_subject_id=owner_id,
+            source_label="recommendation-lifecycle-key",
+        )
+        _, values_memory_version_id, values_content_hash = seed_current_knowledge_memory(
+            test_dsn,
+            vault_id=lifecycle_vault_id,
+            owner_subject_id=owner_id,
+            create_vault=False,
+            source_label="recommendation-lifecycle-values",
+        )
+        lifecycle_context = OwnerTruthCommandContext(
+            vault_id=lifecycle_vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        OwnerTruthMemoryProjectionService(store).rebuild(context=lifecycle_context)
+        for version_id, content_hash, dimension, facets in (
+            (key_memory_version_id, key_content_hash, "keyDecisions", ["choice", "reason"]),
+            (values_memory_version_id, values_content_hash, "values", ["priority"]),
+        ):
+            confirmation = client.post(
+                f"/v2/vaults/{lifecycle_vault_id}/memory-versions/{version_id}"
+                "/knowledge-dimension-confirmations",
+                headers=owner_headers,
+                json={
+                    "commandId": f"recommendation-lifecycle-confirm-{dimension}",
+                    "expectedContentHash": content_hash,
+                    "dimension": dimension,
+                    "coveredFacets": facets,
+                },
+            )
+            require(
+                confirmation.status_code == 201,
+                f"lifecycle {dimension} confirmation failed: {confirmation.text}",
+            )
+
+        lifecycle_thread_id, lifecycle_session_id = start_recommendation_session(
+            store,
+            context=lifecycle_context,
+            label="lifecycle",
+        )
+        lifecycle_plan_path = f"/v2/vaults/{lifecycle_vault_id}/knowledge-recommendations/plan"
+        feedback_path = f"/v2/vaults/{lifecycle_vault_id}/knowledge-recommendations/feedback"
+        activation_path = f"/v2/vaults/{lifecycle_vault_id}/knowledge-recommendations/activate"
+        feedback_hidden = client.post(feedback_path, headers=owner_headers, json={})
+        activation_hidden = client.post(activation_path, headers=owner_headers, json={})
+        require(
+            feedback_hidden.status_code == 404
+            and route_code(feedback_hidden) == "ownerTruthKnowledgeRecommendationFeedbackUnavailable",
+            "recommendation feedback must default hidden",
+        )
+        require(
+            activation_hidden.status_code == 404
+            and route_code(activation_hidden) == "ownerTruthKnowledgeRecommendationActivationUnavailable",
+            "recommendation activation must default hidden",
+        )
+
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED = True
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_QA_ENABLED = True
+        lifecycle_plan = client.post(lifecycle_plan_path, headers=owner_headers, json={})
+        require(lifecycle_plan.status_code == 200, f"lifecycle plan failed: {lifecycle_plan.text}")
+        initial_selected = (lifecycle_plan.json().get("recommendations") or {}).get("selected") or []
+        require(
+            len(initial_selected) == 1 and initial_selected[0].get("slot") == "breadth",
+            "lifecycle must start with exactly one server-planned breadth recommendation",
+        )
+        initial_candidate = initial_selected[0]
+        require(
+            str(initial_candidate.get("candidateId") or "").startswith("server-plan-breadth-"),
+            "lifecycle plan must preserve an opaque server candidate identifier",
+        )
+        require(
+            "claim" not in lifecycle_plan.text and "recommendation-lifecycle" not in lifecycle_plan.text,
+            "lifecycle plan must not leak memory content",
+        )
+        require(
+            recommendation_receipt_counts(test_dsn, vault_id=lifecycle_vault_id) == (0, 0),
+            "planning must not write feedback or activation receipts",
+        )
+
+        feedback = client.post(
+            feedback_path,
+            headers=owner_headers,
+            json={
+                "commandId": "recommendation-lifecycle-replace-001",
+                "expectedCandidateId": initial_candidate["candidateId"],
+                "feedbackAction": "replace",
+                "feedbackReason": "questionWording",
+                "expectedSessionVersion": 1,
+            },
+        )
+        require(feedback.status_code == 201, f"replacement feedback failed: {feedback.text}")
+        feedback_body = feedback.json().get("feedback") or {}
+        require(
+            feedback_body.get("candidateId") == initial_candidate["candidateId"]
+            and feedback_body.get("feedbackScope") == "candidate"
+            and feedback_body.get("reasonCode") == "userRequestedReplacement",
+            "replacement feedback must remain candidate-scoped and value-free",
+        )
+        require(
+            recommendation_receipt_counts(test_dsn, vault_id=lifecycle_vault_id) == (1, 0),
+            "replacement feedback must write exactly one feedback receipt",
+        )
+
+        replacement_plan = client.post(lifecycle_plan_path, headers=owner_headers, json={})
+        require(
+            replacement_plan.status_code == 200,
+            f"replacement plan failed: {replacement_plan.text}",
+        )
+        replacement_selected = (
+            (replacement_plan.json().get("recommendations") or {}).get("selected") or []
+        )
+        require(
+            len(replacement_selected) == 1
+            and replacement_selected[0].get("candidateId") != initial_candidate["candidateId"],
+            "replacement must choose a different safe server candidate",
+        )
+        replacement_filtered = (
+            (replacement_plan.json().get("recommendations") or {}).get("filtered") or []
+        )
+        require(
+            any(
+                row.get("candidateId") == initial_candidate["candidateId"]
+                and row.get("reasonCode") == "userRequestedReplacement"
+                for row in replacement_filtered
+            ),
+            "replacement plan must explain why the prior candidate was filtered",
+        )
+
+        activation = client.post(
+            activation_path,
+            headers=owner_headers,
+            json={
+                "commandId": "recommendation-lifecycle-activate-001",
+                "expectedCandidateId": replacement_selected[0]["candidateId"],
+                "slot": replacement_selected[0]["slot"],
+                "expectedSessionVersion": 1,
+            },
+        )
+        require(activation.status_code == 201, f"recommendation activation failed: {activation.text}")
+        activation_body = activation.json().get("activation") or {}
+        require(
+            activation_body.get("candidateId") == replacement_selected[0]["candidateId"]
+            and activation_body.get("nextAction") == "broaden"
+            and activation_body.get("threadId") == lifecycle_thread_id
+            and activation_body.get("sessionId") == lifecycle_session_id,
+            "breadth activation must bind one current session and BROADEN action",
+        )
+        activation_replay = client.post(
+            activation_path,
+            headers=owner_headers,
+            json={
+                "commandId": "recommendation-lifecycle-activate-001",
+                "expectedCandidateId": replacement_selected[0]["candidateId"],
+                "slot": replacement_selected[0]["slot"],
+                "expectedSessionVersion": 1,
+            },
+        )
+        require(
+            activation_replay.status_code == 200
+            and (activation_replay.json().get("activation") or {}).get("status") == "deduplicated",
+            "recommendation activation must replay idempotently",
+        )
+        require(
+            recommendation_receipt_counts(test_dsn, vault_id=lifecycle_vault_id) == (1, 1),
+            "lifecycle must persist exactly one feedback and one activation receipt",
+        )
+
         print(
             "owner truth knowledge recommendation plan postgres smoke passed "
             f"schemaHead={verified['expectedHead']} defaultHidden=true serverPlanned=true "
             "breadthOnly=true deterministic=true clientInjectionRejected=true "
             "elapsedCooldownContinuity=true doNotAskSuppressed=true "
-            "supersededEvidenceExcluded=true readOnly=true"
+            "supersededEvidenceExcluded=true readOnly=true "
+            "replacementFeedback=true activationBroaden=true activationReplay=true"
         )
     finally:
         main_module.store = previous_store
@@ -589,6 +801,8 @@ def main() -> None:
         main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = previous_confirmation_qa
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = previous_recommendation_qa
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = previous_plan_qa
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED = previous_activation_qa
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_QA_ENABLED = previous_feedback_qa
         main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = previous_thread_preference_qa
         main_module.OWNER_TRUTH_THREAD_COOLDOWN_SECONDS = previous_cooldown_seconds
         if store is not None:

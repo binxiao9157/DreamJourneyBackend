@@ -174,7 +174,7 @@ for required in (
     "sensitiveWithoutRecentConsent",
     "aiInferenceOnly",
     "crisisSafetyOverride",
-    "duplicateThreadFacet",
+    "duplicateKnowledgeGap",
     "at most one continuity and one breadth",
 ):
     assert required in source, f"missing M0-B recommendation policy invariant: {required}"
