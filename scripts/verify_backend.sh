@@ -37,6 +37,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-migration-identity-promotion-gate.s
 echo "== Owner Truth legacy backfill C03 G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-legacy-backfill-g0-gate.sh
 
+echo "== Owner Truth legacy tail C04 G0 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-legacy-tail-shadow-g0-gate.sh
+
 echo "== Voice/DH purpose consent G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-consent-policy-gate.sh
 
@@ -195,6 +198,9 @@ test -f tests/test_owner_truth_legacy_backfill_service.py
 test -f tests/test_owner_truth_legacy_backfill_migration_contract.py
 test -f tests/test_owner_truth_legacy_backfill_api.py
 test -f scripts/run-backend-owner-truth-legacy-backfill-g0-gate.sh
+test -f app/domain/owner_truth/legacy_tail_shadow.py
+test -f tests/test_owner_truth_legacy_tail_shadow.py
+test -f scripts/run-backend-owner-truth-legacy-tail-shadow-g0-gate.sh
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.sql
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.json
 test -f app/services/echo_delayed_reply_effects.py
