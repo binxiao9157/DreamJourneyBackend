@@ -30,7 +30,7 @@ class OwnerTruthInterviewSessionReadStore(Protocol):
 
 
 class OwnerTruthInterviewSessionReadService:
-    """Read one private interview session in the store's existing UoW."""
+    """Read value-minimized private interview session metadata in one UoW."""
 
     def __init__(self, store: OwnerTruthInterviewSessionReadStore):
         self._store = store
@@ -55,6 +55,24 @@ class OwnerTruthInterviewSessionReadService:
                 session_id=normalized_session_id,
                 context=context,
             )
+
+    def read_current(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewSessionSnapshot | None:
+        """Return the active resumable session, never a session history list."""
+
+        with self._store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-current-session-read-"
+                f"{context.vault_id}"
+            ),
+            command_id="read-current",
+        ):
+            return OwnerTruthConversationService(
+                self._store.owner_truth_conversation_repository()
+            ).read_current_session(context=context)
 
 
 __all__ = [

@@ -119,6 +119,20 @@ class OwnerTruthConversationRepository(Protocol):
     ) -> OwnerTruthInterviewSessionSnapshot:
         ...
 
+    def get_current_interview_session(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewSessionSnapshot | None:
+        """Return the one active session that may resume natural input.
+
+        A caller never receives private message or review content from this
+        lookup.  The one-active-session invariant makes this a deterministic
+        ownership-bound resume target rather than a history listing.
+        """
+
+        ...
+
     def get_interview_message_authority(
         self,
         *,
@@ -296,6 +310,16 @@ class OwnerTruthConversationService:
     ) -> OwnerTruthInterviewSessionSnapshot:
         _assert_owner_context(context)
         return self._repository.get_interview_session(session_id=session_id, context=context)
+
+    def read_current_session(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewSessionSnapshot | None:
+        """Read the active natural-input session without listing history."""
+
+        _assert_owner_context(context)
+        return self._repository.get_current_interview_session(context=context)
 
     def read_message_authority(
         self,
@@ -903,6 +927,59 @@ class InMemoryOwnerTruthConversationRepository:
             thread = self._threads.get((context.vault_id, session["threadId"]))
             if thread is None:
                 raise OwnerTruthConversationConflict("interview session points to a missing thread")
+            return OwnerTruthInterviewSessionSnapshot(
+                session_id=str(session["id"]),
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                thread_id=str(session["threadId"]),
+                state=session["state"],
+                boundary=session["boundary"],
+                row_version=int(session["rowVersion"]),
+                thread_version=int(thread["rowVersion"]),
+                turn_count=int(session["turnCount"]),
+                deepening_turn_count=int(session["deepeningTurnCount"]),
+                candidate_batch_turn_count=int(session["candidateBatchTurnCount"]),
+                pending_review_batch_id=session["pendingReviewBatchId"],
+                fatigue=session["fatigue"],
+                authority_epoch=int(vault["authorityEpoch"]),
+            )
+
+    def get_current_interview_session(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewSessionSnapshot | None:
+        _assert_owner_context(context)
+        with self._lock:
+            vault = self._ensure_active_vault(
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+            )
+            current_sessions = tuple(
+                session
+                for (stored_vault_id, _), session in self._sessions.items()
+                if stored_vault_id == context.vault_id
+                and str(session["ownerSubjectId"]) == context.owner_subject_id
+                and int(session["authorityEpoch"]) == int(vault["authorityEpoch"])
+                and session["state"] is InterviewSessionState.ACTIVE
+            )
+            if not current_sessions:
+                return None
+            if len(current_sessions) != 1:
+                raise OwnerTruthConversationConflict(
+                    "Owner Vault has more than one active interview session"
+                )
+            session = current_sessions[0]
+            thread = self._threads.get((context.vault_id, str(session["threadId"])))
+            if (
+                thread is None
+                or str(thread["ownerSubjectId"]) != context.owner_subject_id
+                or int(thread["authorityEpoch"]) != int(vault["authorityEpoch"])
+                or str(thread["state"]) != ConversationThreadState.ACTIVE.value
+            ):
+                raise OwnerTruthConversationConflict(
+                    "active interview session does not bind an active Owner thread"
+                )
             return OwnerTruthInterviewSessionSnapshot(
                 session_id=str(session["id"]),
                 vault_id=context.vault_id,
@@ -2284,6 +2361,78 @@ class PostgresOwnerTruthConversationRepository:
             raise OwnerTruthConversationAccessDenied(
                 "interview session does not belong to this active Owner Vault"
             )
+        return OwnerTruthInterviewSessionSnapshot(
+            session_id=str(row["id"]),
+            vault_id=str(row["vault_id"]),
+            owner_subject_id=str(row["owner_subject_id"]),
+            thread_id=str(row["current_thread_id"]),
+            state=InterviewSessionState(str(row["state"])),
+            boundary=InterviewBoundary(str(row["boundary"])),
+            row_version=int(row["row_version"]),
+            thread_version=int(row["thread_row_version"]),
+            turn_count=int(row["turn_count"]),
+            deepening_turn_count=int(row["deepening_turn_count"]),
+            candidate_batch_turn_count=int(row["candidate_batch_turn_count"]),
+            pending_review_batch_id=(
+                None
+                if row["pending_review_batch_id"] is None
+                else str(row["pending_review_batch_id"])
+            ),
+            fatigue=InterviewFatigue(str(row["fatigue"])),
+            authority_epoch=int(row["authority_epoch"]),
+        )
+
+    def get_current_interview_session(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewSessionSnapshot | None:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            vault = self._active_vault(
+                cursor,
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                lock=False,
+            )
+            cursor.execute(
+                """
+                SELECT s.id, s.vault_id, s.owner_subject_id, s.current_thread_id,
+                    s.state, s.boundary, s.row_version, s.turn_count,
+                    s.deepening_turn_count, s.candidate_batch_turn_count,
+                    s.pending_review_batch_id, s.fatigue,
+                    s.authority_epoch, t.row_version AS thread_row_version
+                FROM owner_truth.interview_sessions AS s
+                JOIN owner_truth.conversation_threads AS t
+                  ON t.vault_id = s.vault_id AND t.id = s.current_thread_id
+                WHERE s.vault_id = %s
+                  AND s.owner_subject_id = %s
+                  AND s.authority_epoch = %s
+                  AND s.state = %s
+                  AND t.owner_subject_id = %s
+                  AND t.authority_epoch = %s
+                  AND t.state = %s
+                ORDER BY s.updated_at DESC, s.id ASC
+                LIMIT 2
+                """,
+                (
+                    context.vault_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    InterviewSessionState.ACTIVE.value,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    ConversationThreadState.ACTIVE.value,
+                ),
+            )
+            rows = cursor.fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise OwnerTruthConversationConflict(
+                "Owner Vault has more than one active interview session"
+            )
+        row = rows[0]
         return OwnerTruthInterviewSessionSnapshot(
             session_id=str(row["id"]),
             vault_id=str(row["vault_id"]),

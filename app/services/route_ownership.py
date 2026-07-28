@@ -260,6 +260,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/interview-sessions/current",
+                session,
+                "ownerTruthInterviewCurrentSessionRead",
+            ),
+            _rule(
+                "GET",
                 "/v2/vaults/{vault_id}/interview-sessions/{session_id}/state",
                 session,
                 "ownerTruthInterviewSessionStateRead",

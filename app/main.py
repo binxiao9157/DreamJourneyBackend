@@ -1682,6 +1682,38 @@ def _owner_truth_interview_session_presentation_response(
     }
 
 
+def _owner_truth_interview_current_session_response(
+    *,
+    vault_id: str,
+    snapshot: Optional[Any],
+) -> Dict[str, Any]:
+    """Return only the stable handle required to resume active natural input.
+
+    This is deliberately not a transcript, history, Candidate, review, or
+    pacing read.  The IDs and optimistic versions are operational handles for
+    the same authenticated Owner to continue the one active interview.
+    """
+
+    current_session: Optional[Dict[str, Any]]
+    if snapshot is None:
+        current_session = None
+    else:
+        current_session = {
+            "status": "resumed",
+            "threadId": snapshot.thread_id,
+            "sessionId": snapshot.session_id,
+            "threadVersion": snapshot.thread_version,
+            "sessionVersion": snapshot.row_version,
+            "state": snapshot.state.value,
+            "boundary": snapshot.boundary.value,
+        }
+    return {
+        "schemaVersion": "owner-truth-interview-current-session-v1",
+        "vaultId": vault_id,
+        "currentSession": current_session,
+    }
+
+
 def _owner_truth_interview_session_command_response(
     *,
     vault_id: str,
@@ -3355,6 +3387,31 @@ def review_owner_truth_candidate(
     return JSONResponse(
         status_code=201 if result.review.outcome == "created" else 200,
         content=_owner_truth_candidate_decision_response(result),
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/interview-sessions/current",
+    include_in_schema=False,
+)
+def read_owner_truth_current_interview_session(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """Read the one active natural-input session without exposing its content."""
+
+    try:
+        context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
+        snapshot = OwnerTruthInterviewSessionReadService(store).read_current(context=context)
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=_owner_truth_interview_current_session_response(
+            vault_id=context.vault_id,
+            snapshot=snapshot,
+        ),
+        headers={"Cache-Control": "no-store"},
     )
 
 

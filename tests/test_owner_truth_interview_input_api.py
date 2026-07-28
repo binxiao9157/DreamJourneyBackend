@@ -64,6 +64,10 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         return f"/v2/vaults/{vault_id}/interview-sessions"
 
     @staticmethod
+    def _current_path(vault_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/interview-sessions/current"
+
+    @staticmethod
     def _append_path(vault_id: str, session_id: str) -> str:
         return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/messages"
 
@@ -161,6 +165,16 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             "ownerTruthCandidateReviewUnavailable",
         )
 
+        current = client.get(
+            self._current_path("vault-interview-input-hidden"),
+            headers=headers,
+        )
+        self.assertEqual(current.status_code, 404)
+        self.assertEqual(
+            current.json()["detail"]["code"],
+            "ownerTruthCandidateReviewUnavailable",
+        )
+
         restore = self._restore_do_not_ask(
             vault_id="vault-interview-input-hidden",
             session_id=str(uuid4()),
@@ -172,6 +186,107 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(
             restore.json()["detail"]["code"],
             "ownerTruthCandidateReviewUnavailable",
+        )
+
+    def test_owner_can_resume_only_current_active_session_without_content(self) -> None:
+        _, headers, _ = self._login("13800139615")
+        vault_id = "vault-interview-current-session"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        start = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(start.status_code, 201, start.text)
+
+        private_text = "这段私有叙述只能留在访谈会话中。"
+        append = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": private_text,
+            },
+        )
+        self.assertEqual(append.status_code, 201, append.text)
+
+        current = client.get(self._current_path(vault_id), headers=headers)
+
+        self.assertEqual(current.status_code, 200, current.text)
+        self.assertEqual(current.headers["cache-control"], "no-store")
+        self.assertEqual(
+            current.json(),
+            {
+                "schemaVersion": "owner-truth-interview-current-session-v1",
+                "vaultId": vault_id,
+                "currentSession": {
+                    "status": "resumed",
+                    "threadId": thread_id,
+                    "sessionId": session_id,
+                    "threadVersion": 2,
+                    "sessionVersion": 2,
+                    "state": "active",
+                    "boundary": "open",
+                },
+            },
+        )
+        rendered = json.dumps(current.json(), ensure_ascii=False, sort_keys=True)
+        for forbidden in (
+            private_text,
+            "candidate",
+            "memory",
+            "review",
+            "ownerSubjectId",
+            "authorityEpoch",
+            "fatigue",
+            "turnCount",
+            "messageSequence",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_current_session_is_owner_bound_and_ignores_paused_history(self) -> None:
+        _, owner_headers, _ = self._login("13800139616")
+        vault_id = "vault-interview-current-owner-boundary"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        start = self._start_session(
+            vault_id=vault_id,
+            headers=owner_headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(start.status_code, 201, start.text)
+
+        _, other_headers, _ = self._login("13800139617")
+        other = client.get(self._current_path(vault_id), headers=other_headers)
+        self.assertEqual(other.status_code, 403, other.text)
+        self.assertEqual(other.json()["detail"]["code"], "ownerTruthInterviewSessionDenied")
+
+        paused = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=1,
+            boundary="doNotAsk",
+            headers=owner_headers,
+        )
+        self.assertEqual(paused.status_code, 201, paused.text)
+
+        current = client.get(self._current_path(vault_id), headers=owner_headers)
+        self.assertEqual(current.status_code, 200, current.text)
+        self.assertEqual(
+            current.json(),
+            {
+                "schemaVersion": "owner-truth-interview-current-session-v1",
+                "vaultId": vault_id,
+                "currentSession": None,
+            },
         )
 
     def test_owner_can_start_and_append_without_receipt_echoing_message_content(self) -> None:
