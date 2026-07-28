@@ -94,6 +94,9 @@ class Settings:
     # candidates. It must not become reachable when the caller-supplied QA
     # reader alone is enabled.
     owner_truth_knowledge_recommendation_plan_qa_enabled: bool = False
+    # Accepting a server-planned recommendation persists only a minimal,
+    # append-only QA receipt. It is independently default-off from planning.
+    owner_truth_knowledge_recommendation_activation_qa_enabled: bool = False
     # Explicit Owner continuation cues remain a fourth, independently closed
     # M0-B QA lane. They do not expose recommendation text or public Echo UI.
     owner_truth_saved_continuation_cue_qa_enabled: bool = False
@@ -274,6 +277,10 @@ class Settings:
             owner_truth_knowledge_recommendation_plan_qa_enabled=_env_bool(
                 "OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED",
                 cls.owner_truth_knowledge_recommendation_plan_qa_enabled,
+            ),
+            owner_truth_knowledge_recommendation_activation_qa_enabled=_env_bool(
+                "OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED",
+                cls.owner_truth_knowledge_recommendation_activation_qa_enabled,
             ),
             owner_truth_saved_continuation_cue_qa_enabled=_env_bool(
                 "OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED",

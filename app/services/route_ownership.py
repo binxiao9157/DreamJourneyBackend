@@ -254,6 +254,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/knowledge-recommendations/activate",
+                session,
+                "ownerTruthKnowledgeRecommendationActivation",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/interview-sessions/{session_id}/saved-continuation-cues",
                 session,
                 "ownerTruthSavedContinuationCue",

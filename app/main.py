@@ -178,6 +178,15 @@ from app.services.owner_truth_knowledge_recommendation_read import (
     OwnerTruthKnowledgeRecommendationReadError,
     OwnerTruthKnowledgeRecommendationReadService,
 )
+from app.services.owner_truth_knowledge_recommendation_activation import (
+    OwnerTruthKnowledgeRecommendationActivationAccessDenied,
+    OwnerTruthKnowledgeRecommendationActivationCommand,
+    OwnerTruthKnowledgeRecommendationActivationConflict,
+    OwnerTruthKnowledgeRecommendationActivationError,
+    OwnerTruthKnowledgeRecommendationActivationService,
+    OwnerTruthKnowledgeRecommendationActivationStale,
+    knowledge_recommendation_activation_summary,
+)
 from app.services.owner_truth_saved_continuation import (
     OwnerTruthSavedContinuationCueAccessDenied,
     OwnerTruthSavedContinuationCueCommand,
@@ -381,6 +390,9 @@ OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = bool(
 OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = bool(
     settings.owner_truth_knowledge_recommendation_plan_qa_enabled
 )
+OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED = bool(
+    settings.owner_truth_knowledge_recommendation_activation_qa_enabled
+)
 OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = bool(
     settings.owner_truth_saved_continuation_cue_qa_enabled
 )
@@ -566,6 +578,30 @@ def _require_owner_truth_knowledge_recommendation_plan_qa(request: Request) -> s
         unavailable_code="ownerTruthKnowledgeRecommendationPlanUnavailable",
         require_plan_gate=True,
     )
+
+
+def _require_owner_truth_knowledge_recommendation_activation_qa(request: Request) -> str:
+    """Keep server-verified recommendation acceptance inside explicit QA."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthKnowledgeRecommendationActivationUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthKnowledgeRecommendationActivationUserSessionRequired"},
+        )
+    return user_id
 
 
 def _require_owner_truth_saved_continuation_cue_qa(request: Request) -> str:
@@ -1124,6 +1160,19 @@ def _owner_truth_knowledge_recommendation_plan_context(
     )
 
 
+def _owner_truth_knowledge_recommendation_activation_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_knowledge_recommendation_activation_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_saved_continuation_cue_context(
     request: Request,
     *,
@@ -1407,6 +1456,30 @@ def _owner_truth_knowledge_recommendation_plan_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthKnowledgeRecommendationPlanInvalid"},
+    )
+
+
+def _owner_truth_knowledge_recommendation_activation_http_error(
+    error: OwnerTruthKnowledgeRecommendationActivationError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthKnowledgeRecommendationActivationAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthKnowledgeRecommendationActivationDenied"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeRecommendationActivationStale):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthKnowledgeRecommendationActivationStale"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeRecommendationActivationConflict):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthKnowledgeRecommendationActivationConflict"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthKnowledgeRecommendationActivationInvalid"},
     )
 
 
@@ -4275,6 +4348,14 @@ _OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_FIELDS = frozenset(
     }
 )
 _OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_FIELDS = frozenset({"crisisActive"})
+_OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_FIELDS = frozenset(
+    {
+        "commandId",
+        "expectedCandidateId",
+        "slot",
+        "expectedSessionVersion",
+    }
+)
 _OWNER_TRUTH_SAVED_CONTINUATION_CUE_FIELDS = frozenset(
     {
         "commandId",
@@ -4453,6 +4534,58 @@ def plan_owner_truth_knowledge_recommendations(
             "schemaVersion": "owner-truth-knowledge-recommendation-plan-response-v1",
             "vaultId": context.vault_id,
             "recommendations": summary,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/knowledge-recommendations/activate",
+    include_in_schema=False,
+)
+def activate_owner_truth_knowledge_recommendation(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Persist a server-revalidated M0-B selection without exposing Echo UI.
+
+    The caller cannot submit a question, evidence reference, thread, provider
+    output, or user content. The service recomputes the current plan and only
+    records an append-only acceptance receipt when the opaque selection and
+    session version still match active Owner authority.
+    """
+
+    try:
+        context = _owner_truth_knowledge_recommendation_activation_context(
+            request,
+            vault_id=vault_id,
+        )
+        unsupported = sorted(
+            set(payload).difference(_OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_FIELDS)
+        )
+        if unsupported:
+            raise OwnerTruthKnowledgeRecommendationActivationError(
+                "knowledge recommendation activation contains unsupported fields"
+            )
+        command = OwnerTruthKnowledgeRecommendationActivationCommand(
+            command_id=str(payload.get("commandId") or ""),
+            expected_candidate_id=str(payload.get("expectedCandidateId") or ""),
+            slot=payload.get("slot"),
+            expected_session_version=payload.get("expectedSessionVersion"),
+        )
+        result = OwnerTruthKnowledgeRecommendationActivationService(
+            store,
+            enabled=True,
+        ).accept(context=context, command=command)
+    except OwnerTruthKnowledgeRecommendationActivationError as error:
+        raise _owner_truth_knowledge_recommendation_activation_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-knowledge-recommendation-activation-response-v1",
+            "vaultId": context.vault_id,
+            "activation": knowledge_recommendation_activation_summary(result),
         },
         headers={"Cache-Control": "no-store"},
     )

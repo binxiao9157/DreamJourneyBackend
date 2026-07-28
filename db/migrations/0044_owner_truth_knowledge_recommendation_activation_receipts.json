@@ -1,0 +1,15 @@
+{
+  "version": "0044",
+  "name": "owner_truth_knowledge_recommendation_activation_receipts",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthKnowledgeRecommendationActivationQaOnly",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthKnowledgeDimensionConfirmationQa": false,
+    "ownerTruthKnowledgeRecommendationReadQa": false,
+    "ownerTruthKnowledgeRecommendationPlanQa": false,
+    "ownerTruthKnowledgeRecommendationActivationQa": false
+  }
+}

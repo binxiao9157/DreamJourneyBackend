@@ -74,6 +74,9 @@ from app.services.owner_truth_knowledge_dimension_confirmation import (
 from app.services.owner_truth_saved_continuation import (
     InMemoryOwnerTruthSavedContinuationCueRepository,
 )
+from app.services.owner_truth_knowledge_recommendation_activation import (
+    InMemoryOwnerTruthKnowledgeRecommendationActivationRepository,
+)
 from app.services.owner_truth_thread_preferences import (
     InMemoryOwnerTruthThreadPreferenceRepository,
 )
@@ -155,6 +158,9 @@ class InMemoryStore:
         )
         self._owner_truth_saved_continuation_cue_repository = (
             InMemoryOwnerTruthSavedContinuationCueRepository()
+        )
+        self._owner_truth_knowledge_recommendation_activation_repository = (
+            InMemoryOwnerTruthKnowledgeRecommendationActivationRepository()
         )
         self._owner_truth_thread_preference_repository = (
             InMemoryOwnerTruthThreadPreferenceRepository()
@@ -273,6 +279,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthSavedContinuationCueRepository:
         return self._owner_truth_saved_continuation_cue_repository
+
+    def owner_truth_knowledge_recommendation_activation_repository(
+        self,
+    ) -> InMemoryOwnerTruthKnowledgeRecommendationActivationRepository:
+        return self._owner_truth_knowledge_recommendation_activation_repository
 
     def owner_truth_thread_preference_repository(
         self,

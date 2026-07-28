@@ -64,6 +64,9 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         self.previous_recommendation_plan_qa = (
             main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED
         )
+        self.previous_recommendation_activation_qa = (
+            main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED
+        )
         self.previous_saved_continuation_cue_qa = (
             main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED
         )
@@ -78,6 +81,7 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = True
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED = False
         main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = False
         main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = False
 
@@ -96,6 +100,9 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         )
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_PLAN_QA_ENABLED = (
             self.previous_recommendation_plan_qa
+        )
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED = (
+            self.previous_recommendation_activation_qa
         )
         main_module.OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = (
             self.previous_saved_continuation_cue_qa
@@ -321,6 +328,10 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
     @staticmethod
     def _plan_path(vault_id: str) -> str:
         return f"/v2/vaults/{vault_id}/knowledge-recommendations/plan"
+
+    @staticmethod
+    def _activation_path(vault_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/knowledge-recommendations/activate"
 
     @staticmethod
     def _saved_continuation_cue_path(vault_id: str, session_id: str) -> str:
@@ -667,6 +678,102 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             injected.json()["detail"]["code"],
             "ownerTruthKnowledgeRecommendationPlanInvalid",
         )
+
+    def test_server_verified_recommendation_activation_is_hidden_then_replay_safe(self) -> None:
+        owner_id, headers = self._login("13800139415")
+        vault_id = "vault-recommendation-activation-api"
+        decision_id, decision_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "This private source must not enter an activation response."},
+            command_id="recommendation-activation-api-memory-001",
+        )
+        values_id, values_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "This second private source stays out of activation output."},
+            command_id="recommendation-activation-api-memory-002",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=decision_id,
+            content_hash=decision_hash,
+            dimension="keyDecisions",
+            facets=("choice", "reason"),
+            command_id="recommendation-activation-api-confirm-001",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=values_id,
+            content_hash=values_hash,
+            dimension="values",
+            facets=("priority",),
+            command_id="recommendation-activation-api-confirm-002",
+        )
+        self._seed_thread_with_session(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="recommendation-activation-api-thread-001",
+        )
+        planned = client.post(self._plan_path(vault_id), headers=headers, json={})
+        self.assertEqual(planned.status_code, 200, planned.text)
+        breadth = next(
+            item
+            for item in planned.json()["recommendations"]["selected"]
+            if item["slot"] == "breadth"
+        )
+        payload = {
+            "commandId": "recommendation-activation-api-001",
+            "expectedCandidateId": breadth["candidateId"],
+            "slot": "breadth",
+            "expectedSessionVersion": 1,
+        }
+
+        hidden = client.post(self._activation_path(vault_id), headers=headers, json=payload)
+        self.assertEqual(hidden.status_code, 404, hidden.text)
+        self.assertEqual(
+            hidden.json()["detail"]["code"],
+            "ownerTruthKnowledgeRecommendationActivationUnavailable",
+        )
+
+        main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED = True
+        injected = client.post(
+            self._activation_path(vault_id),
+            headers=headers,
+            json={**payload, "questionText": "must be rejected"},
+        )
+        stale = client.post(
+            self._activation_path(vault_id),
+            headers=headers,
+            json={**payload, "commandId": "recommendation-activation-api-stale", "expectedSessionVersion": 2},
+        )
+        created = client.post(self._activation_path(vault_id), headers=headers, json=payload)
+        replayed = client.post(self._activation_path(vault_id), headers=headers, json=payload)
+
+        self.assertEqual(injected.status_code, 400, injected.text)
+        self.assertEqual(
+            injected.json()["detail"]["code"],
+            "ownerTruthKnowledgeRecommendationActivationInvalid",
+        )
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(
+            stale.json()["detail"]["code"],
+            "ownerTruthKnowledgeRecommendationActivationStale",
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(replayed.status_code, 200, replayed.text)
+        self.assertEqual(created.headers["cache-control"], "no-store")
+        activation = created.json()["activation"]
+        self.assertEqual(activation["status"], "created")
+        self.assertEqual(activation["candidateId"], breadth["candidateId"])
+        self.assertEqual(activation["slot"], "breadth")
+        self.assertEqual(activation["nextAction"], "broaden")
+        self.assertEqual(replayed.json()["activation"]["status"], "deduplicated")
+        self.assertNotIn("private source", created.text)
+        self.assertNotIn("evidenceRefs", created.text)
+        self.assertNotIn("questionText", created.text)
 
     def test_server_plan_returns_empty_after_session_boundary_blocks_recommendations(self) -> None:
         owner_id, headers = self._login("13800139418")

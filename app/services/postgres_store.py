@@ -116,6 +116,9 @@ from app.services.owner_truth_knowledge_dimension_confirmation import (
 from app.services.owner_truth_saved_continuation import (
     PostgresOwnerTruthSavedContinuationCueRepository,
 )
+from app.services.owner_truth_knowledge_recommendation_activation import (
+    PostgresOwnerTruthKnowledgeRecommendationActivationRepository,
+)
 from app.services.owner_truth_thread_preferences import (
     PostgresOwnerTruthThreadPreferenceRepository,
 )
@@ -389,6 +392,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("saved continuation cue requires an active unit of work")
         return PostgresOwnerTruthSavedContinuationCueRepository(active.connection)
+
+    def owner_truth_knowledge_recommendation_activation_repository(
+        self,
+    ) -> PostgresOwnerTruthKnowledgeRecommendationActivationRepository:
+        """Return QA-only recommendation acceptance persistence in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("recommendation activation requires an active unit of work")
+        return PostgresOwnerTruthKnowledgeRecommendationActivationRepository(active.connection)
 
     def owner_truth_thread_preference_repository(
         self,
