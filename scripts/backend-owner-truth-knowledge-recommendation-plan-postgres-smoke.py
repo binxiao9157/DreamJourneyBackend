@@ -297,6 +297,52 @@ def recommendation_receipt_counts(dsn: str, *, vault_id: str) -> tuple[int, int]
     return tuple(int(value) for value in row)
 
 
+def recommendation_receipt_audit_summaries(
+    dsn: str,
+    *,
+    vault_id: str,
+) -> tuple[tuple[str, int, str], tuple[str, str, int, str, str]]:
+    """Read only the policy/audit columns needed by the lifecycle assertion."""
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT selection_policy_version, evidence_ref_count, reason_code
+                FROM owner_truth.knowledge_recommendation_feedback_receipts
+                WHERE vault_id = %s
+                """,
+                (vault_id,),
+            )
+            feedback = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT
+                    selection_policy_version,
+                    orchestration_policy_version,
+                    evidence_ref_count,
+                    evidence_ref_digest,
+                    reason_code
+                FROM owner_truth.knowledge_recommendation_activation_receipts
+                WHERE vault_id = %s
+                """,
+                (vault_id,),
+            )
+            activation = cursor.fetchone()
+    require(feedback is not None, "feedback audit receipt is unavailable")
+    require(activation is not None, "activation audit receipt is unavailable")
+    return (
+        (str(feedback[0]), int(feedback[1]), str(feedback[2])),
+        (
+            str(activation[0]),
+            str(activation[1]),
+            int(activation[2]),
+            str(activation[3]),
+            str(activation[4]),
+        ),
+    )
+
+
 def expire_cooldown(dsn: str, *, vault_id: str, thread_id: str) -> None:
     """Move only disposable smoke data beyond the server-owned cooldown."""
 
@@ -781,6 +827,24 @@ def main() -> None:
         require(
             recommendation_receipt_counts(test_dsn, vault_id=lifecycle_vault_id) == (1, 1),
             "lifecycle must persist exactly one feedback and one activation receipt",
+        )
+        feedback_audit, activation_audit = recommendation_receipt_audit_summaries(
+            test_dsn,
+            vault_id=lifecycle_vault_id,
+        )
+        require(
+            feedback_audit[0] == "m0-knowledge-dimension-v1"
+            and feedback_audit[1] > 0
+            and feedback_audit[2] == "userRequestedReplacement",
+            "feedback receipt must retain policy version, evidence count, and reason code",
+        )
+        require(
+            activation_audit[0] == "m0-knowledge-dimension-v1"
+            and activation_audit[1] == "owner-truth-interview-orchestration-v1"
+            and activation_audit[2] > 0
+            and len(activation_audit[3]) == 64
+            and activation_audit[4] == "acceptedSafeRecommendation",
+            "activation receipt must retain policy, evidence digest, and BROADEN reason code",
         )
 
         print(
