@@ -567,6 +567,7 @@ class RecommendationSelector:
         now: datetime,
         crisis_active: bool = False,
         policy_version: str = KNOWLEDGE_DIMENSION_POLICY_VERSION,
+        accepted_candidate_ids: Iterable[str] = (),
     ) -> RecommendationSelection:
         owner = require_nonblank(owner_subject_id, field="owner_subject_id")
         vault = require_nonblank(vault_id, field="vault_id")
@@ -580,6 +581,13 @@ class RecommendationSelector:
             raise KnowledgeRecommendationError("coverage scope does not match recommendation scope")
         if not isinstance(crisis_active, bool):
             raise KnowledgeRecommendationError("crisis_active must be a boolean")
+        try:
+            accepted = frozenset(
+                _opaque_identifier(candidate_id, field="accepted_candidate_id")
+                for candidate_id in accepted_candidate_ids
+            )
+        except TypeError as exc:
+            raise KnowledgeRecommendationError("accepted_candidate_ids must be iterable") from exc
 
         eligible: dict[RecommendationSlot, list[RecommendationCandidate]] = {
             RecommendationSlot.CONTINUITY: [],
@@ -589,6 +597,15 @@ class RecommendationSelector:
         for candidate in candidates:
             if not isinstance(candidate, RecommendationCandidate):
                 raise TypeError("candidates must contain RecommendationCandidate")
+            if candidate.candidate_id in accepted:
+                filtered.append(
+                    RecommendationFilteredCandidate(
+                        candidate_id=candidate.candidate_id,
+                        slot=candidate.slot,
+                        reason_code="acceptedAlready",
+                    )
+                )
+                continue
             reason = self._filter_reason(
                 candidate,
                 owner_subject_id=owner,

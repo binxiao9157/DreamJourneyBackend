@@ -775,6 +775,17 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         self.assertNotIn("evidenceRefs", created.text)
         self.assertNotIn("questionText", created.text)
 
+        after_acceptance = client.post(self._plan_path(vault_id), headers=headers, json={})
+        self.assertEqual(after_acceptance.status_code, 200, after_acceptance.text)
+        self.assertEqual(after_acceptance.json()["recommendations"]["selected"], [])
+        self.assertEqual(
+            [
+                (item["candidateId"], item["reasonCode"])
+                for item in after_acceptance.json()["recommendations"]["filtered"]
+            ],
+            [(breadth["candidateId"], "acceptedAlready")],
+        )
+
     def test_server_plan_returns_empty_after_session_boundary_blocks_recommendations(self) -> None:
         owner_id, headers = self._login("13800139418")
         vault_id = "vault-recommendation-plan-boundary"

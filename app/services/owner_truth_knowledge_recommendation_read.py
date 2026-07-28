@@ -80,6 +80,9 @@ class OwnerTruthKnowledgeRecommendationReadStore(Protocol):
     def owner_truth_thread_preference_repository(self) -> Any:
         ...
 
+    def owner_truth_knowledge_recommendation_activation_repository(self) -> Any:
+        ...
+
 
 @dataclass(frozen=True)
 class OwnerTruthKnowledgeRecommendationReadResult:
@@ -296,6 +299,12 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 dimension_read=dimension_read,
                 allow_saved_continuation=True,
             )
+            accepted_candidate_ids = (
+                self._store.owner_truth_knowledge_recommendation_activation_repository().list_accepted_candidate_ids(
+                    context=context,
+                    authority_epoch=dimension_read.authority_epoch,
+                )
+            )
             selection = self._selector.select(
                 owner_subject_id=context.owner_subject_id,
                 vault_id=context.vault_id,
@@ -303,6 +312,7 @@ class OwnerTruthKnowledgeRecommendationReadService:
                 candidates=candidates,
                 now=current_time,
                 crisis_active=crisis_active,
+                accepted_candidate_ids=accepted_candidate_ids,
             )
             return OwnerTruthKnowledgeRecommendationReadResult(
                 dimension_read=dimension_read,

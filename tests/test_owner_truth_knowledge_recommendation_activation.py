@@ -28,7 +28,6 @@ from app.services.owner_truth_knowledge_dimension_confirmation import (
 )
 from app.services.owner_truth_knowledge_recommendation_activation import (
     OwnerTruthKnowledgeRecommendationActivationCommand,
-    OwnerTruthKnowledgeRecommendationActivationConflict,
     OwnerTruthKnowledgeRecommendationActivationService,
     OwnerTruthKnowledgeRecommendationActivationStale,
     OwnerTruthKnowledgeRecommendationActivationUnavailable,
@@ -276,7 +275,20 @@ class OwnerTruthKnowledgeRecommendationActivationTests(unittest.TestCase):
         self.assertNotIn("questionTemplateId", summary)
         self.assertNotIn("evidenceRefs", summary)
 
-        with self.assertRaises(OwnerTruthKnowledgeRecommendationActivationConflict):
+        after_acceptance = OwnerTruthKnowledgeRecommendationReadService(self.store).plan(
+            context=context
+        )
+        assert after_acceptance.selection is not None
+        self.assertEqual(after_acceptance.selection.selected, ())
+        self.assertEqual(
+            [
+                (item.candidate_id, item.reason_code)
+                for item in after_acceptance.selection.filtered
+            ],
+            [(decision.candidate_id, "acceptedAlready")],
+        )
+
+        with self.assertRaises(OwnerTruthKnowledgeRecommendationActivationStale):
             service.accept(
                 context=context,
                 command=OwnerTruthKnowledgeRecommendationActivationCommand(
