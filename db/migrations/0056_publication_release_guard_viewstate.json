@@ -1,0 +1,13 @@
+{
+  "version": "0056",
+  "name": "publication_release_guard_viewstate",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationReleaseGuardViewStateDefaultDeny",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publicationOwnerViewStateV1": false,
+    "publicationReleaseGuardV1": false,
+    "publicationVisitorFeatureV1": false
+  }
+}
