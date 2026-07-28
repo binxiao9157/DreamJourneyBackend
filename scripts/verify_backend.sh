@@ -46,6 +46,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-migration-parity-shadow
 echo "== Owner Truth migration parity C05 persistence gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-migration-parity-shadow-persistence-gate.sh
 
+echo "== Owner Truth migration C06 non-authoritative canary gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-migration-canary-g0-gate.sh
+
 echo "== Voice/DH purpose consent G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-consent-policy-gate.sh
 
@@ -227,6 +230,9 @@ test -f db/migrations/0049_owner_truth_migration_parity_shadow.json
 test -f tests/test_owner_truth_migration_parity_shadow_postgres_smoke_contract.py
 test -f scripts/backend-owner-truth-migration-parity-shadow-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-migration-parity-shadow-postgres-smoke.sh
+test -f app/domain/owner_truth/migration_canary_shadow.py
+test -f tests/test_owner_truth_migration_canary_shadow.py
+test -f scripts/run-backend-owner-truth-migration-canary-g0-gate.sh
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.sql
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.json
 test -f app/services/echo_delayed_reply_effects.py
