@@ -17,6 +17,10 @@ from app.async_effects.target_admission import (
 )
 from app.core.config import Settings
 from app.domain.owner_truth.memory_projection import OwnerTruthMemoryProjectionResult
+from app.domain.owner_truth.search_documents import (
+    OwnerTruthSearchDocumentProjection,
+    OwnerTruthSearchDocumentProjectionRebuildResult,
+)
 from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
     MEMORY_PROJECTION_REBUILD_JOB_TYPE,
@@ -35,17 +39,57 @@ class _ProjectionRepository:
         self.fail = fail
         self.outcome = outcome
         self.contexts = []
+        self.last_checkpoint: str | None = None
 
     def rebuild(self, *, context):
         self.contexts.append(context)
         if self.fail:
             raise RuntimeError("projection fixture failure")
+        checkpoint = _digest({"vault": context.vault_id, "outcome": self.outcome})
+        self.last_checkpoint = checkpoint
         return OwnerTruthMemoryProjectionResult(
             outcome=self.outcome,
             snapshot={
-                "checkpoint": _digest({"vault": context.vault_id, "outcome": self.outcome}),
+                "checkpoint": checkpoint,
                 "entryCount": 1,
             },
+        )
+
+
+class _SearchDocumentProjectionRepository:
+    def __init__(
+        self,
+        *,
+        source: _ProjectionRepository,
+        fail: bool = False,
+        outcome: str = "rebuilt",
+        checkpoint_override: str | None = None,
+    ) -> None:
+        self.source = source
+        self.fail = fail
+        self.outcome = outcome
+        self.checkpoint_override = checkpoint_override
+        self.contexts = []
+
+    def rebuild(self, *, context):
+        self.contexts.append(context)
+        if self.fail:
+            raise RuntimeError("search projection fixture failure")
+        if self.outcome == "sourceRebuilding":
+            return type("SearchProjectionResult", (), {"outcome": self.outcome, "projection": None})()
+        checkpoint = self.checkpoint_override or self.source.last_checkpoint
+        if checkpoint is None:
+            raise RuntimeError("source projection fixture did not rebuild first")
+        projection = OwnerTruthSearchDocumentProjection(
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            authority_epoch=6,
+            checkpoint=checkpoint,
+            documents=(),
+        )
+        return OwnerTruthSearchDocumentProjectionRebuildResult(
+            outcome=self.outcome,
+            projection=projection,
         )
 
 
@@ -55,6 +99,9 @@ class _Store:
         self.consumer_repository = InMemoryAsyncEffectConsumerRepository()
         self.admission_repository = InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository()
         self.projection_repository = projection or _ProjectionRepository()
+        self.search_projection_repository = _SearchDocumentProjectionRepository(
+            source=self.projection_repository
+        )
         self.uow_calls = 0
 
     def readiness_probe(self):
@@ -76,6 +123,9 @@ class _Store:
 
     def owner_truth_memory_projection_repository(self):
         return self.projection_repository
+
+    def owner_truth_memory_search_document_projection_repository(self):
+        return self.search_projection_repository
 
 
 class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
@@ -123,12 +173,18 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
             source_version_current=4,
         )
 
-    def worker(self, *, enabled: bool = True) -> OwnerTruthMemoryProjectionWorkerRuntime:
+    def worker(
+        self,
+        *,
+        enabled: bool = True,
+        search_projection_enabled: bool = False,
+    ) -> OwnerTruthMemoryProjectionWorkerRuntime:
         return OwnerTruthMemoryProjectionWorkerRuntime(
             settings=Settings(
                 async_effect_v1_enabled=True,
                 async_effect_worker_enabled=True,
                 owner_truth_memory_projection_worker_enabled=enabled,
+                owner_truth_memory_search_projection_worker_enabled=search_projection_enabled,
             ),
             store=self.store,
             worker_id="projection-worker-test",
@@ -157,7 +213,9 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
         self.assertEqual(result["outboxState"], "dispatched")
         self.assertEqual(result["consumerInboxState"], "completed")
         self.assertEqual(result["projectionEntryCount"], 1)
+        self.assertNotIn("searchProjectionOutcome", result)
         self.assertEqual(len(self.store.projection_repository.contexts), 1)
+        self.assertEqual(self.store.search_projection_repository.contexts, [])
         self.assertEqual(
             self.store.lease_repository.attempt_state(self.intent.job_id, 1),
             "succeeded",
@@ -175,6 +233,62 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["reason"], "memoryProjectionRebuilt")
 
+    def test_enabled_search_projection_rebuilds_only_after_current_memory_projection(self):
+        result = self.worker(search_projection_enabled=True).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["projectionOutcome"], "rebuilt")
+        self.assertEqual(result["searchProjectionOutcome"], "rebuilt")
+        self.assertEqual(result["searchProjectionDocumentCount"], 0)
+        self.assertEqual(len(self.store.projection_repository.contexts), 1)
+        self.assertEqual(len(self.store.search_projection_repository.contexts), 1)
+        self.assertEqual(
+            self.store.search_projection_repository.contexts[0],
+            self.store.projection_repository.contexts[0],
+        )
+
+    def test_search_projection_failure_releases_the_current_job_for_retry(self):
+        self.store.search_projection_repository.fail = True
+
+        result = self.worker(search_projection_enabled=True).run_once()
+
+        self.assertEqual(result["status"], "retryWait")
+        self.assertEqual(result["reason"], "memoryProjectionRebuildRetryableFailure")
+        self.assertEqual(len(self.store.projection_repository.contexts), 1)
+        self.assertEqual(len(self.store.search_projection_repository.contexts), 1)
+        self.assertEqual(
+            self.store.lease_repository.attempt_state(self.intent.job_id, 1),
+            "retryableFailed",
+        )
+        self.assertEqual(self.store.consumer_repository._inbox, {})
+
+    def test_non_ready_search_projection_result_never_terminalizes_the_job(self):
+        self.store.search_projection_repository.outcome = "sourceRebuilding"
+
+        result = self.worker(search_projection_enabled=True).run_once()
+
+        self.assertEqual(result["status"], "retryWait")
+        self.assertEqual(result["reason"], "memoryProjectionRebuildRetryableFailure")
+        self.assertEqual(self.store.consumer_repository._inbox, {})
+
+    def test_stale_search_projection_checkpoint_never_terminalizes_the_job(self):
+        self.store.search_projection_repository.checkpoint_override = _digest("stale-search-checkpoint")
+
+        result = self.worker(search_projection_enabled=True).run_once()
+
+        self.assertEqual(result["status"], "retryWait")
+        self.assertEqual(result["reason"], "memoryProjectionRebuildRetryableFailure")
+        self.assertEqual(self.store.consumer_repository._inbox, {})
+
+    def test_search_worker_flag_requires_the_private_repository_contract(self):
+        self.store.owner_truth_memory_search_document_projection_repository = None
+
+        result = self.worker(search_projection_enabled=True).run_once()
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "ownerTruthMemorySearchProjectionWorkerStoreUnsupported")
+        self.assertEqual(self.store.projection_repository.contexts, [])
+
     def test_stale_authority_blocks_without_rebuilding_a_projection(self):
         self.store.admission_repository.seed_vault(
             vault_id=self.vault_id,
@@ -190,6 +304,7 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
         self.assertEqual(result["jobState"], "blocked")
         self.assertEqual(result["consumerInboxState"], "skipped")
         self.assertEqual(self.store.projection_repository.contexts, [])
+        self.assertEqual(self.store.search_projection_repository.contexts, [])
         self.assertEqual(
             self.store.lease_repository.attempt_state(self.intent.job_id, 1),
             "terminalFailed",

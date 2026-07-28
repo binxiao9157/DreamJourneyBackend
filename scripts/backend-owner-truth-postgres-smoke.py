@@ -758,6 +758,7 @@ def main() -> None:
                     async_effect_v1_enabled=True,
                     async_effect_worker_enabled=True,
                     owner_truth_memory_projection_worker_enabled=True,
+                    owner_truth_memory_search_projection_worker_enabled=True,
                 ),
                 store=store,
                 worker_id="owner-truth-projection-smoke",
@@ -767,12 +768,15 @@ def main() -> None:
             require(
                 first_projection_worker_result["status"] == "completed"
                 and first_projection_worker_result["projectionOutcome"] == "rebuilt"
+                and first_projection_worker_result["searchProjectionOutcome"] == "rebuilt"
+                and isinstance(first_projection_worker_result["searchProjectionDocumentCount"], int)
                 and first_projection_worker_result["jobState"] == "succeeded"
                 and first_projection_worker_result["operationState"] == "completed"
                 and first_projection_worker_result["outboxState"] == "dispatched"
                 and first_projection_worker_result["consumerInboxState"] == "completed"
                 and second_projection_worker_result["status"] == "completed"
-                and second_projection_worker_result["projectionOutcome"] == "unchanged",
+                and second_projection_worker_result["projectionOutcome"] == "unchanged"
+                and second_projection_worker_result["searchProjectionOutcome"] == "unchanged",
                 "enabled projection worker must terminalize each current rebuild intent: "
                 f"first={json.dumps(first_projection_worker_result, sort_keys=True)} "
                 f"second={json.dumps(second_projection_worker_result, sort_keys=True)}",
@@ -853,6 +857,22 @@ def main() -> None:
                 and projection_ready["checkpoint"]
                 == first_projection_worker_result["projectionCheckpoint"],
                 "accepted and corrected MemoryVersions must be projection-visible",
+            )
+            with store.request_unit_of_work(
+                correlation_id="owner-truth-projection-worker-search-read",
+                command_id="ownerTruthProjectionWorkerSearchRead",
+            ):
+                search_projection_ready = (
+                    store.owner_truth_memory_search_document_projection_repository().read(
+                        context=review_context
+                    )
+                )
+            require(
+                search_projection_ready is not None
+                and search_projection_ready.checkpoint == projection_ready["checkpoint"]
+                and len(search_projection_ready.documents)
+                == first_projection_worker_result["searchProjectionDocumentCount"],
+                "worker-chained SearchDocument projection must bind the current source checkpoint",
             )
             corrected_projection = next(
                 item

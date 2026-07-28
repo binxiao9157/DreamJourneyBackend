@@ -74,8 +74,9 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
         reason = self._runtime_block_reason()
         if reason is not None:
             return self._payload(status="blocked", reason=reason)
-        if not self._supports_worker_store():
-            return self._payload(status="blocked", reason="ownerTruthProjectionWorkerStoreUnsupported")
+        store_reason = self._worker_store_block_reason()
+        if store_reason is not None:
+            return self._payload(status="blocked", reason=store_reason)
 
         lease = self._claim_next()
         if lease is None:
@@ -152,6 +153,17 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
         checkpoint = str(snapshot.get("checkpoint") or "").strip()
         if len(checkpoint) != 64:
             raise OwnerTruthMemoryProjectionWorkerError("projection rebuild returned no checkpoint")
+        search_projection_outcome: str | None = None
+        search_projection_document_count: int | None = None
+        if self._settings.owner_truth_memory_search_projection_worker_enabled:
+            (
+                search_projection_outcome,
+                search_projection_document_count,
+            ) = self._rebuild_search_projection(
+                context=context,
+                source_checkpoint=checkpoint,
+                authority_epoch=int(intent.target.authority_epoch),
+            )
         reason = (
             "memoryProjectionRebuilt"
             if projection_outcome == "rebuilt"
@@ -180,7 +192,50 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
             projection_outcome=projection_outcome,
             projection_checkpoint=checkpoint,
             projection_entry_count=snapshot.get("entryCount"),
+            search_projection_outcome=search_projection_outcome,
+            search_projection_document_count=search_projection_document_count,
         )
+
+    def _rebuild_search_projection(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        source_checkpoint: str,
+        authority_epoch: int,
+    ) -> tuple[str, int]:
+        """Rebuild the optional private index only from this fresh source snapshot.
+
+        The index is a compatibility projection, not a new authority or a
+        separate async effect. Any incomplete or mismatched result makes the
+        current typed job retryable so a read cannot observe stale documents.
+        """
+
+        result = (
+            self._store.owner_truth_memory_search_document_projection_repository()
+            .rebuild(context=context)
+        )
+        outcome = str(getattr(result, "outcome", "")).strip()
+        projection = getattr(result, "projection", None)
+        if outcome not in {"rebuilt", "unchanged"} or projection is None:
+            raise OwnerTruthMemoryProjectionWorkerError(
+                "search projection rebuild returned an invalid outcome"
+            )
+        if (
+            str(getattr(projection, "checkpoint", "")).strip() != source_checkpoint
+            or str(getattr(projection, "vault_id", "")).strip() != context.vault_id
+            or str(getattr(projection, "owner_subject_id", "")).strip()
+            != context.owner_subject_id
+            or getattr(projection, "authority_epoch", None) != authority_epoch
+        ):
+            raise OwnerTruthMemoryProjectionWorkerError(
+                "search projection rebuild returned a cross-scope or stale checkpoint"
+            )
+        documents = getattr(projection, "documents", None)
+        if not isinstance(documents, tuple):
+            raise OwnerTruthMemoryProjectionWorkerError(
+                "search projection rebuild returned an invalid document set"
+            )
+        return outcome, len(documents)
 
     def _claim_next(self) -> AsyncEffectJobLease | None:
         with self._unit_of_work(
@@ -247,15 +302,21 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
             return False
         return is_async_effect_store_ready(probe())
 
-    def _supports_worker_store(self) -> bool:
-        required = (
+    def _worker_store_block_reason(self) -> str | None:
+        required = [
             "request_unit_of_work",
             "async_effect_lease_repository",
             "async_effect_consumer_repository",
             "owner_truth_memory_projection_target_admission_repository",
             "owner_truth_memory_projection_repository",
-        )
-        return all(callable(getattr(self._store, name, None)) for name in required)
+        ]
+        if not all(callable(getattr(self._store, name, None)) for name in required):
+            return "ownerTruthProjectionWorkerStoreUnsupported"
+        if self._settings.owner_truth_memory_search_projection_worker_enabled and not callable(
+            getattr(self._store, "owner_truth_memory_search_document_projection_repository", None)
+        ):
+            return "ownerTruthMemorySearchProjectionWorkerStoreUnsupported"
+        return None
 
     def _unit_of_work(self, *, correlation_id: str, command_id: str):
         return self._store.request_unit_of_work(
@@ -275,6 +336,8 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
         projection_outcome: str | None = None,
         projection_checkpoint: str | None = None,
         projection_entry_count: object | None = None,
+        search_projection_outcome: str | None = None,
+        search_projection_document_count: int | None = None,
         retry_available_at: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -316,6 +379,13 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
             payload["projectionCheckpoint"] = projection_checkpoint
         if isinstance(projection_entry_count, int) and projection_entry_count >= 0:
             payload["projectionEntryCount"] = projection_entry_count
+        if search_projection_outcome is not None:
+            payload["searchProjectionOutcome"] = search_projection_outcome
+        if (
+            isinstance(search_projection_document_count, int)
+            and search_projection_document_count >= 0
+        ):
+            payload["searchProjectionDocumentCount"] = search_projection_document_count
         if retry_available_at is not None:
             payload["retryAvailableAt"] = retry_available_at
         return payload
