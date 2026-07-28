@@ -55,6 +55,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-cutover-admission-shado
 echo "== Owner Truth migration C08 lane activation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-migration-lane-activation-g0-gate.sh
 
+echo "== Owner Truth migration C09 rights/restore/replay gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-migration-rights-restore-replay-g0-gate.sh
+
 echo "== Voice/DH purpose consent G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-voice-dh-consent-policy-gate.sh
 
@@ -247,6 +250,9 @@ test -f app/domain/owner_truth/migration_lane_activation_shadow.py
 test -f tests/test_owner_truth_migration_lane_activation_shadow.py
 test -f scripts/run-backend-owner-truth-migration-lane-activation-g0-gate.sh
 test -f docs/backend/2026-07-29-owner-truth-c08-lane-activation-g0.md
+test -f tests/test_owner_truth_migration_rights_restore_replay_g0.py
+test -f scripts/run-backend-owner-truth-migration-rights-restore-replay-g0-gate.sh
+test -f docs/backend/2026-07-29-owner-truth-c09-rights-restore-replay-g0.md
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.sql
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.json
 test -f app/services/echo_delayed_reply_effects.py
