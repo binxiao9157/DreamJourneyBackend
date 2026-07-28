@@ -198,18 +198,36 @@ class ServerPlannedRecommendationCandidateProjectorTests(unittest.TestCase):
         values.update(overrides)
         return self.planner.project(**values)
 
-    def test_projects_only_one_breadth_candidate_from_current_confirmed_gap(self) -> None:
+    def test_projects_safe_breadth_alternatives_from_current_confirmed_gaps(self) -> None:
         rows = self._project((self._authority(),))
 
-        self.assertEqual(len(rows), 1)
-        candidate = rows[0]
-        self.assertEqual(candidate.slot, RecommendationSlot.BREADTH)
-        self.assertEqual(candidate.question_template_id, "broadenConfirmedGap")
-        self.assertEqual(candidate.reason_code, "confirmedDimensionGap")
-        self.assertEqual(candidate.thread_id, self.thread_id)
-        self.assertTrue(candidate.evidence_refs)
-        self.assertNotIn("claim", str(candidate))
-        self.assertNotIn("今天", str(candidate))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({candidate.slot for candidate in rows}, {RecommendationSlot.BREADTH})
+        self.assertEqual(
+            {(candidate.target_dimension, candidate.missing_facet) for candidate in rows},
+            {
+                (KnowledgeDimension.KEY_DECISIONS, "outcome"),
+                (KnowledgeDimension.VALUES, "reflection"),
+            },
+        )
+        for candidate in rows:
+            self.assertEqual(candidate.question_template_id, "broadenConfirmedGap")
+            self.assertEqual(candidate.reason_code, "confirmedDimensionGap")
+            self.assertEqual(candidate.thread_id, self.thread_id)
+            self.assertTrue(candidate.evidence_refs)
+            self.assertNotIn("claim", str(candidate))
+            self.assertNotIn("今天", str(candidate))
+
+        selection = RecommendationSelector().select(
+            owner_subject_id=OWNER,
+            vault_id=VAULT,
+            coverage=self.coverage,
+            candidates=rows,
+            now=NOW,
+        )
+        self.assertEqual(len(selection.selected), 1)
+        self.assertEqual(selection.selected[0].target_dimension, KnowledgeDimension.VALUES)
+        self.assertEqual(selection.selected[0].missing_facet, "reflection")
 
     def test_projects_explicit_saved_continuation_without_inferring_topic_text(self) -> None:
         cue = ServerPlannedContinuationCue(
@@ -227,7 +245,14 @@ class ServerPlannedRecommendationCandidateProjectorTests(unittest.TestCase):
 
         rows = self._project((self._authority(),), continuity_cues=(cue,))
 
-        self.assertEqual([item.slot for item in rows], [RecommendationSlot.CONTINUITY, RecommendationSlot.BREADTH])
+        self.assertEqual(
+            [item.slot for item in rows],
+            [
+                RecommendationSlot.CONTINUITY,
+                RecommendationSlot.BREADTH,
+                RecommendationSlot.BREADTH,
+            ],
+        )
         continuity = rows[0]
         self.assertEqual(continuity.evidence_kind, RecommendationEvidenceKind.SAVED_CONTINUATION)
         self.assertEqual(continuity.evidence_refs, ("memory-version-decision",))
@@ -442,6 +467,35 @@ class RecommendationSelectorTests(unittest.TestCase):
 
         self.assertEqual(len(result.selected), 1)
         self.assertEqual(result.selected[0].candidate_id, "breadth-values")
+
+    def test_excluded_current_candidate_allows_the_next_safe_breadth_alternative(self) -> None:
+        result = self.select(
+            (
+                candidate(
+                    candidate_id="breadth-first",
+                    slot=RecommendationSlot.BREADTH,
+                    thread_id="thread-values",
+                    target_dimension=KnowledgeDimension.VALUES,
+                    missing_facet="priority",
+                    importance_score=5,
+                ),
+                candidate(
+                    candidate_id="breadth-alternative",
+                    slot=RecommendationSlot.BREADTH,
+                    thread_id="thread-life-stage",
+                    target_dimension=KnowledgeDimension.LIFE_STAGE,
+                    missing_facet="experience",
+                    importance_score=1,
+                ),
+            ),
+            excluded_candidate_ids=("breadth-first",),
+        )
+
+        self.assertEqual([item.candidate_id for item in result.selected], ["breadth-alternative"])
+        self.assertEqual(
+            [(item.candidate_id, item.reason_code) for item in result.filtered],
+            [("breadth-first", "userRequestedReplacement")],
+        )
 
     def test_candidate_rejects_a_facet_from_another_dimension(self) -> None:
         with self.assertRaisesRegex(Exception, "target_dimension"):

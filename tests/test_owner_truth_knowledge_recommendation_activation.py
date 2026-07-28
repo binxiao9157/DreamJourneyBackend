@@ -17,6 +17,7 @@ from app.domain.owner_truth.contracts import (
     SensitivityLevel,
 )
 from app.domain.owner_truth.conversation import StartInterviewSessionCommand
+from app.domain.owner_truth.knowledge_recommendations import RecommendationSlot
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.in_memory_store import InMemoryStore
@@ -279,7 +280,12 @@ class OwnerTruthKnowledgeRecommendationActivationTests(unittest.TestCase):
             context=context
         )
         assert after_acceptance.selection is not None
-        self.assertEqual(after_acceptance.selection.selected, ())
+        self.assertEqual(len(after_acceptance.selection.selected), 1)
+        self.assertEqual(after_acceptance.selection.selected[0].slot, RecommendationSlot.BREADTH)
+        self.assertNotEqual(
+            after_acceptance.selection.selected[0].candidate_id,
+            decision.candidate_id,
+        )
         self.assertEqual(
             [
                 (item.candidate_id, item.reason_code)

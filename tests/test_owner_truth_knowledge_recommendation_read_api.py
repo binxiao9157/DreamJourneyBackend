@@ -795,7 +795,10 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
 
         after_acceptance = client.post(self._plan_path(vault_id), headers=headers, json={})
         self.assertEqual(after_acceptance.status_code, 200, after_acceptance.text)
-        self.assertEqual(after_acceptance.json()["recommendations"]["selected"], [])
+        selected_after_acceptance = after_acceptance.json()["recommendations"]["selected"]
+        self.assertEqual(len(selected_after_acceptance), 1)
+        self.assertEqual(selected_after_acceptance[0]["slot"], "breadth")
+        self.assertNotEqual(selected_after_acceptance[0]["candidateId"], breadth["candidateId"])
         self.assertEqual(
             [
                 (item["candidateId"], item["reasonCode"])

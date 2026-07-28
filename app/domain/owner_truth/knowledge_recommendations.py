@@ -715,6 +715,7 @@ class RecommendationSelector:
         crisis_active: bool = False,
         policy_version: str = KNOWLEDGE_DIMENSION_POLICY_VERSION,
         accepted_candidate_ids: Iterable[str] = (),
+        excluded_candidate_ids: Iterable[str] = (),
     ) -> RecommendationSelection:
         owner = require_nonblank(owner_subject_id, field="owner_subject_id")
         vault = require_nonblank(vault_id, field="vault_id")
@@ -735,6 +736,13 @@ class RecommendationSelector:
             )
         except TypeError as exc:
             raise KnowledgeRecommendationError("accepted_candidate_ids must be iterable") from exc
+        try:
+            excluded = frozenset(
+                _opaque_identifier(candidate_id, field="excluded_candidate_id")
+                for candidate_id in excluded_candidate_ids
+            )
+        except TypeError as exc:
+            raise KnowledgeRecommendationError("excluded_candidate_ids must be iterable") from exc
 
         eligible: dict[RecommendationSlot, list[RecommendationCandidate]] = {
             RecommendationSlot.CONTINUITY: [],
@@ -750,6 +758,18 @@ class RecommendationSelector:
                         candidate_id=candidate.candidate_id,
                         slot=candidate.slot,
                         reason_code="acceptedAlready",
+                    )
+                )
+                continue
+            # A replacement request only suppresses this short-lived planned
+            # candidate. It does not change a ThreadPreference, erase a
+            # knowledge gap, or prohibit a future user-led conversation.
+            if candidate.candidate_id in excluded:
+                filtered.append(
+                    RecommendationFilteredCandidate(
+                        candidate_id=candidate.candidate_id,
+                        slot=candidate.slot,
+                        reason_code="userRequestedReplacement",
                     )
                 )
                 continue
@@ -877,6 +897,12 @@ class RecommendationSelector:
                 coverage.for_dimension(candidate.target_dimension).missing_facet_count,
                 candidate.importance_score,
                 candidate.explicit_intent_priority,
+                # Preserve the existing policy-owned deterministic tie-break
+                # when the private candidate pool contains multiple equally
+                # safe gaps. Candidate IDs are time-window hashes and must not
+                # decide which subject area is shown first.
+                candidate.target_dimension.value,
+                candidate.missing_facet,
                 candidate.candidate_id,
             ),
         )
@@ -1045,29 +1071,35 @@ class ServerPlannedRecommendationCandidateProjector:
                 )
             )
 
-        if not breadth_coverage:
-            return tuple(candidates)
-        selected_coverage = max(
+        # Keep every independently evidenced gap as a private candidate so a
+        # future "换一条" feedback receipt can suppress only the currently
+        # shown question and let the selector choose the next safe one. The
+        # selector still emits at most one breadth decision, therefore this
+        # does not increase the public recommendation count.
+        for selected_coverage in sorted(
             breadth_coverage,
             key=lambda item: (
                 len(item.missing_facets),
                 len(item.memory_version_ids),
                 item.dimension.value,
             ),
-        )
-        breadth = self._candidate(
-            slot=RecommendationSlot.BREADTH,
-            thread_authority=thread_authority,
-            authority_epoch=authority_epoch,
-            checkpoint=normalized_checkpoint,
-            expires_at=expires_at,
-            coverage=selected_coverage,
-            missing_facet=selected_coverage.missing_facets[0],
-            question_template_id="broadenConfirmedGap",
-            reason_code="confirmedDimensionGap",
-            importance_score=len(selected_coverage.missing_facets),
-        )
-        candidates.append(breadth)
+            reverse=True,
+        ):
+            for missing_facet in selected_coverage.missing_facets:
+                candidates.append(
+                    self._candidate(
+                        slot=RecommendationSlot.BREADTH,
+                        thread_authority=thread_authority,
+                        authority_epoch=authority_epoch,
+                        checkpoint=normalized_checkpoint,
+                        expires_at=expires_at,
+                        coverage=selected_coverage,
+                        missing_facet=missing_facet,
+                        question_template_id="broadenConfirmedGap",
+                        reason_code="confirmedDimensionGap",
+                        importance_score=len(selected_coverage.missing_facets),
+                    )
+                )
         return tuple(candidates)
 
     @staticmethod
