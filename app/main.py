@@ -1969,8 +1969,11 @@ ARCHIVE_MEDIA_UPLOAD_LIMITS = {
     "video": ARCHIVE_VIDEO_UPLOAD_LIMIT_BYTES,
 }
 VOICE_CLONE_SAMPLE_STATUSES = {"notProvided", "pending", "ready", "disabled", "deleted", "failed"}
-VOICE_CLONE_CONTRACT_VERSION = 2
+VOICE_CLONE_CONTRACT_VERSION = 3
 VOICE_CLONE_PROVIDER_MODE = "mockContract"
+VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE = "echo"
+VOICE_CLONE_QUALITY_PREVIEW_PURPOSE = "qualityPreview"
+VOICE_CLONE_QUALITY_PREVIEW_RECEIPT_TTL_SECONDS = 15 * 60
 VOICE_CLONE_AUTHORIZATION_COPY = (
     "声音克隆必须由用户主动授权，仅使用用户确认提交的声音样本；"
     "未完成授权、样本质量和合规验收前不会公开训练或合成功能。"
@@ -5664,6 +5667,16 @@ def _voice_clone_provider_speaker_id(profile: Dict[str, Any]) -> str:
 def _voice_clone_public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     public_profile = dict(profile)
     public_profile.pop("providerSpeakerId", None)
+    for private_receipt_field in (
+        "qualityPreviewReceiptHash",
+        "qualityPreviewIssuedAt",
+        "qualityPreviewExpiresAt",
+        "qualityPreviewReceiptVersion",
+        "qualityPreviewReceiptConsumedAt",
+        "qualityAcceptanceReceiptHash",
+        "qualityAcceptanceReceiptIssuedAt",
+    ):
+        public_profile.pop(private_receipt_field, None)
     provider_request_id = str(public_profile.pop("providerRequestId", "") or "").strip()
     provider_log_id = str(public_profile.pop("providerLogId", "") or "").strip()
     public_profile.pop("providerMessage", None)
@@ -5688,6 +5701,30 @@ def _provider_reference_hash(value: Any) -> str:
     if not text:
         return ""
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _voice_clone_quality_preview_receipt_hash(receipt_id: str) -> str:
+    return hashlib.sha256(
+        f"voice-clone-quality-preview-v1:{receipt_id}".encode("utf-8")
+    ).hexdigest()
+
+
+def _issue_voice_profile_quality_preview_receipt(
+    profile: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    now = datetime.now(timezone.utc)
+    receipt_id = secrets.token_urlsafe(32)
+    expires_at = now + timedelta(seconds=VOICE_CLONE_QUALITY_PREVIEW_RECEIPT_TTL_SECONDS)
+    updated = dict(profile)
+    updated["qualityPreviewReceiptHash"] = _voice_clone_quality_preview_receipt_hash(receipt_id)
+    updated["qualityPreviewIssuedAt"] = now.isoformat()
+    updated["qualityPreviewExpiresAt"] = expires_at.isoformat()
+    updated["qualityPreviewReceiptVersion"] = 1
+    updated["updatedAt"] = now.isoformat()
+    return updated, {
+        "id": receipt_id,
+        "expiresAt": expires_at.isoformat(),
+    }
 
 
 def _provider_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -5766,7 +5803,12 @@ def _update_voice_clone_slot(
     )
 
 
-def _validate_voice_profile_for_synthesis(user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+def _validate_voice_profile_for_synthesis(
+    user_id: str,
+    voice_profile_id: str,
+    *,
+    allow_quality_preview: bool = False,
+) -> Dict[str, Any]:
     profile = store.get_voice_profile(user_id, voice_profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="voice profile not found for user")
@@ -5793,7 +5835,7 @@ def _validate_voice_profile_for_synthesis(user_id: str, voice_profile_id: str) -
         except ValueError:
             reason = SubjectEligibilityReason.SUBJECT_MISMATCH
         _subject_eligibility_hard_deny(HighRiskCapability.CLONED_VOICE, reason)
-    if bool(profile.get("qualityAcceptanceRequired", True)):
+    if bool(profile.get("qualityAcceptanceRequired", True)) and not allow_quality_preview:
         raise HTTPException(status_code=409, detail="voice profile quality acceptance is required")
     provider_speaker_id = _voice_clone_provider_speaker_id(profile)
     if not provider_speaker_id:
@@ -6034,16 +6076,44 @@ def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
     return updated
 
 
-def _voice_profile_quality_acceptance_update(profile: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+def _voice_profile_quality_acceptance_update(
+    profile: Dict[str, Any],
+    user_id: str,
+    preview_receipt_id: str,
+) -> Dict[str, Any]:
     if profile.get("sampleStatus") != "ready" or not bool(profile.get("isEnabled")) or not bool(profile.get("realCloneProviderReady")):
         raise HTTPException(status_code=409, detail="voice profile is not ready for quality acceptance")
+    if not bool(profile.get("qualityAcceptanceRequired", True)):
+        raise HTTPException(status_code=409, detail="voice profile quality has already been accepted")
+
+    expected_receipt_hash = str(profile.get("qualityPreviewReceiptHash") or "").strip()
+    if not preview_receipt_id or not expected_receipt_hash:
+        raise HTTPException(status_code=409, detail="voice profile quality preview receipt is required")
+    actual_receipt_hash = _voice_clone_quality_preview_receipt_hash(preview_receipt_id)
+    if not secrets.compare_digest(expected_receipt_hash, actual_receipt_hash):
+        raise HTTPException(status_code=409, detail="voice profile quality preview receipt is invalid")
+
+    expires_at_value = str(profile.get("qualityPreviewExpiresAt") or "").strip()
+    try:
+        expires_at = datetime.fromisoformat(expires_at_value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="voice profile quality preview receipt is invalid") from exc
+    if expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=409, detail="voice profile quality preview receipt has expired")
 
     now = datetime.now(timezone.utc).isoformat()
     updated = dict(profile)
+    updated.pop("qualityPreviewReceiptHash", None)
+    updated.pop("qualityPreviewIssuedAt", None)
+    updated.pop("qualityPreviewExpiresAt", None)
+    updated.pop("qualityPreviewReceiptVersion", None)
     updated["qualityAcceptanceRequired"] = False
     updated["qualityAcceptanceState"] = "accepted"
     updated["qualityAcceptedAt"] = now
     updated["qualityAcceptedBy"] = user_id
+    updated["qualityAcceptanceReceiptHash"] = actual_receipt_hash
+    updated["qualityAcceptanceReceiptIssuedAt"] = now
+    updated["qualityPreviewReceiptConsumedAt"] = now
     updated["updatedAt"] = now
     return updated
 
@@ -6135,12 +6205,18 @@ def refresh_voice_profile(request: Request, user_id: str, voice_profile_id: str)
 
 
 @app.post("/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance")
-def accept_voice_profile_quality(request: Request, user_id: str, voice_profile_id: str) -> Dict[str, Any]:
+def accept_voice_profile_quality(
+    request: Request,
+    user_id: str,
+    voice_profile_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     user_id = _principal_path_owner(request, user_id)
     profile = store.get_voice_profile(user_id, voice_profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="voice profile not found")
-    accepted = _voice_profile_quality_acceptance_update(profile, user_id)
+    preview_receipt_id = str((payload or {}).get("previewReceiptId") or "").strip()
+    accepted = _voice_profile_quality_acceptance_update(profile, user_id, preview_receipt_id)
     saved = store.save_voice_profile(user_id, accepted)
     _update_voice_clone_slot(voice_profile_id, "ready")
     return {"status": "accepted", "profile": _voice_clone_public_profile(saved)}
@@ -6155,14 +6231,23 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
         HighRiskCapability.CLONED_VOICE,
         required=True,
     )
-    profile = _validate_voice_profile_for_synthesis(user_id, voice_profile_id)
-    provider_speaker_id = _voice_clone_provider_speaker_id(profile)
     text = _required_text(payload, "text", 4000)
     audio_format = str(payload.get("format") or "mp3").strip() or "mp3"
     sample_rate = int(payload.get("sampleRate") or 24000)
     speech_rate = int(payload.get("speechRate") or -10)
     loudness_rate = int(payload.get("loudnessRate") or 10)
     output_mode = str(payload.get("outputMode") or "default").strip() or "default"
+    request_purpose = str(payload.get("requestPurpose") or VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE).strip()
+    if request_purpose not in {VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE, VOICE_CLONE_QUALITY_PREVIEW_PURPOSE}:
+        raise HTTPException(status_code=400, detail="unsupported voice synthesis requestPurpose")
+    if request_purpose == VOICE_CLONE_QUALITY_PREVIEW_PURPOSE and output_mode != "default":
+        raise HTTPException(status_code=400, detail="quality preview must use default audio output")
+    profile = _validate_voice_profile_for_synthesis(
+        user_id,
+        voice_profile_id,
+        allow_quality_preview=request_purpose == VOICE_CLONE_QUALITY_PREVIEW_PURPOSE,
+    )
+    provider_speaker_id = _voice_clone_provider_speaker_id(profile)
     provider_audio_format = audio_format
     provider_sample_rate = sample_rate
     if output_mode == "tencentAudioDrive":
@@ -6241,7 +6326,13 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
         )),
         "visemeTimeline": result.get("visemeTimeline"),
         "audio": audio_payload,
+        "requestPurpose": request_purpose,
     }
+    if request_purpose == VOICE_CLONE_QUALITY_PREVIEW_PURPOSE:
+        receipt_profile, receipt = _issue_voice_profile_quality_preview_receipt(profile)
+        store.save_voice_profile(user_id, receipt_profile)
+        response["qualityPreviewReceiptId"] = receipt["id"]
+        response["qualityPreviewExpiresAt"] = receipt["expiresAt"]
     provider_log_id = str(result.get("providerLogId") or "").strip()
     if provider_request_id:
         response["providerRequestIdHash"] = _provider_reference_hash(provider_request_id)

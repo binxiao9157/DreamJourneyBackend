@@ -6,7 +6,7 @@ import unittest
 import wave
 from copy import deepcopy
 from io import BytesIO
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -3674,6 +3674,7 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                 }
 
         profile_store = InMemoryStore()
+        preview_receipt_id = "quality-preview-refresh-001"
         slot = profile_store.allocate_voice_clone_slot(
             ["S_slot_001"],
             user_id="owner",
@@ -3693,6 +3694,8 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                 "isEnabled": False,
                 "realCloneProviderReady": True,
                 "qualityAcceptanceRequired": True,
+                "qualityPreviewReceiptHash": main_module._voice_clone_quality_preview_receipt_hash(preview_receipt_id),
+                "qualityPreviewExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
             },
         )
         provider = FakeProvider()
@@ -3701,7 +3704,10 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
         with patch("app.main.store", profile_store), patch("app.main.VoiceCloneProviderFactory") as factory:
             factory.return_value.make.return_value = provider
             refreshed = client.post("/voice/profiles/owner/vp_bound/refresh")
-            accepted = client.post("/voice/profiles/owner/vp_bound/quality-acceptance")
+            accepted = client.post(
+                "/voice/profiles/owner/vp_bound/quality-acceptance",
+                json={"previewReceiptId": preview_receipt_id},
+            )
             deleted = client.delete("/voice/profiles/owner/vp_bound")
 
         self.assertEqual(refreshed.status_code, 200)
@@ -4030,7 +4036,7 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
         self.assertFalse(profile["isEnabled"])
         self.assertFalse(profile["realCloneProviderReady"])
         self.assertEqual(profile["providerMode"], "mockContract")
-        self.assertEqual(profile["contractVersion"], 2)
+        self.assertEqual(profile["contractVersion"], main_module.VOICE_CLONE_CONTRACT_VERSION)
         self.assertIn("disableVoiceProfile", profile["disableContract"])
         self.assertIn("deleteVoiceProfile", profile["deleteContract"])
         self.assertNotIn("rawSampleURL", profile)
@@ -4095,6 +4101,7 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
             client = TestClient(app)
             user_id = "voice_clone_quality_user"
             voice_profile_id = "S_quality_acceptance_1"
+            preview_receipt_id = "quality-preview-receipt-001"
             main_module.store.save_voice_profile(
                 user_id,
                 {
@@ -4105,6 +4112,8 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                     "isEnabled": True,
                     "realCloneProviderReady": True,
                     "qualityAcceptanceRequired": True,
+                    "qualityPreviewReceiptHash": main_module._voice_clone_quality_preview_receipt_hash(preview_receipt_id),
+                    "qualityPreviewExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
                     "providerMode": "volcengineVoiceCloneV3",
                     "providerStatus": "2",
                     "authorizationConfirmed": True,
@@ -4115,7 +4124,10 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                 },
             )
 
-            accepted = client.post(f"/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance")
+            accepted = client.post(
+                f"/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance",
+                json={"previewReceiptId": preview_receipt_id},
+            )
             listed = client.get(f"/voice/profiles/{user_id}")
 
             self.assertEqual(accepted.status_code, 200)
@@ -4125,6 +4137,7 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
             self.assertEqual(profile["qualityAcceptanceState"], "accepted")
             self.assertEqual(profile["qualityAcceptedBy"], user_id)
             self.assertIn("qualityAcceptedAt", profile)
+            self.assertNotIn("qualityAcceptanceReceiptHash", profile)
             self.assertEqual(listed.json()["profiles"][0]["qualityAcceptanceRequired"], False)
         finally:
             main_module.store = previous_store
@@ -4161,6 +4174,112 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
 
             self.assertEqual(accepted.status_code, 409)
             self.assertTrue(persisted["qualityAcceptanceRequired"])
+        finally:
+            main_module.store = previous_store
+
+    def test_voice_clone_quality_preview_receipt_is_required_before_echo_synthesis(self):
+        class FakeVoiceCloneTTSProvider:
+            provider_mode = "volcengineVoiceCloneV1TTS"
+            is_configured = True
+
+            def synthesize(self, *, text, user_id, voice_profile_id, audio_format, sample_rate, speech_rate, loudness_rate):
+                return {
+                    "audioBase64": "U09VTkQ=",
+                    "audioFormat": audio_format,
+                    "byteCount": 5,
+                    "providerMode": self.provider_mode,
+                    "voiceProfileId": voice_profile_id,
+                    "visemeTimeline": None,
+                }
+
+        previous_store = main_module.store
+        main_module.store = InMemoryStore()
+        try:
+            client = TestClient(app)
+            user_id = "voice_clone_preview_user"
+            voice_profile_id = "vp_quality_preview"
+            main_module.store.save_voice_profile(
+                user_id,
+                {
+                    "id": voice_profile_id,
+                    "voiceProfileId": voice_profile_id,
+                    "userId": user_id,
+                    "providerSpeakerId": "S_quality_preview_001",
+                    "sampleStatus": "ready",
+                    "isEnabled": True,
+                    "realCloneProviderReady": True,
+                    "qualityAcceptanceRequired": True,
+                    "providerMode": "volcengineVoiceCloneV3",
+                    "providerStatus": "2",
+                    "authorizationConfirmed": True,
+                    "authorizationCopy": "用户已授权本人声音样本。",
+                    "disableContract": main_module.VOICE_CLONE_DISABLE_CONTRACT,
+                    "deleteContract": main_module.VOICE_CLONE_DELETE_CONTRACT,
+                    "contractVersion": main_module.VOICE_CLONE_CONTRACT_VERSION,
+                },
+            )
+
+            with patch("app.main.VoiceCloneTTSProviderFactory") as factory:
+                factory.return_value.make.return_value = FakeVoiceCloneTTSProvider()
+                direct_echo = client.post(
+                    "/voice/synthesis",
+                    json={
+                        "userId": user_id,
+                        "voiceProfileId": voice_profile_id,
+                        "text": "这不应直接进入回响。",
+                        "subjectEligibility": verified_self_eligibility(),
+                    },
+                )
+                missing_receipt = client.post(
+                    f"/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance",
+                    json={},
+                )
+                preview = client.post(
+                    "/voice/synthesis",
+                    json={
+                        "userId": user_id,
+                        "voiceProfileId": voice_profile_id,
+                        "text": "请确认这段试听是否像本人。",
+                        "requestPurpose": "qualityPreview",
+                        "subjectEligibility": verified_self_eligibility(),
+                    },
+                )
+
+                self.assertEqual(preview.status_code, 200)
+                preview_payload = preview.json()
+                preview_receipt_id = preview_payload.get("qualityPreviewReceiptId")
+                self.assertIsInstance(preview_receipt_id, str)
+                self.assertTrue(preview_receipt_id)
+                self.assertIn("qualityPreviewExpiresAt", preview_payload)
+
+                accepted = client.post(
+                    f"/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance",
+                    json={"previewReceiptId": preview_receipt_id},
+                )
+                echo_after_acceptance = client.post(
+                    "/voice/synthesis",
+                    json={
+                        "userId": user_id,
+                        "voiceProfileId": voice_profile_id,
+                        "text": "确认后才能进入回响。",
+                        "subjectEligibility": verified_self_eligibility(),
+                    },
+                )
+                replay = client.post(
+                    f"/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance",
+                    json={"previewReceiptId": preview_receipt_id},
+                )
+
+            self.assertEqual(direct_echo.status_code, 409)
+            self.assertEqual(missing_receipt.status_code, 409)
+            self.assertEqual(accepted.status_code, 200)
+            self.assertFalse(accepted.json()["profile"]["qualityAcceptanceRequired"])
+            self.assertEqual(echo_after_acceptance.status_code, 200)
+            self.assertEqual(replay.status_code, 409)
+            persisted = main_module.store.get_voice_profile(user_id, voice_profile_id)
+            self.assertEqual(persisted["qualityAcceptanceState"], "accepted")
+            self.assertIn("qualityAcceptanceReceiptHash", persisted)
+            self.assertNotIn("qualityPreviewReceiptHash", persisted)
         finally:
             main_module.store = previous_store
 
