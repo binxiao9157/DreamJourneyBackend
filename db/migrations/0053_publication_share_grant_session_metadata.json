@@ -1,0 +1,13 @@
+{
+  "version": "0053",
+  "name": "publication_share_grant_session_metadata",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationShareGrantSessionDefaultDeny",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "shareGrantIssueV1": false,
+    "visitorSessionV1": false,
+    "publicGatewayV1": false
+  }
+}
