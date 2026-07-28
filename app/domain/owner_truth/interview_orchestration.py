@@ -92,6 +92,7 @@ class InterviewOrchestrationInput:
     is_sensitive: bool
     fatigue: InterviewFatigue = InterviewFatigue.NORMAL
     has_pending_review_batch: bool = False
+    accepted_broaden_recommendation: bool = False
 
     def __post_init__(self) -> None:
         normalized_thread_id = str(self.thread_id or "").strip()
@@ -125,6 +126,7 @@ class InterviewOrchestrationInput:
             "user_changed_topic",
             "is_sensitive",
             "has_pending_review_batch",
+            "accepted_broaden_recommendation",
         ):
             if not isinstance(getattr(self, field), bool):
                 raise InterviewOrchestrationError(f"{field} must be a boolean")
@@ -245,6 +247,18 @@ class InterviewOrchestrator:
             return InterviewDecision(
                 action=InterviewAction.DEEPEN,
                 reason_code="highValueIncompleteStory",
+                max_followups_remaining=remaining,
+                review_batch_due=batch_due,
+                next_session_state=InterviewSessionState.ACTIVE,
+            )
+        if state.accepted_broaden_recommendation:
+            # A future activation service may set this only after it has
+            # revalidated the current server-planned recommendation. The
+            # orchestrator receives no candidate identity, evidence reference,
+            # question text, or client-supplied authorization claim.
+            return InterviewDecision(
+                action=InterviewAction.BROADEN,
+                reason_code="acceptedSafeRecommendation",
                 max_followups_remaining=remaining,
                 review_batch_due=batch_due,
                 next_session_state=InterviewSessionState.ACTIVE,

@@ -64,6 +64,60 @@ class OwnerTruthInterviewOrchestrationTests(unittest.TestCase):
         self.assertEqual(decision.action, InterviewAction.CLARIFY)
         self.assertEqual(decision.reason_code, "materialAmbiguity")
 
+    def test_accepted_safe_breadth_recommendation_broadens_only_after_the_current_story_is_complete(self) -> None:
+        broaden = self.orchestrator.decide(
+            make_input(
+                topic_incomplete=False,
+                accepted_broaden_recommendation=True,
+            )
+        )
+        incomplete = self.orchestrator.decide(
+            make_input(
+                topic_incomplete=True,
+                accepted_broaden_recommendation=True,
+            )
+        )
+
+        self.assertEqual(broaden.action, InterviewAction.BROADEN)
+        self.assertEqual(broaden.reason_code, "acceptedSafeRecommendation")
+        self.assertEqual(broaden.next_session_state, InterviewSessionState.ACTIVE)
+        self.assertEqual(incomplete.action, InterviewAction.DEEPEN)
+        self.assertEqual(incomplete.reason_code, "highValueIncompleteStory")
+
+    def test_accepted_breadth_recommendation_cannot_bypass_safety_fatigue_or_summary_priority(self) -> None:
+        sensitive = self.orchestrator.decide(
+            make_input(
+                topic_incomplete=False,
+                is_sensitive=True,
+                accepted_broaden_recommendation=True,
+            )
+        )
+        exhausted = self.orchestrator.decide(
+            make_input(
+                topic_incomplete=False,
+                fatigue=InterviewFatigue.EXHAUSTED,
+                accepted_broaden_recommendation=True,
+            )
+        )
+        summary = self.orchestrator.decide(
+            make_input(
+                topic_incomplete=False,
+                deepening_turn_count=4,
+                accepted_broaden_recommendation=True,
+            )
+        )
+
+        self.assertEqual(sensitive.action, InterviewAction.PAUSE)
+        self.assertEqual(sensitive.reason_code, "sensitiveOrUnsafe")
+        self.assertEqual(exhausted.action, InterviewAction.PAUSE)
+        self.assertEqual(exhausted.reason_code, "fatigueLimitReached")
+        self.assertEqual(summary.action, InterviewAction.SUMMARIZE)
+        self.assertEqual(summary.reason_code, "followupBudgetReached")
+
+    def test_broaden_acceptance_signal_must_be_boolean(self) -> None:
+        with self.assertRaisesRegex(Exception, "accepted_broaden_recommendation must be a boolean"):
+            make_input(accepted_broaden_recommendation="true")
+
     def test_user_boundaries_and_sensitive_content_fail_closed_to_pause(self) -> None:
         do_not_ask = self.orchestrator.decide(
             make_input(user_boundary=InterviewBoundary.DO_NOT_ASK)

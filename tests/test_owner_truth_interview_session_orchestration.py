@@ -128,6 +128,21 @@ class OwnerTruthInterviewSessionOrchestrationTests(unittest.TestCase):
         self.assertEqual(persisted.row_version, self.session_version)
         self.assertEqual(persisted.boundary, ConversationInterviewBoundary.SKIP_ONCE)
 
+    def test_server_accepted_breadth_signal_reaches_the_orchestrator_without_exposing_private_content(self) -> None:
+        self._start()
+
+        result = self.orchestration.decide(
+            session_id=self.session_id,
+            context=self.context,
+            signals=self._signals(accepted_broaden_recommendation=True),
+        )
+
+        self.assertEqual(result.decision.action, InterviewAction.BROADEN)
+        self.assertEqual(result.decision.reason_code, "acceptedSafeRecommendation")
+        rendered = str(result.value_free_summary())
+        self.assertNotIn(self.thread_id, rendered)
+        self.assertNotIn(self.session_id, rendered)
+
     def test_persisted_do_not_ask_fails_closed_even_when_transient_signals_are_safe(self) -> None:
         self._start()
         boundary = self.conversation.set_boundary(

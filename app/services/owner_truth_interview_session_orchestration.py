@@ -53,6 +53,7 @@ class InterviewSessionOrchestrationSignals:
     needs_clarification: bool = False
     user_changed_topic: bool = False
     is_sensitive: bool = False
+    accepted_broaden_recommendation: bool = False
 
     def __post_init__(self) -> None:
         for field in (
@@ -60,6 +61,7 @@ class InterviewSessionOrchestrationSignals:
             "needs_clarification",
             "user_changed_topic",
             "is_sensitive",
+            "accepted_broaden_recommendation",
         ):
             if not isinstance(getattr(self, field), bool):
                 raise OwnerTruthInterviewSessionOrchestrationError(
@@ -169,6 +171,7 @@ class OwnerTruthInterviewSessionOrchestrationService:
                 is_sensitive=signals.is_sensitive,
                 fatigue=persisted.fatigue,
                 has_pending_review_batch=persisted.pending_review_batch_id is not None,
+                accepted_broaden_recommendation=signals.accepted_broaden_recommendation,
             )
         )
         return OwnerTruthInterviewSessionOrchestrationResult(
