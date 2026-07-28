@@ -36,6 +36,9 @@ from app.services.owner_truth_memory_projection import (
     InMemoryOwnerTruthMemoryProjectionRepository,
     OwnerTruthMemoryProjectionService,
 )
+from app.services.owner_truth_memory_search_projection import (
+    InMemoryOwnerTruthMemorySearchDocumentProjectionRepository,
+)
 
 
 def _hash(value: object) -> str:
@@ -50,6 +53,11 @@ class _Store:
         self.projection_repository = InMemoryOwnerTruthMemoryProjectionRepository(
             self.review_repository
         )
+        self.search_projection_repository = (
+            InMemoryOwnerTruthMemorySearchDocumentProjectionRepository(
+                self.projection_repository
+            )
+        )
         self.answer_repository = InMemoryOwnerTruthAnswerCitationRepository()
 
     @contextmanager
@@ -61,6 +69,9 @@ class _Store:
 
     def owner_truth_memory_projection_repository(self):
         return self.projection_repository
+
+    def owner_truth_memory_search_document_projection_repository(self):
+        return self.search_projection_repository
 
     def owner_truth_answer_citation_repository(self):
         return self.answer_repository
@@ -204,6 +215,37 @@ class OwnerTruthAnswerCitationTests(unittest.TestCase):
             result.fallbacks,
             ("owner_truth_context_unavailable_no_personal_memory",),
         )
+
+    def test_query_ranked_answer_citation_uses_only_matching_confirmed_memory(self) -> None:
+        matched = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "父亲修好自行车后带我去公园"},
+        )
+        unmatched = self._candidate(
+            kind=MemoryKind.KNOWLEDGE,
+            content={"claim": "夏天的海边总有温暖的风"},
+        )
+        self._activate(matched, command_id="answer-citation-query-matched")
+        self._activate(unmatched, command_id="answer-citation-query-unmatched")
+        self.projection_service.rebuild(context=self.context)
+        self.store.search_projection_repository.rebuild(context=self.context)
+
+        result = self.service.record(
+            context=self.context,
+            command=self._command(
+                command_id="answer-citation-query-ranked-001",
+                answer_text="我只引用与你的问题有关的已确认记忆。",
+            ),
+            context_payload={
+                "intent": "echo_chat",
+                "query": "自行车",
+                "selectionMode": "deterministicTextFallback",
+            },
+        )
+
+        self.assertEqual(result.citation_count, 1)
+        self.assertEqual(result.citations[0]["citation"]["sourceId"], matched.source_id)
+        self.assertEqual(result.fallbacks, ())
 
     def test_rejects_non_owner_and_conflicting_command_reuse(self) -> None:
         candidate = self._candidate(

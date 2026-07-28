@@ -4602,6 +4602,7 @@ def record_owner_truth_answer_citation(
             context_payload={
                 "intent": payload.get("intent"),
                 "query": payload.get("query"),
+                "selectionMode": payload.get("selectionMode"),
             },
         )
     except OwnerTruthMemoryProjectionError as error:

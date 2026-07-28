@@ -979,6 +979,44 @@ def main() -> None:
                 "Context shadow build evidence must not expose raw query or MemoryVersion content",
             )
 
+            query_ranked_context_build = OwnerTruthContextShadowBuildService(
+                store,
+                enabled=True,
+            ).build(
+                context=review_context,
+                payload={
+                    "intent": "echo_chat",
+                    "query": "自行车",
+                    "selectionMode": "deterministicTextFallback",
+                },
+            )
+            query_ranked_context_build_qa_summary = context_shadow_build_summary(
+                query_ranked_context_build
+            )
+            require(
+                query_ranked_context_build["request"]["selectionMode"]
+                == "deterministicTextFallback"
+                and len(query_ranked_context_build["selectedContext"]) == 1
+                and len(query_ranked_context_build["citationProof"]) == 1
+                and query_ranked_context_build["selectedContext"][0]["citation"]["memoryVersionId"]
+                == corrected.memory_activation.memory_version_id
+                and query_ranked_context_build["selectedContext"][0]["rank"]
+                == {"position": 1, "strategy": "deterministicTextFallback"}
+                and any(
+                    item["reason"] == "query_not_matched"
+                    for item in query_ranked_context_build["filteredContext"]
+                )
+                and query_ranked_context_build["fallbacks"] == [],
+                "query-ranked Context must narrow to current matching confirmed memory only",
+            )
+            require(
+                "自行车" not in str(query_ranked_context_build_qa_summary)
+                and review_content["summary"] not in str(query_ranked_context_build_qa_summary)
+                and review_knowledge_content["claim"]
+                not in str(query_ranked_context_build_qa_summary),
+                "query-ranked Context evidence must stay value-free",
+            )
+
             raw_answer = "我只根据当前确认的个人记忆回答。"
             answer_citation_service = OwnerTruthAnswerCitationService(store, enabled=True)
             answer_citation = answer_citation_service.record(
@@ -1013,6 +1051,37 @@ def main() -> None:
                 and review_content["summary"] not in str(answer_citation_qa_summary)
                 and review_knowledge_content["claim"] not in str(answer_citation_qa_summary),
                 "Answer/Citation QA evidence must stay value-free",
+            )
+
+            query_ranked_answer_citation = answer_citation_service.record(
+                context=review_context,
+                command=OwnerTruthAnswerCitationCommand(
+                    command_id="owner-truth-answer-citation-query-ranked-smoke-001",
+                    answer_text="我只引用与当前问题匹配的已确认记忆。",
+                ),
+                context_payload={
+                    "intent": "echo_chat",
+                    "query": "自行车",
+                    "selectionMode": "deterministicTextFallback",
+                },
+            )
+            query_ranked_answer_qa_summary = answer_citation_summary(
+                query_ranked_answer_citation
+            )
+            require(
+                query_ranked_answer_citation.context_hash
+                == query_ranked_context_build["contextHash"]
+                and query_ranked_answer_citation.citation_count == 1
+                and query_ranked_answer_citation.citations[0]["citation"]["memoryVersionId"]
+                == corrected.memory_activation.memory_version_id
+                and query_ranked_answer_citation.fallbacks == (),
+                "query-ranked Answer/Citation receipt must bind the same narrowed Context",
+            )
+            require(
+                "自行车" not in str(query_ranked_answer_qa_summary)
+                and review_content["summary"] not in str(query_ranked_answer_qa_summary)
+                and review_knowledge_content["claim"] not in str(query_ranked_answer_qa_summary),
+                "query-ranked Answer/Citation evidence must stay value-free",
             )
 
             expect_rejected(

@@ -17,6 +17,7 @@ from app.domain.owner_truth.contracts import (
     SensitivityLevel,
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
 
@@ -451,6 +452,36 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertNotIn(raw_query, str(build))
         self.assertNotIn(candidate.content["summary"], str(build))
 
+        main_module.store.owner_truth_memory_search_document_projection_repository().rebuild(
+            context=OwnerTruthCommandContext(
+                vault_id=vault_id,
+                owner_subject_id=owner_id,
+                actor_subject_id=owner_id,
+            )
+        )
+        query_ranked_build = client.post(
+            f"/v2/vaults/{vault_id}/context-shadow/build",
+            headers=headers,
+            json={
+                "intent": "echo_chat",
+                "query": "院子",
+                "selectionMode": "deterministicTextFallback",
+            },
+        )
+        self.assertEqual(query_ranked_build.status_code, 200)
+        query_ranked_shadow = query_ranked_build.json()["contextShadow"]
+        self.assertEqual(
+            query_ranked_shadow["request"]["selectionMode"],
+            "deterministicTextFallback",
+        )
+        self.assertEqual(len(query_ranked_shadow["selectedContext"]), 1)
+        self.assertEqual(
+            query_ranked_shadow["selectedContext"][0]["rank"]["strategy"],
+            "deterministicTextFallback",
+        )
+        self.assertNotIn("院子", str(query_ranked_shadow))
+        self.assertNotIn(candidate.content["summary"], str(query_ranked_shadow))
+
         raw_answer = "我会只依据已确认的个人记忆回答。"
         answer_citation = client.post(
             f"/v2/vaults/{vault_id}/answer-citation-receipts",
@@ -474,6 +505,27 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertNotIn(raw_query, str(evidence))
         self.assertNotIn(raw_answer, str(evidence))
         self.assertNotIn(candidate.content["summary"], str(evidence))
+
+        query_ranked_answer_citation = client.post(
+            f"/v2/vaults/{vault_id}/answer-citation-receipts",
+            headers=headers,
+            json={
+                "commandId": "answer-citation-api-query-ranked-001",
+                "intent": "echo_chat",
+                "query": "院子",
+                "selectionMode": "deterministicTextFallback",
+                "answerText": "我只会引用与当前问题匹配的已确认记忆。",
+            },
+        )
+        self.assertEqual(query_ranked_answer_citation.status_code, 201)
+        query_ranked_evidence = query_ranked_answer_citation.json()["answerCitation"]
+        self.assertEqual(query_ranked_evidence["citationCount"], 1)
+        self.assertEqual(
+            query_ranked_evidence["contextHash"],
+            query_ranked_shadow["contextHash"],
+        )
+        self.assertNotIn("院子", str(query_ranked_evidence))
+        self.assertNotIn(candidate.content["summary"], str(query_ranked_evidence))
 
         correction_text = "不是父亲，是外祖父在院子里讲故事。"
         citation = evidence["citations"][0]

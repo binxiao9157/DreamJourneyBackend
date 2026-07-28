@@ -37,6 +37,9 @@ from app.services.owner_truth_memory_projection import (
     InMemoryOwnerTruthMemoryProjectionRepository,
     OwnerTruthMemoryProjectionService,
 )
+from app.services.owner_truth_memory_search_projection import (
+    InMemoryOwnerTruthMemorySearchDocumentProjectionRepository,
+)
 
 
 def _hash(value: object) -> str:
@@ -51,6 +54,11 @@ class _Store:
         self.projection_repository = InMemoryOwnerTruthMemoryProjectionRepository(
             self.review_repository
         )
+        self.search_projection_repository = (
+            InMemoryOwnerTruthMemorySearchDocumentProjectionRepository(
+                self.projection_repository
+            )
+        )
 
     @contextmanager
     def request_unit_of_work(self, *, correlation_id: str, command_id: str):
@@ -61,6 +69,9 @@ class _Store:
 
     def owner_truth_memory_projection_repository(self):
         return self.projection_repository
+
+    def owner_truth_memory_search_document_projection_repository(self):
+        return self.search_projection_repository
 
     def get_kb_snapshot(self, _user_id: str):
         raise AssertionError("Owner Truth Context shadow must not read legacy KBLite")
@@ -261,6 +272,107 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
         self.assertNotIn(raw_query, str(summary))
         self.assertNotIn(experience.content["summary"], str(summary))
         self.assertNotIn(restricted.content["label"], str(summary))
+
+    def test_shadow_build_can_query_rank_current_search_projection_without_raw_values(self) -> None:
+        matched = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "父亲修好自行车后带我去公园"},
+        )
+        unmatched = self._candidate(
+            kind=MemoryKind.KNOWLEDGE,
+            content={"claim": "夏天的海边总有温暖的风"},
+        )
+        restricted = self._candidate(
+            kind=MemoryKind.EMOTION,
+            content={"label": "自行车相关的敏感情绪"},
+            sensitivity=SensitivityLevel.RESTRICTED,
+        )
+        self._activate(matched, command_id="context-shadow-query-matched")
+        self._activate(unmatched, command_id="context-shadow-query-unmatched")
+        self._activate(restricted, command_id="context-shadow-query-restricted")
+        self.projection_service.rebuild(context=self.context)
+        self.store.search_projection_repository.rebuild(context=self.context)
+
+        query = "自行车"
+        result = OwnerTruthContextShadowBuildService(self.store, enabled=True).build(
+            context=self.context,
+            payload={
+                "intent": "echo_chat",
+                "query": query,
+                "selectionMode": "deterministicTextFallback",
+            },
+        )
+        summary = context_shadow_build_summary(result)
+
+        self.assertEqual(result["request"]["selectionMode"], "deterministicTextFallback")
+        self.assertEqual(len(result["selectedContext"]), 1)
+        self.assertEqual(
+            result["selectedContext"][0]["citation"]["sourceId"],
+            matched.source_id,
+        )
+        self.assertEqual(
+            result["selectedContext"][0]["reason"],
+            "confirmed_current_memory_version_query_match",
+        )
+        self.assertEqual(
+            result["selectedContext"][0]["rank"],
+            {"position": 1, "strategy": "deterministicTextFallback"},
+        )
+        self.assertEqual(
+            {item["reason"] for item in result["filteredContext"]},
+            {"query_not_matched", "sensitivity_not_context_eligible"},
+        )
+        self.assertEqual(result["fallbacks"], [])
+        self.assertNotIn(query, str(summary))
+        self.assertNotIn(matched.content["summary"], str(summary))
+        self.assertNotIn(unmatched.content["claim"], str(summary))
+        self.assertNotIn(restricted.content["label"], str(summary))
+
+    def test_shadow_build_query_selection_fails_closed_without_search_projection(self) -> None:
+        candidate = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "没有当前检索索引时不得回退全部个人记忆"},
+        )
+        self._activate(candidate, command_id="context-shadow-query-search-unavailable")
+        self.projection_service.rebuild(context=self.context)
+
+        result = OwnerTruthContextShadowBuildService(self.store, enabled=True).build(
+            context=self.context,
+            payload={
+                "query": "检索索引",
+                "selectionMode": "deterministicTextFallback",
+            },
+        )
+
+        self.assertEqual(result["authority"]["state"], "ready")
+        self.assertEqual(result["selectedContext"], [])
+        self.assertEqual(
+            result["fallbacks"],
+            ["owner_truth_context_search_unavailable_no_personal_memory"],
+        )
+        self.assertEqual(
+            result["filteredContext"][0]["reason"],
+            "query_retrieval_unavailable",
+        )
+
+    def test_shadow_build_context_hash_binds_query_summary(self) -> None:
+        candidate = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "每轮 QA 上下文必须绑定提交的问题摘要"},
+        )
+        self._activate(candidate, command_id="context-shadow-query-hash")
+        self.projection_service.rebuild(context=self.context)
+
+        first = OwnerTruthContextShadowBuildService(self.store, enabled=True).build(
+            context=self.context,
+            payload={"query": "第一个问题"},
+        )
+        second = OwnerTruthContextShadowBuildService(self.store, enabled=True).build(
+            context=self.context,
+            payload={"query": "第二个问题"},
+        )
+
+        self.assertNotEqual(first["contextHash"], second["contextHash"])
 
     def test_shadow_build_uses_explicit_no_personal_memory_fallback_when_projection_unavailable(self) -> None:
         candidate = self._candidate(
