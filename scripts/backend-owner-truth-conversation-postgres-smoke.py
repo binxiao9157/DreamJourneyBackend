@@ -78,6 +78,9 @@ from app.services.owner_truth_candidate_extraction import (
     OwnerTruthCandidateExtractionService,
 )
 from app.services.owner_truth_conversation import OwnerTruthConversationService
+from app.services.owner_truth_interview_review_batch_automation import (
+    OwnerTruthInterviewReviewBatchAutomationService,
+)
 from app.services.owner_truth_interview_candidate_proposal import (
     OwnerTruthInterviewCandidateProposalService,
 )
@@ -874,7 +877,136 @@ def main() -> None:
                 except Exception:
                     immutable_message_rejected = True
                     connection.rollback()
-                require(immutable_message_rejected, "conversation message must be append-only")
+        require(immutable_message_rejected, "conversation message must be append-only")
+
+        # Exercise the new default-off bridge in a separate Vault so the
+        # existing lifecycle scenario keeps its one-active-session invariant.
+        # It must create one pending ReviewBatch after five persisted owner
+        # narratives, preserve the new optimistic version for the next write,
+        # and never extract a Candidate or activate a Memory on its own.
+        automation_context = OwnerTruthCommandContext(
+            vault_id="conversation-vault-review-batch-automation",
+            owner_subject_id="conversation-owner-review-batch-automation",
+            actor_subject_id="conversation-owner-review-batch-automation",
+            policy_version="owner-truth-v1",
+        )
+        automation_thread_id = str(uuid.uuid4())
+        automation_session_id = str(uuid.uuid4())
+        automation_start = invoke(
+            store,
+            command_id="start-review-batch-automation-smoke",
+            operation=lambda service: service.start_session(
+                command=StartInterviewSessionCommand(
+                    command_id="start-review-batch-automation-smoke",
+                    thread_id=automation_thread_id,
+                    session_id=automation_session_id,
+                    expected_thread_version=0,
+                    entry_mode="naturalInput",
+                ),
+                context=automation_context,
+            ),
+        )
+        automation_thread_version = automation_start.thread_version
+        automation_session_version = automation_start.session_version
+        automation_service = OwnerTruthInterviewReviewBatchAutomationService(
+            store,
+            enabled=True,
+        )
+        automation_review_batch_id = ""
+        for index in range(5):
+            command_id = f"append-review-batch-automation-smoke-{index}"
+            appended_automation_turn = invoke(
+                store,
+                command_id=command_id,
+                operation=lambda service, command_id=command_id, index=index: service.append_message(
+                    command=AppendInterviewMessageCommand(
+                        command_id=command_id,
+                        thread_id=automation_thread_id,
+                        session_id=automation_session_id,
+                        message_id=str(uuid.uuid4()),
+                        expected_thread_version=automation_thread_version,
+                        expected_session_version=automation_session_version,
+                        author=ConversationMessageAuthor.OWNER,
+                        kind=ConversationMessageKind.NARRATIVE,
+                        text=f"自动批次验证私有叙述 {index + 1}。",
+                    ),
+                    context=automation_context,
+                ),
+            )
+            automation_thread_version = appended_automation_turn.thread_version
+            automation_session_version = appended_automation_turn.session_version
+            automation_result = automation_service.ensure_after_transition(
+                session_id=automation_session_id,
+                transition_command_id=command_id,
+                context=automation_context,
+            )
+            if index < 4:
+                require(
+                    automation_result.state == "notDue"
+                    and automation_result.session_version == automation_session_version,
+                    "sub-threshold automation must remain a no-op",
+                )
+            else:
+                require(
+                    automation_result.state == "created"
+                    and automation_result.review_batch is not None,
+                    "fifth owner turn must create one pending review batch",
+                )
+                automation_review_batch_id = automation_result.review_batch.review_batch_id
+                automation_session_version = automation_result.session_version
+        require(automation_review_batch_id, "automatic review batch identifier must be present")
+
+        sixth_command_id = "append-review-batch-automation-smoke-5"
+        sixth_turn = invoke(
+            store,
+            command_id=sixth_command_id,
+            operation=lambda service: service.append_message(
+                command=AppendInterviewMessageCommand(
+                    command_id=sixth_command_id,
+                    thread_id=automation_thread_id,
+                    session_id=automation_session_id,
+                    message_id=str(uuid.uuid4()),
+                    expected_thread_version=automation_thread_version,
+                    expected_session_version=automation_session_version,
+                    author=ConversationMessageAuthor.OWNER,
+                    kind=ConversationMessageKind.NARRATIVE,
+                    text="自动批次验证私有叙述 6。",
+                ),
+                context=automation_context,
+            ),
+        )
+        automation_thread_version = sixth_turn.thread_version
+        automation_session_version = sixth_turn.session_version
+        pending_automation = automation_service.ensure_after_transition(
+            session_id=automation_session_id,
+            transition_command_id=sixth_command_id,
+            context=automation_context,
+        )
+        require(
+            pending_automation.state == "alreadyPending"
+            and pending_automation.review_batch is not None
+            and pending_automation.review_batch.review_batch_id == automation_review_batch_id
+            and pending_automation.session_version == automation_session_version,
+            "later owner turns must reuse the same pending automatic review batch",
+        )
+        with psycopg.connect(test_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM owner_truth.memory_candidates WHERE vault_id = %s",
+                    (automation_context.vault_id,),
+                )
+                require(
+                    cursor.fetchone()[0] == 0,
+                    "automatic review batching must not create Candidates",
+                )
+                cursor.execute(
+                    "SELECT COUNT(*) FROM owner_truth.memory_versions WHERE vault_id = %s",
+                    (automation_context.vault_id,),
+                )
+                require(
+                    cursor.fetchone()[0] == 0,
+                    "automatic review batching must not activate Memories",
+                )
 
         store.close_pool()
         store = None
@@ -903,6 +1035,35 @@ def main() -> None:
             restored_read.pending_review_batch_id is None
             and restored_read.boundary is InterviewBoundary.OPEN,
             "session-state read adapter must remain value-minimized after restart",
+        )
+
+        automation_restored = invoke(
+            restarted_store,
+            command_id="read-review-batch-automation-after-restart",
+            operation=lambda service: service.read_session(
+                session_id=automation_session_id,
+                context=automation_context,
+            ),
+        )
+        require(
+            automation_restored.row_version == automation_session_version
+            and automation_restored.candidate_batch_turn_count == 6
+            and automation_restored.pending_review_batch_id == automation_review_batch_id,
+            "automatic review batch and optimistic version must survive restart",
+        )
+        automation_batches = invoke(
+            restarted_store,
+            command_id="list-review-batch-automation-after-restart",
+            operation=lambda service: service.list_review_batches(
+                session_id=automation_session_id,
+                context=automation_context,
+            ),
+        )
+        require(
+            len(automation_batches) == 1
+            and automation_batches[0].review_batch_id == automation_review_batch_id
+            and automation_batches[0].state is InterviewReviewBatchState.PENDING_ACKNOWLEDGEMENT,
+            "one pending automatic review batch must survive restart",
         )
 
         # A processor/model revision creates a new immutable ExtractionResult for

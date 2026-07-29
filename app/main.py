@@ -185,6 +185,10 @@ from app.services.owner_truth_interview_turn_context import (
     OwnerTruthInterviewTurnContextService,
     interview_turn_context_summary,
 )
+from app.services.owner_truth_interview_review_batch_automation import (
+    OwnerTruthInterviewReviewBatchAutomationService,
+    review_batch_automation_summary,
+)
 from app.services.owner_truth_answer_citation import (
     OwnerTruthAnswerCitationCommand,
     OwnerTruthAnswerCitationConflict,
@@ -2185,6 +2189,60 @@ def _owner_truth_interview_session_command_response(
     }
 
 
+def _owner_truth_review_batch_automation_after_qa_transition(
+    *,
+    request: Request,
+    session_id: str,
+    transition_command_id: str,
+    context: OwnerTruthCommandContext,
+) -> Optional[Dict[str, object]]:
+    """Keep auto-batching outside ordinary released natural-input requests.
+
+    The M0-A batch boundary is exercised only inside explicit Owner QA until
+    the product release path has its own Gate. The result contains no
+    interview content; callers use the returned current session version so a
+    just-created ReviewBatch cannot leave the next optimistic write stale.
+    """
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        return None
+    result = OwnerTruthInterviewReviewBatchAutomationService(
+        store,
+        enabled=True,
+    ).ensure_after_transition(
+        session_id=session_id,
+        transition_command_id=transition_command_id,
+        context=context,
+    )
+    summary = review_batch_automation_summary(result)
+    # Preserve the existing private interview write response until a batch
+    # actually exists. The not-due decision remains internal and value-free.
+    return None if summary["state"] == "notDue" else summary
+
+
+def _attach_owner_truth_review_batch_automation(
+    *,
+    response: Dict[str, Any],
+    automation: Optional[Dict[str, object]],
+) -> Dict[str, Any]:
+    """Attach QA-only batch state while preserving a usable session version."""
+
+    if automation is None:
+        return response
+    session_version = automation.get("sessionVersion")
+    if type(session_version) is not int or session_version < 1:
+        raise OwnerTruthConversationError("review batch automation session version is invalid")
+    receipt = response.get("receipt")
+    if not isinstance(receipt, dict):
+        raise OwnerTruthConversationError("interview command receipt is invalid")
+    receipt["sessionVersion"] = session_version
+    response["reviewBatchAutomation"] = automation
+    return response
+
+
 def _owner_truth_interview_safety_override_response(
     *,
     vault_id: str,
@@ -4010,6 +4068,12 @@ def append_owner_truth_interview_narrative(
                 command=command,
                 context=context,
             )
+        automation = _owner_truth_review_batch_automation_after_qa_transition(
+            request=request,
+            session_id=command.session_id,
+            transition_command_id=command.command_id,
+            context=context,
+        )
     except OwnerTruthContractError as error:
         raise _owner_truth_interview_session_state_http_error(error) from error
     except (TypeError, ValueError) as error:
@@ -4017,11 +4081,15 @@ def append_owner_truth_interview_narrative(
             status_code=400,
             detail={"code": "ownerTruthInterviewSessionInvalid"},
         ) from error
+    response = _owner_truth_interview_session_command_response(
+        vault_id=context.vault_id,
+        result=result,
+    )
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
-        content=_owner_truth_interview_session_command_response(
-            vault_id=context.vault_id,
-            result=result,
+        content=_attach_owner_truth_review_batch_automation(
+            response=response,
+            automation=automation,
         ),
         headers={"Cache-Control": "no-store"},
     )
@@ -4073,15 +4141,25 @@ def set_owner_truth_interview_boundary(
                     command=command,
                     context=context,
                 )
+        automation = _owner_truth_review_batch_automation_after_qa_transition(
+            request=request,
+            session_id=command.session_id,
+            transition_command_id=command.command_id,
+            context=context,
+        )
     except OwnerTruthThreadPreferenceError as error:
         raise _owner_truth_thread_preference_http_error(error) from error
     except OwnerTruthContractError as error:
         raise _owner_truth_interview_session_state_http_error(error) from error
+    response = _owner_truth_interview_session_command_response(
+        vault_id=context.vault_id,
+        result=result,
+    )
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
-        content=_owner_truth_interview_session_command_response(
-            vault_id=context.vault_id,
-            result=result,
+        content=_attach_owner_truth_review_batch_automation(
+            response=response,
+            automation=automation,
         ),
         headers={"Cache-Control": "no-store"},
     )
@@ -4141,6 +4219,19 @@ def defer_owner_truth_interview_with_continuation(
         vault_id=context.vault_id,
         result=session,
     )
+    try:
+        automation = _owner_truth_review_batch_automation_after_qa_transition(
+            request=request,
+            session_id=boundary_command.session_id,
+            transition_command_id=boundary_command.command_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    session_response = _attach_owner_truth_review_batch_automation(
+        response=session_response,
+        automation=automation,
+    )
     return JSONResponse(
         status_code=201 if session.outcome == "created" else 200,
         content={
@@ -4148,6 +4239,11 @@ def defer_owner_truth_interview_with_continuation(
             "vaultId": context.vault_id,
             "cue": saved_continuation_cue_summary(cue),
             "receipt": session_response["receipt"],
+            **(
+                {"reviewBatchAutomation": session_response["reviewBatchAutomation"]}
+                if "reviewBatchAutomation" in session_response
+                else {}
+            ),
         },
         headers={"Cache-Control": "no-store"},
     )
