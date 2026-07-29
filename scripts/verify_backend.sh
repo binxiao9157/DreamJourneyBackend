@@ -141,6 +141,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-recipient-admissio
 echo "== Recovery owner-orphan quarantine G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-recovery-owner-orphan-quarantine-contract-gate.sh
 
+echo "== Owner Truth projection rights fence G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-projection-rights-fence-gate.sh
+
 echo "== Async-effect dead-letter G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-dead-letter-contract-gate.sh
 
@@ -243,6 +246,10 @@ test -f scripts/run-backend-async-effects-postgres-smoke.sh
 	test -f db/migrations/0019_owner_truth_answer_citation_trigger_fix.sql
 	test -f db/migrations/0019_owner_truth_answer_citation_trigger_fix.json
 	test -f app/services/owner_truth_answer_citation.py
+	test -f db/migrations/0061_owner_truth_projection_rights_fence.sql
+	test -f db/migrations/0061_owner_truth_projection_rights_fence.json
+	test -f app/domain/owner_truth/projection_rights.py
+	test -f app/services/owner_truth_projection_rights.py
 test -f db/migrations/0022_owner_truth_correction_resolver.sql
 test -f db/migrations/0022_owner_truth_correction_resolver.json
 test -f app/domain/owner_truth/memory_correction.py

@@ -117,6 +117,9 @@ from app.services.owner_truth_candidate_review import (
 from app.services.owner_truth_memory_projection import (
     PostgresOwnerTruthMemoryProjectionRepository,
 )
+from app.services.owner_truth_projection_rights import (
+    PostgresOwnerTruthProjectionRightsRepository,
+)
 from app.services.owner_truth_memory_search_projection import (
     PostgresOwnerTruthMemorySearchDocumentProjectionRepository,
 )
@@ -415,6 +418,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth memory projection requires an active unit of work")
         return PostgresOwnerTruthMemoryProjectionRepository(active.connection)
+
+    def owner_truth_projection_rights_repository(
+        self,
+    ) -> PostgresOwnerTruthProjectionRightsRepository:
+        """Return the internal Vault rights-fence port bound to the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth projection rights require an active unit of work")
+        return PostgresOwnerTruthProjectionRightsRepository(active.connection)
 
     def owner_truth_memory_search_document_projection_repository(
         self,

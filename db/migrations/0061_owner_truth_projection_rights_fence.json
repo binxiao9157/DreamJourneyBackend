@@ -1,0 +1,14 @@
+{
+  "version": "0061",
+  "name": "owner_truth_projection_rights_fence",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthProjectionRightsFenceShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthProjectionRightsIngressV1": false,
+    "memoryProjectionV1": false,
+    "contextShadowV1": false,
+    "kbliteCompatibilityV1": false
+  }
+}

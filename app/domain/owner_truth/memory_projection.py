@@ -14,6 +14,10 @@ import json
 from typing import Any, Iterable, Mapping
 
 from .contracts import OwnerTruthContractError, require_nonblank, require_uuid
+from .projection_rights import (
+    OwnerTruthProjectionRightsSnapshot,
+    implicit_projection_rights_snapshot,
+)
 
 
 OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION = "owner-truth-memory-projection-v1"
@@ -156,6 +160,7 @@ def build_ready_memory_projection(
     owner_subject_id: str,
     authority_epoch: int,
     inputs: Iterable[OwnerTruthMemoryProjectionInput],
+    rights_snapshot: OwnerTruthProjectionRightsSnapshot | None = None,
 ) -> dict[str, Any]:
     """Create a stable checkpoint from a complete set of current inputs."""
 
@@ -163,6 +168,19 @@ def build_ready_memory_projection(
     normalized_owner_id = require_nonblank(owner_subject_id, field="owner_subject_id")
     if authority_epoch < 0:
         raise OwnerTruthMemoryProjectionError("authority_epoch must not be negative")
+    rights = rights_snapshot or implicit_projection_rights_snapshot(
+        vault_id=normalized_vault_id,
+        owner_subject_id=normalized_owner_id,
+        authority_epoch=authority_epoch,
+    )
+    if (
+        rights.vault_id != normalized_vault_id
+        or rights.owner_subject_id != normalized_owner_id
+        or rights.authority_epoch != authority_epoch
+    ):
+        raise OwnerTruthMemoryProjectionError("projection rights snapshot crosses authority boundary")
+    if not rights.projection_allowed:
+        raise OwnerTruthMemoryProjectionError("projection rights do not permit a ready checkpoint")
 
     entries: list[dict[str, Any]] = []
     seen_memory_ids: set[str] = set()
@@ -187,6 +205,7 @@ def build_ready_memory_projection(
             "vaultId": normalized_vault_id,
             "ownerSubjectId": normalized_owner_id,
             "authorityEpoch": authority_epoch,
+            "rights": rights.projection_fence(),
             "entries": entries,
         }
     )
@@ -204,6 +223,7 @@ def build_ready_memory_projection(
         "vaultId": normalized_vault_id,
         "ownerSubjectId": normalized_owner_id,
         "authorityEpoch": authority_epoch,
+        **rights.projection_fence(),
         "checkpoint": projection_hash,
         "sourceHash": source_hash,
         "entryCount": len(entries),
@@ -216,6 +236,8 @@ def build_rebuilding_memory_projection(
     vault_id: str,
     owner_subject_id: str,
     authority_epoch: int,
+    rights_snapshot: OwnerTruthProjectionRightsSnapshot | None = None,
+    rebuild_reason: str = "projectionUnavailable",
 ) -> dict[str, Any]:
     """Fail closed when a compatible current checkpoint is unavailable."""
 
@@ -223,6 +245,18 @@ def build_rebuilding_memory_projection(
     normalized_owner_id = require_nonblank(owner_subject_id, field="owner_subject_id")
     if authority_epoch < 0:
         raise OwnerTruthMemoryProjectionError("authority_epoch must not be negative")
+    rights = rights_snapshot or implicit_projection_rights_snapshot(
+        vault_id=normalized_vault_id,
+        owner_subject_id=normalized_owner_id,
+        authority_epoch=authority_epoch,
+    )
+    if (
+        rights.vault_id != normalized_vault_id
+        or rights.owner_subject_id != normalized_owner_id
+        or rights.authority_epoch != authority_epoch
+    ):
+        raise OwnerTruthMemoryProjectionError("projection rights snapshot crosses authority boundary")
+    normalized_reason = require_nonblank(rebuild_reason, field="rebuild_reason")
     return {
         "schemaVersion": OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION,
         "projectionSource": OWNER_TRUTH_MEMORY_PROJECTION_SOURCE,
@@ -230,6 +264,8 @@ def build_rebuilding_memory_projection(
         "vaultId": normalized_vault_id,
         "ownerSubjectId": normalized_owner_id,
         "authorityEpoch": authority_epoch,
+        **rights.projection_fence(),
+        "rebuildReason": normalized_reason,
         "checkpoint": None,
         "entryCount": 0,
         "entries": [],
@@ -262,6 +298,10 @@ def projection_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "state": str(snapshot.get("state") or ""),
         "vaultId": str(snapshot.get("vaultId") or ""),
         "authorityEpoch": int(snapshot.get("authorityEpoch") or 0),
+        "rightsRevision": int(snapshot.get("rightsRevision") or 0),
+        "rightsState": str(snapshot.get("rightsState") or ""),
+        "rightsSnapshotHash": snapshot.get("rightsSnapshotHash"),
+        "rebuildReason": snapshot.get("rebuildReason"),
         "checkpoint": snapshot.get("checkpoint"),
         "entryCount": int(snapshot.get("entryCount") or 0),
         "entries": summarized_entries,

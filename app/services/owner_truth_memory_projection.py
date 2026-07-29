@@ -25,7 +25,13 @@ from app.domain.owner_truth.memory_projection import (
     build_rebuilding_memory_projection,
 )
 from app.domain.owner_truth.candidate_decisions import OwnerTruthCandidateReviewAccessDenied
+from app.domain.owner_truth.projection_rights import OwnerTruthProjectionRightsSnapshot
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.owner_truth_projection_rights import (
+    InMemoryOwnerTruthProjectionRightsRepository,
+    OwnerTruthProjectionRightsRepository,
+    PostgresOwnerTruthProjectionRightsRepository,
+)
 
 
 def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
@@ -48,6 +54,10 @@ def _payload_from_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _rights_rebuild_reason(rights: OwnerTruthProjectionRightsSnapshot) -> str:
+    return "rightsRevoked" if not rights.projection_allowed else "rightsRevisionChanged"
+
+
 class OwnerTruthMemoryProjectionStore(Protocol):
     def owner_truth_memory_projection_repository(self) -> Any:
         ...
@@ -56,8 +66,14 @@ class OwnerTruthMemoryProjectionStore(Protocol):
 class InMemoryOwnerTruthMemoryProjectionRepository:
     """Semantic double backed by the Candidate review repository's memory data."""
 
-    def __init__(self, source_repository: Any) -> None:
+    def __init__(
+        self,
+        source_repository: Any,
+        *,
+        rights_repository: OwnerTruthProjectionRightsRepository | None = None,
+    ) -> None:
         self._source_repository = source_repository
+        self._rights_repository = rights_repository or InMemoryOwnerTruthProjectionRightsRepository()
         self._lock = RLock()
         self._snapshots: dict[tuple[str, int], dict[str, Any]] = {}
 
@@ -68,11 +84,24 @@ class InMemoryOwnerTruthMemoryProjectionRepository:
     ) -> OwnerTruthMemoryProjectionResult:
         _assert_owner_context(context)
         authority_epoch, inputs = self._projection_inputs(context=context)
+        rights = self._rights_snapshot(context=context, authority_epoch=authority_epoch)
+        if not rights.projection_allowed:
+            return OwnerTruthMemoryProjectionResult(
+                outcome="blocked",
+                snapshot=build_rebuilding_memory_projection(
+                    vault_id=context.vault_id,
+                    owner_subject_id=context.owner_subject_id,
+                    authority_epoch=authority_epoch,
+                    rights_snapshot=rights,
+                    rebuild_reason=_rights_rebuild_reason(rights),
+                ),
+            )
         snapshot = build_ready_memory_projection(
             vault_id=context.vault_id,
             owner_subject_id=context.owner_subject_id,
             authority_epoch=authority_epoch,
             inputs=inputs,
+            rights_snapshot=rights,
         )
         key = (context.vault_id, authority_epoch)
         with self._lock:
@@ -90,11 +119,21 @@ class InMemoryOwnerTruthMemoryProjectionRepository:
     def read(self, *, context: OwnerTruthCommandContext) -> dict[str, Any]:
         _assert_owner_context(context)
         authority_epoch, inputs = self._projection_inputs(context=context)
+        rights = self._rights_snapshot(context=context, authority_epoch=authority_epoch)
+        if not rights.projection_allowed:
+            return build_rebuilding_memory_projection(
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                authority_epoch=authority_epoch,
+                rights_snapshot=rights,
+                rebuild_reason=_rights_rebuild_reason(rights),
+            )
         expected = build_ready_memory_projection(
             vault_id=context.vault_id,
             owner_subject_id=context.owner_subject_id,
             authority_epoch=authority_epoch,
             inputs=inputs,
+            rights_snapshot=rights,
         )
         with self._lock:
             snapshot = self._snapshots.get((context.vault_id, authority_epoch))
@@ -108,6 +147,14 @@ class InMemoryOwnerTruthMemoryProjectionRepository:
                     vault_id=context.vault_id,
                     owner_subject_id=context.owner_subject_id,
                     authority_epoch=authority_epoch,
+                    rights_snapshot=rights,
+                    rebuild_reason="rightsRevisionChanged"
+                    if snapshot is not None
+                    and (
+                        snapshot.get("rightsRevision") != rights.revision
+                        or snapshot.get("rightsEventHash") != rights.event_hash
+                    )
+                    else "projectionInputsChanged",
                 )
             return _copy_snapshot(snapshot)
 
@@ -123,14 +170,33 @@ class InMemoryOwnerTruthMemoryProjectionRepository:
             )
         return supplier(context=context)
 
+    def _rights_snapshot(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        authority_epoch: int,
+    ) -> OwnerTruthProjectionRightsSnapshot:
+        return self._rights_repository.read(
+            context=context,
+            authority_epoch=authority_epoch,
+        )
+
 
 class PostgresOwnerTruthMemoryProjectionRepository:
     """Postgres projection port bound to one active request/job Unit of Work."""
 
-    def __init__(self, connection: Any) -> None:
+    def __init__(
+        self,
+        connection: Any,
+        *,
+        rights_repository: OwnerTruthProjectionRightsRepository | None = None,
+    ) -> None:
         if connection is None:
             raise ValueError("an active database connection is required")
         self._connection = connection
+        self._rights_repository = rights_repository or PostgresOwnerTruthProjectionRightsRepository(
+            connection
+        )
 
     def rebuild(
         self,
@@ -141,6 +207,18 @@ class PostgresOwnerTruthMemoryProjectionRepository:
         with self._cursor() as cursor:
             vault = self._active_vault(cursor, context=context, lock=True)
             authority_epoch = int(vault["authority_epoch"])
+            rights = self._rights_snapshot(context=context, authority_epoch=authority_epoch)
+            if not rights.projection_allowed:
+                return OwnerTruthMemoryProjectionResult(
+                    outcome="blocked",
+                    snapshot=build_rebuilding_memory_projection(
+                        vault_id=context.vault_id,
+                        owner_subject_id=context.owner_subject_id,
+                        authority_epoch=authority_epoch,
+                        rights_snapshot=rights,
+                        rebuild_reason=_rights_rebuild_reason(rights),
+                    ),
+                )
             cursor.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS locked",
                 (f"owner-truth-memory-projection:{context.vault_id}:{authority_epoch}",),
@@ -155,10 +233,11 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                 owner_subject_id=context.owner_subject_id,
                 authority_epoch=authority_epoch,
                 inputs=inputs,
+                rights_snapshot=rights,
             )
             cursor.execute(
                 """
-                SELECT source_hash, projection_hash
+                SELECT source_hash, projection_hash, rights_revision, rights_event_hash
                 FROM owner_truth.memory_projection_checkpoints
                 WHERE vault_id = %s AND authority_epoch = %s
                 FOR UPDATE
@@ -171,6 +250,8 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                 if existing is not None
                 and str(existing["source_hash"]) == snapshot["sourceHash"]
                 and str(existing["projection_hash"]) == snapshot["checkpoint"]
+                and int(existing["rights_revision"]) == rights.revision
+                and str(existing["rights_event_hash"]) == rights.event_hash
                 else "rebuilt"
             )
             cursor.execute(
@@ -218,8 +299,9 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                 INSERT INTO owner_truth.memory_projection_checkpoints (
                     vault_id, authority_epoch, owner_subject_id, projection_source,
                     state, entry_count, source_hash, projection_hash, schema_version,
+                    rights_revision, rights_event_hash,
                     updated_at
-                ) VALUES (%s, %s, %s, %s, 'ready', %s, %s, %s, %s, NOW())
+                ) VALUES (%s, %s, %s, %s, 'ready', %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (vault_id, authority_epoch) DO UPDATE SET
                     owner_subject_id = EXCLUDED.owner_subject_id,
                     projection_source = EXCLUDED.projection_source,
@@ -228,6 +310,8 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                     source_hash = EXCLUDED.source_hash,
                     projection_hash = EXCLUDED.projection_hash,
                     schema_version = EXCLUDED.schema_version,
+                    rights_revision = EXCLUDED.rights_revision,
+                    rights_event_hash = EXCLUDED.rights_event_hash,
                     updated_at = NOW()
                 """,
                 (
@@ -239,6 +323,8 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                     snapshot["sourceHash"],
                     snapshot["checkpoint"],
                     snapshot["schemaVersion"],
+                    rights.revision,
+                    rights.event_hash,
                 ),
             )
         return OwnerTruthMemoryProjectionResult(outcome=outcome, snapshot=snapshot)
@@ -248,10 +334,19 @@ class PostgresOwnerTruthMemoryProjectionRepository:
         with self._cursor() as cursor:
             vault = self._active_vault(cursor, context=context, lock=False)
             authority_epoch = int(vault["authority_epoch"])
+            rights = self._rights_snapshot(context=context, authority_epoch=authority_epoch)
+            if not rights.projection_allowed:
+                return build_rebuilding_memory_projection(
+                    vault_id=context.vault_id,
+                    owner_subject_id=context.owner_subject_id,
+                    authority_epoch=authority_epoch,
+                    rights_snapshot=rights,
+                    rebuild_reason=_rights_rebuild_reason(rights),
+                )
             cursor.execute(
                 """
                 SELECT owner_subject_id, projection_source, state, entry_count,
-                    source_hash, projection_hash, schema_version
+                    source_hash, projection_hash, schema_version, rights_revision, rights_event_hash
                 FROM owner_truth.memory_projection_checkpoints
                 WHERE vault_id = %s AND authority_epoch = %s
                 """,
@@ -268,6 +363,8 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                     vault_id=context.vault_id,
                     owner_subject_id=context.owner_subject_id,
                     authority_epoch=authority_epoch,
+                    rights_snapshot=rights,
+                    rebuild_reason="projectionUnavailable",
                 )
             inputs = self._load_current_inputs(
                 cursor,
@@ -279,17 +376,27 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                 owner_subject_id=context.owner_subject_id,
                 authority_epoch=authority_epoch,
                 inputs=inputs,
+                rights_snapshot=rights,
             )
             if (
                 str(checkpoint["source_hash"]) != expected["sourceHash"]
                 or str(checkpoint["projection_hash"]) != expected["checkpoint"]
                 or int(checkpoint["entry_count"]) != expected["entryCount"]
                 or str(checkpoint["schema_version"]) != expected["schemaVersion"]
+                or int(checkpoint["rights_revision"]) != rights.revision
+                or str(checkpoint["rights_event_hash"]) != rights.event_hash
             ):
                 return build_rebuilding_memory_projection(
                     vault_id=context.vault_id,
                     owner_subject_id=context.owner_subject_id,
                     authority_epoch=authority_epoch,
+                    rights_snapshot=rights,
+                    rebuild_reason="rightsRevisionChanged"
+                    if (
+                        int(checkpoint["rights_revision"]) != rights.revision
+                        or str(checkpoint["rights_event_hash"]) != rights.event_hash
+                    )
+                    else "projectionInputsChanged",
                 )
             stored_inputs = self._load_stored_inputs(
                 cursor,
@@ -302,6 +409,7 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                 owner_subject_id=context.owner_subject_id,
                 authority_epoch=authority_epoch,
                 inputs=stored_inputs,
+                rights_snapshot=rights,
             )
             if (
                 stored["sourceHash"] != expected["sourceHash"]
@@ -312,8 +420,21 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                     vault_id=context.vault_id,
                     owner_subject_id=context.owner_subject_id,
                     authority_epoch=authority_epoch,
+                    rights_snapshot=rights,
+                    rebuild_reason="projectionInputsChanged",
                 )
             return stored
+
+    def _rights_snapshot(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        authority_epoch: int,
+    ) -> OwnerTruthProjectionRightsSnapshot:
+        return self._rights_repository.read(
+            context=context,
+            authority_epoch=authority_epoch,
+        )
 
     def _active_vault(
         self,
