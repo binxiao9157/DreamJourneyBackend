@@ -132,6 +132,9 @@ echo "== Business completion/message/notification G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-notification-contract-gate.sh
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-projection-contract-gate.sh
 
+echo "== Legacy identity inbox bridge G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-legacy-identity-inbox-bridge-contract-gate.sh
+
 echo "== Async-effect dead-letter G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-dead-letter-contract-gate.sh
 

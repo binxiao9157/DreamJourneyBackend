@@ -1,0 +1,13 @@
+{
+  "version": "0060",
+  "name": "legacy_identity_inbox_bridge",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "legacyIdentityInboxBridgeShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "legacyIdentityAliasBridgeV1": false,
+    "legacyIdentityAliasClaimV1": false,
+    "legacyInboxAccountResolverV1": false
+  }
+}

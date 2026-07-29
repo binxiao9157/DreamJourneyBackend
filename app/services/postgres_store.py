@@ -101,6 +101,9 @@ from app.async_effects.worker_loss_observation_repository import (
 from app.async_effects.business_message_projection_repository import (
     PostgresBusinessMessageProjectionRepository,
 )
+from app.async_effects.legacy_identity_inbox_bridge import (
+    PostgresLegacyInboxAccountResolver,
+)
 from app.async_effects.target_admission import (
     PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository,
     PostgresOwnerTruthSourceTargetAdmissionRepository,
@@ -347,6 +350,21 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("business message projection persistence requires an active unit of work")
         return PostgresBusinessMessageProjectionRepository(active.connection)
+
+    def async_effect_legacy_inbox_account_resolver(
+        self,
+    ) -> PostgresLegacyInboxAccountResolver:
+        """Resolve only an already-verified V4 legacy inbox bridge in this UoW.
+
+        This is a read-only migration boundary. It neither claims a legacy
+        alias nor treats a relationship or a resolver result as resource
+        authorization.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("legacy inbox account resolution requires an active unit of work")
+        return PostgresLegacyInboxAccountResolver(active.connection)
 
     def owner_truth_source_target_admission_repository(
         self,
