@@ -138,6 +138,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-legacy-identity-inbox-bridge-contra
 echo "== Business message recipient admission G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-recipient-admission-g0-gate.sh
 
+echo "== Recovery owner-orphan quarantine G0 contract gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-recovery-owner-orphan-quarantine-contract-gate.sh
+
 echo "== Async-effect dead-letter G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-dead-letter-contract-gate.sh
 

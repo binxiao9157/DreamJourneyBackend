@@ -38,8 +38,12 @@ cd /srv/dreamjourney-backend
 .venv/bin/python -m unittest \
   tests.test_recovery_record \
   tests.test_recovery_integrity_audit \
+  tests.test_recovery_owner_orphan_quarantine \
   tests.test_backup_manifest \
   tests.test_db_migrator -v
+
+PYTHON_BIN=.venv/bin/python \
+  scripts/run-recovery-owner-orphan-quarantine-contract-gate.sh
 
 scripts/db/run-recovery-postgres-smoke.sh
 DATABASE_URL='<isolated-postgres-dsn>' \
@@ -80,6 +84,42 @@ V3 当前会显式报告 Owner Truth 身份根和 async operation authority root
 验证；这不是扫描器可以猜测补齐的关系。因此即便各表扫描完整，仍保持 `NO_GO`，直到
 对应 identity/authority evidence 有可验证来源。该限制同样不等同于 receipt replay
 authority 已完成。
+
+### 3.2 Owner orphan quarantine manifest
+
+若 `integrity-evidence.json` 报告 `ownerOrphansPresent`，可在同一轮
+`dj_recovery_*` 隔离恢复数据库上生成只读、无直接标识的处置候选证据：
+
+```bash
+export RECOVERY_ORPHAN_REDACTION_KEY_FILE=/etc/dreamjourney/recovery-orphan-redaction.key
+# 该文件必须由受限运维账户持有，权限 0600；不要提交、打印或放入 evidence。
+
+.venv/bin/python scripts/db/build_recovery_owner_orphan_quarantine_manifest.py \
+  --dsn "$RECOVERY_DATABASE_URL" \
+  --target-database "$RECOVERY_TARGET_DB" \
+  --production-database "$RECOVERY_PRODUCTION_DB" \
+  --schema-head "<restored-schema-head>" \
+  --redaction-key-file "$RECOVERY_ORPHAN_REDACTION_KEY_FILE" \
+  --output "$RECOVERY_OUTPUT_DIR/owner-orphan-quarantine-manifest.json"
+```
+
+该脚本先校验 DSN 声明的数据库，再在同一个
+`REPEATABLE READ + READ ONLY` 事务中查询 `current_database()`，两次都必须等于
+已验证的 `dj_recovery_*` 目标，才会动态扫描所有带 `user_id` 的
+`public` base table。它仅在内存读取 `user_id` 和稳定主键，持久化文件只包含
+HMAC 定位摘要、表级计数和状态；redaction key 不会进入文件或标准输出。
+
+退出码含义：
+
+- `0`：未发现 orphan；
+- `2`：已生成 `quarantineRequired` 清单，必须保持恢复 `NO_GO`；
+- `1`：目标、权限、redaction key 或查询合同失败。
+
+清单明确标记 `automaticMutation=false`、`automaticOwnerClaim=false`、
+`automaticDelete=false`。它不重绑 owner、不删除记录、不创建隔离表、不输出原始
+owner/主键，也不提供可执行操作员映射。任何未来人工隔离或 reconciliation 都必须另行
+设计加密映射工件、审批、回滚与独立 G2 演练；当前脚本不能关闭 orphan 或 replay
+blocker。
 
 ## 4. 生产级隔离 G2 演练
 
@@ -156,6 +196,8 @@ export RECOVERY_REPLAY_APPLICATION_EVIDENCE_PATH=/secure/recovery/replay-applica
 - `restore-evidence.json`：backup、cutoff、目标哈希和恢复时长绑定；其中 `backupSchemaHead` 是 manifest 的来源版本，`restoredSchemaHead` 是 restore 后 migration verify 的目标版本；
 - `integrity-evidence.json`：绑定 `restoredSchemaHead` 的 schema、动态 direct-user、Vault/operation scope、hash、
   purged owner 检查；
+- `owner-orphan-quarantine-manifest.json`：仅当执行本节只读扫描时生成的 HMAC
+  定位摘要、候选采样状态和显式 `NO_GO` blocker；不含 raw owner/primary key；
 - `replay-evidence.json`：receipt coverage、range、duplicate/conflict 和 application evidence；
 - `recovery-record.json`：最终 RPO/RTO 观测、GO/NO_GO 和所有证据 ID。
 
