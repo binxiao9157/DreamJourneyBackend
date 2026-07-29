@@ -25,7 +25,7 @@ from app.async_effects.consumer_repository import AsyncEffectConsumerReceipt
 from app.async_effects.contracts import AsyncEffectIntent
 
 
-BUSINESS_MESSAGE_NOTIFICATION_SCHEMA_VERSION = "business-message-notification-v1"
+BUSINESS_MESSAGE_NOTIFICATION_SCHEMA_VERSION = "business-message-notification-v2"
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MESSAGE_NAMESPACE = UUID("cb4d0d17-5cc7-4330-b177-33f87e43e657")
@@ -78,9 +78,12 @@ class NotificationRouteAuthorizationReason(str, Enum):
     ALLOWED = "allowed"
     MALFORMED_ROUTE = "malformedRoute"
     SUBSCRIPTION_REVOKED = "subscriptionRevoked"
-    OWNER_MISMATCH = "ownerMismatch"
-    VAULT_MISMATCH = "vaultMismatch"
-    AUTHORITY_EPOCH_MISMATCH = "authorityEpochMismatch"
+    RESOURCE_OWNER_MISMATCH = "resourceOwnerMismatch"
+    INBOX_SUBJECT_MISMATCH = "inboxSubjectMismatch"
+    RESOURCE_VAULT_MISMATCH = "resourceVaultMismatch"
+    INBOX_VAULT_MISMATCH = "inboxVaultMismatch"
+    RESOURCE_AUTHORITY_EPOCH_MISMATCH = "resourceAuthorityEpochMismatch"
+    SUBSCRIPTION_ACCOUNT_EPOCH_MISMATCH = "subscriptionAccountEpochMismatch"
     NOTIFICATION_GENERATION_MISMATCH = "notificationGenerationMismatch"
     SUBSCRIPTION_ID_MISMATCH = "subscriptionIdMismatch"
     SUBSCRIPTION_GENERATION_MISMATCH = "subscriptionGenerationMismatch"
@@ -138,6 +141,8 @@ class BusinessCompletionMessageSource:
     intent: AsyncEffectIntent
     completion: AsyncEffectConsumerReceipt
     message_kind: InAppMessageKind
+    inbox_subject_id: str | None = None
+    inbox_vault_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.intent, AsyncEffectIntent):
@@ -163,13 +168,42 @@ class BusinessCompletionMessageSource:
             raise BusinessMessageNotificationContractError(
                 "completed business receipt requires a terminal completed inbox"
             )
+        if (self.inbox_subject_id is None) != (self.inbox_vault_id is None):
+            raise BusinessMessageNotificationContractError(
+                "inbox_subject_id and inbox_vault_id must be supplied together"
+            )
+        target = self.intent.target
+        object.__setattr__(
+            self,
+            "inbox_subject_id",
+            _identifier(
+                target.owner_subject_id if self.inbox_subject_id is None else self.inbox_subject_id,
+                field="inbox_subject_id",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "inbox_vault_id",
+            _identifier(
+                target.vault_id if self.inbox_vault_id is None else self.inbox_vault_id,
+                field="inbox_vault_id",
+            ),
+        )
 
     @property
     def message_id(self) -> str:
         return str(
             uuid5(
                 _MESSAGE_NAMESPACE,
-                f"in-app-message:{self.completion.business_receipt_id}:{self.message_kind.value}",
+                ":".join(
+                    (
+                        "in-app-message",
+                        self.completion.business_receipt_id,
+                        self.message_kind.value,
+                        str(self.inbox_subject_id),
+                        str(self.inbox_vault_id),
+                    )
+                ),
             )
         )
 
@@ -178,8 +212,10 @@ class BusinessCompletionMessageSource:
         return InAppMessageProjection(
             message_id=self.message_id,
             kind=self.message_kind,
-            owner_subject_id=target.owner_subject_id,
-            vault_id=target.vault_id,
+            resource_owner_subject_id=target.owner_subject_id,
+            resource_vault_id=target.vault_id,
+            inbox_subject_id=str(self.inbox_subject_id),
+            inbox_vault_id=str(self.inbox_vault_id),
             resource_type=target.resource_type,
             resource_id=target.resource_id,
             resource_version=target.resource_version,
@@ -191,12 +227,20 @@ class BusinessCompletionMessageSource:
 
 @dataclass(frozen=True)
 class InAppMessageProjection:
-    """A content-redacted, authenticated-server projection for one result."""
+    """A content-redacted projection with separate resource and inbox identity.
+
+    A resource can belong to one account while an authorized family recipient
+    receives the private in-app message in another account's inbox.  These
+    coordinates intentionally remain separate so a later persistence adapter
+    cannot accidentally route a source owner's message to a recipient device.
+    """
 
     message_id: str
     kind: InAppMessageKind
-    owner_subject_id: str
-    vault_id: str
+    resource_owner_subject_id: str
+    resource_vault_id: str
+    inbox_subject_id: str
+    inbox_vault_id: str
     resource_type: str
     resource_id: str
     resource_version: int
@@ -211,10 +255,27 @@ class InAppMessageProjection:
             raise BusinessMessageNotificationContractError("kind is required")
         object.__setattr__(
             self,
-            "owner_subject_id",
-            _identifier(self.owner_subject_id, field="owner_subject_id"),
+            "resource_owner_subject_id",
+            _identifier(
+                self.resource_owner_subject_id,
+                field="resource_owner_subject_id",
+            ),
         )
-        object.__setattr__(self, "vault_id", _identifier(self.vault_id, field="vault_id"))
+        object.__setattr__(
+            self,
+            "resource_vault_id",
+            _identifier(self.resource_vault_id, field="resource_vault_id"),
+        )
+        object.__setattr__(
+            self,
+            "inbox_subject_id",
+            _identifier(self.inbox_subject_id, field="inbox_subject_id"),
+        )
+        object.__setattr__(
+            self,
+            "inbox_vault_id",
+            _identifier(self.inbox_vault_id, field="inbox_vault_id"),
+        )
         object.__setattr__(
             self,
             "resource_type",
@@ -257,36 +318,40 @@ class InAppMessageProjection:
             "businessTargetKey": self.business_target_key,
             "contentRedacted": True,
             "id": self.message_id,
+            "inboxSubjectId": self.inbox_subject_id,
+            "inboxVaultId": self.inbox_vault_id,
             "kind": self.kind.value,
             "metadataOnly": True,
-            "ownerSubjectId": self.owner_subject_id,
+            "resourceOwnerSubjectId": self.resource_owner_subject_id,
             "resourceId": self.resource_id,
             "resourceType": self.resource_type,
             "resourceVersion": self.resource_version,
+            "resourceVaultId": self.resource_vault_id,
             "schemaVersion": BUSINESS_MESSAGE_NOTIFICATION_SCHEMA_VERSION,
             "state": self.state.value,
-            "vaultId": self.vault_id,
         }
 
     def value_free_summary(self) -> Mapping[str, object]:
         return {
             "authorityEpoch": self.authority_epoch,
             "businessReceiptId": self.business_receipt_id,
+            "inboxSubjectDigest": _digest(self.inbox_subject_id),
+            "inboxVaultIdHash": _digest(self.inbox_vault_id),
             "kind": self.kind.value,
             "messageId": self.message_id,
-            "ownerDigest": _digest(self.owner_subject_id),
+            "resourceOwnerDigest": _digest(self.resource_owner_subject_id),
             "resourceIdHash": _digest(self.resource_id),
             "resourceType": self.resource_type,
             "resourceVersion": self.resource_version,
             "schemaVersion": BUSINESS_MESSAGE_NOTIFICATION_SCHEMA_VERSION,
             "state": self.state.value,
-            "vaultIdHash": _digest(self.vault_id),
+            "resourceVaultIdHash": _digest(self.resource_vault_id),
         }
 
 
 @dataclass(frozen=True)
 class DeviceSubscription:
-    """A hash-only APNs subscription identity with explicit lifecycle state.
+    """A hash-only APNs subscription for one inbox account and installation.
 
     The contract accepts a token hash only.  Raw APNs tokens must be normalized
     and hashed at the HTTP ingress boundary, then kept out of async effects,
@@ -294,13 +359,13 @@ class DeviceSubscription:
     """
 
     subscription_id: str
-    owner_subject_id: str
-    vault_id: str
+    inbox_subject_id: str
+    inbox_vault_id: str
     installation_id: str
     platform: str
     token_hash: str
     generation: int
-    authority_epoch: int
+    account_epoch: int
     status: DeviceSubscriptionStatus = DeviceSubscriptionStatus.ACTIVE
 
     def __post_init__(self) -> None:
@@ -311,10 +376,14 @@ class DeviceSubscription:
         )
         object.__setattr__(
             self,
-            "owner_subject_id",
-            _identifier(self.owner_subject_id, field="owner_subject_id"),
+            "inbox_subject_id",
+            _identifier(self.inbox_subject_id, field="inbox_subject_id"),
         )
-        object.__setattr__(self, "vault_id", _identifier(self.vault_id, field="vault_id"))
+        object.__setattr__(
+            self,
+            "inbox_vault_id",
+            _identifier(self.inbox_vault_id, field="inbox_vault_id"),
+        )
         object.__setattr__(
             self,
             "installation_id",
@@ -330,8 +399,8 @@ class DeviceSubscription:
         object.__setattr__(self, "generation", _non_negative_int(self.generation, field="generation"))
         object.__setattr__(
             self,
-            "authority_epoch",
-            _non_negative_int(self.authority_epoch, field="authority_epoch"),
+            "account_epoch",
+            _non_negative_int(self.account_epoch, field="account_epoch"),
         )
         if not isinstance(self.status, DeviceSubscriptionStatus):
             raise BusinessMessageNotificationContractError("device subscription status is required")
@@ -340,17 +409,17 @@ class DeviceSubscription:
     def register(
         cls,
         *,
-        owner_subject_id: str,
-        vault_id: str,
+        inbox_subject_id: str,
+        inbox_vault_id: str,
         installation_id: str,
         platform: str,
         token_hash: str,
-        authority_epoch: int,
+        account_epoch: int,
     ) -> "DeviceSubscription":
         """Create the first generation without accepting a raw device token."""
 
-        owner = _identifier(owner_subject_id, field="owner_subject_id")
-        vault = _identifier(vault_id, field="vault_id")
+        inbox_subject = _identifier(inbox_subject_id, field="inbox_subject_id")
+        inbox_vault = _identifier(inbox_vault_id, field="inbox_vault_id")
         installation = _identifier(installation_id, field="installation_id")
         normalized_platform = str(platform or "").strip().lower()
         if normalized_platform != "ios":
@@ -361,16 +430,24 @@ class DeviceSubscription:
             subscription_id=str(
                 uuid5(
                     _DEVICE_SUBSCRIPTION_NAMESPACE,
-                    ":".join(("device-subscription", owner, vault, installation, normalized_platform)),
+                    ":".join(
+                        (
+                            "device-subscription",
+                            inbox_subject,
+                            inbox_vault,
+                            installation,
+                            normalized_platform,
+                        )
+                    ),
                 )
             ),
-            owner_subject_id=owner,
-            vault_id=vault,
+            inbox_subject_id=inbox_subject,
+            inbox_vault_id=inbox_vault,
             installation_id=installation,
             platform=normalized_platform,
             token_hash=token_hash,
             generation=0,
-            authority_epoch=authority_epoch,
+            account_epoch=account_epoch,
         )
 
     @property
@@ -400,14 +477,14 @@ class DeviceSubscription:
         """Safe trace shape: token hash and installation ID are never exported."""
 
         return {
-            "authorityEpoch": self.authority_epoch,
+            "accountEpoch": self.account_epoch,
             "generation": self.generation,
-            "ownerDigest": _digest(self.owner_subject_id),
+            "inboxSubjectDigest": _digest(self.inbox_subject_id),
             "platform": self.platform,
             "schemaVersion": BUSINESS_MESSAGE_NOTIFICATION_SCHEMA_VERSION,
             "status": self.status.value,
             "subscriptionId": self.subscription_id,
-            "vaultDigest": _digest(self.vault_id),
+            "inboxVaultDigest": _digest(self.inbox_vault_id),
         }
 
 
@@ -448,20 +525,20 @@ class DeviceSubscriptionTransition:
 
 def register_device_subscription(
     *,
-    owner_subject_id: str,
-    vault_id: str,
+    inbox_subject_id: str,
+    inbox_vault_id: str,
     installation_id: str,
     platform: str,
     token_hash: str,
-    authority_epoch: int,
+    account_epoch: int,
 ) -> DeviceSubscriptionTransition:
     subscription = DeviceSubscription.register(
-        owner_subject_id=owner_subject_id,
-        vault_id=vault_id,
+        inbox_subject_id=inbox_subject_id,
+        inbox_vault_id=inbox_vault_id,
         installation_id=installation_id,
         platform=platform,
         token_hash=token_hash,
-        authority_epoch=authority_epoch,
+        account_epoch=account_epoch,
     )
     return DeviceSubscriptionTransition(
         action=DeviceSubscriptionLifecycleAction.REGISTER,
@@ -531,13 +608,16 @@ class NotificationIntent:
         """Minimal route coordinates; click handling must re-authorize them."""
 
         return {
-            "authorityEpoch": self.message.authority_epoch,
+            "inboxSubjectDigest": _digest(self.message.inbox_subject_id),
+            "inboxVaultDigest": _digest(self.message.inbox_vault_id),
             "generation": self.generation,
             "messageId": self.message.message_id,
-            "ownerDigest": _digest(self.message.owner_subject_id),
+            "resourceAuthorityEpoch": self.message.authority_epoch,
+            "resourceOwnerDigest": _digest(self.message.resource_owner_subject_id),
             "resourceId": self.message.resource_id,
             "resourceType": self.message.resource_type,
             "resourceVersion": self.message.resource_version,
+            "resourceVaultDigest": _digest(self.message.resource_vault_id),
         }
 
     def value_free_summary(self) -> Mapping[str, object]:
@@ -597,17 +677,13 @@ class DeviceSubscriptionNotificationBinding:
                 "device subscriptions may only bind APNs notification intents"
             )
         message = self.notification_intent.message
-        if message.owner_subject_id != self.subscription.owner_subject_id:
+        if message.inbox_subject_id != self.subscription.inbox_subject_id:
             raise BusinessMessageNotificationContractError(
-                "device subscription owner must match notification owner"
+                "device subscription inbox subject must match notification inbox"
             )
-        if message.vault_id != self.subscription.vault_id:
+        if message.inbox_vault_id != self.subscription.inbox_vault_id:
             raise BusinessMessageNotificationContractError(
-                "device subscription vault must match notification vault"
-            )
-        if message.authority_epoch != self.subscription.authority_epoch:
-            raise BusinessMessageNotificationContractError(
-                "device subscription authority epoch must match notification authority"
+                "device subscription inbox vault must match notification inbox"
             )
 
     @property
@@ -622,15 +698,16 @@ class DeviceSubscriptionNotificationBinding:
             {
                 "deviceSubscriptionGeneration": self.subscription.generation,
                 "deviceSubscriptionId": self.subscription.subscription_id,
-                "deviceSubscriptionOwnerDigest": _digest(self.subscription.owner_subject_id),
-                "deviceSubscriptionVaultDigest": _digest(self.subscription.vault_id),
+                "deviceSubscriptionAccountEpoch": self.subscription.account_epoch,
+                "deviceSubscriptionInboxDigest": _digest(self.subscription.inbox_subject_id),
+                "deviceSubscriptionVaultDigest": _digest(self.subscription.inbox_vault_id),
                 "deviceSubscriptionPlatform": self.subscription.platform,
             }
         )
         return route
 
     def authorize_route(self, route: Mapping[str, object]) -> NotificationRouteAuthorization:
-        """Verify a route against current owner, authority, and generations."""
+        """Verify resource, inbox account, and generation coordinates separately."""
 
         if not isinstance(route, Mapping):
             return NotificationRouteAuthorization(
@@ -640,18 +717,37 @@ class DeviceSubscriptionNotificationBinding:
 
         try:
             message_id = _uuid(route.get("messageId"), field="route.messageId")
-            owner_digest = _sha256_hex(route.get("ownerDigest"), field="route.ownerDigest")
-            vault_digest = _sha256_hex(
+            resource_owner_digest = _sha256_hex(
+                route.get("resourceOwnerDigest"),
+                field="route.resourceOwnerDigest",
+            )
+            resource_vault_digest = _sha256_hex(
+                route.get("resourceVaultDigest"),
+                field="route.resourceVaultDigest",
+            )
+            inbox_subject_digest = _sha256_hex(
+                route.get("inboxSubjectDigest"),
+                field="route.inboxSubjectDigest",
+            )
+            inbox_vault_digest = _sha256_hex(
+                route.get("inboxVaultDigest"),
+                field="route.inboxVaultDigest",
+            )
+            subscription_inbox_digest = _sha256_hex(
+                route.get("deviceSubscriptionInboxDigest"),
+                field="route.deviceSubscriptionInboxDigest",
+            )
+            subscription_vault_digest = _sha256_hex(
                 route.get("deviceSubscriptionVaultDigest"),
                 field="route.deviceSubscriptionVaultDigest",
             )
-            subscription_owner_digest = _sha256_hex(
-                route.get("deviceSubscriptionOwnerDigest"),
-                field="route.deviceSubscriptionOwnerDigest",
+            resource_authority_epoch = _non_negative_int(
+                route.get("resourceAuthorityEpoch"),
+                field="route.resourceAuthorityEpoch",
             )
-            authority_epoch = _non_negative_int(
-                route.get("authorityEpoch"),
-                field="route.authorityEpoch",
+            subscription_account_epoch = _non_negative_int(
+                route.get("deviceSubscriptionAccountEpoch"),
+                field="route.deviceSubscriptionAccountEpoch",
             )
             notification_generation = _non_negative_int(
                 route.get("generation"),
@@ -684,22 +780,41 @@ class DeviceSubscriptionNotificationBinding:
                 allowed=False,
                 reason=NotificationRouteAuthorizationReason.MESSAGE_MISMATCH,
             )
-        if owner_digest != _digest(message.owner_subject_id) or subscription_owner_digest != _digest(
-            self.subscription.owner_subject_id
+        if resource_owner_digest != _digest(message.resource_owner_subject_id):
+            return NotificationRouteAuthorization(
+                allowed=False,
+                reason=NotificationRouteAuthorizationReason.RESOURCE_OWNER_MISMATCH,
+            )
+        if resource_vault_digest != _digest(message.resource_vault_id):
+            return NotificationRouteAuthorization(
+                allowed=False,
+                reason=NotificationRouteAuthorizationReason.RESOURCE_VAULT_MISMATCH,
+            )
+        if (
+            inbox_subject_digest != _digest(message.inbox_subject_id)
+            or subscription_inbox_digest != _digest(self.subscription.inbox_subject_id)
         ):
             return NotificationRouteAuthorization(
                 allowed=False,
-                reason=NotificationRouteAuthorizationReason.OWNER_MISMATCH,
+                reason=NotificationRouteAuthorizationReason.INBOX_SUBJECT_MISMATCH,
             )
-        if vault_digest != _digest(self.subscription.vault_id):
+        if (
+            inbox_vault_digest != _digest(message.inbox_vault_id)
+            or subscription_vault_digest != _digest(self.subscription.inbox_vault_id)
+        ):
             return NotificationRouteAuthorization(
                 allowed=False,
-                reason=NotificationRouteAuthorizationReason.VAULT_MISMATCH,
+                reason=NotificationRouteAuthorizationReason.INBOX_VAULT_MISMATCH,
             )
-        if authority_epoch != message.authority_epoch or authority_epoch != self.subscription.authority_epoch:
+        if resource_authority_epoch != message.authority_epoch:
             return NotificationRouteAuthorization(
                 allowed=False,
-                reason=NotificationRouteAuthorizationReason.AUTHORITY_EPOCH_MISMATCH,
+                reason=NotificationRouteAuthorizationReason.RESOURCE_AUTHORITY_EPOCH_MISMATCH,
+            )
+        if subscription_account_epoch != self.subscription.account_epoch:
+            return NotificationRouteAuthorization(
+                allowed=False,
+                reason=NotificationRouteAuthorizationReason.SUBSCRIPTION_ACCOUNT_EPOCH_MISMATCH,
             )
         if notification_generation != self.notification_intent.generation:
             return NotificationRouteAuthorization(

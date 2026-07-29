@@ -41,7 +41,12 @@ def _intent() -> AsyncEffectIntent:
     )
 
 
-def _source(*, outcome: str = "completed") -> BusinessCompletionMessageSource:
+def _source(
+    *,
+    outcome: str = "completed",
+    inbox_subject_id=None,
+    inbox_vault_id=None,
+) -> BusinessCompletionMessageSource:
     intent = _intent()
     receipt = InMemoryAsyncEffectConsumerRepository().consume(
         AsyncEffectSyntheticConsumerCommand(
@@ -53,21 +58,36 @@ def _source(*, outcome: str = "completed") -> BusinessCompletionMessageSource:
             result_ref_hash=sha256(b"fixture-result").hexdigest(),
         )
     )
-    return BusinessCompletionMessageSource(
+    source = BusinessCompletionMessageSource(
         intent=intent,
         completion=receipt,
         message_kind=InAppMessageKind.TIME_LETTER,
     )
+    if inbox_subject_id is None and inbox_vault_id is None:
+        return source
+    return BusinessCompletionMessageSource(
+        intent=intent,
+        completion=receipt,
+        message_kind=InAppMessageKind.TIME_LETTER,
+        inbox_subject_id=inbox_subject_id,
+        inbox_vault_id=inbox_vault_id,
+    )
 
 
-def _subscription(*, token_seed: bytes = b"token-one"):
+def _subscription(
+    *,
+    token_seed: bytes = b"token-one",
+    inbox_subject_id: str = "owner-001",
+    inbox_vault_id: str = "vault-001",
+    account_epoch: int = 3,
+):
     return register_device_subscription(
-        owner_subject_id="owner-001",
-        vault_id="vault-001",
+        inbox_subject_id=inbox_subject_id,
+        inbox_vault_id=inbox_vault_id,
         installation_id="ios-installation-001",
         platform="ios",
         token_hash=sha256(token_seed).hexdigest(),
-        authority_epoch=3,
+        account_epoch=account_epoch,
     ).subscription
 
 
@@ -86,8 +106,11 @@ class BusinessMessageNotificationPlanTests(unittest.TestCase):
         self.assertEqual(projection["kind"], "timeLetter")
         self.assertTrue(projection["metadataOnly"])
         self.assertTrue(projection["contentRedacted"])
+        self.assertEqual(projection["resourceOwnerSubjectId"], "owner-001")
+        self.assertEqual(projection["inboxSubjectId"], "owner-001")
         self.assertNotIn("body", projection)
         self.assertNotIn("title", projection)
+        self.assertNotIn("ownerSubjectId", projection)
         self.assertEqual(
             [intent.channel for intent in plan.notification_intents],
             [NotificationChannel.LOCAL, NotificationChannel.APNS],
@@ -122,6 +145,60 @@ class BusinessMessageNotificationPlanTests(unittest.TestCase):
                 notification_channels=(NotificationChannel.LOCAL, NotificationChannel.LOCAL),
                 generation=2,
             )
+
+    def test_cross_account_message_has_distinct_resource_and_inbox_coordinates(self):
+        source = _source(
+            inbox_subject_id="family-subject-002",
+            inbox_vault_id="family-vault-002",
+        )
+        plan = build_business_completion_message_notification_plan(
+            source,
+            notification_channels=(NotificationChannel.APNS,),
+            generation=2,
+        )
+        message = plan.message
+        recipient_subscription = _subscription(
+            inbox_subject_id="family-subject-002",
+            inbox_vault_id="family-vault-002",
+            account_epoch=11,
+        )
+        binding = DeviceSubscriptionNotificationBinding(
+            subscription=recipient_subscription,
+            notification_intent=plan.notification_intents[0],
+        )
+
+        self.assertEqual(message.resource_owner_subject_id, "owner-001")
+        self.assertEqual(message.resource_vault_id, "vault-001")
+        self.assertEqual(message.inbox_subject_id, "family-subject-002")
+        self.assertEqual(message.inbox_vault_id, "family-vault-002")
+        self.assertTrue(binding.authorize_route(binding.route_contract()).allowed)
+        route = binding.route_contract()
+        self.assertNotIn("owner-001", str(route))
+        self.assertNotIn("family-subject-002", str(route))
+        with self.assertRaises(BusinessMessageNotificationContractError):
+            DeviceSubscriptionNotificationBinding(
+                subscription=_subscription(),
+                notification_intent=plan.notification_intents[0],
+            )
+
+    def test_cross_account_message_identity_must_be_complete_and_changes_message_identity(self):
+        base = _source()
+        with self.assertRaises(BusinessMessageNotificationContractError):
+            BusinessCompletionMessageSource(
+                intent=base.intent,
+                completion=base.completion,
+                message_kind=InAppMessageKind.TIME_LETTER,
+                inbox_subject_id="family-subject-002",
+            )
+
+        recipient = BusinessCompletionMessageSource(
+            intent=base.intent,
+            completion=base.completion,
+            message_kind=InAppMessageKind.TIME_LETTER,
+            inbox_subject_id="family-subject-002",
+            inbox_vault_id="family-vault-002",
+        )
+        self.assertNotEqual(base.message_id, recipient.message_id)
 
     def test_delivery_failure_never_changes_completed_business_or_message_state(self):
         source = _source()
@@ -238,12 +315,12 @@ class BusinessMessageNotificationPlanTests(unittest.TestCase):
 
         with self.assertRaises(BusinessMessageNotificationContractError):
             register_device_subscription(
-                owner_subject_id="owner-001",
-                vault_id="vault-001",
+                inbox_subject_id="owner-001",
+                inbox_vault_id="vault-001",
                 installation_id="ios-installation-001",
                 platform="ios",
                 token_hash="raw-device-token-is-not-a-hash",
-                authority_epoch=3,
+                account_epoch=3,
             )
 
     def test_device_subscription_revoke_prevents_notification_route_delivery(self):
@@ -270,7 +347,7 @@ class BusinessMessageNotificationPlanTests(unittest.TestCase):
         )
         self.assertFalse(revoke_device_subscription(revoked).changed)
 
-    def test_notification_route_rejects_owner_and_generation_mismatches(self):
+    def test_notification_route_rejects_resource_inbox_and_generation_mismatches(self):
         source = _source()
         plan = build_business_completion_message_notification_plan(
             source,
@@ -282,16 +359,34 @@ class BusinessMessageNotificationPlanTests(unittest.TestCase):
             notification_intent=plan.notification_intents[0],
         )
         route = dict(binding.route_contract())
-        wrong_owner_route = dict(route)
-        wrong_owner_route["ownerDigest"] = sha256(b"other-owner").hexdigest()
+        wrong_resource_owner_route = dict(route)
+        wrong_resource_owner_route["resourceOwnerDigest"] = sha256(b"other-owner").hexdigest()
+        wrong_inbox_route = dict(route)
+        wrong_inbox_route["inboxSubjectDigest"] = sha256(b"other-inbox").hexdigest()
+        wrong_resource_epoch = dict(route)
+        wrong_resource_epoch["resourceAuthorityEpoch"] = 4
+        wrong_subscription_epoch = dict(route)
+        wrong_subscription_epoch["deviceSubscriptionAccountEpoch"] = 4
         wrong_notification_generation = dict(route)
         wrong_notification_generation["generation"] = 6
         wrong_subscription_generation = dict(route)
         wrong_subscription_generation["deviceSubscriptionGeneration"] = 1
 
         self.assertEqual(
-            binding.authorize_route(wrong_owner_route).reason,
-            NotificationRouteAuthorizationReason.OWNER_MISMATCH,
+            binding.authorize_route(wrong_resource_owner_route).reason,
+            NotificationRouteAuthorizationReason.RESOURCE_OWNER_MISMATCH,
+        )
+        self.assertEqual(
+            binding.authorize_route(wrong_inbox_route).reason,
+            NotificationRouteAuthorizationReason.INBOX_SUBJECT_MISMATCH,
+        )
+        self.assertEqual(
+            binding.authorize_route(wrong_resource_epoch).reason,
+            NotificationRouteAuthorizationReason.RESOURCE_AUTHORITY_EPOCH_MISMATCH,
+        )
+        self.assertEqual(
+            binding.authorize_route(wrong_subscription_epoch).reason,
+            NotificationRouteAuthorizationReason.SUBSCRIPTION_ACCOUNT_EPOCH_MISMATCH,
         )
         self.assertEqual(
             binding.authorize_route(wrong_notification_generation).reason,
