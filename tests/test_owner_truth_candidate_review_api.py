@@ -133,6 +133,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             headers=headers,
             json={"query": "default hidden"},
         )
+        context_materialization = client.post(
+            "/v2/vaults/vault-hidden/context-shadow/materialize",
+            headers=headers,
+            json={"query": "default hidden"},
+        )
         answer_citation = client.post(
             "/v2/vaults/vault-hidden/answer-citation-receipts",
             headers=headers,
@@ -179,6 +184,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(context_shadow_build.status_code, 404)
         self.assertEqual(
             context_shadow_build.json()["detail"]["code"],
+            "ownerTruthContextShadowUnavailable",
+        )
+        self.assertEqual(context_materialization.status_code, 404)
+        self.assertEqual(
+            context_materialization.json()["detail"]["code"],
             "ownerTruthContextShadowUnavailable",
         )
         self.assertEqual(answer_citation.status_code, 404)
@@ -451,6 +461,26 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(build["citationProof"][0]["citation"]["sourceId"], candidate.source_id)
         self.assertNotIn(raw_query, str(build))
         self.assertNotIn(candidate.content["summary"], str(build))
+
+        context_materialization = client.post(
+            f"/v2/vaults/{vault_id}/context-shadow/materialize",
+            headers=headers,
+            json={"intent": "echo_chat", "query": raw_query},
+        )
+        self.assertEqual(context_materialization.status_code, 200)
+        self.assertEqual(context_materialization.headers["cache-control"], "no-store")
+        self.assertEqual(
+            context_materialization.json()["schemaVersion"],
+            "owner-truth-context-materialization-response-v1",
+        )
+        materialization = context_materialization.json()["contextMaterialization"]
+        self.assertEqual(materialization["state"], "ready")
+        self.assertFalse(materialization["legacyContextRead"])
+        self.assertEqual(materialization["generationContext"]["sourceCount"], 1)
+        self.assertTrue(materialization["generationContext"]["contentHash"])
+        self.assertEqual(len(materialization["typedCitations"]), 1)
+        self.assertNotIn(raw_query, str(materialization))
+        self.assertNotIn(candidate.content["summary"], str(materialization))
 
         main_module.store.owner_truth_memory_search_document_projection_repository().rebuild(
             context=OwnerTruthCommandContext(

@@ -177,6 +177,10 @@ from app.services.owner_truth_context_shadow_build import (
     OwnerTruthContextShadowBuildService,
     context_shadow_build_summary,
 )
+from app.services.owner_truth_context_materialization import (
+    OwnerTruthContextMaterializationService,
+    context_materialization_summary,
+)
 from app.services.owner_truth_answer_citation import (
     OwnerTruthAnswerCitationCommand,
     OwnerTruthAnswerCitationConflict,
@@ -4572,6 +4576,42 @@ def build_owner_truth_context_shadow(
         "schemaVersion": "owner-truth-context-shadow-build-response-v1",
         "contextShadow": context_shadow_build_summary(shadow),
     }
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/context-shadow/materialize",
+    include_in_schema=False,
+)
+def materialize_owner_truth_context_shadow(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """QA-only confirmed-memory materialization metadata.
+
+    The service creates bounded model input in-process from current confirmed
+    Projection entries. The HTTP response intentionally remains value-free, so
+    QA evidence cannot contain the query or personal memory body.
+    """
+
+    try:
+        context = _owner_truth_context_shadow_context(request, vault_id=vault_id)
+        materialization = OwnerTruthContextMaterializationService(
+            store,
+            enabled=True,
+        ).build(
+            context=context,
+            payload=payload,
+        )
+    except OwnerTruthMemoryProjectionError as error:
+        raise _owner_truth_memory_projection_http_error(error) from error
+    return JSONResponse(
+        content={
+            "schemaVersion": "owner-truth-context-materialization-response-v1",
+            "contextMaterialization": context_materialization_summary(materialization),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post(

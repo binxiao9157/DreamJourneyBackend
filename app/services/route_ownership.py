@@ -422,6 +422,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/context-shadow/materialize",
+                session,
+                "ownerTruthContextMaterialization",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/answer-citation-receipts",
                 session,
                 "ownerTruthAnswerCitationReceipt",

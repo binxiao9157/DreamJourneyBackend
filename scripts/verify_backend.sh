@@ -227,6 +227,7 @@ test -f scripts/run-backend-async-effects-postgres-smoke.sh
 	test -f db/migrations/0017_owner_truth_memory_projection_trigger_fix.sql
 	test -f db/migrations/0017_owner_truth_memory_projection_trigger_fix.json
 	test -f app/services/owner_truth_memory_projection.py
+	test -f app/services/owner_truth_context_materialization.py
 	test -f db/migrations/0018_owner_truth_answer_citations.sql
 	test -f db/migrations/0018_owner_truth_answer_citations.json
 	test -f db/migrations/0019_owner_truth_answer_citation_trigger_fix.sql

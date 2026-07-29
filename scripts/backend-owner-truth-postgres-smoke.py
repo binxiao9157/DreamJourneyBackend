@@ -61,6 +61,10 @@ from app.services.owner_truth_context_shadow_build import (
     OwnerTruthContextShadowBuildService,
     context_shadow_build_summary,
 )
+from app.services.owner_truth_context_materialization import (
+    OwnerTruthContextMaterializationService,
+    context_materialization_summary,
+)
 from app.services.owner_truth_answer_citation import (
     OwnerTruthAnswerCitationCommand,
     OwnerTruthAnswerCitationService,
@@ -978,6 +982,35 @@ def main() -> None:
                 and review_knowledge_content["claim"] not in str(context_shadow_build_qa_summary),
                 "Context shadow build evidence must not expose raw query or MemoryVersion content",
             )
+            context_materialization = OwnerTruthContextMaterializationService(
+                store,
+                enabled=True,
+            ).build(
+                context=review_context,
+                payload={"intent": "echo_chat", "query": raw_context_query},
+            )
+            context_materialization_qa_summary = context_materialization_summary(
+                context_materialization
+            )
+            require(
+                context_materialization["state"] == "ready"
+                and context_materialization["legacyContextRead"] is False
+                and len(context_materialization["typedCitations"]) == 2
+                and context_materialization["generationContext"]["sourceCount"] == 2
+                and review_content["summary"]
+                in context_materialization["generationContext"]["text"]
+                and review_knowledge_content["claim"]
+                in context_materialization["generationContext"]["text"],
+                "Context materialization must use only selected current confirmed Projection content",
+            )
+            require(
+                raw_context_query not in str(context_materialization_qa_summary)
+                and review_content["summary"] not in str(context_materialization_qa_summary)
+                and review_knowledge_content["claim"]
+                not in str(context_materialization_qa_summary)
+                and "'text':" not in str(context_materialization_qa_summary),
+                "Context materialization QA summary must remain value-free",
+            )
 
             query_ranked_context_build = OwnerTruthContextShadowBuildService(
                 store,
@@ -1015,6 +1048,26 @@ def main() -> None:
                 and review_knowledge_content["claim"]
                 not in str(query_ranked_context_build_qa_summary),
                 "query-ranked Context evidence must stay value-free",
+            )
+            query_ranked_materialization = OwnerTruthContextMaterializationService(
+                store,
+                enabled=True,
+            ).build(
+                context=review_context,
+                payload={
+                    "intent": "echo_chat",
+                    "query": "自行车",
+                    "selectionMode": "deterministicTextFallback",
+                },
+            )
+            require(
+                query_ranked_materialization["state"] == "ready"
+                and query_ranked_materialization["generationContext"]["sourceCount"] == 1
+                and review_knowledge_content["claim"]
+                in query_ranked_materialization["generationContext"]["text"]
+                and review_content["summary"]
+                not in query_ranked_materialization["generationContext"]["text"],
+                "query-ranked materialization must not reintroduce unmatched confirmed memory",
             )
 
             raw_answer = "我只根据当前确认的个人记忆回答。"
@@ -1710,6 +1763,21 @@ def main() -> None:
                 == ["owner_truth_context_unavailable_no_personal_memory"],
                 "Context shadow build must use explicit no-personal-memory fallback",
             )
+            context_materialization_changed = OwnerTruthContextMaterializationService(
+                store,
+                enabled=True,
+            ).build(
+                context=review_context,
+                payload={"query": "投影失效时不得物化旧上下文"},
+            )
+            require(
+                context_materialization_changed["state"] == "rebuilding"
+                and context_materialization_changed["generationContext"]["text"] == ""
+                and context_materialization_changed["typedCitations"] == []
+                and context_materialization_changed["fallbacks"]
+                == ["owner_truth_context_unavailable_no_personal_memory"],
+                "Context materialization must fail closed when Projection is unavailable",
+            )
             with psycopg.connect(test_dsn) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
@@ -1810,6 +1878,10 @@ def main() -> None:
                     "contextShadowBuildCitationProof": True,
                     "contextShadowBuildNoPersonalMemoryFallback": True,
                     "contextShadowBuildValueFree": True,
+                    "contextMaterializationConfirmedProjectionOnly": True,
+                    "contextMaterializationQueryNarrowing": True,
+                    "contextMaterializationFailsClosed": True,
+                    "contextMaterializationSummaryValueFree": True,
                     "answerCitationTyped": True,
                     "answerCitationIdempotent": True,
                     "answerCitationValueFree": True,

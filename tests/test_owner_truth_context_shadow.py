@@ -33,6 +33,10 @@ from app.services.owner_truth_context_shadow_build import (
     OwnerTruthContextShadowBuildService,
     context_shadow_build_summary,
 )
+from app.services.owner_truth_context_materialization import (
+    OwnerTruthContextMaterializationService,
+    context_materialization_summary,
+)
 from app.services.owner_truth_memory_projection import (
     InMemoryOwnerTruthMemoryProjectionRepository,
     OwnerTruthMemoryProjectionService,
@@ -390,6 +394,75 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
         self.assertEqual(result["selectedContext"], [])
         self.assertEqual(result["citationProof"], [])
         self.assertTrue(result["contextHash"])
+        self.assertEqual(
+            result["fallbacks"],
+            ["owner_truth_context_unavailable_no_personal_memory"],
+        )
+
+    def test_materialization_uses_only_selected_confirmed_projection_content(self) -> None:
+        matched = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "父亲修好自行车后带我去公园"},
+        )
+        unmatched = self._candidate(
+            kind=MemoryKind.KNOWLEDGE,
+            content={"claim": "夏天的海边总有温暖的风"},
+        )
+        restricted = self._candidate(
+            kind=MemoryKind.EMOTION,
+            content={"label": "自行车相关的敏感情绪"},
+            sensitivity=SensitivityLevel.RESTRICTED,
+        )
+        self._activate(matched, command_id="context-materialization-matched")
+        self._activate(unmatched, command_id="context-materialization-unmatched")
+        self._activate(restricted, command_id="context-materialization-restricted")
+        self.projection_service.rebuild(context=self.context)
+        self.store.search_projection_repository.rebuild(context=self.context)
+
+        raw_query = "自行车"
+        result = OwnerTruthContextMaterializationService(self.store, enabled=True).build(
+            context=self.context,
+            payload={
+                "intent": "echo_chat",
+                "query": raw_query,
+                "selectionMode": "deterministicTextFallback",
+            },
+        )
+        summary = context_materialization_summary(result)
+
+        self.assertEqual(result["state"], "ready")
+        self.assertTrue(result["shadowOnly"])
+        self.assertTrue(result["legacyContextUnchanged"])
+        self.assertFalse(result["legacyContextRead"])
+        self.assertEqual(result["generationContext"]["sourceCount"], 1)
+        self.assertIn(matched.content["summary"], result["generationContext"]["text"])
+        self.assertNotIn(unmatched.content["claim"], result["generationContext"]["text"])
+        self.assertNotIn(restricted.content["label"], result["generationContext"]["text"])
+        self.assertEqual(
+            result["typedCitations"][0]["memoryVersionId"],
+            result["selectedContext"][0]["citation"]["memoryVersionId"],
+        )
+        self.assertNotIn(raw_query, str(summary))
+        self.assertNotIn(matched.content["summary"], str(summary))
+        self.assertNotIn(unmatched.content["claim"], str(summary))
+        self.assertNotIn(restricted.content["label"], str(summary))
+        self.assertNotIn("'text':", str(summary))
+
+    def test_materialization_fails_closed_without_current_projection(self) -> None:
+        candidate = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "投影未就绪时不得物化个人上下文"},
+        )
+        self._activate(candidate, command_id="context-materialization-unavailable")
+
+        result = OwnerTruthContextMaterializationService(self.store, enabled=True).build(
+            context=self.context,
+            payload={"query": "投影尚未重建"},
+        )
+
+        self.assertEqual(result["state"], "rebuilding")
+        self.assertEqual(result["generationContext"]["text"], "")
+        self.assertEqual(result["typedCitations"], [])
         self.assertEqual(
             result["fallbacks"],
             ["owner_truth_context_unavailable_no_personal_memory"],
