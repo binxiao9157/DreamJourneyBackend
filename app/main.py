@@ -117,6 +117,7 @@ from app.domain.owner_truth.conversation import (
     AppendInterviewMessageCommand,
     ConversationMessageAuthor,
     ConversationMessageKind,
+    EndInterviewSessionCommand,
     InterviewBoundary,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationConflict,
@@ -1059,6 +1060,14 @@ _OWNER_TRUTH_INTERVIEW_BOUNDARY_PAYLOAD_FIELDS = frozenset(
         "boundary",
     }
 )
+_OWNER_TRUTH_INTERVIEW_END_PAYLOAD_FIELDS = frozenset(
+    {
+        "commandId",
+        "threadId",
+        "expectedThreadVersion",
+        "expectedSessionVersion",
+    }
+)
 _OWNER_TRUTH_DEFER_WITH_CONTINUATION_PAYLOAD_FIELDS = frozenset(
     {
         "commandId",
@@ -1116,6 +1125,41 @@ def _owner_truth_formal_interview_boundary_command(
         session_id=session_id,
         expected_session_version=expected_session_version,
         boundary=InterviewBoundary(boundary),
+    )
+
+
+def _owner_truth_end_interview_session_command(
+    *,
+    payload: Dict[str, Any],
+    session_id: str,
+) -> EndInterviewSessionCommand:
+    """Decode an explicit, value-free end-of-session lifecycle fence."""
+
+    if set(payload) != _OWNER_TRUTH_INTERVIEW_END_PAYLOAD_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    command_id = payload.get("commandId")
+    thread_id = payload.get("threadId")
+    expected_thread_version = payload.get("expectedThreadVersion")
+    expected_session_version = payload.get("expectedSessionVersion")
+    if (
+        not isinstance(command_id, str)
+        or not isinstance(thread_id, str)
+        or type(expected_thread_version) is not int
+        or type(expected_session_version) is not int
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    return EndInterviewSessionCommand(
+        command_id=command_id,
+        thread_id=thread_id,
+        session_id=session_id,
+        expected_thread_version=expected_thread_version,
+        expected_session_version=expected_session_version,
     )
 
 
@@ -4417,6 +4461,64 @@ def append_owner_truth_interview_narrative(
             status_code=400,
             detail={"code": "ownerTruthInterviewSessionInvalid"},
         ) from error
+    response = _owner_truth_interview_session_command_response(
+        vault_id=context.vault_id,
+        result=result,
+    )
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_attach_owner_truth_review_batch_automation(
+            response=response,
+            automation=automation,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/end",
+    include_in_schema=False,
+)
+def end_owner_truth_interview_session(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """End a private interview session behind the existing Owner QA gate.
+
+    This route records no transcript or decision. It only closes the private
+    thread/session pair, then allows the existing QA-only automation to create
+    one value-free ``sessionExit`` review batch when pending owner turns exist.
+    """
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        command = _owner_truth_end_interview_session_command(
+            payload=payload,
+            session_id=session_id,
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-end:"
+                f"{context.vault_id}:{command.session_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = OwnerTruthConversationService(
+                store.owner_truth_conversation_repository()
+            ).end_session(
+                command=command,
+                context=context,
+            )
+        automation = _owner_truth_review_batch_automation_after_qa_transition(
+            request=request,
+            session_id=command.session_id,
+            transition_command_id=command.command_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
     response = _owner_truth_interview_session_command_response(
         vault_id=context.vault_id,
         result=result,

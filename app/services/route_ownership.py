@@ -338,6 +338,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/end",
+                session,
+                "ownerTruthInterviewSessionEnd",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/interview-sessions/{session_id}/defer-with-continuation",
                 session,
                 "ownerTruthInterviewSessionDeferWithContinuation",

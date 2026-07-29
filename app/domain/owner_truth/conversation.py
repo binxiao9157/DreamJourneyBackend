@@ -539,6 +539,59 @@ class PauseInterviewForTopicSwitchCommand:
 
 
 @dataclass(frozen=True)
+class EndInterviewSessionCommand:
+    """End one private interview session without carrying transcript content.
+
+    Ending is a lifecycle fence rather than a review or promotion decision. It
+    prevents later turns from being appended to the finished thread while the
+    separate review-batch automation can decide whether an existing private
+    batch is due.
+    """
+
+    command_id: str
+    thread_id: str
+    session_id: str
+    expected_thread_version: int
+    expected_session_version: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
+        object.__setattr__(self, "thread_id", require_uuid(self.thread_id, field="thread_id"))
+        object.__setattr__(self, "session_id", require_uuid(self.session_id, field="session_id"))
+        _positive_version(self.expected_thread_version, field="expected_thread_version")
+        _positive_version(self.expected_session_version, field="expected_session_version")
+
+    def write_record(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> "EndInterviewSessionWriteRecord":
+        command_id_hash = _sha256(self.command_id)
+        payload = {
+            "schemaVersion": OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION,
+            "commandType": "endInterviewSession",
+            "threadId": self.thread_id,
+            "sessionId": self.session_id,
+            "expectedThreadVersion": self.expected_thread_version,
+            "expectedSessionVersion": self.expected_session_version,
+            "state": InterviewSessionState.ENDED.value,
+        }
+        return EndInterviewSessionWriteRecord(
+            receipt_id=_receipt_id(context=context, command_id_hash=command_id_hash),
+            command_id_hash=command_id_hash,
+            payload_hash=_sha256(_canonical_json(payload)),
+            thread_id=self.thread_id,
+            session_id=self.session_id,
+            expected_thread_version=self.expected_thread_version,
+            expected_session_version=self.expected_session_version,
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            actor_subject_id=context.actor_subject_id,
+            policy_version=context.policy_version,
+        )
+
+
+@dataclass(frozen=True)
 class RecordInterviewPacingCommand:
     command_id: str
     thread_id: str
@@ -748,6 +801,21 @@ class RestoreDoNotAskInterviewBoundaryWriteRecord:
 
 @dataclass(frozen=True)
 class PauseInterviewForTopicSwitchWriteRecord:
+    receipt_id: str
+    command_id_hash: str
+    payload_hash: str
+    thread_id: str
+    session_id: str
+    expected_thread_version: int
+    expected_session_version: int
+    vault_id: str
+    owner_subject_id: str
+    actor_subject_id: str
+    policy_version: str
+
+
+@dataclass(frozen=True)
+class EndInterviewSessionWriteRecord:
     receipt_id: str
     command_id_hash: str
     payload_hash: str
@@ -997,6 +1065,8 @@ __all__ = [
     "AcknowledgeInterviewReviewBatchWriteRecord",
     "ConversationMessageAuthor",
     "ConversationMessageKind",
+    "EndInterviewSessionCommand",
+    "EndInterviewSessionWriteRecord",
     "InterviewBoundary",
     "InterviewFatigue",
     "InterviewPacingEvent",

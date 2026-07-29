@@ -76,6 +76,10 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/boundary"
 
     @staticmethod
+    def _end_path(vault_id: str, session_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/end"
+
+    @staticmethod
     def _restore_do_not_ask_path(vault_id: str, session_id: str) -> str:
         return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/restore-do-not-ask"
 
@@ -150,6 +154,32 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             },
         )
 
+    def _end_session(
+        self,
+        *,
+        vault_id: str,
+        session_id: str,
+        thread_id: str,
+        expected_thread_version: int,
+        expected_session_version: int,
+        headers: dict[str, str],
+        command_id: str | None = None,
+        extra: dict[str, object] | None = None,
+    ):
+        payload: dict[str, object] = {
+            "commandId": command_id or str(uuid4()),
+            "threadId": thread_id,
+            "expectedThreadVersion": expected_thread_version,
+            "expectedSessionVersion": expected_session_version,
+        }
+        if extra:
+            payload.update(extra)
+        return client.post(
+            self._end_path(vault_id, session_id),
+            headers=headers,
+            json=payload,
+        )
+
     def test_contract_is_default_hidden(self) -> None:
         _, headers, _ = self._login("13800139601")
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = False
@@ -187,6 +217,156 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             restore.json()["detail"]["code"],
             "ownerTruthCandidateReviewUnavailable",
         )
+
+        ended = self._end_session(
+            vault_id="vault-interview-input-hidden",
+            session_id=str(uuid4()),
+            thread_id=str(uuid4()),
+            expected_thread_version=1,
+            expected_session_version=1,
+            headers=headers,
+        )
+        self.assertEqual(ended.status_code, 404)
+        self.assertEqual(
+            ended.json()["detail"]["code"],
+            "ownerTruthCandidateReviewUnavailable",
+        )
+
+    def test_owner_can_end_session_once_and_create_one_session_exit_review_batch(self) -> None:
+        _, headers, _ = self._login("13800139618")
+        vault_id = "vault-interview-explicit-end"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        started = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+        appended = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": "本轮结束前的私有叙述不应出现在结束回执。",
+            },
+        )
+        self.assertEqual(appended.status_code, 201, appended.text)
+
+        command_id = str(uuid4())
+        ended = self._end_session(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=2,
+            expected_session_version=2,
+            headers=headers,
+            command_id=command_id,
+        )
+
+        self.assertEqual(ended.status_code, 201, ended.text)
+        payload = ended.json()
+        self.assertEqual(payload["receipt"]["status"], "created")
+        self.assertEqual(payload["receipt"]["threadVersion"], 3)
+        self.assertEqual(payload["receipt"]["sessionVersion"], 4)
+        self.assertEqual(payload["receipt"]["state"], "ended")
+        self.assertEqual(payload["reviewBatchAutomation"]["state"], "created")
+        self.assertEqual(payload["reviewBatchAutomation"]["reviewBatch"]["trigger"], "sessionExit")
+        self.assertEqual(
+            payload["reviewBatchAutomation"]["reviewBatch"]["capturedCandidateBatchTurnCount"],
+            1,
+        )
+        rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn("本轮结束前", rendered)
+        self.assertNotIn("candidate", rendered)
+        self.assertNotIn("memory", rendered)
+
+        replayed = self._end_session(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=2,
+            expected_session_version=2,
+            headers=headers,
+            command_id=command_id,
+        )
+        self.assertEqual(replayed.status_code, 200, replayed.text)
+        self.assertEqual(replayed.json()["receipt"]["status"], "deduplicated")
+        self.assertEqual(replayed.json()["receipt"]["sessionVersion"], 4)
+        self.assertEqual(replayed.json()["reviewBatchAutomation"]["state"], "alreadyPending")
+
+        blocked_append = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 3,
+                "expectedSessionVersion": 4,
+                "text": "结束后不能继续写入。",
+            },
+        )
+        self.assertEqual(blocked_append.status_code, 409, blocked_append.text)
+        self.assertEqual(
+            blocked_append.json()["detail"]["code"],
+            "ownerTruthInterviewSessionConflict",
+        )
+        current = client.get(self._current_path(vault_id), headers=headers)
+        self.assertEqual(current.status_code, 200, current.text)
+        self.assertIsNone(current.json()["currentSession"])
+
+    def test_end_requires_owner_current_versions_and_exact_payload(self) -> None:
+        _, owner_headers, _ = self._login("13800139619")
+        vault_id = "vault-interview-explicit-end-controls"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        started = self._start_session(
+            vault_id=vault_id,
+            headers=owner_headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+        _, other_headers, _ = self._login("13800139620")
+
+        denied = self._end_session(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=1,
+            expected_session_version=1,
+            headers=other_headers,
+        )
+        stale = self._end_session(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=9,
+            expected_session_version=9,
+            headers=owner_headers,
+        )
+        malformed = self._end_session(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=1,
+            expected_session_version=1,
+            headers=owner_headers,
+            extra={"reason": "free-form end reasons are not accepted"},
+        )
+
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(denied.json()["detail"]["code"], "ownerTruthInterviewSessionDenied")
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(stale.json()["detail"]["code"], "ownerTruthInterviewSessionConflict")
+        self.assertEqual(malformed.status_code, 400, malformed.text)
+        self.assertEqual(malformed.json()["detail"]["code"], "ownerTruthInterviewSessionInvalid")
 
     def test_owner_can_resume_only_current_active_session_without_content(self) -> None:
         _, headers, _ = self._login("13800139615")

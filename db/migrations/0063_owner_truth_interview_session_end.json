@@ -1,0 +1,14 @@
+{
+  "version": "0063",
+  "name": "owner_truth_interview_session_end",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthInterviewSessionEndQA",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthConversationV1": false,
+    "guidedInterviewM0A": false,
+    "ownerTruthInterviewSessionEndQA": false,
+    "publicEchoInterviewEnd": false
+  }
+}

@@ -23,6 +23,8 @@ from app.domain.owner_truth.conversation import (
     ConversationThreadState,
     CreateInterviewReviewBatchCommand,
     CreateInterviewReviewBatchWriteRecord,
+    EndInterviewSessionCommand,
+    EndInterviewSessionWriteRecord,
     InterviewBoundary,
     InterviewFatigue,
     InterviewPacingState,
@@ -82,6 +84,12 @@ class OwnerTruthConversationRepository(Protocol):
     def pause_interview_for_topic_switch(
         self,
         record: PauseInterviewForTopicSwitchWriteRecord,
+    ) -> OwnerTruthInterviewSessionResult:
+        ...
+
+    def end_interview_session(
+        self,
+        record: EndInterviewSessionWriteRecord,
     ) -> OwnerTruthInterviewSessionResult:
         ...
 
@@ -260,6 +268,15 @@ class OwnerTruthConversationService:
         return self._repository.pause_interview_for_topic_switch(
             command.write_record(context=context)
         )
+
+    def end_session(
+        self,
+        *,
+        command: EndInterviewSessionCommand,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewSessionResult:
+        _assert_owner_context(context)
+        return self._repository.end_interview_session(command.write_record(context=context))
 
     def record_pacing(
         self,
@@ -978,6 +995,58 @@ class InMemoryOwnerTruthConversationRepository:
             self._store_receipt(record, result)
             return result
 
+    def end_interview_session(
+        self,
+        record: EndInterviewSessionWriteRecord,
+    ) -> OwnerTruthInterviewSessionResult:
+        with self._lock:
+            self._ensure_active_vault(
+                vault_id=record.vault_id,
+                owner_subject_id=record.owner_subject_id,
+            )
+            existing = self._existing_receipt(record)
+            if existing is not None:
+                return self._replay_result(existing, record=record)
+            session, thread = self._live_session_and_thread(
+                vault_id=record.vault_id,
+                session_id=record.session_id,
+                thread_id=record.thread_id,
+                owner_subject_id=record.owner_subject_id,
+            )
+            if (
+                session["state"] is InterviewSessionState.ENDED
+                or thread["state"] == ConversationThreadState.ENDED.value
+            ):
+                raise OwnerTruthInterviewSessionStateConflict(
+                    "an ended interview session and thread cannot be ended again"
+                )
+            self._assert_version(
+                resource="thread",
+                expected=record.expected_thread_version,
+                current=int(thread["rowVersion"]),
+            )
+            self._assert_version(
+                resource="interview session",
+                expected=record.expected_session_version,
+                current=int(session["rowVersion"]),
+            )
+            thread["state"] = ConversationThreadState.ENDED.value
+            thread["rowVersion"] += 1
+            session["state"] = InterviewSessionState.ENDED
+            session["rowVersion"] += 1
+            result = OwnerTruthInterviewSessionResult(
+                outcome="created",
+                receipt_id=record.receipt_id,
+                thread_id=record.thread_id,
+                session_id=record.session_id,
+                thread_version=int(thread["rowVersion"]),
+                session_version=int(session["rowVersion"]),
+                state=session["state"],
+                boundary=session["boundary"],
+            )
+            self._store_receipt(record, result)
+            return result
+
     def record_interview_pacing(
         self,
         record: RecordInterviewPacingWriteRecord,
@@ -1472,6 +1541,8 @@ class InMemoryOwnerTruthConversationRepository:
             return "restoreDoNotAskInterviewBoundary"
         if isinstance(record, PauseInterviewForTopicSwitchWriteRecord):
             return "pauseInterviewForTopicSwitch"
+        if isinstance(record, EndInterviewSessionWriteRecord):
+            return "endInterviewSession"
         if isinstance(record, RecordInterviewPacingWriteRecord):
             return "recordInterviewPacing"
         if isinstance(record, CreateInterviewReviewBatchWriteRecord):
@@ -2005,6 +2076,105 @@ class PostgresOwnerTruthConversationRepository:
                 """
                 UPDATE owner_truth.interview_sessions
                 SET state = 'paused', updated_at = NOW()
+                WHERE vault_id = %s AND id = %s AND row_version = %s
+                RETURNING row_version, state, boundary
+                """,
+                (record.vault_id, record.session_id, record.expected_session_version),
+            )
+            updated_session = cursor.fetchone()
+            if updated_session is None:
+                raise OwnerTruthConversationVersionConflict(
+                    resource="interview session",
+                    expected_version=record.expected_session_version,
+                    current_version=int(session["row_version"]),
+                )
+            self._insert_receipt(
+                cursor,
+                record=record,
+                authority_epoch=int(vault["authority_epoch"]),
+                result_message_id=None,
+                expected_thread_version=record.expected_thread_version,
+                expected_session_version=record.expected_session_version,
+            )
+        return OwnerTruthInterviewSessionResult(
+            outcome="created",
+            receipt_id=record.receipt_id,
+            thread_id=record.thread_id,
+            session_id=record.session_id,
+            thread_version=int(updated_thread["row_version"]),
+            session_version=int(updated_session["row_version"]),
+            state=InterviewSessionState(str(updated_session["state"])),
+            boundary=InterviewBoundary(str(updated_session["boundary"])),
+        )
+
+    def end_interview_session(
+        self,
+        record: EndInterviewSessionWriteRecord,
+    ) -> OwnerTruthInterviewSessionResult:
+        with self._cursor() as cursor:
+            self._lock(
+                cursor,
+                f"owner-truth-conversation-command:{record.vault_id}:{record.command_id_hash}",
+            )
+            self._lock(cursor, f"owner-truth-conversation-vault:{record.vault_id}")
+            self._lock(cursor, f"owner-truth-conversation-session:{record.vault_id}:{record.session_id}")
+            vault = self._active_vault(
+                cursor,
+                vault_id=record.vault_id,
+                owner_subject_id=record.owner_subject_id,
+                lock=True,
+            )
+            existing = self._receipt_by_command(
+                cursor,
+                vault_id=record.vault_id,
+                command_id_hash=record.command_id_hash,
+            )
+            if existing is not None:
+                return self._deduplicated_result(cursor, existing=existing, record=record)
+            session, thread = self._locked_session_and_thread(cursor, record=record)
+            self._assert_live_session(
+                session=session,
+                thread=thread,
+                record=record,
+                authority_epoch=int(vault["authority_epoch"]),
+            )
+            if (
+                str(session["state"]) == InterviewSessionState.ENDED.value
+                or str(thread["state"]) == ConversationThreadState.ENDED.value
+            ):
+                raise OwnerTruthInterviewSessionStateConflict(
+                    "an ended interview session and thread cannot be ended again"
+                )
+            self._assert_version(
+                resource="thread",
+                expected=record.expected_thread_version,
+                current=int(thread["row_version"]),
+            )
+            self._assert_version(
+                resource="interview session",
+                expected=record.expected_session_version,
+                current=int(session["row_version"]),
+            )
+            cursor.execute(
+                """
+                UPDATE owner_truth.conversation_threads
+                SET state = 'ended', updated_at = NOW()
+                WHERE vault_id = %s AND id = %s AND row_version = %s
+                RETURNING row_version
+                """,
+                (record.vault_id, record.thread_id, record.expected_thread_version),
+            )
+            updated_thread = cursor.fetchone()
+            if updated_thread is None:
+                raise OwnerTruthConversationVersionConflict(
+                    resource="thread",
+                    expected_version=record.expected_thread_version,
+                    current_version=int(thread["row_version"]),
+                )
+            cursor.execute(
+                """
+                UPDATE owner_truth.interview_sessions
+                SET state = 'ended', updated_at = NOW()
                 WHERE vault_id = %s AND id = %s AND row_version = %s
                 RETURNING row_version, state, boundary
                 """,
@@ -2892,6 +3062,8 @@ class PostgresOwnerTruthConversationRepository:
             return "restoreDoNotAskInterviewBoundary"
         if isinstance(record, PauseInterviewForTopicSwitchWriteRecord):
             return "pauseInterviewForTopicSwitch"
+        if isinstance(record, EndInterviewSessionWriteRecord):
+            return "endInterviewSession"
         if isinstance(record, RecordInterviewPacingWriteRecord):
             return "recordInterviewPacing"
         if isinstance(record, CreateInterviewReviewBatchWriteRecord):

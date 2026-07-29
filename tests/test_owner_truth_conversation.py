@@ -7,6 +7,7 @@ from app.domain.owner_truth.conversation import (
     ConversationMessageAuthor,
     ConversationMessageKind,
     ConversationThreadState,
+    EndInterviewSessionCommand,
     InterviewBoundary,
     InterviewSessionState,
     OwnerTruthConversationAccessDenied,
@@ -64,6 +65,21 @@ class OwnerTruthConversationTests(unittest.TestCase):
             author=ConversationMessageAuthor.OWNER,
             kind=ConversationMessageKind.NARRATIVE,
             text=text,
+        )
+
+    def end(
+        self,
+        *,
+        command_id: str = "end-interview-1",
+        expected_thread_version: int = 1,
+        expected_session_version: int = 1,
+    ) -> EndInterviewSessionCommand:
+        return EndInterviewSessionCommand(
+            command_id=command_id,
+            thread_id=self.thread_id,
+            session_id=self.session_id,
+            expected_thread_version=expected_thread_version,
+            expected_session_version=expected_session_version,
         )
 
     def test_start_replays_without_creating_a_second_thread_or_session(self) -> None:
@@ -218,6 +234,78 @@ class OwnerTruthConversationTests(unittest.TestCase):
                     command_id="append-after-do-not-ask",
                     message_id=str(uuid.uuid4()),
                     expected_session_version=2,
+                ),
+                context=self.context,
+            )
+
+    def test_explicit_end_is_idempotent_and_fences_future_turns(self) -> None:
+        self.service.start_session(command=self.start(), context=self.context)
+        self.service.append_message(command=self.append(), context=self.context)
+        command = self.end(
+            expected_thread_version=2,
+            expected_session_version=2,
+        )
+
+        ended = self.service.end_session(command=command, context=self.context)
+        replayed = self.service.end_session(command=command, context=self.context)
+
+        self.assertEqual(ended.outcome, "created")
+        self.assertEqual(replayed.outcome, "deduplicated")
+        self.assertEqual(ended.thread_version, 3)
+        self.assertEqual(ended.session_version, 3)
+        session = self.service.read_session(session_id=self.session_id, context=self.context)
+        self.assertEqual(session.state, InterviewSessionState.ENDED)
+        self.assertEqual(session.thread_version, 3)
+        self.assertEqual(session.row_version, 3)
+        authority = self.service.read_thread_authority(
+            thread_id=self.thread_id,
+            context=self.context,
+        )
+        self.assertEqual(authority.state, ConversationThreadState.ENDED)
+        self.assertEqual(authority.session_state, InterviewSessionState.ENDED)
+        self.assertFalse(authority.is_recommendation_eligible)
+        self.assertIsNone(self.service.read_current_session(context=self.context))
+        with self.assertRaises(OwnerTruthInterviewSessionStateConflict):
+            self.service.append_message(
+                command=self.append(
+                    command_id="append-after-explicit-end",
+                    message_id=str(uuid.uuid4()),
+                    expected_thread_version=3,
+                    expected_session_version=3,
+                ),
+                context=self.context,
+            )
+
+    def test_explicit_end_allows_paused_session_but_preserves_boundary(self) -> None:
+        self.service.start_session(command=self.start(), context=self.context)
+        self.service.set_boundary(
+            command=SetInterviewBoundaryCommand(
+                command_id="pause-before-explicit-end",
+                thread_id=self.thread_id,
+                session_id=self.session_id,
+                expected_session_version=1,
+                boundary=InterviewBoundary.DO_NOT_ASK,
+            ),
+            context=self.context,
+        )
+
+        ended = self.service.end_session(
+            command=self.end(
+                command_id="end-paused-interview",
+                expected_thread_version=1,
+                expected_session_version=2,
+            ),
+            context=self.context,
+        )
+
+        self.assertEqual(ended.state, InterviewSessionState.ENDED)
+        self.assertEqual(ended.boundary, InterviewBoundary.DO_NOT_ASK)
+        with self.assertRaises(OwnerTruthInterviewSessionStateConflict):
+            self.service.end_session(
+                command=self.end(
+                    command_id="end-paused-interview-again",
+                    expected_thread_version=2,
+                    expected_session_version=3,
                 ),
                 context=self.context,
             )
