@@ -479,6 +479,10 @@ test -f tests/test_owner_truth_interview_topic_switch_migration_contract.py
 test -f app/async_effects/readiness_evidence.py
 test -f tests/test_async_effect_readiness_evidence.py
 test -f scripts/run-backend-async-effect-readiness-evidence-contract-gate.sh
+test -f app/async_effects/readiness_manifest_projection.py
+test -f tests/test_async_effect_readiness_manifest_projection.py
+test -f scripts/run-backend-async-effect-readiness-manifest-gate.sh
+test -f scripts/backend-async-effect-readiness-manifest-postgres-smoke.py
 test -f app/async_effects/recovery_evidence.py
 test -f tests/test_async_effect_recovery_evidence.py
 test -f scripts/run-backend-async-effect-recovery-evidence-contract-gate.sh
