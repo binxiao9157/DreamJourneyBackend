@@ -14,7 +14,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 import json
 from threading import RLock
-from typing import Any, ContextManager, Mapping, Protocol
+from typing import Any, Callable, ContextManager, Mapping, Protocol
 
 from app.async_effects.contracts import EffectReceiptSummary
 from app.domain.owner_truth.contracts import SourceKind
@@ -151,13 +151,29 @@ class _InMemoryReviewBatch:
 
 
 class InMemoryOwnerTruthInterviewCandidateProposalRepository:
-    """G0 semantic double for acknowledged-batch admission tests."""
+    """G0 semantic double for acknowledged-batch admission tests.
 
-    def __init__(self) -> None:
+    Direct service tests can seed one frozen batch explicitly.  The application
+    store instead supplies an internal snapshot reconstructed from the real
+    in-memory conversation aggregate.  This keeps the HTTP QA path subject to
+    the same acknowledged-batch, owner, epoch, and frozen-message-window
+    boundary as the Postgres implementation rather than letting a route seed
+    an unrelated fixture.
+    """
+
+    def __init__(
+        self,
+        *,
+        review_batch_snapshot_lookup: Callable[
+            [OwnerTruthInterviewCandidateProposalWriteRecord], Mapping[str, Any] | None
+        ]
+        | None = None,
+    ) -> None:
         self._lock = RLock()
         self._batches: dict[tuple[str, str], _InMemoryReviewBatch] = {}
         self._admissions_by_command: dict[tuple[str, str], dict[str, Any]] = {}
         self._admissions_by_batch: dict[tuple[str, str], dict[str, Any]] = {}
+        self._review_batch_snapshot_lookup = review_batch_snapshot_lookup
 
     def seed_review_batch(
         self,
@@ -201,6 +217,10 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 return self._result_from_item(existing, outcome="deduplicated")
 
             batch = self._batches.get((record.vault_id, record.review_batch_id))
+            if batch is None and self._review_batch_snapshot_lookup is not None:
+                snapshot = self._review_batch_snapshot_lookup(record)
+                if snapshot is not None:
+                    batch = self._batch_from_snapshot(snapshot)
             if batch is None or batch.owner_subject_id != record.owner_subject_id:
                 raise OwnerTruthInterviewCandidateProposalAccessDenied(
                     "review batch does not belong to this active Owner Vault"
@@ -264,6 +284,61 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 "admissionsByBatch": deepcopy(self._admissions_by_batch),
                 "admissionsByCommand": deepcopy(self._admissions_by_command),
             }
+
+    @staticmethod
+    def _batch_from_snapshot(snapshot: Mapping[str, Any]) -> _InMemoryReviewBatch:
+        """Normalise an internal conversation aggregate snapshot defensively."""
+
+        if not isinstance(snapshot, Mapping):
+            raise OwnerTruthInterviewCandidateProposalConflict(
+                "review batch snapshot is not recoverable"
+            )
+        raw_messages = snapshot.get("ownerMessages")
+        if not isinstance(raw_messages, (tuple, list)) or not raw_messages:
+            raise OwnerTruthInterviewCandidateProposalConflict(
+                "review batch owner message window is not recoverable"
+            )
+        try:
+            owner_messages = tuple(
+                sorted(
+                    (
+                        (int(item[0]), str(item[1]).strip())
+                        for item in raw_messages
+                        if isinstance(item, (tuple, list)) and len(item) == 2
+                    ),
+                    key=lambda item: item[0],
+                )
+            )
+            batch = _InMemoryReviewBatch(
+                review_batch_id=str(snapshot["reviewBatchId"]),
+                vault_id=str(snapshot["vaultId"]),
+                owner_subject_id=str(snapshot["ownerSubjectId"]),
+                thread_id=str(snapshot["threadId"]),
+                session_id=str(snapshot["sessionId"]),
+                state=str(snapshot["state"]),
+                row_version=int(snapshot["rowVersion"]),
+                authority_epoch=int(snapshot["authorityEpoch"]),
+                owner_turn_start_count=int(snapshot["ownerTurnStartCount"]),
+                owner_turn_end_count=int(snapshot["ownerTurnEndCount"]),
+                through_message_sequence=int(snapshot["throughMessageSequence"]),
+                owner_messages=owner_messages,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise OwnerTruthInterviewCandidateProposalConflict(
+                "review batch snapshot is not recoverable"
+            ) from error
+        if (
+            not batch.owner_messages
+            or any(sequence < 1 or not text for sequence, text in batch.owner_messages)
+            or batch.row_version < 1
+            or batch.owner_turn_start_count < 1
+            or batch.owner_turn_end_count < batch.owner_turn_start_count
+            or batch.through_message_sequence < batch.owner_messages[-1][0]
+        ):
+            raise OwnerTruthInterviewCandidateProposalConflict(
+                "review batch owner message window is not recoverable"
+            )
+        return batch
 
     @staticmethod
     def _prepare_from_batch(

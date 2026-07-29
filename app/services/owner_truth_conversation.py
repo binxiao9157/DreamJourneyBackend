@@ -637,6 +637,88 @@ class InMemoryOwnerTruthConversationRepository:
                 )
             )
 
+    def candidate_proposal_review_batch_snapshot(
+        self,
+        record: Any,
+    ) -> Mapping[str, Any] | None:
+        """Return one frozen batch window for the in-memory admission adapter.
+
+        This is deliberately an internal store seam, not a transcript read API.
+        It mirrors the Postgres candidate-admission query: only the same active
+        Vault owner, current authority epoch, acknowledged batch, and frozen
+        owner-turn window can supply private text to the in-process Source
+        writer.  Callers receive the snapshot only inside that writer; no HTTP
+        response may expose its messages or metadata.
+        """
+
+        with self._lock:
+            vault = self._ensure_active_vault(
+                vault_id=str(record.vault_id),
+                owner_subject_id=str(record.owner_subject_id),
+            )
+            item = self._review_batches.get((str(record.vault_id), str(record.review_batch_id)))
+            if (
+                item is None
+                or str(item["ownerSubjectId"]) != str(record.owner_subject_id)
+                or int(item["authorityEpoch"]) != int(vault["authorityEpoch"])
+            ):
+                raise OwnerTruthConversationAccessDenied(
+                    "review batch does not belong to this active Owner Vault"
+                )
+
+            current_epoch = int(item["authorityEpoch"])
+            owner_messages = sorted(
+                (
+                    message
+                    for message in self._messages.values()
+                    if str(message["vaultId"]) == str(record.vault_id)
+                    and str(message["ownerSubjectId"]) == str(record.owner_subject_id)
+                    and str(message["threadId"]) == str(item["threadId"])
+                    and str(message["sessionId"]) == str(item["sessionId"])
+                    and str(getattr(message["author"], "value", message["author"])) == "owner"
+                    and int(message["sequence"]) <= int(item["throughMessageSequence"])
+                    and int(message["authorityEpoch"]) == current_epoch
+                ),
+                key=lambda message: int(message["sequence"]),
+            )
+            selected_messages = owner_messages[
+                int(item["ownerTurnStartCount"]) - 1 : int(item["ownerTurnEndCount"])
+            ]
+            if len(selected_messages) != int(item["capturedCandidateBatchTurnCount"]):
+                raise OwnerTruthConversationConflict(
+                    "review batch owner message window is not recoverable"
+                )
+
+            recovered_messages: list[tuple[int, str]] = []
+            for message in selected_messages:
+                payload = message["contentPayload"]
+                if not isinstance(payload, Mapping):
+                    raise OwnerTruthConversationConflict(
+                        "review batch message payload is not recoverable"
+                    )
+                text = str(payload.get("text") or "").strip()
+                if not text:
+                    raise OwnerTruthConversationConflict(
+                        "review batch owner message is not recoverable"
+                    )
+                recovered_messages.append((int(message["sequence"]), text))
+
+            state = item["state"]
+            return {
+                "reviewBatchId": str(item["id"]),
+                "vaultId": str(item["vaultId"]),
+                "ownerSubjectId": str(item["ownerSubjectId"]),
+                "threadId": str(item["threadId"]),
+                "sessionId": str(item["sessionId"]),
+                "state": str(getattr(state, "value", state)),
+                "rowVersion": int(item["rowVersion"]),
+                "authorityEpoch": current_epoch,
+                "ownerTurnStartCount": int(item["ownerTurnStartCount"]),
+                "ownerTurnEndCount": int(item["ownerTurnEndCount"]),
+                "throughMessageSequence": int(item["throughMessageSequence"]),
+                "ownerMessages": tuple(recovered_messages),
+            }
+
     def append_interview_message(
         self,
         record: AppendInterviewMessageWriteRecord,

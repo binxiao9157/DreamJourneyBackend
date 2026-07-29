@@ -369,6 +369,7 @@ test -f db/migrations/0033_owner_truth_interview_candidate_proposal_admission.js
 test -f app/domain/owner_truth/interview_candidate_proposal.py
 test -f app/services/owner_truth_interview_candidate_proposal.py
 test -f tests/test_owner_truth_interview_candidate_proposal.py
+test -f tests/test_owner_truth_interview_candidate_proposal_api.py
 test -f tests/test_owner_truth_interview_candidate_proposal_migration_contract.py
 test -f app/domain/owner_truth/interview_candidate_review.py
 test -f app/services/owner_truth_interview_candidate_review.py

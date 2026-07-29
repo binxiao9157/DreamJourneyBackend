@@ -97,6 +97,13 @@ from app.domain.owner_truth.interview_candidate_review import (
     OwnerTruthInterviewCandidateReviewError,
     OwnerTruthInterviewCandidateReviewSourceInactive,
 )
+from app.domain.owner_truth.interview_candidate_proposal import (
+    AdmitInterviewReviewBatchForCandidateProposalCommand,
+    OwnerTruthInterviewCandidateProposalAccessDenied,
+    OwnerTruthInterviewCandidateProposalConflict,
+    OwnerTruthInterviewCandidateProposalError,
+    OwnerTruthInterviewCandidateProposalVersionConflict,
+)
 from app.domain.owner_truth.interview_candidate_single_review import (
     OwnerTruthInterviewCandidateSingleReviewBatchRequired,
     OwnerTruthInterviewCandidateSingleReviewCommand,
@@ -140,6 +147,9 @@ from app.services.owner_truth_interview_candidate_batch_decision import (
 )
 from app.services.owner_truth_interview_candidate_review import (
     OwnerTruthInterviewCandidateReviewReadService,
+)
+from app.services.owner_truth_interview_candidate_proposal import (
+    OwnerTruthInterviewCandidateProposalService,
 )
 from app.services.owner_truth_interview_session_read import (
     OwnerTruthInterviewSessionReadService,
@@ -1165,6 +1175,13 @@ _OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_ACKNOWLEDGEMENT_PAYLOAD_FIELDS = frozenset(
     }
 )
 
+_OWNER_TRUTH_INTERVIEW_CANDIDATE_PROPOSAL_PAYLOAD_FIELDS = frozenset(
+    {
+        "commandId",
+        "expectedReviewBatchVersion",
+    }
+)
+
 
 def _owner_truth_restore_do_not_ask_command(
     *,
@@ -1272,6 +1289,37 @@ def _owner_truth_acknowledge_interview_review_batch_command(
         session_id=session_id,
         review_batch_id=review_batch_id,
         expected_session_version=expected_session_version,
+        expected_review_batch_version=expected_review_batch_version,
+    )
+
+
+def _owner_truth_admit_interview_review_batch_candidate_proposal_command(
+    *,
+    payload: Dict[str, Any],
+    review_batch_id: str,
+) -> AdmitInterviewReviewBatchForCandidateProposalCommand:
+    """Decode the narrow candidate-admission action without transcript input.
+
+    The immutable review batch already owns the private message window.  The
+    client can only name the batch and assert the version it reviewed; it
+    cannot substitute text, Source metadata, Candidates, or provider fields.
+    """
+
+    if set(payload) != _OWNER_TRUTH_INTERVIEW_CANDIDATE_PROPOSAL_PAYLOAD_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewCandidateProposalInvalid"},
+        )
+    command_id = payload.get("commandId")
+    expected_review_batch_version = payload.get("expectedReviewBatchVersion")
+    if not isinstance(command_id, str) or type(expected_review_batch_version) is not int:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewCandidateProposalInvalid"},
+        )
+    return AdmitInterviewReviewBatchForCandidateProposalCommand(
+        command_id=command_id,
+        review_batch_id=review_batch_id,
         expected_review_batch_version=expected_review_batch_version,
     )
 
@@ -1578,6 +1626,61 @@ def _owner_truth_candidate_review_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthCandidateReviewInvalid"},
+    )
+
+
+def _owner_truth_interview_candidate_proposal_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    """Map the acknowledged-batch admission seam to stable QA-only errors."""
+
+    if isinstance(
+        error,
+        (
+            OwnerTruthInterviewCandidateProposalAccessDenied,
+            OwnerTruthConversationAccessDenied,
+        ),
+    ):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthInterviewCandidateProposalDenied"},
+        )
+    if isinstance(error, OwnerTruthInterviewCandidateProposalVersionConflict):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "ownerTruthInterviewCandidateProposalVersionConflict",
+                "expectedReviewBatchVersion": error.expected_version,
+                "currentReviewBatchVersion": error.current_version,
+            },
+        )
+    if isinstance(
+        error,
+        (
+            OwnerTruthInterviewCandidateProposalConflict,
+            OwnerTruthConversationConflict,
+            OwnerTruthConversationVersionConflict,
+            OwnerTruthInterviewSessionStateConflict,
+        ),
+    ):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthInterviewCandidateProposalConflict"},
+        )
+    if isinstance(
+        error,
+        (
+            OwnerTruthInterviewCandidateProposalError,
+            OwnerTruthConversationError,
+        ),
+    ):
+        return HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewCandidateProposalInvalid"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthInterviewCandidateProposalInvalid"},
     )
 
 
@@ -2273,6 +2376,38 @@ def _owner_truth_interview_review_batch_acknowledgement_response(
             "rowVersion": review_batch.row_version,
         },
         "candidateProposal": {"status": "notStarted"},
+        "memoryActivation": {"status": "notApplicable"},
+    }
+
+
+def _owner_truth_interview_candidate_proposal_admission_response(
+    *,
+    vault_id: str,
+    result: Any,
+) -> Dict[str, Any]:
+    """Return evidence that a frozen batch entered only the Source/effect lane.
+
+    The response deliberately omits transcript text, source metadata and IDs,
+    effect IDs, Candidate data, Memory versions and provider data.  QA can
+    verify the authority transition without turning this private seam into a
+    read model or claiming that extraction/promotion has happened.
+    """
+
+    return {
+        "schemaVersion": "owner-truth-interview-candidate-proposal-admission-response-v1",
+        "vaultId": vault_id,
+        "status": result.outcome,
+        "reviewBatch": {"reviewBatchId": result.review_batch_id},
+        "source": {
+            "status": "admitted",
+            "kind": "conversation",
+            "version": result.source_version,
+        },
+        "candidateExtraction": {
+            "status": "requested",
+            "ownerMessageCount": result.owner_message_count,
+        },
+        "candidate": {"status": "notCreated"},
         "memoryActivation": {"status": "notApplicable"},
     }
 
@@ -4510,6 +4645,51 @@ def acknowledge_owner_truth_interview_review_batch(
     return JSONResponse(
         status_code=201 if result.outcome == "acknowledged" else 200,
         content=_owner_truth_interview_review_batch_acknowledgement_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-proposal/admit",
+    include_in_schema=False,
+)
+def admit_owner_truth_interview_review_batch_candidate_proposal(
+    request: Request,
+    vault_id: str,
+    review_batch_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only admission of one acknowledged batch into Source/effect staging.
+
+    This is intentionally after, not part of, acknowledgement.  It can create
+    one immutable private conversation Source and one default-off extraction
+    effect only.  It cannot return transcript text or create Candidates,
+    decisions, MemoryVersions, public content, or provider requests.
+    """
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        command = _owner_truth_admit_interview_review_batch_candidate_proposal_command(
+            payload=payload,
+            review_batch_id=review_batch_id,
+        )
+        result = OwnerTruthInterviewCandidateProposalService(store).admit_review_batch(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_proposal_http_error(error) from error
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewCandidateProposalInvalid"},
+        ) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_candidate_proposal_admission_response(
             vault_id=context.vault_id,
             result=result,
         ),

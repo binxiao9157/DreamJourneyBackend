@@ -56,6 +56,9 @@ from app.services.owner_truth_candidate_review import (
 from app.services.owner_truth_conversation import (
     InMemoryOwnerTruthConversationRepository,
 )
+from app.services.owner_truth_interview_candidate_proposal import (
+    InMemoryOwnerTruthInterviewCandidateProposalRepository,
+)
 from app.services.owner_truth_interview_candidate_batch_decision import (
     InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository,
 )
@@ -106,6 +109,7 @@ from app.services.owner_truth_migration_parity_shadow import (
     InMemoryOwnerTruthMigrationParityShadowRepository,
 )
 from app.services.user_identity import stable_user_id
+from app.async_effects.repository import InMemoryEffectKernelRepository
 from app.services.echo_delayed_reply_effects import ECHO_DELAYED_REPLY_SCHEMA_VERSION
 from app.observability.events import (
     EvidenceEventConflict,
@@ -150,6 +154,14 @@ class InMemoryStore:
         self._owner_truth_conversation_repository = (
             InMemoryOwnerTruthConversationRepository()
         )
+        self._owner_truth_interview_candidate_proposal_repository = (
+            InMemoryOwnerTruthInterviewCandidateProposalRepository(
+                review_batch_snapshot_lookup=(
+                    self._owner_truth_conversation_repository.candidate_proposal_review_batch_snapshot
+                )
+            )
+        )
+        self._effect_kernel_repository = InMemoryEffectKernelRepository()
         self._owner_truth_interview_candidate_review_repository = (
             InMemoryOwnerTruthInterviewCandidateReviewRepository(
                 candidate_snapshot_lookup=(
@@ -271,6 +283,14 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthConversationRepository:
         return self._owner_truth_conversation_repository
+
+    def owner_truth_interview_candidate_proposal_repository(
+        self,
+    ) -> InMemoryOwnerTruthInterviewCandidateProposalRepository:
+        return self._owner_truth_interview_candidate_proposal_repository
+
+    def effect_kernel_repository(self) -> InMemoryEffectKernelRepository:
+        return self._effect_kernel_repository
 
     @contextmanager
     def request_unit_of_work(

@@ -361,6 +361,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthInterviewReviewBatchAcknowledgement",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-proposal/admit",
+                session,
+                "ownerTruthInterviewCandidateProposalAdmission",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review",
                 session,
