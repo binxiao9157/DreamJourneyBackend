@@ -43,6 +43,11 @@ from app.domain.owner_truth.interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchSelection,
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.owner_truth_context_materialization import (
+    OwnerTruthContextMaterializationService,
+    context_materialization_summary,
+)
 from app.services.postgres_store import PostgresStore
 
 
@@ -1025,6 +1030,33 @@ def main() -> None:
         )
         require(memory_counts(test_dsn, vault_id=vault_id) == (1, 1), "activation replay must not duplicate authority records")
 
+        materialization_context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        materialization_payload = {
+            "intent": "echo_chat",
+            "query": "formal confirmation",
+            "selectionMode": "deterministicTextFallback",
+        }
+        materialization_before_projection = OwnerTruthContextMaterializationService(
+            store,
+            enabled=True,
+        ).build(
+            context=materialization_context,
+            payload=materialization_payload,
+        )
+        require(
+            materialization_before_projection["state"] == "rebuilding"
+            and materialization_before_projection["typedCitations"] == []
+            and materialization_before_projection["generationContext"]["sourceCount"] == 0
+            and materialization_before_projection["generationContext"]["text"] == ""
+            and materialization_before_projection["fallbacks"]
+            == ["owner_truth_context_unavailable_no_personal_memory"],
+            "formal activation must fail closed until its Projection is rebuilt",
+        )
+
         projection_worker = OwnerTruthMemoryProjectionWorkerRuntime(
             settings=Settings(
                 async_effect_v1_enabled=True,
@@ -1051,6 +1083,38 @@ def main() -> None:
                 sort_keys=True,
             ),
             "formal projection worker evidence must remain value-free",
+        )
+        materialization_after_projection = OwnerTruthContextMaterializationService(
+            store,
+            enabled=True,
+        ).build(
+            context=materialization_context,
+            payload=materialization_payload,
+        )
+        materialization_summary = context_materialization_summary(materialization_after_projection)
+        require(
+            materialization_after_projection["state"] == "ready"
+            and materialization_after_projection["shadowOnly"] is True
+            and materialization_after_projection["legacyContextUnchanged"] is True
+            and materialization_after_projection["legacyContextRead"] is False
+            and materialization_after_projection["authority"]["checkpoint"]
+            == projection_result["projectionCheckpoint"]
+            and len(materialization_after_projection["typedCitations"]) == 1
+            and materialization_after_projection["generationContext"]["sourceCount"] == 1
+            and candidate_content["summary"]
+            in materialization_after_projection["generationContext"]["text"],
+            "formal activation must materialize exactly one confirmed Projection citation after rebuild",
+        )
+        serialized_materialization_summary = json.dumps(
+            materialization_summary,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        require(
+            candidate_content["summary"] not in serialized_materialization_summary
+            and materialization_payload["query"] not in serialized_materialization_summary
+            and "'text':" not in serialized_materialization_summary,
+            "formal Context evidence must remain value-free",
         )
         projection_idle = projection_worker.run_once()
         require(
@@ -1145,6 +1209,7 @@ def main() -> None:
             "batchLinkFailureRolledBack=true accountCaptureDenied=true "
             "formalMemoryActivationCreated=true formalMemoryActivationReplayDeduplicated=true "
             "formalMemoryActivationProjectionRebuilt=true"
+            " formalMemoryActivationContextMaterialized=true"
         )
     finally:
         main_module.store = previous_store

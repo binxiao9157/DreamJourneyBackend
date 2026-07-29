@@ -72,9 +72,10 @@ Postgres 路径对 root/link/receipt 使用事务锁和同一 activation Unit of
 - 新增正式确认 -> 显式激活 -> 重放去重的 API 覆盖；断言批量确认本身不创建
   MemoryVersion，激活响应不泄露 MemoryVersion/receipt 标识。
 - 新增 QA-only receipt 不能通过正式激活路由的负向覆盖。
-- disposable formal Postgres smoke 进一步串联正式激活发出的 rebuild intent：在临时库中由
-  默认关闭的 typed projection worker 消费恰好一个 job，要求 operation/outbox/job/consumer
-  全部终态完成，并断言 worker 输出仍不含候选正文。
+- disposable formal Postgres smoke 进一步串联正式激活发出的 rebuild intent：在临时库中先证明
+  Projection 未重建时 Context 物化 fail-closed，再由默认关闭的 typed projection worker 消费恰好
+  一个 job，要求 operation/outbox/job/consumer 全部终态完成；随后只读物化一个当前 confirmed
+  Projection citation，并断言 QA-safe summary 不含候选正文或查询正文。
 - 更新 route ownership、authentication、runtime capability 与 deployed-smoke 的
   route inventory 断言至 `125`。
 - focused Owner Truth / route / session 测试通过。
