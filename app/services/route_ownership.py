@@ -355,6 +355,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthInterviewSessionRestoreCooldown",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/acknowledgement",
+                session,
+                "ownerTruthInterviewReviewBatchAcknowledgement",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review",
                 session,

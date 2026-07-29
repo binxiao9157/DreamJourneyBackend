@@ -106,6 +106,7 @@ from app.domain.owner_truth.interview_candidate_single_review import (
 )
 from app.domain.owner_truth.contracts import OwnerTruthContractError
 from app.domain.owner_truth.conversation import (
+    AcknowledgeInterviewReviewBatchCommand,
     AppendInterviewMessageCommand,
     ConversationMessageAuthor,
     ConversationMessageKind,
@@ -1154,6 +1155,16 @@ _OWNER_TRUTH_RESTORE_COOLDOWN_PAYLOAD_FIELDS = frozenset(
     }
 )
 
+_OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_ACKNOWLEDGEMENT_PAYLOAD_FIELDS = frozenset(
+    {
+        "commandId",
+        "threadId",
+        "sessionId",
+        "expectedSessionVersion",
+        "expectedReviewBatchVersion",
+    }
+)
+
 
 def _owner_truth_restore_do_not_ask_command(
     *,
@@ -1219,6 +1230,49 @@ def _owner_truth_restore_cooldown_command(
         thread_id=thread_id,
         session_id=session_id,
         expected_session_version=expected_session_version,
+    )
+
+
+def _owner_truth_acknowledge_interview_review_batch_command(
+    *,
+    payload: Dict[str, Any],
+    review_batch_id: str,
+) -> AcknowledgeInterviewReviewBatchCommand:
+    """Decode the owner-only acknowledgement without accepting review content.
+
+    Acknowledgement only advances a frozen review boundary. Candidate extraction,
+    Candidate decisions, Memory activation and Provider effects remain separate
+    authority steps and cannot be smuggled into this payload.
+    """
+
+    if set(payload) != _OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_ACKNOWLEDGEMENT_PAYLOAD_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    command_id = payload.get("commandId")
+    thread_id = payload.get("threadId")
+    session_id = payload.get("sessionId")
+    expected_session_version = payload.get("expectedSessionVersion")
+    expected_review_batch_version = payload.get("expectedReviewBatchVersion")
+    if (
+        not isinstance(command_id, str)
+        or not isinstance(thread_id, str)
+        or not isinstance(session_id, str)
+        or type(expected_session_version) is not int
+        or type(expected_review_batch_version) is not int
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    return AcknowledgeInterviewReviewBatchCommand(
+        command_id=command_id,
+        thread_id=thread_id,
+        session_id=session_id,
+        review_batch_id=review_batch_id,
+        expected_session_version=expected_session_version,
+        expected_review_batch_version=expected_review_batch_version,
     )
 
 
@@ -2186,6 +2240,40 @@ def _owner_truth_interview_session_command_response(
         "schemaVersion": "owner-truth-interview-session-command-v1",
         "vaultId": vault_id,
         "receipt": minimized_receipt,
+    }
+
+
+def _owner_truth_interview_review_batch_acknowledgement_response(
+    *,
+    vault_id: str,
+    result: Any,
+) -> Dict[str, Any]:
+    """Return a value-minimized acknowledgement receipt for Owner QA.
+
+    This response intentionally contains no transcript, Source, Candidate,
+    MemoryVersion, Provider, or effect identifiers. Acknowledging the review
+    boundary is not evidence that any memory artefact was admitted.
+    """
+
+    review_batch = result.review_batch
+    return {
+        "schemaVersion": "owner-truth-interview-review-batch-acknowledgement-response-v1",
+        "vaultId": vault_id,
+        "status": result.outcome,
+        "session": {
+            "threadId": result.thread_id,
+            "sessionId": result.session_id,
+            "sessionVersion": result.session_version,
+        },
+        "reviewBatch": {
+            "reviewBatchId": review_batch.review_batch_id,
+            "trigger": review_batch.trigger.value,
+            "state": review_batch.state.value,
+            "capturedCandidateBatchTurnCount": review_batch.captured_candidate_batch_turn_count,
+            "rowVersion": review_batch.row_version,
+        },
+        "candidateProposal": {"status": "notStarted"},
+        "memoryActivation": {"status": "notApplicable"},
     }
 
 
@@ -4369,6 +4457,59 @@ def read_owner_truth_interview_candidate_review(
     return JSONResponse(
         status_code=200,
         content=_owner_truth_interview_candidate_review_read_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/acknowledgement",
+    include_in_schema=False,
+)
+def acknowledge_owner_truth_interview_review_batch(
+    request: Request,
+    vault_id: str,
+    review_batch_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only explicit acknowledgement of one frozen interview review batch.
+
+    The owner confirms that the five-turn/session-exit boundary is frozen. This
+    action only advances the private conversation state; it does not create a
+    Source, Candidate, DecisionReceipt, MemoryVersion, or Provider effect.
+    """
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        command = _owner_truth_acknowledge_interview_review_batch_command(
+            payload=payload,
+            review_batch_id=review_batch_id,
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-review-batch-acknowledgement:"
+                f"{context.vault_id}:{command.review_batch_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = OwnerTruthConversationService(
+                store.owner_truth_conversation_repository()
+            ).acknowledge_review_batch(
+                command=command,
+                context=context,
+            )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        ) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "acknowledged" else 200,
+        content=_owner_truth_interview_review_batch_acknowledgement_response(
             vault_id=context.vault_id,
             result=result,
         ),
