@@ -33,6 +33,10 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.json import Jsonb
 
 import app.main as main_module
+from app.async_effects.owner_truth_memory_projection_worker import (
+    OwnerTruthMemoryProjectionWorkerRuntime,
+)
+from app.core.config import Settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.domain.owner_truth.interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchAcceptCommand,
@@ -1021,6 +1025,40 @@ def main() -> None:
         )
         require(memory_counts(test_dsn, vault_id=vault_id) == (1, 1), "activation replay must not duplicate authority records")
 
+        projection_worker = OwnerTruthMemoryProjectionWorkerRuntime(
+            settings=Settings(
+                async_effect_v1_enabled=True,
+                async_effect_worker_enabled=True,
+                owner_truth_memory_projection_worker_enabled=True,
+            ),
+            store=store,
+            worker_id="formal-confirmation-memory-projection-smoke",
+        )
+        projection_result = projection_worker.run_once()
+        require(
+            projection_result["status"] == "completed"
+            and projection_result["reason"] == "memoryProjectionRebuilt"
+            and projection_result["jobState"] == "succeeded"
+            and projection_result["operationState"] == "completed"
+            and projection_result["outboxState"] == "dispatched"
+            and projection_result["consumerInboxState"] == "completed",
+            "formal activation must reach the typed compatibility projection worker",
+        )
+        require(
+            "Synthetic batch Candidate for formal confirmation." not in json.dumps(
+                projection_result,
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            "formal projection worker evidence must remain value-free",
+        )
+        projection_idle = projection_worker.run_once()
+        require(
+            projection_idle["status"] == "idle"
+            and projection_idle["reason"] == "noEligibleMemoryProjectionRebuildJob",
+            "formal activation must enqueue exactly one typed projection rebuild",
+        )
+
         replay = client.post(
             path,
             headers=formal_headers(
@@ -1105,7 +1143,8 @@ def main() -> None:
             "receiptLinkPersisted=true receiptLinkTamperDenied=true "
             "replayDeduplicated=true concurrentCommandDeduplicated=true "
             "batchLinkFailureRolledBack=true accountCaptureDenied=true "
-            "formalMemoryActivationCreated=true formalMemoryActivationReplayDeduplicated=true"
+            "formalMemoryActivationCreated=true formalMemoryActivationReplayDeduplicated=true "
+            "formalMemoryActivationProjectionRebuilt=true"
         )
     finally:
         main_module.store = previous_store
