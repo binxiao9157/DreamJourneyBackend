@@ -8,14 +8,16 @@ Status: `G0_LOCAL_VERIFIED / QA_ONLY / DEFAULT_OFF / NO_WORKER_PROVIDER_CANDIDAT
 
 After a review batch is acknowledged, the narrow proposal-admission command can
 write one private `conversation` Source plus one default-off
-`ownerTruth.source.created` effect. Before an extraction worker is separately
-approved, QA could not distinguish these safe states for an individual batch:
+`ownerTruth.source.created` effect. QA can distinguish the safe admission
+states and, when an already-persisted synthetic extraction result exists, its
+value-free review readiness:
 
 ```text
 pending acknowledgement
 -> acknowledged and ready for explicit admission
 -> Source/effect admission recorded
--> extraction deliberately not executing
+-> no persisted result: extraction deliberately not executing
+-> persisted result: result status and review readiness, still no worker
 ```
 
 This change adds a value-free status read:
@@ -64,8 +66,24 @@ Possible staging states are:
 | `acknowledged` | `admitted` | The Source/effect admission record exists; extraction remains default-off. |
 
 `source.status=admitted` means the immutable admission record exists. It does
-not claim a live Provider run, a Candidate extraction result, an active
-Projection, or a released product feature.
+not claim a live Provider run, an active Projection, or a released product
+feature. When a durable result was recorded through the separately controlled
+synthetic admission boundary, `candidateExtraction.status` may be
+`succeeded`, `failed`, or `quarantined`; otherwise it remains `requested`.
+`candidateReview.status` then follows the existing private composition rule:
+
+| Latest durable result | Pending Candidates from newest successful result | Review status |
+| --- | --- | --- |
+| none | no | `notReady` |
+| `succeeded` | yes | `reviewReady` |
+| `succeeded` | no | `noCandidates` |
+| `failed` / `quarantined` | no | `extractionFailed` / `extractionQuarantined` |
+| `failed` / `quarantined` | yes | `reviewReady` |
+
+`effectExecution.status=disabled` remains deliberate in every row above. It
+means the generic Source-effect worker and any Provider are still disabled; it
+does not erase an immutable QA result that was already persisted by the exact
+synthetic admission contract.
 
 The API never returns transcript text, source/effect/admission IDs, source
 metadata, Candidate details/counts, evidence spans, Memory IDs/content, or
@@ -83,8 +101,9 @@ The API contract test exercises the real in-memory conversation aggregate:
 6. verifies response serialization excludes private text and operational IDs.
 
 The Postgres reader uses the same active Vault owner and authority-epoch checks
-against the persisted review batch and immutable admission record. It is kept
-for the existing isolated Postgres conversation smoke/deployment gate; this
+against the persisted review batch and immutable admission record. The isolated
+Postgres conversation smoke additionally asserts `succeeded/reviewReady` after
+one durable result and `failed/reviewReady` after a later failed retry. This
 commit does not assert G2 deployment evidence.
 
 ## Explicit Non-Goals

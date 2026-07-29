@@ -20,12 +20,18 @@ from app.domain.owner_truth.source_commands import (
 from app.services.owner_truth_interview_candidate_proposal import (
     InMemoryOwnerTruthInterviewCandidateProposalRepository,
     OwnerTruthInterviewCandidateProposalService,
+    OwnerTruthInterviewCandidateProposalExtractionStatus,
+    OwnerTruthInterviewCandidateProposalStatusService,
 )
 
 
 class _AdmissionStore:
-    def __init__(self) -> None:
-        self.repository = InMemoryOwnerTruthInterviewCandidateProposalRepository()
+    def __init__(
+        self,
+        *,
+        repository: InMemoryOwnerTruthInterviewCandidateProposalRepository | None = None,
+    ) -> None:
+        self.repository = repository or InMemoryOwnerTruthInterviewCandidateProposalRepository()
         self.effects = InMemoryEffectKernelRepository()
         self.sources: dict[tuple[str, str], dict[str, object]] = {}
 
@@ -191,6 +197,97 @@ class OwnerTruthInterviewCandidateProposalTests(unittest.TestCase):
         self.assertEqual(conversation_source.source_kind, SourceKind.CONVERSATION)
         self.assertEqual(conversation_source.content_payload["sourceKind"], "conversation")
         self.assertNotEqual(text_source.content_hash, conversation_source.content_hash)
+
+    def test_status_reflects_durable_extraction_outcome_without_enabling_worker(self) -> None:
+        extraction_status: OwnerTruthInterviewCandidateProposalExtractionStatus | None = None
+        repository = InMemoryOwnerTruthInterviewCandidateProposalRepository(
+            extraction_status_lookup=lambda **_kwargs: extraction_status,
+        )
+        store = _AdmissionStore(repository=repository)
+        review_batch_id = str(uuid4())
+        context = OwnerTruthCommandContext(
+            vault_id="interview-candidate-status-vault-a",
+            owner_subject_id="interview-candidate-status-owner-a",
+            actor_subject_id="interview-candidate-status-owner-a",
+            policy_version="owner-truth-v1",
+        )
+        repository.seed_review_batch(
+            review_batch_id=review_batch_id,
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            thread_id=str(uuid4()),
+            session_id=str(uuid4()),
+            owner_messages=((1, "这段私有访谈不应出现在状态响应中。"),),
+        )
+        service = OwnerTruthInterviewCandidateProposalService(store)
+        service.admit_review_batch(
+            command=AdmitInterviewReviewBatchForCandidateProposalCommand(
+                command_id="admit-review-batch-status",
+                review_batch_id=review_batch_id,
+                expected_review_batch_version=2,
+            ),
+            context=context,
+        )
+        status_service = OwnerTruthInterviewCandidateProposalStatusService(store)
+
+        expectations = (
+            (
+                OwnerTruthInterviewCandidateProposalExtractionStatus(
+                    latest_status="succeeded",
+                    has_pending_candidates=True,
+                ),
+                "succeeded",
+                "reviewReady",
+            ),
+            (
+                OwnerTruthInterviewCandidateProposalExtractionStatus(
+                    latest_status="succeeded",
+                    has_pending_candidates=False,
+                ),
+                "succeeded",
+                "noCandidates",
+            ),
+            (
+                OwnerTruthInterviewCandidateProposalExtractionStatus(
+                    latest_status="failed",
+                    has_pending_candidates=False,
+                ),
+                "failed",
+                "extractionFailed",
+            ),
+            (
+                OwnerTruthInterviewCandidateProposalExtractionStatus(
+                    latest_status="quarantined",
+                    has_pending_candidates=False,
+                ),
+                "quarantined",
+                "extractionQuarantined",
+            ),
+            # A later failed retry must not hide the newest successful pending
+            # baseline; this matches the Candidate review composition rule.
+            (
+                OwnerTruthInterviewCandidateProposalExtractionStatus(
+                    latest_status="failed",
+                    has_pending_candidates=True,
+                ),
+                "failed",
+                "reviewReady",
+            ),
+        )
+        for snapshot, expected_extraction, expected_review in expectations:
+            extraction_status = snapshot
+            status = status_service.read_status(
+                review_batch_id=review_batch_id,
+                context=context,
+            )
+            self.assertEqual(status.candidate_proposal_status, "admitted")
+            self.assertEqual(status.source_status, "admitted")
+            self.assertEqual(status.candidate_extraction_status, expected_extraction)
+            self.assertEqual(status.effect_execution_status, "disabled")
+            self.assertEqual(status.candidate_review_status, expected_review)
+            rendered = str(status.public_summary())
+            self.assertNotIn("这段私有访谈", rendered)
+            self.assertNotIn("sourceId", rendered)
 
 
 if __name__ == "__main__":

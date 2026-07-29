@@ -83,6 +83,7 @@ from app.services.owner_truth_interview_review_batch_automation import (
 )
 from app.services.owner_truth_interview_candidate_proposal import (
     OwnerTruthInterviewCandidateProposalService,
+    OwnerTruthInterviewCandidateProposalStatusService,
 )
 from app.services.owner_truth_interview_candidate_review import (
     OwnerTruthInterviewCandidateReviewCompositionService,
@@ -639,6 +640,18 @@ def main() -> None:
             len(extracted.candidate_ids) == 2,
             "conversation Source extraction must produce two pending Candidates",
         )
+        proposal_status_after_extraction = (
+            OwnerTruthInterviewCandidateProposalStatusService(store).read_status(
+                review_batch_id=review_batch.review_batch.review_batch_id,
+                context=context,
+            )
+        )
+        require(
+            proposal_status_after_extraction.candidate_extraction_status == "succeeded"
+            and proposal_status_after_extraction.candidate_review_status == "reviewReady"
+            and proposal_status_after_extraction.effect_execution_status == "disabled",
+            "proposal status must report the durable result without enabling the Source worker",
+        )
         composition = OwnerTruthInterviewCandidateReviewCompositionService(store).compose(
             review_batch_id=review_batch.review_batch.review_batch_id,
             context=context,
@@ -1164,6 +1177,18 @@ def main() -> None:
             tuple(item.candidate_id for item in failed_refresh_composition.batch_candidates)
             == refreshed_extraction.candidate_ids,
             "a failed retry must not hide the prior reviewable Candidate",
+        )
+        proposal_status_after_failed_refresh = (
+            OwnerTruthInterviewCandidateProposalStatusService(store).read_status(
+                review_batch_id=review_batch.review_batch.review_batch_id,
+                context=context,
+            )
+        )
+        require(
+            proposal_status_after_failed_refresh.candidate_extraction_status == "failed"
+            and proposal_status_after_failed_refresh.candidate_review_status == "reviewReady"
+            and proposal_status_after_failed_refresh.effect_execution_status == "disabled",
+            "proposal status must retain the reviewable baseline after a failed retry",
         )
         restored_batches = invoke(
             restarted_store,

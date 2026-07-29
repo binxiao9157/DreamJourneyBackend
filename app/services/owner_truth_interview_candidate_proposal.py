@@ -145,6 +145,28 @@ class OwnerTruthInterviewCandidateProposalStatus:
         }
 
 
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateProposalExtractionStatus:
+    """Value-free read model for one admitted Source's extraction state.
+
+    ``latest_status`` follows the immutable ExtractionResult timeline. Pending
+    Candidates intentionally come from the newest successful result, so they
+    can remain reviewable even when a later retry failed or was quarantined.
+    This mirrors the existing Candidate review composition without exposing
+    extraction, Candidate, or Source identifiers.
+    """
+
+    latest_status: str | None
+    has_pending_candidates: bool
+
+    def __post_init__(self) -> None:
+        if self.latest_status not in {None, "succeeded", "failed", "quarantined"}:
+            raise OwnerTruthInterviewCandidateProposalError(
+                "unsupported candidate extraction status"
+            )
+        object.__setattr__(self, "has_pending_candidates", bool(self.has_pending_candidates))
+
+
 def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
     if not isinstance(context, OwnerTruthCommandContext):
         raise OwnerTruthInterviewCandidateProposalAccessDenied(
@@ -311,6 +333,10 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
         | None = None,
         review_batch_status_lookup: Callable[..., Mapping[str, Any] | None] | None = None,
         source_status_lookup: Callable[..., Mapping[str, Any] | None] | None = None,
+        extraction_status_lookup: Callable[
+            ..., OwnerTruthInterviewCandidateProposalExtractionStatus | None
+        ]
+        | None = None,
     ) -> None:
         self._lock = RLock()
         self._batches: dict[tuple[str, str], _InMemoryReviewBatch] = {}
@@ -319,6 +345,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
         self._review_batch_snapshot_lookup = review_batch_snapshot_lookup
         self._review_batch_status_lookup = review_batch_status_lookup
         self._source_status_lookup = source_status_lookup
+        self._extraction_status_lookup = extraction_status_lookup
 
     def seed_review_batch(
         self,
@@ -450,10 +477,24 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                         source_id=str(admission["sourceId"]),
                     ),
                 )
+            extraction_status = None
+            if (
+                admission is not None
+                and source_is_live
+                and self._extraction_status_lookup is not None
+            ):
+                extraction_status = self._extraction_status_lookup(
+                    vault_id=context.vault_id,
+                    owner_subject_id=context.owner_subject_id,
+                    source_id=str(admission["sourceId"]),
+                    source_version=int(admission["sourceVersion"]),
+                    authority_epoch=batch.authority_epoch,
+                )
             return self._status_from_batch(
                 batch=batch,
                 admitted=admission is not None,
                 source_is_live=source_is_live,
+                extraction_status=extraction_status,
             )
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
@@ -530,6 +571,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
         batch: _InMemoryReviewBatchStatus,
         admitted: bool,
         source_is_live: bool = True,
+        extraction_status: OwnerTruthInterviewCandidateProposalExtractionStatus | None = None,
     ) -> OwnerTruthInterviewCandidateProposalStatus:
         if batch.state == "pendingAcknowledgement":
             return OwnerTruthInterviewCandidateProposalStatus(
@@ -564,6 +606,28 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 candidate_extraction_status="blocked",
                 effect_execution_status="disabled",
                 candidate_review_status="notReady",
+            )
+        if extraction_status is not None and extraction_status.latest_status is not None:
+            candidate_review_status = (
+                "reviewReady"
+                if extraction_status.has_pending_candidates
+                else {
+                    "succeeded": "noCandidates",
+                    "failed": "extractionFailed",
+                    "quarantined": "extractionQuarantined",
+                }[extraction_status.latest_status]
+            )
+            return OwnerTruthInterviewCandidateProposalStatus(
+                review_batch_id=batch.review_batch_id,
+                review_batch_state=batch.state,
+                candidate_proposal_status="admitted",
+                source_status="admitted",
+                candidate_extraction_status=extraction_status.latest_status,
+                # The default Source-effect worker remains disabled. A durable
+                # QA result may still be present through the exact synthetic
+                # admission boundary; do not imply Provider execution here.
+                effect_execution_status="disabled",
+                candidate_review_status=candidate_review_status,
             )
         return OwnerTruthInterviewCandidateProposalStatus(
             review_batch_id=batch.review_batch_id,
@@ -851,6 +915,7 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                     v.authority_epoch AS vault_authority_epoch,
                     a.id AS admission_id,
                     a.authority_epoch AS admission_authority_epoch,
+                    a.source_id AS admission_source_id,
                     a.source_version AS admission_source_version,
                     a.source_content_hash AS admission_source_content_hash,
                     s.owner_subject_id AS source_owner_subject_id,
@@ -917,10 +982,98 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                     "metadata": row["source_metadata"],
                 },
             )
+        extraction_status = None
+        if admitted and source_is_live:
+            with self._cursor() as cursor:
+                extraction_status = self._read_extraction_status(
+                    cursor,
+                    vault_id=context.vault_id,
+                    owner_subject_id=context.owner_subject_id,
+                    source_id=str(row["admission_source_id"]),
+                    source_version=int(row["admission_source_version"]),
+                    authority_epoch=int(row["vault_authority_epoch"]),
+                )
         return InMemoryOwnerTruthInterviewCandidateProposalRepository._status_from_batch(
             batch=status,
             admitted=admitted,
             source_is_live=source_is_live,
+            extraction_status=extraction_status,
+        )
+
+    @staticmethod
+    def _read_extraction_status(
+        cursor: Any,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        source_id: str,
+        source_version: int,
+        authority_epoch: int,
+    ) -> OwnerTruthInterviewCandidateProposalExtractionStatus | None:
+        """Match the Candidate-review selection rules without returning values.
+
+        A newer failed/quarantined extraction is still the latest result, while
+        pending Candidates remain selectable from the newest successful result.
+        The proposal-status endpoint only reports those two booleans/labels;
+        it never exposes the result, Candidate, or Source identifiers.
+        """
+
+        cursor.execute(
+            """
+            SELECT id, status
+            FROM owner_truth.extraction_results
+            WHERE vault_id = %s
+              AND source_id = %s
+              AND source_version = %s
+            ORDER BY completed_at DESC NULLS LAST, created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (vault_id, source_id, source_version),
+        )
+        latest = cursor.fetchone()
+        if latest is None:
+            return None
+
+        cursor.execute(
+            """
+            SELECT id
+            FROM owner_truth.extraction_results
+            WHERE vault_id = %s
+              AND source_id = %s
+              AND source_version = %s
+              AND status = 'succeeded'
+            ORDER BY completed_at DESC NULLS LAST, created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (vault_id, source_id, source_version),
+        )
+        selected = cursor.fetchone()
+        has_pending_candidates = False
+        if selected is not None:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM owner_truth.memory_candidates
+                WHERE vault_id = %s
+                  AND owner_subject_id = %s
+                  AND source_id = %s
+                  AND extraction_result_id = %s
+                  AND decision_status = 'pending'
+                  AND authority_epoch = %s
+                LIMIT 1
+                """,
+                (
+                    vault_id,
+                    owner_subject_id,
+                    source_id,
+                    selected["id"],
+                    authority_epoch,
+                ),
+            )
+            has_pending_candidates = cursor.fetchone() is not None
+        return OwnerTruthInterviewCandidateProposalExtractionStatus(
+            latest_status=str(latest["status"]),
+            has_pending_candidates=has_pending_candidates,
         )
 
     def _locked_active_vault(
@@ -1124,6 +1277,7 @@ __all__ = [
     "InMemoryOwnerTruthInterviewCandidateProposalRepository",
     "OwnerTruthInterviewCandidateProposalRepository",
     "OwnerTruthInterviewCandidateProposalService",
+    "OwnerTruthInterviewCandidateProposalExtractionStatus",
     "OwnerTruthInterviewCandidateProposalStatus",
     "OwnerTruthInterviewCandidateProposalStatusService",
     "PostgresOwnerTruthInterviewCandidateProposalRepository",
