@@ -181,6 +181,10 @@ from app.services.owner_truth_context_materialization import (
     OwnerTruthContextMaterializationService,
     context_materialization_summary,
 )
+from app.services.owner_truth_interview_turn_context import (
+    OwnerTruthInterviewTurnContextService,
+    interview_turn_context_summary,
+)
 from app.services.owner_truth_answer_citation import (
     OwnerTruthAnswerCitationCommand,
     OwnerTruthAnswerCitationConflict,
@@ -4609,6 +4613,43 @@ def materialize_owner_truth_context_shadow(
         content={
             "schemaVersion": "owner-truth-context-materialization-response-v1",
             "contextMaterialization": context_materialization_summary(materialization),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/turn-context/prepare",
+    include_in_schema=False,
+)
+def prepare_owner_truth_interview_turn_context(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only binding of a current interview turn to confirmed Projection Context.
+
+    This route returns only value-free preparation metadata.  The bounded
+    confirmed-memory text stays in-process, no provider receives it, and the
+    legacy public Context/Echo path remains unchanged.
+    """
+
+    try:
+        context = _owner_truth_context_shadow_context(request, vault_id=vault_id)
+        result = OwnerTruthInterviewTurnContextService(store, enabled=True).prepare(
+            session_id=session_id,
+            context=context,
+            payload=payload,
+        )
+    except OwnerTruthConversationError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    except OwnerTruthMemoryProjectionError as error:
+        raise _owner_truth_memory_projection_http_error(error) from error
+    return JSONResponse(
+        content={
+            "schemaVersion": "owner-truth-interview-turn-context-prepare-response-v1",
+            "interviewTurnContext": interview_turn_context_summary(result),
         },
         headers={"Cache-Control": "no-store"},
     )

@@ -428,6 +428,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/turn-context/prepare",
+                session,
+                "ownerTruthInterviewTurnContextPrepare",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/answer-citation-receipts",
                 session,
                 "ownerTruthAnswerCitationReceipt",

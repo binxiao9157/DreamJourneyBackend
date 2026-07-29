@@ -36,6 +36,12 @@ from app.domain.owner_truth.source_commands import (
     OwnerTruthSourceCommandConflict,
     OwnerTruthSourceVersionConflict,
 )
+from app.domain.owner_truth.conversation import (
+    AppendInterviewMessageCommand,
+    ConversationMessageAuthor,
+    ConversationMessageKind,
+    StartInterviewSessionCommand,
+)
 from app.domain.owner_truth.candidate_decisions import (
     CandidateReviewAction,
     OwnerTruthCandidateReviewCommand,
@@ -65,6 +71,11 @@ from app.services.owner_truth_context_materialization import (
     OwnerTruthContextMaterializationService,
     context_materialization_summary,
 )
+from app.services.owner_truth_interview_turn_context import (
+    OwnerTruthInterviewTurnContextService,
+    interview_turn_context_summary,
+)
+from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_answer_citation import (
     OwnerTruthAnswerCitationCommand,
     OwnerTruthAnswerCitationService,
@@ -1010,6 +1021,84 @@ def main() -> None:
                 not in str(context_materialization_qa_summary)
                 and "'text':" not in str(context_materialization_qa_summary),
                 "Context materialization QA summary must remain value-free",
+            )
+
+            interview_thread_id = str(uuid.uuid4())
+            interview_session_id = str(uuid.uuid4())
+            interview_message_id = str(uuid.uuid4())
+            raw_interview_message = "私有访谈原文不能出现在回合上下文 QA 摘要中。"
+            conversation_service = OwnerTruthConversationService(
+                store.owner_truth_conversation_repository()
+            )
+            with store.request_unit_of_work(
+                correlation_id="owner-truth-interview-turn-context-start",
+                command_id="ownerTruthInterviewTurnContextStart",
+            ):
+                interview_started = conversation_service.start_session(
+                    command=StartInterviewSessionCommand(
+                        command_id="owner-truth-interview-turn-context-start",
+                        thread_id=interview_thread_id,
+                        session_id=interview_session_id,
+                        expected_thread_version=0,
+                        entry_mode="naturalInput",
+                    ),
+                    context=review_context,
+                )
+            with store.request_unit_of_work(
+                correlation_id="owner-truth-interview-turn-context-append",
+                command_id="ownerTruthInterviewTurnContextAppend",
+            ):
+                interview_appended = conversation_service.append_message(
+                    command=AppendInterviewMessageCommand(
+                        command_id="owner-truth-interview-turn-context-append",
+                        thread_id=interview_thread_id,
+                        session_id=interview_session_id,
+                        message_id=interview_message_id,
+                        expected_thread_version=interview_started.thread_version,
+                        expected_session_version=interview_started.session_version,
+                        author=ConversationMessageAuthor.OWNER,
+                        kind=ConversationMessageKind.NARRATIVE,
+                        text=raw_interview_message,
+                    ),
+                    context=review_context,
+                )
+            interview_turn_context = OwnerTruthInterviewTurnContextService(
+                store,
+                enabled=True,
+            ).prepare(
+                session_id=interview_session_id,
+                context=review_context,
+                payload={
+                    "messageId": interview_message_id,
+                    "expectedSessionVersion": interview_appended.session_version,
+                    "intent": "echo_chat",
+                    "query": raw_context_query,
+                },
+            )
+            interview_turn_context_qa_summary = interview_turn_context_summary(
+                interview_turn_context
+            )
+            require(
+                interview_turn_context["state"] == "ready"
+                and interview_turn_context["readyForServerTurn"] is True
+                and interview_turn_context["providerDispatchAllowed"] is False
+                and interview_turn_context["generationContext"]["sourceCount"] == 2
+                and review_content["summary"]
+                in interview_turn_context["generationContext"]["text"]
+                and review_knowledge_content["claim"]
+                in interview_turn_context["generationContext"]["text"],
+                "interview turn Context must bind a current Owner message to confirmed Projection only",
+            )
+            require(
+                raw_context_query not in str(interview_turn_context_qa_summary)
+                and raw_interview_message not in str(interview_turn_context_qa_summary)
+                and review_content["summary"] not in str(interview_turn_context_qa_summary)
+                and review_knowledge_content["claim"]
+                not in str(interview_turn_context_qa_summary)
+                and interview_thread_id not in str(interview_turn_context_qa_summary)
+                and interview_session_id not in str(interview_turn_context_qa_summary)
+                and interview_message_id not in str(interview_turn_context_qa_summary),
+                "interview turn Context QA summary must stay value-free and identifier-minimized",
             )
 
             query_ranked_context_build = OwnerTruthContextShadowBuildService(
