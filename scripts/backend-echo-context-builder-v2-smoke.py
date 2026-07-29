@@ -210,18 +210,33 @@ def main() -> None:
             },
         )
 
+        owner_query = "西湖和妈妈有什么线索？"
         owner_packet = context_packet(
             client,
             {
                 "userId": user_id,
                 "intent": "echo_chat",
-                "query": "西湖和妈妈有什么线索？",
+                "query": owner_query,
                 "personaScope": "personal",
                 "digitalHumanId": user_id,
             },
         )
         require(owner_packet.get("schemaVersion") == 1, "schemaVersion should remain v1-compatible")
         require(owner_packet.get("contextVersion") == "echo-context-v2", "contextVersion should be echo-context-v2")
+        request_correlation = owner_packet.get("requestCorrelation") or {}
+        require(
+            request_correlation == {
+                "schemaVersion": "echo-context-request-correlation-v1",
+                "intent": "echo_chat",
+                "queryHash": hashlib.sha256(owner_query.encode("utf-8")).hexdigest(),
+                "queryLength": len(owner_query),
+            },
+            "Context packet should retain only the normalized request fingerprint",
+        )
+        require(
+            owner_query not in json.dumps(request_correlation, ensure_ascii=False, sort_keys=True),
+            "request correlation must not retain raw query text",
+        )
         require("archive_v2_selected" in selected_refs(owner_packet), "selected archive should enter context")
         owner_sources = {
             str(item.get("source") or "")
@@ -346,6 +361,7 @@ def main() -> None:
             "completed": True,
             "contextVersion": owner_packet.get("contextVersion"),
             "schemaVersion": owner_packet.get("schemaVersion"),
+            "requestCorrelation": request_correlation,
             "selectedContextRefs": selected_refs(owner_packet),
             "selectedContextSources": sorted(owner_sources),
             "selectedContextSourceCounts": owner_packet.get("trace", {}).get("selectedContextSourceCounts"),

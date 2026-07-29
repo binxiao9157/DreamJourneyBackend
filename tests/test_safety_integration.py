@@ -1,3 +1,4 @@
+import hashlib
 import json
 import unittest
 
@@ -86,6 +87,15 @@ class SafetyIntegrationTests(unittest.TestCase):
         packet = response.json()["contextPacket"]
         self.assertEqual(packet["query"], "")
         self.assertFalse(packet["containsRawExpression"])
+        correlation = packet["requestCorrelation"]
+        self.assertEqual(correlation["schemaVersion"], "echo-context-request-correlation-v1")
+        self.assertEqual(correlation["intent"], "echo_chat")
+        self.assertEqual(
+            correlation["queryHash"],
+            hashlib.sha256(raw_expression.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(correlation["queryLength"], len(raw_expression))
+        self.assertNotIn(raw_expression, json.dumps(correlation, ensure_ascii=False, sort_keys=True))
         self.assertEqual(packet["safetyPolicy"]["riskClass"], "highDistress")
         self.assertEqual(packet["safetyPolicy"]["action"], "respondWithNeutralSafetyText")
         self.assertEqual(packet["policy"]["safetyMode"], "neutralSafetyText")

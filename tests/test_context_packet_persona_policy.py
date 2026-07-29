@@ -1,3 +1,5 @@
+import hashlib
+import json
 import unittest
 
 from app.core.config import Settings
@@ -203,6 +205,29 @@ class ContextPacketPersonaPolicyTests(unittest.TestCase):
             reasons["not-generation-allowed"],
             "kb_fact_privacy_scope_not_generation_allowed",
         )
+
+    def test_request_correlation_hashes_normalized_query_without_retaining_raw_text(self):
+        raw_query = "  春天的院子和 🌿  \n"
+        normalized_query = raw_query.strip()
+        packet = self.builder.build(
+            {
+                "userId": self.user_id,
+                "intent": "echo_chat",
+                "query": raw_query,
+                "personaScope": "personal",
+                "digitalHumanId": self.user_id,
+            }
+        )
+
+        correlation = packet["requestCorrelation"]
+        self.assertEqual(correlation["schemaVersion"], "echo-context-request-correlation-v1")
+        self.assertEqual(correlation["intent"], "echo_chat")
+        self.assertEqual(
+            correlation["queryHash"],
+            hashlib.sha256(normalized_query.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(correlation["queryLength"], len(normalized_query))
+        self.assertNotIn(normalized_query, json.dumps(correlation, ensure_ascii=False, sort_keys=True))
 
 
 if __name__ == "__main__":

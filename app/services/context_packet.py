@@ -22,6 +22,7 @@ class ContextPacketBuilder:
     generation_context_version = "echo-generation-context-v1"
     generation_context_max_chars = 12000
     generation_context_sources = ("archive", "kbFact", "persona", "care")
+    request_correlation_schema_version = "echo-context-request-correlation-v1"
 
     def __init__(self, store: Any, settings: Settings):
         self.store = store
@@ -42,6 +43,7 @@ class ContextPacketBuilder:
                 started=started,
                 user_id=user_id,
                 intent=intent,
+                query=query,
                 persona_scope=persona_scope,
                 digital_human_id=digital_human_id,
                 lifecycle_mode=lifecycle_mode,
@@ -170,6 +172,7 @@ class ContextPacketBuilder:
             "intent": intent,
             "userId": user_id,
             "query": query,
+            "requestCorrelation": self._request_correlation(intent=intent, query=query),
             "aiDisclosure": safety_decision.disclosure.model_dump(mode="json"),
             "safetyPolicy": safety_decision.model_dump(mode="json"),
             "persona": {
@@ -250,6 +253,7 @@ class ContextPacketBuilder:
         started: float,
         user_id: str,
         intent: str,
+        query: str,
         persona_scope: str,
         digital_human_id: str,
         lifecycle_mode: str,
@@ -289,6 +293,7 @@ class ContextPacketBuilder:
             "intent": intent,
             "userId": user_id,
             "query": "",
+            "requestCorrelation": self._request_correlation(intent=intent, query=query),
             "containsRawExpression": False,
             "aiDisclosure": safety_decision.disclosure.model_dump(mode="json"),
             "safetyPolicy": safety_decision.model_dump(mode="json"),
@@ -390,6 +395,29 @@ class ContextPacketBuilder:
     def _text(value: Any, default: str) -> str:
         text = str(value or "").strip()
         return text or default
+
+    @classmethod
+    def _request_correlation(cls, *, intent: str, query: str) -> Dict[str, Any]:
+        """Return a value-free fingerprint for one Context build request.
+
+        The packet remains backward compatible.  QA parity code can use this
+        additive field to reject a delayed response without retaining or
+        exporting user text. Neutral safety packets keep their visible query
+        blank while retaining only the submitted request fingerprint.
+        """
+
+        normalized_intent = cls._text(intent, "echo_chat")
+        normalized_query = cls._text(query, "")
+        return {
+            "schemaVersion": cls.request_correlation_schema_version,
+            "intent": normalized_intent,
+            "queryHash": (
+                hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
+                if normalized_query
+                else None
+            ),
+            "queryLength": len(normalized_query),
+        }
 
     @staticmethod
     def _optional_text(value: Any) -> Optional[str]:
