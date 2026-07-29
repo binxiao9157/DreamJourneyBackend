@@ -77,6 +77,24 @@ class _Store:
         return self.answer_repository
 
 
+class _InvalidateProjectionBeforeSecondRead:
+    """Test double that invalidates a source between Context build and write."""
+
+    def __init__(self, delegate, *, invalidate) -> None:
+        self._delegate = delegate
+        self._invalidate = invalidate
+        self._read_count = 0
+
+    def read(self, *, context):
+        self._read_count += 1
+        if self._read_count == 2:
+            self._invalidate()
+        return self._delegate.read(context=context)
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+
 class OwnerTruthAnswerCitationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.vault_id = "vault-answer-citation"
@@ -246,6 +264,34 @@ class OwnerTruthAnswerCitationTests(unittest.TestCase):
         self.assertEqual(result.citation_count, 1)
         self.assertEqual(result.citations[0]["citation"]["sourceId"], matched.source_id)
         self.assertEqual(result.fallbacks, ())
+
+    def test_rejects_context_that_becomes_stale_before_answer_evidence_write(self) -> None:
+        candidate = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "来源撤回后不得保留为新的答案引用"},
+        )
+        self._activate(candidate, command_id="answer-citation-currentness")
+        self.projection_service.rebuild(context=self.context)
+        original_repository = self.store.projection_repository
+        self.store.projection_repository = _InvalidateProjectionBeforeSecondRead(
+            original_repository,
+            invalidate=lambda: self.store.review_repository._source_states.__setitem__(
+                (self.vault_id, candidate.source_id),
+                "deleted",
+            ),
+        )
+
+        with self.assertRaises(OwnerTruthAnswerCitationConflict):
+            self.service.record(
+                context=self.context,
+                command=self._command(
+                    command_id="answer-citation-stale-before-write-001",
+                    answer_text="这个证据不能在来源撤回后写入。",
+                ),
+                context_payload={"query": "不应写入已经撤回的来源"},
+            )
+
+        self.assertEqual(self.store.answer_repository.snapshot()["records"], [])
 
     def test_rejects_non_owner_and_conflicting_command_reuse(self) -> None:
         candidate = self._candidate(

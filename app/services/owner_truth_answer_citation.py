@@ -24,6 +24,7 @@ from app.domain.owner_truth.memory_projection import (
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_context_shadow_build import OwnerTruthContextShadowBuildService
+from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 
 
 OWNER_TRUTH_ANSWER_CITATION_SCHEMA_VERSION = "owner-truth-answer-citation-v1"
@@ -605,6 +606,10 @@ class OwnerTruthAnswerCitationService:
                 context=context,
                 payload=context_payload,
             )
+            self._assert_context_build_is_current(
+                context=context,
+                context_build=context_build,
+            )
             record = _record_input(
                 context=context,
                 command=command,
@@ -613,6 +618,61 @@ class OwnerTruthAnswerCitationService:
             return self._store.owner_truth_answer_citation_repository().record(
                 context=context,
                 record=record,
+            )
+
+    def _assert_context_build_is_current(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        context_build: Mapping[str, Any],
+    ) -> None:
+        """Fail closed when a ready Context changed before evidence is written.
+
+        The Postgres citation trigger remains the transaction-local final
+        authority check.  This service-level check keeps the in-memory
+        semantic double honest and makes the stale Context failure explicit
+        before any immutable Answer/Citation receipt is attempted.
+        """
+
+        authority = context_build.get("authority")
+        if not isinstance(authority, Mapping):
+            raise OwnerTruthAnswerCitationError("Context shadow build authority is invalid")
+        state = _nonblank_text(authority.get("state"), field="authority.state")
+        if state != "ready":
+            return
+
+        expected_epoch = _nonnegative_int(
+            authority.get("authorityEpoch"),
+            field="authority.authorityEpoch",
+        )
+        expected_checkpoint = _hash(
+            authority.get("projectionCheckpoint"),
+            field="authority.projectionCheckpoint",
+        )
+        current_projection = OwnerTruthMemoryProjectionService(self._store).read(context=context)
+        if not isinstance(current_projection, Mapping):
+            raise OwnerTruthAnswerCitationConflict(
+                "Context projection changed before Answer/Citation persistence"
+            )
+        current_state = _nonblank_text(current_projection.get("state"), field="projection.state")
+        if current_state != "ready":
+            raise OwnerTruthAnswerCitationConflict(
+                "Context projection changed before Answer/Citation persistence"
+            )
+        current_epoch = _nonnegative_int(
+            current_projection.get("authorityEpoch"),
+            field="projection.authorityEpoch",
+        )
+        current_checkpoint = _hash(
+            current_projection.get("checkpoint"),
+            field="projection.checkpoint",
+        )
+        if (
+            current_epoch != expected_epoch
+            or current_checkpoint != expected_checkpoint
+        ):
+            raise OwnerTruthAnswerCitationConflict(
+                "Context projection changed before Answer/Citation persistence"
             )
 
     def _request_unit_of_work(
