@@ -368,6 +368,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-proposal/status",
+                session,
+                "ownerTruthInterviewCandidateProposalStatus",
+            ),
+            _rule(
+                "GET",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review",
                 session,
                 "ownerTruthInterviewCandidateReviewRead",

@@ -158,7 +158,10 @@ class InMemoryStore:
             InMemoryOwnerTruthInterviewCandidateProposalRepository(
                 review_batch_snapshot_lookup=(
                     self._owner_truth_conversation_repository.candidate_proposal_review_batch_snapshot
-                )
+                ),
+                review_batch_status_lookup=(
+                    self._owner_truth_conversation_repository.candidate_proposal_review_batch_status_snapshot
+                ),
             )
         )
         self._effect_kernel_repository = InMemoryEffectKernelRepository()

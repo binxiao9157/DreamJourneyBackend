@@ -17,7 +17,7 @@ from threading import RLock
 from typing import Any, Callable, ContextManager, Mapping, Protocol
 
 from app.async_effects.contracts import EffectReceiptSummary
-from app.domain.owner_truth.contracts import SourceKind
+from app.domain.owner_truth.contracts import SourceKind, require_uuid
 from app.domain.owner_truth.interview_candidate_proposal import (
     AdmitInterviewReviewBatchForCandidateProposalCommand,
     OwnerTruthInterviewCandidateProposalAccessDenied,
@@ -54,6 +54,14 @@ class OwnerTruthInterviewCandidateProposalRepository(Protocol):
     ) -> OwnerTruthInterviewCandidateProposalResult:
         ...
 
+    def read_status(
+        self,
+        *,
+        review_batch_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> "OwnerTruthInterviewCandidateProposalStatus":
+        ...
+
 
 class OwnerTruthInterviewCandidateProposalStore(Protocol):
     def request_unit_of_work(
@@ -77,6 +85,62 @@ class OwnerTruthInterviewCandidateProposalStore(Protocol):
 
     def effect_kernel_repository(self) -> Any:
         ...
+
+
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateProposalStatus:
+    """Value-free progress for one review batch's default-off proposal lane.
+
+    This status describes only the durable admission boundary.  It must not be
+    mistaken for extraction execution: no worker or Provider is enabled by
+    this G0 slice, so an admitted batch remains ``requested`` and cannot yet
+    expose Candidate review content.
+    """
+
+    review_batch_id: str
+    review_batch_state: str
+    candidate_proposal_status: str
+    source_status: str
+    candidate_extraction_status: str
+    effect_execution_status: str
+    candidate_review_status: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "review_batch_id",
+            require_uuid(self.review_batch_id, field="review_batch_id"),
+        )
+        for field in (
+            "review_batch_state",
+            "candidate_proposal_status",
+            "source_status",
+            "candidate_extraction_status",
+            "effect_execution_status",
+            "candidate_review_status",
+        ):
+            value = str(getattr(self, field) or "").strip()
+            if not value:
+                raise OwnerTruthInterviewCandidateProposalError(
+                    f"{field} is required"
+                )
+            object.__setattr__(self, field, value)
+
+    def public_summary(self) -> dict[str, Any]:
+        """Return a deliberately value-free QA diagnostic envelope."""
+
+        return {
+            "schemaVersion": "owner-truth-interview-candidate-proposal-status-v1",
+            "reviewBatch": {
+                "reviewBatchId": self.review_batch_id,
+                "state": self.review_batch_state,
+            },
+            "candidateProposal": {"status": self.candidate_proposal_status},
+            "source": {"status": self.source_status},
+            "candidateExtraction": {"status": self.candidate_extraction_status},
+            "effectExecution": {"status": self.effect_execution_status},
+            "candidateReview": {"status": self.candidate_review_status},
+        }
 
 
 def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
@@ -134,6 +198,36 @@ class OwnerTruthInterviewCandidateProposalService:
             )
 
 
+class OwnerTruthInterviewCandidateProposalStatusService:
+    """Read one batch's proposal staging state without executing extraction."""
+
+    def __init__(self, store: OwnerTruthInterviewCandidateProposalStore):
+        self._store = store
+
+    def read_status(
+        self,
+        *,
+        review_batch_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewCandidateProposalStatus:
+        _assert_owner_context(context)
+        normalized_review_batch_id = require_uuid(
+            review_batch_id,
+            field="review_batch_id",
+        )
+        with self._store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-candidate-proposal-status:"
+                f"{context.vault_id}:{normalized_review_batch_id}"
+            ),
+            command_id=f"read:{normalized_review_batch_id}",
+        ):
+            return self._store.owner_truth_interview_candidate_proposal_repository().read_status(
+                review_batch_id=normalized_review_batch_id,
+                context=context,
+            )
+
+
 @dataclass(frozen=True)
 class _InMemoryReviewBatch:
     review_batch_id: str
@@ -148,6 +242,16 @@ class _InMemoryReviewBatch:
     owner_turn_end_count: int
     through_message_sequence: int
     owner_messages: tuple[tuple[int, str], ...]
+
+
+@dataclass(frozen=True)
+class _InMemoryReviewBatchStatus:
+    review_batch_id: str
+    vault_id: str
+    owner_subject_id: str
+    state: str
+    row_version: int
+    authority_epoch: int
 
 
 class InMemoryOwnerTruthInterviewCandidateProposalRepository:
@@ -168,12 +272,14 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
             [OwnerTruthInterviewCandidateProposalWriteRecord], Mapping[str, Any] | None
         ]
         | None = None,
+        review_batch_status_lookup: Callable[..., Mapping[str, Any] | None] | None = None,
     ) -> None:
         self._lock = RLock()
         self._batches: dict[tuple[str, str], _InMemoryReviewBatch] = {}
         self._admissions_by_command: dict[tuple[str, str], dict[str, Any]] = {}
         self._admissions_by_batch: dict[tuple[str, str], dict[str, Any]] = {}
         self._review_batch_snapshot_lookup = review_batch_snapshot_lookup
+        self._review_batch_status_lookup = review_batch_status_lookup
 
     def seed_review_batch(
         self,
@@ -278,12 +384,132 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
             self._admissions_by_batch[(record.vault_id, record.review_batch_id)] = item
             return self._result_from_item(item, outcome="created")
 
+    def read_status(
+        self,
+        *,
+        review_batch_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewCandidateProposalStatus:
+        _assert_owner_context(context)
+        normalized_batch_id = require_uuid(review_batch_id, field="review_batch_id")
+        with self._lock:
+            batch = self._status_batch(
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                review_batch_id=normalized_batch_id,
+            )
+            admission = self._admissions_by_batch.get(
+                (context.vault_id, normalized_batch_id)
+            )
+            return self._status_from_batch(batch=batch, admitted=admission is not None)
+
     def snapshot(self) -> dict[str, dict[str, Any]]:
         with self._lock:
             return {
                 "admissionsByBatch": deepcopy(self._admissions_by_batch),
                 "admissionsByCommand": deepcopy(self._admissions_by_command),
             }
+
+    def _status_batch(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        review_batch_id: str,
+    ) -> _InMemoryReviewBatchStatus:
+        batch = self._batches.get((vault_id, review_batch_id))
+        if batch is not None:
+            if batch.owner_subject_id != owner_subject_id:
+                raise OwnerTruthInterviewCandidateProposalAccessDenied(
+                    "review batch does not belong to this active Owner Vault"
+                )
+            return _InMemoryReviewBatchStatus(
+                review_batch_id=batch.review_batch_id,
+                vault_id=batch.vault_id,
+                owner_subject_id=batch.owner_subject_id,
+                state=batch.state,
+                row_version=batch.row_version,
+                authority_epoch=batch.authority_epoch,
+            )
+        if self._review_batch_status_lookup is None:
+            raise OwnerTruthInterviewCandidateProposalAccessDenied(
+                "review batch does not belong to this active Owner Vault"
+            )
+        snapshot = self._review_batch_status_lookup(
+            vault_id=vault_id,
+            owner_subject_id=owner_subject_id,
+            review_batch_id=review_batch_id,
+        )
+        if snapshot is None:
+            raise OwnerTruthInterviewCandidateProposalAccessDenied(
+                "review batch does not belong to this active Owner Vault"
+            )
+        return self._status_batch_from_snapshot(snapshot)
+
+    @staticmethod
+    def _status_batch_from_snapshot(
+        snapshot: Mapping[str, Any],
+    ) -> _InMemoryReviewBatchStatus:
+        if not isinstance(snapshot, Mapping):
+            raise OwnerTruthInterviewCandidateProposalConflict(
+                "review batch status is not recoverable"
+            )
+        try:
+            return _InMemoryReviewBatchStatus(
+                review_batch_id=require_uuid(
+                    snapshot["reviewBatchId"],
+                    field="review_batch_id",
+                ),
+                vault_id=str(snapshot["vaultId"]),
+                owner_subject_id=str(snapshot["ownerSubjectId"]),
+                state=str(snapshot["state"]),
+                row_version=int(snapshot["rowVersion"]),
+                authority_epoch=int(snapshot["authorityEpoch"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise OwnerTruthInterviewCandidateProposalConflict(
+                "review batch status is not recoverable"
+            ) from error
+
+    @staticmethod
+    def _status_from_batch(
+        *,
+        batch: _InMemoryReviewBatchStatus,
+        admitted: bool,
+    ) -> OwnerTruthInterviewCandidateProposalStatus:
+        if batch.state == "pendingAcknowledgement":
+            return OwnerTruthInterviewCandidateProposalStatus(
+                review_batch_id=batch.review_batch_id,
+                review_batch_state=batch.state,
+                candidate_proposal_status="pendingAcknowledgement",
+                source_status="notAdmitted",
+                candidate_extraction_status="notRequested",
+                effect_execution_status="disabled",
+                candidate_review_status="notReady",
+            )
+        if batch.state != "acknowledged":
+            raise OwnerTruthInterviewCandidateProposalConflict(
+                "review batch status is not supported for candidate proposal admission"
+            )
+        if not admitted:
+            return OwnerTruthInterviewCandidateProposalStatus(
+                review_batch_id=batch.review_batch_id,
+                review_batch_state=batch.state,
+                candidate_proposal_status="readyForAdmission",
+                source_status="notAdmitted",
+                candidate_extraction_status="notRequested",
+                effect_execution_status="disabled",
+                candidate_review_status="notReady",
+            )
+        return OwnerTruthInterviewCandidateProposalStatus(
+            review_batch_id=batch.review_batch_id,
+            review_batch_state=batch.state,
+            candidate_proposal_status="admitted",
+            source_status="admitted",
+            candidate_extraction_status="requested",
+            effect_execution_status="disabled",
+            candidate_review_status="notReady",
+        )
 
     @staticmethod
     def _batch_from_snapshot(snapshot: Mapping[str, Any]) -> _InMemoryReviewBatch:
@@ -542,6 +768,67 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                 raise RuntimeError("review batch candidate proposal admission insert did not produce a row")
             return self._result_from_row(row, outcome="created")
 
+    def read_status(
+        self,
+        *,
+        review_batch_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewCandidateProposalStatus:
+        _assert_owner_context(context)
+        normalized_batch_id = require_uuid(review_batch_id, field="review_batch_id")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT b.id AS review_batch_id, b.owner_subject_id AS batch_owner_subject_id,
+                    b.state AS review_batch_state,
+                    b.authority_epoch AS batch_authority_epoch,
+                    v.owner_subject_id AS vault_owner_subject_id,
+                    v.status AS vault_status,
+                    v.authority_epoch AS vault_authority_epoch,
+                    a.id AS admission_id,
+                    a.authority_epoch AS admission_authority_epoch
+                FROM owner_truth.interview_review_batches AS b
+                JOIN owner_truth.vaults AS v ON v.vault_id = b.vault_id
+                LEFT JOIN owner_truth.interview_review_batch_candidate_admissions AS a
+                  ON a.vault_id = b.vault_id AND a.review_batch_id = b.id
+                WHERE b.vault_id = %s AND b.id = %s
+                """,
+                (context.vault_id, normalized_batch_id),
+            )
+            row = cursor.fetchone()
+        if (
+            row is None
+            or str(row["vault_owner_subject_id"]) != context.owner_subject_id
+            or str(row["vault_status"]) != "active"
+            or str(row["batch_owner_subject_id"]) != context.owner_subject_id
+        ):
+            raise OwnerTruthInterviewCandidateProposalAccessDenied(
+                "review batch does not belong to this active Owner Vault"
+            )
+        if int(row["batch_authority_epoch"]) != int(row["vault_authority_epoch"]):
+            raise OwnerTruthInterviewCandidateProposalConflict(
+                "review batch authority is no longer current"
+            )
+        status = _InMemoryReviewBatchStatus(
+            review_batch_id=str(row["review_batch_id"]),
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            state=str(row["review_batch_state"]),
+            row_version=1,
+            authority_epoch=int(row["vault_authority_epoch"]),
+        )
+        admitted = row["admission_id"] is not None
+        if admitted and int(row["admission_authority_epoch"]) != int(
+            row["vault_authority_epoch"]
+        ):
+            raise OwnerTruthInterviewCandidateProposalConflict(
+                "candidate proposal admission authority is no longer current"
+            )
+        return InMemoryOwnerTruthInterviewCandidateProposalRepository._status_from_batch(
+            batch=status,
+            admitted=admitted,
+        )
+
     def _locked_active_vault(
         self,
         cursor: Any,
@@ -743,5 +1030,7 @@ __all__ = [
     "InMemoryOwnerTruthInterviewCandidateProposalRepository",
     "OwnerTruthInterviewCandidateProposalRepository",
     "OwnerTruthInterviewCandidateProposalService",
+    "OwnerTruthInterviewCandidateProposalStatus",
+    "OwnerTruthInterviewCandidateProposalStatusService",
     "PostgresOwnerTruthInterviewCandidateProposalRepository",
 ]

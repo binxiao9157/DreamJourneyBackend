@@ -150,6 +150,7 @@ from app.services.owner_truth_interview_candidate_review import (
 )
 from app.services.owner_truth_interview_candidate_proposal import (
     OwnerTruthInterviewCandidateProposalService,
+    OwnerTruthInterviewCandidateProposalStatusService,
 )
 from app.services.owner_truth_interview_session_read import (
     OwnerTruthInterviewSessionReadService,
@@ -2409,6 +2410,19 @@ def _owner_truth_interview_candidate_proposal_admission_response(
         },
         "candidate": {"status": "notCreated"},
         "memoryActivation": {"status": "notApplicable"},
+    }
+
+
+def _owner_truth_interview_candidate_proposal_status_response(
+    *,
+    vault_id: str,
+    status: Any,
+) -> Dict[str, Any]:
+    """Return value-free staging state; it is not an extraction result read."""
+
+    return {
+        "vaultId": vault_id,
+        **status.public_summary(),
     }
 
 
@@ -4692,6 +4706,40 @@ def admit_owner_truth_interview_review_batch_candidate_proposal(
         content=_owner_truth_interview_candidate_proposal_admission_response(
             vault_id=context.vault_id,
             result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-proposal/status",
+    include_in_schema=False,
+)
+def read_owner_truth_interview_review_batch_candidate_proposal_status(
+    request: Request,
+    vault_id: str,
+    review_batch_id: str,
+) -> JSONResponse:
+    """QA-only, value-free status for the non-executing proposal staging lane."""
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        status = OwnerTruthInterviewCandidateProposalStatusService(store).read_status(
+            review_batch_id=review_batch_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_proposal_http_error(error) from error
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewCandidateProposalInvalid"},
+        ) from error
+    return JSONResponse(
+        status_code=200,
+        content=_owner_truth_interview_candidate_proposal_status_response(
+            vault_id=context.vault_id,
+            status=status,
         ),
         headers={"Cache-Control": "no-store"},
     )

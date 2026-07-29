@@ -719,6 +719,46 @@ class InMemoryOwnerTruthConversationRepository:
                 "ownerMessages": tuple(recovered_messages),
             }
 
+    def candidate_proposal_review_batch_status_snapshot(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        review_batch_id: str,
+    ) -> Mapping[str, Any] | None:
+        """Return value-free batch state for the default-off proposal status read.
+
+        Unlike ``candidate_proposal_review_batch_snapshot``, this helper never
+        reconstructs the frozen message window.  It exists only so the
+        in-memory QA contract can prove the same owner/vault/epoch boundary as
+        the Postgres status reader without turning conversation text into a
+        read model.
+        """
+
+        with self._lock:
+            vault = self._ensure_active_vault(
+                vault_id=str(vault_id),
+                owner_subject_id=str(owner_subject_id),
+            )
+            item = self._review_batches.get((str(vault_id), str(review_batch_id)))
+            if (
+                item is None
+                or str(item["ownerSubjectId"]) != str(owner_subject_id)
+                or int(item["authorityEpoch"]) != int(vault["authorityEpoch"])
+            ):
+                raise OwnerTruthConversationAccessDenied(
+                    "review batch does not belong to this active Owner Vault"
+                )
+            state = item["state"]
+            return {
+                "reviewBatchId": str(item["id"]),
+                "vaultId": str(item["vaultId"]),
+                "ownerSubjectId": str(item["ownerSubjectId"]),
+                "state": str(getattr(state, "value", state)),
+                "rowVersion": int(item["rowVersion"]),
+                "authorityEpoch": int(item["authorityEpoch"]),
+            }
+
     def append_interview_message(
         self,
         record: AppendInterviewMessageWriteRecord,

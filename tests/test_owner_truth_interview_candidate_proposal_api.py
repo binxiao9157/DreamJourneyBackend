@@ -72,6 +72,13 @@ class OwnerTruthInterviewCandidateProposalAPITests(unittest.TestCase):
             f"{review_batch_id}/candidate-proposal/admit"
         )
 
+    @staticmethod
+    def _status_path(vault_id: str, review_batch_id: str) -> str:
+        return (
+            f"/v2/vaults/{vault_id}/interview-review-batches/"
+            f"{review_batch_id}/candidate-proposal/status"
+        )
+
     def _start_and_create_pending_batch(
         self,
         *,
@@ -319,6 +326,90 @@ class OwnerTruthInterviewCandidateProposalAPITests(unittest.TestCase):
         )
         self.assertEqual(self.store.owner_truth_source_count(vault_id), 0)
         self.assertEqual(self.store.effect_kernel_repository().record_count(), 0)
+
+    def test_status_exposes_only_default_off_staging_without_private_values(self) -> None:
+        _owner_id, headers = self._login("13800139754")
+        vault_id = "vault-interview-candidate-proposal-status"
+        (
+            thread_id,
+            session_id,
+            _thread_version,
+            session_version,
+            review_batch_id,
+            review_batch_version,
+            private_texts,
+        ) = self._start_and_create_pending_batch(vault_id=vault_id, headers=headers)
+
+        pending = client.get(self._status_path(vault_id, review_batch_id), headers=headers)
+        self.assertEqual(pending.status_code, 200, pending.text)
+        self.assertEqual(
+            pending.json(),
+            {
+                "schemaVersion": "owner-truth-interview-candidate-proposal-status-v1",
+                "vaultId": vault_id,
+                "reviewBatch": {
+                    "reviewBatchId": review_batch_id,
+                    "state": "pendingAcknowledgement",
+                },
+                "candidateProposal": {"status": "pendingAcknowledgement"},
+                "source": {"status": "notAdmitted"},
+                "candidateExtraction": {"status": "notRequested"},
+                "effectExecution": {"status": "disabled"},
+                "candidateReview": {"status": "notReady"},
+            },
+        )
+
+        acknowledged_session_version, acknowledged_batch_version = self._acknowledge(
+            vault_id=vault_id,
+            review_batch_id=review_batch_id,
+            thread_id=thread_id,
+            session_id=session_id,
+            session_version=session_version,
+            review_batch_version=review_batch_version,
+            headers=headers,
+        )
+        del acknowledged_session_version
+
+        ready = client.get(self._status_path(vault_id, review_batch_id), headers=headers)
+        self.assertEqual(ready.status_code, 200, ready.text)
+        self.assertEqual(ready.json()["candidateProposal"], {"status": "readyForAdmission"})
+        self.assertEqual(ready.json()["source"], {"status": "notAdmitted"})
+        self.assertEqual(ready.json()["candidateExtraction"], {"status": "notRequested"})
+
+        admitted = client.post(
+            self._admission_path(vault_id, review_batch_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "expectedReviewBatchVersion": acknowledged_batch_version,
+            },
+        )
+        self.assertEqual(admitted.status_code, 201, admitted.text)
+
+        staged = client.get(self._status_path(vault_id, review_batch_id), headers=headers)
+        self.assertEqual(staged.status_code, 200, staged.text)
+        self.assertEqual(staged.json()["candidateProposal"], {"status": "admitted"})
+        self.assertEqual(staged.json()["source"], {"status": "admitted"})
+        self.assertEqual(staged.json()["candidateExtraction"], {"status": "requested"})
+        self.assertEqual(staged.json()["effectExecution"], {"status": "disabled"})
+        self.assertEqual(staged.json()["candidateReview"], {"status": "notReady"})
+        rendered = json.dumps(staged.json(), ensure_ascii=False, sort_keys=True)
+        for forbidden in (*private_texts, "sourceId", "effectOperationId", "candidateId", "memoryVersionId", "provider"):
+            self.assertNotIn(forbidden, rendered)
+
+        main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = False
+        hidden = client.get(self._status_path(vault_id, review_batch_id), headers=headers)
+        self.assertEqual(hidden.status_code, 404, hidden.text)
+        self.assertEqual(hidden.json()["detail"]["code"], "ownerTruthCandidateReviewUnavailable")
+
+        main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
+        _other_id, other_headers = self._login("13800139755")
+        denied = client.get(self._status_path(vault_id, review_batch_id), headers=other_headers)
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(
+            denied.json()["detail"]["code"],
+            "ownerTruthInterviewCandidateProposalDenied",
+        )
 
 
 if __name__ == "__main__":
