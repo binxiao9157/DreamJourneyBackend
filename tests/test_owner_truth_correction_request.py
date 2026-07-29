@@ -361,6 +361,50 @@ class OwnerTruthCorrectionRequestTests(unittest.TestCase):
         }
         self.assertIn(second.candidate_id, pending_ids)
 
+    def test_resolution_fails_closed_when_original_source_is_invalidated(self) -> None:
+        request = self.service.request(
+            context=self.context,
+            command=self._command(command_id="correction-resolution-original-source-stale-001"),
+        )
+        repository = self.store.owner_truth_candidate_review_repository()
+        repository._source_states[(self.vault_id, self.memory_candidate.source_id)] = "deleted"
+
+        with self.assertRaises(OwnerTruthCorrectionResolutionStale):
+            self.service.resolve(
+                context=self.context,
+                correction_request_id=request.correction_request_id,
+                command=self._resolution_command(
+                    command_id="correction-resolution-original-source-stale-001",
+                    expected_memory_version_id=request.expected_memory_version_id,
+                ),
+            )
+
+        pending_ids = {
+            item.candidate_id for item in self.review_service.list_pending(context=self.context)
+        }
+        self.assertIn(request.candidate_id, pending_ids)
+
+    def test_resolution_fails_closed_when_correction_source_is_invalidated(self) -> None:
+        request = self.service.request(
+            context=self.context,
+            command=self._command(command_id="correction-resolution-correction-source-stale-001"),
+        )
+        repository = self.store.owner_truth_candidate_review_repository()
+        repository._source_states[(self.vault_id, request.correction_source_id)] = "deleted"
+
+        with self.assertRaises(OwnerTruthCorrectionResolutionStale):
+            self.service.resolve(
+                context=self.context,
+                correction_request_id=request.correction_request_id,
+                command=self._resolution_command(
+                    command_id="correction-resolution-correction-source-stale-001",
+                    expected_memory_version_id=request.expected_memory_version_id,
+                ),
+            )
+
+        snapshot = repository.snapshot()
+        self.assertEqual(snapshot["candidates"][request.candidate_id]["decision"], "pending")
+
 
 if __name__ == "__main__":
     unittest.main()

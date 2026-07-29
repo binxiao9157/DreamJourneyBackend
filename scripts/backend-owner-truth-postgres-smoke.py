@@ -1403,6 +1403,18 @@ def main() -> None:
                     reason_code="ownerReportedCorrection",
                 ),
             )
+            stale_trigger_request = correction_service.request(
+                context=review_context,
+                command=OwnerTruthCorrectionRequestCommand(
+                    command_id="owner-truth-correction-request-smoke-trigger-stale-003",
+                    answer_id=answer_citation.answer_id,
+                    citation_id=correction_citation["citationId"],
+                    memory_id=correction_fields["memoryId"],
+                    expected_memory_version_id=correction_fields["memoryVersionId"],
+                    correction_text="不是父亲，是舅舅在院子里讲故事。",
+                    reason_code="ownerReportedCorrection",
+                ),
+            )
             correction_resolution = correction_service.resolve(
                 context=review_context,
                 correction_request_id=correction_request.correction_request_id,
@@ -1468,6 +1480,62 @@ def main() -> None:
                 pass
             else:
                 raise AssertionError("stale correction must not consume a second Candidate decision")
+
+            # A privileged direct writer must not be able to turn a request for
+            # the now-superseded predecessor into a terminal rejection. The
+            # service already fails closed; this exercises the replacement
+            # database trigger as the final bypass-resistant fence.
+            stale_trigger_command = OwnerTruthCorrectionResolutionCommand(
+                command_id="owner-truth-correction-resolution-smoke-trigger-stale-003",
+                expected_candidate_version=stale_trigger_request.candidate_row_version,
+                expected_memory_version_id=stale_trigger_request.expected_memory_version_id,
+                action=CandidateReviewAction.REJECT,
+                corrected_value=None,
+                corrected_value_schema_version=OWNER_TRUTH_SCHEMA_VERSION,
+                reason_code="ownerRejectedCorrection",
+            )
+            with store.request_unit_of_work(
+                correlation_id="owner-truth-correction-trigger-stale-smoke",
+                command_id=stale_trigger_command.command_id_hash,
+            ):
+                stale_trigger_review = store.owner_truth_candidate_review_repository().decide(
+                    command=stale_trigger_command.review_command(
+                        candidate_id=stale_trigger_request.candidate_id
+                    ),
+                    context=review_context,
+                    allow_correction=True,
+                )
+            require(
+                stale_trigger_review.decision.value == "rejected",
+                "direct stale-trigger setup must create one rejected Candidate receipt",
+            )
+            expect_rejected(
+                test_dsn,
+                lambda cursor: cursor.execute(
+                    """
+                    INSERT INTO owner_truth.correction_resolutions (
+                        id, vault_id, correction_request_id, candidate_id,
+                        decision_receipt_id, command_id_hash, command_payload_hash,
+                        expected_memory_version_id, decision,
+                        replacement_memory_version_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'rejected', NULL)
+                    """,
+                    (
+                        stale_trigger_command.resolution_id(
+                            vault_id=review_vault_id,
+                            correction_request_id=stale_trigger_request.correction_request_id,
+                        ),
+                        review_vault_id,
+                        stale_trigger_request.correction_request_id,
+                        stale_trigger_request.candidate_id,
+                        stale_trigger_review.receipt_id,
+                        stale_trigger_command.command_id_hash,
+                        stale_trigger_command.payload_hash,
+                        stale_trigger_request.expected_memory_version_id,
+                    ),
+                ),
+                "correction resolution trigger must reject a terminal decision for a superseded predecessor",
+            )
 
             correction_projection_worker_result = projection_worker.run_once()
             require(

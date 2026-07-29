@@ -26,6 +26,7 @@ from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateReviewCommand,
     OwnerTruthCandidateReviewConflict,
     OwnerTruthCandidateReviewError,
+    OwnerTruthCandidateReviewSourceInactive,
     OwnerTruthCandidateSnapshot,
 )
 from app.domain.owner_truth.contracts import (
@@ -899,6 +900,11 @@ class PostgresOwnerTruthCorrectionRequestRepository:
                 memory_id=request_record["memoryId"],
                 expected_memory_version_id=request_record["expectedMemoryVersionId"],
             )
+            self._assert_current_correction_source(
+                cursor,
+                context=context,
+                correction_source_id=request_record["correctionSourceId"],
+            )
             review_repository = PostgresOwnerTruthCandidateReviewRepository(self._connection)
             review = review_repository.decide(
                 command=command.review_command(candidate_id=request_record["candidateId"]),
@@ -1160,6 +1166,9 @@ class PostgresOwnerTruthCorrectionRequestRepository:
             JOIN owner_truth.memory_versions AS version
               ON version.vault_id = memory.vault_id
              AND version.memory_id = memory.id
+            JOIN owner_truth.sources AS source
+              ON source.vault_id = version.vault_id
+             AND source.id = version.source_id
             JOIN owner_truth.vaults AS vault
               ON vault.vault_id = memory.vault_id
             WHERE memory.vault_id = %s
@@ -1171,7 +1180,11 @@ class PostgresOwnerTruthCorrectionRequestRepository:
               AND vault.owner_subject_id = %s
               AND vault.status = 'active'
               AND version.is_current = TRUE
-            FOR SHARE OF memory, version, vault
+              AND source.owner_subject_id = %s
+              AND source.state = 'active'
+              AND source.authority_epoch = vault.authority_epoch
+              AND source.source_version = version.source_version
+            FOR SHARE OF memory, version, source, vault
             """,
             (
                 context.vault_id,
@@ -1179,11 +1192,54 @@ class PostgresOwnerTruthCorrectionRequestRepository:
                 expected_memory_version_id,
                 context.owner_subject_id,
                 context.owner_subject_id,
+                context.owner_subject_id,
             ),
         )
         if cursor.fetchone() is None:
             raise OwnerTruthCorrectionResolutionStale(
                 "cited MemoryVersion is no longer current and cannot be resolved"
+            )
+
+    @staticmethod
+    def _assert_current_correction_source(
+        cursor: Any,
+        *,
+        context: OwnerTruthCommandContext,
+        correction_source_id: str,
+    ) -> None:
+        """Keep a pending correction bound to its still-live private Source.
+
+        A correction Source is immutable, but it can still be redacted or
+        invalidated by a rights/authority transition between request creation
+        and resolution.  Hold the row through the surrounding transaction so
+        terminal review cannot consume evidence that has already been revoked.
+        """
+
+        cursor.execute(
+            """
+            SELECT source.id
+            FROM owner_truth.sources AS source
+            JOIN owner_truth.vaults AS vault
+              ON vault.vault_id = source.vault_id
+            WHERE source.vault_id = %s
+              AND source.id = %s
+              AND source.owner_subject_id = %s
+              AND source.state = 'active'
+              AND source.authority_epoch = vault.authority_epoch
+              AND vault.owner_subject_id = %s
+              AND vault.status = 'active'
+            FOR SHARE OF source, vault
+            """,
+            (
+                context.vault_id,
+                correction_source_id,
+                context.owner_subject_id,
+                context.owner_subject_id,
+            ),
+        )
+        if cursor.fetchone() is None:
+            raise OwnerTruthCorrectionResolutionStale(
+                "correction Source is no longer active and cannot be resolved"
             )
 
     def _existing_request(
@@ -1541,6 +1597,8 @@ class OwnerTruthCorrectionRequestService:
                 )
                 return replace(result, projection_effect=effect)
             except OwnerTruthMemoryCorrectionError as error:
+                raise OwnerTruthCorrectionResolutionStale(str(error)) from error
+            except OwnerTruthCandidateReviewSourceInactive as error:
                 raise OwnerTruthCorrectionResolutionStale(str(error)) from error
             except OwnerTruthCandidateReviewAccessDenied as error:
                 raise OwnerTruthCorrectionRequestAccessDenied(str(error)) from error
