@@ -93,8 +93,10 @@ class OwnerTruthInterviewCandidateProposalStatus:
 
     This status describes only the durable admission boundary.  It must not be
     mistaken for extraction execution: no worker or Provider is enabled by
-    this G0 slice, so an admitted batch remains ``requested`` and cannot yet
-    expose Candidate review content.
+    this G0 slice, so a live admitted batch remains ``requested`` and cannot
+    yet expose Candidate review content. A Source that has since become
+    inactive or no longer matches its immutable provenance is reported as
+    invalidated rather than as executable work.
     """
 
     review_batch_id: str
@@ -152,6 +154,41 @@ def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
         raise OwnerTruthInterviewCandidateProposalAccessDenied(
             "only the Vault Owner may admit an interview review batch"
         )
+
+
+def _admitted_source_is_live(
+    *,
+    batch: "_InMemoryReviewBatchStatus",
+    admission: Mapping[str, Any],
+    source: Mapping[str, Any] | None,
+) -> bool:
+    """Revalidate a staged Source without returning its private content.
+
+    Status reads are not an execution permission, but they must not tell an
+    Owner that a redacted, stale, or provenance-mismatched Source is still
+    safely waiting for extraction. The same conditions are enforced by the
+    candidate-review reader and execution-time target admission.
+    """
+
+    if not isinstance(source, Mapping):
+        return False
+    try:
+        metadata = source.get("metadata")
+        return (
+            str(source.get("ownerSubjectId") or "") == batch.owner_subject_id
+            and int(source.get("sourceVersion")) == int(admission["sourceVersion"])
+            and str(source.get("state") or "") == "active"
+            and int(source.get("authorityEpoch")) == batch.authority_epoch
+            and str(source.get("sourceKind") or "") == "conversation"
+            and str(source.get("contentHash") or "")
+            == str(admission["sourceContentHash"])
+            and isinstance(metadata, Mapping)
+            and str(metadata.get("origin") or "")
+            == "interviewReviewBatchCandidateProposal"
+            and str(metadata.get("reviewBatchId") or "") == batch.review_batch_id
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 class OwnerTruthInterviewCandidateProposalService:
@@ -273,6 +310,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
         ]
         | None = None,
         review_batch_status_lookup: Callable[..., Mapping[str, Any] | None] | None = None,
+        source_status_lookup: Callable[..., Mapping[str, Any] | None] | None = None,
     ) -> None:
         self._lock = RLock()
         self._batches: dict[tuple[str, str], _InMemoryReviewBatch] = {}
@@ -280,6 +318,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
         self._admissions_by_batch: dict[tuple[str, str], dict[str, Any]] = {}
         self._review_batch_snapshot_lookup = review_batch_snapshot_lookup
         self._review_batch_status_lookup = review_batch_status_lookup
+        self._source_status_lookup = source_status_lookup
 
     def seed_review_batch(
         self,
@@ -401,7 +440,21 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
             admission = self._admissions_by_batch.get(
                 (context.vault_id, normalized_batch_id)
             )
-            return self._status_from_batch(batch=batch, admitted=admission is not None)
+            source_is_live = True
+            if admission is not None and self._source_status_lookup is not None:
+                source_is_live = _admitted_source_is_live(
+                    batch=batch,
+                    admission=admission,
+                    source=self._source_status_lookup(
+                        vault_id=context.vault_id,
+                        source_id=str(admission["sourceId"]),
+                    ),
+                )
+            return self._status_from_batch(
+                batch=batch,
+                admitted=admission is not None,
+                source_is_live=source_is_live,
+            )
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         with self._lock:
@@ -476,6 +529,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
         *,
         batch: _InMemoryReviewBatchStatus,
         admitted: bool,
+        source_is_live: bool = True,
     ) -> OwnerTruthInterviewCandidateProposalStatus:
         if batch.state == "pendingAcknowledgement":
             return OwnerTruthInterviewCandidateProposalStatus(
@@ -498,6 +552,16 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 candidate_proposal_status="readyForAdmission",
                 source_status="notAdmitted",
                 candidate_extraction_status="notRequested",
+                effect_execution_status="disabled",
+                candidate_review_status="notReady",
+            )
+        if not source_is_live:
+            return OwnerTruthInterviewCandidateProposalStatus(
+                review_batch_id=batch.review_batch_id,
+                review_batch_state=batch.state,
+                candidate_proposal_status="invalidated",
+                source_status="inactive",
+                candidate_extraction_status="blocked",
                 effect_execution_status="disabled",
                 candidate_review_status="notReady",
             )
@@ -786,11 +850,22 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                     v.status AS vault_status,
                     v.authority_epoch AS vault_authority_epoch,
                     a.id AS admission_id,
-                    a.authority_epoch AS admission_authority_epoch
+                    a.authority_epoch AS admission_authority_epoch,
+                    a.source_version AS admission_source_version,
+                    a.source_content_hash AS admission_source_content_hash,
+                    s.owner_subject_id AS source_owner_subject_id,
+                    s.source_version AS source_version,
+                    s.state AS source_state,
+                    s.authority_epoch AS source_authority_epoch,
+                    s.source_kind AS source_kind,
+                    s.content_hash AS source_content_hash,
+                    s.metadata AS source_metadata
                 FROM owner_truth.interview_review_batches AS b
                 JOIN owner_truth.vaults AS v ON v.vault_id = b.vault_id
                 LEFT JOIN owner_truth.interview_review_batch_candidate_admissions AS a
                   ON a.vault_id = b.vault_id AND a.review_batch_id = b.id
+                LEFT JOIN owner_truth.sources AS s
+                  ON s.vault_id = a.vault_id AND s.id = a.source_id
                 WHERE b.vault_id = %s AND b.id = %s
                 """,
                 (context.vault_id, normalized_batch_id),
@@ -824,9 +899,28 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
             raise OwnerTruthInterviewCandidateProposalConflict(
                 "candidate proposal admission authority is no longer current"
             )
+        source_is_live = True
+        if admitted:
+            source_is_live = _admitted_source_is_live(
+                batch=status,
+                admission={
+                    "sourceVersion": row["admission_source_version"],
+                    "sourceContentHash": row["admission_source_content_hash"],
+                },
+                source={
+                    "ownerSubjectId": row["source_owner_subject_id"],
+                    "sourceVersion": row["source_version"],
+                    "state": row["source_state"],
+                    "authorityEpoch": row["source_authority_epoch"],
+                    "sourceKind": row["source_kind"],
+                    "contentHash": row["source_content_hash"],
+                    "metadata": row["source_metadata"],
+                },
+            )
         return InMemoryOwnerTruthInterviewCandidateProposalRepository._status_from_batch(
             batch=status,
             admitted=admitted,
+            source_is_live=source_is_live,
         )
 
     def _locked_active_vault(

@@ -411,6 +411,56 @@ class OwnerTruthInterviewCandidateProposalAPITests(unittest.TestCase):
             "ownerTruthInterviewCandidateProposalDenied",
         )
 
+    def test_status_invalidates_redacted_admitted_source_without_private_leakage(self) -> None:
+        _owner_id, headers = self._login("13800139756")
+        vault_id = "vault-interview-candidate-proposal-redacted-status"
+        (
+            thread_id,
+            session_id,
+            _thread_version,
+            session_version,
+            review_batch_id,
+            review_batch_version,
+            private_texts,
+        ) = self._start_and_create_pending_batch(vault_id=vault_id, headers=headers)
+        acknowledged_session_version, acknowledged_batch_version = self._acknowledge(
+            vault_id=vault_id,
+            review_batch_id=review_batch_id,
+            thread_id=thread_id,
+            session_id=session_id,
+            session_version=session_version,
+            review_batch_version=review_batch_version,
+            headers=headers,
+        )
+        del acknowledged_session_version
+        admitted = client.post(
+            self._admission_path(vault_id, review_batch_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "expectedReviewBatchVersion": acknowledged_batch_version,
+            },
+        )
+        self.assertEqual(admitted.status_code, 201, admitted.text)
+        source_key = next(
+            key
+            for key in self.store._owner_truth_sources
+            if key[0] == vault_id
+        )
+        self.store._owner_truth_sources[source_key]["state"] = "redacted"
+
+        status = client.get(self._status_path(vault_id, review_batch_id), headers=headers)
+
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(status.json()["candidateProposal"], {"status": "invalidated"})
+        self.assertEqual(status.json()["source"], {"status": "inactive"})
+        self.assertEqual(status.json()["candidateExtraction"], {"status": "blocked"})
+        self.assertEqual(status.json()["effectExecution"], {"status": "disabled"})
+        self.assertEqual(status.json()["candidateReview"], {"status": "notReady"})
+        rendered = json.dumps(status.json(), ensure_ascii=False, sort_keys=True)
+        for forbidden in (*private_texts, "sourceId", "effectOperationId", "candidateId"):
+            self.assertNotIn(forbidden, rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

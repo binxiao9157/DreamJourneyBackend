@@ -162,6 +162,9 @@ class InMemoryStore:
                 review_batch_status_lookup=(
                     self._owner_truth_conversation_repository.candidate_proposal_review_batch_status_snapshot
                 ),
+                source_status_lookup=(
+                    self._owner_truth_interview_candidate_proposal_source_status_snapshot
+                ),
             )
         )
         self._effect_kernel_repository = InMemoryEffectKernelRepository()
@@ -2468,6 +2471,18 @@ class InMemoryStore:
     def owner_truth_source_count(self, vault_id: str) -> int:
         with self._owner_truth_lock:
             return sum(1 for key in self._owner_truth_sources if key[0] == vault_id)
+
+    def _owner_truth_interview_candidate_proposal_source_status_snapshot(
+        self,
+        *,
+        vault_id: str,
+        source_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return only the Source metadata required by the QA status recheck."""
+
+        with self._owner_truth_lock:
+            source = self._owner_truth_sources.get((str(vault_id), str(source_id)))
+            return deepcopy(source) if source is not None else None
 
     def list_owner_truth_data_rights_records(self, user_id: str) -> Dict[str, List[Dict[str, Any]]]:
         """Return a bounded, owner-filtered Owner Truth export projection.
