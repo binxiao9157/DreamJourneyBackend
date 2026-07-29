@@ -26,6 +26,7 @@ def empty_owner_truth_data_rights_records() -> Dict[str, List[Dict[str, Any]]]:
         "decisionReceipt": [],
         "memoryVersion": [],
         "answerCitation": [],
+        "answerFeedback": [],
         "correction": [],
     }
 
@@ -237,6 +238,32 @@ def read_owner_truth_data_rights_records(
             LIMIT 1000
             """
         ),
+        "answerFeedback": rows(
+            """
+            SELECT jsonb_build_object(
+                'feedbackId', feedback.id,
+                'vaultId', feedback.vault_id,
+                'ownerSubjectId', feedback.owner_subject_id,
+                'commandIdHash', feedback.command_id_hash,
+                'commandPayloadHash', feedback.command_payload_hash,
+                'answerId', feedback.answer_id,
+                'helpful', feedback.helpful,
+                'citationCount', feedback.citation_count,
+                'eligibleCitationCount', feedback.eligible_citation_count,
+                'metricEligible', feedback.metric_eligible,
+                'eligibilityReason', feedback.eligibility_reason,
+                'authorityEpoch', feedback.authority_epoch,
+                'createdAt', feedback.created_at
+            ) AS payload
+            FROM owner_truth.answer_feedback AS feedback
+            INNER JOIN owner_truth.vaults AS vault
+                ON vault.vault_id = feedback.vault_id
+            WHERE vault.owner_subject_id = %s
+              AND feedback.owner_subject_id = vault.owner_subject_id
+            ORDER BY feedback.created_at, feedback.id
+            LIMIT 1000
+            """
+        ),
         "correction": rows(
             """
             SELECT jsonb_build_object(
@@ -297,6 +324,7 @@ def count_owner_truth_data_rights_records(
         "ownerTruthDecisionReceipt",
         "ownerTruthMemoryVersion",
         "ownerTruthAnswerCitation",
+        "ownerTruthAnswerFeedback",
         "ownerTruthCorrection",
     )
     if not owner_id:
@@ -357,6 +385,15 @@ def count_owner_truth_data_rights_records(
             INNER JOIN owner_truth.vaults AS vault ON vault.vault_id = answer.vault_id
             WHERE vault.owner_subject_id = %s
               AND answer.owner_subject_id = vault.owner_subject_id
+            """
+        ),
+        "ownerTruthAnswerFeedback": count(
+            """
+            SELECT COUNT(*) AS count
+            FROM owner_truth.answer_feedback AS feedback
+            INNER JOIN owner_truth.vaults AS vault ON vault.vault_id = feedback.vault_id
+            WHERE vault.owner_subject_id = %s
+              AND feedback.owner_subject_id = vault.owner_subject_id
             """
         ),
         "ownerTruthCorrection": count(

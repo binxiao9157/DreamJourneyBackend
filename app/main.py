@@ -212,6 +212,18 @@ from app.services.owner_truth_answer_citation import (
     OwnerTruthAnswerCitationService,
     answer_citation_summary,
 )
+from app.services.owner_truth_answer_feedback import (
+    OwnerTruthAnswerCitationReadNotFound,
+    OwnerTruthAnswerCitationReadService,
+    OwnerTruthAnswerCitationReadUnavailable,
+    OwnerTruthAnswerFeedbackCommand,
+    OwnerTruthAnswerFeedbackConflict,
+    OwnerTruthAnswerFeedbackError,
+    OwnerTruthAnswerFeedbackNotFound,
+    OwnerTruthAnswerFeedbackService,
+    answer_citation_read_summary,
+    answer_feedback_summary,
+)
 from app.services.owner_truth_knowledge_dimension_confirmation import (
     OwnerTruthKnowledgeDimensionConfirmationAccessDenied,
     OwnerTruthKnowledgeDimensionConfirmationCommand,
@@ -1852,6 +1864,30 @@ def _owner_truth_answer_citation_http_error(
         return HTTPException(status_code=403, detail={"code": "ownerTruthAnswerCitationDenied"})
     if isinstance(error, OwnerTruthAnswerCitationConflict):
         return HTTPException(status_code=409, detail={"code": "ownerTruthAnswerCitationConflict"})
+    return HTTPException(status_code=400, detail={"code": "ownerTruthAnswerCitationInvalid"})
+
+
+def _owner_truth_answer_feedback_http_error(
+    error: OwnerTruthMemoryProjectionError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthMemoryProjectionAccessDenied):
+        return HTTPException(status_code=403, detail={"code": "ownerTruthAnswerFeedbackDenied"})
+    if isinstance(error, OwnerTruthAnswerFeedbackNotFound):
+        return HTTPException(status_code=404, detail={"code": "ownerTruthAnswerFeedbackNotFound"})
+    if isinstance(error, OwnerTruthAnswerFeedbackConflict):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthAnswerFeedbackConflict"})
+    return HTTPException(status_code=400, detail={"code": "ownerTruthAnswerFeedbackInvalid"})
+
+
+def _owner_truth_answer_citation_read_http_error(
+    error: OwnerTruthMemoryProjectionError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthMemoryProjectionAccessDenied):
+        return HTTPException(status_code=403, detail={"code": "ownerTruthAnswerCitationDenied"})
+    if isinstance(error, OwnerTruthAnswerCitationReadNotFound):
+        return HTTPException(status_code=404, detail={"code": "ownerTruthAnswerCitationNotFound"})
+    if isinstance(error, OwnerTruthAnswerCitationReadUnavailable):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthAnswerCitationUnavailable"})
     return HTTPException(status_code=400, detail={"code": "ownerTruthAnswerCitationInvalid"})
 
 
@@ -5266,6 +5302,80 @@ def record_owner_truth_answer_citation(
             "schemaVersion": "owner-truth-answer-citation-receipt-response-v1",
             "status": result.outcome,
             "answerCitation": answer_citation_summary(result),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/answers/{answer_id}/feedback",
+    include_in_schema=False,
+)
+def record_owner_truth_answer_feedback(
+    request: Request,
+    vault_id: str,
+    answer_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Record a value-free Owner feedback receipt for one QA-only answer.
+
+    This endpoint is intentionally hidden with the same Owner QA gate as the
+    answer/citation receipt.  It does not expose public Echo feedback, accept
+    free text, or aggregate product metrics.
+    """
+
+    try:
+        context = _owner_truth_answer_citation_context(request, vault_id=vault_id)
+        command = OwnerTruthAnswerFeedbackCommand(
+            command_id=payload.get("commandId"),
+            answer_id=answer_id,
+            helpful=payload.get("helpful"),
+        )
+        result = OwnerTruthAnswerFeedbackService(store, enabled=True).record(
+            context=context,
+            command=command,
+        )
+    except OwnerTruthMemoryProjectionError as error:
+        raise _owner_truth_answer_feedback_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-answer-feedback-receipt-response-v1",
+            "status": result.outcome,
+            "answerFeedback": answer_feedback_summary(result),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/answers/{answer_id}/citations",
+    include_in_schema=False,
+)
+def read_owner_truth_answer_citations(
+    request: Request,
+    vault_id: str,
+    answer_id: str,
+) -> JSONResponse:
+    """Read typed citation currentness for one QA-only Answer receipt.
+
+    This reuses the explicit Owner QA gate.  It returns no question, answer,
+    projection body, or legacy Echo state; the response is limited to the
+    immutable typed citation IDs/hashes and their currentness at read time.
+    """
+
+    try:
+        context = _owner_truth_answer_citation_context(request, vault_id=vault_id)
+        result = OwnerTruthAnswerCitationReadService(store, enabled=True).read(
+            context=context,
+            answer_id=answer_id,
+        )
+    except OwnerTruthMemoryProjectionError as error:
+        raise _owner_truth_answer_citation_read_http_error(error) from error
+    return JSONResponse(
+        content={
+            "schemaVersion": "owner-truth-answer-citation-read-response-v1",
+            "answerCitation": answer_citation_read_summary(result),
         },
         headers={"Cache-Control": "no-store"},
     )

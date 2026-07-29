@@ -24,6 +24,8 @@ class OwnerTruthDataRightsProjectionTests(unittest.TestCase):
                 return [{"payload": {"memoryVersionId": "version-a"}}]
             if "FROM owner_truth.answers" in query:
                 return [{"payload": {"answerId": "answer-a", "citations": []}}]
+            if "FROM owner_truth.answer_feedback" in query:
+                return [{"payload": {"feedbackId": "feedback-a", "metricEligible": False}}]
             if "FROM owner_truth.correction_requests" in query:
                 return [{"payload": {"correctionRequestId": "correction-a"}}]
             if "FROM owner_truth.vaults" in query:
@@ -41,8 +43,9 @@ class OwnerTruthDataRightsProjectionTests(unittest.TestCase):
         self.assertEqual(records["decisionReceipt"][0]["id"], "decision-a")
         self.assertEqual(records["memoryVersion"][0]["memoryVersionId"], "version-a")
         self.assertEqual(records["answerCitation"][0]["answerId"], "answer-a")
+        self.assertEqual(records["answerFeedback"][0]["feedbackId"], "feedback-a")
         self.assertEqual(records["correction"][0]["correctionRequestId"], "correction-a")
-        self.assertEqual(len(queries), 7)
+        self.assertEqual(len(queries), 8)
         self.assertTrue(all("DELETE" not in query.upper() for query, _ in queries))
 
     def test_count_projection_is_owner_parameterized_and_empty_subject_is_zero(self):
@@ -65,10 +68,11 @@ class OwnerTruthDataRightsProjectionTests(unittest.TestCase):
             "ownerTruthDecisionReceipt",
             "ownerTruthMemoryVersion",
             "ownerTruthAnswerCitation",
+            "ownerTruthAnswerFeedback",
             "ownerTruthCorrection",
         })
         self.assertTrue(all(value == 3 for value in counts.values()))
-        self.assertEqual(len(queries), 7)
+        self.assertEqual(len(queries), 8)
         self.assertTrue(all("DELETE" not in query.upper() for query, _ in queries))
         self.assertEqual(
             count_owner_truth_data_rights_records(subject_id="", fetchone=fetchone),

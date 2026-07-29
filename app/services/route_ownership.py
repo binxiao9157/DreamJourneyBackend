@@ -463,6 +463,18 @@ class RouteOwnershipRegistry:
                 "ownerTruthAnswerCitationReceipt",
             ),
             _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/answers/{answer_id}/citations",
+                session,
+                "ownerTruthAnswerCitationRead",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/answers/{answer_id}/feedback",
+                session,
+                "ownerTruthAnswerFeedback",
+            ),
+            _rule(
                 "POST",
                 "/v2/vaults/{vault_id}/memories/{memory_id}/corrections",
                 session,

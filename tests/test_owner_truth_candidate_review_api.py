@@ -147,6 +147,15 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
                 "answerText": "不得公开。",
             },
         )
+        citation_read = client.get(
+            f"/v2/vaults/vault-hidden/answers/{uuid4()}/citations",
+            headers=headers,
+        )
+        answer_feedback = client.post(
+            f"/v2/vaults/vault-hidden/answers/{uuid4()}/feedback",
+            headers=headers,
+            json={"commandId": "answer-feedback-hidden-001", "helpful": True},
+        )
         correction = client.post(
             "/v2/vaults/vault-hidden/memories/00000000-0000-0000-0000-000000000001/corrections",
             headers=headers,
@@ -194,6 +203,16 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(answer_citation.status_code, 404)
         self.assertEqual(
             answer_citation.json()["detail"]["code"],
+            "ownerTruthAnswerCitationUnavailable",
+        )
+        self.assertEqual(citation_read.status_code, 404)
+        self.assertEqual(
+            citation_read.json()["detail"]["code"],
+            "ownerTruthAnswerCitationUnavailable",
+        )
+        self.assertEqual(answer_feedback.status_code, 404)
+        self.assertEqual(
+            answer_feedback.json()["detail"]["code"],
             "ownerTruthAnswerCitationUnavailable",
         )
         self.assertEqual(correction.status_code, 404)
@@ -535,6 +554,41 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertNotIn(raw_query, str(evidence))
         self.assertNotIn(raw_answer, str(evidence))
         self.assertNotIn(candidate.content["summary"], str(evidence))
+
+        citation_read = client.get(
+            f"/v2/vaults/{vault_id}/answers/{evidence['answerId']}/citations",
+            headers=headers,
+        )
+        self.assertEqual(citation_read.status_code, 200)
+        self.assertEqual(citation_read.headers["cache-control"], "no-store")
+        self.assertEqual(
+            citation_read.json()["schemaVersion"],
+            "owner-truth-answer-citation-read-response-v1",
+        )
+        currentness = citation_read.json()["answerCitation"]
+        self.assertEqual(currentness["citationCount"], 1)
+        self.assertEqual(currentness["currentCitationCount"], 1)
+        self.assertTrue(currentness["citations"][0]["current"])
+        self.assertNotIn(raw_query, str(currentness))
+        self.assertNotIn(raw_answer, str(currentness))
+        self.assertNotIn(candidate.content["summary"], str(currentness))
+
+        answer_feedback = client.post(
+            f"/v2/vaults/{vault_id}/answers/{evidence['answerId']}/feedback",
+            headers=headers,
+            json={"commandId": "answer-feedback-api-001", "helpful": True},
+        )
+        self.assertEqual(answer_feedback.status_code, 201)
+        self.assertEqual(
+            answer_feedback.json()["schemaVersion"],
+            "owner-truth-answer-feedback-receipt-response-v1",
+        )
+        feedback = answer_feedback.json()["answerFeedback"]
+        self.assertTrue(feedback["metricEligible"])
+        self.assertEqual(feedback["eligibilityReason"], "eligible")
+        self.assertNotIn(raw_query, str(feedback))
+        self.assertNotIn(raw_answer, str(feedback))
+        self.assertNotIn(candidate.content["summary"], str(feedback))
 
         query_ranked_answer_citation = client.post(
             f"/v2/vaults/{vault_id}/answer-citation-receipts",

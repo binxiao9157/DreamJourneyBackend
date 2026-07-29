@@ -1,0 +1,13 @@
+{
+  "version": "0062",
+  "name": "owner_truth_answer_feedback",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthAnswerFeedbackShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthAnswerFeedbackQA": false,
+    "ownerTruthV1Read": false,
+    "publicEchoFeedback": false
+  }
+}

@@ -16,6 +16,9 @@ fi
 echo "== Backend unittest =="
 STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" -m unittest discover tests
 
+echo "== Owner Truth Answer feedback G0 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-answer-feedback-g0-gate.sh
+
 echo "== Credential response boundary smoke =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-credential-response-boundary-smoke.sh
 
@@ -250,6 +253,12 @@ test -f scripts/run-backend-async-effects-postgres-smoke.sh
 	test -f db/migrations/0061_owner_truth_projection_rights_fence.json
 	test -f app/domain/owner_truth/projection_rights.py
 	test -f app/services/owner_truth_projection_rights.py
+	test -f db/migrations/0062_owner_truth_answer_feedback.sql
+	test -f db/migrations/0062_owner_truth_answer_feedback.json
+	test -f app/services/owner_truth_answer_feedback.py
+	test -f tests/test_owner_truth_answer_feedback.py
+	test -f tests/test_owner_truth_answer_feedback_migration_contract.py
+	test -f scripts/run-backend-owner-truth-answer-feedback-g0-gate.sh
 test -f db/migrations/0022_owner_truth_correction_resolver.sql
 test -f db/migrations/0022_owner_truth_correction_resolver.json
 test -f app/domain/owner_truth/memory_correction.py

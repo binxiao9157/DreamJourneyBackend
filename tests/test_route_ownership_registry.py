@@ -29,7 +29,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 125)
+        self.assertEqual(len(app_routes), 127)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
 
@@ -91,6 +91,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
             ("POST", "/v2/vaults/{vault_id}/context-shadow/materialize"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/interview-sessions/{session_id}/turn-context/prepare"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/answer-citation-receipts"): RouteOwnershipCategory.USER_SESSION,
+            ("GET", "/v2/vaults/{vault_id}/answers/{answer_id}/citations"): RouteOwnershipCategory.USER_SESSION,
+            ("POST", "/v2/vaults/{vault_id}/answers/{answer_id}/feedback"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/memory-versions/{memory_version_id}/knowledge-dimension-confirmations"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/knowledge-recommendations/read"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/knowledge-recommendations/plan"): RouteOwnershipCategory.USER_SESSION,
@@ -116,8 +118,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 125)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 125)
+        self.assertEqual(summary["routeCount"], 127)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 127)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)

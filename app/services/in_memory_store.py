@@ -77,6 +77,9 @@ from app.services.owner_truth_memory_search_projection import (
 from app.services.owner_truth_answer_citation import (
     InMemoryOwnerTruthAnswerCitationRepository,
 )
+from app.services.owner_truth_answer_feedback import (
+    InMemoryOwnerTruthAnswerFeedbackRepository,
+)
 from app.services.owner_truth_knowledge_dimension_confirmation import (
     InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository,
 )
@@ -197,6 +200,9 @@ class InMemoryStore:
         )
         self._owner_truth_answer_citation_repository = (
             InMemoryOwnerTruthAnswerCitationRepository()
+        )
+        self._owner_truth_answer_feedback_repository = (
+            InMemoryOwnerTruthAnswerFeedbackRepository()
         )
         self._owner_truth_knowledge_dimension_confirmation_repository = (
             InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository()
@@ -349,6 +355,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthAnswerCitationRepository:
         return self._owner_truth_answer_citation_repository
+
+    def owner_truth_answer_feedback_repository(
+        self,
+    ) -> InMemoryOwnerTruthAnswerFeedbackRepository:
+        return self._owner_truth_answer_feedback_repository
 
     def owner_truth_knowledge_dimension_confirmation_repository(
         self,
@@ -2595,6 +2606,13 @@ class InMemoryStore:
             if str(record.get("ownerSubjectId") or "") == subject_id
             and str(record.get("vaultId") or "") in vault_ids
         ]
+        answer_feedback_snapshot = self._owner_truth_answer_feedback_repository.snapshot()
+        answer_feedback = [
+            deepcopy(record)
+            for record in answer_feedback_snapshot.get("records", [])
+            if str(record.get("ownerSubjectId") or "") == subject_id
+            and str(record.get("vaultId") or "") in vault_ids
+        ]
         correction_snapshot = self._owner_truth_correction_request_repository.snapshot()
         corrections_by_id = {
             str(record.get("correctionRequestId") or ""): deepcopy(record)
@@ -2626,6 +2644,7 @@ class InMemoryStore:
             "decisionReceipt": self._sorted_owner_truth_data_rights_records(decision_receipts),
             "memoryVersion": self._sorted_owner_truth_data_rights_records(memory_versions),
             "answerCitation": self._sorted_owner_truth_data_rights_records(answer_citations),
+            "answerFeedback": self._sorted_owner_truth_data_rights_records(answer_feedback),
             "correction": self._sorted_owner_truth_data_rights_records(corrections),
         }
 
@@ -2638,6 +2657,7 @@ class InMemoryStore:
             "ownerTruthDecisionReceipt": len(records["decisionReceipt"]),
             "ownerTruthMemoryVersion": len(records["memoryVersion"]),
             "ownerTruthAnswerCitation": len(records["answerCitation"]),
+            "ownerTruthAnswerFeedback": len(records["answerFeedback"]),
             "ownerTruthCorrection": len(records["correction"]),
         }
 
@@ -2650,6 +2670,7 @@ class InMemoryStore:
             "decisionReceipt": [],
             "memoryVersion": [],
             "answerCitation": [],
+            "answerFeedback": [],
             "correction": [],
         }
 

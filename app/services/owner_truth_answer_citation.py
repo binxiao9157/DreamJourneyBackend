@@ -372,6 +372,30 @@ class InMemoryOwnerTruthAnswerCitationRepository:
                         return deepcopy(dict(citation))
         return None
 
+    def find_answer(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        answer_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve one hash-only Answer receipt for the same Owner Vault.
+
+        This intentionally returns only the already stored QA evidence shape.
+        The raw question and answer have never entered the repository.
+        """
+
+        _assert_owner_context(context)
+        normalized_answer_id = _uuid(answer_id, field="answer_id")
+        with self._lock:
+            for record in self._records.values():
+                if (
+                    str(record.get("vaultId") or "") == context.vault_id
+                    and str(record.get("ownerSubjectId") or "") == context.owner_subject_id
+                    and str(record.get("answerId") or "") == normalized_answer_id
+                ):
+                    return deepcopy(dict(record))
+        return None
+
 
 class PostgresOwnerTruthAnswerCitationRepository:
     """Postgres writer bound to one request Unit of Work."""
@@ -527,6 +551,84 @@ class PostgresOwnerTruthAnswerCitationRepository:
             "fallbacks": list(fallbacks or []),
         }
         return _result_from_record(record, outcome=outcome)
+
+    def find_answer(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        answer_id: str,
+    ) -> dict[str, Any] | None:
+        """Read one immutable QA receipt without exposing answer/query content."""
+
+        _assert_owner_context(context)
+        normalized_answer_id = _uuid(answer_id, field="answer_id")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, vault_id, owner_subject_id, command_id_hash,
+                    context_hash, context_version, query_hash, query_length,
+                    answer_hash, answer_length, authority_epoch,
+                    projection_checkpoint, fallbacks
+                FROM owner_truth.answers
+                WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+                FOR SHARE
+                """,
+                (context.vault_id, normalized_answer_id, context.owner_subject_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            cursor.execute(
+                """
+                SELECT id, citation_position, memory_id, memory_version_id,
+                    memory_version, source_id, source_version, content_hash
+                FROM owner_truth.answer_citations
+                WHERE vault_id = %s AND answer_id = %s
+                ORDER BY citation_position ASC
+                """,
+                (context.vault_id, normalized_answer_id),
+            )
+            citations = [
+                {
+                    "citationId": str(item["id"]),
+                    "position": int(item["citation_position"]),
+                    "resolved": True,
+                    "resolution": "recorded_current_confirmed_projection_entry",
+                    "citation": {
+                        "vaultId": context.vault_id,
+                        "memoryId": str(item["memory_id"]),
+                        "memoryVersionId": str(item["memory_version_id"]),
+                        "memoryVersion": int(item["memory_version"]),
+                        "sourceId": str(item["source_id"]),
+                        "sourceVersion": int(item["source_version"]),
+                        "contentHash": str(item["content_hash"]),
+                    },
+                }
+                for item in cursor.fetchall()
+            ]
+            fallbacks = row["fallbacks"]
+            if isinstance(fallbacks, str):
+                fallbacks = json.loads(fallbacks)
+            return {
+                "answerId": str(row["id"]),
+                "vaultId": str(row["vault_id"]),
+                "ownerSubjectId": str(row["owner_subject_id"]),
+                "commandIdHash": str(row["command_id_hash"]),
+                "contextHash": str(row["context_hash"]),
+                "contextVersion": str(row["context_version"]),
+                "queryHash": row["query_hash"],
+                "queryLength": int(row["query_length"]),
+                "answerHash": str(row["answer_hash"]),
+                "answerLength": int(row["answer_length"]),
+                "authorityEpoch": (
+                    None
+                    if row["authority_epoch"] is None
+                    else int(row["authority_epoch"])
+                ),
+                "projectionCheckpoint": row["projection_checkpoint"],
+                "citations": citations,
+                "fallbacks": list(fallbacks or []),
+            }
 
     @staticmethod
     def _assert_active_vault(

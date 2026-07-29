@@ -126,6 +126,9 @@ from app.services.owner_truth_memory_search_projection import (
 from app.services.owner_truth_answer_citation import (
     PostgresOwnerTruthAnswerCitationRepository,
 )
+from app.services.owner_truth_answer_feedback import (
+    PostgresOwnerTruthAnswerFeedbackRepository,
+)
 from app.services.owner_truth_knowledge_dimension_confirmation import (
     PostgresOwnerTruthKnowledgeDimensionConfirmationRepository,
 )
@@ -453,6 +456,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth answer citation requires an active unit of work")
         return PostgresOwnerTruthAnswerCitationRepository(active.connection)
+
+    def owner_truth_answer_feedback_repository(
+        self,
+    ) -> PostgresOwnerTruthAnswerFeedbackRepository:
+        """Return QA-only Owner answer-feedback persistence in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth answer feedback requires an active unit of work")
+        return PostgresOwnerTruthAnswerFeedbackRepository(active.connection)
 
     def owner_truth_knowledge_dimension_confirmation_repository(
         self,

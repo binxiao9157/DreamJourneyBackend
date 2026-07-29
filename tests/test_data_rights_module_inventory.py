@@ -229,6 +229,7 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
                 "ownerTruthDecisionReceipt": 0,
                 "ownerTruthMemoryVersion": 0,
                 "ownerTruthAnswerCitation": 0,
+                "ownerTruthAnswerFeedback": 0,
                 "ownerTruthCorrection": 0,
             },
         ):
