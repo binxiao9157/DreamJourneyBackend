@@ -460,6 +460,24 @@ def counts(dsn: str, *, vault_id: str) -> tuple[int, int, int]:
     return ledgers, receipts, links
 
 
+def memory_counts(dsn: str, *, vault_id: str) -> tuple[int, int]:
+    """Return only authority-record counts; never read memory payloads."""
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM owner_truth.memories WHERE vault_id = %s",
+                (vault_id,),
+            )
+            memories = int(cursor.fetchone()[0])
+            cursor.execute(
+                "SELECT COUNT(*) FROM owner_truth.memory_versions WHERE vault_id = %s",
+                (vault_id,),
+            )
+            versions = int(cursor.fetchone()[0])
+    return memories, versions
+
+
 def candidate_decisions(dsn: str, *, vault_id: str) -> dict[str, str]:
     with psycopg.connect(dsn, row_factory=psycopg.rows.dict_row) as connection:
         with connection.cursor() as cursor:
@@ -841,6 +859,21 @@ def main() -> None:
             vault_id=legacy_vault_id,
             owner_subject_id="formal-confirmation-legacy-owner",
         )
+        historical_upgrade = apply_migrations_through(
+            test_dsn,
+            build_id="formal-interview-confirmation-authority-receipts-0037",
+            final_version="0037",
+        )
+        require(
+            historical_upgrade["appliedVersions"] == ["0036", "0037"],
+            "historical upgrade must apply authority receipts and the feature constraint",
+        )
+        assert_legacy_qa_root_survives_upgrade(
+            test_dsn,
+            vault_id=legacy_vault_id,
+            command_id_hash=legacy_command_id_hash,
+        )
+
         migrator = PostgresMigrator(
             dsn=test_dsn,
             migrations_dir=default_migrations_dir(),
@@ -849,20 +882,19 @@ def main() -> None:
             statement_timeout_ms=15000,
         )
         upgrade = migrator.apply()
+        latest_version = max(
+            path.name.split("_", 1)[0]
+            for path in default_migrations_dir().glob("*.sql")
+        )
         require(
-            upgrade["appliedVersions"] == ["0036", "0037"],
-            "upgrade must apply authority receipts and the feature constraint",
+            all(str(version) > "0037" for version in upgrade["appliedVersions"]),
+            "current schema upgrade must only apply migrations after the historical authority test",
         )
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         require(
-            verified["expectedHead"] == "0037",
-            "authority receipt feature-constraint migration must be present",
-        )
-        assert_legacy_qa_root_survives_upgrade(
-            test_dsn,
-            vault_id=legacy_vault_id,
-            command_id_hash=legacy_command_id_hash,
+            verified["expectedHead"] == latest_version,
+            "formal smoke must run on the current migration head",
         )
 
         store = PostgresStore(dsn=test_dsn, pool_min_size=1, pool_max_size=3)
@@ -918,6 +950,7 @@ def main() -> None:
         require(accepted.headers.get("cache-control") == "no-store", "formal result must remain no-store")
         require(accepted.json().get("status") == "created", "formal confirmation must create once")
         require(counts(test_dsn, vault_id=vault_id) == (1, 1, 1), "formal command must atomically create root, receipt and link")
+        require(memory_counts(test_dsn, vault_id=vault_id) == (0, 0), "formal batch confirmation must remain receipt-only")
         assert_persisted_authority_evidence(
             test_dsn,
             vault_id=vault_id,
@@ -926,6 +959,67 @@ def main() -> None:
             candidate_id=candidate_id,
         )
         assert_wrong_child_command_link_is_rejected(test_dsn, vault_id=vault_id)
+
+        activation_path = (
+            f"/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/"
+            f"confirmation/candidates/{candidate_id}/memory-activation"
+        )
+        activation_qa_only = client.post(
+            activation_path,
+            headers={**owner_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+            json={"commandId": "formal-confirmation-postgres-smoke-memory-qa-only"},
+        )
+        require(
+            activation_qa_only.status_code == 403,
+            "QA header must not bypass the formal MemoryVersion activation policy",
+        )
+        require(
+            route_code(activation_qa_only) == "release_policy_denied",
+            "formal activation QA bypass denial must stay typed",
+        )
+        require(memory_counts(test_dsn, vault_id=vault_id) == (0, 0), "denied activation must write nothing")
+
+        activation = client.post(
+            activation_path,
+            headers=formal_headers(
+                owner_headers,
+                session_id=session_id,
+                decision_id="formal-confirmation-postgres-smoke-memory-activation",
+            ),
+            json={"commandId": "formal-confirmation-postgres-smoke-memory-activation"},
+        )
+        require(activation.status_code == 201, f"formal MemoryVersion activation failed: {activation.text}")
+        require(
+            activation.headers.get("cache-control") == "no-store",
+            "formal MemoryVersion activation must remain no-store",
+        )
+        activation_body = activation.json()
+        require(activation_body.get("status") == "created", "formal activation must create once")
+        require(
+            activation_body.get("memoryActivation", {}).get("memoryVersionCreated") is True,
+            "formal activation must create a MemoryVersion",
+        )
+        require(
+            "memoryVersionId" not in json.dumps(activation_body, ensure_ascii=False),
+            "formal activation response must not disclose internal MemoryVersion IDs",
+        )
+        require(memory_counts(test_dsn, vault_id=vault_id) == (1, 1), "formal activation must create one Memory and version")
+
+        activation_replay = client.post(
+            activation_path,
+            headers=formal_headers(
+                owner_headers,
+                session_id=session_id,
+                decision_id="formal-confirmation-postgres-smoke-memory-activation-replay",
+            ),
+            json={"commandId": "formal-confirmation-postgres-smoke-memory-activation-replay"},
+        )
+        require(
+            activation_replay.status_code == 200
+            and activation_replay.json().get("status") == "deduplicated",
+            "formal activation replay must deduplicate by its DecisionReceipt",
+        )
+        require(memory_counts(test_dsn, vault_id=vault_id) == (1, 1), "activation replay must not duplicate authority records")
 
         replay = client.post(
             path,
@@ -1004,12 +1098,14 @@ def main() -> None:
 
         print(
             "formal interview confirmation postgres smoke passed "
-            "migration0037=true legacyQaUpgradeCompatible=true "
+            "historicalUpgrade0037=true currentMigrationHeadReady=true "
+            "legacyQaUpgradeCompatible=true "
             "wrongFeatureAuthorityRejected=true qaBypassDenied=true "
             "authorityCapturePersisted=true "
             "receiptLinkPersisted=true receiptLinkTamperDenied=true "
             "replayDeduplicated=true concurrentCommandDeduplicated=true "
-            "batchLinkFailureRolledBack=true accountCaptureDenied=true"
+            "batchLinkFailureRolledBack=true accountCaptureDenied=true "
+            "formalMemoryActivationCreated=true formalMemoryActivationReplayDeduplicated=true"
         )
     finally:
         main_module.store = previous_store

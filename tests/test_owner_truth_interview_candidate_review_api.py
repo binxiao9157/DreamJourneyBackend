@@ -207,6 +207,18 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
     def _confirmation_batch_accept_path(cls, vault_id: str, review_batch_id: str) -> str:
         return f"{cls._confirmation_path(vault_id, review_batch_id)}/batch-accept"
 
+    @classmethod
+    def _confirmation_memory_activation_path(
+        cls,
+        vault_id: str,
+        review_batch_id: str,
+        candidate_id: str,
+    ) -> str:
+        return (
+            f"{cls._confirmation_path(vault_id, review_batch_id)}/candidates/"
+            f"{candidate_id}/memory-activation"
+        )
+
     @staticmethod
     def _confirmation_policy_headers(
         headers: dict[str, str],
@@ -504,6 +516,150 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
             serialized = str(capture.value_minimized_payload())
             self.assertNotIn(owner_session_id, serialized)
             self.assertNotIn(decision_id, serialized)
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
+    def test_formal_confirmation_requires_explicit_memory_activation(self) -> None:
+        owner_id, owner_headers, owner_session_id = self._login_release_policy("13800139416")
+        vault_id = "vault-interview-confirmation-memory-activation"
+        review_batch_id, standard, _ = self._seed_review_batch(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthCandidateReview"
+        }
+        try:
+            accepted = client.post(
+                self._confirmation_batch_accept_path(vault_id, review_batch_id),
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="candidate-confirmation-activation-accept",
+                ),
+                json={
+                    "commandId": "candidate-confirmation-activation-accept-command",
+                    "selections": [
+                        {
+                            "candidateId": standard.candidate_id,
+                            "expectedCandidateVersion": 1,
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(accepted.status_code, 201)
+            self.assertEqual(
+                self.store.owner_truth_candidate_review_repository().snapshot()[
+                    "memoryActivations"
+                ],
+                {},
+            )
+
+            activation_path = self._confirmation_memory_activation_path(
+                vault_id,
+                review_batch_id,
+                standard.candidate_id,
+            )
+            activation = client.post(
+                activation_path,
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="candidate-confirmation-activation-memory",
+                ),
+                json={"commandId": "candidate-confirmation-activation-memory-command"},
+            )
+            self.assertEqual(activation.status_code, 201)
+            self.assertEqual(activation.headers["cache-control"], "no-store")
+            body = activation.json()
+            self.assertEqual(
+                body["schemaVersion"],
+                "owner-truth-interview-candidate-confirmation-memory-activation-response-v1",
+            )
+            self.assertEqual(body["status"], "created")
+            self.assertEqual(body["candidateId"], standard.candidate_id)
+            self.assertTrue(body["memoryActivation"]["memoryVersionCreated"])
+            self.assertNotIn("memoryVersionId", str(body))
+            self.assertNotIn("receiptId", str(body))
+            self.assertEqual(
+                len(
+                    self.store.owner_truth_candidate_review_repository().snapshot()[
+                        "memoryActivations"
+                    ]
+                ),
+                1,
+            )
+
+            replay = client.post(
+                activation_path,
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="candidate-confirmation-activation-memory-replay",
+                ),
+                json={"commandId": "candidate-confirmation-activation-memory-command-replay"},
+            )
+            self.assertEqual(replay.status_code, 200)
+            self.assertEqual(replay.json()["status"], "deduplicated")
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
+    def test_formal_memory_activation_rejects_qa_only_batch_receipt(self) -> None:
+        owner_id, qa_headers = self._login("13800139417")
+        vault_id = "vault-interview-confirmation-qa-receipt"
+        review_batch_id, standard, _ = self._seed_review_batch(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        qa_accept = client.post(
+            f"{self._read_path(vault_id, review_batch_id)}/batch-accept",
+            headers=qa_headers,
+            json={
+                "commandId": "candidate-qa-only-accept-command",
+                "selections": [
+                    {
+                        "candidateId": standard.candidate_id,
+                        "expectedCandidateVersion": 1,
+                    }
+                ],
+                "reasonCode": "ownerReviewed",
+            },
+        )
+        self.assertEqual(qa_accept.status_code, 201)
+
+        _, owner_headers, owner_session_id = self._login_release_policy("13800139417")
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthCandidateReview"
+        }
+        try:
+            denied = client.post(
+                self._confirmation_memory_activation_path(
+                    vault_id,
+                    review_batch_id,
+                    standard.candidate_id,
+                ),
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="candidate-qa-only-activation-attempt",
+                ),
+                json={"commandId": "candidate-qa-only-activation-command"},
+            )
+            self.assertEqual(denied.status_code, 403)
+            self.assertEqual(
+                denied.json()["detail"]["code"],
+                "ownerTruthInterviewCandidateReviewDenied",
+            )
+            self.assertEqual(
+                self.store.owner_truth_candidate_review_repository().snapshot()[
+                    "memoryActivations"
+                ],
+                {},
+            )
         finally:
             policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 

@@ -392,6 +392,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/confirmation/candidates/{candidate_id}/memory-activation",
+                session,
+                "ownerTruthInterviewCandidateConfirmationMemoryActivation",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review/batch-accept",
                 session,
                 "ownerTruthInterviewCandidateBatchDecision",

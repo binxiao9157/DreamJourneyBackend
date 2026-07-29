@@ -145,6 +145,10 @@ from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewS
 from app.services.owner_truth_interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchDecisionService,
 )
+from app.services.owner_truth_interview_candidate_memory_activation import (
+    OwnerTruthInterviewCandidateMemoryActivationCommand,
+    OwnerTruthInterviewCandidateMemoryActivationService,
+)
 from app.services.owner_truth_interview_candidate_review import (
     OwnerTruthInterviewCandidateReviewReadService,
 )
@@ -1366,6 +1370,25 @@ def _owner_truth_interview_candidate_confirmation_write_context(
     )
 
 
+def _owner_truth_interview_candidate_confirmation_activation_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the separate formal MemoryVersion activation command."""
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=(
+            f"{request.method.upper()} /v2/vaults/*/interview-review-batches/*/"
+            "confirmation/candidates/*/memory-activation"
+        ),
+        user_session_required_code="ownerTruthInterviewCandidateConfirmationUserSessionRequired",
+    )
+
+
 def _owner_truth_memory_projection_context(
     request: Request,
     *,
@@ -2117,6 +2140,25 @@ def _owner_truth_interview_candidate_batch_selections(
     return tuple(selections)
 
 
+def _owner_truth_interview_candidate_confirmation_activation_command(
+    *,
+    payload: Dict[str, Any],
+    review_batch_id: str,
+    candidate_id: str,
+) -> OwnerTruthInterviewCandidateMemoryActivationCommand:
+    """Decode only the explicit activation id; Candidate value stays server-side."""
+
+    if set(payload) != {"commandId"} or not isinstance(payload.get("commandId"), str):
+        raise OwnerTruthCandidateReviewError(
+            "formal interview MemoryVersion activation requires only commandId"
+        )
+    return OwnerTruthInterviewCandidateMemoryActivationCommand(
+        command_id=payload["commandId"],
+        review_batch_id=review_batch_id,
+        candidate_id=candidate_id,
+    )
+
+
 def _owner_truth_candidate_inbox_item_response(item: Any) -> Dict[str, Any]:
     return {
         "candidateId": item.candidate_id,
@@ -2558,6 +2600,27 @@ def _owner_truth_interview_candidate_confirmation_batch_decision_response(
             "status": "notApplicable",
             "memoryVersionCreated": False,
         },
+    }
+
+
+def _owner_truth_interview_candidate_confirmation_memory_activation_response(
+    result: Any,
+) -> Dict[str, Any]:
+    """Return no candidate value, receipt ID, or internal projection target."""
+
+    activation = result.memory_activation
+    return {
+        "schemaVersion": (
+            "owner-truth-interview-candidate-confirmation-memory-activation-response-v1"
+        ),
+        "status": result.outcome,
+        "reviewBatchId": result.review_batch_id,
+        "candidateId": result.candidate_id,
+        "memoryActivation": {
+            "status": activation.outcome,
+            "memoryVersionCreated": activation.memory_version_id is not None,
+        },
+        "projectionRebuildRequested": result.projection_effect is not None,
     }
 
 
@@ -4819,6 +4882,50 @@ def accept_owner_truth_interview_candidate_confirmation_batch(
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
         content=_owner_truth_interview_candidate_confirmation_batch_decision_response(result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/"
+    "confirmation/candidates/{candidate_id}/memory-activation",
+    include_in_schema=False,
+)
+def activate_owner_truth_interview_candidate_confirmation_memory(
+    request: Request,
+    vault_id: str,
+    review_batch_id: str,
+    candidate_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Default-off explicit activation after formal batch confirmation.
+
+    Batch confirmation remains receipt-only. This later command can activate
+    only an accepted/corrected receipt linked to the exact formal review batch;
+    QA-only receipt links and arbitrary Candidate IDs are rejected.
+    """
+
+    try:
+        context = _owner_truth_interview_candidate_confirmation_activation_context(
+            request,
+            vault_id=vault_id,
+        )
+        command = _owner_truth_interview_candidate_confirmation_activation_command(
+            payload=payload,
+            review_batch_id=review_batch_id,
+            candidate_id=candidate_id,
+        )
+        result = OwnerTruthInterviewCandidateMemoryActivationService(store).activate(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_candidate_confirmation_memory_activation_response(
+            result
+        ),
         headers={"Cache-Control": "no-store"},
     )
 

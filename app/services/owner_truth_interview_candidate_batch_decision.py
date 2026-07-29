@@ -17,7 +17,7 @@ from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateReviewAccessDenied,
     OwnerTruthCandidateVersionConflict,
 )
-from app.domain.owner_truth.contracts import OwnerTruthContractError
+from app.domain.owner_truth.contracts import CandidateDecision, OwnerTruthContractError
 from app.domain.owner_truth.interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchAcceptCommand,
     OwnerTruthInterviewCandidateBatchDecisionConflict,
@@ -60,6 +60,22 @@ class OwnerTruthInterviewCandidateBatchDecisionReceiptLink:
     receipt_id: str
     candidate_id: str
     candidate_command_id_hash: str
+
+
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateFormalActivationAdmission:
+    """A value-minimized proof that one receipt came from formal confirmation.
+
+    Batch confirmation intentionally stops at a DecisionReceipt.  The later
+    MemoryVersion activation command therefore needs to prove it is following
+    that *same* formally-authorized batch decision, not a QA-only review or an
+    unrelated terminal Candidate receipt.
+    """
+
+    review_batch_id: str
+    candidate_id: str
+    receipt_id: str
+    authority_epoch: int
 
 
 @dataclass(frozen=True)
@@ -244,6 +260,55 @@ class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
                 f"{vault_id}:{receipt_id}": link
                 for (vault_id, receipt_id), link in self._receipt_links.items()
             }
+
+    def formal_activation_admission(
+        self,
+        *,
+        review_batch_id: str,
+        candidate_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewCandidateFormalActivationAdmission:
+        """Return the formal root receipt for a later explicit activation."""
+
+        with self._lock:
+            matching_link = next(
+                (
+                    link
+                    for link in self._receipt_links.values()
+                    if link.vault_id == context.vault_id
+                    and link.candidate_id == candidate_id
+                ),
+                None,
+            )
+            if matching_link is None:
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "Candidate has no formal interview confirmation receipt"
+                )
+            record = next(
+                (
+                    item
+                    for item in self._records.values()
+                    if item.batch_decision_id == matching_link.batch_decision_id
+                ),
+                None,
+            )
+            if record is None:
+                raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+                    "interview confirmation receipt is missing its root decision"
+                )
+            _assert_formal_activation_authority(
+                actual_review_batch_id=record.review_batch_id,
+                actual_owner_subject_id=record.owner_subject_id,
+                authorization_capture=record.authorization_capture,
+                review_batch_id=review_batch_id,
+                context=context,
+            )
+            return OwnerTruthInterviewCandidateFormalActivationAdmission(
+                review_batch_id=record.review_batch_id,
+                candidate_id=matching_link.candidate_id,
+                receipt_id=matching_link.receipt_id,
+                authority_epoch=record.authority_epoch,
+            )
 
 
 class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
@@ -446,6 +511,83 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
         )
         return existing
 
+    def formal_activation_admission(
+        self,
+        *,
+        review_batch_id: str,
+        candidate_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewCandidateFormalActivationAdmission:
+        """Lock and verify one formal batch receipt before Memory activation.
+
+        The foreign-key and trigger chain established by migrations 0033-0037
+        already binds the receipt to its admitted conversation Source.  This
+        read adds the command boundary: only a non-empty, matching formal
+        release-policy capture for the exact review batch may continue.
+        Candidate/source/vault liveness is then checked by the canonical
+        ``activate_memory_version`` repository method in the same UoW.
+        """
+
+        with self._cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS locked",
+                (
+                    "owner-truth-interview-formal-memory-activation:"
+                    f"{context.vault_id}:{review_batch_id}:{candidate_id}",
+                ),
+            )
+            cursor.execute(
+                """
+                SELECT root.review_batch_id, root.owner_subject_id,
+                       root.authority_epoch, root.authorization_evidence,
+                       link.decision_receipt_id, link.candidate_id,
+                       receipt.decision
+                FROM owner_truth.interview_review_batch_candidate_decisions AS root
+                JOIN owner_truth.interview_review_batch_candidate_decision_receipts AS link
+                  ON link.vault_id = root.vault_id
+                 AND link.batch_decision_id = root.id
+                JOIN owner_truth.decision_receipts AS receipt
+                  ON receipt.vault_id = link.vault_id
+                 AND receipt.id = link.decision_receipt_id
+                WHERE root.vault_id = %s
+                  AND root.review_batch_id = %s
+                  AND link.candidate_id = %s
+                FOR UPDATE OF root, link, receipt
+                """,
+                (context.vault_id, review_batch_id, candidate_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise OwnerTruthCandidateReviewAccessDenied(
+                "Candidate has no formal interview confirmation receipt"
+            )
+        authorization_capture = _authorization_capture_from_database(
+            row.get("authorization_evidence")
+        )
+        _assert_formal_activation_authority(
+            actual_review_batch_id=str(row["review_batch_id"]),
+            actual_owner_subject_id=str(row["owner_subject_id"]),
+            authorization_capture=authorization_capture,
+            review_batch_id=review_batch_id,
+            context=context,
+        )
+        try:
+            decision = CandidateDecision(str(row["decision"]))
+        except (TypeError, ValueError) as exc:
+            raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+                "formal interview confirmation receipt has an unsupported decision"
+            ) from exc
+        if decision not in {CandidateDecision.ACCEPTED, CandidateDecision.CORRECTED}:
+            raise OwnerTruthInterviewCandidateBatchDecisionConflict(
+                "only accepted or corrected formal Candidates can activate MemoryVersion"
+            )
+        return OwnerTruthInterviewCandidateFormalActivationAdmission(
+            review_batch_id=str(row["review_batch_id"]),
+            candidate_id=str(row["candidate_id"]),
+            receipt_id=str(row["decision_receipt_id"]),
+            authority_epoch=int(row["authority_epoch"]),
+        )
+
     @contextmanager
     def _cursor(self):
         try:
@@ -490,6 +632,32 @@ def _authorization_capture_from_database(
         raise OwnerTruthInterviewCandidateBatchDecisionConflict(
             "stored authorization evidence is malformed"
         ) from exc
+
+
+def _assert_formal_activation_authority(
+    *,
+    actual_review_batch_id: str,
+    actual_owner_subject_id: str,
+    authorization_capture: OwnerTruthCommandAuthorizationCapture | None,
+    review_batch_id: str,
+    context: OwnerTruthCommandContext,
+) -> None:
+    """Reject QA-only or cross-batch receipts before MemoryVersion activation."""
+
+    if (
+        actual_review_batch_id != review_batch_id
+        or actual_owner_subject_id != context.owner_subject_id
+    ):
+        raise OwnerTruthCandidateReviewAccessDenied(
+            "formal interview confirmation receipt is unavailable to this Owner"
+        )
+    if (
+        authorization_capture is None
+        or authorization_capture.feature != FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE
+    ):
+        raise OwnerTruthCandidateReviewAccessDenied(
+            "MemoryVersion activation requires a formal interview confirmation receipt"
+        )
 
 
 def _receipt_links_for_results(
@@ -755,6 +923,7 @@ __all__ = [
     "OwnerTruthInterviewCandidateBatchAcceptResult",
     "OwnerTruthInterviewCandidateBatchDecisionLedgerRecord",
     "OwnerTruthInterviewCandidateBatchDecisionReceiptLink",
+    "OwnerTruthInterviewCandidateFormalActivationAdmission",
     "OwnerTruthInterviewCandidateBatchDecisionService",
     "OwnerTruthInterviewCandidateDecisionLedgerCommand",
     "OwnerTruthInterviewCandidateBatchDecisionStore",
