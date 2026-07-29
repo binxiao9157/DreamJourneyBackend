@@ -130,6 +130,7 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-query-operations-contract-
 
 echo "== Business completion/message/notification G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-notification-contract-gate.sh
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-projection-contract-gate.sh
 
 echo "== Async-effect dead-letter G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-async-effect-dead-letter-contract-gate.sh
@@ -323,6 +324,13 @@ test -f scripts/run-backend-provider-query-operations-postgres-smoke.sh
 test -f app/async_effects/message_notification_effects.py
 test -f tests/test_business_message_notification_effects.py
 test -f scripts/run-backend-business-message-notification-contract-gate.sh
+test -f db/migrations/0059_async_effect_business_message_projection_shadow.sql
+test -f db/migrations/0059_async_effect_business_message_projection_shadow.json
+test -f app/async_effects/business_message_projection_repository.py
+test -f tests/test_business_message_projection_repository.py
+test -f tests/test_business_message_projection_migration_contract.py
+test -f scripts/run-backend-business-message-projection-contract-gate.sh
+test -f scripts/backend-business-message-projection-postgres-smoke.py
 test -f app/async_effects/dead_letter_effects.py
 test -f tests/test_async_effect_dead_letter_contract.py
 test -f scripts/run-backend-async-effect-dead-letter-contract-gate.sh

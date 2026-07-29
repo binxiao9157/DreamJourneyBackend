@@ -1,0 +1,13 @@
+{
+  "version": "0059",
+  "name": "async_effect_business_message_projection_shadow",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "asyncEffectBusinessMessageProjectionShadow",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "asyncEffectBusinessMessageProjectionV1": false,
+    "asyncEffectBusinessMessagePublicReadV1": false,
+    "asyncEffectBusinessMessageDispatchV1": false
+  }
+}

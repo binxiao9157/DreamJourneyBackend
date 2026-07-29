@@ -98,6 +98,9 @@ from app.async_effects.dead_letter_replay_repository import (
 from app.async_effects.worker_loss_observation_repository import (
     PostgresAsyncEffectWorkerLossObservationRepository,
 )
+from app.async_effects.business_message_projection_repository import (
+    PostgresBusinessMessageProjectionRepository,
+)
 from app.async_effects.target_admission import (
     PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository,
     PostgresOwnerTruthSourceTargetAdmissionRepository,
@@ -329,6 +332,21 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("async effect worker-loss evidence requires an active unit of work")
         return PostgresAsyncEffectWorkerLossObservationRepository(active.connection)
+
+    def async_effect_business_message_projection_repository(
+        self,
+    ) -> PostgresBusinessMessageProjectionRepository:
+        """Return inert internal message projection persistence in the active UoW.
+
+        This writes only an append-only, metadata-only shadow. It does not
+        replace mailbox_letters, make a public message visible, dispatch a
+        notification, or authorize an inbox relationship.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("business message projection persistence requires an active unit of work")
+        return PostgresBusinessMessageProjectionRepository(active.connection)
 
     def owner_truth_source_target_admission_repository(
         self,
