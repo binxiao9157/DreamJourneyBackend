@@ -35,8 +35,13 @@ from app.async_effects.owner_truth_candidate_extraction_worker import (
 )
 from app.async_effects.scheduler_repository import AsyncEffectSchedulerLeaseLost
 from app.core.config import Settings, settings
-from app.db.migrator import PostgresMigrator, default_migrations_dir
+from app.db.migrator import PostgresMigrator, default_migrations_dir, load_migrations
+from app.domain.owner_truth.candidate_decisions import (
+    CandidateReviewAction,
+    OwnerTruthCandidateReviewCommand,
+)
 from app.domain.owner_truth.source_commands import CreateTextSourceCommand, OwnerTruthCommandContext
+from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.owner_truth_source import (
     OwnerTruthSourceAsyncEffectCommandService,
     build_source_created_effect_intent,
@@ -135,6 +140,16 @@ def count_candidate_rows(dsn: str, *, vault_id: str, extraction_id: str) -> int:
             return int(cursor.fetchone()[0])
 
 
+def count_memory_version_rows(dsn: str, *, vault_id: str) -> int:
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM owner_truth.memory_versions WHERE vault_id = %s",
+                (vault_id,),
+            )
+            return int(cursor.fetchone()[0])
+
+
 def count_effect_resource_rows(dsn: str, *, vault_id: str, resource_id: str) -> int:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
@@ -186,6 +201,8 @@ def main() -> None:
     admin_dsn = dsn_for_database(base_dsn, "postgres")
     database_name = f"dj_async_effects_smoke_{uuid.uuid4().hex[:12]}"
     test_dsn = dsn_for_database(base_dsn, database_name)
+    migrations_dir = default_migrations_dir()
+    expected_migration_head = load_migrations(migrations_dir)[-1].version
 
     intent = AsyncEffectIntent(
         operation_type="timeLetter.delivery",
@@ -208,7 +225,7 @@ def main() -> None:
         database_created = True
         migrator = PostgresMigrator(
             dsn=test_dsn,
-            migrations_dir=default_migrations_dir(),
+            migrations_dir=migrations_dir,
             build_id="async-effects-g2",
             lock_timeout_ms=1000,
             statement_timeout_ms=15000,
@@ -216,7 +233,10 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(applied["appliedVersions"][-1] == "0013", "async effect migration must apply")
+        require(
+            applied["appliedVersions"][-1] == expected_migration_head,
+            "all current migrations must apply before the async-effect smoke",
+        )
 
         store = PostgresStore(dsn=test_dsn, pool_min_size=1, pool_max_size=4)
         store.open_pool(wait=True)
@@ -334,6 +354,60 @@ def main() -> None:
             candidate_replayed["status"] == "idle"
             and candidate_replayed["reason"] == "noEligibleCandidateExtractionJob",
             "terminal Source worker job must not replay without a new effect",
+        )
+        require(
+            count_memory_version_rows(test_dsn, vault_id=source_context.vault_id) == 0,
+            "Source worker must not activate a MemoryVersion before explicit Owner review",
+        )
+        candidate_review_service = OwnerTruthCandidateReviewService(store)
+        pending_candidates = candidate_review_service.list_pending(context=source_context)
+        require(
+            len(pending_candidates) == 1
+            and pending_candidates[0].source_id == source_command.source_id
+            and pending_candidates[0].review_mode == "single",
+            "Source worker Candidate must enter the existing Owner review inbox unchanged",
+        )
+        worker_candidate = pending_candidates[0]
+        worker_candidate_decision = OwnerTruthCandidateReviewCommand(
+            command_id="source-worker-candidate-review-smoke",
+            candidate_id=worker_candidate.candidate_id,
+            expected_candidate_version=worker_candidate.candidate_row_version,
+            action=CandidateReviewAction.ACCEPT,
+            corrected_value=None,
+            corrected_value_schema_version=worker_candidate.content_schema_version,
+            reason_code="ownerReviewed",
+        )
+        worker_candidate_activation = candidate_review_service.decide_and_activate(
+            command=worker_candidate_decision,
+            context=source_context,
+        )
+        require(
+            worker_candidate_activation.review.outcome == "created"
+            and worker_candidate_activation.review.candidate_id == worker_candidate.candidate_id
+            and worker_candidate_activation.review.decision.value == "accepted",
+            "explicit Owner review must create one immutable DecisionReceipt for the worker Candidate",
+        )
+        require(
+            worker_candidate_activation.memory_activation.outcome == "created"
+            and worker_candidate_activation.memory_activation.memory_version == 1
+            and worker_candidate_activation.memory_activation.memory_id is not None
+            and worker_candidate_activation.memory_activation.memory_version_id is not None,
+            "explicit Owner review must activate exactly one initial MemoryVersion",
+        )
+        require(
+            count_memory_version_rows(test_dsn, vault_id=source_context.vault_id) == 1,
+            "Owner review must persist exactly one MemoryVersion for the worker Candidate",
+        )
+        worker_candidate_activation_replayed = candidate_review_service.decide_and_activate(
+            command=worker_candidate_decision,
+            context=source_context,
+        )
+        require(
+            worker_candidate_activation_replayed.review.outcome == "deduplicated"
+            and worker_candidate_activation_replayed.memory_activation.outcome == "deduplicated"
+            and worker_candidate_activation_replayed.memory_activation.memory_version_id
+            == worker_candidate_activation.memory_activation.memory_version_id,
+            "replaying the Owner review must not create a second receipt or MemoryVersion",
         )
         with store.request_unit_of_work(
             correlation_id="async-effect-source-target-admission",

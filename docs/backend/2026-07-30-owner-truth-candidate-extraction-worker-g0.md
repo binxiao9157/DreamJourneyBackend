@@ -56,8 +56,14 @@ deployment, or production flag change is part of G0.
 inside its randomly named disposable database. It verifies the typed effect
 job, current Source read, restricted pending Candidate, typed consumer receipt,
 terminal lease attempt, private worker output, and a subsequent idle rerun.
-The script applies migrations to that temporary database and drops it only if
-creation succeeded.
+It also verifies that the existing Owner review lane can read that pending
+Candidate, create one immutable DecisionReceipt, activate exactly one initial
+MemoryVersion, and deduplicate a replayed Owner decision. The worker itself
+never promotes a Candidate.
+
+The script derives the required migration head from the current migration
+manifest instead of hard-coding an old schema version. It applies migrations to
+the temporary database and drops it only if creation succeeded.
 
 ```bash
 PYTHONPATH=. .venv/bin/python scripts/backend-async-effects-postgres-smoke.py
