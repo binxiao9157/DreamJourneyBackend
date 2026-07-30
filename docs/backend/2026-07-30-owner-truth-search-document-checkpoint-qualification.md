@@ -47,3 +47,7 @@ python scripts/backend-owner-truth-postgres-smoke.py
 The smoke must return a completed MemoryProjection worker outcome and a
 rebuilt/unchanged private SearchDocument projection using only a disposable
 database.
+
+The smoke constructs its UoW-bound conversation repository inside each start
+and append transaction. This keeps its later InterviewTurnContext assertion on
+the same Postgres execution boundary as the code it verifies.

@@ -1027,14 +1027,13 @@ def main() -> None:
             interview_session_id = str(uuid.uuid4())
             interview_message_id = str(uuid.uuid4())
             raw_interview_message = "私有访谈原文不能出现在回合上下文 QA 摘要中。"
-            conversation_service = OwnerTruthConversationService(
-                store.owner_truth_conversation_repository()
-            )
             with store.request_unit_of_work(
                 correlation_id="owner-truth-interview-turn-context-start",
                 command_id="ownerTruthInterviewTurnContextStart",
             ):
-                interview_started = conversation_service.start_session(
+                interview_started = OwnerTruthConversationService(
+                    store.owner_truth_conversation_repository()
+                ).start_session(
                     command=StartInterviewSessionCommand(
                         command_id="owner-truth-interview-turn-context-start",
                         thread_id=interview_thread_id,
@@ -1048,7 +1047,9 @@ def main() -> None:
                 correlation_id="owner-truth-interview-turn-context-append",
                 command_id="ownerTruthInterviewTurnContextAppend",
             ):
-                interview_appended = conversation_service.append_message(
+                interview_appended = OwnerTruthConversationService(
+                    store.owner_truth_conversation_repository()
+                ).append_message(
                     command=AppendInterviewMessageCommand(
                         command_id="owner-truth-interview-turn-context-append",
                         thread_id=interview_thread_id,

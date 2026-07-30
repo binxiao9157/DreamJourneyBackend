@@ -244,6 +244,7 @@ test -f db/migrations/0012_owner_truth_source_commands.sql
 test -f db/migrations/0012_owner_truth_source_commands.json
 test -f scripts/backend-owner-truth-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-postgres-smoke.sh
+test -f tests/test_owner_truth_postgres_smoke_contract.py
 test -f db/migrations/0013_async_effects_kernel.sql
 test -f db/migrations/0013_async_effects_kernel.json
 test -f scripts/backend-async-effects-postgres-smoke.py
