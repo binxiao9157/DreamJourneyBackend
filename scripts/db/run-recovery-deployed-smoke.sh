@@ -81,9 +81,16 @@ replay_args=(
   --output "$RECOVERY_OUTPUT_DIR/replay-evidence.json"
 )
 if [[ -n "${RECOVERY_REPLAY_BUNDLE_PATH:-}" ]]; then
+  : "${RECOVERY_REPLAY_ATTESTATION_KEY_FILE:?RECOVERY_REPLAY_ATTESTATION_KEY_FILE is required when a replay bundle is supplied}"
   replay_args+=(--bundle "$RECOVERY_REPLAY_BUNDLE_PATH")
+  replay_args+=(--attestation-key-file "$RECOVERY_REPLAY_ATTESTATION_KEY_FILE")
+  replay_args+=(--attestation-key-id "${RECOVERY_REPLAY_ATTESTATION_KEY_ID:-recovery-replay-v1}")
 fi
 if [[ -n "${RECOVERY_REPLAY_APPLICATION_EVIDENCE_PATH:-}" ]]; then
+  if [[ -z "${RECOVERY_REPLAY_BUNDLE_PATH:-}" ]]; then
+    echo "RECOVERY_REPLAY_APPLICATION_EVIDENCE_PATH requires RECOVERY_REPLAY_BUNDLE_PATH" >&2
+    exit 64
+  fi
   replay_args+=(--application-evidence "$RECOVERY_REPLAY_APPLICATION_EVIDENCE_PATH")
 fi
 "$PYTHON_BIN" scripts/db/replay_recovery.py "${replay_args[@]}" >/dev/null

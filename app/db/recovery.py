@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -17,6 +18,10 @@ SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MACHINE_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$")
 RECEIPT_KINDS = ("command", "outbox", "deletion", "provider")
 TERMINAL_RECEIPT_STATUSES = ("applied", "verified", "terminal")
+REPLAY_BUNDLE_SCHEMA_VERSION = 2
+REPLAY_BUNDLE_ATTESTATION_SCHEMA_VERSION = 1
+REPLAY_BUNDLE_ATTESTATION_ALGORITHM = "hmac-sha256"
+MIN_REPLAY_ATTESTATION_KEY_BYTES = 32
 LEGACY_INTEGRITY_SCHEMA_VERSION = 1
 DIRECT_USER_ID_AUDIT_SCHEMA_VERSION = 2
 INTEGRITY_SCHEMA_VERSION = 3
@@ -114,6 +119,103 @@ def _require_digest(payload: Mapping[str, Any], *, field: str, code: str) -> str
     return supplied
 
 
+def _replay_attestation_key(value: bytes) -> bytes:
+    if not isinstance(value, (bytes, bytearray)):
+        raise RecoveryContractError("invalidReplayAttestationKey")
+    key = bytes(value)
+    if len(key) < MIN_REPLAY_ATTESTATION_KEY_BYTES:
+        raise RecoveryContractError("invalidReplayAttestationKey")
+    return key
+
+
+def _replay_bundle_payload(bundle: Mapping[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in bundle.items() if key != "attestation"}
+
+
+def _replay_bundle_attestation_message(*, key_id: str, bundle_digest: str) -> bytes:
+    return (
+        f"{REPLAY_BUNDLE_ATTESTATION_ALGORITHM}:{key_id}:{bundle_digest}"
+    ).encode("ascii")
+
+
+def sign_replay_bundle(
+    bundle: Mapping[str, Any],
+    *,
+    attestation_key: bytes,
+    attestation_key_id: str,
+) -> Dict[str, Any]:
+    """Attach the trusted-producer attestation required for a GO replay plan."""
+
+    payload = _replay_bundle_payload(bundle)
+    if int(payload.get("schemaVersion") or 0) != REPLAY_BUNDLE_SCHEMA_VERSION:
+        raise RecoveryContractError("replayAttestationSchemaUnsupported")
+    key = _replay_attestation_key(attestation_key)
+    key_id = _machine_value(attestation_key_id, code="invalidReplayAttestationKeyId")
+    bundle_digest = _canonical_hash(payload)
+    signature = hmac.new(
+        key,
+        _replay_bundle_attestation_message(
+            key_id=key_id,
+            bundle_digest=bundle_digest,
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+    payload["attestation"] = {
+        "schemaVersion": REPLAY_BUNDLE_ATTESTATION_SCHEMA_VERSION,
+        "algorithm": REPLAY_BUNDLE_ATTESTATION_ALGORITHM,
+        "keyId": key_id,
+        "bundleDigest": bundle_digest,
+        "signature": signature,
+    }
+    return payload
+
+
+def verify_replay_bundle_attestation(
+    bundle: Mapping[str, Any],
+    *,
+    attestation_key: bytes,
+    attestation_key_id: str,
+) -> str:
+    """Fail closed unless a replay bundle came from the configured trusted producer."""
+
+    if int(bundle.get("schemaVersion") or 0) != REPLAY_BUNDLE_SCHEMA_VERSION:
+        raise RecoveryContractError("replayAttestationSchemaUnsupported")
+    raw_attestation = bundle.get("attestation")
+    if not isinstance(raw_attestation, Mapping):
+        raise RecoveryContractError("replayBundleAttestationRequired")
+    expected_fields = {
+        "schemaVersion",
+        "algorithm",
+        "keyId",
+        "bundleDigest",
+        "signature",
+    }
+    if set(raw_attestation) != expected_fields:
+        raise RecoveryContractError("invalidReplayAttestation")
+    if int(raw_attestation.get("schemaVersion") or 0) != REPLAY_BUNDLE_ATTESTATION_SCHEMA_VERSION:
+        raise RecoveryContractError("replayAttestationSchemaUnsupported")
+    if raw_attestation.get("algorithm") != REPLAY_BUNDLE_ATTESTATION_ALGORITHM:
+        raise RecoveryContractError("invalidReplayAttestationAlgorithm")
+    key_id = _machine_value(attestation_key_id, code="invalidReplayAttestationKeyId")
+    if raw_attestation.get("keyId") != key_id:
+        raise RecoveryContractError("replayAttestationKeyMismatch")
+    bundle_digest = _canonical_hash(_replay_bundle_payload(bundle))
+    if raw_attestation.get("bundleDigest") != bundle_digest:
+        raise RecoveryContractError("invalidReplayAttestationDigest")
+    signature = _sha256(raw_attestation.get("signature"), code="invalidReplayAttestation")
+    expected_signature = hmac.new(
+        _replay_attestation_key(attestation_key),
+        _replay_bundle_attestation_message(
+            key_id=key_id,
+            bundle_digest=bundle_digest,
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        raise RecoveryContractError("invalidReplayAttestation")
+    return key_id
+
+
 def validate_recovery_target(target_database: str, production_database: str) -> str:
     target = str(target_database or "").strip().lower()
     production = str(production_database or "").strip().lower()
@@ -128,6 +230,8 @@ def build_replay_plan(
     *,
     backup_id: str,
     cutoff_lsn: str,
+    attestation_key: bytes | None = None,
+    attestation_key_id: str | None = None,
 ) -> Dict[str, Any]:
     expected_backup_id = _backup_id(backup_id)
     expected_cutoff = _known_lsn(
@@ -145,6 +249,8 @@ def build_replay_plan(
             "rangeEndInclusive": None,
             "sourceEvidenceId": None,
             "sourceEvidencePresent": False,
+            "sourceEvidenceAttestationStatus": "notPresent",
+            "sourceEvidenceAttestationKeyId": None,
             "coverage": {kind: False for kind in RECEIPT_KINDS},
             "receiptCounts": {kind: 0 for kind in RECEIPT_KINDS},
             "uniqueReceiptCount": 0,
@@ -156,7 +262,7 @@ def build_replay_plan(
         payload["replayDigest"] = _canonical_hash(payload)
         return payload
 
-    if int(bundle.get("schemaVersion") or 0) != 1:
+    if int(bundle.get("schemaVersion") or 0) not in {1, REPLAY_BUNDLE_SCHEMA_VERSION}:
         raise RecoveryContractError("replaySchemaUnsupported")
     if _backup_id(bundle.get("backupId")) != expected_backup_id:
         raise RecoveryContractError("replayBackupMismatch")
@@ -247,6 +353,20 @@ def build_replay_plan(
         {"receiptId": receipt_id, **unique[receipt_id]}
         for receipt_id in sorted(unique)
     ]
+    attestation_status = "notRequiredIncomplete"
+    attestation_key_id_output = None
+    if not blockers:
+        if attestation_key is None:
+            raise RecoveryContractError("replayBundleAttestationRequired")
+        if attestation_key_id is None:
+            raise RecoveryContractError("invalidReplayAttestationKeyId")
+        attestation_key_id_output = verify_replay_bundle_attestation(
+            bundle,
+            attestation_key=attestation_key,
+            attestation_key_id=attestation_key_id,
+        )
+        attestation_status = "verified"
+
     payload = {
         "schemaVersion": 1,
         "backupId": expected_backup_id,
@@ -256,6 +376,8 @@ def build_replay_plan(
         "rangeEndInclusive": range_end,
         "sourceEvidenceId": source_evidence_id,
         "sourceEvidencePresent": True,
+        "sourceEvidenceAttestationStatus": attestation_status,
+        "sourceEvidenceAttestationKeyId": attestation_key_id_output,
         "coverage": coverage,
         "receiptCounts": counts,
         "uniqueReceiptCount": len(unique),
@@ -278,6 +400,8 @@ def finalize_replay_plan(
     _require_digest(plan, field="replayDigest", code="invalidReplayDigest")
     if plan.get("status") != "ready" or plan.get("blockers"):
         raise RecoveryContractError("replayPlanNotReady")
+    if plan.get("sourceEvidenceAttestationStatus") != "verified":
+        raise RecoveryContractError("replayBundleAttestationRequired")
     if not isinstance(application_evidence, Mapping):
         raise RecoveryContractError("invalidReplayApplicationEvidence")
     if int(application_evidence.get("schemaVersion") or 0) != 1:

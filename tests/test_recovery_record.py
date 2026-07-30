@@ -10,6 +10,7 @@ from app.db.recovery import (
     build_replay_plan,
     build_restore_evidence,
     finalize_replay_plan,
+    sign_replay_bundle,
     validate_recovery_target,
     verify_integrity_metrics,
 )
@@ -19,6 +20,8 @@ class RecoveryRecordTests(unittest.TestCase):
     def setUp(self):
         self.backup_id = "dj-20260717T010203Z-a1b2c3d4"
         self.cutoff_lsn = "0/16B6A40"
+        self.attestation_key = b"recovery-record-unit-attestation-key-v1"
+        self.attestation_key_id = "recovery-record-unit-v1"
         self.metrics = {
             "schemaVersion": 3,
             "schemaHead": "0001",
@@ -65,7 +68,7 @@ class RecoveryRecordTests(unittest.TestCase):
 
     def complete_bundle(self):
         return {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "backupId": self.backup_id,
             "cutoffLSN": self.cutoff_lsn,
             "rangeEndLSN": "0/16B6B00",
@@ -87,6 +90,22 @@ class RecoveryRecordTests(unittest.TestCase):
                 }
             ],
         }
+
+    def signed_bundle(self, bundle=None):
+        return sign_replay_bundle(
+            bundle or self.complete_bundle(),
+            attestation_key=self.attestation_key,
+            attestation_key_id=self.attestation_key_id,
+        )
+
+    def ready_replay_plan(self, bundle=None):
+        return build_replay_plan(
+            self.signed_bundle(bundle),
+            backup_id=self.backup_id,
+            cutoff_lsn=self.cutoff_lsn,
+            attestation_key=self.attestation_key,
+            attestation_key_id=self.attestation_key_id,
+        )
 
     def test_target_must_be_isolated_and_cannot_equal_production(self):
         self.assertEqual(
@@ -256,14 +275,15 @@ class RecoveryRecordTests(unittest.TestCase):
     def test_replay_is_idempotent_but_conflicting_duplicates_fail_closed(self):
         bundle = self.complete_bundle()
         bundle["receipts"].append(dict(bundle["receipts"][0]))
-        plan = build_replay_plan(
-            bundle,
-            backup_id=self.backup_id,
-            cutoff_lsn=self.cutoff_lsn,
-        )
+        plan = self.ready_replay_plan(bundle)
         self.assertEqual(plan["status"], "ready")
         self.assertEqual(plan["uniqueReceiptCount"], 1)
         self.assertEqual(plan["duplicateReceiptCount"], 1)
+        self.assertEqual(plan["sourceEvidenceAttestationStatus"], "verified")
+        self.assertEqual(
+            plan["sourceEvidenceAttestationKeyId"],
+            self.attestation_key_id,
+        )
 
         conflicting = self.complete_bundle()
         duplicate = dict(conflicting["receipts"][0])
@@ -274,6 +294,54 @@ class RecoveryRecordTests(unittest.TestCase):
                 conflicting,
                 backup_id=self.backup_id,
                 cutoff_lsn=self.cutoff_lsn,
+            )
+
+    def test_ready_replay_requires_attested_trusted_producer_bundle(self):
+        unsigned = self.complete_bundle()
+        with self.assertRaisesRegex(RecoveryContractError, "replayBundleAttestationRequired"):
+            build_replay_plan(
+                unsigned,
+                backup_id=self.backup_id,
+                cutoff_lsn=self.cutoff_lsn,
+            )
+
+        signed = self.signed_bundle()
+        verified = build_replay_plan(
+            signed,
+            backup_id=self.backup_id,
+            cutoff_lsn=self.cutoff_lsn,
+            attestation_key=self.attestation_key,
+            attestation_key_id=self.attestation_key_id,
+        )
+        self.assertEqual(verified["sourceEvidenceAttestationStatus"], "verified")
+
+        tampered = copy.deepcopy(signed)
+        tampered["sourceEvidenceId"] = "d" * 64
+        with self.assertRaisesRegex(RecoveryContractError, "invalidReplayAttestationDigest"):
+            build_replay_plan(
+                tampered,
+                backup_id=self.backup_id,
+                cutoff_lsn=self.cutoff_lsn,
+                attestation_key=self.attestation_key,
+                attestation_key_id=self.attestation_key_id,
+            )
+
+        with self.assertRaisesRegex(RecoveryContractError, "replayAttestationKeyMismatch"):
+            build_replay_plan(
+                signed,
+                backup_id=self.backup_id,
+                cutoff_lsn=self.cutoff_lsn,
+                attestation_key=self.attestation_key,
+                attestation_key_id="different-replay-key-v1",
+            )
+
+        with self.assertRaisesRegex(RecoveryContractError, "invalidReplayAttestation"):
+            build_replay_plan(
+                signed,
+                backup_id=self.backup_id,
+                cutoff_lsn=self.cutoff_lsn,
+                attestation_key=b"different-recovery-record-attestation-key-v1",
+                attestation_key_id=self.attestation_key_id,
             )
 
     def test_missing_coverage_or_unknown_provider_is_no_go(self):
@@ -334,11 +402,7 @@ class RecoveryRecordTests(unittest.TestCase):
 
     def test_record_is_value_free_and_only_goes_with_integrity_and_replay(self):
         integrity = self.verified_integrity()
-        ready = build_replay_plan(
-            self.complete_bundle(),
-            backup_id=self.backup_id,
-            cutoff_lsn=self.cutoff_lsn,
-        )
+        ready = self.ready_replay_plan()
         complete = finalize_replay_plan(
             ready,
             application_evidence=self.application_evidence(ready),
@@ -399,11 +463,7 @@ class RecoveryRecordTests(unittest.TestCase):
             metrics=migrated_metrics,
             expected_schema_head=restored_schema_head,
         )
-        ready = build_replay_plan(
-            self.complete_bundle(),
-            backup_id=self.backup_id,
-            cutoff_lsn=self.cutoff_lsn,
-        )
+        ready = self.ready_replay_plan()
         replay = finalize_replay_plan(
             ready,
             application_evidence=self.application_evidence(ready),
@@ -453,11 +513,7 @@ class RecoveryRecordTests(unittest.TestCase):
             )
 
     def test_fabricated_or_mismatched_evidence_cannot_produce_go(self):
-        ready = build_replay_plan(
-            self.complete_bundle(),
-            backup_id=self.backup_id,
-            cutoff_lsn=self.cutoff_lsn,
-        )
+        ready = self.ready_replay_plan()
         evidence = self.application_evidence(ready)
         evidence["planDigest"] = "0" * 64
         with self.assertRaisesRegex(RecoveryContractError, "replayApplicationPlanMismatch"):

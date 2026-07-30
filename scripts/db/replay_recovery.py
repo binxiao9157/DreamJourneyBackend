@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import stat
 import sys
 from pathlib import Path
 
@@ -25,6 +26,17 @@ def load_optional(path):
     return payload
 
 
+def load_attestation_key(path: Path) -> bytes:
+    if not path.is_file():
+        raise RecoveryContractError("replayAttestationKeyMissing")
+    if stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise RecoveryContractError("replayAttestationKeyPermissionsUnsafe")
+    key = path.read_bytes().strip()
+    if len(key) < 32:
+        raise RecoveryContractError("invalidReplayAttestationKey")
+    return key
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Validate and bind trusted recovery replay evidence. This tool does not synthesize receipts."
@@ -33,18 +45,30 @@ def main():
     parser.add_argument("--cutoff-lsn", required=True)
     parser.add_argument("--bundle", type=Path)
     parser.add_argument("--application-evidence", type=Path)
+    parser.add_argument("--attestation-key-file", type=Path)
+    parser.add_argument("--attestation-key-id", default="recovery-replay-v1")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
     try:
+        attestation_key = (
+            load_attestation_key(args.attestation_key_file)
+            if args.attestation_key_file is not None
+            else None
+        )
         plan = build_replay_plan(
             load_optional(args.bundle),
             backup_id=args.backup_id,
             cutoff_lsn=args.cutoff_lsn,
+            attestation_key=attestation_key,
+            attestation_key_id=args.attestation_key_id,
         )
         application = load_optional(args.application_evidence)
         if application is not None:
-            plan = finalize_replay_plan(plan, application_evidence=application)
+            plan = finalize_replay_plan(
+                plan,
+                application_evidence=application,
+            )
         write_recovery_record_atomic(args.output, plan)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecoveryContractError) as exc:
         code = exc.code if isinstance(exc, RecoveryContractError) else type(exc).__name__

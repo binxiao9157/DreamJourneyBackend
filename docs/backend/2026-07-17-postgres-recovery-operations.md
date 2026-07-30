@@ -171,9 +171,17 @@ sudo -E scripts/db/run-recovery-deployed-smoke.sh
 ```bash
 export RECOVERY_REPLAY_BUNDLE_PATH=/secure/recovery/replay-bundle.json
 export RECOVERY_REPLAY_APPLICATION_EVIDENCE_PATH=/secure/recovery/replay-application.json
+export RECOVERY_REPLAY_ATTESTATION_KEY_FILE=/etc/dreamjourney/recovery-replay-attestation.key
+export RECOVERY_REPLAY_ATTESTATION_KEY_ID=recovery-replay-v1
 ```
 
-这两个文件必须来自服务端 authority/worker，不得手工伪造。
+这两个文件必须来自服务端 authority/worker，不得手工伪造。`replay-bundle.json` 必须是
+schema v2，且包含使用 root-only HMAC key 生成的 attestation；没有有效 attestation 的完整
+bundle 会 fail-closed，不能产出 `GO` replay evidence。attestation key 必须由受控运维流程
+写入服务器，权限为 `0600`，不得提交、打印、写入备份或复用为应用/provider 凭据。
+
+未提供 `RECOVERY_REPLAY_BUNDLE_PATH` 时，脚本仍按当前流程生成 `replayBundleMissing` 的
+`NO_GO` 记录，不要求配置该 key；这正是当前线上演练的预期状态。
 
 ### 4.3 恢复流量
 

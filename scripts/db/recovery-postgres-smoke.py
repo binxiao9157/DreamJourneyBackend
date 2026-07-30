@@ -13,7 +13,12 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.db.backup import build_completed_manifest, write_manifest_atomic
 from app.db.migrator import default_migrations_dir, load_migrations
-from app.db.recovery import build_replay_plan, verify_integrity_metrics, write_recovery_record_atomic
+from app.db.recovery import (
+    build_replay_plan,
+    sign_replay_bundle,
+    verify_integrity_metrics,
+    write_recovery_record_atomic,
+)
 
 
 RESTORE_SCRIPT = ROOT_DIR / "scripts/db/restore_postgres.sh"
@@ -99,6 +104,11 @@ else:
         fake_docker.chmod(0o755)
 
         output_dir = temp / "recovery-output"
+        attestation_key_path = temp / "recovery-replay-attestation.key"
+        attestation_key = b"recovery-postgres-smoke-attestation-key-v1"
+        attestation_key_path.write_bytes(attestation_key)
+        attestation_key_path.chmod(0o600)
+        attestation_key_id = "recovery-replay-smoke-v1"
         target = "dj_recovery_smoke_1234"
         env = dict(os.environ)
         env.update(
@@ -205,7 +215,7 @@ else:
         require(incomplete["status"] == "incomplete", "missing receipt authority must remain incomplete")
 
         bundle = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "backupId": manifest["backupId"],
             "cutoffLSN": manifest["lsn"],
             "rangeEndLSN": "0/16B6B00",
@@ -229,7 +239,71 @@ else:
         }
         bundle_path = output_dir / "replay-bundle.json"
         bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
-        plan = build_replay_plan(bundle, backup_id=manifest["backupId"], cutoff_lsn=manifest["lsn"])
+        unattested_replay_path = output_dir / "replay-unattested.json"
+        unattested = run(
+            [
+                sys.executable,
+                str(REPLAY_SCRIPT),
+                "--backup-id",
+                manifest["backupId"],
+                "--cutoff-lsn",
+                manifest["lsn"],
+                "--bundle",
+                str(bundle_path),
+                "--output",
+                str(unattested_replay_path),
+            ],
+            env=env,
+            expected=1,
+        )
+        require(
+            "replayBundleAttestationRequired" in unattested.stderr,
+            "complete replay bundle without trusted attestation must fail closed",
+        )
+        require(
+            not unattested_replay_path.exists(),
+            "rejected replay bundle must not produce replay evidence",
+        )
+
+        bundle = sign_replay_bundle(
+            bundle,
+            attestation_key=attestation_key,
+            attestation_key_id=attestation_key_id,
+        )
+        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+        attestation_key_path.chmod(0o644)
+        unsafe_key = run(
+            [
+                sys.executable,
+                str(REPLAY_SCRIPT),
+                "--backup-id",
+                manifest["backupId"],
+                "--cutoff-lsn",
+                manifest["lsn"],
+                "--bundle",
+                str(bundle_path),
+                "--attestation-key-file",
+                str(attestation_key_path),
+                "--attestation-key-id",
+                attestation_key_id,
+                "--output",
+                str(output_dir / "replay-unsafe-key.json"),
+            ],
+            env=env,
+            expected=1,
+        )
+        require(
+            "replayAttestationKeyPermissionsUnsafe" in unsafe_key.stderr,
+            "replay attestation key must remain root-only",
+        )
+        attestation_key_path.chmod(0o600)
+        plan = build_replay_plan(
+            bundle,
+            backup_id=manifest["backupId"],
+            cutoff_lsn=manifest["lsn"],
+            attestation_key=attestation_key,
+            attestation_key_id=attestation_key_id,
+        )
         application = {
             "schemaVersion": 1,
             "status": "applied",
@@ -261,6 +335,10 @@ else:
                 str(bundle_path),
                 "--application-evidence",
                 str(application_path),
+                "--attestation-key-file",
+                str(attestation_key_path),
+                "--attestation-key-id",
+                attestation_key_id,
                 "--output",
                 str(complete_replay_path),
             ],
@@ -307,7 +385,10 @@ else:
                     "isolatedRestore": True,
                     "productionTargetRejected": True,
                     "missingReceiptAuthorityNoGo": True,
+                    "unattestedReplayRejected": True,
+                    "unsafeAttestationKeyRejected": True,
                     "receiptReplayBinding": True,
+                    "attestedReplayRequired": True,
                     "integrityBinding": True,
                     "schemaLineageBinding": True,
                     "valueFreeRecoveryRecord": True,
