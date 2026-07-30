@@ -277,6 +277,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthInterviewSessionOutcomeRead",
             ),
             _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/outcome",
+                session,
+                "ownerTruthInterviewOutcomePresentation",
+            ),
+            _rule(
                 "POST",
                 "/v2/vaults/{vault_id}/life-map/read",
                 session,

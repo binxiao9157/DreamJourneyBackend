@@ -108,6 +108,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             "echoGuidedRecommendations",
             "ownerTruthLifeMap",
             "ownerTruthMemorySearch",
+            "ownerTruthInterviewOutcome",
             "familyManagement",
             "timeLetters",
             "voiceCloneShell",
@@ -755,6 +756,14 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
                 {},
             ),
             "echoGuidedRecommendations",
+        )
+        self.assertEqual(
+            gate.feature_for_request(
+                "GET",
+                "/v2/vaults/vault-a/interview-sessions/session-a/outcome",
+                {},
+            ),
+            "ownerTruthInterviewOutcome",
         )
         self.assertEqual(
             gate.route_label_for_request(

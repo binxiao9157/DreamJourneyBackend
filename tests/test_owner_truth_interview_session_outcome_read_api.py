@@ -86,6 +86,40 @@ class OwnerTruthInterviewSessionOutcomeReadAPITests(unittest.TestCase):
             "X-DreamJourney-QA-Owner-Truth": "1",
         }
 
+    @staticmethod
+    def _login_release_policy(phone: str) -> tuple[str, dict[str, str], str]:
+        response = client.post(
+            "/auth/login",
+            json={"phone": phone, "nickname": "访谈回顾展示测试", "password": "password123"},
+        )
+        if response.status_code != 200:
+            raise AssertionError(response.text)
+        body = response.json()
+        return (
+            str(body["user"]["id"]),
+            {"Authorization": f"Bearer {body['auth']['accessToken']}"},
+            str(body["auth"]["sessionId"]),
+        )
+
+    @staticmethod
+    def _outcome_presentation_policy_headers(
+        headers: dict[str, str],
+        *,
+        session_id: str,
+        decision_id: str,
+    ) -> dict[str, str]:
+        return {
+            **headers,
+            "X-DreamJourney-Feature": "ownerTruthInterviewOutcome",
+            "X-DreamJourney-Feature-Decision-Id": decision_id,
+            "X-DreamJourney-Feature-Allowed": "true",
+            "X-DreamJourney-Policy-Version": "release-policy-v1",
+            "X-DreamJourney-Policy-Revision": "1",
+            "X-DreamJourney-Account-Generation": sha256(
+                session_id.encode("utf-8")
+            ).hexdigest()[:24],
+        }
+
     def _seed_session(self, *, vault_id: str, owner_id: str) -> str:
         session_id = str(uuid4())
         source_id = str(uuid4())
@@ -196,6 +230,70 @@ class OwnerTruthInterviewSessionOutcomeReadAPITests(unittest.TestCase):
         self.assertNotIn("message", str(outcome))
         self.assertNotIn("candidate", str(outcome).lower())
         self.assertNotIn("content", str(outcome).lower())
+
+    def test_product_outcome_requires_its_own_policy_and_limits_response(self) -> None:
+        owner_id, headers, auth_session_id = self._login_release_policy("13800139646")
+        vault_id = "vault-session-outcome-presentation"
+        session_id = self._seed_session(vault_id=vault_id, owner_id=owner_id)
+        path = f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/outcome"
+
+        denied = client.get(
+            path,
+            headers={**headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+        )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(denied.json()["detail"]["code"], "release_policy_denied")
+        self.assertEqual(denied.json()["detail"]["feature"], "ownerTruthInterviewOutcome")
+
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthInterviewOutcome"
+        }
+        try:
+            response = client.get(
+                path,
+                headers=self._outcome_presentation_policy_headers(
+                    headers,
+                    session_id=auth_session_id,
+                    decision_id="interview-outcome-presentation-owner",
+                ),
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            body = response.json()
+            self.assertEqual(
+                body["schemaVersion"],
+                "owner-truth-interview-session-outcome-presentation-v1",
+            )
+            self.assertEqual(body["vaultId"], vault_id)
+            outcome = body["sessionOutcome"]
+            self.assertEqual(set(outcome), {"state", "thisSession", "laterContinue"})
+            self.assertEqual(outcome["state"], "ready")
+            self.assertEqual(
+                outcome["thisSession"],
+                {"confirmedMemoryCount": 0, "pendingReviewBatchCount": 0},
+            )
+            self.assertEqual(
+                outcome["laterContinue"],
+                {"canContinueLater": True, "eligibleCueCount": 0},
+            )
+            rendered = json.dumps(body, ensure_ascii=False)
+            for forbidden in (
+                "sessionId",
+                "threadId",
+                "memoryVersionId",
+                "sourceId",
+                "candidate",
+                "message",
+                "content",
+                "reviewBatch",
+                "authorityEpoch",
+                "policyVersion",
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 
     def test_owner_cannot_submit_extra_fields(self) -> None:
         owner_id, headers = self._login("13800139643")

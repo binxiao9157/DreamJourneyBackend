@@ -170,9 +170,11 @@ from app.services.owner_truth_interview_session_orchestration import (
     OwnerTruthInterviewSessionOrchestrationService,
 )
 from app.services.owner_truth_interview_session_outcome_read import (
+    OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_PRESENTATION_SCHEMA_VERSION,
     OwnerTruthInterviewSessionOutcomeReadAccessDenied,
     OwnerTruthInterviewSessionOutcomeReadError,
     OwnerTruthInterviewSessionOutcomeReadService,
+    interview_session_outcome_presentation,
 )
 from app.services.owner_truth_life_map_read import (
     OWNER_TRUTH_LIFE_MAP_PRESENTATION_SCHEMA_VERSION,
@@ -1876,6 +1878,25 @@ def _owner_truth_memory_search_presentation_context(
         feature="ownerTruthMemorySearch",
         route=f"{request.method.upper()} /v2/vaults/*/memory-search",
         user_session_required_code="ownerTruthMemorySearchUserSessionRequired",
+    )
+
+
+def _owner_truth_interview_session_outcome_presentation_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the independent default-off interview outcome surface."""
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthInterviewOutcome",
+        route=(
+            f"{request.method.upper()} "
+            "/v2/vaults/*/interview-sessions/*/outcome"
+        ),
+        user_session_required_code="ownerTruthInterviewOutcomeUserSessionRequired",
     )
 
 
@@ -6587,6 +6608,44 @@ def read_owner_truth_interview_session_outcome(
             "schemaVersion": "owner-truth-interview-session-outcome-read-response-v1",
             "vaultId": context.vault_id,
             "sessionOutcome": result.value_free_summary(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/outcome",
+    include_in_schema=False,
+)
+def get_owner_truth_interview_session_outcome_presentation(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+) -> JSONResponse:
+    """Return a default-off product summary for the Owner's interview.
+
+    This formal read is intentionally smaller than the QA endpoint.  It does
+    not accept QA bypass headers, mutate interview state, or expose identifiers
+    and content from the private conversation and review pipeline.
+    """
+
+    try:
+        context = _owner_truth_interview_session_outcome_presentation_context(
+            request,
+            vault_id=vault_id,
+        )
+        result = OwnerTruthInterviewSessionOutcomeReadService(store).read(
+            session_id=session_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_outcome_read_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_PRESENTATION_SCHEMA_VERSION,
+            "vaultId": context.vault_id,
+            "sessionOutcome": interview_session_outcome_presentation(result),
         },
         headers={"Cache-Control": "no-store"},
     )

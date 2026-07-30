@@ -47,6 +47,9 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_SCHEMA_VERSION = (
     "owner-truth-interview-session-outcome-read-v1"
 )
+OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_PRESENTATION_SCHEMA_VERSION = (
+    "owner-truth-interview-session-outcome-presentation-v1"
+)
 
 
 class OwnerTruthInterviewSessionOutcomeReadError(OwnerTruthContractError):
@@ -181,6 +184,52 @@ class OwnerTruthInterviewSessionOutcomeReadResult:
                 "eligibleSavedContinuationCueCount": self.eligible_saved_continuation_cue_count,
             },
         }
+
+
+def interview_session_outcome_presentation(
+    result: OwnerTruthInterviewSessionOutcomeReadResult,
+) -> dict[str, object]:
+    """Build the default-off product summary for one completed interview.
+
+    The QA-only read above intentionally retains session/thread identifiers so
+    test operators can correlate a private session.  This presentation is a
+    separate boundary: it is limited to current counts and continuation
+    availability.  It never returns raw conversation, Candidate, Source,
+    MemoryVersion, review-batch, or provider identifiers.
+    """
+
+    if not isinstance(result, OwnerTruthInterviewSessionOutcomeReadResult):
+        raise OwnerTruthInterviewSessionOutcomeReadError(
+            "session outcome presentation requires a valid read result"
+        )
+
+    if result.confirmation_state is OwnerTruthKnowledgeDimensionReadState.READY:
+        assert result.confirmed_memory_version_count is not None
+        assert result.eligible_saved_continuation_cue_count is not None
+        state = "ready"
+        confirmed_memory_count = result.confirmed_memory_version_count
+        pending_review_batch_count = result.pending_review_batch_count
+        eligible_cue_count = result.eligible_saved_continuation_cue_count
+    else:
+        # A rebuilding projection must never leak a prior count as though it
+        # were a current confirmed fact.  The client receives only a neutral
+        # rebuilding state and no stale session-derived values.
+        state = "rebuilding"
+        confirmed_memory_count = 0
+        pending_review_batch_count = 0
+        eligible_cue_count = 0
+
+    return {
+        "state": state,
+        "thisSession": {
+            "confirmedMemoryCount": confirmed_memory_count,
+            "pendingReviewBatchCount": pending_review_batch_count,
+        },
+        "laterContinue": {
+            "canContinueLater": result.can_continue_later,
+            "eligibleCueCount": eligible_cue_count,
+        },
+    }
 
 
 class OwnerTruthInterviewSessionOutcomeReadStore(Protocol):
@@ -494,10 +543,12 @@ class OwnerTruthInterviewSessionOutcomeReadService:
 
 
 __all__ = [
+    "OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_PRESENTATION_SCHEMA_VERSION",
     "OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_SCHEMA_VERSION",
     "OwnerTruthInterviewSessionOutcomeReadAccessDenied",
     "OwnerTruthInterviewSessionOutcomeReadError",
     "OwnerTruthInterviewSessionOutcomeReadResult",
     "OwnerTruthInterviewSessionOutcomeReadService",
     "OwnerTruthInterviewSessionOutcomeReadStore",
+    "interview_session_outcome_presentation",
 ]

@@ -423,6 +423,10 @@ class ReleasePolicyService:
         # remains separately default closed until its result-display boundary
         # has G0/G1/G2 evidence. It does not inherit life-map visibility.
         "ownerTruthMemorySearch": ("G0", "G1", "G2"),
+        # The interview ending summary is a separate Owner-only read surface.
+        # It reports only durable counts and continuation availability; it must
+        # not inherit visibility from the QA outcome read or natural input.
+        "ownerTruthInterviewOutcome": ("G0", "G1", "G2"),
         "echoImageInput": ("G0", "G1", "G2"),
         "timeLetters": ("G0", "G1", "G2", "G4"),
         "profileSettings": ("G0", "G1"),
@@ -834,6 +838,12 @@ class ReleasePolicyCommandGate:
             and normalized_path.endswith("/memory-search")
         ):
             return "ownerTruthMemorySearch"
+        if (
+            method.upper() == "GET"
+            and normalized_path.startswith("/v2/vaults/")
+            and normalized_path.endswith("/outcome")
+        ):
+            return "ownerTruthInterviewOutcome"
         if method.upper() == "GET" and normalized_path.startswith("/archive/items/"):
             return "archiveRemoteFetch"
         return None
