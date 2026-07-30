@@ -181,8 +181,10 @@ from app.services.owner_truth_life_map_read import (
     life_map_presentation,
 )
 from app.services.owner_truth_memory_search_read import (
+    OWNER_TRUTH_MEMORY_SEARCH_PRESENTATION_SCHEMA_VERSION,
     OwnerTruthMemorySearchReadAccessDenied,
     OwnerTruthMemorySearchReadService,
+    memory_search_presentation,
 )
 from app.services.owner_truth_memory_search_projection import (
     OwnerTruthMemorySearchDocumentProjectionService,
@@ -1858,6 +1860,22 @@ def _owner_truth_life_map_presentation_context(
         feature="ownerTruthLifeMap",
         route=f"{request.method.upper()} /v2/vaults/*/life-map",
         user_session_required_code="ownerTruthLifeMapUserSessionRequired",
+    )
+
+
+def _owner_truth_memory_search_presentation_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the independent default-off Owner recall-search surface."""
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthMemorySearch",
+        route=f"{request.method.upper()} /v2/vaults/*/memory-search",
+        user_session_required_code="ownerTruthMemorySearchUserSessionRequired",
     )
 
 
@@ -6635,7 +6653,54 @@ def get_owner_truth_life_map_presentation(
 
 
 _OWNER_TRUTH_MEMORY_SEARCH_READ_FIELDS = frozenset({"query", "limit"})
+_OWNER_TRUTH_MEMORY_SEARCH_PRESENTATION_FIELDS = frozenset({"query"})
 _OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_REBUILD_FIELDS = frozenset()
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memory-search",
+    include_in_schema=False,
+)
+def search_owner_truth_memory_presentation(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Return a default-off Owner recall search with bounded readable previews.
+
+    This is not a semantic-ranker claim: the response labels the deterministic
+    fallback explicitly and never returns Source/Candidate data or diagnostic
+    identifiers from the private search projection.
+    """
+
+    try:
+        context = _owner_truth_memory_search_presentation_context(
+            request,
+            vault_id=vault_id,
+        )
+        unsupported = sorted(
+            set(payload).difference(_OWNER_TRUTH_MEMORY_SEARCH_PRESENTATION_FIELDS)
+        )
+        if unsupported or "query" not in payload:
+            raise OwnerTruthMemorySearchReadError(
+                "memory-search presentation contains unsupported fields"
+            )
+        result = OwnerTruthMemorySearchReadService(store).read(
+            context=context,
+            query=payload["query"],
+            limit=8,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_memory_search_read_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": OWNER_TRUTH_MEMORY_SEARCH_PRESENTATION_SCHEMA_VERSION,
+            "vaultId": context.vault_id,
+            "memorySearch": memory_search_presentation(result),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post(

@@ -290,6 +290,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/memory-search",
+                session,
+                "ownerTruthMemorySearchPresentation",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/memory-search/read",
                 session,
                 "ownerTruthMemorySearchRead",

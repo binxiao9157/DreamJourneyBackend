@@ -419,6 +419,10 @@ class ReleasePolicyService:
         # The life map is a separate read-only M0-B surface. It intentionally
         # has no visibility inheritance from natural input or recommendations.
         "ownerTruthLifeMap": ("G0", "G1", "G2"),
+        # Owner-only recall search uses the confirmed-memory projection but
+        # remains separately default closed until its result-display boundary
+        # has G0/G1/G2 evidence. It does not inherit life-map visibility.
+        "ownerTruthMemorySearch": ("G0", "G1", "G2"),
         "echoImageInput": ("G0", "G1", "G2"),
         "timeLetters": ("G0", "G1", "G2", "G4"),
         "profileSettings": ("G0", "G1"),
@@ -824,6 +828,12 @@ class ReleasePolicyCommandGate:
             and normalized_path.endswith("/life-map")
         ):
             return "ownerTruthLifeMap"
+        if (
+            method.upper() == "POST"
+            and normalized_path.startswith("/v2/vaults/")
+            and normalized_path.endswith("/memory-search")
+        ):
+            return "ownerTruthMemorySearch"
         if method.upper() == "GET" and normalized_path.startswith("/archive/items/"):
             return "archiveRemoteFetch"
         return None
@@ -865,6 +875,12 @@ class ReleasePolicyCommandGate:
             and normalized_path.endswith("/life-map")
         ):
             return "GET /v2/vaults/*/life-map"
+        if (
+            normalized_method == "POST"
+            and normalized_path.startswith("/v2/vaults/")
+            and normalized_path.endswith("/memory-search")
+        ):
+            return "POST /v2/vaults/*/memory-search"
         if normalized_method == "GET" and normalized_path.startswith("/archive/items/"):
             return "GET /archive/items/*"
         feature = self.feature_for_request(method, path, payload)

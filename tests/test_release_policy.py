@@ -107,6 +107,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         for feature in [
             "echoGuidedRecommendations",
             "ownerTruthLifeMap",
+            "ownerTruthMemorySearch",
             "familyManagement",
             "timeLetters",
             "voiceCloneShell",

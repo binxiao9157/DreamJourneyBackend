@@ -88,6 +88,40 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
             "X-DreamJourney-QA-Owner-Truth": "1",
         }
 
+    @staticmethod
+    def _login_release_policy(phone: str) -> tuple[str, dict[str, str], str]:
+        response = client.post(
+            "/auth/login",
+            json={"phone": phone, "nickname": "回顾检索展示测试", "password": "password123"},
+        )
+        if response.status_code != 200:
+            raise AssertionError(response.text)
+        body = response.json()
+        return (
+            str(body["user"]["id"]),
+            {"Authorization": f"Bearer {body['auth']['accessToken']}"},
+            str(body["auth"]["sessionId"]),
+        )
+
+    @staticmethod
+    def _memory_search_presentation_policy_headers(
+        headers: dict[str, str],
+        *,
+        session_id: str,
+        decision_id: str,
+    ) -> dict[str, str]:
+        return {
+            **headers,
+            "X-DreamJourney-Feature": "ownerTruthMemorySearch",
+            "X-DreamJourney-Feature-Decision-Id": decision_id,
+            "X-DreamJourney-Feature-Allowed": "true",
+            "X-DreamJourney-Policy-Version": "release-policy-v1",
+            "X-DreamJourney-Policy-Revision": "1",
+            "X-DreamJourney-Account-Generation": sha256(
+                session_id.encode("utf-8")
+            ).hexdigest()[:24],
+        }
+
     def _activate_memory(
         self,
         *,
@@ -186,6 +220,86 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
         self.assertNotIn("sourceId", rendered)
         self.assertNotIn('"searchText":', rendered)
         self.assertNotIn("structuredTerms", rendered)
+
+    def test_product_memory_search_requires_its_own_policy_and_limits_its_response(
+        self,
+    ) -> None:
+        owner_id, headers, session_id = self._login_release_policy("13800139706")
+        vault_id = "vault-memory-search-presentation"
+        self._activate_memory(vault_id=vault_id, owner_id=owner_id)
+        path = f"/v2/vaults/{vault_id}/memory-search"
+
+        denied = client.post(
+            path,
+            headers={**headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+            json={"query": "career"},
+        )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(denied.json()["detail"]["code"], "release_policy_denied")
+        self.assertEqual(denied.json()["detail"]["feature"], "ownerTruthMemorySearch")
+
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthMemorySearch"
+        }
+        try:
+            response = client.post(
+                path,
+                headers=self._memory_search_presentation_policy_headers(
+                    headers,
+                    session_id=session_id,
+                    decision_id="memory-search-presentation-owner",
+                ),
+                json={"query": "career"},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            body = response.json()
+            self.assertEqual(
+                body["schemaVersion"],
+                "owner-truth-memory-search-presentation-response-v1",
+            )
+            self.assertEqual(body["vaultId"], vault_id)
+            search = body["memorySearch"]
+            self.assertEqual(
+                set(search),
+                {"state", "retrievalMode", "resultCount", "results"},
+            )
+            self.assertEqual(search["state"], "ready")
+            self.assertEqual(search["retrievalMode"], "deterministicTextFallback")
+            self.assertEqual(search["resultCount"], 1)
+            self.assertEqual(len(search["results"]), 1)
+            result = search["results"][0]
+            self.assertEqual(
+                set(result),
+                {
+                    "rank",
+                    "preview",
+                    "memoryKind",
+                    "perspectiveType",
+                    "sensitivity",
+                    "matchKind",
+                },
+            )
+            self.assertEqual(result["rank"], 1)
+            self.assertIn("career", result["preview"])
+            rendered = json.dumps(body, ensure_ascii=False)
+            for forbidden in (
+                "memoryVersionId",
+                "memoryId",
+                "sourceId",
+                "threadId",
+                "contentHash",
+                "searchText",
+                "structuredTerms",
+                "authorityEpoch",
+                "projectionCheckpoint",
+                "policyVersion",
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 
     def test_projection_rebuild_is_independently_gated_and_required_before_search(self) -> None:
         owner_id, headers = self._login("13800139705")
