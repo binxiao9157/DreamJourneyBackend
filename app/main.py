@@ -124,6 +124,7 @@ from app.domain.owner_truth.conversation import (
     OwnerTruthConversationError,
     OwnerTruthConversationVersionConflict,
     OwnerTruthInterviewSessionStateConflict,
+    PauseInterviewForTopicSwitchCommand,
     RestoreDoNotAskInterviewBoundaryCommand,
     SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
@@ -1068,6 +1069,14 @@ _OWNER_TRUTH_INTERVIEW_END_PAYLOAD_FIELDS = frozenset(
         "expectedSessionVersion",
     }
 )
+_OWNER_TRUTH_INTERVIEW_TOPIC_SWITCH_PAYLOAD_FIELDS = frozenset(
+    {
+        "commandId",
+        "threadId",
+        "expectedThreadVersion",
+        "expectedSessionVersion",
+    }
+)
 _OWNER_TRUTH_DEFER_WITH_CONTINUATION_PAYLOAD_FIELDS = frozenset(
     {
         "commandId",
@@ -1155,6 +1164,47 @@ def _owner_truth_end_interview_session_command(
             detail={"code": "ownerTruthInterviewSessionInvalid"},
         )
     return EndInterviewSessionCommand(
+        command_id=command_id,
+        thread_id=thread_id,
+        session_id=session_id,
+        expected_thread_version=expected_thread_version,
+        expected_session_version=expected_session_version,
+    )
+
+
+def _owner_truth_pause_interview_for_topic_switch_command(
+    *,
+    payload: Dict[str, Any],
+    session_id: str,
+) -> PauseInterviewForTopicSwitchCommand:
+    """Decode the value-free fence that closes one thread before a new topic.
+
+    Topic classification and text stay outside this route.  The caller only
+    supplies the optimistic versions needed to pause the current private
+    thread/session pair; starting the next thread remains the existing,
+    separate natural-input command.
+    """
+
+    if set(payload) != _OWNER_TRUTH_INTERVIEW_TOPIC_SWITCH_PAYLOAD_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    command_id = payload.get("commandId")
+    thread_id = payload.get("threadId")
+    expected_thread_version = payload.get("expectedThreadVersion")
+    expected_session_version = payload.get("expectedSessionVersion")
+    if (
+        not isinstance(command_id, str)
+        or not isinstance(thread_id, str)
+        or type(expected_thread_version) is not int
+        or type(expected_session_version) is not int
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewSessionInvalid"},
+        )
+    return PauseInterviewForTopicSwitchCommand(
         command_id=command_id,
         thread_id=thread_id,
         session_id=session_id,
@@ -4555,6 +4605,65 @@ def end_owner_truth_interview_session(
             result = OwnerTruthConversationService(
                 store.owner_truth_conversation_repository()
             ).end_session(
+                command=command,
+                context=context,
+            )
+        automation = _owner_truth_review_batch_automation_after_qa_transition(
+            request=request,
+            session_id=command.session_id,
+            transition_command_id=command.command_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    response = _owner_truth_interview_session_command_response(
+        vault_id=context.vault_id,
+        result=result,
+    )
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_attach_owner_truth_review_batch_automation(
+            response=response,
+            automation=automation,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/pause-for-topic-switch",
+    include_in_schema=False,
+)
+def pause_owner_truth_interview_for_topic_switch(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Pause one private thread before an explicit new-topic session starts.
+
+    This remains an Owner QA contract until the released natural-input product
+    flow has its own Gate.  It records no topic text, classifier result,
+    Candidate, MemoryVersion, transcript, or Provider effect.  The caller must
+    use the existing start route to create the next thread after this fence.
+    """
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        command = _owner_truth_pause_interview_for_topic_switch_command(
+            payload=payload,
+            session_id=session_id,
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-topic-switch:"
+                f"{context.vault_id}:{command.session_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = OwnerTruthConversationService(
+                store.owner_truth_conversation_repository()
+            ).pause_for_topic_switch(
                 command=command,
                 context=context,
             )

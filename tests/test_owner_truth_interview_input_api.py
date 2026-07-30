@@ -80,6 +80,13 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/end"
 
     @staticmethod
+    def _topic_switch_path(vault_id: str, session_id: str) -> str:
+        return (
+            f"/v2/vaults/{vault_id}/interview-sessions/"
+            f"{session_id}/pause-for-topic-switch"
+        )
+
+    @staticmethod
     def _restore_do_not_ask_path(vault_id: str, session_id: str) -> str:
         return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/restore-do-not-ask"
 
@@ -180,6 +187,32 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             json=payload,
         )
 
+    def _pause_for_topic_switch(
+        self,
+        *,
+        vault_id: str,
+        session_id: str,
+        thread_id: str,
+        expected_thread_version: int,
+        expected_session_version: int,
+        headers: dict[str, str],
+        command_id: str | None = None,
+        extra: dict[str, object] | None = None,
+    ):
+        payload: dict[str, object] = {
+            "commandId": command_id or str(uuid4()),
+            "threadId": thread_id,
+            "expectedThreadVersion": expected_thread_version,
+            "expectedSessionVersion": expected_session_version,
+        }
+        if extra:
+            payload.update(extra)
+        return client.post(
+            self._topic_switch_path(vault_id, session_id),
+            headers=headers,
+            json=payload,
+        )
+
     def test_contract_is_default_hidden(self) -> None:
         _, headers, _ = self._login("13800139601")
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = False
@@ -229,6 +262,20 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(ended.status_code, 404)
         self.assertEqual(
             ended.json()["detail"]["code"],
+            "ownerTruthCandidateReviewUnavailable",
+        )
+
+        paused = self._pause_for_topic_switch(
+            vault_id="vault-interview-input-hidden",
+            session_id=str(uuid4()),
+            thread_id=str(uuid4()),
+            expected_thread_version=1,
+            expected_session_version=1,
+            headers=headers,
+        )
+        self.assertEqual(paused.status_code, 404)
+        self.assertEqual(
+            paused.json()["detail"]["code"],
             "ownerTruthCandidateReviewUnavailable",
         )
 
@@ -367,6 +414,161 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(stale.json()["detail"]["code"], "ownerTruthInterviewSessionConflict")
         self.assertEqual(malformed.status_code, 400, malformed.text)
         self.assertEqual(malformed.json()["detail"]["code"], "ownerTruthInterviewSessionInvalid")
+
+    def test_owner_can_pause_topic_switch_once_then_start_a_new_private_thread(self) -> None:
+        _, headers, _ = self._login("13800139632")
+        vault_id = "vault-interview-topic-switch"
+        old_thread_id = str(uuid4())
+        old_session_id = str(uuid4())
+        started = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=old_thread_id,
+            session_id=old_session_id,
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+        private_text = "旧主题的私人叙述不能出现在切换回执里。"
+        appended = client.post(
+            self._append_path(vault_id, old_session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": old_thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": private_text,
+            },
+        )
+        self.assertEqual(appended.status_code, 201, appended.text)
+
+        command_id = str(uuid4())
+        paused = self._pause_for_topic_switch(
+            vault_id=vault_id,
+            session_id=old_session_id,
+            thread_id=old_thread_id,
+            expected_thread_version=2,
+            expected_session_version=2,
+            headers=headers,
+            command_id=command_id,
+        )
+        self.assertEqual(paused.status_code, 201, paused.text)
+        self.assertEqual(paused.headers["cache-control"], "no-store")
+        payload = paused.json()
+        self.assertEqual(payload["receipt"]["status"], "created")
+        self.assertEqual(payload["receipt"]["threadId"], old_thread_id)
+        self.assertEqual(payload["receipt"]["sessionId"], old_session_id)
+        self.assertEqual(payload["receipt"]["threadVersion"], 3)
+        self.assertEqual(payload["receipt"]["sessionVersion"], 4)
+        self.assertEqual(payload["receipt"]["state"], "paused")
+        self.assertEqual(payload["receipt"]["boundary"], "open")
+        self.assertEqual(payload["reviewBatchAutomation"]["state"], "created")
+        self.assertEqual(payload["reviewBatchAutomation"]["reviewBatch"]["trigger"], "sessionExit")
+        rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        for forbidden in (
+            private_text,
+            "客户端不得发送主题文本",
+            "topicId",
+            "candidate",
+            "memory",
+            "source",
+            "provider",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+        replayed = self._pause_for_topic_switch(
+            vault_id=vault_id,
+            session_id=old_session_id,
+            thread_id=old_thread_id,
+            expected_thread_version=2,
+            expected_session_version=2,
+            headers=headers,
+            command_id=command_id,
+        )
+        self.assertEqual(replayed.status_code, 200, replayed.text)
+        self.assertEqual(replayed.json()["receipt"]["status"], "deduplicated")
+        self.assertEqual(replayed.json()["receipt"]["sessionVersion"], 4)
+        self.assertEqual(replayed.json()["reviewBatchAutomation"]["state"], "alreadyPending")
+
+        blocked_append = client.post(
+            self._append_path(vault_id, old_session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": old_thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 3,
+                "expectedSessionVersion": 4,
+                "text": "已暂停的旧主题不能继续写入。",
+            },
+        )
+        self.assertEqual(blocked_append.status_code, 409, blocked_append.text)
+        self.assertEqual(
+            blocked_append.json()["detail"]["code"],
+            "ownerTruthInterviewSessionConflict",
+        )
+
+        new_thread_id = str(uuid4())
+        new_session_id = str(uuid4())
+        new_session = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=new_thread_id,
+            session_id=new_session_id,
+        )
+        self.assertEqual(new_session.status_code, 201, new_session.text)
+        self.assertEqual(new_session.json()["receipt"]["threadId"], new_thread_id)
+        self.assertEqual(new_session.json()["receipt"]["sessionId"], new_session_id)
+
+    def test_topic_switch_requires_owner_current_versions_and_exact_value_free_payload(self) -> None:
+        _, owner_headers, _ = self._login("13800139633")
+        vault_id = "vault-interview-topic-switch-controls"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        started = self._start_session(
+            vault_id=vault_id,
+            headers=owner_headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+        _, other_headers, _ = self._login("13800139634")
+
+        denied = self._pause_for_topic_switch(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=1,
+            expected_session_version=1,
+            headers=other_headers,
+        )
+        stale = self._pause_for_topic_switch(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=9,
+            expected_session_version=9,
+            headers=owner_headers,
+        )
+        malformed = self._pause_for_topic_switch(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=1,
+            expected_session_version=1,
+            headers=owner_headers,
+            extra={"topic": "客户端不得发送主题文本"},
+        )
+
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(denied.json()["detail"]["code"], "ownerTruthInterviewSessionDenied")
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(stale.json()["detail"]["code"], "ownerTruthInterviewSessionConflict")
+        self.assertEqual(malformed.status_code, 400, malformed.text)
+        self.assertEqual(
+            malformed.json()["detail"]["code"],
+            "ownerTruthInterviewSessionInvalid",
+        )
 
     def test_owner_can_resume_only_current_active_session_without_content(self) -> None:
         _, headers, _ = self._login("13800139615")

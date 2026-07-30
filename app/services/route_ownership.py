@@ -344,6 +344,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/pause-for-topic-switch",
+                session,
+                "ownerTruthInterviewSessionTopicSwitch",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/interview-sessions/{session_id}/defer-with-continuation",
                 session,
                 "ownerTruthInterviewSessionDeferWithContinuation",
