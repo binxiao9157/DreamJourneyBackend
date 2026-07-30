@@ -40,6 +40,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-memory-search-offline-e
 echo "== Owner Truth Context/Citation offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-context-citation-offline-evaluation-gate.sh
 
+echo "== Owner Truth authority-epoch offline evaluation gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-authority-epoch-offline-evaluation-gate.sh
+
 echo "== Owner Truth recommendation offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-recommendation-offline-evaluation-gate.sh
 
@@ -449,6 +452,9 @@ test -f scripts/run-backend-owner-truth-memory-search-projection-postgres-smoke.
 test -f app/services/owner_truth_memory_search_offline_evaluation.py
 test -f tests/test_owner_truth_memory_search_offline_evaluation.py
 test -f scripts/run-backend-owner-truth-memory-search-offline-evaluation-gate.sh
+test -f tests/test_owner_truth_authority_epoch_offline_evaluation.py
+test -f tests/fixtures/owner_truth/authority_epoch_offline_evaluation_v1.json
+test -f scripts/run-backend-owner-truth-authority-epoch-offline-evaluation-gate.sh
 test -f app/services/owner_truth_recommendation_offline_evaluation.py
 test -f tests/test_owner_truth_recommendation_offline_evaluation.py
 test -f tests/fixtures/owner_truth/recommendation_offline_evaluation_v1.json

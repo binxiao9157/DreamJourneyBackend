@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "owner-truth-authority-epoch-offline-evaluation-v1",
+  "syntheticOnly": true,
+  "cases": [
+    {
+      "caseId": "stale-source-async-callback-blocked",
+      "scenario": "staleSourceAsyncCallback",
+      "privateMarkers": ["synthetic-private-source-callback"],
+      "expected": {
+        "disposition": "blocked",
+        "reasonCodes": ["authorityEpochChanged"],
+        "nonzeroMetrics": {"asyncCallbackBlockedCount": 1}
+      }
+    },
+    {
+      "caseId": "stale-candidate-command-rejected",
+      "scenario": "staleCandidateCommand",
+      "privateMarkers": ["synthetic-private-candidate-command"],
+      "expected": {
+        "disposition": "rejected",
+        "reasonCodes": ["candidateAuthorityEpochStale"],
+        "nonzeroMetrics": {"candidateWriteRejectedCount": 1}
+      }
+    },
+    {
+      "caseId": "stale-projection-context-cache-discarded",
+      "scenario": "staleProjectionContextCache",
+      "privateMarkers": ["synthetic-private-projection-cache"],
+      "expected": {
+        "disposition": "rebuilding",
+        "reasonCodes": ["projectionAuthorityEpochChanged"],
+        "nonzeroMetrics": {
+          "projectionFallbackCount": 1,
+          "contextRebuildingCount": 1
+        }
+      }
+    },
+    {
+      "caseId": "stale-context-citation-receipt-rejected",
+      "scenario": "staleContextCitationReceipt",
+      "privateMarkers": ["synthetic-private-citation-receipt"],
+      "expected": {
+        "disposition": "rejected",
+        "reasonCodes": ["citationAuthorityEpochChanged"],
+        "nonzeroMetrics": {"citationWriteRejectedCount": 1}
+      }
+    },
+    {
+      "caseId": "stale-correction-resolution-rejected",
+      "scenario": "staleCorrectionResolution",
+      "privateMarkers": ["synthetic-private-correction-resolution"],
+      "expected": {
+        "disposition": "rejected",
+        "reasonCodes": ["correctionAuthorityEpochStale"],
+        "nonzeroMetrics": {"correctionWriteRejectedCount": 1}
+      }
+    },
+    {
+      "caseId": "cross-owner-async-replay-blocked",
+      "scenario": "crossOwnerAsyncReplay",
+      "privateMarkers": ["synthetic-private-cross-owner-replay"],
+      "expected": {
+        "disposition": "blocked",
+        "reasonCodes": ["vaultOwnerMismatch"],
+        "nonzeroMetrics": {
+          "asyncCallbackBlockedCount": 1,
+          "crossScopeDeniedCount": 1
+        }
+      }
+    },
+    {
+      "caseId": "cross-vault-context-replay-denied",
+      "scenario": "crossVaultContextReplay",
+      "privateMarkers": ["synthetic-private-cross-vault-replay"],
+      "expected": {
+        "disposition": "accessDenied",
+        "reasonCodes": ["vaultScopeMismatch"],
+        "nonzeroMetrics": {"crossScopeDeniedCount": 1}
+      }
+    }
+  ]
+}
