@@ -26,6 +26,7 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_interview_candidate_batch_decision import (
     FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE,
     OwnerTruthInterviewCandidateFormalActivationAdmission,
+    OwnerTruthInterviewCandidateFormalActivationInboxItem,
 )
 from app.services.owner_truth_memory_projection_effects import (
     build_memory_projection_rebuild_effect_intent,
@@ -71,6 +72,35 @@ class OwnerTruthInterviewCandidateMemoryActivationResult:
     candidate_id: str
     memory_activation: OwnerTruthMemoryActivationResult
     projection_effect: EffectReceiptSummary | None = None
+
+
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateMemoryActivationInbox:
+    """Content-free retry discovery for formally confirmed Candidates.
+
+    Items intentionally do not carry the confirmation receipt, candidate value,
+    source information, or any generated Memory identifiers.  The existing
+    explicit activation route remains the sole transition to MemoryVersion.
+    """
+
+    items: tuple[OwnerTruthInterviewCandidateFormalActivationInboxItem, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+        if any(
+            not isinstance(item, OwnerTruthInterviewCandidateFormalActivationInboxItem)
+            for item in self.items
+        ):
+            raise OwnerTruthCandidateReviewError(
+                "Memory activation inbox items are invalid"
+            )
+        identifiers = [
+            (item.review_batch_id, item.candidate_id) for item in self.items
+        ]
+        if len(identifiers) != len(set(identifiers)):
+            raise OwnerTruthCandidateReviewError(
+                "Memory activation inbox cannot repeat a Candidate"
+            )
 
 
 class OwnerTruthInterviewCandidateMemoryActivationStore(Protocol):
@@ -190,7 +220,63 @@ class OwnerTruthInterviewCandidateMemoryActivationService:
         return nullcontext()
 
 
+class OwnerTruthInterviewCandidateMemoryActivationInboxReadService:
+    """Read retry handles after an interrupted formal activation flow."""
+
+    def __init__(self, store: OwnerTruthInterviewCandidateMemoryActivationStore):
+        self._store = store
+
+    def read(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewCandidateMemoryActivationInbox:
+        _assert_formal_owner_context(context)
+        with self._request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-formal-memory-activation-inbox-"
+                f"{context.vault_id}"
+            ),
+            command_id=f"read:formal-memory-activation-inbox:{context.vault_id}",
+        ):
+            # Prove the owner/vault relationship without asking the candidate
+            # repository to materialize content for this value-free route.
+            candidate_repository = self._store.owner_truth_candidate_review_repository()
+            owner_vault_guard = getattr(
+                candidate_repository,
+                "assert_active_owner_vault",
+                None,
+            )
+            if not callable(owner_vault_guard):
+                raise OwnerTruthCandidateReviewError(
+                    "Memory activation inbox requires an active owner/vault guard"
+                )
+            owner_vault_guard(context=context)
+
+            ledger = self._store.owner_truth_interview_candidate_batch_decision_repository()
+            reader = getattr(ledger, "list_formal_pending_memory_activations", None)
+            if not callable(reader):
+                raise OwnerTruthCandidateReviewError(
+                    "formal memory activation inbox is not supported by this store"
+                )
+            items = reader(context=context)
+        return OwnerTruthInterviewCandidateMemoryActivationInbox(items=tuple(items))
+
+    def _request_unit_of_work(
+        self,
+        *,
+        correlation_id: str,
+        command_id: str,
+    ) -> ContextManager[Any]:
+        factory = getattr(self._store, "request_unit_of_work", None)
+        if callable(factory):
+            return factory(correlation_id=correlation_id, command_id=command_id)
+        return nullcontext()
+
+
 __all__ = [
+    "OwnerTruthInterviewCandidateMemoryActivationInbox",
+    "OwnerTruthInterviewCandidateMemoryActivationInboxReadService",
     "OwnerTruthInterviewCandidateMemoryActivationCommand",
     "OwnerTruthInterviewCandidateMemoryActivationResult",
     "OwnerTruthInterviewCandidateMemoryActivationService",

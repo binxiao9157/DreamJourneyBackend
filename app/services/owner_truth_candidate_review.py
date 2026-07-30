@@ -195,6 +195,66 @@ class InMemoryOwnerTruthCandidateReviewRepository:
             ]
         return tuple(sorted(items, key=lambda item: item.candidate_id))
 
+    def assert_active_owner_vault(self, *, context: OwnerTruthCommandContext) -> None:
+        """Prove an active owner/vault boundary without loading Candidate content."""
+
+        _assert_owner_context(context)
+        with self._lock:
+            vault = self._vault_states.get(context.vault_id)
+            if (
+                vault is None
+                or vault[0] != context.owner_subject_id
+                or vault[1] != "active"
+            ):
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "Vault is not active for this Owner"
+                )
+
+    def is_memory_activation_pending(
+        self,
+        candidate_id: str,
+        receipt_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> bool:
+        """Return only whether one terminal receipt can still activate memory.
+
+        This is an internal, value-free bridge for the formal activation inbox.
+        It deliberately returns no Candidate, receipt, or MemoryVersion data.
+        """
+
+        _assert_owner_context(context)
+        with self._lock:
+            candidate = self._candidates.get(candidate_id)
+            receipt = next(
+                (
+                    item
+                    for item in self._receipts.values()
+                    if str(item.get("id") or "") == receipt_id
+                ),
+                None,
+            )
+            if (
+                candidate is None
+                or receipt is None
+                or candidate.vault_id != context.vault_id
+                or candidate.owner_subject_id != context.owner_subject_id
+                or candidate.decision
+                not in {CandidateDecision.ACCEPTED, CandidateDecision.CORRECTED}
+                or self._candidate_receipts.get(candidate_id) != receipt_id
+                or str(receipt.get("candidateId") or "") != candidate_id
+                or str(receipt.get("decision") or "") != candidate.decision.value
+                or receipt_id in self._memory_activations
+            ):
+                return False
+            try:
+                self._assert_live_target(candidate=candidate, context=context)
+            except (
+                OwnerTruthCandidateReviewAccessDenied,
+                OwnerTruthCandidateReviewSourceInactive,
+            ):
+                return False
+            return True
+
     def decide(
         self,
         *,
@@ -751,6 +811,13 @@ class PostgresOwnerTruthCandidateReviewRepository:
             )
             for row in rows
         )
+
+    def assert_active_owner_vault(self, *, context: OwnerTruthCommandContext) -> None:
+        """Prove the owner/vault boundary without reading Candidate payloads."""
+
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            self._active_vault(cursor, context=context, lock=False)
 
     def decide(
         self,

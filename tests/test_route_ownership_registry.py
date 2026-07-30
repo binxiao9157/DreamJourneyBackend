@@ -29,7 +29,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 138)
+        self.assertEqual(len(app_routes), 139)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
 
@@ -72,6 +72,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
             ("GET", "/v2/vaults/{vault_id}/interview-sessions/{session_id}/presentation"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/interview-sessions/current"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/interview-candidate-confirmations"): RouteOwnershipCategory.USER_SESSION,
+            ("GET", "/v2/vaults/{vault_id}/interview-memory-activation-inbox"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/confirmation"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/confirmation/batch-accept"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/confirmation/candidates/{candidate_id}/decision"): RouteOwnershipCategory.USER_SESSION,
@@ -128,8 +129,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 138)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 138)
+        self.assertEqual(summary["routeCount"], 139)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 139)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)

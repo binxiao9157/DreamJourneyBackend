@@ -151,6 +151,7 @@ from app.services.owner_truth_interview_candidate_batch_decision import (
 )
 from app.services.owner_truth_interview_candidate_memory_activation import (
     OwnerTruthInterviewCandidateMemoryActivationCommand,
+    OwnerTruthInterviewCandidateMemoryActivationInboxReadService,
     OwnerTruthInterviewCandidateMemoryActivationService,
 )
 from app.services.owner_truth_interview_candidate_review import (
@@ -1672,6 +1673,30 @@ def _owner_truth_interview_candidate_confirmation_activation_context(
     )
 
 
+def _owner_truth_interview_candidate_memory_activation_inbox_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize value-free formal activation retry discovery.
+
+    The route deliberately shares the captured release-policy feature with
+    formal confirmation.  A QA header alone cannot discover confirmation
+    receipts or bypass the owner/session boundary.
+    """
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=(
+            f"{request.method.upper()} /v2/vaults/*/"
+            "interview-memory-activation-inbox"
+        ),
+        user_session_required_code="ownerTruthInterviewCandidateConfirmationUserSessionRequired",
+    )
+
+
 def _owner_truth_memory_projection_context(
     request: Request,
     *,
@@ -2717,6 +2742,28 @@ def _owner_truth_interview_candidate_confirmation_inbox_response(
         "schemaVersion": "owner-truth-interview-candidate-confirmation-inbox-v1",
         "vaultId": vault_id,
         "confirmations": [item.public_summary() for item in inbox.items],
+    }
+
+
+def _owner_truth_interview_candidate_memory_activation_inbox_response(
+    *,
+    vault_id: str,
+    inbox: Any,
+) -> Dict[str, Any]:
+    """Return activation retry handles only, never Candidate or receipt values."""
+
+    return {
+        "schemaVersion": (
+            "owner-truth-interview-candidate-memory-activation-inbox-v1"
+        ),
+        "vaultId": vault_id,
+        "items": [
+            {
+                "reviewBatchId": item.review_batch_id,
+                "candidateId": item.candidate_id,
+            }
+            for item in inbox.items
+        ],
     }
 
 
@@ -5527,6 +5574,42 @@ def list_owner_truth_interview_candidate_confirmations(
     return JSONResponse(
         status_code=200,
         content=_owner_truth_interview_candidate_confirmation_inbox_response(
+            vault_id=context.vault_id,
+            inbox=inbox,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/interview-memory-activation-inbox",
+    include_in_schema=False,
+)
+def list_owner_truth_interview_candidate_memory_activation_inbox(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """List only formal confirmed Candidates still awaiting MemoryVersion.
+
+    This is a recovery read for failed or interrupted explicit activation.
+    The item contains only opaque batch/candidate handles; confirmation
+    receipts, Candidate values, source provenance, and MemoryVersion IDs stay
+    server-side.
+    """
+
+    try:
+        context = _owner_truth_interview_candidate_memory_activation_inbox_context(
+            request,
+            vault_id=vault_id,
+        )
+        inbox = OwnerTruthInterviewCandidateMemoryActivationInboxReadService(store).read(
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=_owner_truth_interview_candidate_memory_activation_inbox_response(
             vault_id=context.vault_id,
             inbox=inbox,
         ),

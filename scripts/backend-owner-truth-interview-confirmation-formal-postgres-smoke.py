@@ -944,6 +944,9 @@ def main() -> None:
             f"{review_batch_id}/confirmation/batch-accept"
         )
         inbox_path = f"/v2/vaults/{vault_id}/interview-candidate-confirmations"
+        activation_inbox_path = (
+            f"/v2/vaults/{vault_id}/interview-memory-activation-inbox"
+        )
         payload = {
             "commandId": "formal-confirmation-postgres-smoke-accept",
             "selections": [{"candidateId": candidate_id, "expectedCandidateVersion": 1}],
@@ -1034,6 +1037,57 @@ def main() -> None:
         )
         assert_wrong_child_command_link_is_rejected(test_dsn, vault_id=vault_id)
 
+        activation_inbox_qa_only = client.get(
+            activation_inbox_path,
+            headers={**owner_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+        )
+        require(
+            activation_inbox_qa_only.status_code == 403
+            and route_code(activation_inbox_qa_only) == "release_policy_denied",
+            "QA header must not bypass formal MemoryVersion activation inbox policy",
+        )
+        activation_inbox = client.get(
+            activation_inbox_path,
+            headers=formal_headers(
+                owner_headers,
+                session_id=session_id,
+                decision_id="formal-confirmation-postgres-smoke-memory-inbox",
+            ),
+        )
+        require(
+            activation_inbox.status_code == 200
+            and activation_inbox.headers.get("cache-control") == "no-store",
+            f"formal MemoryVersion activation inbox failed: {activation_inbox.text}",
+        )
+        activation_inbox_body = activation_inbox.json()
+        require(
+            activation_inbox_body.get("schemaVersion")
+            == "owner-truth-interview-candidate-memory-activation-inbox-v1"
+            and activation_inbox_body.get("vaultId") == vault_id
+            and activation_inbox_body.get("items")
+            == [{"reviewBatchId": review_batch_id, "candidateId": candidate_id}],
+            "formal activation inbox must expose exactly one opaque retry handle",
+        )
+        rendered_activation_inbox = json.dumps(
+            activation_inbox_body,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        require(
+            all(
+                forbidden not in rendered_activation_inbox
+                for forbidden in (
+                    "content",
+                    "receipt",
+                    "memoryId",
+                    "memoryVersionId",
+                    "sourceId",
+                    "provider",
+                )
+            ),
+            "formal activation inbox must remain value-minimized",
+        )
+
         activation_path = (
             f"/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/"
             f"confirmation/candidates/{candidate_id}/memory-activation"
@@ -1078,6 +1132,20 @@ def main() -> None:
             "formal activation response must not disclose internal MemoryVersion IDs",
         )
         require(memory_counts(test_dsn, vault_id=vault_id) == (1, 1), "formal activation must create one Memory and version")
+
+        activation_inbox_after_activation = client.get(
+            activation_inbox_path,
+            headers=formal_headers(
+                owner_headers,
+                session_id=session_id,
+                decision_id="formal-confirmation-postgres-smoke-memory-inbox-after-activation",
+            ),
+        )
+        require(
+            activation_inbox_after_activation.status_code == 200
+            and activation_inbox_after_activation.json().get("items") == [],
+            "activated Candidate must not remain in the formal activation inbox",
+        )
 
         activation_replay = client.post(
             activation_path,
@@ -1384,6 +1452,8 @@ def main() -> None:
             "replayDeduplicated=true concurrentCommandDeduplicated=true "
             "batchLinkFailureRolledBack=true accountCaptureDenied=true "
             "formalMemoryActivationCreated=true formalMemoryActivationReplayDeduplicated=true "
+            "formalMemoryActivationInboxContentFree=true "
+            "formalMemoryActivationInboxCompletionFiltered=true "
             "formalMemoryActivationProjectionRebuilt=true"
             " formalMemoryActivationContextMaterialized=true"
             " formalSingleMemoryActivationCreated=true"

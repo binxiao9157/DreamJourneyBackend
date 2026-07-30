@@ -207,6 +207,10 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
     def _confirmation_inbox_path(vault_id: str) -> str:
         return f"/v2/vaults/{vault_id}/interview-candidate-confirmations"
 
+    @staticmethod
+    def _memory_activation_inbox_path(vault_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/interview-memory-activation-inbox"
+
     @classmethod
     def _confirmation_batch_accept_path(cls, vault_id: str, review_batch_id: str) -> str:
         return f"{cls._confirmation_path(vault_id, review_batch_id)}/batch-accept"
@@ -411,6 +415,193 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
             self.assertEqual(denied.status_code, 403)
             self.assertEqual(
                 denied.json()["detail"]["code"],
+                "ownerTruthInterviewCandidateReviewDenied",
+            )
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
+    def test_formal_memory_activation_inbox_is_value_minimized_and_filters_terminal_entries(self) -> None:
+        owner_id, owner_headers, owner_session_id = self._login_release_policy("13800139429")
+        vault_id = "vault-interview-memory-activation-inbox"
+        review_batch_id, standard, sensitive = self._seed_review_batch(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        qa_batch_id, qa_standard, _ = self._seed_review_batch(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        inbox_path = self._memory_activation_inbox_path(vault_id)
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthCandidateReview"
+        }
+        try:
+            qa_header_only = client.get(
+                inbox_path,
+                headers={**owner_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+            )
+            self.assertEqual(qa_header_only.status_code, 403)
+            self.assertEqual(
+                qa_header_only.json()["detail"]["code"],
+                "release_policy_denied",
+            )
+
+            accepted = client.post(
+                self._confirmation_batch_accept_path(vault_id, review_batch_id),
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="memory-activation-inbox-formal-accept",
+                ),
+                json={
+                    "commandId": "memory-activation-inbox-formal-accept-command",
+                    "selections": [
+                        {
+                            "candidateId": standard.candidate_id,
+                            "expectedCandidateVersion": 1,
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(accepted.status_code, 201)
+
+            rejected = client.post(
+                self._confirmation_single_decision_path(
+                    vault_id,
+                    review_batch_id,
+                    sensitive.candidate_id,
+                ),
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="memory-activation-inbox-formal-reject",
+                ),
+                json={
+                    "commandId": "memory-activation-inbox-formal-reject-command",
+                    "expectedCandidateVersion": 1,
+                    "action": "reject",
+                },
+            )
+            self.assertEqual(rejected.status_code, 201)
+
+            qa_only = client.post(
+                f"{self._read_path(vault_id, qa_batch_id)}/batch-accept",
+                headers={**owner_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+                json={
+                    "commandId": "memory-activation-inbox-qa-only-command",
+                    "selections": [
+                        {
+                            "candidateId": qa_standard.candidate_id,
+                            "expectedCandidateVersion": 1,
+                        }
+                    ],
+                    "reasonCode": "ownerReviewed",
+                },
+            )
+            self.assertEqual(qa_only.status_code, 201)
+
+            response = client.get(
+                inbox_path,
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="memory-activation-inbox-formal-read",
+                ),
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            payload = response.json()
+            self.assertEqual(
+                payload["schemaVersion"],
+                "owner-truth-interview-candidate-memory-activation-inbox-v1",
+            )
+            self.assertEqual(payload["vaultId"], vault_id)
+            self.assertEqual(
+                payload["items"],
+                [
+                    {
+                        "reviewBatchId": review_batch_id,
+                        "candidateId": standard.candidate_id,
+                    }
+                ],
+            )
+            rendered = json.dumps(payload, ensure_ascii=False)
+            for forbidden in (
+                "content",
+                "receipt",
+                "memoryId",
+                "memoryVersionId",
+                "provider",
+                "sourceId",
+            ):
+                self.assertNotIn(forbidden, rendered)
+
+            activated = client.post(
+                self._confirmation_memory_activation_path(
+                    vault_id,
+                    review_batch_id,
+                    standard.candidate_id,
+                ),
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="memory-activation-inbox-formal-activate",
+                ),
+                json={"commandId": "memory-activation-inbox-formal-activate-command"},
+            )
+            self.assertEqual(activated.status_code, 201)
+
+            after_activation = client.get(
+                inbox_path,
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="memory-activation-inbox-after-activation",
+                ),
+            )
+            self.assertEqual(after_activation.status_code, 200)
+            self.assertEqual(after_activation.json()["items"], [])
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
+    def test_formal_memory_activation_inbox_rejects_cross_owner_and_vault(self) -> None:
+        owner_id, owner_headers, owner_session_id = self._login_release_policy("13800139430")
+        vault_id = "vault-interview-memory-activation-inbox-boundary"
+        self._seed_review_batch(vault_id=vault_id, owner_subject_id=owner_id)
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthCandidateReview"
+        }
+        try:
+            _, other_headers, other_session_id = self._login_release_policy("13800139431")
+            cross_owner = client.get(
+                self._memory_activation_inbox_path(vault_id),
+                headers=self._confirmation_policy_headers(
+                    other_headers,
+                    session_id=other_session_id,
+                    decision_id="memory-activation-inbox-cross-owner",
+                ),
+            )
+            self.assertEqual(cross_owner.status_code, 403)
+            self.assertEqual(
+                cross_owner.json()["detail"]["code"],
+                "ownerTruthInterviewCandidateReviewDenied",
+            )
+
+            cross_vault = client.get(
+                self._memory_activation_inbox_path("vault-not-owned-by-session"),
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="memory-activation-inbox-cross-vault",
+                ),
+            )
+            self.assertEqual(cross_vault.status_code, 403)
+            self.assertEqual(
+                cross_vault.json()["detail"]["code"],
                 "ownerTruthInterviewCandidateReviewDenied",
             )
         finally:

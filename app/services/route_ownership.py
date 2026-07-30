@@ -440,6 +440,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/interview-memory-activation-inbox",
+                session,
+                "ownerTruthInterviewCandidateMemoryActivationInboxRead",
+            ),
+            _rule(
+                "GET",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/confirmation",
                 session,
                 "ownerTruthInterviewCandidateConfirmationRead",

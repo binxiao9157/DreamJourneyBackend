@@ -11,13 +11,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 from threading import RLock
-from typing import Any, ContextManager, Mapping, Protocol
+from typing import Any, Callable, ContextManager, Mapping, Protocol
 
 from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateReviewAccessDenied,
     OwnerTruthCandidateVersionConflict,
 )
-from app.domain.owner_truth.contracts import CandidateDecision, OwnerTruthContractError
+from app.domain.owner_truth.contracts import (
+    CandidateDecision,
+    OwnerTruthContractError,
+    require_uuid,
+)
 from app.domain.owner_truth.interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchAcceptCommand,
     OwnerTruthInterviewCandidateBatchDecisionConflict,
@@ -76,6 +80,31 @@ class OwnerTruthInterviewCandidateFormalActivationAdmission:
     candidate_id: str
     receipt_id: str
     authority_epoch: int
+
+
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateFormalActivationInboxItem:
+    """One content-free formal activation retry handle.
+
+    The immutable confirmation receipt remains private to the repository.  A
+    caller receives only the review-batch and Candidate identifiers needed to
+    issue the existing explicit activation command after an interrupted flow.
+    """
+
+    review_batch_id: str
+    candidate_id: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "review_batch_id",
+            require_uuid(self.review_batch_id, field="review_batch_id"),
+        )
+        object.__setattr__(
+            self,
+            "candidate_id",
+            require_uuid(self.candidate_id, field="candidate_id"),
+        )
 
 
 @dataclass(frozen=True)
@@ -165,12 +194,23 @@ def _assert_formal_confirmation_authorization_capture(
 class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
     """Semantic double for root-command replay and immutable command meaning."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        memory_activation_pending_reader: Callable[
+            [str, str, OwnerTruthCommandContext], bool
+        ]
+        | None = None,
+    ) -> None:
         self._lock = RLock()
         self._records: dict[tuple[str, str], OwnerTruthInterviewCandidateBatchDecisionLedgerRecord] = {}
         self._receipt_links: dict[
             tuple[str, str], OwnerTruthInterviewCandidateBatchDecisionReceiptLink
         ] = {}
+        # The canonical Candidate repository owns terminal state and
+        # MemoryVersion activation.  Keep this root-command ledger
+        # value-minimized and ask that repository only for a boolean.
+        self._memory_activation_pending_reader = memory_activation_pending_reader
 
     @contextmanager
     def transaction(self):
@@ -309,6 +349,58 @@ class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
                 receipt_id=matching_link.receipt_id,
                 authority_epoch=record.authority_epoch,
             )
+
+    def list_formal_pending_memory_activations(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewCandidateFormalActivationInboxItem, ...]:
+        """List only live, formal, not-yet-activated receipt links.
+
+        A standalone batch-decision repository cannot independently infer
+        current Candidate/MemoryVersion state.  The injected canonical reader
+        therefore returns a boolean after checking owner/vault/source liveness,
+        accepted/corrected status, and absence of a MemoryVersion.  Missing
+        wiring fails closed to an empty inbox.
+        """
+
+        _assert_owner_context(context)
+        reader = self._memory_activation_pending_reader
+        if reader is None:
+            return ()
+        with self._lock:
+            records_by_id = {
+                record.batch_decision_id: record
+                for (vault_id, _command_hash), record in self._records.items()
+                if vault_id == context.vault_id
+            }
+            items: set[OwnerTruthInterviewCandidateFormalActivationInboxItem] = set()
+            for link in self._receipt_links.values():
+                if link.vault_id != context.vault_id:
+                    continue
+                record = records_by_id.get(link.batch_decision_id)
+                if record is None or record.owner_subject_id != context.owner_subject_id:
+                    continue
+                capture = record.authorization_capture
+                if (
+                    capture is None
+                    or capture.feature != FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE
+                ):
+                    continue
+                if not reader(link.candidate_id, link.receipt_id, context):
+                    continue
+                items.add(
+                    OwnerTruthInterviewCandidateFormalActivationInboxItem(
+                        review_batch_id=record.review_batch_id,
+                        candidate_id=link.candidate_id,
+                    )
+                )
+        return tuple(
+            sorted(
+                items,
+                key=lambda item: (item.review_batch_id, item.candidate_id),
+            )
+        )
 
 
 class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
@@ -586,6 +678,127 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
             candidate_id=str(row["candidate_id"]),
             receipt_id=str(row["decision_receipt_id"]),
             authority_epoch=int(row["authority_epoch"]),
+        )
+
+    def list_formal_pending_memory_activations(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewCandidateFormalActivationInboxItem, ...]:
+        """Read formal activation retries without selecting value-bearing rows.
+
+        Existing confirmation receipt and MemoryVersion provenance tables are
+        sufficient: a row is actionable only when its receipt came from the
+        formal feature, the Candidate/Source/Owner Vault remain live, and no
+        MemoryVersion references that receipt.  No migration or read model
+        copy is required.
+        """
+
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT owner_subject_id, authority_epoch, status
+                FROM owner_truth.vaults
+                WHERE vault_id = %s
+                FOR SHARE
+                """,
+                (context.vault_id,),
+            )
+            vault = cursor.fetchone()
+            if (
+                vault is None
+                or str(vault["owner_subject_id"]) != context.owner_subject_id
+                or str(vault["status"]) != "active"
+            ):
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "Memory activation inbox is unavailable to this Owner Vault"
+                )
+            cursor.execute(
+                """
+                SELECT root.review_batch_id, link.candidate_id
+                FROM owner_truth.interview_review_batch_candidate_decisions AS root
+                JOIN owner_truth.interview_review_batch_candidate_decision_receipts AS link
+                  ON link.vault_id = root.vault_id
+                 AND link.batch_decision_id = root.id
+                JOIN owner_truth.decision_receipts AS receipt
+                  ON receipt.vault_id = link.vault_id
+                 AND receipt.id = link.decision_receipt_id
+                JOIN owner_truth.memory_candidates AS candidate
+                  ON candidate.vault_id = link.vault_id
+                 AND candidate.id = link.candidate_id
+                JOIN owner_truth.interview_review_batch_candidate_admissions AS admission
+                  ON admission.vault_id = root.vault_id
+                 AND admission.review_batch_id = root.review_batch_id
+                JOIN owner_truth.interview_review_batches AS review_batch
+                  ON review_batch.vault_id = admission.vault_id
+                 AND review_batch.id = admission.review_batch_id
+                JOIN owner_truth.sources AS source
+                  ON source.vault_id = admission.vault_id
+                 AND source.id = admission.source_id
+                JOIN owner_truth.extraction_results AS extraction
+                  ON extraction.vault_id = candidate.vault_id
+                 AND extraction.id = candidate.extraction_result_id
+                LEFT JOIN owner_truth.memory_versions AS memory_version
+                  ON memory_version.vault_id = link.vault_id
+                 AND memory_version.decision_receipt_id = link.decision_receipt_id
+                WHERE root.vault_id = %s
+                  AND root.owner_subject_id = %s
+                  AND root.authority_epoch = %s
+                  AND COALESCE(root.authorization_evidence ->> 'feature', '') = %s
+                  AND receipt.actor_subject_id = %s
+                  AND receipt.authority_epoch = %s
+                  AND receipt.decision IN ('accepted', 'corrected')
+                  AND receipt.candidate_id = link.candidate_id
+                  AND candidate.owner_subject_id = %s
+                  AND candidate.authority_epoch = %s
+                  AND candidate.decision_status = receipt.decision
+                  AND candidate.decision_status IN ('accepted', 'corrected')
+                  AND admission.owner_subject_id = %s
+                  AND admission.authority_epoch = %s
+                  AND review_batch.owner_subject_id = %s
+                  AND review_batch.authority_epoch = %s
+                  AND review_batch.state = 'acknowledged'
+                  AND source.owner_subject_id = %s
+                  AND source.authority_epoch = %s
+                  AND source.state = 'active'
+                  AND source.source_kind = 'conversation'
+                  AND source.source_version = admission.source_version
+                  AND COALESCE(source.metadata ->> 'origin', '')
+                        = 'interviewReviewBatchCandidateProposal'
+                  AND COALESCE(source.metadata ->> 'reviewBatchId', '')
+                        = root.review_batch_id::TEXT
+                  AND candidate.source_id = admission.source_id
+                  AND extraction.source_id = admission.source_id
+                  AND extraction.source_version = admission.source_version
+                  AND extraction.status = 'succeeded'
+                  AND memory_version.id IS NULL
+                ORDER BY root.review_batch_id ASC, link.candidate_id ASC
+                """,
+                (
+                    context.vault_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            OwnerTruthInterviewCandidateFormalActivationInboxItem(
+                review_batch_id=str(row["review_batch_id"]),
+                candidate_id=str(row["candidate_id"]),
+            )
+            for row in rows
         )
 
     @contextmanager
@@ -919,6 +1132,7 @@ class OwnerTruthInterviewCandidateBatchDecisionService:
 
 
 __all__ = [
+    "OwnerTruthInterviewCandidateFormalActivationInboxItem",
     "InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository",
     "OwnerTruthInterviewCandidateBatchAcceptResult",
     "OwnerTruthInterviewCandidateBatchDecisionLedgerRecord",

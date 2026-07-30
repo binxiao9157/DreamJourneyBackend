@@ -182,7 +182,11 @@ class InMemoryStore:
             )
         )
         self._owner_truth_interview_candidate_batch_decision_repository = (
-            InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository()
+            InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository(
+                memory_activation_pending_reader=(
+                    self._owner_truth_candidate_review_repository.is_memory_activation_pending
+                )
+            )
         )
         self._owner_truth_projection_rights_repository = (
             InMemoryOwnerTruthProjectionRightsRepository()
