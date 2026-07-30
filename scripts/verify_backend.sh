@@ -37,6 +37,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-candidate-extraction-wo
 echo "== Owner Truth memory-search offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-memory-search-offline-evaluation-gate.sh
 
+echo "== Owner Truth Context/Citation offline evaluation gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-context-citation-offline-evaluation-gate.sh
+
 echo "== Owner Truth recommendation offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-recommendation-offline-evaluation-gate.sh
 

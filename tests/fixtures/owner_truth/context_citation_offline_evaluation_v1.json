@@ -1,0 +1,111 @@
+{
+  "schemaVersion": "owner-truth-context-citation-offline-evaluation-v1",
+  "syntheticOnly": true,
+  "cases": [
+    {
+      "caseId": "query-match-owner-only",
+      "scenario": "queryMatch",
+      "expectedVaultId": "vault-context-citation-evaluation-a",
+      "privateMarkers": ["synthetic-private-orbit-a", "query-orbit-a"],
+      "expected": {
+        "disposition": "recorded",
+        "contextState": "ready",
+        "selectedCount": 1,
+        "filteredReasonCodes": ["query_not_matched"],
+        "citationCount": 1,
+        "fallbacks": []
+      }
+    },
+    {
+      "caseId": "query-no-match-fails-closed",
+      "scenario": "queryNoMatch",
+      "expectedVaultId": "vault-context-citation-evaluation-a",
+      "privateMarkers": ["synthetic-private-orbit-b", "query-no-match-token"],
+      "expected": {
+        "disposition": "recorded",
+        "contextState": "ready",
+        "selectedCount": 0,
+        "filteredReasonCodes": ["query_not_matched"],
+        "citationCount": 0,
+        "fallbacks": ["owner_truth_context_no_query_match_no_personal_memory"]
+      }
+    },
+    {
+      "caseId": "projection-unavailable-no-legacy-fallback",
+      "scenario": "projectionUnavailable",
+      "expectedVaultId": "vault-context-citation-evaluation-a",
+      "privateMarkers": ["synthetic-private-projection-unavailable"],
+      "expected": {
+        "disposition": "recorded",
+        "contextState": "rebuilding",
+        "selectedCount": 0,
+        "filteredReasonCodes": [],
+        "citationCount": 0,
+        "fallbacks": ["owner_truth_context_unavailable_no_personal_memory"]
+      }
+    },
+    {
+      "caseId": "sensitive-and-ai-only-filtered",
+      "scenario": "filteredEligibility",
+      "expectedVaultId": "vault-context-citation-evaluation-a",
+      "privateMarkers": [
+        "synthetic-private-standard",
+        "synthetic-private-sensitive",
+        "synthetic-private-ai-only"
+      ],
+      "expected": {
+        "disposition": "recorded",
+        "contextState": "ready",
+        "selectedCount": 1,
+        "filteredReasonCodes": [
+          "ai_only_perspective_not_context_eligible",
+          "sensitivity_not_context_eligible"
+        ],
+        "citationCount": 1,
+        "fallbacks": []
+      }
+    },
+    {
+      "caseId": "cross-owner-denied-without-record",
+      "scenario": "crossOwnerDenied",
+      "expectedVaultId": "vault-context-citation-evaluation-a",
+      "privateMarkers": ["synthetic-private-cross-owner"],
+      "expected": {
+        "disposition": "accessDenied",
+        "contextState": null,
+        "selectedCount": 0,
+        "filteredReasonCodes": [],
+        "citationCount": 0,
+        "fallbacks": []
+      }
+    },
+    {
+      "caseId": "cross-vault-denied-without-record",
+      "scenario": "crossVaultDenied",
+      "expectedVaultId": "vault-context-citation-evaluation-b",
+      "privateMarkers": ["synthetic-private-cross-vault"],
+      "expected": {
+        "disposition": "accessDenied",
+        "contextState": null,
+        "selectedCount": 0,
+        "filteredReasonCodes": [],
+        "citationCount": 0,
+        "fallbacks": []
+      }
+    },
+    {
+      "caseId": "source-invalidated-before-receipt",
+      "scenario": "sourceInvalidated",
+      "expectedVaultId": "vault-context-citation-evaluation-a",
+      "privateMarkers": ["synthetic-private-invalidated-source"],
+      "expected": {
+        "disposition": "rejected",
+        "contextState": "ready",
+        "selectedCount": 1,
+        "filteredReasonCodes": [],
+        "citationCount": 0,
+        "fallbacks": []
+      }
+    }
+  ]
+}
