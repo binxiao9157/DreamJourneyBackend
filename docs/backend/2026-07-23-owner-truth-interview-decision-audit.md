@@ -32,6 +32,22 @@ Echo 行为，也不实现自然语言主题识别。
 决策函数保持只读；写入在独立的 `OwnerTruthInterviewDecisionAuditService` 中显式执行，
 避免读取/推荐过程产生隐式副作用。
 
+## 2026-07-30：正式自然输入追加的原子审计
+
+`OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED=false` 时，正式自然输入追加路径与此前
+完全一致，不写入审计。显式开启后，`POST .../messages` 在同一个 request UoW 中按以下顺序
+处理：
+
+1. 先按既有 Owner/ReleasePolicy 规则追加 `narrative`；
+2. 只用服务端固定的 opaque topic 与全 `false` 布尔信号计算确定性动作；
+3. 通过 `decide_and_record_in_active_unit_of_work` 写入无正文审计回执；
+4. 事务任一步失败时由 Postgres request UoW 回滚，不能留下“消息已提交、审计缺失”的
+   半完成状态。
+
+该信号封套不从叙述文本推断话题、风险、分类或模型结论；其普通结果是 `listen /
+noSafePrimaryQuestion`。危机安全 override 在追加之前直接返回，绝不写入此审计。审计仍不会
+加入 HTTP 响应，客户端也不能通过请求字段改变审计内容。
+
 ## 验证
 
 本地：
@@ -39,6 +55,7 @@ Echo 行为，也不实现自然语言主题识别。
 ```bash
 PYTHONPATH=. .venv/bin/python -m unittest \
   tests.test_owner_truth_interview_decision_audit \
+  tests.test_owner_truth_interview_input_api \
   tests.test_owner_truth_interview_decision_audit_migration_contract \
   tests.test_owner_truth_interview_session_orchestration \
   tests.test_owner_truth_interview_orchestration
@@ -72,6 +89,10 @@ curl -fsS https://dreamjourney-api.liftora.cn/ready
 
 结果：`appliedHead=0041`、`expectedHead=0041`、`status=ready`；隔离 smoke 输出
 `valueFree=true deduplicated=true staleFenced=true`，公网 `/ready` 为 `ready`。
+
+上述证据只证明 `0041` schema 与独立审计服务曾部署。本文件 2026-07-30 的正式追加原子
+接入尚未部署；部署前必须保持新环境变量为 `false`，并先在隔离 Postgres smoke 验证后再决定
+是否显式开启。
 
 ## 非目标
 

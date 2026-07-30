@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.main import app
+from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.in_memory_store import InMemoryStore
+from app.services.owner_truth_interview_decision_audit import (
+    OwnerTruthInterviewDecisionAuditCommand,
+)
 
 
 client = TestClient(app)
@@ -23,6 +27,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.previous_route_mode = main_module.AUTH_ROUTE_MODE
         self.previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
         self.previous_qa_enabled = main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        self.previous_decision_audit_enabled = (
+            main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED
+        )
         self.store = InMemoryStore()
         main_module.store = self.store
         main_module.BACKEND_API_TOKEN = ""
@@ -30,6 +37,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         main_module.AUTH_ROUTE_MODE = "enforce"
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
+        main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = False
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -38,6 +46,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         main_module.AUTH_ROUTE_MODE = self.previous_route_mode
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = self.previous_qa_enabled
+        main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = (
+            self.previous_decision_audit_enabled
+        )
 
     @staticmethod
     def _login(phone: str, *, qa: bool = True) -> tuple[str, dict[str, str], str]:
@@ -763,7 +774,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(replay.json()["receipt"]["sessionVersion"], 2)
 
     def test_crisis_narrative_is_interrupted_before_interview_persistence(self) -> None:
-        _, headers, _ = self._login("13800139614")
+        owner_id, headers, _ = self._login("13800139614")
         vault_id = "vault-interview-safety-override"
         thread_id = str(uuid4())
         session_id = str(uuid4())
@@ -776,13 +787,16 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(start.status_code, 201, start.text)
 
         crisis_text = "我真的撑不住了。"
+        crisis_command_id = str(uuid4())
+        crisis_message_id = str(uuid4())
+        main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = True
         interrupted = client.post(
             self._append_path(vault_id, session_id),
             headers=headers,
             json={
-                "commandId": str(uuid4()),
+                "commandId": crisis_command_id,
                 "threadId": thread_id,
-                "messageId": str(uuid4()),
+                "messageId": crisis_message_id,
                 "expectedThreadVersion": 1,
                 "expectedSessionVersion": 1,
                 "text": crisis_text,
@@ -818,6 +832,27 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(state.json()["session"]["ownerTurnCount"], 0)
         self.assertEqual(state.json()["session"]["threadVersion"], 1)
         self.assertEqual(state.json()["session"]["rowVersion"], 1)
+        blocked_audit_command = OwnerTruthInterviewDecisionAuditCommand(
+            command_id=(
+                "owner-truth-interview-append-decision-audit:"
+                f"{crisis_command_id}"
+            ),
+            thread_id=thread_id,
+            session_id=session_id,
+            message_id=crisis_message_id,
+            expected_session_version=1,
+        )
+        self.assertIsNone(
+            self.store.owner_truth_interview_decision_audit_repository().find_by_command(
+                context=OwnerTruthCommandContext(
+                    vault_id=vault_id,
+                    owner_subject_id=owner_id,
+                    actor_subject_id=owner_id,
+                ),
+                command_id_hash=blocked_audit_command.command_id_hash,
+                request_payload_hash=blocked_audit_command.request_payload_hash,
+            )
+        )
 
         normal = client.post(
             self._append_path(vault_id, session_id),
@@ -1198,6 +1233,119 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         )
         self.assertEqual(append.status_code, 201)
         self.assertEqual(append.json()["receipt"]["messageSequence"], 1)
+
+    def test_formal_natural_input_writes_value_free_audit_only_when_enabled(self) -> None:
+        owner_id, headers, auth_session_id = self._login("13800139620", qa=False)
+        headers.update(
+            {
+                "X-DreamJourney-Feature": "echoTextInput",
+                "X-DreamJourney-Feature-Decision-Id": "decision-interview-append-audit",
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": hashlib.sha256(
+                    auth_session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        vault_id = "vault-interview-append-decision-audit"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        start = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(start.status_code, 201, start.text)
+
+        default_off_command_id = str(uuid4())
+        default_off_message_id = str(uuid4())
+        default_off = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": default_off_command_id,
+                "threadId": thread_id,
+                "messageId": default_off_message_id,
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": "开关关闭时只追加私有叙述。",
+            },
+        )
+        self.assertEqual(default_off.status_code, 201, default_off.text)
+        default_off_audit_command = OwnerTruthInterviewDecisionAuditCommand(
+            command_id=(
+                "owner-truth-interview-append-decision-audit:"
+                f"{default_off_command_id}"
+            ),
+            thread_id=thread_id,
+            session_id=session_id,
+            message_id=default_off_message_id,
+            expected_session_version=2,
+        )
+        audit_context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+            policy_version="release-policy-v1",
+        )
+        repository = self.store.owner_truth_interview_decision_audit_repository()
+        self.assertIsNone(
+            repository.find_by_command(
+                context=audit_context,
+                command_id_hash=default_off_audit_command.command_id_hash,
+                request_payload_hash=default_off_audit_command.request_payload_hash,
+            )
+        )
+
+        append_command_id = str(uuid4())
+        message_id = str(uuid4())
+        private_text = "这段叙述只能写入私有会话，不能进入审计正文。"
+        main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = True
+        append = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": append_command_id,
+                "threadId": thread_id,
+                "messageId": message_id,
+                "expectedThreadVersion": 2,
+                "expectedSessionVersion": 2,
+                "text": private_text,
+            },
+        )
+
+        self.assertEqual(append.status_code, 201, append.text)
+        rendered_response = json.dumps(append.json(), ensure_ascii=False, sort_keys=True)
+        self.assertNotIn(private_text, rendered_response)
+        self.assertNotIn("decisionAudit", rendered_response)
+
+        audit_command = OwnerTruthInterviewDecisionAuditCommand(
+            command_id=(
+                "owner-truth-interview-append-decision-audit:"
+                f"{append_command_id}"
+            ),
+            thread_id=thread_id,
+            session_id=session_id,
+            message_id=message_id,
+            expected_session_version=3,
+        )
+        audit = repository.find_by_command(
+            context=audit_context,
+            command_id_hash=audit_command.command_id_hash,
+            request_payload_hash=audit_command.request_payload_hash,
+        )
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        self.assertEqual(audit.outcome, "deduplicated")
+        self.assertEqual(audit.action.value, "listen")
+        self.assertEqual(audit.reason_code, "noSafePrimaryQuestion")
+        self.assertEqual(audit.session_version, 3)
+        rendered_audit = json.dumps(audit.value_free_summary(), ensure_ascii=False, sort_keys=True)
+        self.assertNotIn(private_text, rendered_audit)
+        self.assertNotIn(thread_id, rendered_audit)
+        self.assertNotIn(message_id, rendered_audit)
 
     def test_formal_boundary_requires_captured_echo_policy(self) -> None:
         _, headers, auth_session_id = self._login("13800139611", qa=False)

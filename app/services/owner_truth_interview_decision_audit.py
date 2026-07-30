@@ -562,57 +562,83 @@ class OwnerTruthInterviewDecisionAuditService:
             correlation_id=f"owner-truth-interview-decision-audit-{command.message_id}",
             command_id=command.command_id_hash,
         ):
-            repository = self._store.owner_truth_interview_decision_audit_repository()
-            replay = repository.find_by_command(
-                context=context,
-                command_id_hash=command.command_id_hash,
-                request_payload_hash=command.request_payload_hash,
-            )
-            if replay is not None:
-                return replay
-
-            conversation = OwnerTruthConversationService(
-                self._store.owner_truth_conversation_repository()
-            )
-            orchestration = OwnerTruthInterviewSessionOrchestrationService(
-                conversation_service=conversation
-            ).decide(
-                session_id=command.session_id,
+            return self.decide_and_record_in_active_unit_of_work(
+                command=command,
                 context=context,
                 signals=signals,
             )
-            session = orchestration.persisted_session
-            if (
-                session.thread_id != command.thread_id
-                or session.row_version != command.expected_session_version
-            ):
-                raise OwnerTruthInterviewDecisionAuditStale(
-                    "decision audit must bind the current interview session version"
-                )
-            message = conversation.read_message_authority(
-                message_id=command.message_id,
-                context=context,
+
+    def decide_and_record_in_active_unit_of_work(
+        self,
+        *,
+        command: OwnerTruthInterviewDecisionAuditCommand,
+        context: OwnerTruthCommandContext,
+        signals: InterviewSessionOrchestrationSignals,
+    ) -> OwnerTruthInterviewDecisionAuditResult:
+        """Write an audit in the caller's already-active transaction.
+
+        Postgres repositories refuse to resolve outside a request UoW. This
+        explicit entry point lets an aggregate command bind its write and the
+        value-free audit atomically rather than opening an independent writer
+        after the aggregate was already persisted.
+        """
+
+        _assert_owner_context(context)
+        if not self._enabled:
+            raise OwnerTruthInterviewDecisionAuditUnavailable(
+                "owner truth interview decision audit is unavailable"
             )
-            if (
-                message.thread_id != session.thread_id
-                or message.session_id != session.session_id
-                or message.owner_subject_id != context.owner_subject_id
-                or message.authority_epoch != session.authority_epoch
-                or message.author is not ConversationMessageAuthor.OWNER
-                or message.kind is not ConversationMessageKind.NARRATIVE
-            ):
-                raise OwnerTruthInterviewDecisionAuditAccessDenied(
-                    "decision audit must bind one current Owner narrative"
-                )
-            record = self._record(
-                command=command,
-                context=context,
-                action=orchestration.decision.action,
-                reason_code=orchestration.decision.reason_code,
-                authority_epoch=session.authority_epoch,
-                session_version=session.row_version,
+        repository = self._store.owner_truth_interview_decision_audit_repository()
+        replay = repository.find_by_command(
+            context=context,
+            command_id_hash=command.command_id_hash,
+            request_payload_hash=command.request_payload_hash,
+        )
+        if replay is not None:
+            return replay
+
+        conversation = OwnerTruthConversationService(
+            self._store.owner_truth_conversation_repository()
+        )
+        orchestration = OwnerTruthInterviewSessionOrchestrationService(
+            conversation_service=conversation
+        ).decide(
+            session_id=command.session_id,
+            context=context,
+            signals=signals,
+        )
+        session = orchestration.persisted_session
+        if (
+            session.thread_id != command.thread_id
+            or session.row_version != command.expected_session_version
+        ):
+            raise OwnerTruthInterviewDecisionAuditStale(
+                "decision audit must bind the current interview session version"
             )
-            return repository.record(context=context, record=record)
+        message = conversation.read_message_authority(
+            message_id=command.message_id,
+            context=context,
+        )
+        if (
+            message.thread_id != session.thread_id
+            or message.session_id != session.session_id
+            or message.owner_subject_id != context.owner_subject_id
+            or message.authority_epoch != session.authority_epoch
+            or message.author is not ConversationMessageAuthor.OWNER
+            or message.kind is not ConversationMessageKind.NARRATIVE
+        ):
+            raise OwnerTruthInterviewDecisionAuditAccessDenied(
+                "decision audit must bind one current Owner narrative"
+            )
+        record = self._record(
+            command=command,
+            context=context,
+            action=orchestration.decision.action,
+            reason_code=orchestration.decision.reason_code,
+            authority_epoch=session.authority_epoch,
+            session_version=session.row_version,
+        )
+        return repository.record(context=context, record=record)
 
     @staticmethod
     def _record(

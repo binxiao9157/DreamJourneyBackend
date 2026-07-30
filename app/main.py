@@ -163,6 +163,10 @@ from app.services.owner_truth_interview_candidate_proposal import (
     OwnerTruthInterviewCandidateProposalService,
     OwnerTruthInterviewCandidateProposalStatusService,
 )
+from app.services.owner_truth_interview_decision_audit import (
+    OwnerTruthInterviewDecisionAuditCommand,
+    OwnerTruthInterviewDecisionAuditService,
+)
 from app.services.owner_truth_interview_session_read import (
     OwnerTruthInterviewSessionReadService,
 )
@@ -474,6 +478,9 @@ DELEGATED_ACCESS_CONTRACT_API_ENABLED = bool(
 )
 OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = bool(
     settings.owner_truth_candidate_review_qa_enabled
+)
+OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = bool(
+    settings.owner_truth_interview_decision_audit_enabled
 )
 OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = bool(
     settings.owner_truth_knowledge_dimension_confirmation_qa_enabled
@@ -1115,6 +1122,7 @@ _OWNER_TRUTH_INTERVIEW_ORCHESTRATION_REQUIRED_PAYLOAD_FIELDS = frozenset(
     }
 )
 _OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_TOPIC_ID = "qa-interview-orchestration"
+_OWNER_TRUTH_INTERVIEW_APPEND_DECISION_AUDIT_TOPIC_ID = "ownerNarrativeAppendAudit"
 _OWNER_TRUTH_INTERVIEW_PACING_PAYLOAD_FIELDS = frozenset(
     {
         "commandId",
@@ -1311,6 +1319,48 @@ def _owner_truth_interview_orchestration_read_signals(
     return InterviewSessionOrchestrationSignals(
         topic_id=_OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_TOPIC_ID,
         **values,
+    )
+
+
+def _record_owner_truth_interview_append_decision_audit(
+    *,
+    command: AppendInterviewMessageCommand,
+    result: Any,
+    context: OwnerTruthCommandContext,
+) -> None:
+    """Bind a successful Owner narrative append to a value-free audit receipt.
+
+    This helper runs inside the aggregate append transaction. Its server-owned,
+    all-false signal envelope never derives a topic, classification, or policy
+    fact from the narrative text.
+    """
+
+    if not OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED:
+        return
+    message_id = getattr(result, "message_id", None)
+    session_version = getattr(result, "session_version", None)
+    if not isinstance(message_id, str) or not message_id or type(session_version) is not int:
+        raise OwnerTruthConversationError(
+            "interview append result cannot bind a decision audit"
+        )
+    OwnerTruthInterviewDecisionAuditService(
+        store,
+        enabled=True,
+    ).decide_and_record_in_active_unit_of_work(
+        command=OwnerTruthInterviewDecisionAuditCommand(
+            command_id=(
+                "owner-truth-interview-append-decision-audit:"
+                f"{command.command_id}"
+            ),
+            thread_id=command.thread_id,
+            session_id=command.session_id,
+            message_id=message_id,
+            expected_session_version=session_version,
+        ),
+        context=context,
+        signals=InterviewSessionOrchestrationSignals(
+            topic_id=_OWNER_TRUTH_INTERVIEW_APPEND_DECISION_AUDIT_TOPIC_ID,
+        ),
     )
 
 
@@ -5035,6 +5085,11 @@ def append_owner_truth_interview_narrative(
                 store.owner_truth_conversation_repository()
             ).append_message(
                 command=command,
+                context=context,
+            )
+            _record_owner_truth_interview_append_decision_audit(
+                command=command,
+                result=result,
                 context=context,
             )
         automation = _owner_truth_review_batch_automation_after_qa_transition(

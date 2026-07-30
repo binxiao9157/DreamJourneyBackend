@@ -107,6 +107,9 @@ class Settings:
     # Recommendation feedback records only value-free replacement or ranking
     # signals. It remains independently default-off from planning/activation.
     owner_truth_knowledge_recommendation_feedback_qa_enabled: bool = False
+    # A server-side, value-free audit writer for successful natural-input
+    # appends. It has no public API surface and remains default-off.
+    owner_truth_interview_decision_audit_enabled: bool = False
     # Explicit Owner continuation cues remain a fourth, independently closed
     # M0-B QA lane. They do not expose recommendation text or public Echo UI.
     owner_truth_saved_continuation_cue_qa_enabled: bool = False
@@ -314,6 +317,10 @@ class Settings:
             owner_truth_knowledge_recommendation_activation_qa_enabled=_env_bool(
                 "OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_QA_ENABLED",
                 cls.owner_truth_knowledge_recommendation_activation_qa_enabled,
+            ),
+            owner_truth_interview_decision_audit_enabled=_env_bool(
+                "OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED",
+                cls.owner_truth_interview_decision_audit_enabled,
             ),
             owner_truth_saved_continuation_cue_qa_enabled=_env_bool(
                 "OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED",
