@@ -258,12 +258,14 @@ from app.services.owner_truth_knowledge_recommendation_activation import (
     knowledge_recommendation_activation_summary,
 )
 from app.services.owner_truth_knowledge_recommendation_feedback import (
+    OwnerTruthGuidedRecommendationFeedbackCommand,
     OwnerTruthKnowledgeRecommendationFeedbackAccessDenied,
     OwnerTruthKnowledgeRecommendationFeedbackCommand,
     OwnerTruthKnowledgeRecommendationFeedbackConflict,
     OwnerTruthKnowledgeRecommendationFeedbackError,
     OwnerTruthKnowledgeRecommendationFeedbackService,
     OwnerTruthKnowledgeRecommendationFeedbackStale,
+    guided_recommendation_set_id,
     knowledge_recommendation_feedback_summary,
 )
 from app.services.owner_truth_thread_summary_read import OwnerTruthThreadSummaryReadService
@@ -1827,11 +1829,16 @@ def _owner_truth_guided_recommendation_presentation_context(
 ) -> OwnerTruthCommandContext:
     """Authorize the default-off product presentation without accepting QA."""
 
+    route_suffix = (
+        "/guided-recommendations/feedback"
+        if request.method.upper() == "POST"
+        else "/guided-recommendations"
+    )
     return _owner_truth_captured_release_policy_context(
         request,
         vault_id=vault_id,
         feature="echoGuidedRecommendations",
-        route=f"{request.method.upper()} /v2/vaults/*/guided-recommendations",
+        route=f"{request.method.upper()} /v2/vaults/*{route_suffix}",
         user_session_required_code="ownerTruthGuidedRecommendationUserSessionRequired",
     )
 
@@ -2342,6 +2349,30 @@ def _owner_truth_guided_recommendation_presentation_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthGuidedRecommendationInvalid"},
+    )
+
+
+def _owner_truth_guided_recommendation_feedback_http_error(
+    error: OwnerTruthKnowledgeRecommendationFeedbackError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthKnowledgeRecommendationFeedbackAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthGuidedRecommendationFeedbackDenied"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeRecommendationFeedbackStale):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthGuidedRecommendationFeedbackStale"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeRecommendationFeedbackConflict):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthGuidedRecommendationFeedbackConflict"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthGuidedRecommendationFeedbackInvalid"},
     )
 
 
@@ -6147,6 +6178,15 @@ _OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_FIELDS = frozenset(
         "expectedSessionVersion",
     }
 )
+_OWNER_TRUTH_GUIDED_RECOMMENDATION_FEEDBACK_FIELDS = frozenset(
+    {
+        "commandId",
+        "recommendationSetId",
+        "slot",
+        "feedbackAction",
+        "feedbackReason",
+    }
+)
 _OWNER_TRUTH_SAVED_CONTINUATION_CUE_FIELDS = frozenset(
     {
         "commandId",
@@ -6360,7 +6400,13 @@ def get_owner_truth_guided_recommendations(
         raise _owner_truth_guided_recommendation_presentation_http_error(error) from error
 
     recommendations: list[dict[str, str]] = []
+    recommendation_set_id: str | None = None
     if result.selection is not None:
+        recommendation_set_id = guided_recommendation_set_id(
+            context=context,
+            authority_epoch=result.dimension_read.authority_epoch,
+            decisions=result.selection.selected,
+        )
         for decision in result.selection.selected:
             prompt = decision.presentation()
             recommendations.append(
@@ -6374,10 +6420,58 @@ def get_owner_truth_guided_recommendations(
     return JSONResponse(
         status_code=200,
         content={
-            "schemaVersion": "owner-truth-guided-recommendation-presentation-response-v1",
+            "schemaVersion": "owner-truth-guided-recommendation-presentation-response-v2",
             "vaultId": context.vault_id,
             "state": result.state.value,
+            "recommendationSetId": recommendation_set_id,
             "recommendations": recommendations,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/guided-recommendations/feedback",
+    include_in_schema=False,
+)
+def submit_owner_truth_guided_recommendation_feedback(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Persist one display-safe prompt action without exposing planner internals."""
+
+    try:
+        context = _owner_truth_guided_recommendation_presentation_context(
+            request,
+            vault_id=vault_id,
+        )
+        unsupported = sorted(
+            set(payload).difference(_OWNER_TRUTH_GUIDED_RECOMMENDATION_FEEDBACK_FIELDS)
+        )
+        if unsupported:
+            raise OwnerTruthKnowledgeRecommendationFeedbackError(
+                "guided recommendation feedback contains unsupported fields"
+            )
+        command = OwnerTruthGuidedRecommendationFeedbackCommand(
+            command_id=str(payload.get("commandId") or ""),
+            recommendation_set_id=str(payload.get("recommendationSetId") or ""),
+            slot=payload.get("slot"),
+            feedback_action=payload.get("feedbackAction"),
+            feedback_reason=payload.get("feedbackReason"),
+        )
+        result = OwnerTruthKnowledgeRecommendationFeedbackService(
+            store,
+            enabled=True,
+        ).submit_guided_presentation(context=context, command=command)
+    except OwnerTruthKnowledgeRecommendationFeedbackError as error:
+        raise _owner_truth_guided_recommendation_feedback_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-guided-recommendation-feedback-response-v1",
+            "vaultId": context.vault_id,
+            "feedback": {"status": result.outcome},
         },
         headers={"Cache-Control": "no-store"},
     )

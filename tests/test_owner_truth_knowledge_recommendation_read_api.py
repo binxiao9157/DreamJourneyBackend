@@ -152,6 +152,10 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         return f"/v2/vaults/{vault_id}/guided-recommendations"
 
     @staticmethod
+    def _guided_presentation_feedback_path(vault_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/guided-recommendations/feedback"
+
+    @staticmethod
     def _guided_presentation_policy_headers(
         headers: dict[str, str],
         *,
@@ -623,14 +627,21 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             body = response.json()
             self.assertEqual(
                 set(body),
-                {"schemaVersion", "vaultId", "state", "recommendations"},
+                {
+                    "schemaVersion",
+                    "vaultId",
+                    "state",
+                    "recommendationSetId",
+                    "recommendations",
+                },
             )
             self.assertEqual(
                 body["schemaVersion"],
-                "owner-truth-guided-recommendation-presentation-response-v1",
+                "owner-truth-guided-recommendation-presentation-response-v2",
             )
             self.assertEqual(body["vaultId"], vault_id)
             self.assertEqual(body["state"], "ready")
+            self.assertRegex(body["recommendationSetId"], r"^[a-f0-9]{64}$")
             self.assertEqual(len(body["recommendations"]), 1)
             self.assertEqual(
                 set(body["recommendations"][0]),
@@ -654,6 +665,114 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
                 "claim",
             ):
                 self.assertNotIn(forbidden, rendered)
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
+    def test_product_guided_recommendation_feedback_is_scope_bound_replay_safe_and_value_free(self) -> None:
+        owner_id, headers, session_id = self._login_release_policy("13800139421")
+        vault_id = "vault-guided-recommendation-feedback-presentation"
+        decision_id, decision_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "A selected prompt must remain private to the owner."},
+            command_id="guided-feedback-activate-decision",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=decision_id,
+            content_hash=decision_hash,
+            dimension="keyDecisions",
+            facets=("choice", "reason"),
+            command_id="guided-feedback-confirm-decision",
+        )
+        self._seed_thread(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="guided-feedback-thread",
+        )
+        presentation_path = self._guided_presentation_path(vault_id)
+        feedback_path = self._guided_presentation_feedback_path(vault_id)
+        payload = {
+            "commandId": "guided-feedback-replay-safe",
+            "recommendationSetId": "0" * 64,
+            "slot": "breadth",
+            "feedbackAction": "replace",
+            "feedbackReason": "questionWording",
+        }
+
+        qa_header_only = client.post(
+            feedback_path,
+            headers={**headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+            json=payload,
+        )
+        self.assertEqual(qa_header_only.status_code, 403, qa_header_only.text)
+        self.assertEqual(
+            qa_header_only.json()["detail"]["code"],
+            "release_policy_denied",
+        )
+        self.assertEqual(
+            qa_header_only.json()["detail"]["feature"],
+            "echoGuidedRecommendations",
+        )
+
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "echoGuidedRecommendations"
+        }
+        policy_headers = self._guided_presentation_policy_headers(
+            headers,
+            session_id=session_id,
+            decision_id="guided-feedback-owner",
+        )
+        try:
+            presentation = client.get(presentation_path, headers=policy_headers)
+            self.assertEqual(presentation.status_code, 200, presentation.text)
+            presentation_body = presentation.json()
+            self.assertEqual(presentation_body["state"], "ready")
+            self.assertEqual([item["slot"] for item in presentation_body["recommendations"]], ["breadth"])
+            payload["recommendationSetId"] = presentation_body["recommendationSetId"]
+
+            created = client.post(feedback_path, headers=policy_headers, json=payload)
+            self.assertEqual(created.status_code, 201, created.text)
+            self.assertEqual(created.headers["cache-control"], "no-store")
+            self.assertEqual(
+                created.json(),
+                {
+                    "schemaVersion": "owner-truth-guided-recommendation-feedback-response-v1",
+                    "vaultId": vault_id,
+                    "feedback": {"status": "created"},
+                },
+            )
+            rendered = json.dumps(created.json(), ensure_ascii=False)
+            for forbidden in (
+                "candidateId",
+                "evidenceRef",
+                "reasonCode",
+                "targetDimension",
+                "policyVersion",
+                "questionTemplate",
+                "threadId",
+                "sessionId",
+                "A selected prompt must remain private",
+            ):
+                self.assertNotIn(forbidden, rendered)
+
+            replayed = client.post(feedback_path, headers=policy_headers, json=payload)
+            self.assertEqual(replayed.status_code, 200, replayed.text)
+            self.assertEqual(replayed.json()["feedback"], {"status": "deduplicated"})
+
+            stale = client.post(
+                feedback_path,
+                headers=policy_headers,
+                json={**payload, "commandId": "guided-feedback-stale-selection"},
+            )
+            self.assertEqual(stale.status_code, 409, stale.text)
+            self.assertEqual(
+                stale.json()["detail"]["code"],
+                "ownerTruthGuidedRecommendationFeedbackStale",
+            )
         finally:
             policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 

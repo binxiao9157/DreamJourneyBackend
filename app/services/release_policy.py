@@ -807,9 +807,12 @@ class ReleasePolicyCommandGate:
         if normalized_path == "/archive/items" and method.upper() == "POST":
             return self._archive_item_feature(body)
         if (
-            method.upper() == "GET"
+            method.upper() in {"GET", "POST"}
             and normalized_path.startswith("/v2/vaults/")
-            and normalized_path.endswith("/guided-recommendations")
+            and (
+                normalized_path.endswith("/guided-recommendations")
+                or normalized_path.endswith("/guided-recommendations/feedback")
+            )
         ):
             return "echoGuidedRecommendations"
         if method.upper() == "GET" and normalized_path.startswith("/archive/items/"):
@@ -834,11 +837,19 @@ class ReleasePolicyCommandGate:
         if normalized_path in {"/archive/media/upload-intent", "/archive/items"}:
             return f"{normalized_method} {normalized_path}"
         if (
-            normalized_method == "GET"
+            normalized_method in {"GET", "POST"}
             and normalized_path.startswith("/v2/vaults/")
-            and normalized_path.endswith("/guided-recommendations")
+            and (
+                normalized_path.endswith("/guided-recommendations")
+                or normalized_path.endswith("/guided-recommendations/feedback")
+            )
         ):
-            return "GET /v2/vaults/*/guided-recommendations"
+            suffix = (
+                "/guided-recommendations/feedback"
+                if normalized_path.endswith("/guided-recommendations/feedback")
+                else "/guided-recommendations"
+            )
+            return f"{normalized_method} /v2/vaults/*{suffix}"
         if normalized_method == "GET" and normalized_path.startswith("/archive/items/"):
             return "GET /archive/items/*"
         feature = self.feature_for_request(method, path, payload)

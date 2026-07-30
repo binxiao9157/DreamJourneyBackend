@@ -763,6 +763,22 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
             "GET /v2/vaults/*/guided-recommendations",
         )
         self.assertEqual(
+            gate.feature_for_request(
+                "POST",
+                "/v2/vaults/vault-a/guided-recommendations/feedback",
+                {},
+            ),
+            "echoGuidedRecommendations",
+        )
+        self.assertEqual(
+            gate.route_label_for_request(
+                "POST",
+                "/v2/vaults/vault-a/guided-recommendations/feedback",
+                {},
+            ),
+            "POST /v2/vaults/*/guided-recommendations/feedback",
+        )
+        self.assertEqual(
             gate.feature_for_request("POST", "/echo/delayed-replies/dispatch-due", {}),
             "echoTextInput",
         )

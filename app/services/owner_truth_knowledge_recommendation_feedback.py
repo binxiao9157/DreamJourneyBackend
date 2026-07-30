@@ -45,6 +45,9 @@ OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_SCHEMA_VERSION = (
 OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_UI_SCHEMA_VERSION = (
     "knowledge-recommendation-feedback-v1"
 )
+OWNER_TRUTH_GUIDED_RECOMMENDATION_FEEDBACK_SCHEMA_VERSION = (
+    "owner-truth-guided-recommendation-feedback-v1"
+)
 
 _FEEDBACK_NAMESPACE = UUID("961f5cf8-6ee9-4b9c-bcd4-cde6ebf702a2")
 _HASH_PATTERN = re.compile(r"^[a-f0-9]{64}$")
@@ -234,6 +237,7 @@ class OwnerTruthKnowledgeRecommendationFeedbackCommand:
     feedback_action: RecommendationFeedbackAction | str
     feedback_reason: RecommendationFeedbackReason | str
     expected_session_version: int
+    idempotency_payload_hash: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
@@ -258,6 +262,15 @@ class OwnerTruthKnowledgeRecommendationFeedbackCommand:
                 "recommendation feedback contains an unsupported action or reason"
             ) from exc
         _positive_int(self.expected_session_version, field="expected_session_version")
+        if self.idempotency_payload_hash is not None:
+            object.__setattr__(
+                self,
+                "idempotency_payload_hash",
+                _hash(
+                    self.idempotency_payload_hash,
+                    field="idempotency_payload_hash",
+                ),
+            )
         if (
             self.feedback_action is RecommendationFeedbackAction.REPLACE
             and self.feedback_reason is not RecommendationFeedbackReason.QUESTION_WORDING
@@ -283,6 +296,8 @@ class OwnerTruthKnowledgeRecommendationFeedbackCommand:
 
     @property
     def payload_hash(self) -> str:
+        if self.idempotency_payload_hash is not None:
+            return self.idempotency_payload_hash
         return _digest(
             {
                 "schemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_SCHEMA_VERSION,
@@ -301,6 +316,90 @@ class OwnerTruthKnowledgeRecommendationFeedbackCommand:
         if self.feedback_reason is RecommendationFeedbackReason.TOPIC_PREFERENCE:
             return RecommendationFeedbackScope.DIMENSION
         return RecommendationFeedbackScope.QUESTION_TEMPLATE
+
+
+@dataclass(frozen=True)
+class OwnerTruthGuidedRecommendationFeedbackCommand:
+    """Public-safe feedback bound to one opaque guided recommendation set."""
+
+    command_id: str
+    recommendation_set_id: str
+    slot: RecommendationSlot | str
+    feedback_action: RecommendationFeedbackAction | str
+    feedback_reason: RecommendationFeedbackReason | str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
+        object.__setattr__(
+            self,
+            "recommendation_set_id",
+            _hash(self.recommendation_set_id, field="recommendation_set_id"),
+        )
+        try:
+            object.__setattr__(self, "slot", RecommendationSlot(self.slot))
+            object.__setattr__(
+                self,
+                "feedback_action",
+                RecommendationFeedbackAction(self.feedback_action),
+            )
+            object.__setattr__(
+                self,
+                "feedback_reason",
+                RecommendationFeedbackReason(self.feedback_reason),
+            )
+        except (TypeError, ValueError) as exc:
+            raise OwnerTruthKnowledgeRecommendationFeedbackError(
+                "guided recommendation feedback contains an unsupported action, reason or slot"
+            ) from exc
+        if (
+            self.feedback_action is RecommendationFeedbackAction.REPLACE
+            and self.feedback_reason is not RecommendationFeedbackReason.QUESTION_WORDING
+        ):
+            raise OwnerTruthKnowledgeRecommendationFeedbackError(
+                "replace feedback only supports questionWording"
+            )
+        if (
+            self.feedback_action is RecommendationFeedbackAction.NOT_INTERESTED
+            and self.feedback_reason
+            not in {
+                RecommendationFeedbackReason.TOPIC_PREFERENCE,
+                RecommendationFeedbackReason.RECOMMENDATION_TYPE,
+            }
+        ):
+            raise OwnerTruthKnowledgeRecommendationFeedbackError(
+                "notInterested feedback requires topicPreference or recommendationType"
+            )
+
+    @property
+    def payload_hash(self) -> str:
+        return _digest(
+            {
+                "schemaVersion": OWNER_TRUTH_GUIDED_RECOMMENDATION_FEEDBACK_SCHEMA_VERSION,
+                "recommendationSetId": self.recommendation_set_id,
+                "slot": self.slot.value,
+                "feedbackAction": self.feedback_action.value,
+                "feedbackReason": self.feedback_reason.value,
+            }
+        )
+
+    def to_feedback_command(
+        self,
+        *,
+        decision: RecommendationDecision,
+        expected_session_version: int,
+    ) -> "OwnerTruthKnowledgeRecommendationFeedbackCommand":
+        if decision.slot is not self.slot:
+            raise OwnerTruthKnowledgeRecommendationFeedbackStale(
+                "guided recommendation slot is no longer selected"
+            )
+        return OwnerTruthKnowledgeRecommendationFeedbackCommand(
+            command_id=self.command_id,
+            expected_candidate_id=decision.candidate_id,
+            feedback_action=self.feedback_action,
+            feedback_reason=self.feedback_reason,
+            expected_session_version=expected_session_version,
+            idempotency_payload_hash=self.payload_hash,
+        )
 
 
 @dataclass(frozen=True)
@@ -412,6 +511,15 @@ class OwnerTruthKnowledgeRecommendationFeedbackRepository(Protocol):
     ) -> OwnerTruthKnowledgeRecommendationFeedbackResult | None:
         ...
 
+    def replay_idempotency(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command_id: str,
+        payload_hash: str,
+    ) -> OwnerTruthKnowledgeRecommendationFeedbackResult | None:
+        ...
+
     def record(
         self,
         *,
@@ -487,6 +595,53 @@ def _result_from_record(
     )
 
 
+def guided_recommendation_set_id(
+    *,
+    context: OwnerTruthCommandContext,
+    authority_epoch: int,
+    decisions: tuple[RecommendationDecision, ...],
+) -> str:
+    """Bind a display-only recommendation set to current Owner authority."""
+
+    _assert_owner_context(context)
+    _nonnegative_int(authority_epoch, field="authority_epoch")
+    if len(decisions) > 2:
+        raise OwnerTruthKnowledgeRecommendationFeedbackError(
+            "guided recommendation set cannot contain more than two decisions"
+        )
+    if any(not isinstance(decision, RecommendationDecision) for decision in decisions):
+        raise OwnerTruthKnowledgeRecommendationFeedbackError(
+            "guided recommendation set requires recommendation decisions"
+        )
+    if len({decision.slot for decision in decisions}) != len(decisions):
+        raise OwnerTruthKnowledgeRecommendationFeedbackError(
+            "guided recommendation set cannot duplicate a slot"
+        )
+    return _digest(
+        {
+            "schemaVersion": "owner-truth-guided-recommendation-set-v1",
+            "vaultId": context.vault_id,
+            "ownerSubjectId": context.owner_subject_id,
+            "authorityEpoch": authority_epoch,
+            "selected": [
+                {
+                    "slot": decision.slot.value,
+                    "candidateId": decision.candidate_id,
+                    "threadId": decision.thread_id,
+                    "targetDimension": decision.target_dimension.value,
+                    "missingFacet": decision.missing_facet,
+                    "questionTemplateId": decision.question_template_id,
+                    "policyVersion": decision.policy_version,
+                    "expiresAt": (
+                        None if decision.expires_at is None else decision.expires_at.isoformat()
+                    ),
+                }
+                for decision in sorted(decisions, key=lambda item: item.slot.value)
+            ],
+        }
+    )
+
+
 class InMemoryOwnerTruthKnowledgeRecommendationFeedbackRepository:
     """Thread-safe semantic double for feedback receipts and derived policy."""
 
@@ -508,6 +663,34 @@ class InMemoryOwnerTruthKnowledgeRecommendationFeedbackRepository:
             if existing is None:
                 return None
             if str(existing.get("payloadHash") or "") != command.payload_hash:
+                raise OwnerTruthKnowledgeRecommendationFeedbackConflict(
+                    "commandId cannot be reused with different recommendation feedback"
+                )
+            return _result_from_record(existing, outcome="deduplicated")
+
+    def replay_idempotency(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command_id: str,
+        payload_hash: str,
+    ) -> OwnerTruthKnowledgeRecommendationFeedbackResult | None:
+        _assert_owner_context(context)
+        command_hash = _sha256(require_nonblank(command_id, field="command_id"))
+        normalized_payload_hash = _hash(payload_hash, field="payload_hash")
+        command_key = (context.vault_id, command_hash)
+        with self._lock:
+            existing = self._records_by_command.get(command_key)
+            if existing is None:
+                return None
+            if (
+                str(existing.get("ownerSubjectId") or "") != context.owner_subject_id
+                or str(existing.get("actorSubjectId") or "") != context.owner_subject_id
+            ):
+                raise OwnerTruthKnowledgeRecommendationFeedbackAccessDenied(
+                    "recommendation feedback replay does not match Owner context"
+                )
+            if str(existing.get("payloadHash") or "") != normalized_payload_hash:
                 raise OwnerTruthKnowledgeRecommendationFeedbackConflict(
                     "commandId cannot be reused with different recommendation feedback"
                 )
@@ -644,6 +827,54 @@ class PostgresOwnerTruthKnowledgeRecommendationFeedbackRepository:
         if existing is None:
             return None
         if str(existing["command_payload_hash"]) != command.payload_hash:
+            raise OwnerTruthKnowledgeRecommendationFeedbackConflict(
+                "commandId cannot be reused with different recommendation feedback"
+            )
+        return _result_from_record(self._row_to_record(existing), outcome="deduplicated")
+
+    def replay_idempotency(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command_id: str,
+        payload_hash: str,
+    ) -> OwnerTruthKnowledgeRecommendationFeedbackResult | None:
+        _assert_owner_context(context)
+        command_hash = _sha256(require_nonblank(command_id, field="command_id"))
+        normalized_payload_hash = _hash(payload_hash, field="payload_hash")
+        with self._cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS locked",
+                (
+                    "owner-truth-recommendation-feedback-command:"
+                    f"{context.vault_id}:{command_hash}",
+                ),
+            )
+            cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT id, vault_id, owner_subject_id, actor_subject_id, authority_epoch,
+                    candidate_id, feedback_action, feedback_reason, feedback_scope,
+                    slot, thread_id, session_id, expected_session_version,
+                    target_dimension, missing_facet, question_template_id,
+                    evidence_ref_count, reason_code, command_id_hash, command_payload_hash
+                FROM owner_truth.knowledge_recommendation_feedback_receipts
+                WHERE vault_id = %s AND command_id_hash = %s
+                FOR UPDATE
+                """,
+                (context.vault_id, command_hash),
+            )
+            existing = cursor.fetchone()
+        if existing is None:
+            return None
+        if (
+            str(existing["owner_subject_id"]) != context.owner_subject_id
+            or str(existing["actor_subject_id"]) != context.owner_subject_id
+        ):
+            raise OwnerTruthKnowledgeRecommendationFeedbackAccessDenied(
+                "recommendation feedback replay does not match Owner context"
+            )
+        if str(existing["command_payload_hash"]) != normalized_payload_hash:
             raise OwnerTruthKnowledgeRecommendationFeedbackConflict(
                 "commandId cannot be reused with different recommendation feedback"
             )
@@ -919,87 +1150,154 @@ class OwnerTruthKnowledgeRecommendationFeedbackService:
             replayed = repository.replay(context=context, command=command)
             if replayed is not None:
                 return replayed
-            try:
-                # Delayed to avoid a module import cycle: the read adapter
-                # consumes the feedback policy while this command revalidates
-                # the current output of that same adapter.
-                from app.services.owner_truth_knowledge_recommendation_read import (
-                    OwnerTruthKnowledgeRecommendationReadService,
-                )
-
-                plan = OwnerTruthKnowledgeRecommendationReadService(self._store).plan(
-                    context=context
-                )
-            except OwnerTruthContractError as error:
-                raise OwnerTruthKnowledgeRecommendationFeedbackUnavailable(
-                    "current Owner-confirmed recommendation plan is unavailable"
-                ) from error
-            if (
-                plan.state is not OwnerTruthKnowledgeDimensionReadState.READY
-                or plan.selection is None
-            ):
-                raise OwnerTruthKnowledgeRecommendationFeedbackUnavailable(
-                    "current Owner-confirmed recommendation plan is unavailable"
-                )
-            decision = self._selected_decision(
-                plan.selection.selected,
+            return self._record_current_plan(
+                repository=repository,
+                context=context,
                 command=command,
+                plan=self._current_plan(context=context),
             )
-            conversation = self._store.owner_truth_conversation_repository()
-            try:
-                session_id = self._session_id_for_decision(
-                    conversation=conversation,
-                    context=context,
-                    decision=decision,
+
+    def submit_guided_presentation(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command: OwnerTruthGuidedRecommendationFeedbackCommand,
+    ) -> OwnerTruthKnowledgeRecommendationFeedbackResult:
+        """Map a display-only prompt action to the current private plan server-side."""
+
+        _assert_owner_context(context)
+        if not isinstance(command, OwnerTruthGuidedRecommendationFeedbackCommand):
+            raise OwnerTruthKnowledgeRecommendationFeedbackError(
+                "guided recommendation feedback command is required"
+            )
+        if not self._enabled:
+            raise OwnerTruthKnowledgeRecommendationFeedbackUnavailable(
+                "guided recommendation feedback contract is disabled"
+            )
+        with self._request_unit_of_work(
+            correlation_id=(
+                "owner-truth-guided-recommendation-feedback-"
+                f"{context.vault_id}:{command.recommendation_set_id}"
+            ),
+            command_id=_sha256(command.command_id),
+        ):
+            repository = self._store.owner_truth_knowledge_recommendation_feedback_repository()
+            replayed = repository.replay_idempotency(
+                context=context,
+                command_id=command.command_id,
+                payload_hash=command.payload_hash,
+            )
+            if replayed is not None:
+                return replayed
+            plan = self._current_plan(context=context)
+            if plan.selection is None:
+                raise OwnerTruthKnowledgeRecommendationFeedbackUnavailable(
+                    "current Owner-confirmed recommendation plan is unavailable"
                 )
-                session = conversation.get_interview_session(
-                    session_id=session_id,
-                    context=context,
-                )
-            except OwnerTruthConversationAccessDenied as error:
-                raise OwnerTruthKnowledgeRecommendationFeedbackAccessDenied(str(error)) from error
-            except OwnerTruthContractError as error:
+            current_set_id = guided_recommendation_set_id(
+                context=context,
+                authority_epoch=plan.dimension_read.authority_epoch,
+                decisions=plan.selection.selected,
+            )
+            if current_set_id != command.recommendation_set_id:
                 raise OwnerTruthKnowledgeRecommendationFeedbackStale(
-                    "server-planned recommendation no longer has current conversation authority"
-                ) from error
-            if (
-                session.thread_id != decision.thread_id
-                or session.row_version != command.expected_session_version
-                or session.state is not InterviewSessionState.ACTIVE
-                or session.boundary is not InterviewBoundary.OPEN
-                or session.authority_epoch != plan.dimension_read.authority_epoch
-            ):
-                raise OwnerTruthKnowledgeRecommendationFeedbackStale(
-                    "server-planned recommendation no longer binds the current active open interview session"
+                    "guided recommendation set is no longer current"
                 )
-            record = {
-                "feedbackId": str(
-                    uuid5(_FEEDBACK_NAMESPACE, f"{context.vault_id}:{command.command_id_hash}")
-                ),
-                "vaultId": context.vault_id,
-                "ownerSubjectId": context.owner_subject_id,
-                "actorSubjectId": context.actor_subject_id,
-                "authorityEpoch": plan.dimension_read.authority_epoch,
-                "candidateId": decision.candidate_id,
-                "feedbackAction": command.feedback_action.value,
-                "feedbackReason": command.feedback_reason.value,
-                "feedbackScope": command.feedback_scope.value,
-                "slot": decision.slot.value,
-                "threadId": decision.thread_id,
-                "sessionId": session.session_id,
-                "expectedSessionVersion": command.expected_session_version,
-                "targetDimension": decision.target_dimension.value,
-                "missingFacet": decision.missing_facet,
-                "questionTemplateId": decision.question_template_id,
-                "selectionPolicyVersion": decision.policy_version,
-                "evidenceRefCount": len(decision.evidence_refs),
-                "reasonCode": self._reason_code(command),
-                "commandIdHash": command.command_id_hash,
-                "payloadHash": command.payload_hash,
-                "schemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_SCHEMA_VERSION,
-                "uiSchemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_UI_SCHEMA_VERSION,
-            }
-            return repository.record(context=context, record=record)
+            decision = self._selected_slot(
+                plan.selection.selected,
+                slot=command.slot,
+            )
+            session = self._current_session_for_decision(
+                context=context,
+                decision=decision,
+            )
+            feedback_command = command.to_feedback_command(
+                decision=decision,
+                expected_session_version=session.row_version,
+            )
+            return self._record_current_plan(
+                repository=repository,
+                context=context,
+                command=feedback_command,
+                plan=plan,
+            )
+
+    def _current_plan(self, *, context: OwnerTruthCommandContext) -> Any:
+        try:
+            # Delayed to avoid a module import cycle: the read adapter consumes
+            # feedback policy while this writer revalidates its current output.
+            from app.services.owner_truth_knowledge_recommendation_read import (
+                OwnerTruthKnowledgeRecommendationReadService,
+            )
+
+            plan = OwnerTruthKnowledgeRecommendationReadService(self._store).plan(context=context)
+        except OwnerTruthContractError as error:
+            raise OwnerTruthKnowledgeRecommendationFeedbackUnavailable(
+                "current Owner-confirmed recommendation plan is unavailable"
+            ) from error
+        if (
+            plan.state is not OwnerTruthKnowledgeDimensionReadState.READY
+            or plan.selection is None
+        ):
+            raise OwnerTruthKnowledgeRecommendationFeedbackUnavailable(
+                "current Owner-confirmed recommendation plan is unavailable"
+            )
+        return plan
+
+    def _record_current_plan(
+        self,
+        *,
+        repository: OwnerTruthKnowledgeRecommendationFeedbackRepository,
+        context: OwnerTruthCommandContext,
+        command: OwnerTruthKnowledgeRecommendationFeedbackCommand,
+        plan: Any,
+    ) -> OwnerTruthKnowledgeRecommendationFeedbackResult:
+        decision = self._selected_decision(
+            plan.selection.selected,
+            command=command,
+        )
+        session = self._current_session_for_decision(
+            context=context,
+            decision=decision,
+        )
+        if (
+            session.thread_id != decision.thread_id
+            or session.row_version != command.expected_session_version
+            or session.state is not InterviewSessionState.ACTIVE
+            or session.boundary is not InterviewBoundary.OPEN
+            or session.authority_epoch != plan.dimension_read.authority_epoch
+        ):
+            raise OwnerTruthKnowledgeRecommendationFeedbackStale(
+                "server-planned recommendation no longer binds the current active open interview session"
+            )
+        record = {
+            "feedbackId": str(
+                uuid5(_FEEDBACK_NAMESPACE, f"{context.vault_id}:{command.command_id_hash}")
+            ),
+            "vaultId": context.vault_id,
+            "ownerSubjectId": context.owner_subject_id,
+            "actorSubjectId": context.actor_subject_id,
+            "authorityEpoch": plan.dimension_read.authority_epoch,
+            "candidateId": decision.candidate_id,
+            "feedbackAction": command.feedback_action.value,
+            "feedbackReason": command.feedback_reason.value,
+            "feedbackScope": command.feedback_scope.value,
+            "slot": decision.slot.value,
+            "threadId": decision.thread_id,
+            "sessionId": session.session_id,
+            "expectedSessionVersion": command.expected_session_version,
+            "targetDimension": decision.target_dimension.value,
+            "missingFacet": decision.missing_facet,
+            "questionTemplateId": decision.question_template_id,
+            "selectionPolicyVersion": decision.policy_version,
+            "evidenceRefCount": len(decision.evidence_refs),
+            "reasonCode": self._reason_code(command),
+            "commandIdHash": command.command_id_hash,
+            "payloadHash": command.payload_hash,
+            "schemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_SCHEMA_VERSION,
+            "uiSchemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_UI_SCHEMA_VERSION,
+        }
+        return repository.record(context=context, record=record)
 
     @staticmethod
     def _selected_decision(
@@ -1017,6 +1315,43 @@ class OwnerTruthKnowledgeRecommendationFeedbackService:
                 "server-planned recommendation is no longer selected"
             )
         return matches[0]
+
+    @staticmethod
+    def _selected_slot(
+        decisions: tuple[RecommendationDecision, ...],
+        *,
+        slot: RecommendationSlot,
+    ) -> RecommendationDecision:
+        matches = tuple(decision for decision in decisions if decision.slot is slot)
+        if len(matches) != 1:
+            raise OwnerTruthKnowledgeRecommendationFeedbackStale(
+                "guided recommendation slot is no longer selected"
+            )
+        return matches[0]
+
+    def _current_session_for_decision(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        decision: RecommendationDecision,
+    ) -> Any:
+        conversation = self._store.owner_truth_conversation_repository()
+        try:
+            session_id = self._session_id_for_decision(
+                conversation=conversation,
+                context=context,
+                decision=decision,
+            )
+            return conversation.get_interview_session(
+                session_id=session_id,
+                context=context,
+            )
+        except OwnerTruthConversationAccessDenied as error:
+            raise OwnerTruthKnowledgeRecommendationFeedbackAccessDenied(str(error)) from error
+        except OwnerTruthContractError as error:
+            raise OwnerTruthKnowledgeRecommendationFeedbackStale(
+                "server-planned recommendation no longer has current conversation authority"
+            ) from error
 
     @staticmethod
     def _session_id_for_decision(
