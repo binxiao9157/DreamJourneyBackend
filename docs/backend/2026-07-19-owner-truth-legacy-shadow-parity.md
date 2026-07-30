@@ -23,9 +23,14 @@ retirement。
 
 - `projectionRebuilding`：V4 Projection 尚未 ready。
 - `legacyEvidenceIncomplete`：没有具备完整 Owner/Source/terminal Decision/revision
-  证据的旧记录。
+  证据的旧记录，或 `archiveItem`、`memory`、`kbSnapshot`、`kbChange`、
+  `kbReceipt` 任一核心旧数据域不可用。
 - `legacyRecordMappingRequired`：即使旧记录证据完整，仍缺少显式的
   `legacy record -> Source -> DecisionReceipt -> MemoryVersion` 映射。
+
+报告会以枚举形式返回 `unavailableDomains`；不会返回任何旧记录正文、原始 ID 或
+对象地址。`conversationCache` 是非 Owner Memory 域，单独不可用不会把“仅缺
+lineage mapping”的结果误判为核心证据不完整。
 
 所有路径都固定输出：
 

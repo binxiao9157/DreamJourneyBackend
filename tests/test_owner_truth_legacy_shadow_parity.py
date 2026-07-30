@@ -199,6 +199,117 @@ class OwnerTruthLegacyShadowParityServiceTests(unittest.TestCase):
         self.assertFalse(report.summary()["legacyWriterRetired"])
         self.assertIn("legacyRecordMappingUnavailable", report.summary()["reasonCodes"])
 
+    def test_required_legacy_domain_unavailable_blocks_even_with_proven_memory(self) -> None:
+        inventory = build_legacy_migration_inventory(
+            vault_id=self.vault_id,
+            classifier_version="legacy-shadow-parity-test-v1",
+            records=(
+                LegacyMigrationRecord(
+                    domain=LegacyMigrationDomain.MEMORY,
+                    legacy_id="legacy-proven-memory-with-missing-domain",
+                    record_hash="d" * 64,
+                    canonical_owner_subject_id=self.owner_id,
+                    observed_owner_subject_id=self.owner_id,
+                    source_evidence_id="source-evidence",
+                    decision_receipt_id="decision-receipt",
+                    decision_is_terminal=True,
+                    revision_evidence_id="revision-evidence",
+                ),
+            ),
+            unavailable_domains=(LegacyMigrationDomain.ARCHIVE_ITEM,),
+        )
+        projection = {
+            "authorityEpoch": 0,
+            "checkpoint": "b" * 64,
+            "entryCount": 1,
+            "ownerSubjectId": self.owner_id,
+            "sourceHash": "c" * 64,
+            "state": "ready",
+            "vaultId": self.vault_id,
+        }
+
+        report = build_legacy_shadow_parity_report(
+            inventory_run_id="parity-run-required-domain-unavailable",
+            inventory=inventory,
+            owner_subject_id=self.owner_id,
+            projection_snapshot=projection,
+        )
+        summary = report.summary()
+
+        self.assertEqual(summary["comparisonStatus"], "legacyEvidenceIncomplete")
+        self.assertEqual(summary["legacyEligibleEntryCount"], 1)
+        self.assertEqual(summary["unavailableDomains"], ["archiveItem"])
+        self.assertIn("legacyRequiredDomainUnavailable", summary["reasonCodes"])
+        self.assertIn("legacyEvidenceIncomplete", summary["reasonCodes"])
+        self.assertNotIn("legacyRecordMappingUnavailable", summary["reasonCodes"])
+        self.assertFalse(summary["cutoverAllowed"])
+
+        available_report = build_legacy_shadow_parity_report(
+            inventory_run_id="parity-run-required-domain-unavailable",
+            inventory=build_legacy_migration_inventory(
+                vault_id=self.vault_id,
+                classifier_version="legacy-shadow-parity-test-v1",
+                records=(
+                    LegacyMigrationRecord(
+                        domain=LegacyMigrationDomain.MEMORY,
+                        legacy_id="legacy-proven-memory-with-missing-domain",
+                        record_hash="d" * 64,
+                        canonical_owner_subject_id=self.owner_id,
+                        observed_owner_subject_id=self.owner_id,
+                        source_evidence_id="source-evidence",
+                        decision_receipt_id="decision-receipt",
+                        decision_is_terminal=True,
+                        revision_evidence_id="revision-evidence",
+                    ),
+                ),
+            ),
+            owner_subject_id=self.owner_id,
+            projection_snapshot=projection,
+        )
+        self.assertNotEqual(report.report_hash, available_report.report_hash)
+
+    def test_conversation_cache_unavailable_does_not_block_lineage_only_status(self) -> None:
+        inventory = build_legacy_migration_inventory(
+            vault_id=self.vault_id,
+            classifier_version="legacy-shadow-parity-test-v1",
+            records=(
+                LegacyMigrationRecord(
+                    domain=LegacyMigrationDomain.MEMORY,
+                    legacy_id="legacy-proven-memory-with-conversation-gap",
+                    record_hash="e" * 64,
+                    canonical_owner_subject_id=self.owner_id,
+                    observed_owner_subject_id=self.owner_id,
+                    source_evidence_id="source-evidence",
+                    decision_receipt_id="decision-receipt",
+                    decision_is_terminal=True,
+                    revision_evidence_id="revision-evidence",
+                ),
+            ),
+            unavailable_domains=(LegacyMigrationDomain.CONVERSATION_CACHE,),
+        )
+        projection = {
+            "authorityEpoch": 0,
+            "checkpoint": "b" * 64,
+            "entryCount": 1,
+            "ownerSubjectId": self.owner_id,
+            "sourceHash": "c" * 64,
+            "state": "ready",
+            "vaultId": self.vault_id,
+        }
+
+        report = build_legacy_shadow_parity_report(
+            inventory_run_id="parity-run-conversation-cache-unavailable",
+            inventory=inventory,
+            owner_subject_id=self.owner_id,
+            projection_snapshot=projection,
+        )
+        summary = report.summary()
+
+        self.assertEqual(summary["comparisonStatus"], "legacyRecordMappingRequired")
+        self.assertEqual(summary["unavailableDomains"], ["conversationCache"])
+        self.assertIn("legacyRecordMappingUnavailable", summary["reasonCodes"])
+        self.assertNotIn("legacyRequiredDomainUnavailable", summary["reasonCodes"])
+
 
 if __name__ == "__main__":
     unittest.main()

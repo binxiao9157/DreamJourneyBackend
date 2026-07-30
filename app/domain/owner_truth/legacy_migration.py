@@ -233,6 +233,19 @@ class LegacyMigrationInventory:
 
 LEGACY_SHADOW_PARITY_SCHEMA_VERSION = "owner-truth-legacy-shadow-parity-v1"
 
+# These legacy domains are the minimum evidence surface for a future Owner
+# Truth parity decision. Conversation cache is deliberately excluded: it is
+# not Owner Memory and therefore cannot establish or invalidate Memory lineage.
+_LEGACY_SHADOW_REQUIRED_DOMAINS = frozenset(
+    {
+        LegacyMigrationDomain.ARCHIVE_ITEM,
+        LegacyMigrationDomain.MEMORY,
+        LegacyMigrationDomain.KB_SNAPSHOT,
+        LegacyMigrationDomain.KB_CHANGE,
+        LegacyMigrationDomain.KB_RECEIPT,
+    }
+)
+
 
 @dataclass(frozen=True)
 class LegacyShadowParityReport:
@@ -252,6 +265,7 @@ class LegacyShadowParityReport:
     legacy_entry_count: int
     legacy_disposition_counts: Mapping[str, int]
     legacy_eligible_entry_count: int
+    unavailable_domains: tuple[LegacyMigrationDomain, ...]
     projection_state: str
     projection_authority_epoch: int
     projection_checkpoint: str | None
@@ -290,6 +304,7 @@ class LegacyShadowParityReport:
             "reasonCodes": list(self.reason_codes),
             "reportHash": self.report_hash,
             "schemaVersion": LEGACY_SHADOW_PARITY_SCHEMA_VERSION,
+            "unavailableDomains": [domain.value for domain in self.unavailable_domains],
             "vaultId": self.vault_id,
         }
 
@@ -352,8 +367,30 @@ def build_legacy_shadow_parity_report(
         if entry.disposition is LegacyMigrationDisposition.MEMORY_V1_ELIGIBLE:
             eligible_count += 1
 
+    unavailable_domains = tuple(
+        sorted(
+            {LegacyMigrationDomain(domain) for domain in inventory.unavailable_domains},
+            key=lambda domain: domain.value,
+        )
+    )
+    required_unavailable_domains = tuple(
+        domain
+        for domain in unavailable_domains
+        if domain in _LEGACY_SHADOW_REQUIRED_DOMAINS
+    )
+
     reason_codes = {"authorityEpochCutoverRequiresSeparateGate"}
-    if projection_state != "ready":
+    if required_unavailable_domains:
+        comparison_status = LegacyShadowParityComparisonStatus.LEGACY_EVIDENCE_INCOMPLETE
+        reason_codes.update(
+            {
+                "legacyEvidenceIncomplete",
+                "legacyRequiredDomainUnavailable",
+            }
+        )
+        if projection_state != "ready":
+            reason_codes.add("projectionRebuilding")
+    elif projection_state != "ready":
         comparison_status = LegacyShadowParityComparisonStatus.PROJECTION_REBUILDING
         reason_codes.add("projectionRebuilding")
     elif eligible_count == 0:
@@ -385,6 +422,7 @@ def build_legacy_shadow_parity_report(
                 },
                 "reasonCodes": normalized_reasons,
                 "schemaVersion": LEGACY_SHADOW_PARITY_SCHEMA_VERSION,
+                "unavailableDomains": [domain.value for domain in unavailable_domains],
                 "vaultId": inventory.vault_id,
             }
         )
@@ -397,6 +435,7 @@ def build_legacy_shadow_parity_report(
         legacy_entry_count=len(inventory.entries),
         legacy_disposition_counts=normalized_counts,
         legacy_eligible_entry_count=eligible_count,
+        unavailable_domains=unavailable_domains,
         projection_state=projection_state,
         projection_authority_epoch=projection_epoch,
         projection_checkpoint=projection_checkpoint,
