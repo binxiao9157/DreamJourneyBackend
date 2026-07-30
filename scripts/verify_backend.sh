@@ -545,6 +545,8 @@ test -f app/async_effects/readiness_manifest_projection.py
 test -f tests/test_async_effect_readiness_manifest_projection.py
 test -f scripts/run-backend-async-effect-readiness-manifest-gate.sh
 test -f scripts/backend-async-effect-readiness-manifest-postgres-smoke.py
+test -f scripts/run-backend-async-effect-readiness-manifest-postgres-smoke.sh
+test -f tests/test_async_effect_readiness_manifest_postgres_smoke_contract.py
 test -f app/async_effects/recovery_evidence.py
 test -f tests/test_async_effect_recovery_evidence.py
 test -f scripts/run-backend-async-effect-recovery-evidence-contract-gate.sh
