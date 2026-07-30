@@ -43,6 +43,11 @@ from app.services.owner_truth_candidate_review import (
 from app.services.owner_truth_interview_candidate_batch_decision import (
     InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository,
     OwnerTruthInterviewCandidateBatchDecisionService,
+    PostgresOwnerTruthInterviewCandidateBatchDecisionRepository,
+)
+from app.services.owner_truth_memory_projection_effects import (
+    MEMORY_PROJECTION_REBUILD_JOB_TYPE,
+    MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
 )
 
 
@@ -418,6 +423,75 @@ class OwnerTruthInterviewCandidateBatchDecisionTests(TestCase):
 
         self.assertEqual(store.review_repository.snapshot()["receipts"], {})
         self.assertEqual(store.ledger_repository.snapshot(), {})
+
+
+class _ProjectionRecoveryQueryCursor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+        self._row: dict[str, object] | None = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, statement: str, params: tuple[object, ...] = ()) -> None:
+        self.calls.append((statement, params))
+        if "FROM owner_truth.vaults" in statement:
+            self._row = {
+                "authority_epoch": 3,
+                "owner_subject_id": "projection-recovery-owner",
+                "status": "active",
+            }
+        else:
+            self._row = None
+
+    def fetchone(self):
+        return self._row
+
+    @staticmethod
+    def fetchall():
+        return []
+
+
+class _ProjectionRecoveryQueryConnection:
+    def __init__(self) -> None:
+        self.cursor_instance = _ProjectionRecoveryQueryCursor()
+
+    def cursor(self, **_kwargs):
+        return self.cursor_instance
+
+
+class OwnerTruthInterviewCandidateProjectionRecoveryQueryContractTests(TestCase):
+    def test_recovery_query_requires_exact_runnable_projection_effect(self) -> None:
+        connection = _ProjectionRecoveryQueryConnection()
+        repository = PostgresOwnerTruthInterviewCandidateBatchDecisionRepository(connection)
+
+        items = repository.list_formal_pending_memory_projection_recoveries(
+            context=OwnerTruthCommandContext(
+                vault_id="projection-recovery-vault",
+                owner_subject_id="projection-recovery-owner",
+                actor_subject_id="projection-recovery-owner",
+            )
+        )
+
+        self.assertEqual(items, ())
+        self.assertEqual(len(connection.cursor_instance.calls), 2)
+        statement, params = connection.cursor_instance.calls[1]
+        self.assertEqual(
+            params[:2],
+            (
+                MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+                MEMORY_PROJECTION_REBUILD_JOB_TYPE,
+            ),
+        )
+        self.assertIn("JOIN async_effects.operations AS projection_operation", statement)
+        self.assertIn("JOIN async_effects.jobs AS projection_job", statement)
+        self.assertIn("projection_operation.resource_id = memory_version.id::TEXT", statement)
+        self.assertIn("projection_operation.state = 'accepted'", statement)
+        self.assertIn("projection_job.state IN ('pending', 'retryWait', 'leased')", statement)
+        self.assertIn("projection_job.cancel_requested_at IS NULL", statement)
 
 
 if __name__ == "__main__":

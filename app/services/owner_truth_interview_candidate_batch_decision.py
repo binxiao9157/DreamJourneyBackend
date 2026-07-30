@@ -38,6 +38,10 @@ from app.domain.owner_truth.source_commands import (
     OwnerTruthCommandContext,
 )
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewResult
+from app.services.owner_truth_memory_projection_effects import (
+    MEMORY_PROJECTION_REBUILD_JOB_TYPE,
+    MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+)
 
 
 FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE = "ownerTruthCandidateReview"
@@ -887,12 +891,12 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
         *,
         context: OwnerTruthCommandContext,
     ) -> tuple[OwnerTruthInterviewCandidateFormalProjectionRecoveryInboxItem, ...]:
-        """Read formal MemoryVersions absent from the active Projection.
+        """Read formal MemoryVersions with a runnable Projection rebuild.
 
         This is a content-free discovery query. It joins the current
-        MemoryVersion and current Projection entries directly, rather than
-        exposing worker/job state or treating any unrelated Vault rebuild as a
-        retry for every formally confirmed Candidate.
+        MemoryVersion, current Projection entries, and its exact typed async
+        effect. A missing Projection alone is not a recovery promise: terminal
+        or cancelled work is omitted rather than exposed as ``rebuilding``.
         """
 
         _assert_owner_context(context)
@@ -944,6 +948,28 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
                 JOIN owner_truth.sources AS source
                   ON source.vault_id = memory_version.vault_id
                  AND source.id = memory_version.source_id
+                JOIN async_effects.operations AS projection_operation
+                  ON projection_operation.vault_id = memory_version.vault_id
+                 AND projection_operation.operation_type = %s
+                 AND projection_operation.owner_subject_id = root.owner_subject_id
+                 AND projection_operation.resource_type = 'memoryVersion'
+                 AND projection_operation.resource_id = memory_version.id::TEXT
+                 AND projection_operation.resource_version = memory_version.version_number
+                 AND projection_operation.purpose = 'compatibilityProjection'
+                 AND projection_operation.authority_epoch = root.authority_epoch
+                 AND projection_operation.payload_hash = memory_version.content_hash
+                JOIN async_effects.jobs AS projection_job
+                  ON projection_job.operation_id = projection_operation.operation_id
+                 AND projection_job.owner_subject_id = projection_operation.owner_subject_id
+                 AND projection_job.vault_id = projection_operation.vault_id
+                 AND projection_job.resource_type = projection_operation.resource_type
+                 AND projection_job.resource_id = projection_operation.resource_id
+                 AND projection_job.resource_version = projection_operation.resource_version
+                 AND projection_job.purpose = projection_operation.purpose
+                 AND projection_job.authority_epoch = projection_operation.authority_epoch
+                 AND projection_job.stable_key = projection_operation.stable_key
+                 AND projection_job.payload_hash = projection_operation.payload_hash
+                 AND projection_job.job_type = %s
                 LEFT JOIN owner_truth.memory_projection_entries AS projection_entry
                   ON projection_entry.vault_id = memory_version.vault_id
                  AND projection_entry.authority_epoch = root.authority_epoch
@@ -973,9 +999,14 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
                   AND source.state = 'active'
                   AND source.source_version = memory_version.source_version
                   AND projection_entry.memory_version_id IS NULL
+                  AND projection_operation.state = 'accepted'
+                  AND projection_job.state IN ('pending', 'retryWait', 'leased')
+                  AND projection_job.cancel_requested_at IS NULL
                 ORDER BY root.review_batch_id ASC, link.candidate_id ASC
                 """,
                 (
+                    MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+                    MEMORY_PROJECTION_REBUILD_JOB_TYPE,
                     context.vault_id,
                     context.owner_subject_id,
                     int(vault["authority_epoch"]),

@@ -1,7 +1,12 @@
 import hashlib
 import unittest
 
-from app.async_effects.contracts import AsyncEffectConflict, AsyncEffectIntent, AsyncEffectTarget
+from app.async_effects.contracts import (
+    AsyncEffectConflict,
+    AsyncEffectIntent,
+    AsyncEffectJobState,
+    AsyncEffectTarget,
+)
 from app.async_effects.repository import InMemoryEffectKernelRepository, PostgresEffectKernelRepository
 
 
@@ -48,6 +53,24 @@ class InMemoryEffectKernelRepositoryTests(unittest.TestCase):
             self.repository.accept(self.intent(payload="request-v2"))
 
         self.assertEqual(self.repository.record_count(), 1)
+
+    def test_runnable_read_fence_excludes_terminal_jobs(self):
+        intent = self.intent()
+        self.repository.accept(intent)
+
+        for state in (
+            AsyncEffectJobState.PENDING,
+            AsyncEffectJobState.RETRY_WAIT,
+            AsyncEffectJobState.LEASED,
+        ):
+            with self.subTest(state=state.value):
+                self.repository.set_job_state_for_test(job_id=intent.job_id, state=state)
+                self.assertTrue(self.repository.is_runnable(intent))
+
+        for state in (AsyncEffectJobState.CANCELLED, AsyncEffectJobState.BLOCKED):
+            with self.subTest(state=state.value):
+                self.repository.set_job_state_for_test(job_id=intent.job_id, state=state)
+                self.assertFalse(self.repository.is_runnable(intent))
 
 
 class _FakeCursor:

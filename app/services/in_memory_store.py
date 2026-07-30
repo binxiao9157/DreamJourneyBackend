@@ -154,8 +154,13 @@ class InMemoryStore:
         self._owner_truth_vaults: Dict[str, Dict[str, Any]] = {}
         self._owner_truth_sources: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._owner_truth_source_receipts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._effect_kernel_repository = InMemoryEffectKernelRepository()
         self._owner_truth_candidate_review_repository = (
-            InMemoryOwnerTruthCandidateReviewRepository()
+            InMemoryOwnerTruthCandidateReviewRepository(
+                memory_projection_rebuild_runnable_reader=(
+                    self._effect_kernel_repository.is_runnable
+                )
+            )
         )
         self._owner_truth_conversation_repository = (
             InMemoryOwnerTruthConversationRepository()
@@ -173,7 +178,6 @@ class InMemoryStore:
                 ),
             )
         )
-        self._effect_kernel_repository = InMemoryEffectKernelRepository()
         self._owner_truth_interview_candidate_review_repository = (
             InMemoryOwnerTruthInterviewCandidateReviewRepository(
                 candidate_snapshot_lookup=(

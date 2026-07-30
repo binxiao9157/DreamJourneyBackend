@@ -57,9 +57,53 @@ class InMemoryEffectKernelRepository:
                 return _summary(intent, outcome="deduplicated")
             self._records[key] = {
                 "fingerprint": fingerprint,
+                "intent": intent,
+                "job_state": AsyncEffectJobState.PENDING,
+                "operation_state": AsyncEffectOperationState.ACCEPTED,
                 "summary": _summary(intent, outcome="accepted"),
             }
             return _summary(intent, outcome="accepted")
+
+    def is_runnable(self, intent: AsyncEffectIntent) -> bool:
+        """Return whether this exact semantic-double intent can still run.
+
+        Read paths use this only to avoid presenting an already terminal
+        effect as an active recovery.  It deliberately returns a boolean and
+        never exposes coordination IDs or lifecycle details to product code.
+        """
+
+        key = (intent.target.vault_id, intent.stable_key)
+        with self._lock:
+            record = self._records.get(key)
+            if record is None or record.get("fingerprint") != intent.immutable_fingerprint():
+                return False
+            return (
+                record.get("operation_state") is AsyncEffectOperationState.ACCEPTED
+                and record.get("job_state")
+                in {
+                    AsyncEffectJobState.PENDING,
+                    AsyncEffectJobState.RETRY_WAIT,
+                    AsyncEffectJobState.LEASED,
+                }
+            )
+
+    def set_job_state_for_test(
+        self,
+        *,
+        job_id: str,
+        state: AsyncEffectJobState,
+    ) -> None:
+        """Set a semantic-double lifecycle state for contract tests only."""
+
+        if not isinstance(state, AsyncEffectJobState):
+            raise TypeError("state must be an AsyncEffectJobState")
+        with self._lock:
+            for record in self._records.values():
+                intent = record.get("intent")
+                if isinstance(intent, AsyncEffectIntent) and intent.job_id == job_id:
+                    record["job_state"] = state
+                    return
+        raise KeyError(f"unknown async effect job: {job_id}")
 
     def record_count(self) -> int:
         with self._lock:

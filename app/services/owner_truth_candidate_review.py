@@ -8,9 +8,9 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
 from threading import RLock
-from typing import Any, ContextManager, Mapping, Protocol
+from typing import Any, Callable, ContextManager, Mapping, Protocol
 
-from app.async_effects.contracts import EffectReceiptSummary
+from app.async_effects.contracts import AsyncEffectIntent, EffectReceiptSummary
 from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateDecisionWriteRecord,
     OwnerTruthCandidateReviewAccessDenied,
@@ -23,6 +23,7 @@ from app.domain.owner_truth.candidate_decisions import (
 )
 from app.domain.owner_truth.contracts import CandidateDecision
 from app.domain.owner_truth.memory_activation import (
+    OwnerTruthMemoryActivationError,
     OwnerTruthMemoryActivationResult,
     build_memory_activation_plan,
 )
@@ -140,7 +141,12 @@ def _inbox_item(candidate: OwnerTruthCandidateSnapshot, *, created_at: str | Non
 class InMemoryOwnerTruthCandidateReviewRepository:
     """Thread-safe semantic double for command/CAS/receipt behavior."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        memory_projection_rebuild_runnable_reader: Callable[[AsyncEffectIntent], bool]
+        | None = None,
+    ) -> None:
         self._lock = RLock()
         self._candidates: dict[str, OwnerTruthCandidateSnapshot] = {}
         self._candidate_created_at: dict[str, str | None] = {}
@@ -150,6 +156,9 @@ class InMemoryOwnerTruthCandidateReviewRepository:
         self._candidate_receipts: dict[str, str] = {}
         self._corrected_values: dict[str, dict[str, Any]] = {}
         self._memory_activations: dict[str, dict[str, Any]] = {}
+        self._memory_projection_rebuild_runnable_reader = (
+            memory_projection_rebuild_runnable_reader
+        )
 
     def seed(
         self,
@@ -302,7 +311,27 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 OwnerTruthCandidateReviewSourceInactive,
             ):
                 return False
-            return True
+            reader = self._memory_projection_rebuild_runnable_reader
+            if reader is None:
+                return False
+            try:
+                intent = build_memory_projection_rebuild_effect_intent(
+                    context=context,
+                    activation=OwnerTruthMemoryActivationResult(
+                        outcome="deduplicated",
+                        receipt_id=receipt_id,
+                        candidate_id=candidate_id,
+                        decision=candidate.decision,
+                        memory_id=str(activation.get("memoryId") or ""),
+                        memory_version_id=str(activation.get("memoryVersionId") or ""),
+                        memory_version=int(activation.get("memoryVersion") or 0),
+                        authority_epoch=int(activation.get("authorityEpoch") or 0),
+                        content_hash=str(activation.get("contentHash") or ""),
+                    ),
+                )
+            except (OwnerTruthMemoryActivationError, TypeError, ValueError):
+                return False
+            return reader(intent)
 
     def decide(
         self,

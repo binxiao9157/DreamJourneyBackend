@@ -8,6 +8,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.async_effects.contracts import AsyncEffectJobState
 from app.domain.owner_truth.candidate_decisions import OwnerTruthCandidateSnapshot
 from app.domain.owner_truth.candidate_extraction import (
     CandidateEvidenceSpan,
@@ -673,6 +674,27 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
                 "provider",
             ):
                 self.assertNotIn(forbidden, rendered)
+
+            effect_records = self.store.effect_kernel_repository().snapshot()
+            projection_job_id = next(
+                record["intent"].job_id
+                for record in effect_records.values()
+                if record["intent"].target.vault_id == vault_id
+            )
+            self.store.effect_kernel_repository().set_job_state_for_test(
+                job_id=projection_job_id,
+                state=AsyncEffectJobState.CANCELLED,
+            )
+            terminal = client.get(
+                inbox_path,
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="memory-projection-recovery-inbox-terminal-read",
+                ),
+            )
+            self.assertEqual(terminal.status_code, 200)
+            self.assertEqual(terminal.json()["items"], [])
 
             self.store.owner_truth_memory_projection_repository().rebuild(
                 context=OwnerTruthCommandContext(
