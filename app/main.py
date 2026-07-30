@@ -1152,6 +1152,35 @@ def _owner_truth_interview_candidate_proposal_admission_context(
     )
 
 
+def _owner_truth_interview_candidate_proposal_status_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize value-free staging status without widening the QA lane.
+
+    A formal Owner who has admitted a batch needs to distinguish a durable
+    ``requested`` stage from a stale or invalidated one before the separately
+    authorized confirmation read becomes actionable.  This route remains
+    value-free and default-off: it accepts the existing QA header only for
+    the QA path, otherwise it requires the same captured
+    ``ownerTruthCandidateReview`` decision as formal admission/confirmation.
+    """
+
+    if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
+        return _owner_truth_candidate_review_context(request, vault_id=vault_id)
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=(
+            f"{request.method.upper()} /v2/vaults/*/interview-review-batches/*/"
+            "candidate-proposal/status"
+        ),
+        user_session_required_code="ownerTruthInterviewCandidateProposalStatusUserSessionRequired",
+    )
+
+
 _OWNER_TRUTH_INTERVIEW_BOUNDARY_PAYLOAD_FIELDS = frozenset(
     {
         "commandId",
@@ -5828,10 +5857,19 @@ def read_owner_truth_interview_review_batch_candidate_proposal_status(
     vault_id: str,
     review_batch_id: str,
 ) -> JSONResponse:
-    """QA-only, value-free status for the non-executing proposal staging lane."""
+    """Read value-free proposal staging state through QA or formal policy.
+
+    The response is limited to durable staging labels.  It never exposes the
+    private review-batch narrative, Source/Candidate identifiers, extraction
+    payloads, effect receipts, or Provider state, and it never executes the
+    default-disabled extraction worker.
+    """
 
     try:
-        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        context = _owner_truth_interview_candidate_proposal_status_context(
+            request,
+            vault_id=vault_id,
+        )
         status = OwnerTruthInterviewCandidateProposalStatusService(store).read_status(
             review_batch_id=review_batch_id,
             context=context,
