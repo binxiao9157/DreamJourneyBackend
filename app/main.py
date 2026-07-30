@@ -168,6 +168,9 @@ from app.services.owner_truth_interview_decision_audit import (
     OwnerTruthInterviewDecisionAuditCommand,
     OwnerTruthInterviewDecisionAuditService,
 )
+from app.services.owner_truth_do_not_ask_reactivation_preflight import (
+    OwnerTruthDoNotAskReactivationPreflightService,
+)
 from app.services.owner_truth_interview_session_read import (
     OwnerTruthInterviewSessionReadService,
 )
@@ -489,6 +492,9 @@ OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = bool(
 )
 OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED = bool(
     settings.owner_truth_topic_shift_shadow_enabled
+)
+OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED = bool(
+    settings.owner_truth_do_not_ask_reactivation_preflight_enabled
 )
 OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = bool(
     settings.owner_truth_interview_review_batch_automation_enabled
@@ -3330,6 +3336,27 @@ def _owner_truth_interview_safety_override_response(
     )
 
 
+def _owner_truth_do_not_ask_reactivation_preflight_response(
+    *,
+    vault_id: str,
+    preflight: Any,
+) -> JSONResponse:
+    """Return an explicit restore confirmation requirement without writing text."""
+
+    return JSONResponse(
+        status_code=409,
+        content={
+            "schemaVersion": "owner-truth-interview-do-not-ask-reopen-response-v1",
+            "vaultId": vault_id,
+            "persisted": False,
+            "retryable": False,
+            "nextAction": "restoreDoNotAsk",
+            "preflight": preflight.value_free_summary(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _owner_truth_interview_candidate_review_receipt_response(review: Any) -> Dict[str, Any]:
     return {
         "receiptId": review.receipt_id,
@@ -5240,6 +5267,21 @@ def append_owner_truth_interview_narrative(
                 vault_id=context.vault_id,
                 decision=safety_decision,
             )
+        if OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED:
+            preflight = OwnerTruthDoNotAskReactivationPreflightService(
+                conversation_service=OwnerTruthConversationService(
+                    store.owner_truth_conversation_repository()
+                )
+            ).preflight(
+                session_id=session_id,
+                context=context,
+                user_text=narrative_text,
+            )
+            if preflight.requires_confirmation:
+                return _owner_truth_do_not_ask_reactivation_preflight_response(
+                    vault_id=context.vault_id,
+                    preflight=preflight,
+                )
         command = AppendInterviewMessageCommand(
             command_id=str(payload.get("commandId") or ""),
             thread_id=str(payload.get("threadId") or ""),

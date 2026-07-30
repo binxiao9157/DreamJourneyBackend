@@ -34,6 +34,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.previous_topic_shift_shadow_enabled = (
             main_module.OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED
         )
+        self.previous_do_not_ask_reactivation_preflight_enabled = (
+            main_module.OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED
+        )
         self.previous_review_batch_automation_enabled = (
             main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED
         )
@@ -46,6 +49,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
         main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = False
         main_module.OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED = False
+        main_module.OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED = False
         main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = False
 
     def tearDown(self) -> None:
@@ -60,6 +64,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         )
         main_module.OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED = (
             self.previous_topic_shift_shadow_enabled
+        )
+        main_module.OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED = (
+            self.previous_do_not_ask_reactivation_preflight_enabled
         )
         main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = (
             self.previous_review_batch_automation_enabled
@@ -1488,6 +1495,112 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(state.status_code, 200, state.text)
         self.assertEqual(state.json()["session"]["state"], "active")
         self.assertEqual(state.json()["session"]["rowVersion"], 3)
+
+    def test_natural_input_do_not_ask_reactivation_preflight_is_default_off_and_write_free(self) -> None:
+        _, headers, auth_session_id = self._login("13800139627", qa=False)
+        headers.update(
+            {
+                "X-DreamJourney-Feature": "echoTextInput",
+                "X-DreamJourney-Feature-Decision-Id": "decision-interview-do-not-ask-preflight",
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": hashlib.sha256(
+                    auth_session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        vault_id = "vault-interview-do-not-ask-preflight"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        started = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+        paused = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=1,
+            boundary="doNotAsk",
+            headers=headers,
+        )
+        self.assertEqual(paused.status_code, 201, paused.text)
+        self.assertEqual(paused.json()["receipt"]["state"], "paused")
+        self.assertEqual(paused.json()["receipt"]["boundary"], "doNotAsk")
+
+        attempted_text = "我愿意重新聊这个话题。"
+        default_off = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 2,
+                "expectedSessionVersion": 2,
+                "text": attempted_text,
+            },
+        )
+        self.assertEqual(default_off.status_code, 409, default_off.text)
+        self.assertEqual(
+            default_off.json()["detail"]["code"],
+            "ownerTruthInterviewSessionConflict",
+        )
+
+        main_module.OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED = True
+        payload = {
+            "commandId": str(uuid4()),
+            "threadId": thread_id,
+            "messageId": str(uuid4()),
+            "expectedThreadVersion": 2,
+            "expectedSessionVersion": 2,
+            "text": attempted_text,
+        }
+        preflight = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json=payload,
+        )
+        self.assertEqual(preflight.status_code, 409, preflight.text)
+        self.assertEqual(preflight.headers["cache-control"], "no-store")
+        self.assertNotIn(attempted_text, preflight.text)
+        self.assertEqual(
+            preflight.json(),
+            {
+                "schemaVersion": "owner-truth-interview-do-not-ask-reopen-response-v1",
+                "vaultId": vault_id,
+                "persisted": False,
+                "retryable": False,
+                "nextAction": "restoreDoNotAsk",
+                "preflight": {
+                    "schemaVersion": "owner-truth-do-not-ask-reactivation-preflight-v1",
+                    "status": "confirmationRequired",
+                    "requiresConfirmation": True,
+                    "reasonCode": "doNotAskRestoreConfirmationRequired",
+                },
+            },
+        )
+
+        replay = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json=payload,
+        )
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.assertEqual(replay.json(), preflight.json())
+        state = client.get(
+            f"{self._start_path(vault_id)}/{session_id}/state",
+            headers=headers,
+        )
+        self.assertEqual(state.status_code, 200, state.text)
+        self.assertEqual(state.json()["session"]["state"], "paused")
+        self.assertEqual(state.json()["session"]["boundary"], "doNotAsk")
+        self.assertEqual(state.json()["session"]["rowVersion"], 2)
+        self.assertEqual(state.json()["session"]["ownerTurnCount"], 0)
 
     def test_formal_review_batch_automation_is_default_off_and_value_free_when_enabled(self) -> None:
         owner_id, headers, auth_session_id = self._login("13800139621", qa=False)

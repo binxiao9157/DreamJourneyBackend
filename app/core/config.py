@@ -114,6 +114,10 @@ class Settings:
     # current natural-input message only while the audit lane is enabled. It
     # writes no text and only shadows the existing pause decision.
     owner_truth_topic_shift_shadow_enabled: bool = False
+    # A separate write-free preflight may ask an Owner to explicitly confirm a
+    # do-not-ask restore after an unambiguous natural-language reactivation.
+    # It does not reopen the session or persist the attempted message.
+    owner_truth_do_not_ask_reactivation_preflight_enabled: bool = False
     # A separate server-only M0-A cadence writer. When enabled, a formally
     # authorized owner transition may atomically create one pending ReviewBatch
     # at the persisted threshold or paused-session boundary. It never exposes
@@ -334,6 +338,10 @@ class Settings:
             owner_truth_topic_shift_shadow_enabled=_env_bool(
                 "OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED",
                 cls.owner_truth_topic_shift_shadow_enabled,
+            ),
+            owner_truth_do_not_ask_reactivation_preflight_enabled=_env_bool(
+                "OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED",
+                cls.owner_truth_do_not_ask_reactivation_preflight_enabled,
             ),
             owner_truth_interview_review_batch_automation_enabled=_env_bool(
                 "OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED",

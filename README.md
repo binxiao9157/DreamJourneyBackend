@@ -67,6 +67,7 @@
 - `OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED=false` 默认关闭 V4 Candidate Inbox/Owner 决策、Projection、KBLite compatibility 与 Context shadow QA 接口。即使临时开启，也必须携带认证后的用户会话和 `X-DreamJourney-QA-Owner-Truth: 1`；这些接口仅用于 QA，不代表 Candidate、Projection 或 Context 已对公开产品开放。
 - `OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED=false` 默认关闭成功自然输入追加后的服务端无正文审计。开启时，它只在同一数据库事务中记录确定性动作、原因码和版本等回执；不返回给客户端、不保存叙述文本或话题名、不创建 Candidate、MemoryVersion 或 Provider 效果。
 - `OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED=false` 是独立、保守的自然换话题 shadow 开关。它只有在上述无正文审计已显式开启时才会瞬时检查当前 Owner 输入；仅识别明确的换话题表述，向既有编排器传入布尔信号并记录既有 `topicChanged` 决策，不保存文本、不暂停真实 Session、不创建新 Thread/Candidate，也不暴露公开 Echo UI。
+- `OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED=false` 是独立的自然重开预检开关。开启后，已暂停的 `doNotAsk` Session 收到明确的“愿意重新聊”表达时，只返回无正文的 `restoreDoNotAsk` 确认要求；不会写入该条输入、不会自动恢复边界，也不会创建 Thread/Candidate/MemoryVersion 或公开 UI。真正恢复仍必须走既有 `confirmed=true` 的 Owner 命令。
 - `OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED=false` 默认关闭正式自然输入的服务端 ReviewBatch 节奏写入。开启时，仅已捕获 `echoTextInput` 策略的 Owner 追加或暂停边界会在同一事务内按既有阈值创建一个待确认批次；自然输入响应只返回当前 session 版本，不泄露批次内容，也不创建 Candidate、MemoryVersion 或 Provider 效果。
 - `OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED=false` 是独立的 M0-B Owner 知识维度确认回执开关。即使 Candidate QA 已开启，它仍默认关闭；开启后只允许 Owner 对当前 `MemoryVersion` 的 hash 追加明确的维度/Facet 确认，不写回记忆原文、不创建 Candidate/新版本，也不接入公开 Echo。
 - `OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED=false` 是独立的 M0-B 推荐读取开关。它要求前两个 Owner Truth QA 开关和认证 Owner 会话同时成立，只允许用当前确认回执绑定的同维度 `confirmedMemory` 引用执行值无关的选择策略；不生成问题文本、不落库、不接入公开 Echo。
