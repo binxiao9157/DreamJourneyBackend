@@ -4,9 +4,10 @@ This module keeps recommendation feedback deliberately narrower than a new
 conversation or topic authority.  ``replace`` suppresses only one short-lived
 server-planned candidate.  ``notInterested`` records a value-free preference
 against a knowledge dimension or policy question template so later selection
-can lower its ranking.  Timing and long-term topic boundaries remain owned by
-the existing ThreadPreference commands; feedback must never silently become
-``cooldown`` or ``doNotAsk``.
+can lower its ranking.  The one explicit ``defer`` + ``timing`` combination
+reuses the existing ThreadPreference and saved-continuation commands.  It is
+available only from the opaque guided recommendation set, so feedback can
+never silently become ``cooldown`` or ``doNotAsk``.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from app.domain.owner_truth.conversation import (
     InterviewBoundary,
     InterviewSessionState,
     OwnerTruthConversationAccessDenied,
+    SetInterviewBoundaryCommand,
 )
 from app.domain.owner_truth.knowledge_dimension_read import OwnerTruthKnowledgeDimensionReadState
 from app.domain.owner_truth.knowledge_recommendations import (
@@ -37,6 +39,15 @@ from app.domain.owner_truth.knowledge_recommendations import (
     knowledge_dimension_facets,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.owner_truth_saved_continuation import (
+    OwnerTruthSavedContinuationCueCommand,
+    OwnerTruthSavedContinuationCueError,
+    OwnerTruthSavedContinuationCueService,
+)
+from app.services.owner_truth_thread_preferences import (
+    OwnerTruthThreadPreferenceError,
+    OwnerTruthThreadPreferenceService,
+)
 
 
 OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_SCHEMA_VERSION = (
@@ -85,12 +96,14 @@ class OwnerTruthKnowledgeRecommendationFeedbackUnavailable(
 class RecommendationFeedbackAction(str, Enum):
     REPLACE = "replace"
     NOT_INTERESTED = "notInterested"
+    DEFER = "defer"
 
 
 class RecommendationFeedbackReason(str, Enum):
     QUESTION_WORDING = "questionWording"
     TOPIC_PREFERENCE = "topicPreference"
     RECOMMENDATION_TYPE = "recommendationType"
+    TIMING = "timing"
 
 
 class RecommendationFeedbackScope(str, Enum):
@@ -289,6 +302,13 @@ class OwnerTruthKnowledgeRecommendationFeedbackCommand:
             raise OwnerTruthKnowledgeRecommendationFeedbackError(
                 "notInterested feedback requires topicPreference or recommendationType"
             )
+        if (
+            self.feedback_action is RecommendationFeedbackAction.DEFER
+            and self.feedback_reason is not RecommendationFeedbackReason.TIMING
+        ):
+            raise OwnerTruthKnowledgeRecommendationFeedbackError(
+                "defer feedback only supports timing"
+            )
 
     @property
     def command_id_hash(self) -> str:
@@ -311,7 +331,10 @@ class OwnerTruthKnowledgeRecommendationFeedbackCommand:
 
     @property
     def feedback_scope(self) -> RecommendationFeedbackScope:
-        if self.feedback_action is RecommendationFeedbackAction.REPLACE:
+        if self.feedback_action in {
+            RecommendationFeedbackAction.REPLACE,
+            RecommendationFeedbackAction.DEFER,
+        }:
             return RecommendationFeedbackScope.CANDIDATE
         if self.feedback_reason is RecommendationFeedbackReason.TOPIC_PREFERENCE:
             return RecommendationFeedbackScope.DIMENSION
@@ -368,6 +391,13 @@ class OwnerTruthGuidedRecommendationFeedbackCommand:
         ):
             raise OwnerTruthKnowledgeRecommendationFeedbackError(
                 "notInterested feedback requires topicPreference or recommendationType"
+            )
+        if (
+            self.feedback_action is RecommendationFeedbackAction.DEFER
+            and self.feedback_reason is not RecommendationFeedbackReason.TIMING
+        ):
+            raise OwnerTruthKnowledgeRecommendationFeedbackError(
+                "defer feedback only supports timing"
             )
 
     @property
@@ -489,7 +519,11 @@ class OwnerTruthKnowledgeRecommendationFeedbackResult:
         _nonnegative_int(self.evidence_ref_count, field="evidence_ref_count")
         expected_scope = (
             RecommendationFeedbackScope.CANDIDATE
-            if self.feedback_action is RecommendationFeedbackAction.REPLACE
+            if self.feedback_action
+            in {
+                RecommendationFeedbackAction.REPLACE,
+                RecommendationFeedbackAction.DEFER,
+            }
             else (
                 RecommendationFeedbackScope.DIMENSION
                 if self.feedback_reason is RecommendationFeedbackReason.TOPIC_PREFERENCE
@@ -770,6 +804,10 @@ class InMemoryOwnerTruthKnowledgeRecommendationFeedbackRepository:
             scope = RecommendationFeedbackScope(record.get("feedbackScope"))
             if action is RecommendationFeedbackAction.REPLACE:
                 replaced.add(_opaque_identifier(record.get("candidateId"), field="candidateId"))
+            elif action is RecommendationFeedbackAction.DEFER:
+                # Timing is enforced by the explicit ThreadPreference cooldown,
+                # not by permanently suppressing a candidate or topic.
+                continue
             elif scope is RecommendationFeedbackScope.DIMENSION:
                 dimension = KnowledgeDimension(record.get("targetDimension"))
                 dimensions[dimension] = dimensions.get(dimension, 0) + 1
@@ -1120,9 +1158,12 @@ class OwnerTruthKnowledgeRecommendationFeedbackService:
         store: OwnerTruthKnowledgeRecommendationFeedbackStore,
         *,
         enabled: bool = False,
+        thread_cooldown_seconds: int = 7 * 24 * 60 * 60,
     ) -> None:
+        _positive_int(thread_cooldown_seconds, field="thread_cooldown_seconds")
         self._store = store
         self._enabled = bool(enabled)
+        self._thread_cooldown_seconds = thread_cooldown_seconds
 
     def submit(
         self,
@@ -1138,6 +1179,10 @@ class OwnerTruthKnowledgeRecommendationFeedbackService:
         if not self._enabled:
             raise OwnerTruthKnowledgeRecommendationFeedbackUnavailable(
                 "recommendation feedback QA contract is disabled"
+            )
+        if command.feedback_action is RecommendationFeedbackAction.DEFER:
+            raise OwnerTruthKnowledgeRecommendationFeedbackUnavailable(
+                "timing feedback must use the guided recommendation presentation contract"
             )
         with self._request_unit_of_work(
             correlation_id=(
@@ -1215,12 +1260,108 @@ class OwnerTruthKnowledgeRecommendationFeedbackService:
                 decision=decision,
                 expected_session_version=session.row_version,
             )
+            if command.feedback_action is RecommendationFeedbackAction.DEFER:
+                return self._record_guided_timing_feedback(
+                    repository=repository,
+                    context=context,
+                    command=feedback_command,
+                    decision=decision,
+                    session=session,
+                    plan=plan,
+                )
             return self._record_current_plan(
                 repository=repository,
                 context=context,
                 command=feedback_command,
                 plan=plan,
             )
+
+    def _record_guided_timing_feedback(
+        self,
+        *,
+        repository: OwnerTruthKnowledgeRecommendationFeedbackRepository,
+        context: OwnerTruthCommandContext,
+        command: OwnerTruthKnowledgeRecommendationFeedbackCommand,
+        decision: RecommendationDecision,
+        session: Any,
+        plan: Any,
+    ) -> OwnerTruthKnowledgeRecommendationFeedbackResult:
+        """Persist an explicit defer receipt, then enter the existing cooldown flow.
+
+        The feedback receipt is intentionally written while the session remains
+        active/open because its database trigger verifies that exact authority
+        boundary.  The surrounding request unit of work makes the receipt,
+        continuation cue and cooldown transition atomic in Postgres.
+        """
+
+        if command.feedback_action is not RecommendationFeedbackAction.DEFER:
+            raise OwnerTruthKnowledgeRecommendationFeedbackError(
+                "guided timing feedback requires defer action"
+            )
+        if command.feedback_reason is not RecommendationFeedbackReason.TIMING:
+            raise OwnerTruthKnowledgeRecommendationFeedbackError(
+                "guided timing feedback requires timing reason"
+            )
+        memory_version_id = self._continuation_memory_version_id(decision=decision)
+        feedback = self._record_current_plan(
+            repository=repository,
+            context=context,
+            command=command,
+            plan=plan,
+        )
+        cue_command = OwnerTruthSavedContinuationCueCommand(
+            command_id=f"{command.command_id}:guided-defer-continuation",
+            thread_id=decision.thread_id,
+            session_id=session.session_id,
+            expected_session_version=command.expected_session_version,
+            memory_version_id=memory_version_id,
+            target_dimension=decision.target_dimension,
+            missing_facet=decision.missing_facet,
+        )
+        boundary_command = SetInterviewBoundaryCommand(
+            command_id=f"{command.command_id}:guided-defer-cooldown",
+            thread_id=decision.thread_id,
+            session_id=session.session_id,
+            expected_session_version=command.expected_session_version,
+            boundary=InterviewBoundary.COOLDOWN,
+        )
+        try:
+            OwnerTruthSavedContinuationCueService(
+                self._store,
+                enabled=True,
+            ).create(context=context, command=cue_command)
+            OwnerTruthThreadPreferenceService(
+                self._store,
+                enabled=True,
+                cooldown_seconds=self._thread_cooldown_seconds,
+            ).set_boundary(context=context, command=boundary_command)
+        except (
+            OwnerTruthSavedContinuationCueError,
+            OwnerTruthThreadPreferenceError,
+        ) as error:
+            # The client never supplied these authority fields.  A failure here
+            # means the server-planned active/open state changed or no longer
+            # safely supports the complete defer transition.
+            raise OwnerTruthKnowledgeRecommendationFeedbackStale(
+                "guided timing feedback no longer binds the current continuation state"
+            ) from error
+        return feedback
+
+    @staticmethod
+    def _continuation_memory_version_id(*, decision: RecommendationDecision) -> str:
+        if not decision.evidence_refs:
+            raise OwnerTruthKnowledgeRecommendationFeedbackUnavailable(
+                "guided timing feedback requires current confirmed evidence"
+            )
+        try:
+            return require_uuid(
+                min(decision.evidence_refs),
+                field="guided_timing_memory_version_id",
+            )
+        except OwnerTruthContractError as error:
+            raise OwnerTruthKnowledgeRecommendationFeedbackUnavailable(
+                "guided timing feedback requires current confirmed evidence"
+            ) from error
 
     def _current_plan(self, *, context: OwnerTruthCommandContext) -> Any:
         try:
@@ -1370,6 +1511,8 @@ class OwnerTruthKnowledgeRecommendationFeedbackService:
     def _reason_code(
         command: OwnerTruthKnowledgeRecommendationFeedbackCommand,
     ) -> str:
+        if command.feedback_action is RecommendationFeedbackAction.DEFER:
+            return "userDeferredTiming"
         if command.feedback_action is RecommendationFeedbackAction.REPLACE:
             return "userRequestedReplacement"
         if command.feedback_reason is RecommendationFeedbackReason.TOPIC_PREFERENCE:

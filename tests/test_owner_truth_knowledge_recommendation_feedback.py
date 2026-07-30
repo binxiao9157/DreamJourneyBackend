@@ -338,7 +338,7 @@ class OwnerTruthKnowledgeRecommendationFeedbackTests(unittest.TestCase):
                 ),
             )
 
-    def test_command_rejects_feedback_that_would_duplicate_timing_or_do_not_ask(self) -> None:
+    def test_command_rejects_invalid_pairs_and_reserves_timing_for_guided_presentation(self) -> None:
         with self.assertRaisesRegex(Exception, "replace feedback"):
             OwnerTruthKnowledgeRecommendationFeedbackCommand(
                 command_id="recommendation-feedback-invalid-replace",
@@ -355,6 +355,21 @@ class OwnerTruthKnowledgeRecommendationFeedbackTests(unittest.TestCase):
                 feedback_reason="questionWording",
                 expected_session_version=1,
             )
+        timing = OwnerTruthKnowledgeRecommendationFeedbackCommand(
+            command_id="recommendation-feedback-generic-timing",
+            expected_candidate_id="server-plan-breadth-a",
+            feedback_action="defer",
+            feedback_reason="timing",
+            expected_session_version=1,
+        )
+        with self.assertRaisesRegex(
+            OwnerTruthKnowledgeRecommendationFeedbackUnavailable,
+            "guided recommendation presentation",
+        ):
+            OwnerTruthKnowledgeRecommendationFeedbackService(
+                self.store,
+                enabled=True,
+            ).submit(context=self.context, command=timing)
 
 
 if __name__ == "__main__":  # pragma: no cover

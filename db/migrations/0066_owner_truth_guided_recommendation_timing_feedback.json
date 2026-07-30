@@ -1,0 +1,12 @@
+{
+  "version": "0066",
+  "name": "owner_truth_guided_recommendation_timing_feedback",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthGuidedRecommendationTimingFeedbackDefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthKnowledgeRecommendationFeedbackQa": false,
+    "echoGuidedRecommendations": false
+  }
+}

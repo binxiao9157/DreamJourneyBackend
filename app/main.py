@@ -6439,7 +6439,13 @@ def submit_owner_truth_guided_recommendation_feedback(
     vault_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """Persist one display-safe prompt action without exposing planner internals."""
+    """Persist one display-safe prompt action without exposing planner internals.
+
+    ``defer`` + ``timing`` is the sole presentation action that can enter a
+    short cooldown. The server derives its continuation anchor from the
+    current Owner-confirmed plan; clients never provide session or evidence
+    identifiers.
+    """
 
     try:
         context = _owner_truth_guided_recommendation_presentation_context(
@@ -6463,6 +6469,7 @@ def submit_owner_truth_guided_recommendation_feedback(
         result = OwnerTruthKnowledgeRecommendationFeedbackService(
             store,
             enabled=True,
+            thread_cooldown_seconds=OWNER_TRUTH_THREAD_COOLDOWN_SECONDS,
         ).submit_guided_presentation(context=context, command=command)
     except OwnerTruthKnowledgeRecommendationFeedbackError as error:
         raise _owner_truth_guided_recommendation_feedback_http_error(error) from error

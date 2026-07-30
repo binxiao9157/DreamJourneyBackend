@@ -776,6 +776,126 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         finally:
             policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 
+    def test_product_guided_recommendation_timing_feedback_defers_with_safe_continuation(self) -> None:
+        owner_id, headers, session_id = self._login_release_policy("13800139422")
+        vault_id = "vault-guided-recommendation-timing-feedback"
+        memory_version_id, content_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "Deferred prompts must not expose private source text."},
+            command_id="guided-timing-feedback-activate",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=memory_version_id,
+            content_hash=content_hash,
+            dimension="keyDecisions",
+            facets=("choice", "reason"),
+            command_id="guided-timing-feedback-confirm",
+        )
+        thread_id, _interview_session_id = self._seed_thread_with_session(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="guided-timing-feedback-thread",
+        )
+        presentation_path = self._guided_presentation_path(vault_id)
+        feedback_path = self._guided_presentation_feedback_path(vault_id)
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "echoGuidedRecommendations"
+        }
+        policy_headers = self._guided_presentation_policy_headers(
+            headers,
+            session_id=session_id,
+            decision_id="guided-timing-feedback-owner",
+        )
+        try:
+            presentation = client.get(presentation_path, headers=policy_headers)
+            self.assertEqual(presentation.status_code, 200, presentation.text)
+            body = presentation.json()
+            self.assertEqual(body["state"], "ready")
+            self.assertEqual(len(body["recommendations"]), 1)
+            payload = {
+                "commandId": "guided-timing-feedback-replay-safe",
+                "recommendationSetId": body["recommendationSetId"],
+                "slot": body["recommendations"][0]["slot"],
+                "feedbackAction": "defer",
+                "feedbackReason": "timing",
+            }
+
+            injected = client.post(
+                feedback_path,
+                headers=policy_headers,
+                json={**payload, "threadId": thread_id},
+            )
+            self.assertEqual(injected.status_code, 400, injected.text)
+            self.assertEqual(
+                injected.json()["detail"]["code"],
+                "ownerTruthGuidedRecommendationFeedbackInvalid",
+            )
+
+            created = client.post(feedback_path, headers=policy_headers, json=payload)
+            self.assertEqual(created.status_code, 201, created.text)
+            self.assertEqual(
+                created.json(),
+                {
+                    "schemaVersion": "owner-truth-guided-recommendation-feedback-response-v1",
+                    "vaultId": vault_id,
+                    "feedback": {"status": "created"},
+                },
+            )
+            rendered = json.dumps(created.json(), ensure_ascii=False)
+            for forbidden in (
+                "candidateId",
+                "evidenceRef",
+                "reasonCode",
+                "targetDimension",
+                "policyVersion",
+                "questionTemplate",
+                "threadId",
+                "sessionId",
+                "Deferred prompts must not",
+            ):
+                self.assertNotIn(forbidden, rendered)
+
+            context = OwnerTruthCommandContext(
+                vault_id=vault_id,
+                owner_subject_id=owner_id,
+                actor_subject_id=owner_id,
+            )
+            preference = self.store.owner_truth_thread_preference_repository().read(
+                context=context,
+                thread_id=thread_id,
+            )
+            self.assertIsNotNone(preference)
+            assert preference is not None
+            self.assertEqual(preference.preference.value, "cooldown")
+            cues = self.store.owner_truth_saved_continuation_cue_repository().list_for_recommendation(
+                context=context
+            )
+            self.assertEqual(len(cues), 1)
+            self.assertEqual(cues[0].thread_id, thread_id)
+            self.assertEqual(cues[0].memory_version_id, memory_version_id)
+
+            replayed = client.post(feedback_path, headers=policy_headers, json=payload)
+            self.assertEqual(replayed.status_code, 200, replayed.text)
+            self.assertEqual(replayed.json()["feedback"], {"status": "deduplicated"})
+
+            stale = client.post(
+                feedback_path,
+                headers=policy_headers,
+                json={**payload, "commandId": "guided-timing-feedback-stale"},
+            )
+            self.assertEqual(stale.status_code, 409, stale.text)
+            self.assertEqual(
+                stale.json()["detail"]["code"],
+                "ownerTruthGuidedRecommendationFeedbackStale",
+            )
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
     def test_explicit_saved_continuation_cue_is_hidden_then_plans_only_current_private_state(self) -> None:
         owner_id, headers = self._login("13800139417")
         vault_id = "vault-recommendation-saved-continuation"
