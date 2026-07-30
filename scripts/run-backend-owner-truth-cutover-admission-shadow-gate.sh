@@ -43,6 +43,7 @@ for required in (
     '"authorityEpochChanged": self.authority_epoch_changed',
     '"legacyWriterRetired": self.legacy_writer_retired',
     '"separateProductionGoRecordRequired"',
+    '"ownerScopeMismatch"',
 ):
     assert required in source, f"missing fail-closed cutover invariant: {required}"
 

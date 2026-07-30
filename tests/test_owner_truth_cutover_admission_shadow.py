@@ -27,15 +27,25 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
-def _context(*, authority_epoch: int = 0, vault_id: str = "vault-cutover-a") -> OwnerTruthCutoverAdmissionContext:
+def _context(
+    *,
+    authority_epoch: int = 0,
+    owner_subject_id: str = "owner-cutover-a",
+    vault_id: str = "vault-cutover-a",
+) -> OwnerTruthCutoverAdmissionContext:
     return OwnerTruthCutoverAdmissionContext(
         vault_id=vault_id,
-        owner_subject_id="owner-cutover-a",
+        owner_subject_id=owner_subject_id,
         authority_epoch=authority_epoch,
     )
 
 
-def _parity_report(*, vault_id: str = "vault-cutover-a", authority_epoch: int = 0):
+def _parity_report(
+    *,
+    vault_id: str = "vault-cutover-a",
+    owner_subject_id: str = "owner-cutover-a",
+    authority_epoch: int = 0,
+):
     inventory = build_legacy_migration_inventory(
         vault_id=vault_id,
         classifier_version="cutover-admission-shadow-test-v1",
@@ -44,8 +54,8 @@ def _parity_report(*, vault_id: str = "vault-cutover-a", authority_epoch: int = 
                 domain=LegacyMigrationDomain.MEMORY,
                 legacy_id="legacy-memory-a",
                 record_hash=_digest({"legacy": "memory-a"}),
-                canonical_owner_subject_id="owner-cutover-a",
-                observed_owner_subject_id="owner-cutover-a",
+                canonical_owner_subject_id=owner_subject_id,
+                observed_owner_subject_id=owner_subject_id,
                 source_evidence_id="source-evidence-a",
                 decision_receipt_id="decision-receipt-a",
                 decision_is_terminal=True,
@@ -56,12 +66,12 @@ def _parity_report(*, vault_id: str = "vault-cutover-a", authority_epoch: int = 
     return build_legacy_shadow_parity_report(
         inventory_run_id="cutover-admission-run-a",
         inventory=inventory,
-        owner_subject_id="owner-cutover-a",
+        owner_subject_id=owner_subject_id,
         projection_snapshot={
             "authorityEpoch": authority_epoch,
             "checkpoint": _digest({"checkpoint": "a"}),
             "entryCount": 1,
-            "ownerSubjectId": "owner-cutover-a",
+            "ownerSubjectId": owner_subject_id,
             "sourceHash": _digest({"source": "a"}),
             "state": "ready",
             "vaultId": vault_id,
@@ -132,7 +142,7 @@ class OwnerTruthCutoverAdmissionShadowTests(unittest.TestCase):
         self.assertIn("authorityEpochCasRequiresIndependentCommand", result.reason_codes)
         self.assertIn("legacyWriterRetirementRequiresIndependentCommand", result.reason_codes)
 
-    def test_epoch_or_vault_mismatch_fails_closed_before_external_go_evaluation(self) -> None:
+    def test_epoch_vault_or_owner_scope_mismatch_fails_closed_before_external_go_evaluation(self) -> None:
         epoch_mismatch = observe_owner_truth_cutover_admission(
             _parity_report(),
             context=_context(authority_epoch=1),
@@ -141,6 +151,11 @@ class OwnerTruthCutoverAdmissionShadowTests(unittest.TestCase):
         vault_mismatch = observe_owner_truth_cutover_admission(
             _parity_report(),
             context=_context(vault_id="vault-cutover-b"),
+            enabled=True,
+        )
+        owner_mismatch = observe_owner_truth_cutover_admission(
+            _parity_report(),
+            context=_context(owner_subject_id="owner-cutover-b"),
             enabled=True,
         )
 
@@ -154,6 +169,13 @@ class OwnerTruthCutoverAdmissionShadowTests(unittest.TestCase):
             OwnerTruthCutoverAdmissionDisposition.CONTEXT_MISMATCH,
         )
         self.assertIn("vaultMismatch", vault_mismatch.reason_codes)
+        self.assertEqual(
+            owner_mismatch.disposition,
+            OwnerTruthCutoverAdmissionDisposition.CONTEXT_MISMATCH,
+        )
+        self.assertIn("ownerScopeMismatch", owner_mismatch.reason_codes)
+        self.assertEqual(owner_mismatch.value_free_summary()["status"], "context_mismatch")
+        self.assertNotIn("owner-cutover-b", repr(owner_mismatch.value_free_summary()))
 
 
 if __name__ == "__main__":

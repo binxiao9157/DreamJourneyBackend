@@ -13,11 +13,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from hashlib import sha256
-import json
 import re
 
-from app.domain.owner_truth.legacy_migration import LegacyShadowParityReport
+from app.domain.owner_truth.legacy_migration import (
+    LegacyShadowParityReport,
+    build_legacy_shadow_parity_owner_scope_hash,
+)
 
 
 OWNER_TRUTH_CUTOVER_ADMISSION_SHADOW_SCHEMA_VERSION = "owner-truth-cutover-admission-shadow-v1"
@@ -43,14 +44,11 @@ def _identifier(value: object, *, field: str) -> str:
 
 
 def _scope_hash(*, vault_id: str, owner_subject_id: str, authority_epoch: int) -> str:
-    material = {
-        "authorityEpoch": authority_epoch,
-        "ownerSubjectId": owner_subject_id,
-        "vaultId": vault_id,
-    }
-    return sha256(
-        json.dumps(material, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return build_legacy_shadow_parity_owner_scope_hash(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        authority_epoch=authority_epoch,
+    )
 
 
 @dataclass(frozen=True)
@@ -177,6 +175,14 @@ def observe_owner_truth_cutover_admission(
             enabled=True,
             disposition=OwnerTruthCutoverAdmissionDisposition.CONTEXT_MISMATCH,
             reason_codes=("authorityEpochMismatch", "separateProductionGoRecordRequired"),
+            scope_hash=scope_hash,
+            parity_report_hash=parity_report.report_hash,
+        )
+    if parity_report.owner_scope_hash != scope_hash:
+        return OwnerTruthCutoverAdmissionShadow(
+            enabled=True,
+            disposition=OwnerTruthCutoverAdmissionDisposition.CONTEXT_MISMATCH,
+            reason_codes=("ownerScopeMismatch", "separateProductionGoRecordRequired"),
             scope_hash=scope_hash,
             parity_report_hash=parity_report.report_hash,
         )

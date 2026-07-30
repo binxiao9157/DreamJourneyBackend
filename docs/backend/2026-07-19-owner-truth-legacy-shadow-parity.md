@@ -32,6 +32,10 @@ retirement。
 对象地址。`conversationCache` 是非 Owner Memory 域，单独不可用不会把“仅缺
 lineage mapping”的结果误判为核心证据不完整。
 
+每份报告还带有仅含摘要的 `ownerScopeHash`，由当前 Vault、Owner 和 authority epoch
+计算；原始 Owner ID 不会进入响应。后续 cutover shadow 必须复算并比对这个 hash，任何
+Owner scope 不一致都停在 `context_mismatch`，不能进入 `external_go_required`。
+
 所有路径都固定输出：
 
 ```text

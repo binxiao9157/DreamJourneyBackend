@@ -247,6 +247,39 @@ _LEGACY_SHADOW_REQUIRED_DOMAINS = frozenset(
 )
 
 
+def build_legacy_shadow_parity_owner_scope_hash(
+    *,
+    vault_id: object,
+    owner_subject_id: object,
+    authority_epoch: object,
+) -> str:
+    """Bind a parity observation to one Owner, Vault and authority epoch.
+
+    The raw Owner identifier stays inside the hash input and never appears in
+    a parity summary.  Future cutover code can compare this opaque binding to
+    its current Owner context without trusting a report from another Owner.
+    """
+
+    normalized_vault_id = _normalized_text(vault_id, field="vault_id")
+    normalized_owner_subject_id = _normalized_text(
+        owner_subject_id,
+        field="owner_subject_id",
+    )
+    if isinstance(authority_epoch, bool) or not isinstance(authority_epoch, int):
+        raise OwnerTruthLegacyMigrationError("authority_epoch must be an integer")
+    if authority_epoch < 0:
+        raise OwnerTruthLegacyMigrationError("authority_epoch must not be negative")
+    return _hash(
+        _canonical_json(
+            {
+                "authorityEpoch": authority_epoch,
+                "ownerSubjectId": normalized_owner_subject_id,
+                "vaultId": normalized_vault_id,
+            }
+        )
+    )
+
+
 @dataclass(frozen=True)
 class LegacyShadowParityReport:
     """A value-free, fail-closed observation before any legacy cutover.
@@ -259,6 +292,7 @@ class LegacyShadowParityReport:
     """
 
     vault_id: str
+    owner_scope_hash: str
     inventory_run_id: str
     classifier_version: str
     inventory_hash: str
@@ -294,6 +328,7 @@ class LegacyShadowParityReport:
             "legacyEntryCount": self.legacy_entry_count,
             "legacyWriterRetired": self.legacy_writer_retired,
             "mappedRecordCount": self.mapped_record_count,
+            "ownerScopeHash": self.owner_scope_hash,
             "projection": {
                 "authorityEpoch": self.projection_authority_epoch,
                 "checkpoint": self.projection_checkpoint,
@@ -345,6 +380,11 @@ def build_legacy_shadow_parity_report(
         raise OwnerTruthLegacyMigrationError("projection summary values are invalid") from exc
     if projection_epoch < 0 or projection_entry_count < 0:
         raise OwnerTruthLegacyMigrationError("projection summary values are invalid")
+    owner_scope_hash = build_legacy_shadow_parity_owner_scope_hash(
+        vault_id=inventory.vault_id,
+        owner_subject_id=owner,
+        authority_epoch=projection_epoch,
+    )
 
     projection_checkpoint_value = projection_snapshot.get("checkpoint")
     projection_checkpoint = (
@@ -413,6 +453,7 @@ def build_legacy_shadow_parity_report(
                 "legacyEligibleEntryCount": eligible_count,
                 "legacyEntryCount": len(inventory.entries),
                 "mappedRecordCount": 0,
+                "ownerScopeHash": owner_scope_hash,
                 "projection": {
                     "authorityEpoch": projection_epoch,
                     "checkpoint": projection_checkpoint,
@@ -429,6 +470,7 @@ def build_legacy_shadow_parity_report(
     )
     return LegacyShadowParityReport(
         vault_id=inventory.vault_id,
+        owner_scope_hash=owner_scope_hash,
         inventory_run_id=run_id,
         classifier_version=inventory.classifier_version,
         inventory_hash=inventory.inventory_hash,
@@ -608,6 +650,7 @@ __all__ = [
     "LegacyMigrationRecord",
     "OwnerTruthLegacyMigrationError",
     "build_legacy_migration_inventory",
+    "build_legacy_shadow_parity_owner_scope_hash",
     "build_legacy_shadow_parity_report",
     "classify_legacy_record",
 ]

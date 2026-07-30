@@ -140,6 +140,7 @@ class OwnerTruthLegacyShadowParityAPITests(unittest.TestCase):
         self.assertEqual(first.headers["cache-control"], "no-store")
         payload = first.json()
         self.assertEqual(payload["schemaVersion"], "owner-truth-legacy-shadow-parity-v1")
+        self.assertRegex(payload["ownerScopeHash"], r"^[0-9a-f]{64}$")
         self.assertEqual(payload["comparisonStatus"], "projectionRebuilding")
         self.assertFalse(payload["cutoverAllowed"])
         self.assertFalse(payload["authorityEpochChanged"])
@@ -152,6 +153,7 @@ class OwnerTruthLegacyShadowParityAPITests(unittest.TestCase):
         )
         self.assertNotIn(raw_archive_body, str(payload))
         self.assertNotIn("legacy-shadow-api", str(payload))
+        self.assertNotIn(owner_id, str(payload))
         self.assertEqual(replay.status_code, 200)
         self.assertEqual(replay.json()["inventoryRunId"], payload["inventoryRunId"])
 

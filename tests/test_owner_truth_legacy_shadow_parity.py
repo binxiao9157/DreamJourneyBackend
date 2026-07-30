@@ -310,6 +310,40 @@ class OwnerTruthLegacyShadowParityServiceTests(unittest.TestCase):
         self.assertIn("legacyRecordMappingUnavailable", summary["reasonCodes"])
         self.assertNotIn("legacyRequiredDomainUnavailable", summary["reasonCodes"])
 
+    def test_owner_scope_hash_changes_without_disclosing_owner_identity(self) -> None:
+        inventory = build_legacy_migration_inventory(
+            vault_id=self.vault_id,
+            classifier_version="legacy-shadow-parity-test-v1",
+            records=(),
+        )
+        projection = {
+            "authorityEpoch": 0,
+            "checkpoint": "b" * 64,
+            "entryCount": 0,
+            "sourceHash": "c" * 64,
+            "state": "ready",
+            "vaultId": self.vault_id,
+        }
+        owner_a = "owner-parity-scope-a"
+        owner_b = "owner-parity-scope-b"
+        report_a = build_legacy_shadow_parity_report(
+            inventory_run_id="parity-run-owner-scope",
+            inventory=inventory,
+            owner_subject_id=owner_a,
+            projection_snapshot={**projection, "ownerSubjectId": owner_a},
+        )
+        report_b = build_legacy_shadow_parity_report(
+            inventory_run_id="parity-run-owner-scope",
+            inventory=inventory,
+            owner_subject_id=owner_b,
+            projection_snapshot={**projection, "ownerSubjectId": owner_b},
+        )
+
+        self.assertNotEqual(report_a.owner_scope_hash, report_b.owner_scope_hash)
+        self.assertNotEqual(report_a.report_hash, report_b.report_hash)
+        self.assertNotIn(owner_a, str(report_a.summary()))
+        self.assertNotIn(owner_b, str(report_b.summary()))
+
 
 if __name__ == "__main__":
     unittest.main()
