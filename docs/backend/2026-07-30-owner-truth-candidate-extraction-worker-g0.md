@@ -39,6 +39,10 @@ The worker is intentionally one-shot. It only claims
 6. Candidate persistence, Consumer completion, and lease terminalization share
    the worker transaction. Replays retain the same immutable extraction and
    candidate identity.
+7. A generic Source worker Candidate has no `ReviewBatch` admission provenance.
+   Its existing generic Owner review lane is deliberately separate from the
+   formal interview confirmation routes; the worker must never create or borrow
+   an `interview_review_batch_candidate_admissions` row.
 
 ## Local Verification
 
@@ -56,10 +60,12 @@ deployment, or production flag change is part of G0.
 inside its randomly named disposable database. It verifies the typed effect
 job, current Source read, restricted pending Candidate, typed consumer receipt,
 terminal lease attempt, private worker output, and a subsequent idle rerun.
-It also verifies that the existing Owner review lane can read that pending
-Candidate, create one immutable DecisionReceipt, activate exactly one initial
+It also proves that the generic Source Candidate has zero formal interview
+admission rows before it enters the existing generic Owner review lane. That
+lane can create one immutable DecisionReceipt, activate exactly one initial
 MemoryVersion, and deduplicate a replayed Owner decision. The worker itself
-never promotes a Candidate.
+never promotes a Candidate or manufactures formal interview-confirmation
+provenance.
 
 The script derives the required migration head from the current migration
 manifest instead of hard-coding an old schema version. It applies migrations to

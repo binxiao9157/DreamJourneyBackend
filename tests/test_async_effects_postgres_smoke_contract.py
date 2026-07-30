@@ -32,9 +32,14 @@ class AsyncEffectsPostgresSmokeContractTests(unittest.TestCase):
         self.assertIn("terminal Source worker job must not replay without a new effect", source)
         self.assertIn("Source worker must not activate a MemoryVersion before explicit Owner review", source)
         self.assertIn("Source worker Candidate must enter the existing Owner review inbox unchanged", source)
-        self.assertIn("explicit Owner review must create one immutable DecisionReceipt for the worker Candidate", source)
-        self.assertIn("explicit Owner review must activate exactly one initial MemoryVersion", source)
-        self.assertIn("Owner review must persist exactly one MemoryVersion for the worker Candidate", source)
+        self.assertIn("count_interview_candidate_admissions", source)
+        self.assertIn(
+            "Source worker Candidate must remain outside formal interview-confirmation provenance",
+            source,
+        )
+        self.assertIn("generic Owner review must create one immutable DecisionReceipt for the worker Candidate", source)
+        self.assertIn("generic Owner review must activate exactly one initial MemoryVersion", source)
+        self.assertIn("generic Owner review must persist exactly one MemoryVersion for the worker Candidate", source)
         self.assertIn("replaying the Owner review must not create a second receipt or MemoryVersion", source)
         self.assertIn("source must roll back when its effect request cannot commit", source)
         self.assertIn("current owner truth source target must be admitted", source)

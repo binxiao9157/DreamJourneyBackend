@@ -140,6 +140,26 @@ def count_candidate_rows(dsn: str, *, vault_id: str, extraction_id: str) -> int:
             return int(cursor.fetchone()[0])
 
 
+def count_interview_candidate_admissions(dsn: str, *, vault_id: str, source_id: str) -> int:
+    """Return formal interview admission rows for one private Source.
+
+    The default-disabled Source worker creates a generic pending Candidate. It
+    must never manufacture the interview ReviewBatch provenance required by
+    the formal confirmation routes.
+    """
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM owner_truth.interview_review_batch_candidate_admissions
+                WHERE vault_id = %s AND source_id = %s
+                """,
+                (vault_id, source_id),
+            )
+            return int(cursor.fetchone()[0])
+
+
 def count_memory_version_rows(dsn: str, *, vault_id: str) -> int:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
@@ -368,6 +388,15 @@ def main() -> None:
             "Source worker Candidate must enter the existing Owner review inbox unchanged",
         )
         worker_candidate = pending_candidates[0]
+        require(
+            count_interview_candidate_admissions(
+                test_dsn,
+                vault_id=source_context.vault_id,
+                source_id=source_command.source_id,
+            )
+            == 0,
+            "Source worker Candidate must remain outside formal interview-confirmation provenance",
+        )
         worker_candidate_decision = OwnerTruthCandidateReviewCommand(
             command_id="source-worker-candidate-review-smoke",
             candidate_id=worker_candidate.candidate_id,
@@ -385,18 +414,18 @@ def main() -> None:
             worker_candidate_activation.review.outcome == "created"
             and worker_candidate_activation.review.candidate_id == worker_candidate.candidate_id
             and worker_candidate_activation.review.decision.value == "accepted",
-            "explicit Owner review must create one immutable DecisionReceipt for the worker Candidate",
+            "generic Owner review must create one immutable DecisionReceipt for the worker Candidate",
         )
         require(
             worker_candidate_activation.memory_activation.outcome == "created"
             and worker_candidate_activation.memory_activation.memory_version == 1
             and worker_candidate_activation.memory_activation.memory_id is not None
             and worker_candidate_activation.memory_activation.memory_version_id is not None,
-            "explicit Owner review must activate exactly one initial MemoryVersion",
+            "generic Owner review must activate exactly one initial MemoryVersion",
         )
         require(
             count_memory_version_rows(test_dsn, vault_id=source_context.vault_id) == 1,
-            "Owner review must persist exactly one MemoryVersion for the worker Candidate",
+            "generic Owner review must persist exactly one MemoryVersion for the worker Candidate",
         )
         worker_candidate_activation_replayed = candidate_review_service.decide_and_activate(
             command=worker_candidate_decision,
