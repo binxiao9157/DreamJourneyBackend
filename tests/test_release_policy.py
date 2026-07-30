@@ -105,6 +105,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertTrue(decisions["profileSettings"].releaseVisible)
         self.assertTrue(decisions["accountDeletion"].releaseVisible)
         for feature in [
+            "echoGuidedRecommendations",
             "familyManagement",
             "timeLetters",
             "voiceCloneShell",
@@ -745,6 +746,22 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
         self.assertEqual(gate.feature_for_request("GET", "/care/snapshots/latest/user-a", {}), "careDashboard")
         self.assertEqual(gate.feature_for_request("POST", "/profile", {}), "profileSettings")
         self.assertEqual(gate.feature_for_request("POST", "/context/build", {}), "echoTextInput")
+        self.assertEqual(
+            gate.feature_for_request(
+                "GET",
+                "/v2/vaults/vault-a/guided-recommendations",
+                {},
+            ),
+            "echoGuidedRecommendations",
+        )
+        self.assertEqual(
+            gate.route_label_for_request(
+                "GET",
+                "/v2/vaults/vault-a/guided-recommendations",
+                {},
+            ),
+            "GET /v2/vaults/*/guided-recommendations",
+        )
         self.assertEqual(
             gate.feature_for_request("POST", "/echo/delayed-replies/dispatch-due", {}),
             "echoTextInput",

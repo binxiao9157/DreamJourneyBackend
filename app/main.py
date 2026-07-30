@@ -1820,6 +1820,22 @@ def _owner_truth_knowledge_recommendation_plan_context(
     )
 
 
+def _owner_truth_guided_recommendation_presentation_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the default-off product presentation without accepting QA."""
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="echoGuidedRecommendations",
+        route=f"{request.method.upper()} /v2/vaults/*/guided-recommendations",
+        user_session_required_code="ownerTruthGuidedRecommendationUserSessionRequired",
+    )
+
+
 def _owner_truth_knowledge_recommendation_activation_context(
     request: Request,
     *,
@@ -2312,6 +2328,20 @@ def _owner_truth_knowledge_recommendation_plan_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthKnowledgeRecommendationPlanInvalid"},
+    )
+
+
+def _owner_truth_guided_recommendation_presentation_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthMemoryProjectionAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthGuidedRecommendationDenied"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthGuidedRecommendationInvalid"},
     )
 
 
@@ -6297,6 +6327,57 @@ def plan_owner_truth_knowledge_recommendations(
             "schemaVersion": "owner-truth-knowledge-recommendation-plan-response-v1",
             "vaultId": context.vault_id,
             "recommendations": summary,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/guided-recommendations",
+    include_in_schema=False,
+)
+def get_owner_truth_guided_recommendations(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """Return at most two approved, display-safe M0-B prompts.
+
+    This is the formal product presentation boundary for the existing
+    server-side planner. It remains default-off behind its own captured
+    release-policy feature and intentionally omits all candidate, evidence,
+    reason, dimension and policy metadata.
+    """
+
+    try:
+        context = _owner_truth_guided_recommendation_presentation_context(
+            request,
+            vault_id=vault_id,
+        )
+        result = OwnerTruthKnowledgeRecommendationReadService(store).plan(
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_guided_recommendation_presentation_http_error(error) from error
+
+    recommendations: list[dict[str, str]] = []
+    if result.selection is not None:
+        for decision in result.selection.selected:
+            prompt = decision.presentation()
+            recommendations.append(
+                {
+                    "slot": decision.slot.value,
+                    "label": prompt.label,
+                    "question": prompt.question,
+                }
+            )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-guided-recommendation-presentation-response-v1",
+            "vaultId": context.vault_id,
+            "state": result.state.value,
+            "recommendations": recommendations,
         },
         headers={"Cache-Control": "no-store"},
     )

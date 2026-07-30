@@ -253,6 +253,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthKnowledgeRecommendationPlan",
             ),
             _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/guided-recommendations",
+                session,
+                "ownerTruthGuidedRecommendationPresentation",
+            ),
+            _rule(
                 "POST",
                 "/v2/vaults/{vault_id}/thread-summaries/read",
                 session,

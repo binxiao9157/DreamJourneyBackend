@@ -412,6 +412,10 @@ class ReleasePolicyService:
     _FEATURE_GATES: dict[str, tuple[Gate, ...]] = {
         "echoTextInput": ("G0", "G1"),
         "ownerTruthCandidateReview": ("G0", "G1", "G2"),
+        # This is a read-only, display-safe presentation of the server-owned
+        # M0-B selector. It remains default closed until its product Gate is
+        # explicitly approved; it must not inherit echoTextInput visibility.
+        "echoGuidedRecommendations": ("G0", "G1", "G2"),
         "echoImageInput": ("G0", "G1", "G2"),
         "timeLetters": ("G0", "G1", "G2", "G4"),
         "profileSettings": ("G0", "G1"),
@@ -802,6 +806,12 @@ class ReleasePolicyCommandGate:
             return self._archive_media_feature(body)
         if normalized_path == "/archive/items" and method.upper() == "POST":
             return self._archive_item_feature(body)
+        if (
+            method.upper() == "GET"
+            and normalized_path.startswith("/v2/vaults/")
+            and normalized_path.endswith("/guided-recommendations")
+        ):
+            return "echoGuidedRecommendations"
         if method.upper() == "GET" and normalized_path.startswith("/archive/items/"):
             return "archiveRemoteFetch"
         return None
@@ -823,6 +833,12 @@ class ReleasePolicyCommandGate:
                 return f"{normalized_method} {prefix}/*"
         if normalized_path in {"/archive/media/upload-intent", "/archive/items"}:
             return f"{normalized_method} {normalized_path}"
+        if (
+            normalized_method == "GET"
+            and normalized_path.startswith("/v2/vaults/")
+            and normalized_path.endswith("/guided-recommendations")
+        ):
+            return "GET /v2/vaults/*/guided-recommendations"
         if normalized_method == "GET" and normalized_path.startswith("/archive/items/"):
             return "GET /archive/items/*"
         feature = self.feature_for_request(method, path, payload)

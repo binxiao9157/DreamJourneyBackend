@@ -132,6 +132,44 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             "X-DreamJourney-QA-Owner-Truth": "1",
         }
 
+    @staticmethod
+    def _login_release_policy(phone: str) -> tuple[str, dict[str, str], str]:
+        response = client.post(
+            "/auth/login",
+            json={"phone": phone, "nickname": "推荐展示测试", "password": "password123"},
+        )
+        if response.status_code != 200:
+            raise AssertionError(response.text)
+        body = response.json()
+        return (
+            str(body["user"]["id"]),
+            {"Authorization": f"Bearer {body['auth']['accessToken']}"},
+            str(body["auth"]["sessionId"]),
+        )
+
+    @staticmethod
+    def _guided_presentation_path(vault_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/guided-recommendations"
+
+    @staticmethod
+    def _guided_presentation_policy_headers(
+        headers: dict[str, str],
+        *,
+        session_id: str,
+        decision_id: str,
+    ) -> dict[str, str]:
+        return {
+            **headers,
+            "X-DreamJourney-Feature": "echoGuidedRecommendations",
+            "X-DreamJourney-Feature-Decision-Id": decision_id,
+            "X-DreamJourney-Feature-Allowed": "true",
+            "X-DreamJourney-Policy-Version": "release-policy-v1",
+            "X-DreamJourney-Policy-Revision": "1",
+            "X-DreamJourney-Account-Generation": sha256(
+                session_id.encode("utf-8")
+            ).hexdigest()[:24],
+        }
+
     def _activate_memory(
         self,
         *,
@@ -526,6 +564,98 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             response.json()["detail"]["code"],
             "ownerTruthKnowledgeRecommendationPlanUnavailable",
         )
+
+    def test_product_guided_recommendations_require_own_policy_and_hide_planner_metadata(self) -> None:
+        owner_id, headers, session_id = self._login_release_policy("13800139418")
+        vault_id = "vault-guided-recommendation-presentation"
+        decision_id, decision_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "Owner text must never be returned by the guided prompt."},
+            command_id="guided-presentation-activate-decision",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=decision_id,
+            content_hash=decision_hash,
+            dimension="keyDecisions",
+            facets=("choice", "reason"),
+            command_id="guided-presentation-confirm-decision",
+        )
+        self._seed_thread(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="guided-presentation-thread",
+        )
+        path = self._guided_presentation_path(vault_id)
+
+        qa_header_only = client.get(
+            path,
+            headers={**headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+        )
+        self.assertEqual(qa_header_only.status_code, 403, qa_header_only.text)
+        self.assertEqual(
+            qa_header_only.json()["detail"]["code"],
+            "release_policy_denied",
+        )
+        self.assertEqual(
+            qa_header_only.json()["detail"]["feature"],
+            "echoGuidedRecommendations",
+        )
+
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "echoGuidedRecommendations"
+        }
+        try:
+            response = client.get(
+                path,
+                headers=self._guided_presentation_policy_headers(
+                    headers,
+                    session_id=session_id,
+                    decision_id="guided-recommendation-owner",
+                ),
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            body = response.json()
+            self.assertEqual(
+                set(body),
+                {"schemaVersion", "vaultId", "state", "recommendations"},
+            )
+            self.assertEqual(
+                body["schemaVersion"],
+                "owner-truth-guided-recommendation-presentation-response-v1",
+            )
+            self.assertEqual(body["vaultId"], vault_id)
+            self.assertEqual(body["state"], "ready")
+            self.assertEqual(len(body["recommendations"]), 1)
+            self.assertEqual(
+                set(body["recommendations"][0]),
+                {"slot", "label", "question"},
+            )
+            self.assertEqual(body["recommendations"][0]["slot"], "breadth")
+            self.assertTrue(body["recommendations"][0]["question"].endswith("？"))
+            self.assertEqual(
+                len({item["slot"] for item in body["recommendations"]}),
+                len(body["recommendations"]),
+            )
+            rendered = json.dumps(body, ensure_ascii=False)
+            for forbidden in (
+                "candidateId",
+                "evidenceRef",
+                "reasonCode",
+                "targetDimension",
+                "policyVersion",
+                "questionTemplate",
+                "Owner text must never",
+                "claim",
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 
     def test_explicit_saved_continuation_cue_is_hidden_then_plans_only_current_private_state(self) -> None:
         owner_id, headers = self._login("13800139417")
