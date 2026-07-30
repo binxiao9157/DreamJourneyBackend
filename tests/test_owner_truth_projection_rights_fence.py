@@ -27,6 +27,7 @@ from app.domain.owner_truth.projection_rights import (
     ProjectionRightsState,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.async_effects.repository import InMemoryEffectKernelRepository
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
     OwnerTruthCandidateReviewService,
@@ -56,6 +57,7 @@ class _Store:
     def __init__(self) -> None:
         self.review_repository = InMemoryOwnerTruthCandidateReviewRepository()
         self.rights_repository = InMemoryOwnerTruthProjectionRightsRepository()
+        self.effect_repository = InMemoryEffectKernelRepository()
         self.projection_repository = InMemoryOwnerTruthMemoryProjectionRepository(
             self.review_repository,
             rights_repository=self.rights_repository,
@@ -71,6 +73,9 @@ class _Store:
 
     def owner_truth_projection_rights_repository(self):
         return self.rights_repository
+
+    def effect_kernel_repository(self):
+        return self.effect_repository
 
     def owner_truth_memory_projection_repository(self):
         return self.projection_repository
@@ -156,6 +161,7 @@ class OwnerTruthProjectionRightsFenceTests(unittest.TestCase):
         self._activate()
         baseline = self.projection_service.rebuild(context=self.context).snapshot
 
+        effect_count_before_revision = self.store.effect_repository.record_count()
         changed = self._record_rights(
             expected_revision=0,
             state=ProjectionRightsState.ACTIVE,
@@ -167,6 +173,10 @@ class OwnerTruthProjectionRightsFenceTests(unittest.TestCase):
         self.assertEqual(baseline["rightsRevision"], 0)
         self.assertEqual(changed.outcome, "recorded")
         self.assertEqual(changed.snapshot.revision, 1)
+        self.assertEqual(
+            self.store.effect_repository.record_count(),
+            effect_count_before_revision + 1,
+        )
         self.assertEqual(stale["state"], "rebuilding")
         self.assertEqual(stale["rebuildReason"], "rightsRevisionChanged")
         self.assertEqual(stale["entries"], [])

@@ -17,6 +17,11 @@ from app.async_effects.target_admission import (
 )
 from app.core.config import Settings
 from app.domain.owner_truth.memory_projection import OwnerTruthMemoryProjectionResult
+from app.domain.owner_truth.projection_rights import (
+    OwnerTruthProjectionRightsSnapshot,
+    ProjectionRightsState,
+)
+from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.domain.owner_truth.search_documents import (
     OwnerTruthSearchDocumentProjection,
     OwnerTruthSearchDocumentProjectionRebuildResult,
@@ -25,6 +30,7 @@ from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
     MEMORY_PROJECTION_REBUILD_JOB_TYPE,
     MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+    build_memory_projection_rebuild_effect_intent_for_rights_revision,
 )
 
 
@@ -237,6 +243,115 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
             "succeeded",
         )
         self.assertNotIn("content", json.dumps(result, sort_keys=True).lower())
+
+    def test_active_rights_revision_rebuilds_projection_without_a_memory_payload_target(self):
+        store = _Store()
+        context = OwnerTruthCommandContext(
+            vault_id="vault-projection-rights-worker",
+            owner_subject_id="owner-projection-rights-worker",
+            actor_subject_id="owner-projection-rights-worker",
+        )
+        rights = OwnerTruthProjectionRightsSnapshot(
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            authority_epoch=6,
+            revision=1,
+            state=ProjectionRightsState.ACTIVE,
+            event_hash=_digest({"event": "projection-rights-worker-active"}),
+        )
+        intent = build_memory_projection_rebuild_effect_intent_for_rights_revision(
+            context=context,
+            rights=rights,
+        )
+        store.lease_repository.seed(intent)
+        store.admission_repository.seed_vault(
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            authority_epoch=6,
+            status="active",
+        )
+        store.admission_repository.seed_projection_rights_revision(
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            authority_epoch=6,
+            revision=1,
+            state="active",
+            event_hash=rights.event_hash,
+        )
+
+        result = OwnerTruthMemoryProjectionWorkerRuntime(
+            settings=Settings(
+                async_effect_v1_enabled=True,
+                async_effect_worker_enabled=True,
+                owner_truth_memory_projection_worker_enabled=True,
+            ),
+            store=store,
+            worker_id="projection-rights-worker-test",
+            retry_seconds=5,
+        ).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["reason"], "memoryProjectionRebuilt")
+        self.assertEqual(result["projectionEntryCount"], 1)
+        self.assertEqual(len(store.projection_repository.contexts), 1)
+        self.assertEqual(
+            store.lease_repository.attempt_state(intent.job_id, 1),
+            "succeeded",
+        )
+
+    def test_revoked_rights_revision_terminalizes_without_rebuilding_projection(self):
+        store = _Store()
+        context = OwnerTruthCommandContext(
+            vault_id="vault-projection-rights-worker-revoked",
+            owner_subject_id="owner-projection-rights-worker-revoked",
+            actor_subject_id="owner-projection-rights-worker-revoked",
+        )
+        rights = OwnerTruthProjectionRightsSnapshot(
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            authority_epoch=6,
+            revision=1,
+            state=ProjectionRightsState.REVOKED,
+            event_hash=_digest({"event": "projection-rights-worker-revoked"}),
+        )
+        intent = build_memory_projection_rebuild_effect_intent_for_rights_revision(
+            context=context,
+            rights=rights,
+        )
+        store.lease_repository.seed(intent)
+        store.admission_repository.seed_vault(
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            authority_epoch=6,
+            status="active",
+        )
+        store.admission_repository.seed_projection_rights_revision(
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            authority_epoch=6,
+            revision=1,
+            state="revoked",
+            event_hash=rights.event_hash,
+        )
+
+        result = OwnerTruthMemoryProjectionWorkerRuntime(
+            settings=Settings(
+                async_effect_v1_enabled=True,
+                async_effect_worker_enabled=True,
+                owner_truth_memory_projection_worker_enabled=True,
+            ),
+            store=store,
+            worker_id="projection-rights-worker-revoked-test",
+            retry_seconds=5,
+        ).run_once()
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "projectionRightsNotActive")
+        self.assertEqual(store.projection_repository.contexts, [])
+        self.assertEqual(
+            store.lease_repository.attempt_state(intent.job_id, 1),
+            "terminalFailed",
+        )
 
     def test_postgres_readiness_contract_allows_a_current_rebuild(self):
         self.store.readiness_probe = lambda: {

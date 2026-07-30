@@ -17,12 +17,53 @@ from app.domain.owner_truth.memory_activation import (
 from app.domain.owner_truth.memory_correction import (
     OwnerTruthMemoryCorrectionActivationResult,
 )
+from app.domain.owner_truth.projection_rights import OwnerTruthProjectionRightsSnapshot
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 
 
 MEMORY_PROJECTION_REBUILD_OPERATION_TYPE = "ownerTruth.memoryVersion.activated"
 MEMORY_PROJECTION_REBUILD_EVENT_TYPE = "ownerTruth.memoryProjection.rebuildRequested"
 MEMORY_PROJECTION_REBUILD_JOB_TYPE = "ownerTruth.memoryProjection.rebuild"
+MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE = "ownerTruth.projectionRights.recorded"
+MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE = "ownerTruth.memoryProjection.rightsRebuildRequested"
+
+
+def build_memory_projection_rebuild_effect_intent_for_rights_revision(
+    *,
+    context: OwnerTruthCommandContext,
+    rights: OwnerTruthProjectionRightsSnapshot,
+) -> AsyncEffectIntent:
+    """Return a value-free rebuild request for one recorded rights revision.
+
+    A rights event changes the projection fence even when no MemoryVersion has
+    changed.  The effect identifies only the immutable revision and event hash;
+    it does not transport consent text, source values, or memory content.  The
+    existing projection worker rechecks the live rights state before rebuilding.
+    """
+
+    if not isinstance(rights, OwnerTruthProjectionRightsSnapshot):
+        raise TypeError("projection rights snapshot is required")
+    if (
+        rights.vault_id != context.vault_id
+        or rights.owner_subject_id != context.owner_subject_id
+        or rights.revision < 1
+    ):
+        raise ValueError("recorded projection rights metadata is required for a rebuild")
+    return AsyncEffectIntent(
+        operation_type=MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE,
+        target=AsyncEffectTarget(
+            owner_subject_id=context.owner_subject_id,
+            vault_id=context.vault_id,
+            resource_type="projectionRightsRevision",
+            resource_id=f"projectionRightsRevision:{rights.revision}",
+            resource_version=rights.revision,
+            purpose="compatibilityProjectionRights",
+            authority_epoch=rights.authority_epoch,
+        ),
+        payload_hash=rights.event_hash,
+        event_type=MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE,
+        job_type=MEMORY_PROJECTION_REBUILD_JOB_TYPE,
+    )
 
 
 def build_memory_projection_rebuild_effect_intent(
@@ -120,7 +161,10 @@ __all__ = [
     "MEMORY_PROJECTION_REBUILD_EVENT_TYPE",
     "MEMORY_PROJECTION_REBUILD_JOB_TYPE",
     "MEMORY_PROJECTION_REBUILD_OPERATION_TYPE",
+    "MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE",
+    "MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE",
     "build_memory_projection_rebuild_effect_intent",
     "build_memory_projection_rebuild_effect_intent_for_correction",
+    "build_memory_projection_rebuild_effect_intent_for_rights_revision",
     "build_memory_projection_rebuild_effect_intent_for_version",
 ]

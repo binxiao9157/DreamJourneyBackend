@@ -55,6 +55,9 @@ class OwnerTruthProjectionRightsStore(Protocol):
     def owner_truth_projection_rights_repository(self) -> OwnerTruthProjectionRightsRepository:
         ...
 
+    def effect_kernel_repository(self) -> Any:
+        ...
+
 
 class InMemoryOwnerTruthProjectionRightsRepository:
     """Thread-safe semantic double for immutable per-epoch rights revisions."""
@@ -350,10 +353,26 @@ class OwnerTruthProjectionRightsService:
             correlation_id=f"owner-truth-projection-rights-{context.vault_id}",
             command_id=command.command_id_hash,
         ):
-            return self._store.owner_truth_projection_rights_repository().record(
+            result = self._store.owner_truth_projection_rights_repository().record(
                 context=context,
                 command=command,
             )
+            # The intent contains only immutable rights-revision coordinates.
+            # It shares this UoW so a persisted fence can never silently miss
+            # the Projection rebuild request that makes it current again.
+            # Import lazily: the effect kernel imports typed admission modules
+            # which also consume the Projection service at application startup.
+            from app.services.owner_truth_memory_projection_effects import (
+                build_memory_projection_rebuild_effect_intent_for_rights_revision,
+            )
+
+            self._store.effect_kernel_repository().accept(
+                build_memory_projection_rebuild_effect_intent_for_rights_revision(
+                    context=context,
+                    rights=result.snapshot,
+                )
+            )
+            return result
 
     def _request_unit_of_work(
         self,

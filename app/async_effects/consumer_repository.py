@@ -21,6 +21,8 @@ from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
     MEMORY_PROJECTION_REBUILD_JOB_TYPE,
     MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+    MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE,
+    MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE,
 )
 
 
@@ -32,6 +34,27 @@ _TERMINAL_OUTCOMES = {"completed", "skipped", "blocked", "failed", "unknown"}
 _OWNER_TRUTH_SOURCE_BLOCKED_CONSUMER = "ownerTruth.source.blocked"
 _OWNER_TRUTH_SOURCE_EXTRACTION_CONSUMER = "ownerTruth.source.extraction"
 _OWNER_TRUTH_MEMORY_PROJECTION_CONSUMER = "ownerTruth.memoryProjection.rebuild"
+
+
+def _is_typed_memory_projection_rebuild(intent: AsyncEffectIntent) -> bool:
+    target = intent.target
+    if (
+        intent.operation_type == MEMORY_PROJECTION_REBUILD_OPERATION_TYPE
+        and intent.event_type == MEMORY_PROJECTION_REBUILD_EVENT_TYPE
+        and intent.job_type == MEMORY_PROJECTION_REBUILD_JOB_TYPE
+    ):
+        return target.resource_type == "memoryVersion" and target.purpose == "compatibilityProjection"
+    if (
+        intent.operation_type == MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE
+        and intent.event_type == MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE
+        and intent.job_type == MEMORY_PROJECTION_REBUILD_JOB_TYPE
+    ):
+        return (
+            target.resource_type == "projectionRightsRevision"
+            and target.purpose == "compatibilityProjectionRights"
+            and target.resource_id == f"projectionRightsRevision:{target.resource_version}"
+        )
+    return False
 
 
 class AsyncEffectConsumerError(RuntimeError):
@@ -215,25 +238,16 @@ class OwnerTruthSourceCandidateExtractionConsumerCommand(AsyncEffectConsumerComp
 
 @dataclass(frozen=True)
 class OwnerTruthMemoryProjectionRebuildConsumerCommand(AsyncEffectConsumerCompletionCommand):
-    """Complete one admitted or blocked MemoryVersion projection rebuild."""
+    """Complete one admitted or blocked typed Projection rebuild."""
 
     admission: AsyncEffectTargetAdmission
     projection_outcome: str | None
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        target = self.intent.target
-        if (
-            self.intent.operation_type != MEMORY_PROJECTION_REBUILD_OPERATION_TYPE
-            or self.intent.event_type != MEMORY_PROJECTION_REBUILD_EVENT_TYPE
-            or self.intent.job_type != MEMORY_PROJECTION_REBUILD_JOB_TYPE
-        ):
+        if not _is_typed_memory_projection_rebuild(self.intent):
             raise AsyncEffectConsumerAdmissionDenied(
                 "memory projection completion requires its typed effect contract"
-            )
-        if target.resource_type != "memoryVersion" or target.purpose != "compatibilityProjection":
-            raise AsyncEffectConsumerAdmissionDenied(
-                "memory projection completion requires its typed target"
             )
         if self.consumer_name != _OWNER_TRUTH_MEMORY_PROJECTION_CONSUMER:
             raise AsyncEffectConsumerAdmissionDenied(
@@ -244,12 +258,12 @@ class OwnerTruthMemoryProjectionRebuildConsumerCommand(AsyncEffectConsumerComple
                 "memory projection completion has one fixed business target"
             )
         if not isinstance(self.admission, AsyncEffectTargetAdmission):
-            raise AsyncEffectConsumerError("live MemoryVersion target admission is required")
+            raise AsyncEffectConsumerError("live Projection target admission is required")
         if (
             self.admission.operation_id != self.intent.operation_id
             or self.admission.target_stable_key != self.intent.stable_key
         ):
-            raise AsyncEffectConsumerError("MemoryVersion target admission does not belong to this effect")
+            raise AsyncEffectConsumerError("Projection target admission does not belong to this effect")
         normalized_projection_outcome = (
             None if self.projection_outcome is None else str(self.projection_outcome).strip()
         )
@@ -268,7 +282,7 @@ class OwnerTruthMemoryProjectionRebuildConsumerCommand(AsyncEffectConsumerComple
                 raise AsyncEffectConsumerError("projection completion must preserve its fixed reason")
             return
         if self.outcome != "blocked":
-            raise AsyncEffectConsumerError("blocked MemoryVersion target must write a blocked completion")
+            raise AsyncEffectConsumerError("blocked Projection target must write a blocked completion")
         if self.reason_code != self.admission.reason_code:
             raise AsyncEffectConsumerError("blocked projection completion must preserve live admission")
         if normalized_projection_outcome is not None:

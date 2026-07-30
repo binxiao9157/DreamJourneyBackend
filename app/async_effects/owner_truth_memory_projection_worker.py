@@ -35,6 +35,7 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.observability.operation_metrics import OperationMetricRecorder
 from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_JOB_TYPE,
+    MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE,
 )
 from app.services.store_factory import close_store, make_store, open_store
 
@@ -159,10 +160,11 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
         intent = lease_repository.load_intent(lease)
         if intent.job_type != MEMORY_PROJECTION_REBUILD_JOB_TYPE:
             raise OwnerTruthMemoryProjectionWorkerError("claimed job does not match projection worker type")
-        admission = (
-            self._store.owner_truth_memory_projection_target_admission_repository()
-            .admit_owner_truth_memory_projection(intent)
-        )
+        admission_repository = self._store.owner_truth_memory_projection_target_admission_repository()
+        if intent.operation_type == MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE:
+            admission = admission_repository.admit_owner_truth_projection_rights_rebuild(intent)
+        else:
+            admission = admission_repository.admit_owner_truth_memory_projection(intent)
         consumer_repository = self._store.async_effect_consumer_repository()
         if not admission.allowed:
             receipt = consumer_repository.consume(

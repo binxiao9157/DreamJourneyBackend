@@ -19,6 +19,8 @@ from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
     MEMORY_PROJECTION_REBUILD_JOB_TYPE,
     MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+    MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE,
+    MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE,
 )
 
 
@@ -27,6 +29,8 @@ _SOURCE_RESOURCE_TYPE = "source"
 _SOURCE_EXTRACTION_PURPOSE = "candidateExtraction"
 _MEMORY_PROJECTION_RESOURCE_TYPE = "memoryVersion"
 _MEMORY_PROJECTION_PURPOSE = "compatibilityProjection"
+_PROJECTION_RIGHTS_RESOURCE_TYPE = "projectionRightsRevision"
+_PROJECTION_RIGHTS_PURPOSE = "compatibilityProjectionRights"
 
 
 class AsyncEffectTargetAdmissionError(RuntimeError):
@@ -77,6 +81,15 @@ class _MemoryProjectionTargetSnapshot:
     source_authority_epoch: int | None
     source_state: str | None
     source_version_current: int | None
+
+
+@dataclass(frozen=True)
+class _ProjectionRightsTargetSnapshot:
+    owner_subject_id: str
+    authority_epoch: int
+    revision: int
+    state: str
+    event_hash: str
 
 
 def _blocked(intent: AsyncEffectIntent, reason_code: str) -> AsyncEffectTargetAdmission:
@@ -135,6 +148,24 @@ def _memory_projection_target_precondition(intent: AsyncEffectIntent) -> str | N
         UUID(target.resource_id)
     except (TypeError, ValueError, AttributeError):
         return "invalidMemoryVersionTarget"
+    return None
+
+
+def _projection_rights_rebuild_target_precondition(intent: AsyncEffectIntent) -> str | None:
+    if intent.operation_type != MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE:
+        return "unsupportedOperation"
+    if (
+        intent.event_type != MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE
+        or intent.job_type != MEMORY_PROJECTION_REBUILD_JOB_TYPE
+    ):
+        return "unsupportedEffectContract"
+    target = intent.target
+    if (
+        target.resource_type != _PROJECTION_RIGHTS_RESOURCE_TYPE
+        or target.purpose != _PROJECTION_RIGHTS_PURPOSE
+        or target.resource_id != f"projectionRightsRevision:{target.resource_version}"
+    ):
+        return "invalidProjectionRightsRevisionTarget"
     return None
 
 
@@ -222,6 +253,43 @@ def _evaluate_owner_truth_memory_projection(
     )
 
 
+def _evaluate_owner_truth_projection_rights_rebuild(
+    *,
+    intent: AsyncEffectIntent,
+    vault: _VaultSnapshot | None,
+    rights: _ProjectionRightsTargetSnapshot | None,
+) -> AsyncEffectTargetAdmission:
+    precondition = _projection_rights_rebuild_target_precondition(intent)
+    if precondition is not None:
+        return _blocked(intent, precondition)
+    if vault is None:
+        return _blocked(intent, "vaultMissing")
+    target = intent.target
+    if vault.status != "active":
+        return _blocked(intent, "vaultInactive")
+    if vault.owner_subject_id != target.owner_subject_id:
+        return _blocked(intent, "vaultOwnerMismatch")
+    if vault.authority_epoch != target.authority_epoch:
+        return _blocked(intent, "authorityEpochChanged")
+    if rights is None:
+        return _blocked(intent, "projectionRightsRevisionMissing")
+    if rights.owner_subject_id != target.owner_subject_id:
+        return _blocked(intent, "projectionRightsOwnerMismatch")
+    if rights.authority_epoch != vault.authority_epoch:
+        return _blocked(intent, "projectionRightsAuthorityEpochChanged")
+    if rights.revision != target.resource_version:
+        return _blocked(intent, "projectionRightsRevisionChanged")
+    if rights.event_hash != intent.payload_hash:
+        return _blocked(intent, "projectionRightsEventChanged")
+    if rights.state != "active":
+        return _blocked(intent, "projectionRightsNotActive")
+    return _admitted(
+        intent,
+        authority_epoch=vault.authority_epoch,
+        resource_version=rights.revision,
+    )
+
+
 class InMemoryOwnerTruthSourceTargetAdmissionRepository:
     """G0 semantic double for Owner Truth Source execution-time admission."""
 
@@ -279,6 +347,9 @@ class InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository:
         self._lock = RLock()
         self._vaults: dict[str, _VaultSnapshot] = {}
         self._memory_versions: dict[tuple[str, str], _MemoryProjectionTargetSnapshot] = {}
+        self._projection_rights: dict[
+            tuple[str, int], _ProjectionRightsTargetSnapshot
+        ] = {}
 
     def seed_vault(
         self,
@@ -335,6 +406,27 @@ class InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository:
                 )
             )
 
+    def seed_projection_rights_revision(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        authority_epoch: int,
+        revision: int,
+        state: str,
+        event_hash: str,
+    ) -> None:
+        with self._lock:
+            self._projection_rights[(str(vault_id), int(authority_epoch))] = (
+                _ProjectionRightsTargetSnapshot(
+                    owner_subject_id=str(owner_subject_id),
+                    authority_epoch=int(authority_epoch),
+                    revision=int(revision),
+                    state=str(state),
+                    event_hash=str(event_hash),
+                )
+            )
+
     def admit_owner_truth_memory_projection(
         self,
         intent: AsyncEffectIntent,
@@ -350,6 +442,23 @@ class InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository:
             intent=intent,
             vault=vault,
             memory_version=memory_version,
+        )
+
+    def admit_owner_truth_projection_rights_rebuild(
+        self,
+        intent: AsyncEffectIntent,
+    ) -> AsyncEffectTargetAdmission:
+        if not isinstance(intent, AsyncEffectIntent):
+            raise AsyncEffectTargetAdmissionError("async effect intent is required")
+        with self._lock:
+            vault = self._vaults.get(intent.target.vault_id)
+            rights = self._projection_rights.get(
+                (intent.target.vault_id, intent.target.authority_epoch)
+            )
+        return _evaluate_owner_truth_projection_rights_rebuild(
+            intent=intent,
+            vault=vault,
+            rights=rights,
         )
 
 class PostgresOwnerTruthSourceTargetAdmissionRepository:
@@ -515,6 +624,60 @@ class PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository:
             intent=intent,
             vault=vault,
             memory_version=memory_version,
+        )
+
+    def admit_owner_truth_projection_rights_rebuild(
+        self,
+        intent: AsyncEffectIntent,
+    ) -> AsyncEffectTargetAdmission:
+        if not isinstance(intent, AsyncEffectIntent):
+            raise AsyncEffectTargetAdmissionError("async effect intent is required")
+        precondition = _projection_rights_rebuild_target_precondition(intent)
+        if precondition is not None:
+            return _blocked(intent, precondition)
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT owner_subject_id, authority_epoch, status
+                FROM owner_truth.vaults
+                WHERE vault_id = %s
+                FOR SHARE
+                """,
+                (intent.target.vault_id,),
+            )
+            vault_row = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT owner_subject_id, authority_epoch, revision, rights_state, event_hash
+                FROM owner_truth.projection_rights_events
+                WHERE vault_id = %s AND authority_epoch = %s
+                ORDER BY revision DESC
+                LIMIT 1
+                FOR SHARE
+                """,
+                (intent.target.vault_id, intent.target.authority_epoch),
+            )
+            rights_row = cursor.fetchone()
+        vault = None
+        if vault_row is not None:
+            vault = _VaultSnapshot(
+                owner_subject_id=str(vault_row["owner_subject_id"]),
+                authority_epoch=int(vault_row["authority_epoch"]),
+                status=str(vault_row["status"]),
+            )
+        rights = None
+        if rights_row is not None:
+            rights = _ProjectionRightsTargetSnapshot(
+                owner_subject_id=str(rights_row["owner_subject_id"]),
+                authority_epoch=int(rights_row["authority_epoch"]),
+                revision=int(rights_row["revision"]),
+                state=str(rights_row["rights_state"]),
+                event_hash=str(rights_row["event_hash"]),
+            )
+        return _evaluate_owner_truth_projection_rights_rebuild(
+            intent=intent,
+            vault=vault,
+            rights=rights,
         )
 
     def _cursor(self):
