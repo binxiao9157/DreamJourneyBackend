@@ -380,6 +380,8 @@ test -f tests/test_business_message_projection_repository.py
 test -f tests/test_business_message_projection_migration_contract.py
 test -f scripts/run-backend-business-message-projection-contract-gate.sh
 test -f scripts/backend-business-message-projection-postgres-smoke.py
+test -f scripts/run-backend-business-message-projection-postgres-smoke.sh
+test -f tests/test_business_message_projection_postgres_smoke_contract.py
 test -f app/async_effects/dead_letter_effects.py
 test -f tests/test_async_effect_dead_letter_contract.py
 test -f scripts/run-backend-async-effect-dead-letter-contract-gate.sh

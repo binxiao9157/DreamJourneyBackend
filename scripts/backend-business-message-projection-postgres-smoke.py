@@ -25,7 +25,6 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.async_effects.business_message_projection_repository import (
     BusinessMessageProjectionConflict,
-    BusinessMessageProjectionPersistenceError,
     InboxAccountSnapshot,
 )
 from app.async_effects.consumer_repository import AsyncEffectSyntheticConsumerCommand
@@ -144,6 +143,20 @@ def assert_append_only(dsn: str, message_id: str) -> None:
         pass
 
 
+def assert_business_receipt_append_only(dsn: str, business_receipt_id: str) -> None:
+    try:
+        with psycopg.connect(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE async_effects.business_receipts SET resource_version = 3 "
+                    "WHERE receipt_id = %s",
+                    (business_receipt_id,),
+                )
+        raise AssertionError("business receipt accepted an immutable coordinate mutation")
+    except psycopg.Error:
+        pass
+
+
 def assert_direct_receipt_coordinate_mismatch_rejected(
     dsn: str,
     *,
@@ -234,19 +247,7 @@ def exercise(dsn: str) -> None:
         except BusinessMessageProjectionConflict:
             pass
 
-        with psycopg.connect(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "UPDATE async_effects.business_receipts SET resource_version = 3 "
-                    "WHERE receipt_id = %s",
-                    (source.completion.business_receipt_id,),
-                )
-        try:
-            record(store, source, owner_snapshot)
-            raise AssertionError("durable receipt mismatch must fail closed")
-        except BusinessMessageProjectionPersistenceError:
-            pass
-
+        assert_business_receipt_append_only(dsn, source.completion.business_receipt_id)
         assert_append_only(dsn, owner.record.message.message_id)
         assert_direct_receipt_coordinate_mismatch_rejected(dsn, record=owner.record)
     finally:

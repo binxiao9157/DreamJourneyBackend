@@ -15,7 +15,8 @@ cd "$ROOT_DIR"
 STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" -m unittest \
   tests.test_business_message_notification_effects \
   tests.test_business_message_projection_repository \
-  tests.test_business_message_projection_migration_contract
+  tests.test_business_message_projection_migration_contract \
+  tests.test_business_message_projection_postgres_smoke_contract
 PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/async_effects/message_notification_effects.py \
   app/async_effects/business_message_projection_repository.py \
