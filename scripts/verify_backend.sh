@@ -39,6 +39,8 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-memory-search-offline-e
 
 echo "== Owner Truth Context/Citation offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-context-citation-offline-evaluation-gate.sh
+echo "== Owner Truth Context capacity preflight G0 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-context-capacity-preflight-gate.sh
 
 echo "== Owner Truth authority-epoch offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-authority-epoch-offline-evaluation-gate.sh
