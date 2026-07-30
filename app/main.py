@@ -1426,6 +1426,30 @@ def _owner_truth_interview_candidate_confirmation_write_context(
     )
 
 
+def _owner_truth_interview_candidate_confirmation_single_decision_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize one formal sensitive/single Candidate decision.
+
+    This remains a default-off product route.  The captured release-policy
+    evidence is persisted with the root decision so that a later explicit
+    MemoryVersion activation can distinguish it from the QA-only review lane.
+    """
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=(
+            f"{request.method.upper()} /v2/vaults/*/interview-review-batches/*/"
+            "confirmation/candidates/*/decision"
+        ),
+        user_session_required_code="ownerTruthInterviewCandidateConfirmationUserSessionRequired",
+    )
+
+
 def _owner_truth_interview_candidate_confirmation_activation_context(
     request: Request,
     *,
@@ -2701,6 +2725,29 @@ def _owner_truth_interview_candidate_confirmation_memory_activation_response(
             "memoryVersionCreated": activation.memory_version_id is not None,
         },
         "projectionRebuildRequested": result.projection_effect is not None,
+    }
+
+
+def _owner_truth_interview_candidate_confirmation_single_review_response(
+    result: Any,
+) -> Dict[str, Any]:
+    """Return a formal single-decision summary without QA receipt identifiers."""
+
+    return {
+        "schemaVersion": (
+            "owner-truth-interview-candidate-confirmation-single-decision-response-v1"
+        ),
+        "status": result.outcome,
+        "batchDecisionId": result.batch_decision_id,
+        "reviewBatchId": result.review_batch_id,
+        "candidateId": result.review.candidate_id,
+        "decision": result.review.decision.value,
+        # Formal confirmation remains receipt-only. The separately authorized
+        # memory-activation route owns the Authority transition.
+        "memoryActivation": {
+            "status": "notApplicable",
+            "memoryVersionCreated": False,
+        },
     }
 
 
@@ -5020,6 +5067,62 @@ def accept_owner_truth_interview_candidate_confirmation_batch(
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
         content=_owner_truth_interview_candidate_confirmation_batch_decision_response(result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/"
+    "confirmation/candidates/{candidate_id}/decision",
+    include_in_schema=False,
+)
+def review_owner_truth_interview_candidate_confirmation_single(
+    request: Request,
+    vault_id: str,
+    review_batch_id: str,
+    candidate_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Default-off formal decision for a sensitive/single-review Candidate.
+
+    The route shares the candidate CAS and immutable receipt implementation
+    with QA single review, but requires a captured product-policy decision and
+    deliberately stops before MemoryVersion activation.
+    """
+
+    try:
+        context = _owner_truth_interview_candidate_confirmation_single_decision_context(
+            request,
+            vault_id=vault_id,
+        )
+        command = OwnerTruthInterviewCandidateSingleReviewCommand(
+            command_id=str(payload.get("commandId") or ""),
+            review_batch_id=review_batch_id,
+            candidate_id=candidate_id,
+            expected_candidate_version=_owner_truth_candidate_expected_version(payload),
+            action=CandidateReviewAction(str(payload.get("action") or "")),
+            corrected_value=payload.get("correctedValue"),
+            corrected_value_schema_version=str(
+                payload.get("correctedValueSchemaVersion")
+                or OWNER_TRUTH_SCHEMA_VERSION
+            ),
+            reason_code=str(payload.get("reasonCode") or "ownerConfirmedAtBoundary"),
+        )
+        result = OwnerTruthInterviewCandidateSingleReviewService(store).review_single(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_review_http_error(error) from error
+    except (TypeError, ValueError) as error:
+        raise _owner_truth_interview_candidate_review_http_error(
+            OwnerTruthInterviewCandidateSingleReviewError(
+                "single-review action is unsupported"
+            )
+        ) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_candidate_confirmation_single_review_response(result),
         headers={"Cache-Control": "no-store"},
     )
 

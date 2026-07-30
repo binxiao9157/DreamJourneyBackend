@@ -22,6 +22,9 @@ from app.domain.owner_truth.interview_candidate_review import (
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewResult
+from app.services.owner_truth_interview_candidate_batch_decision import (
+    FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE,
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,24 @@ def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
         )
 
 
+def _assert_confirmation_authorization_capture(context: OwnerTruthCommandContext) -> None:
+    """Keep a formal single decision bound to its dedicated release feature.
+
+    Empty evidence remains the existing QA-only path.  Any populated capture
+    must belong to the same formal feature that later admits MemoryVersion
+    activation; a capture from another route can never be borrowed here.
+    """
+
+    capture = context.authorization_capture
+    if (
+        capture is not None
+        and capture.feature != FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE
+    ):
+        raise OwnerTruthInterviewCandidateSingleReviewConflict(
+            "formal interview Candidate confirmation requires ownerTruthCandidateReview authorization"
+        )
+
+
 class OwnerTruthInterviewCandidateSingleReviewService:
     """Apply one terminal decision without promoting a MemoryVersion."""
 
@@ -84,6 +105,7 @@ class OwnerTruthInterviewCandidateSingleReviewService:
         context: OwnerTruthCommandContext,
     ) -> OwnerTruthInterviewCandidateSingleReviewResult:
         _assert_owner_context(context)
+        _assert_confirmation_authorization_capture(context)
         with self._store.request_unit_of_work(
             correlation_id=(
                 "owner-truth-interview-candidate-single-review-"

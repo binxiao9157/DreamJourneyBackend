@@ -31,8 +31,12 @@ from app.domain.owner_truth.interview_candidate_review import (
 from app.domain.owner_truth.interview_candidate_single_review import (
     OwnerTruthInterviewCandidateSingleReviewBatchRequired,
     OwnerTruthInterviewCandidateSingleReviewCommand,
+    OwnerTruthInterviewCandidateSingleReviewConflict,
 )
-from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.domain.owner_truth.source_commands import (
+    OwnerTruthCommandAuthorizationCapture,
+    OwnerTruthCommandContext,
+)
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
 )
@@ -272,6 +276,37 @@ class OwnerTruthInterviewCandidateSingleReviewTests(TestCase):
         self.assertEqual(replayed.review.outcome, "deduplicated")
         self.assertEqual(store.composition_repository.calls, 1)
         self.assertEqual(len(store.review_repository.snapshot()["receipts"]), 1)
+
+    def test_single_review_rejects_authorization_capture_from_another_feature(self) -> None:
+        sensitive = self._candidate(summary="不能借用其他功能的正式授权。")
+        service, store = self._service(sensitive)
+        wrong_capture_context = OwnerTruthCommandContext(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            actor_subject_id=self.owner_subject_id,
+            policy_version="owner-truth-v1",
+            authorization_capture=OwnerTruthCommandAuthorizationCapture(
+                feature="timeLetters",
+                policy_version="release-policy-v1",
+                policy_revision=1,
+                emergency_revision=0,
+                account_generation_hash="a" * 24,
+                decision_id_hash="b" * 64,
+                audience="owner",
+                cohort="closedPilotAdultSelf",
+                client_build=1,
+                expires_at="2026-07-30T00:00:00+00:00",
+            ),
+        )
+
+        with self.assertRaises(OwnerTruthInterviewCandidateSingleReviewConflict):
+            service.review_single(
+                command=self._command(sensitive),
+                context=wrong_capture_context,
+            )
+
+        self.assertEqual(store.review_repository.snapshot()["receipts"], {})
+        self.assertEqual(store.ledger_repository.snapshot(), {})
 
     def test_batch_candidate_cannot_bypass_partial_batch_boundary(self) -> None:
         batch_candidate = self._candidate(

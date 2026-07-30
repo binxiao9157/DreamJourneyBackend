@@ -165,7 +165,13 @@ def seed_reviewable_batch(
     *,
     vault_id: str,
     owner_subject_id: str,
+    review_mode: str = "batch",
+    sensitivity: str = "standard",
 ) -> tuple[str, str]:
+    if review_mode not in {"batch", "single"}:
+        raise ValueError("review_mode must be batch or single")
+    if sensitivity not in {"standard", "sensitive"}:
+        raise ValueError("sensitivity must be standard or sensitive")
     thread_id = str(uuid.uuid4())
     session_id = str(uuid.uuid4())
     review_batch_id = str(uuid.uuid4())
@@ -174,7 +180,9 @@ def seed_reviewable_batch(
     extraction_id = str(uuid.uuid4())
     candidate_id = str(uuid.uuid4())
     source_payload = {"text": "Formal confirmation Postgres smoke source"}
-    candidate_content = {"summary": "Synthetic batch Candidate for formal confirmation."}
+    candidate_content = {
+        "summary": f"Synthetic {review_mode} Candidate for formal confirmation."
+    }
     candidate_payload = {
         "schemaVersion": "owner-truth-candidate-proposal-v1",
         "contentSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION,
@@ -186,7 +194,7 @@ def seed_reviewable_batch(
                 "span": {"start": 0, "end": 1},
             }
         ],
-        "reviewMode": "batch",
+        "reviewMode": review_mode,
     }
     review_metadata = {
         "origin": "interviewReviewBatchCandidateProposal",
@@ -318,7 +326,7 @@ def seed_reviewable_batch(
                     "experience",
                     "firstPerson",
                     "recalled",
-                    "standard",
+                    sensitivity,
                     OWNER_TRUTH_SCHEMA_VERSION,
                     canonical_hash(candidate_content),
                     "owner-truth-candidate-proposal-v1",
@@ -1136,6 +1144,115 @@ def main() -> None:
         require(replay.json().get("status") == "deduplicated", "formal replay must deduplicate")
         require(counts(test_dsn, vault_id=vault_id) == (1, 1, 1), "replay must not duplicate root, receipt or link")
 
+        single_vault_id = "vault-formal-confirmation-single-smoke"
+        single_review_batch_id, single_candidate_id = seed_reviewable_batch(
+            test_dsn,
+            vault_id=single_vault_id,
+            owner_subject_id=owner_id,
+            review_mode="single",
+            sensitivity="sensitive",
+        )
+        single_path = (
+            f"/v2/vaults/{single_vault_id}/interview-review-batches/"
+            f"{single_review_batch_id}/confirmation/candidates/{single_candidate_id}/decision"
+        )
+        single_payload = {
+            "commandId": "formal-confirmation-postgres-smoke-single-accept",
+            "expectedCandidateVersion": 1,
+            "action": "accept",
+        }
+        single_qa_only = client.post(
+            single_path,
+            headers={**owner_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+            json=single_payload,
+        )
+        require(
+            single_qa_only.status_code == 403
+            and route_code(single_qa_only) == "release_policy_denied",
+            "QA header must not bypass formal single-confirmation policy",
+        )
+        require(
+            counts(test_dsn, vault_id=single_vault_id) == (0, 0, 0),
+            "denied formal single confirmation must write nothing",
+        )
+
+        single_decision_id = "formal-confirmation-postgres-smoke-single-decision"
+        single_confirmed = client.post(
+            single_path,
+            headers=formal_headers(
+                owner_headers,
+                session_id=session_id,
+                decision_id=single_decision_id,
+            ),
+            json=single_payload,
+        )
+        require(
+            single_confirmed.status_code == 201,
+            f"formal single confirmation failed: {single_confirmed.text}",
+        )
+        single_body = single_confirmed.json()
+        require(
+            single_body.get("status") == "created"
+            and single_body.get("candidateId") == single_candidate_id
+            and single_body.get("decision") == "accepted"
+            and "receipt" not in single_body
+            and single_body.get("memoryActivation", {}).get("memoryVersionCreated") is False,
+            "formal single confirmation must stay value-minimized and receipt-only",
+        )
+        require(
+            counts(test_dsn, vault_id=single_vault_id) == (1, 1, 1)
+            and memory_counts(test_dsn, vault_id=single_vault_id) == (0, 0),
+            "formal single confirmation must persist one root/receipt/link without MemoryVersion",
+        )
+        assert_persisted_authority_evidence(
+            test_dsn,
+            vault_id=single_vault_id,
+            session_id=session_id,
+            decision_id=single_decision_id,
+            candidate_id=single_candidate_id,
+        )
+
+        single_activation_path = (
+            f"/v2/vaults/{single_vault_id}/interview-review-batches/"
+            f"{single_review_batch_id}/confirmation/candidates/{single_candidate_id}/memory-activation"
+        )
+        single_activation = client.post(
+            single_activation_path,
+            headers=formal_headers(
+                owner_headers,
+                session_id=session_id,
+                decision_id="formal-confirmation-postgres-smoke-single-memory-activation",
+            ),
+            json={"commandId": "formal-confirmation-postgres-smoke-single-memory-activation"},
+        )
+        require(
+            single_activation.status_code == 201
+            and single_activation.json().get("memoryActivation", {}).get(
+                "memoryVersionCreated"
+            )
+            is True,
+            f"formal single MemoryVersion activation failed: {single_activation.text}",
+        )
+        require(
+            memory_counts(test_dsn, vault_id=single_vault_id) == (1, 1),
+            "formal single activation must create exactly one Memory and version",
+        )
+
+        single_replay = client.post(
+            single_path,
+            headers=formal_headers(
+                owner_headers,
+                session_id=session_id,
+                decision_id="formal-confirmation-postgres-smoke-single-replay",
+            ),
+            json=single_payload,
+        )
+        require(
+            single_replay.status_code == 200
+            and single_replay.json().get("status") == "deduplicated",
+            "formal single confirmation replay must deduplicate",
+        )
+
         concurrent_vault_id = "vault-formal-confirmation-concurrent-smoke"
         concurrent_review_batch_id, concurrent_candidate_id = seed_reviewable_batch(
             test_dsn,
@@ -1210,6 +1327,7 @@ def main() -> None:
             "formalMemoryActivationCreated=true formalMemoryActivationReplayDeduplicated=true "
             "formalMemoryActivationProjectionRebuilt=true"
             " formalMemoryActivationContextMaterialized=true"
+            " formalSingleMemoryActivationCreated=true"
         )
     finally:
         main_module.store = previous_store
