@@ -1,9 +1,10 @@
 """Owner-scoped read service for the conservative M0-B Thread summary projection.
 
-This service intentionally has no HTTP route or writer in this slice.  It is a
-typed composition seam for later QA/map presentation and keeps the association
-rule server-side: only explicit, current Owner continuation cues may associate
-Threads, and they remain separate records.
+The live read remains a typed composition seam for QA/map presentation. Its
+separate QA route never writes; the persisted checkpoint lane reuses this exact
+source assembly and remains independently default-off. Only explicit, current
+Owner continuation cues may associate Threads, and they remain separate
+records.
 """
 
 from __future__ import annotations
@@ -44,6 +45,48 @@ class OwnerTruthThreadSummaryReadStore(Protocol):
         ...
 
 
+def read_owner_truth_thread_summary_source(
+    *,
+    context: OwnerTruthCommandContext,
+    memory_projection_repository: Any,
+    confirmation_repository: Any,
+    conversation_repository: Any,
+    continuation_cue_repository: Any,
+) -> OwnerTruthThreadSummaryReadResult:
+    """Assemble one current content-free Thread summary projection.
+
+    Keeping the source assembly here makes a persisted checkpoint use the
+    exact same eligibility and association rules as the existing QA read.
+    Callers own their transaction boundary; this helper never opens a second
+    Unit of Work.
+    """
+
+    dimension_read = OwnerTruthKnowledgeDimensionReadService(
+        memory_projection_repository,
+        confirmation_repository,
+    ).read(context=context)
+    if dimension_read.state is not OwnerTruthKnowledgeDimensionReadState.READY:
+        return OwnerTruthThreadSummaryReadResult(
+            state=dimension_read.state,
+            projection=None,
+        )
+    projection = build_owner_truth_thread_summary_projection(
+        dimension_read=dimension_read,
+        thread_authorities=(
+            conversation_repository.list_recommendation_candidate_thread_authorities(
+                context=context
+            )
+        ),
+        continuation_cues=(
+            continuation_cue_repository.list_for_recommendation(context=context)
+        ),
+    )
+    return OwnerTruthThreadSummaryReadResult(
+        state=OwnerTruthKnowledgeDimensionReadState.READY,
+        projection=projection,
+    )
+
+
 class OwnerTruthThreadSummaryReadService:
     """Compose only current Owner Truth reads into a rebuildable thread map."""
 
@@ -59,35 +102,21 @@ class OwnerTruthThreadSummaryReadService:
             correlation_id=f"owner-truth-thread-summary-read-{context.vault_id}",
             command_id="ownerTruthThreadSummaryRead",
         ):
-            dimension_read = OwnerTruthKnowledgeDimensionReadService(
-                self._store.owner_truth_memory_projection_repository(),
-                self._store.owner_truth_knowledge_dimension_confirmation_repository(),
-            ).read(context=context)
-            if dimension_read.state is not OwnerTruthKnowledgeDimensionReadState.READY:
-                return OwnerTruthThreadSummaryReadResult(
-                    state=dimension_read.state,
-                    projection=None,
-                )
-            projection = build_owner_truth_thread_summary_projection(
-                dimension_read=dimension_read,
-                thread_authorities=(
-                    self._store.owner_truth_conversation_repository().list_recommendation_candidate_thread_authorities(
-                        context=context
-                    )
+            return read_owner_truth_thread_summary_source(
+                context=context,
+                memory_projection_repository=self._store.owner_truth_memory_projection_repository(),
+                confirmation_repository=(
+                    self._store.owner_truth_knowledge_dimension_confirmation_repository()
                 ),
-                continuation_cues=(
-                    self._store.owner_truth_saved_continuation_cue_repository().list_for_recommendation(
-                        context=context
-                    )
+                conversation_repository=self._store.owner_truth_conversation_repository(),
+                continuation_cue_repository=(
+                    self._store.owner_truth_saved_continuation_cue_repository()
                 ),
-            )
-            return OwnerTruthThreadSummaryReadResult(
-                state=OwnerTruthKnowledgeDimensionReadState.READY,
-                projection=projection,
             )
 
 
 __all__ = [
     "OwnerTruthThreadSummaryReadService",
     "OwnerTruthThreadSummaryReadStore",
+    "read_owner_truth_thread_summary_source",
 ]

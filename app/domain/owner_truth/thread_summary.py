@@ -33,6 +33,9 @@ from .knowledge_recommendations import (
 
 
 OWNER_TRUTH_THREAD_SUMMARY_PROJECTION_SCHEMA_VERSION = "owner-truth-thread-summary-projection-v1"
+OWNER_TRUTH_THREAD_SUMMARY_CHECKPOINT_SCHEMA_VERSION = (
+    "owner-truth-thread-summary-checkpoint-v1"
+)
 THREAD_ASSOCIATION_REASON_SHARED_CONFIRMED_MEMORY_VERSION = "sharedConfirmedMemoryVersion"
 
 
@@ -49,6 +52,13 @@ def _canonical_json(value: object) -> str:
 
 def _digest(value: object) -> str:
     return sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _require_digest(value: object, *, field: str) -> str:
+    normalized = require_nonblank(str(value or ""), field=field)
+    if len(normalized) != 64 or any(character not in "0123456789abcdef" for character in normalized):
+        raise OwnerTruthThreadSummaryError(f"{field} must be a SHA-256 digest")
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -170,6 +180,8 @@ class OwnerTruthThreadSummaryProjection:
     authority_epoch: int
     checkpoint: str
     policy_version: str
+    source_dimension_checkpoint: str
+    input_digest: str
     summaries: tuple[ThreadSummary, ...]
     associations: tuple[ThreadAssociation, ...]
     filtered_stale_cue_count: int
@@ -187,8 +199,17 @@ class OwnerTruthThreadSummaryProjection:
             or self.authority_epoch < 0
         ):
             raise OwnerTruthThreadSummaryError("authority_epoch must be a non-negative integer")
-        object.__setattr__(self, "checkpoint", require_nonblank(self.checkpoint, field="checkpoint"))
+        object.__setattr__(self, "checkpoint", _require_digest(self.checkpoint, field="checkpoint"))
         object.__setattr__(self, "policy_version", require_nonblank(self.policy_version, field="policy_version"))
+        object.__setattr__(
+            self,
+            "source_dimension_checkpoint",
+            _require_digest(
+                self.source_dimension_checkpoint,
+                field="source_dimension_checkpoint",
+            ),
+        )
+        object.__setattr__(self, "input_digest", _require_digest(self.input_digest, field="input_digest"))
         summaries = tuple(self.summaries)
         associations = tuple(self.associations)
         if any(not isinstance(item, ThreadSummary) for item in summaries):
@@ -225,6 +246,8 @@ class OwnerTruthThreadSummaryProjection:
             "authorityEpoch": self.authority_epoch,
             "checkpoint": self.checkpoint,
             "policyVersion": self.policy_version,
+            "sourceDimensionCheckpoint": self.source_dimension_checkpoint,
+            "inputDigest": self.input_digest,
             "threadCount": len(self.summaries),
             "associatedThreadCount": len(associated_thread_ids),
             "unanchoredThreadCount": sum(1 for item in self.summaries if not item.anchors),
@@ -233,6 +256,128 @@ class OwnerTruthThreadSummaryProjection:
             "threads": [item.value_free_summary() for item in self.summaries],
             "associations": [item.value_free_summary() for item in self.associations],
         }
+
+
+def build_owner_truth_thread_summary_associations(
+    *,
+    vault_id: str,
+    authority_epoch: int,
+    summaries: Iterable[ThreadSummary],
+) -> tuple[ThreadAssociation, ...]:
+    """Derive reversible associations from persisted, content-free anchors.
+
+    The checkpoint never stores a semantic topic label or inferred fact.  It
+    preserves the same conservative rule as the live builder: only two or
+    more Threads with the exact same current confirmed ``MemoryVersion`` are
+    associated.
+    """
+
+    vault = require_nonblank(vault_id, field="vault_id")
+    if (
+        not isinstance(authority_epoch, int)
+        or isinstance(authority_epoch, bool)
+        or authority_epoch < 0
+    ):
+        raise OwnerTruthThreadSummaryError("authority_epoch must be a non-negative integer")
+    normalized_summaries = tuple(summaries)
+    if any(not isinstance(item, ThreadSummary) for item in normalized_summaries):
+        raise OwnerTruthThreadSummaryError("thread summaries must be typed")
+    associated_threads_by_memory: dict[str, set[str]] = {}
+    for summary in normalized_summaries:
+        for anchor in summary.anchors:
+            associated_threads_by_memory.setdefault(anchor.memory_version_id, set()).add(summary.thread_id)
+    return tuple(
+        ThreadAssociation(
+            association_id=_digest(
+                {
+                    "schemaVersion": OWNER_TRUTH_THREAD_SUMMARY_PROJECTION_SCHEMA_VERSION,
+                    "vaultId": vault,
+                    "authorityEpoch": authority_epoch,
+                    "anchorMemoryVersionId": memory_version_id,
+                    "reasonCode": THREAD_ASSOCIATION_REASON_SHARED_CONFIRMED_MEMORY_VERSION,
+                }
+            ),
+            anchor_memory_version_id=memory_version_id,
+            thread_ids=tuple(thread_ids),
+        )
+        for memory_version_id, thread_ids in associated_threads_by_memory.items()
+        if len(thread_ids) >= 2
+    )
+
+
+def build_owner_truth_thread_summary_projection_from_summaries(
+    *,
+    owner_subject_id: str,
+    vault_id: str,
+    authority_epoch: int,
+    source_dimension_checkpoint: str,
+    policy_version: str,
+    summaries: Iterable[ThreadSummary],
+    filtered_stale_cue_count: int,
+) -> OwnerTruthThreadSummaryProjection:
+    """Materialize a checkpoint from typed, content-free Thread summaries.
+
+    Both the live builder and persistence reader call this exact function. A
+    changed stored anchor set therefore cannot retain a hash for a current
+    projection: its recomputed input digest and checkpoint will differ.
+    """
+
+    owner = require_nonblank(owner_subject_id, field="owner_subject_id")
+    vault = require_nonblank(vault_id, field="vault_id")
+    source_checkpoint = _require_digest(
+        source_dimension_checkpoint,
+        field="source_dimension_checkpoint",
+    )
+    policy = require_nonblank(policy_version, field="policy_version")
+    normalized_summaries = tuple(summaries)
+    if any(not isinstance(item, ThreadSummary) for item in normalized_summaries):
+        raise OwnerTruthThreadSummaryError("thread summaries must be typed")
+    if (
+        not isinstance(filtered_stale_cue_count, int)
+        or isinstance(filtered_stale_cue_count, bool)
+        or filtered_stale_cue_count < 0
+    ):
+        raise OwnerTruthThreadSummaryError("filtered_stale_cue_count must be a non-negative integer")
+    associations = build_owner_truth_thread_summary_associations(
+        vault_id=vault,
+        authority_epoch=authority_epoch,
+        summaries=normalized_summaries,
+    )
+    sorted_summaries = tuple(sorted(normalized_summaries, key=lambda item: item.thread_id))
+    input_digest = _digest(
+        {
+            "schemaVersion": OWNER_TRUTH_THREAD_SUMMARY_CHECKPOINT_SCHEMA_VERSION,
+            "sourceDimensionCheckpoint": source_checkpoint,
+            "policyVersion": policy,
+            "threads": [item.value_free_summary() for item in sorted_summaries],
+            "filteredStaleCueCount": filtered_stale_cue_count,
+        }
+    )
+    checkpoint = _digest(
+        {
+            "schemaVersion": OWNER_TRUTH_THREAD_SUMMARY_PROJECTION_SCHEMA_VERSION,
+            "dimensionCheckpoint": source_checkpoint,
+            "inputDigest": input_digest,
+            "threads": [item.value_free_summary() for item in sorted_summaries],
+            "associations": [
+                item.value_free_summary()
+                for item in sorted(associations, key=lambda item: item.association_id)
+            ],
+            "filteredStaleCueCount": filtered_stale_cue_count,
+        }
+    )
+    return OwnerTruthThreadSummaryProjection(
+        owner_subject_id=owner,
+        vault_id=vault,
+        authority_epoch=authority_epoch,
+        checkpoint=checkpoint,
+        policy_version=policy,
+        source_dimension_checkpoint=source_checkpoint,
+        input_digest=input_digest,
+        summaries=normalized_summaries,
+        associations=associations,
+        filtered_stale_cue_count=filtered_stale_cue_count,
+    )
 
 
 @dataclass(frozen=True)
@@ -333,50 +478,20 @@ def build_owner_truth_thread_summary_projection(
         )
         for thread in thread_index.values()
     )
-    associated_threads_by_memory: dict[str, set[str]] = {}
-    for summary in summaries:
-        for anchor in summary.anchors:
-            associated_threads_by_memory.setdefault(anchor.memory_version_id, set()).add(summary.thread_id)
-    associations = tuple(
-        ThreadAssociation(
-            association_id=_digest(
-                {
-                    "schemaVersion": OWNER_TRUTH_THREAD_SUMMARY_PROJECTION_SCHEMA_VERSION,
-                    "vaultId": dimension_read.vault_id,
-                    "authorityEpoch": dimension_read.authority_epoch,
-                    "anchorMemoryVersionId": memory_version_id,
-                    "reasonCode": THREAD_ASSOCIATION_REASON_SHARED_CONFIRMED_MEMORY_VERSION,
-                }
-            ),
-            anchor_memory_version_id=memory_version_id,
-            thread_ids=tuple(thread_ids),
-        )
-        for memory_version_id, thread_ids in associated_threads_by_memory.items()
-        if len(thread_ids) >= 2
-    )
-    checkpoint = _digest(
-        {
-            "schemaVersion": OWNER_TRUTH_THREAD_SUMMARY_PROJECTION_SCHEMA_VERSION,
-            "dimensionCheckpoint": dimension_read.checkpoint,
-            "threads": [item.value_free_summary() for item in sorted(summaries, key=lambda item: item.thread_id)],
-            "associations": [item.value_free_summary() for item in sorted(associations, key=lambda item: item.association_id)],
-            "filteredStaleCueCount": stale_cue_count,
-        }
-    )
-    return OwnerTruthThreadSummaryProjection(
+    return build_owner_truth_thread_summary_projection_from_summaries(
         owner_subject_id=dimension_read.owner_subject_id,
         vault_id=dimension_read.vault_id,
         authority_epoch=dimension_read.authority_epoch,
-        checkpoint=checkpoint,
+        source_dimension_checkpoint=dimension_read.checkpoint,
         policy_version=coverage.policy_version,
         summaries=summaries,
-        associations=associations,
         filtered_stale_cue_count=stale_cue_count,
     )
 
 
 __all__ = [
     "OWNER_TRUTH_THREAD_SUMMARY_PROJECTION_SCHEMA_VERSION",
+    "OWNER_TRUTH_THREAD_SUMMARY_CHECKPOINT_SCHEMA_VERSION",
     "THREAD_ASSOCIATION_REASON_SHARED_CONFIRMED_MEMORY_VERSION",
     "OwnerTruthThreadSummaryError",
     "OwnerTruthThreadSummaryProjection",
@@ -384,5 +499,7 @@ __all__ = [
     "ThreadAssociation",
     "ThreadSummary",
     "ThreadSummaryAnchor",
+    "build_owner_truth_thread_summary_associations",
+    "build_owner_truth_thread_summary_projection_from_summaries",
     "build_owner_truth_thread_summary_projection",
 ]

@@ -28,6 +28,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-credential-response-boundary-smoke.sh
 echo "== Owner Truth knowledge dimension confirmation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-knowledge-recommendation-gate.sh
 
+echo "== Owner Truth Thread-summary projection gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-thread-summary-projection-gate.sh
+
 echo "== Owner Truth SearchDocument projection worker gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-memory-search-projection-worker-gate.sh
 

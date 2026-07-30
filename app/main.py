@@ -202,6 +202,10 @@ from app.services.owner_truth_memory_search_projection import (
     OwnerTruthMemorySearchDocumentProjectionService,
     OwnerTruthMemorySearchProjectionAccessDenied,
 )
+from app.services.owner_truth_thread_summary_projection import (
+    OwnerTruthThreadSummaryProjectionAccessDenied,
+    OwnerTruthThreadSummaryProjectionService,
+)
 from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_interview_candidate_single_review import (
     OwnerTruthInterviewCandidateSingleReviewService,
@@ -525,6 +529,9 @@ OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED = bool(
 OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED = bool(
     settings.owner_truth_thread_summary_read_qa_enabled
 )
+OWNER_TRUTH_THREAD_SUMMARY_PROJECTION_QA_ENABLED = bool(
+    settings.owner_truth_thread_summary_projection_qa_enabled
+)
 OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED = bool(
     settings.owner_truth_interview_session_outcome_read_qa_enabled
 )
@@ -729,6 +736,29 @@ def _require_owner_truth_thread_summary_read_qa(request: Request) -> str:
         raise HTTPException(
             status_code=401,
             detail={"code": "ownerTruthThreadSummaryReadUserSessionRequired"},
+        )
+    return user_id
+
+
+def _require_owner_truth_thread_summary_projection_qa(request: Request) -> str:
+    """Keep persisted Phase 4A checkpoints inside a separate explicit QA gate."""
+
+    if (
+        not OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        or not OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED
+        or not OWNER_TRUTH_THREAD_SUMMARY_READ_QA_ENABLED
+        or not OWNER_TRUTH_THREAD_SUMMARY_PROJECTION_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthThreadSummaryProjectionUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthThreadSummaryProjectionUserSessionRequired"},
         )
     return user_id
 
@@ -1988,6 +2018,19 @@ def _owner_truth_thread_summary_read_context(
     )
 
 
+def _owner_truth_thread_summary_projection_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_owner_truth_thread_summary_projection_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_interview_session_outcome_read_context(
     request: Request,
     *,
@@ -2548,6 +2591,26 @@ def _owner_truth_thread_summary_read_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthThreadSummaryReadInvalid"},
+    )
+
+
+def _owner_truth_thread_summary_projection_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    if isinstance(
+        error,
+        (
+            OwnerTruthThreadSummaryProjectionAccessDenied,
+            OwnerTruthMemoryProjectionAccessDenied,
+        ),
+    ):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthThreadSummaryProjectionDenied"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthThreadSummaryProjectionInvalid"},
     )
 
 
@@ -7187,6 +7250,76 @@ def read_owner_truth_thread_summaries(
             "schemaVersion": "owner-truth-thread-summary-read-response-v1",
             "vaultId": context.vault_id,
             "threadSummaries": result.value_free_summary(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+_OWNER_TRUTH_THREAD_SUMMARY_PROJECTION_FIELDS = frozenset()
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/thread-summary-projections/rebuild",
+    include_in_schema=False,
+)
+def rebuild_owner_truth_thread_summary_projection(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only rebuild of the private, content-free Phase 4A checkpoint."""
+
+    try:
+        context = _owner_truth_thread_summary_projection_context(request, vault_id=vault_id)
+        unsupported = sorted(set(payload).difference(_OWNER_TRUTH_THREAD_SUMMARY_PROJECTION_FIELDS))
+        if unsupported:
+            raise OwnerTruthThreadSummaryError(
+                "thread summary projection rebuild contains unsupported fields"
+            )
+        result = OwnerTruthThreadSummaryProjectionService(store).rebuild(context=context)
+    except OwnerTruthContractError as error:
+        raise _owner_truth_thread_summary_projection_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-thread-summary-projection-rebuild-response-v1",
+            "vaultId": context.vault_id,
+            "threadSummaryProjection": result.value_free_summary(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/thread-summary-projections/read",
+    include_in_schema=False,
+)
+def read_owner_truth_thread_summary_projection(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only current checkpoint read; stale source state fails closed."""
+
+    try:
+        context = _owner_truth_thread_summary_projection_context(request, vault_id=vault_id)
+        unsupported = sorted(set(payload).difference(_OWNER_TRUTH_THREAD_SUMMARY_PROJECTION_FIELDS))
+        if unsupported:
+            raise OwnerTruthThreadSummaryError(
+                "thread summary projection read contains unsupported fields"
+            )
+        projection = OwnerTruthThreadSummaryProjectionService(store).read(context=context)
+    except OwnerTruthContractError as error:
+        raise _owner_truth_thread_summary_projection_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-thread-summary-projection-read-response-v1",
+            "vaultId": context.vault_id,
+            "threadSummaryProjection": {
+                "state": "ready" if projection is not None else "rebuilding",
+                "projection": projection.value_free_summary() if projection is not None else None,
+            },
         },
         headers={"Cache-Control": "no-store"},
     )

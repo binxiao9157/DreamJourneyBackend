@@ -118,6 +118,9 @@ from app.services.owner_truth_candidate_review import (
 from app.services.owner_truth_memory_projection import (
     PostgresOwnerTruthMemoryProjectionRepository,
 )
+from app.services.owner_truth_thread_summary_projection import (
+    PostgresOwnerTruthThreadSummaryProjectionRepository,
+)
 from app.services.owner_truth_projection_rights import (
     PostgresOwnerTruthProjectionRightsRepository,
 )
@@ -499,6 +502,32 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("saved continuation cue requires an active unit of work")
         return PostgresOwnerTruthSavedContinuationCueRepository(active.connection)
+
+    def owner_truth_thread_summary_projection_repository(
+        self,
+    ) -> PostgresOwnerTruthThreadSummaryProjectionRepository:
+        """Return default-off, content-free Thread summary checkpoint persistence."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError(
+                "thread summary projection requires an active unit of work"
+            )
+        return PostgresOwnerTruthThreadSummaryProjectionRepository(
+            active.connection,
+            memory_projection_repository=PostgresOwnerTruthMemoryProjectionRepository(
+                active.connection
+            ),
+            confirmation_repository=(
+                PostgresOwnerTruthKnowledgeDimensionConfirmationRepository(
+                    active.connection
+                )
+            ),
+            conversation_repository=PostgresOwnerTruthConversationRepository(active.connection),
+            continuation_cue_repository=PostgresOwnerTruthSavedContinuationCueRepository(
+                active.connection
+            ),
+        )
 
     def owner_truth_knowledge_recommendation_activation_repository(
         self,

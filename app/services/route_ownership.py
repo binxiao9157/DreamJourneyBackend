@@ -278,6 +278,18 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/thread-summary-projections/rebuild",
+                session,
+                "ownerTruthThreadSummaryProjection",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/thread-summary-projections/read",
+                session,
+                "ownerTruthThreadSummaryProjection",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/interview-sessions/{session_id}/outcome/read",
                 session,
                 "ownerTruthInterviewSessionOutcomeRead",

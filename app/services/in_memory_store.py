@@ -68,6 +68,9 @@ from app.services.owner_truth_interview_candidate_review import (
 from app.services.owner_truth_memory_projection import (
     InMemoryOwnerTruthMemoryProjectionRepository,
 )
+from app.services.owner_truth_thread_summary_projection import (
+    InMemoryOwnerTruthThreadSummaryProjectionRepository,
+)
 from app.services.owner_truth_projection_rights import (
     InMemoryOwnerTruthProjectionRightsRepository,
 )
@@ -229,6 +232,18 @@ class InMemoryStore:
         )
         self._owner_truth_thread_preference_repository = (
             InMemoryOwnerTruthThreadPreferenceRepository()
+        )
+        self._owner_truth_thread_summary_projection_repository = (
+            InMemoryOwnerTruthThreadSummaryProjectionRepository(
+                memory_projection_repository=self._owner_truth_memory_projection_repository,
+                confirmation_repository=(
+                    self._owner_truth_knowledge_dimension_confirmation_repository
+                ),
+                conversation_repository=self._owner_truth_conversation_repository,
+                continuation_cue_repository=(
+                    self._owner_truth_saved_continuation_cue_repository
+                ),
+            )
         )
         self._owner_truth_interview_decision_audit_repository = (
             InMemoryOwnerTruthInterviewDecisionAuditRepository()
@@ -396,6 +411,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthThreadPreferenceRepository:
         return self._owner_truth_thread_preference_repository
+
+    def owner_truth_thread_summary_projection_repository(
+        self,
+    ) -> InMemoryOwnerTruthThreadSummaryProjectionRepository:
+        return self._owner_truth_thread_summary_projection_repository
 
     def owner_truth_interview_decision_audit_repository(
         self,

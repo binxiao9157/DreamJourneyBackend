@@ -1,0 +1,11 @@
+{
+  "version": "0069",
+  "name": "owner_truth_thread_summary_projection_checkpoint",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthThreadSummaryProjectionDefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthThreadSummaryProjectionQA": false
+  }
+}
