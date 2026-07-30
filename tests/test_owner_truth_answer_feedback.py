@@ -327,7 +327,7 @@ class OwnerTruthAnswerFeedbackTests(unittest.TestCase):
         self.assertEqual(citation_read.current_citation_count, 0)
         self.assertEqual(citation_read.citations[0]["currentness"], "projectionInputsChanged")
         self.assertFalse(feedback.metric_eligible)
-        self.assertEqual(feedback.eligibility_reason, "projectionUnavailable")
+        self.assertEqual(feedback.eligibility_reason, "projectionInputsChanged")
 
     def test_rights_revision_feedback_retains_the_value_free_stale_reason(self) -> None:
         candidate = self._candidate(summary="权利修订后引用需要重新构建")
