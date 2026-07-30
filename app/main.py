@@ -482,6 +482,9 @@ OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = bool(
 OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = bool(
     settings.owner_truth_interview_decision_audit_enabled
 )
+OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = bool(
+    settings.owner_truth_interview_review_batch_automation_enabled
+)
 OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = bool(
     settings.owner_truth_knowledge_dimension_confirmation_qa_enabled
 )
@@ -3106,6 +3109,37 @@ def _owner_truth_review_batch_automation_after_qa_transition(
     return None if summary["state"] == "notDue" else summary
 
 
+def _owner_truth_formal_review_batch_automation_in_active_unit_of_work(
+    *,
+    session_id: str,
+    transition_command_id: str,
+    context: OwnerTruthCommandContext,
+) -> Optional[int]:
+    """Create a due batch atomically for captured formal natural input.
+
+    The older QA helper intentionally stays outside the ordinary request
+    response so QA can inspect its value-minimized batch summary. Formal
+    natural input has no such response surface: this default-off writer uses
+    only an already-captured ``echoTextInput`` authorization and returns the
+    current session version needed by the next optimistic command.
+    """
+
+    if (
+        not OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED
+        or context.authorization_capture is None
+    ):
+        return None
+    result = OwnerTruthInterviewReviewBatchAutomationService(
+        store,
+        enabled=True,
+    ).ensure_after_transition_in_active_unit_of_work(
+        session_id=session_id,
+        transition_command_id=transition_command_id,
+        context=context,
+    )
+    return result.session_version
+
+
 def _attach_owner_truth_review_batch_automation(
     *,
     response: Dict[str, Any],
@@ -3123,6 +3157,24 @@ def _attach_owner_truth_review_batch_automation(
         raise OwnerTruthConversationError("interview command receipt is invalid")
     receipt["sessionVersion"] = session_version
     response["reviewBatchAutomation"] = automation
+    return response
+
+
+def _attach_owner_truth_formal_review_batch_session_version(
+    *,
+    response: Dict[str, Any],
+    session_version: Optional[int],
+) -> Dict[str, Any]:
+    """Keep formal optimistic writes current without exposing batch details."""
+
+    if session_version is None:
+        return response
+    if type(session_version) is not int or session_version < 1:
+        raise OwnerTruthConversationError("formal review batch session version is invalid")
+    receipt = response.get("receipt")
+    if not isinstance(receipt, dict):
+        raise OwnerTruthConversationError("interview command receipt is invalid")
+    receipt["sessionVersion"] = session_version
     return response
 
 
@@ -5074,6 +5126,7 @@ def append_owner_truth_interview_narrative(
             kind=ConversationMessageKind.NARRATIVE,
             text=narrative_text,
         )
+        formal_review_batch_session_version: Optional[int] = None
         with store.request_unit_of_work(
             correlation_id=(
                 "owner-truth-interview-input-append:"
@@ -5092,6 +5145,13 @@ def append_owner_truth_interview_narrative(
                 result=result,
                 context=context,
             )
+            formal_review_batch_session_version = (
+                _owner_truth_formal_review_batch_automation_in_active_unit_of_work(
+                    session_id=command.session_id,
+                    transition_command_id=command.command_id,
+                    context=context,
+                )
+            )
         automation = _owner_truth_review_batch_automation_after_qa_transition(
             request=request,
             session_id=command.session_id,
@@ -5108,6 +5168,10 @@ def append_owner_truth_interview_narrative(
     response = _owner_truth_interview_session_command_response(
         vault_id=context.vault_id,
         result=result,
+    )
+    response = _attach_owner_truth_formal_review_batch_session_version(
+        response=response,
+        session_version=formal_review_batch_session_version,
     )
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
@@ -5259,6 +5323,7 @@ def set_owner_truth_interview_boundary(
             payload=payload,
             session_id=session_id,
         )
+        formal_review_batch_session_version: Optional[int] = None
         with store.request_unit_of_work(
             correlation_id=(
                 "owner-truth-interview-boundary:"
@@ -5282,6 +5347,13 @@ def set_owner_truth_interview_boundary(
                     command=command,
                     context=context,
                 )
+            formal_review_batch_session_version = (
+                _owner_truth_formal_review_batch_automation_in_active_unit_of_work(
+                    session_id=command.session_id,
+                    transition_command_id=command.command_id,
+                    context=context,
+                )
+            )
         automation = _owner_truth_review_batch_automation_after_qa_transition(
             request=request,
             session_id=command.session_id,
@@ -5295,6 +5367,10 @@ def set_owner_truth_interview_boundary(
     response = _owner_truth_interview_session_command_response(
         vault_id=context.vault_id,
         result=result,
+    )
+    response = _attach_owner_truth_formal_review_batch_session_version(
+        response=response,
+        session_version=formal_review_batch_session_version,
     )
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,

@@ -11,6 +11,7 @@ import app.main as main_module
 from app.main import app
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.in_memory_store import InMemoryStore
+from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_interview_decision_audit import (
     OwnerTruthInterviewDecisionAuditCommand,
 )
@@ -30,6 +31,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.previous_decision_audit_enabled = (
             main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED
         )
+        self.previous_review_batch_automation_enabled = (
+            main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED
+        )
         self.store = InMemoryStore()
         main_module.store = self.store
         main_module.BACKEND_API_TOKEN = ""
@@ -38,6 +42,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
         main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = False
+        main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = False
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -48,6 +53,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = self.previous_qa_enabled
         main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = (
             self.previous_decision_audit_enabled
+        )
+        main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = (
+            self.previous_review_batch_automation_enabled
         )
 
     @staticmethod
@@ -1346,6 +1354,218 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertNotIn(private_text, rendered_audit)
         self.assertNotIn(thread_id, rendered_audit)
         self.assertNotIn(message_id, rendered_audit)
+
+    def test_formal_review_batch_automation_is_default_off_and_value_free_when_enabled(self) -> None:
+        owner_id, headers, auth_session_id = self._login("13800139621", qa=False)
+        headers.update(
+            {
+                "X-DreamJourney-Feature": "echoTextInput",
+                "X-DreamJourney-Feature-Decision-Id": "decision-interview-review-batch",
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": hashlib.sha256(
+                    auth_session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        vault_id = "vault-interview-formal-review-batch"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        started = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+
+        thread_version = 1
+        session_version = 1
+        for index in range(5):
+            response = client.post(
+                self._append_path(vault_id, session_id),
+                headers=headers,
+                json={
+                    "commandId": str(uuid4()),
+                    "threadId": thread_id,
+                    "messageId": str(uuid4()),
+                    "expectedThreadVersion": thread_version,
+                    "expectedSessionVersion": session_version,
+                    "text": f"默认关闭的正式私有叙述 {index + 1}，不得出现在回执。",
+                },
+            )
+            self.assertEqual(response.status_code, 201, response.text)
+            payload = response.json()
+            self.assertNotIn("reviewBatchAutomation", payload)
+            receipt = payload["receipt"]
+            thread_version = int(receipt["threadVersion"])
+            session_version = int(receipt["sessionVersion"])
+
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        conversation = OwnerTruthConversationService(
+            self.store.owner_truth_conversation_repository()
+        )
+        self.assertEqual(
+            conversation.list_review_batches(session_id=session_id, context=context),
+            (),
+        )
+
+        # A new formal session proves the enabled path independently; the
+        # first default-off session remains untouched.
+        enabled_vault_id = "vault-interview-formal-review-batch-enabled"
+        enabled_thread_id = str(uuid4())
+        enabled_session_id = str(uuid4())
+        started_enabled = self._start_session(
+            vault_id=enabled_vault_id,
+            headers=headers,
+            thread_id=enabled_thread_id,
+            session_id=enabled_session_id,
+        )
+        self.assertEqual(started_enabled.status_code, 201, started_enabled.text)
+        main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = True
+        thread_version = 1
+        session_version = 1
+        private_text = "第五段正式私有叙述不得泄露到批次或回执。"
+        for index in range(5):
+            text = private_text if index == 4 else f"启用后的正式私有叙述 {index + 1}。"
+            response = client.post(
+                self._append_path(enabled_vault_id, enabled_session_id),
+                headers=headers,
+                json={
+                    "commandId": str(uuid4()),
+                    "threadId": enabled_thread_id,
+                    "messageId": str(uuid4()),
+                    "expectedThreadVersion": thread_version,
+                    "expectedSessionVersion": session_version,
+                    "text": text,
+                },
+            )
+            self.assertEqual(response.status_code, 201, response.text)
+            payload = response.json()
+            self.assertNotIn("reviewBatchAutomation", payload)
+            self.assertNotIn(private_text, json.dumps(payload, ensure_ascii=False))
+            receipt = payload["receipt"]
+            thread_version = int(receipt["threadVersion"])
+            session_version = int(receipt["sessionVersion"])
+
+        self.assertEqual(thread_version, 6)
+        # The fifth append creates a hidden ReviewBatch in the same command
+        # UoW, so the formal receipt returns the usable post-batch version.
+        self.assertEqual(session_version, 7)
+        batches = conversation.list_review_batches(
+            session_id=enabled_session_id,
+            context=OwnerTruthCommandContext(
+                vault_id=enabled_vault_id,
+                owner_subject_id=owner_id,
+                actor_subject_id=owner_id,
+            ),
+        )
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0].trigger.value, "turnThreshold")
+        self.assertEqual(batches[0].captured_candidate_batch_turn_count, 5)
+
+        sixth = client.post(
+            self._append_path(enabled_vault_id, enabled_session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": enabled_thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": thread_version,
+                "expectedSessionVersion": session_version,
+                "text": "已有待确认批次后不能再创建第二个批次。",
+            },
+        )
+        self.assertEqual(sixth.status_code, 201, sixth.text)
+        self.assertNotIn("reviewBatchAutomation", sixth.json())
+        self.assertEqual(
+            len(
+                conversation.list_review_batches(
+                    session_id=enabled_session_id,
+                    context=OwnerTruthCommandContext(
+                        vault_id=enabled_vault_id,
+                        owner_subject_id=owner_id,
+                        actor_subject_id=owner_id,
+                    ),
+                )
+            ),
+            1,
+        )
+
+    def test_formal_pause_boundary_creates_hidden_session_exit_batch_when_enabled(self) -> None:
+        owner_id, headers, auth_session_id = self._login("13800139622", qa=False)
+        headers.update(
+            {
+                "X-DreamJourney-Feature": "echoTextInput",
+                "X-DreamJourney-Feature-Decision-Id": "decision-interview-review-boundary",
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": hashlib.sha256(
+                    auth_session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        vault_id = "vault-interview-formal-review-boundary"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        self.assertEqual(
+            self._start_session(
+                vault_id=vault_id,
+                headers=headers,
+                thread_id=thread_id,
+                session_id=session_id,
+            ).status_code,
+            201,
+        )
+        appended = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": "暂停前的正式私有叙述。",
+            },
+        )
+        self.assertEqual(appended.status_code, 201, appended.text)
+
+        main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = True
+        paused = self._set_boundary(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_session_version=2,
+            boundary="doNotAsk",
+            headers=headers,
+        )
+        self.assertEqual(paused.status_code, 201, paused.text)
+        payload = paused.json()
+        self.assertNotIn("reviewBatchAutomation", payload)
+        self.assertEqual(payload["receipt"]["state"], "paused")
+        self.assertEqual(payload["receipt"]["boundary"], "doNotAsk")
+        self.assertEqual(payload["receipt"]["sessionVersion"], 4)
+
+        batches = OwnerTruthConversationService(
+            self.store.owner_truth_conversation_repository()
+        ).list_review_batches(
+            session_id=session_id,
+            context=OwnerTruthCommandContext(
+                vault_id=vault_id,
+                owner_subject_id=owner_id,
+                actor_subject_id=owner_id,
+            ),
+        )
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0].trigger.value, "sessionExit")
+        self.assertEqual(batches[0].captured_candidate_batch_turn_count, 1)
 
     def test_formal_boundary_requires_captured_echo_policy(self) -> None:
         _, headers, auth_session_id = self._login("13800139611", qa=False)

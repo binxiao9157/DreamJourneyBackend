@@ -2,7 +2,7 @@
 
 Date: 2026-07-30
 Scope: M0-A private guided-interview review boundary
-Status: `G0_LOCAL_VERIFIED / QA_ONLY / DEFAULT_OFF / NO_PUBLIC_ECHO_CUTOVER`
+Status: `G0_LOCAL_VERIFIED / QA_AND_CAPTURED_FORMAL_DEFAULT_OFF / NO_PUBLIC_ECHO_CUTOVER`
 
 ## Purpose
 
@@ -17,20 +17,35 @@ input/output behavior.
 
 ## Boundary
 
-`OwnerTruthInterviewReviewBatchAutomationService` is default-disabled. It runs
-only when both existing Owner Truth Candidate Review QA conditions are present:
+`OwnerTruthInterviewReviewBatchAutomationService` is default-disabled. The
+existing QA reconciliation path still runs only when both Owner Truth Candidate
+Review QA conditions are present:
 
 1. `OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED=true`;
 2. the authenticated self-owner request includes
    `x-dreamjourney-qa-owner-truth: 1`.
 
-The existing hidden private write routes invoke it after a durable transition:
+QA invokes it after a durable transition:
 
 - owner narrative append;
 - formal interview boundary;
 - defer-with-continuation boundary.
 
-The service reads the current owner-scoped session and:
+`OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED=false` is a separate
+server-only switch for captured formal natural input. When an authenticated
+self-owner request has a valid captured `echoTextInput` authorization and that
+switch is explicitly enabled, the following already-existing formal commands
+invoke the same deterministic service *inside their request Unit of Work*:
+
+- owner narrative append;
+- `skipOnce` / `cooldown` / `doNotAsk` formal boundary transition.
+
+The latter forms a `sessionExit` batch only when the persisted boundary actually
+leaves an owner narrative window. The explicit `end` and topic-switch routes
+remain QA-only in this slice; this change does not widen their route authority
+or create a new public Echo control.
+
+In either mode the service reads the current owner-scoped session and:
 
 - creates one pending `ReviewBatch` after five unreviewed owner narratives;
 - creates one session-exit batch when a non-active session has pending owner
@@ -42,10 +57,13 @@ Its child command id is deterministically derived from the durable parent
 command: `auto-review-batch:{transitionCommandId}`. A parent write replay or a
 later narrative therefore reconciles a pending batch without duplicating it.
 
-The bridge is deliberately post-transition and has its own Unit of Work. It is
-an idempotent QA reconciliation boundary, not a production outbox claim. A
-future public activation must move this obligation to the effect/outbox lane
-and prove crash recovery in G2 before claiming exactly-once delivery.
+The QA bridge is deliberately post-transition and has its own Unit of Work. It
+remains an idempotent QA reconciliation boundary, not a production outbox
+claim. The captured formal path is stricter: its parent transition and any due
+ReviewBatch share the same Postgres request transaction, so a batch-writer
+failure rolls back the enabled append or pause. A future public activation must
+still move this obligation to the effect/outbox lane and prove crash
+recovery/concurrency in G2 before claiming exactly-once delivery.
 
 ## Response and Version Contract
 
@@ -63,6 +81,12 @@ is updated to the post-batch `sessionVersion`, so the next optimistic client
 write is not stale. While the batch is not due, the prior response shape is
 preserved and no automation field is added.
 
+The captured formal path never adds `reviewBatchAutomation` or any batch ID to
+the HTTP response. If a due batch advances the session version, the ordinary
+value-minimized receipt is updated only to that post-batch `sessionVersion`.
+This preserves optimistic concurrency without turning a private review boundary
+into a formal Echo read model.
+
 No route was added; route-authentication and ownership inventory remains 121.
 
 ## Local Verification
@@ -73,10 +97,8 @@ Passed locally:
 PYTHONPATH=. .venv/bin/python -m unittest \
   tests.test_owner_truth_interview_review_batch_automation \
   tests.test_owner_truth_interview_review_batch_automation_api \
-  tests.test_owner_truth_interview_review_batch \
-  tests.test_owner_truth_interview_session_state_api \
   tests.test_owner_truth_interview_input_api \
-  tests.test_owner_truth_knowledge_recommendation_read_api -v
+  tests.test_owner_truth_interview_review_batch -v
 
 PYTHON_BIN=.venv/bin/python scripts/verify_backend.sh
 PYTHONPATH=. .venv/bin/python -m py_compile \
@@ -87,10 +109,11 @@ git diff --check
 ```
 
 The focused suites verify threshold creation, session-exit creation, replay,
-pending reuse, cross-owner denial, value minimization, response-version
-continuity, ordinary non-QA non-invocation, route inventory and existing
-defer-with-continuation behavior. `verify_backend.sh` passed 1474 backend unit
-tests and its existing G0/FastAPI smoke gates.
+pending reuse, cross-owner denial, QA response continuity, captured-formal
+default-off behavior, captured-formal threshold and paused-boundary creation,
+value minimization and post-batch optimistic-version continuity. The formal
+tests also prove no `reviewBatchAutomation` field or narrative text enters the
+formal response.
 
 The disposable Postgres conversation smoke now additionally verifies five-turn
 creation, a sixth optimistic write, one pending batch after restart and zero
@@ -101,8 +124,8 @@ does not claim G2, deployment, production scheduling or public release.
 
 ## Open Gates
 
-- G2: run the disposable Postgres smoke after deployment and retain the
-  value-free result.
+- G2: run the disposable Postgres smoke after deployment with the formal flag
+  both false and true, and retain value-free result evidence.
 - Public activation: replace post-transition reconciliation with an approved
   outbox/effect obligation and prove crash recovery/concurrency behavior.
 - M0 product closure: Candidate composition, owner confirmation, Projection

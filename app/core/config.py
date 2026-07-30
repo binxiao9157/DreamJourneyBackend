@@ -110,6 +110,11 @@ class Settings:
     # A server-side, value-free audit writer for successful natural-input
     # appends. It has no public API surface and remains default-off.
     owner_truth_interview_decision_audit_enabled: bool = False
+    # A separate server-only M0-A cadence writer. When enabled, a formally
+    # authorized owner transition may atomically create one pending ReviewBatch
+    # at the persisted threshold or paused-session boundary. It never exposes
+    # the batch through the natural-input response and remains default-off.
+    owner_truth_interview_review_batch_automation_enabled: bool = False
     # Explicit Owner continuation cues remain a fourth, independently closed
     # M0-B QA lane. They do not expose recommendation text or public Echo UI.
     owner_truth_saved_continuation_cue_qa_enabled: bool = False
@@ -321,6 +326,10 @@ class Settings:
             owner_truth_interview_decision_audit_enabled=_env_bool(
                 "OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED",
                 cls.owner_truth_interview_decision_audit_enabled,
+            ),
+            owner_truth_interview_review_batch_automation_enabled=_env_bool(
+                "OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED",
+                cls.owner_truth_interview_review_batch_automation_enabled,
             ),
             owner_truth_saved_continuation_cue_qa_enabled=_env_bool(
                 "OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED",

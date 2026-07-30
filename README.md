@@ -66,6 +66,7 @@
 - `DELEGATED_ACCESS_CONTRACT_API_ENABLED=false` 默认关闭 Family/Care/TimeLetter 的 Grant/Relationship 管理接口；安全合同和数据库迁移可以先部署，但在 G4 产品政策通过前不得在常驻服务进程中开启。部署 smoke 仅在独立进程内临时开启该合同。
 - `OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED=false` 默认关闭 V4 Candidate Inbox/Owner 决策、Projection、KBLite compatibility 与 Context shadow QA 接口。即使临时开启，也必须携带认证后的用户会话和 `X-DreamJourney-QA-Owner-Truth: 1`；这些接口仅用于 QA，不代表 Candidate、Projection 或 Context 已对公开产品开放。
 - `OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED=false` 默认关闭成功自然输入追加后的服务端无正文审计。开启时，它只在同一数据库事务中记录确定性动作、原因码和版本等回执；不返回给客户端、不保存叙述文本或话题名、不创建 Candidate、MemoryVersion 或 Provider 效果。
+- `OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED=false` 默认关闭正式自然输入的服务端 ReviewBatch 节奏写入。开启时，仅已捕获 `echoTextInput` 策略的 Owner 追加或暂停边界会在同一事务内按既有阈值创建一个待确认批次；自然输入响应只返回当前 session 版本，不泄露批次内容，也不创建 Candidate、MemoryVersion 或 Provider 效果。
 - `OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED=false` 是独立的 M0-B Owner 知识维度确认回执开关。即使 Candidate QA 已开启，它仍默认关闭；开启后只允许 Owner 对当前 `MemoryVersion` 的 hash 追加明确的维度/Facet 确认，不写回记忆原文、不创建 Candidate/新版本，也不接入公开 Echo。
 - `OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_READ_QA_ENABLED=false` 是独立的 M0-B 推荐读取开关。它要求前两个 Owner Truth QA 开关和认证 Owner 会话同时成立，只允许用当前确认回执绑定的同维度 `confirmedMemory` 引用执行值无关的选择策略；不生成问题文本、不落库、不接入公开 Echo。
 - `OWNER_TRUTH_SAVED_CONTINUATION_CUE_QA_ENABLED=false` 是独立的 M0-B 显式续聊线索开关。它额外要求服务端规划 QA 开关；只允许 Owner 将当前 `active + open` 会话、当前确认的 `MemoryVersion` 和仍缺失的 facet 绑定为 append-only cue。它不保存对话/问题正文，Session/authority/MemoryVersion/facet 失效后自动不再参与计划，也不接入公开 Echo。

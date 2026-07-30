@@ -131,52 +131,82 @@ class OwnerTruthInterviewReviewBatchAutomationService:
             ),
             command_id=f"auto-review-batch:{normalized_transition_command_id}",
         ):
-            conversation = OwnerTruthConversationService(
-                self._store.owner_truth_conversation_repository()
-            )
-            session = conversation.read_session(
+            return self.ensure_after_transition_in_active_unit_of_work(
                 session_id=normalized_session_id,
+                transition_command_id=normalized_transition_command_id,
                 context=context,
             )
-            pending = self._pending_batch(
+
+    def ensure_after_transition_in_active_unit_of_work(
+        self,
+        *,
+        session_id: str,
+        transition_command_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewReviewBatchAutomationResult:
+        """Run the deterministic ReviewBatch write in the caller's UoW.
+
+        Formal natural input first persists one Owner transition. This method
+        lets that transition and its due ReviewBatch share the same Postgres
+        request transaction, so a failed batch writer cannot leave a durable
+        append or pause without its enabled cadence boundary.
+        """
+
+        if not self._enabled:
+            raise OwnerTruthInterviewReviewBatchAutomationUnavailable(
+                "interview review batch automation is unavailable"
+            )
+        normalized_session_id = require_uuid(session_id, field="session_id")
+        normalized_transition_command_id = require_nonblank(
+            transition_command_id,
+            field="transition_command_id",
+        )
+        conversation = OwnerTruthConversationService(
+            self._store.owner_truth_conversation_repository()
+        )
+        session = conversation.read_session(
+            session_id=normalized_session_id,
+            context=context,
+        )
+        pending = self._pending_batch(
+            conversation=conversation,
+            session_id=normalized_session_id,
+            pending_review_batch_id=session.pending_review_batch_id,
+            context=context,
+        )
+        if pending is not None:
+            return OwnerTruthInterviewReviewBatchAutomationResult(
+                state="alreadyPending",
+                review_batch=pending,
+                session_version=session.row_version,
+            )
+        if not self._is_due(session_state=session.state, turn_count=session.candidate_batch_turn_count):
+            return OwnerTruthInterviewReviewBatchAutomationResult(
+                state="notDue",
+                review_batch=None,
+                session_version=session.row_version,
+            )
+        try:
+            created = conversation.create_review_batch(
+                command=CreateInterviewReviewBatchCommand(
+                    command_id=f"auto-review-batch:{normalized_transition_command_id}",
+                    thread_id=session.thread_id,
+                    session_id=session.session_id,
+                    expected_session_version=session.row_version,
+                ),
+                context=context,
+            )
+        except OwnerTruthConversationConflict:
+            return self._reconcile_conflict(
                 conversation=conversation,
                 session_id=normalized_session_id,
-                pending_review_batch_id=session.pending_review_batch_id,
                 context=context,
             )
-            if pending is not None:
-                return OwnerTruthInterviewReviewBatchAutomationResult(
-                    state="alreadyPending",
-                    review_batch=pending,
-                    session_version=session.row_version,
-                )
-            if not self._is_due(session_state=session.state, turn_count=session.candidate_batch_turn_count):
-                return OwnerTruthInterviewReviewBatchAutomationResult(
-                    state="notDue",
-                    review_batch=None,
-                    session_version=session.row_version,
-                )
-            try:
-                created = conversation.create_review_batch(
-                    command=CreateInterviewReviewBatchCommand(
-                        command_id=f"auto-review-batch:{normalized_transition_command_id}",
-                        thread_id=session.thread_id,
-                        session_id=session.session_id,
-                        expected_session_version=session.row_version,
-                    ),
-                    context=context,
-                )
-            except OwnerTruthConversationConflict:
-                return self._reconcile_conflict(
-                    conversation=conversation,
-                    session_id=normalized_session_id,
-                    context=context,
-                )
-            return OwnerTruthInterviewReviewBatchAutomationResult(
-                state="created",
-                review_batch=created.review_batch,
-                session_version=created.session_version,
-            )
+        return OwnerTruthInterviewReviewBatchAutomationResult(
+            state="created",
+            review_batch=created.review_batch,
+            session_version=created.session_version,
+        )
 
     @staticmethod
     def _is_due(*, session_state: InterviewSessionState, turn_count: int) -> bool:
