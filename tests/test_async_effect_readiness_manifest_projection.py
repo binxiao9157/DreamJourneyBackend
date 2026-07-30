@@ -57,7 +57,7 @@ class AsyncEffectReadinessManifestProjectionTests(unittest.TestCase):
             evidence,
             manifest_service=self.service,
             source_commit="abcdef1234567",
-            now=now,
+            now=self.now if now is None else now,
         )
 
     def test_ready_observation_persists_a_value_free_passed_manifest(self):
