@@ -947,6 +947,9 @@ def main() -> None:
         activation_inbox_path = (
             f"/v2/vaults/{vault_id}/interview-memory-activation-inbox"
         )
+        projection_recovery_inbox_path = (
+            f"/v2/vaults/{vault_id}/interview-memory-projection-recovery-inbox"
+        )
         payload = {
             "commandId": "formal-confirmation-postgres-smoke-accept",
             "selections": [{"candidateId": candidate_id, "expectedCandidateVersion": 1}],
@@ -1133,6 +1136,66 @@ def main() -> None:
         )
         require(memory_counts(test_dsn, vault_id=vault_id) == (1, 1), "formal activation must create one Memory and version")
 
+        projection_recovery_inbox_qa_only = client.get(
+            projection_recovery_inbox_path,
+            headers={**owner_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+        )
+        require(
+            projection_recovery_inbox_qa_only.status_code == 403
+            and route_code(projection_recovery_inbox_qa_only) == "release_policy_denied",
+            "QA header must not bypass formal MemoryVersion Projection recovery policy",
+        )
+        projection_recovery_inbox = client.get(
+            projection_recovery_inbox_path,
+            headers=formal_headers(
+                owner_headers,
+                session_id=session_id,
+                decision_id="formal-confirmation-postgres-smoke-projection-recovery-inbox",
+            ),
+        )
+        require(
+            projection_recovery_inbox.status_code == 200
+            and projection_recovery_inbox.headers.get("cache-control") == "no-store",
+            f"formal MemoryVersion Projection recovery inbox failed: {projection_recovery_inbox.text}",
+        )
+        projection_recovery_inbox_body = projection_recovery_inbox.json()
+        require(
+            projection_recovery_inbox_body.get("schemaVersion")
+            == "owner-truth-interview-memory-projection-recovery-inbox-v1"
+            and projection_recovery_inbox_body.get("vaultId") == vault_id
+            and projection_recovery_inbox_body.get("items")
+            == [
+                {
+                    "reviewBatchId": review_batch_id,
+                    "candidateId": candidate_id,
+                    "state": "rebuilding",
+                }
+            ],
+            "formal Projection recovery inbox must expose exactly one rebuilding handle",
+        )
+        rendered_projection_recovery_inbox = json.dumps(
+            projection_recovery_inbox_body,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        require(
+            all(
+                forbidden not in rendered_projection_recovery_inbox
+                for forbidden in (
+                    "content",
+                    "receipt",
+                    "memoryId",
+                    "memoryVersionId",
+                    "sourceId",
+                    "job",
+                    "checkpoint",
+                    "rebuildReason",
+                    "provider",
+                )
+            ),
+            "formal Projection recovery inbox must remain value-minimized",
+        )
+
         activation_inbox_after_activation = client.get(
             activation_inbox_path,
             headers=formal_headers(
@@ -1216,6 +1279,19 @@ def main() -> None:
                 sort_keys=True,
             ),
             "formal projection worker evidence must remain value-free",
+        )
+        projection_recovery_inbox_after_worker = client.get(
+            projection_recovery_inbox_path,
+            headers=formal_headers(
+                owner_headers,
+                session_id=session_id,
+                decision_id="formal-confirmation-postgres-smoke-projection-recovery-after-worker",
+            ),
+        )
+        require(
+            projection_recovery_inbox_after_worker.status_code == 200
+            and projection_recovery_inbox_after_worker.json().get("items") == [],
+            "rebuilt formal MemoryVersion must leave the Projection recovery inbox",
         )
         materialization_after_projection = OwnerTruthContextMaterializationService(
             store,
@@ -1454,6 +1530,8 @@ def main() -> None:
             "formalMemoryActivationCreated=true formalMemoryActivationReplayDeduplicated=true "
             "formalMemoryActivationInboxContentFree=true "
             "formalMemoryActivationInboxCompletionFiltered=true "
+            "formalMemoryProjectionRecoveryInboxContentFree=true "
+            "formalMemoryProjectionRecoveryInboxCompletionFiltered=true "
             "formalMemoryActivationProjectionRebuilt=true"
             " formalMemoryActivationContextMaterialized=true"
             " formalSingleMemoryActivationCreated=true"

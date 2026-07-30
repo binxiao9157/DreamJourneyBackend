@@ -27,7 +27,9 @@ from app.services.owner_truth_interview_candidate_batch_decision import (
     FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE,
     OwnerTruthInterviewCandidateFormalActivationAdmission,
     OwnerTruthInterviewCandidateFormalActivationInboxItem,
+    OwnerTruthInterviewCandidateFormalProjectionRecoveryInboxItem,
 )
+from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.owner_truth_memory_projection_effects import (
     build_memory_projection_rebuild_effect_intent,
 )
@@ -103,6 +105,50 @@ class OwnerTruthInterviewCandidateMemoryActivationInbox:
             )
 
 
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateMemoryProjectionRecoveryInboxItem:
+    """One display-safe state for an activated formal MemoryVersion.
+
+    State is intentionally fixed to ``rebuilding``. The response must not
+    reveal the underlying effect job, worker attempt, MemoryVersion, receipt,
+    source, or Candidate content.
+    """
+
+    review_batch_id: str
+    candidate_id: str
+    state: str = "rebuilding"
+
+    def __post_init__(self) -> None:
+        if self.state != "rebuilding":
+            raise OwnerTruthCandidateReviewError(
+                "Projection recovery inbox may expose only rebuilding state"
+            )
+
+
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateMemoryProjectionRecoveryInbox:
+    """Content-free formal discovery for active MemoryVersion materialization."""
+
+    items: tuple[OwnerTruthInterviewCandidateMemoryProjectionRecoveryInboxItem, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+        if any(
+            not isinstance(item, OwnerTruthInterviewCandidateMemoryProjectionRecoveryInboxItem)
+            for item in self.items
+        ):
+            raise OwnerTruthCandidateReviewError(
+                "Memory projection recovery inbox items are invalid"
+            )
+        identifiers = [
+            (item.review_batch_id, item.candidate_id) for item in self.items
+        ]
+        if len(identifiers) != len(set(identifiers)):
+            raise OwnerTruthCandidateReviewError(
+                "Memory projection recovery inbox cannot repeat a Candidate"
+            )
+
+
 class OwnerTruthInterviewCandidateMemoryActivationStore(Protocol):
     def request_unit_of_work(
         self,
@@ -116,6 +162,9 @@ class OwnerTruthInterviewCandidateMemoryActivationStore(Protocol):
         ...
 
     def owner_truth_candidate_review_repository(self) -> Any:
+        ...
+
+    def owner_truth_memory_projection_repository(self) -> Any:
         ...
 
 
@@ -144,6 +193,11 @@ class OwnerTruthInterviewCandidateMemoryActivationService:
         context: OwnerTruthCommandContext,
     ) -> OwnerTruthInterviewCandidateMemoryActivationResult:
         _assert_formal_owner_context(context)
+        effect_factory = getattr(self._store, "effect_kernel_repository", None)
+        if not callable(effect_factory):
+            raise OwnerTruthCandidateReviewError(
+                "MemoryVersion activation requires a Projection rebuild effect kernel"
+            )
         with self._request_unit_of_work(
             correlation_id=(
                 "owner-truth-interview-formal-memory-activation-"
@@ -199,8 +253,10 @@ class OwnerTruthInterviewCandidateMemoryActivationService:
         if activation.memory_version_id is None:
             return None
         factory = getattr(self._store, "effect_kernel_repository", None)
-        if not callable(factory):
-            return None
+        if not callable(factory):  # guarded before activation; keep fail-closed if replaced
+            raise OwnerTruthCandidateReviewError(
+                "MemoryVersion activation requires a Projection rebuild effect kernel"
+            )
         return factory().accept(
             build_memory_projection_rebuild_effect_intent(
                 context=context,
@@ -274,9 +330,83 @@ class OwnerTruthInterviewCandidateMemoryActivationInboxReadService:
         return nullcontext()
 
 
+class OwnerTruthInterviewCandidateMemoryProjectionRecoveryInboxReadService:
+    """Read only active formal MemoryVersions still rebuilding compatibility state."""
+
+    def __init__(self, store: OwnerTruthInterviewCandidateMemoryActivationStore):
+        self._store = store
+
+    def read(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewCandidateMemoryProjectionRecoveryInbox:
+        _assert_formal_owner_context(context)
+        with self._request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-formal-memory-projection-recovery-inbox-"
+                f"{context.vault_id}"
+            ),
+            command_id=f"read:formal-memory-projection-recovery-inbox:{context.vault_id}",
+        ):
+            candidate_repository = self._store.owner_truth_candidate_review_repository()
+            owner_vault_guard = getattr(
+                candidate_repository,
+                "assert_active_owner_vault",
+                None,
+            )
+            if not callable(owner_vault_guard):
+                raise OwnerTruthCandidateReviewError(
+                    "Memory projection recovery inbox requires an active owner/vault guard"
+                )
+            owner_vault_guard(context=context)
+
+            projection = OwnerTruthMemoryProjectionService(self._store).read(context=context)
+            if (
+                str(projection.get("state") or "") != "rebuilding"
+                or str(projection.get("rightsState") or "") != "active"
+            ):
+                return OwnerTruthInterviewCandidateMemoryProjectionRecoveryInbox(items=())
+
+            ledger = self._store.owner_truth_interview_candidate_batch_decision_repository()
+            reader = getattr(
+                ledger,
+                "list_formal_pending_memory_projection_recoveries",
+                None,
+            )
+            if not callable(reader):
+                raise OwnerTruthCandidateReviewError(
+                    "formal memory projection recovery inbox is not supported by this store"
+                )
+            candidates = reader(context=context)
+        return OwnerTruthInterviewCandidateMemoryProjectionRecoveryInbox(
+            items=tuple(
+                OwnerTruthInterviewCandidateMemoryProjectionRecoveryInboxItem(
+                    review_batch_id=item.review_batch_id,
+                    candidate_id=item.candidate_id,
+                )
+                for item in candidates
+            )
+        )
+
+    def _request_unit_of_work(
+        self,
+        *,
+        correlation_id: str,
+        command_id: str,
+    ) -> ContextManager[Any]:
+        factory = getattr(self._store, "request_unit_of_work", None)
+        if callable(factory):
+            return factory(correlation_id=correlation_id, command_id=command_id)
+        return nullcontext()
+
+
 __all__ = [
     "OwnerTruthInterviewCandidateMemoryActivationInbox",
     "OwnerTruthInterviewCandidateMemoryActivationInboxReadService",
+    "OwnerTruthInterviewCandidateMemoryProjectionRecoveryInbox",
+    "OwnerTruthInterviewCandidateMemoryProjectionRecoveryInboxItem",
+    "OwnerTruthInterviewCandidateMemoryProjectionRecoveryInboxReadService",
     "OwnerTruthInterviewCandidateMemoryActivationCommand",
     "OwnerTruthInterviewCandidateMemoryActivationResult",
     "OwnerTruthInterviewCandidateMemoryActivationService",

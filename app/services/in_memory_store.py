@@ -185,7 +185,10 @@ class InMemoryStore:
             InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository(
                 memory_activation_pending_reader=(
                     self._owner_truth_candidate_review_repository.is_memory_activation_pending
-                )
+                ),
+                memory_projection_recovery_reader=(
+                    self._owner_truth_candidate_review_repository.is_memory_projection_recovery_pending
+                ),
             )
         )
         self._owner_truth_projection_rights_repository = (

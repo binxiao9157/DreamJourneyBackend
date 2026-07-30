@@ -152,6 +152,7 @@ from app.services.owner_truth_interview_candidate_batch_decision import (
 from app.services.owner_truth_interview_candidate_memory_activation import (
     OwnerTruthInterviewCandidateMemoryActivationCommand,
     OwnerTruthInterviewCandidateMemoryActivationInboxReadService,
+    OwnerTruthInterviewCandidateMemoryProjectionRecoveryInboxReadService,
     OwnerTruthInterviewCandidateMemoryActivationService,
 )
 from app.services.owner_truth_interview_candidate_review import (
@@ -1697,6 +1698,30 @@ def _owner_truth_interview_candidate_memory_activation_inbox_context(
     )
 
 
+def _owner_truth_interview_candidate_memory_projection_recovery_inbox_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize content-free status discovery while Projection rebuilds.
+
+    This shares the formal confirmation release-policy capture. It is a
+    recovery status read only: callers cannot obtain Candidate, receipt,
+    source, MemoryVersion, or worker details from this route.
+    """
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=(
+            f"{request.method.upper()} /v2/vaults/*/"
+            "interview-memory-projection-recovery-inbox"
+        ),
+        user_session_required_code="ownerTruthInterviewCandidateConfirmationUserSessionRequired",
+    )
+
+
 def _owner_truth_memory_projection_context(
     request: Request,
     *,
@@ -2761,6 +2786,29 @@ def _owner_truth_interview_candidate_memory_activation_inbox_response(
             {
                 "reviewBatchId": item.review_batch_id,
                 "candidateId": item.candidate_id,
+            }
+            for item in inbox.items
+        ],
+    }
+
+
+def _owner_truth_interview_candidate_memory_projection_recovery_inbox_response(
+    *,
+    vault_id: str,
+    inbox: Any,
+) -> Dict[str, Any]:
+    """Return status-only handles for formal MemoryVersions rebuilding Projection."""
+
+    return {
+        "schemaVersion": (
+            "owner-truth-interview-memory-projection-recovery-inbox-v1"
+        ),
+        "vaultId": vault_id,
+        "items": [
+            {
+                "reviewBatchId": item.review_batch_id,
+                "candidateId": item.candidate_id,
+                "state": item.state,
             }
             for item in inbox.items
         ],
@@ -5612,6 +5660,47 @@ def list_owner_truth_interview_candidate_memory_activation_inbox(
         content=_owner_truth_interview_candidate_memory_activation_inbox_response(
             vault_id=context.vault_id,
             inbox=inbox,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/interview-memory-projection-recovery-inbox",
+    include_in_schema=False,
+)
+def list_owner_truth_interview_candidate_memory_projection_recovery_inbox(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """List formal active MemoryVersions awaiting safe Projection materialization.
+
+    The existing Projection worker remains the only recovery owner. This
+    value-free route exposes a bounded ``rebuilding`` status so an interrupted
+    async effect is discoverable without disclosing content or worker internals.
+    """
+
+    try:
+        context = (
+            _owner_truth_interview_candidate_memory_projection_recovery_inbox_context(
+                request,
+                vault_id=vault_id,
+            )
+        )
+        inbox = (
+            OwnerTruthInterviewCandidateMemoryProjectionRecoveryInboxReadService(
+                store
+            ).read(context=context)
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=(
+            _owner_truth_interview_candidate_memory_projection_recovery_inbox_response(
+                vault_id=context.vault_id,
+                inbox=inbox,
+            )
         ),
         headers={"Cache-Control": "no-store"},
     )

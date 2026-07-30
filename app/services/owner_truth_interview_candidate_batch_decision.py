@@ -108,6 +108,31 @@ class OwnerTruthInterviewCandidateFormalActivationInboxItem:
 
 
 @dataclass(frozen=True)
+class OwnerTruthInterviewCandidateFormalProjectionRecoveryInboxItem:
+    """One content-free formal MemoryVersion materialization recovery handle.
+
+    The item exists only while an already activated current MemoryVersion has
+    not reached the current compatibility Projection. It deliberately carries
+    no MemoryVersion, receipt, source, job, or Candidate value identifiers.
+    """
+
+    review_batch_id: str
+    candidate_id: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "review_batch_id",
+            require_uuid(self.review_batch_id, field="review_batch_id"),
+        )
+        object.__setattr__(
+            self,
+            "candidate_id",
+            require_uuid(self.candidate_id, field="candidate_id"),
+        )
+
+
+@dataclass(frozen=True)
 class OwnerTruthInterviewCandidateBatchAcceptResult:
     outcome: str
     batch_decision_id: str
@@ -201,6 +226,10 @@ class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
             [str, str, OwnerTruthCommandContext], bool
         ]
         | None = None,
+        memory_projection_recovery_reader: Callable[
+            [str, str, OwnerTruthCommandContext], bool
+        ]
+        | None = None,
     ) -> None:
         self._lock = RLock()
         self._records: dict[tuple[str, str], OwnerTruthInterviewCandidateBatchDecisionLedgerRecord] = {}
@@ -211,6 +240,7 @@ class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
         # MemoryVersion activation.  Keep this root-command ledger
         # value-minimized and ask that repository only for a boolean.
         self._memory_activation_pending_reader = memory_activation_pending_reader
+        self._memory_projection_recovery_reader = memory_projection_recovery_reader
 
     @contextmanager
     def transaction(self):
@@ -391,6 +421,57 @@ class InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository:
                     continue
                 items.add(
                     OwnerTruthInterviewCandidateFormalActivationInboxItem(
+                        review_batch_id=record.review_batch_id,
+                        candidate_id=link.candidate_id,
+                    )
+                )
+        return tuple(
+            sorted(
+                items,
+                key=lambda item: (item.review_batch_id, item.candidate_id),
+            )
+        )
+
+    def list_formal_pending_memory_projection_recoveries(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewCandidateFormalProjectionRecoveryInboxItem, ...]:
+        """List live formal activations absent from the current Projection.
+
+        The canonical Candidate repository supplies only a boolean about a
+        current activated MemoryVersion. The caller separately proves that the
+        Vault Projection is rebuilding, so this ledger never carries a
+        Projection checkpoint, effect job, receipt, or Candidate value.
+        """
+
+        _assert_owner_context(context)
+        reader = self._memory_projection_recovery_reader
+        if reader is None:
+            return ()
+        with self._lock:
+            records_by_id = {
+                record.batch_decision_id: record
+                for (vault_id, _command_hash), record in self._records.items()
+                if vault_id == context.vault_id
+            }
+            items: set[OwnerTruthInterviewCandidateFormalProjectionRecoveryInboxItem] = set()
+            for link in self._receipt_links.values():
+                if link.vault_id != context.vault_id:
+                    continue
+                record = records_by_id.get(link.batch_decision_id)
+                if record is None or record.owner_subject_id != context.owner_subject_id:
+                    continue
+                capture = record.authorization_capture
+                if (
+                    capture is None
+                    or capture.feature != FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE
+                ):
+                    continue
+                if not reader(link.candidate_id, link.receipt_id, context):
+                    continue
+                items.add(
+                    OwnerTruthInterviewCandidateFormalProjectionRecoveryInboxItem(
                         review_batch_id=record.review_batch_id,
                         candidate_id=link.candidate_id,
                     )
@@ -801,6 +882,127 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
             for row in rows
         )
 
+    def list_formal_pending_memory_projection_recoveries(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewCandidateFormalProjectionRecoveryInboxItem, ...]:
+        """Read formal MemoryVersions absent from the active Projection.
+
+        This is a content-free discovery query. It joins the current
+        MemoryVersion and current Projection entries directly, rather than
+        exposing worker/job state or treating any unrelated Vault rebuild as a
+        retry for every formally confirmed Candidate.
+        """
+
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT owner_subject_id, authority_epoch, status
+                FROM owner_truth.vaults
+                WHERE vault_id = %s
+                FOR SHARE
+                """,
+                (context.vault_id,),
+            )
+            vault = cursor.fetchone()
+            if (
+                vault is None
+                or str(vault["owner_subject_id"]) != context.owner_subject_id
+                or str(vault["status"]) != "active"
+            ):
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "Memory projection recovery inbox is unavailable to this Owner Vault"
+                )
+            cursor.execute(
+                """
+                SELECT root.review_batch_id, link.candidate_id
+                FROM owner_truth.interview_review_batch_candidate_decisions AS root
+                JOIN owner_truth.interview_review_batch_candidate_decision_receipts AS link
+                  ON link.vault_id = root.vault_id
+                 AND link.batch_decision_id = root.id
+                JOIN owner_truth.decision_receipts AS receipt
+                  ON receipt.vault_id = link.vault_id
+                 AND receipt.id = link.decision_receipt_id
+                JOIN owner_truth.memory_candidates AS candidate
+                  ON candidate.vault_id = link.vault_id
+                 AND candidate.id = link.candidate_id
+                JOIN owner_truth.interview_review_batch_candidate_admissions AS admission
+                  ON admission.vault_id = root.vault_id
+                 AND admission.review_batch_id = root.review_batch_id
+                JOIN owner_truth.interview_review_batches AS review_batch
+                  ON review_batch.vault_id = admission.vault_id
+                 AND review_batch.id = admission.review_batch_id
+                JOIN owner_truth.memory_versions AS memory_version
+                  ON memory_version.vault_id = link.vault_id
+                 AND memory_version.decision_receipt_id = link.decision_receipt_id
+                 AND memory_version.is_current = TRUE
+                JOIN owner_truth.memories AS memory
+                  ON memory.vault_id = memory_version.vault_id
+                 AND memory.id = memory_version.memory_id
+                JOIN owner_truth.sources AS source
+                  ON source.vault_id = memory_version.vault_id
+                 AND source.id = memory_version.source_id
+                LEFT JOIN owner_truth.memory_projection_entries AS projection_entry
+                  ON projection_entry.vault_id = memory_version.vault_id
+                 AND projection_entry.authority_epoch = root.authority_epoch
+                 AND projection_entry.memory_version_id = memory_version.id
+                WHERE root.vault_id = %s
+                  AND root.owner_subject_id = %s
+                  AND root.authority_epoch = %s
+                  AND COALESCE(root.authorization_evidence ->> 'feature', '') = %s
+                  AND receipt.actor_subject_id = %s
+                  AND receipt.authority_epoch = %s
+                  AND receipt.decision IN ('accepted', 'corrected')
+                  AND receipt.candidate_id = link.candidate_id
+                  AND candidate.owner_subject_id = %s
+                  AND candidate.authority_epoch = %s
+                  AND candidate.decision_status = receipt.decision
+                  AND candidate.decision_status IN ('accepted', 'corrected')
+                  AND admission.owner_subject_id = %s
+                  AND admission.authority_epoch = %s
+                  AND review_batch.owner_subject_id = %s
+                  AND review_batch.authority_epoch = %s
+                  AND review_batch.state = 'acknowledged'
+                  AND memory.owner_subject_id = %s
+                  AND memory.authority_epoch = %s
+                  AND memory.status = 'active'
+                  AND source.owner_subject_id = %s
+                  AND source.authority_epoch = %s
+                  AND source.state = 'active'
+                  AND source.source_version = memory_version.source_version
+                  AND projection_entry.memory_version_id IS NULL
+                ORDER BY root.review_batch_id ASC, link.candidate_id ASC
+                """,
+                (
+                    context.vault_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    FORMAL_INTERVIEW_CANDIDATE_REVIEW_FEATURE,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            OwnerTruthInterviewCandidateFormalProjectionRecoveryInboxItem(
+                review_batch_id=str(row["review_batch_id"]),
+                candidate_id=str(row["candidate_id"]),
+            )
+            for row in rows
+        )
+
     @contextmanager
     def _cursor(self):
         try:
@@ -1133,6 +1335,7 @@ class OwnerTruthInterviewCandidateBatchDecisionService:
 
 __all__ = [
     "OwnerTruthInterviewCandidateFormalActivationInboxItem",
+    "OwnerTruthInterviewCandidateFormalProjectionRecoveryInboxItem",
     "InMemoryOwnerTruthInterviewCandidateBatchDecisionRepository",
     "OwnerTruthInterviewCandidateBatchAcceptResult",
     "OwnerTruthInterviewCandidateBatchDecisionLedgerRecord",

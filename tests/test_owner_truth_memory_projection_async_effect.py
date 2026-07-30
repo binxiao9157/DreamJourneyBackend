@@ -10,6 +10,7 @@ from uuid import uuid4
 from app.async_effects.repository import InMemoryEffectKernelRepository
 from app.domain.owner_truth.candidate_decisions import (
     CandidateReviewAction,
+    OwnerTruthCandidateReviewError,
     OwnerTruthCandidateReviewCommand,
     OwnerTruthCandidateSnapshot,
 )
@@ -21,7 +22,10 @@ from app.domain.owner_truth.contracts import (
     SensitivityLevel,
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
-from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.domain.owner_truth.source_commands import (
+    OwnerTruthCommandAuthorizationCapture,
+    OwnerTruthCommandContext,
+)
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
     OwnerTruthCandidateReviewService,
@@ -30,6 +34,10 @@ from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
     MEMORY_PROJECTION_REBUILD_JOB_TYPE,
     MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+)
+from app.services.owner_truth_interview_candidate_memory_activation import (
+    OwnerTruthInterviewCandidateMemoryActivationCommand,
+    OwnerTruthInterviewCandidateMemoryActivationService,
 )
 
 
@@ -130,6 +138,19 @@ class _AtomicCandidateEffectStore:
         if not self._active:
             raise AssertionError("effect write escaped its unit of work")
         return self.effect_writer
+
+
+class _MissingEffectKernelFormalActivationStore:
+    """Minimal double proving formal activation cannot mutate before effect wiring."""
+
+    effect_kernel_repository = None
+
+    def __init__(self) -> None:
+        self.ledger_requested = False
+
+    def owner_truth_interview_candidate_batch_decision_repository(self):
+        self.ledger_requested = True
+        raise AssertionError("formal admission must not run without an effect kernel")
 
 
 class OwnerTruthMemoryProjectionAsyncEffectTests(unittest.TestCase):
@@ -266,6 +287,41 @@ class OwnerTruthMemoryProjectionAsyncEffectTests(unittest.TestCase):
         self.assertEqual(snapshot["memoryActivations"], {})
         self.assertEqual(writer.record_count, 0)
         self.assertEqual(writer.intents, [])
+
+    def test_formal_activation_fails_closed_before_admission_without_effect_kernel(self) -> None:
+        store = _MissingEffectKernelFormalActivationStore()
+        context = OwnerTruthCommandContext(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_id,
+            actor_subject_id=self.owner_id,
+            authorization_capture=OwnerTruthCommandAuthorizationCapture(
+                feature="ownerTruthCandidateReview",
+                policy_version="release-policy-v1",
+                policy_revision=1,
+                emergency_revision=0,
+                account_generation_hash="a" * 24,
+                decision_id_hash="b" * 64,
+                audience="owner",
+                cohort="closedPilotAdultSelf",
+                client_build=1,
+                expires_at="2026-07-30T00:00:00+00:00",
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            OwnerTruthCandidateReviewError,
+            "requires a Projection rebuild effect kernel",
+        ):
+            OwnerTruthInterviewCandidateMemoryActivationService(store).activate(
+                command=OwnerTruthInterviewCandidateMemoryActivationCommand(
+                    command_id="formal-activation-needs-effect-kernel",
+                    review_batch_id=str(uuid4()),
+                    candidate_id=str(uuid4()),
+                ),
+                context=context,
+            )
+
+        self.assertFalse(store.ledger_requested)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from app.domain.owner_truth.contracts import (
     SourceRef,
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
 
@@ -210,6 +211,13 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
     @staticmethod
     def _memory_activation_inbox_path(vault_id: str) -> str:
         return f"/v2/vaults/{vault_id}/interview-memory-activation-inbox"
+
+    @staticmethod
+    def _memory_projection_recovery_inbox_path(vault_id: str) -> str:
+        return (
+            f"/v2/vaults/{vault_id}/"
+            "interview-memory-projection-recovery-inbox"
+        )
 
     @classmethod
     def _confirmation_batch_accept_path(cls, vault_id: str, review_batch_id: str) -> str:
@@ -563,6 +571,126 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
             )
             self.assertEqual(after_activation.status_code, 200)
             self.assertEqual(after_activation.json()["items"], [])
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
+    def test_formal_memory_projection_recovery_inbox_is_status_only_until_rebuilt(self) -> None:
+        owner_id, owner_headers, owner_session_id = self._login_release_policy("13800139432")
+        vault_id = "vault-interview-memory-projection-recovery-inbox"
+        review_batch_id, standard, _ = self._seed_review_batch(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        inbox_path = self._memory_projection_recovery_inbox_path(vault_id)
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthCandidateReview"
+        }
+        try:
+            qa_header_only = client.get(
+                inbox_path,
+                headers={**owner_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+            )
+            self.assertEqual(qa_header_only.status_code, 403)
+            self.assertEqual(
+                qa_header_only.json()["detail"]["code"],
+                "release_policy_denied",
+            )
+
+            accepted = client.post(
+                self._confirmation_batch_accept_path(vault_id, review_batch_id),
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="memory-projection-recovery-inbox-formal-accept",
+                ),
+                json={
+                    "commandId": "memory-projection-recovery-inbox-formal-accept-command",
+                    "selections": [
+                        {
+                            "candidateId": standard.candidate_id,
+                            "expectedCandidateVersion": 1,
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(accepted.status_code, 201)
+
+            activated = client.post(
+                self._confirmation_memory_activation_path(
+                    vault_id,
+                    review_batch_id,
+                    standard.candidate_id,
+                ),
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="memory-projection-recovery-inbox-formal-activate",
+                ),
+                json={
+                    "commandId": "memory-projection-recovery-inbox-formal-activate-command"
+                },
+            )
+            self.assertEqual(activated.status_code, 201)
+
+            rebuilding = client.get(
+                inbox_path,
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="memory-projection-recovery-inbox-rebuilding-read",
+                ),
+            )
+            self.assertEqual(rebuilding.status_code, 200)
+            self.assertEqual(rebuilding.headers["cache-control"], "no-store")
+            payload = rebuilding.json()
+            self.assertEqual(
+                payload["schemaVersion"],
+                "owner-truth-interview-memory-projection-recovery-inbox-v1",
+            )
+            self.assertEqual(payload["vaultId"], vault_id)
+            self.assertEqual(
+                payload["items"],
+                [
+                    {
+                        "reviewBatchId": review_batch_id,
+                        "candidateId": standard.candidate_id,
+                        "state": "rebuilding",
+                    }
+                ],
+            )
+            rendered = json.dumps(payload, ensure_ascii=False)
+            for forbidden in (
+                "content",
+                "receipt",
+                "memoryId",
+                "memoryVersionId",
+                "sourceId",
+                "job",
+                "checkpoint",
+                "rebuildReason",
+                "provider",
+            ):
+                self.assertNotIn(forbidden, rendered)
+
+            self.store.owner_truth_memory_projection_repository().rebuild(
+                context=OwnerTruthCommandContext(
+                    vault_id=vault_id,
+                    owner_subject_id=owner_id,
+                    actor_subject_id=owner_id,
+                )
+            )
+            ready = client.get(
+                inbox_path,
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="memory-projection-recovery-inbox-ready-read",
+                ),
+            )
+            self.assertEqual(ready.status_code, 200)
+            self.assertEqual(ready.json()["items"], [])
         finally:
             policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 

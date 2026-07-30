@@ -446,6 +446,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/interview-memory-projection-recovery-inbox",
+                session,
+                "ownerTruthInterviewCandidateMemoryProjectionRecoveryInboxRead",
+            ),
+            _rule(
+                "GET",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/confirmation",
                 session,
                 "ownerTruthInterviewCandidateConfirmationRead",

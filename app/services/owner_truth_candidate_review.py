@@ -255,6 +255,55 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 return False
             return True
 
+    def is_memory_projection_recovery_pending(
+        self,
+        candidate_id: str,
+        receipt_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> bool:
+        """Return whether one live formal activation lacks a ready projection.
+
+        This is the in-memory semantic-double bridge for the formal Projection
+        recovery inbox. It returns no Candidate, receipt, MemoryVersion, or
+        Projection data; the caller still checks the global Projection state.
+        """
+
+        _assert_owner_context(context)
+        with self._lock:
+            candidate = self._candidates.get(candidate_id)
+            receipt = next(
+                (
+                    item
+                    for item in self._receipts.values()
+                    if str(item.get("id") or "") == receipt_id
+                ),
+                None,
+            )
+            activation = self._memory_activations.get(receipt_id)
+            if (
+                candidate is None
+                or receipt is None
+                or activation is None
+                or candidate.vault_id != context.vault_id
+                or candidate.owner_subject_id != context.owner_subject_id
+                or candidate.decision
+                not in {CandidateDecision.ACCEPTED, CandidateDecision.CORRECTED}
+                or self._candidate_receipts.get(candidate_id) != receipt_id
+                or str(receipt.get("candidateId") or "") != candidate_id
+                or str(receipt.get("decision") or "") != candidate.decision.value
+                or str(activation.get("candidateId") or "") != candidate_id
+                or activation.get("isCurrent") is not True
+            ):
+                return False
+            try:
+                self._assert_live_target(candidate=candidate, context=context)
+            except (
+                OwnerTruthCandidateReviewAccessDenied,
+                OwnerTruthCandidateReviewSourceInactive,
+            ):
+                return False
+            return True
+
     def decide(
         self,
         *,
