@@ -223,6 +223,9 @@ from app.services.owner_truth_context_shadow_build import (
     OwnerTruthContextShadowBuildService,
     context_shadow_build_summary,
 )
+from app.services.owner_truth_context_shadow_compare import (
+    OwnerTruthContextShadowCompareService,
+)
 from app.services.owner_truth_context_materialization import (
     OwnerTruthContextMaterializationService,
     context_materialization_summary,
@@ -6555,6 +6558,35 @@ def build_owner_truth_context_shadow(
         "schemaVersion": "owner-truth-context-shadow-build-response-v1",
         "contextShadow": context_shadow_build_summary(shadow),
     }
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/context-shadow/compare",
+    include_in_schema=False,
+)
+def compare_owner_truth_context_shadow(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only V1/V4 Context correlation without returning either Context body."""
+
+    try:
+        context = _owner_truth_context_shadow_context(request, vault_id=vault_id)
+        comparison = OwnerTruthContextShadowCompareService(
+            store,
+            settings,
+            enabled=True,
+        ).compare(context=context, payload=payload)
+    except OwnerTruthMemoryProjectionError as error:
+        raise _owner_truth_memory_projection_http_error(error) from error
+    return JSONResponse(
+        content={
+            "schemaVersion": "owner-truth-context-shadow-compare-response-v1",
+            "contextComparison": comparison,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post(

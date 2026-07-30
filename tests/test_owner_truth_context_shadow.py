@@ -6,6 +6,7 @@ import json
 import unittest
 from uuid import uuid4
 
+from app.core.config import Settings
 from app.domain.owner_truth.candidate_decisions import (
     CandidateReviewAction,
     OwnerTruthCandidateReviewCommand,
@@ -33,6 +34,10 @@ from app.services.owner_truth_context_shadow_build import (
     OwnerTruthContextShadowBuildService,
     context_shadow_build_summary,
 )
+from app.services.owner_truth_context_shadow_compare import (
+    OwnerTruthContextShadowCompareError,
+    OwnerTruthContextShadowCompareService,
+)
 from app.services.owner_truth_context_materialization import (
     OwnerTruthContextMaterializationService,
     context_materialization_summary,
@@ -55,6 +60,7 @@ def _hash(value: object) -> str:
 class _Store:
     def __init__(self) -> None:
         self.review_repository = InMemoryOwnerTruthCandidateReviewRepository()
+        self.legacy_kblite_read_count = 0
         self.projection_repository = InMemoryOwnerTruthMemoryProjectionRepository(
             self.review_repository
         )
@@ -78,7 +84,20 @@ class _Store:
         return self.search_projection_repository
 
     def get_kb_snapshot(self, _user_id: str):
-        raise AssertionError("Owner Truth Context shadow must not read legacy KBLite")
+        self.legacy_kblite_read_count += 1
+        return {"people": [], "places": [], "events": [], "facts": []}
+
+    def list_archive_items(self, _user_id: str):
+        return []
+
+    def get_latest_care_snapshot(self, _user_id: str, viewer_family_member_id=None):
+        return None
+
+    def list_voice_profiles(self, _user_id: str):
+        return []
+
+    def get_family_relationship_by_member(self, _user_id: str, _member_id: str):
+        return None
 
 
 class OwnerTruthContextShadowTests(unittest.TestCase):
@@ -155,6 +174,7 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
         self.assertEqual(result["state"], "disabled")
         self.assertEqual(result["selectedContext"], [])
         self.assertIsNone(result["contextHash"])
+        self.assertEqual(self.store.legacy_kblite_read_count, 0)
 
     def test_ready_shadow_selects_standard_confirmed_memories_with_typed_citations(self) -> None:
         experience = self._candidate(
@@ -563,6 +583,70 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
             OwnerTruthContextShadowBuildService(self.store, enabled=True).build(
                 context=unknown_vault_context,
                 payload={"query": "跨 Vault 访问不应泄露底层异常"},
+            )
+
+    def test_compare_binds_legacy_and_v4_to_one_value_free_request(self) -> None:
+        candidate = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "上下文对照只保留请求哈希和引用完整性"},
+        )
+        self._activate(candidate, command_id="context-shadow-compare")
+        self.projection_service.rebuild(context=self.context)
+
+        raw_query = "不要把这段私密问题写入对照结果"
+        result = OwnerTruthContextShadowCompareService(
+            self.store,
+            Settings(store_backend="memory"),
+            enabled=True,
+        ).compare(
+            context=self.context,
+            payload={"intent": "echo_chat", "query": raw_query},
+        )
+
+        self.assertTrue(result["shadowOnly"])
+        self.assertTrue(result["legacyContextUnchanged"])
+        self.assertTrue(result["legacyContextRead"])
+        self.assertTrue(result["requestCorrelationMatches"])
+        self.assertEqual(result["disposition"], "observed")
+        self.assertEqual(result["v4"]["selectedContextCount"], 1)
+        self.assertTrue(result["v4"]["allSelectedItemsHaveTypedCitation"])
+        self.assertTrue(result["v4"]["authorityEpochPresent"])
+        self.assertTrue(result["v4"]["projectionCheckpointPresent"])
+        self.assertNotIn(raw_query, str(result))
+        self.assertNotIn(candidate.content["summary"], str(result))
+
+    def test_compare_marks_unready_projection_as_no_personal_memory(self) -> None:
+        candidate = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "未完成重建时不得把旧上下文标为 V4 个人记忆"},
+        )
+        self._activate(candidate, command_id="context-shadow-compare-unready")
+
+        result = OwnerTruthContextShadowCompareService(
+            self.store,
+            Settings(store_backend="memory"),
+            enabled=True,
+        ).compare(
+            context=self.context,
+            payload={"query": "投影尚未就绪"},
+        )
+
+        self.assertTrue(result["requestCorrelationMatches"])
+        self.assertEqual(result["v4"]["state"], "rebuilding")
+        self.assertEqual(result["v4"]["selectedContextCount"], 0)
+        self.assertEqual(result["disposition"], "v4_no_personal_memory")
+
+    def test_compare_rejects_unapproved_intent_without_retaining_it(self) -> None:
+        compare = OwnerTruthContextShadowCompareService(
+            self.store,
+            Settings(store_backend="memory"),
+            enabled=True,
+        )
+
+        with self.assertRaises(OwnerTruthContextShadowCompareError):
+            compare.compare(
+                context=self.context,
+                payload={"intent": "untrusted free form intent", "query": "ignored"},
             )
 
 

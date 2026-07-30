@@ -548,6 +548,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/context-shadow/compare",
+                session,
+                "ownerTruthContextShadowCompare",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/context-shadow/materialize",
                 session,
                 "ownerTruthContextMaterialization",

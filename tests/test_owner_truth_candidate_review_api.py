@@ -133,6 +133,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             headers=headers,
             json={"query": "default hidden"},
         )
+        context_shadow_compare = client.post(
+            "/v2/vaults/vault-hidden/context-shadow/compare",
+            headers=headers,
+            json={"query": "default hidden"},
+        )
         context_materialization = client.post(
             "/v2/vaults/vault-hidden/context-shadow/materialize",
             headers=headers,
@@ -193,6 +198,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(context_shadow_build.status_code, 404)
         self.assertEqual(
             context_shadow_build.json()["detail"]["code"],
+            "ownerTruthContextShadowUnavailable",
+        )
+        self.assertEqual(context_shadow_compare.status_code, 404)
+        self.assertEqual(
+            context_shadow_compare.json()["detail"]["code"],
             "ownerTruthContextShadowUnavailable",
         )
         self.assertEqual(context_materialization.status_code, 404)
@@ -290,6 +300,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             headers=headers,
             json={"query": "跨 Vault 读取不得构建个人上下文"},
         )
+        shadow_compare_denied = client.post(
+            "/v2/vaults/vault-other-owner/context-shadow/compare",
+            headers=headers,
+            json={"query": "跨 Vault 读取不得对照旧上下文"},
+        )
         answer_citation_denied = client.post(
             "/v2/vaults/vault-other-owner/answer-citation-receipts",
             headers=headers,
@@ -316,6 +331,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(shadow_denied.status_code, 403)
         self.assertEqual(
             shadow_denied.json()["detail"]["code"],
+            "ownerTruthMemoryProjectionDenied",
+        )
+        self.assertEqual(shadow_compare_denied.status_code, 403)
+        self.assertEqual(
+            shadow_compare_denied.json()["detail"]["code"],
             "ownerTruthMemoryProjectionDenied",
         )
         self.assertEqual(answer_citation_denied.status_code, 403)
@@ -480,6 +500,25 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(build["citationProof"][0]["citation"]["sourceId"], candidate.source_id)
         self.assertNotIn(raw_query, str(build))
         self.assertNotIn(candidate.content["summary"], str(build))
+
+        context_shadow_compare = client.post(
+            f"/v2/vaults/{vault_id}/context-shadow/compare",
+            headers=headers,
+            json={"intent": "echo_chat", "query": raw_query},
+        )
+        self.assertEqual(context_shadow_compare.status_code, 200)
+        self.assertEqual(context_shadow_compare.headers["cache-control"], "no-store")
+        self.assertEqual(
+            context_shadow_compare.json()["schemaVersion"],
+            "owner-truth-context-shadow-compare-response-v1",
+        )
+        comparison = context_shadow_compare.json()["contextComparison"]
+        self.assertTrue(comparison["shadowOnly"])
+        self.assertTrue(comparison["legacyContextRead"])
+        self.assertTrue(comparison["requestCorrelationMatches"])
+        self.assertTrue(comparison["v4"]["allSelectedItemsHaveTypedCitation"])
+        self.assertNotIn(raw_query, str(comparison))
+        self.assertNotIn(candidate.content["summary"], str(comparison))
 
         context_materialization = client.post(
             f"/v2/vaults/{vault_id}/context-shadow/materialize",
