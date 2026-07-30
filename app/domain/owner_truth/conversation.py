@@ -19,6 +19,7 @@ from .contracts import OwnerTruthContractError, require_nonblank, require_uuid
 from .interview_orchestration import (
     InterviewFatigue,
     MAX_DEEPENING_TURNS_BEFORE_SUMMARY,
+    MIN_DEEPENING_TURNS_BEFORE_SUMMARY,
     MIN_TURNS_BEFORE_CANDIDATE_BATCH,
 )
 from .source_commands import OwnerTruthCommandContext
@@ -208,6 +209,10 @@ class InterviewPacingState:
                 fatigue=self.fatigue,
             )
         if event is InterviewPacingEvent.SUMMARY_COMPLETED:
+            if self.deepening_turn_count < MIN_DEEPENING_TURNS_BEFORE_SUMMARY:
+                raise OwnerTruthConversationConflict(
+                    "summary requires the minimum bounded interview follow-up count"
+                )
             return InterviewPacingState(
                 boundary=self.boundary,
                 deepening_turn_count=0,

@@ -119,12 +119,14 @@ from app.domain.owner_truth.conversation import (
     ConversationMessageKind,
     EndInterviewSessionCommand,
     InterviewBoundary,
+    InterviewPacingEvent,
     OwnerTruthConversationAccessDenied,
     OwnerTruthConversationConflict,
     OwnerTruthConversationError,
     OwnerTruthConversationVersionConflict,
     OwnerTruthInterviewSessionStateConflict,
     PauseInterviewForTopicSwitchCommand,
+    RecordInterviewPacingCommand,
     RestoreDoNotAskInterviewBoundaryCommand,
     SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
@@ -1092,6 +1094,20 @@ _OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_PAYLOAD_FIELDS = frozenset(
     }
 )
 _OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_TOPIC_ID = "qa-interview-orchestration"
+_OWNER_TRUTH_INTERVIEW_PACING_PAYLOAD_FIELDS = frozenset(
+    {
+        "commandId",
+        "threadId",
+        "expectedSessionVersion",
+        "event",
+    }
+)
+_OWNER_TRUTH_INTERVIEW_PACING_QA_EVENTS = frozenset(
+    {
+        InterviewPacingEvent.DEEPENING_COMPLETED,
+        InterviewPacingEvent.SUMMARY_COMPLETED,
+    }
+)
 _OWNER_TRUTH_DEFER_WITH_CONTINUATION_PAYLOAD_FIELDS = frozenset(
     {
         "commandId",
@@ -1262,6 +1278,41 @@ def _owner_truth_interview_orchestration_read_signals(
     return InterviewSessionOrchestrationSignals(
         topic_id=_OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_TOPIC_ID,
         **values,
+    )
+
+
+def _owner_truth_interview_pacing_command(
+    *,
+    payload: Dict[str, Any],
+    session_id: str,
+) -> RecordInterviewPacingCommand:
+    """Decode the two QA-only pacing facts without accepting content or policy overrides."""
+
+    if set(payload) != _OWNER_TRUTH_INTERVIEW_PACING_PAYLOAD_FIELDS:
+        raise OwnerTruthConversationError("interview pacing contains unsupported fields")
+    command_id = payload.get("commandId")
+    thread_id = payload.get("threadId")
+    expected_session_version = payload.get("expectedSessionVersion")
+    event_raw = payload.get("event")
+    if (
+        not isinstance(command_id, str)
+        or not isinstance(thread_id, str)
+        or type(expected_session_version) is not int
+        or not isinstance(event_raw, str)
+    ):
+        raise OwnerTruthConversationError("interview pacing payload is malformed")
+    try:
+        event = InterviewPacingEvent(event_raw)
+    except ValueError as error:
+        raise OwnerTruthConversationError("interview pacing event is not supported") from error
+    if event not in _OWNER_TRUTH_INTERVIEW_PACING_QA_EVENTS:
+        raise OwnerTruthConversationError("interview pacing event is unavailable in QA")
+    return RecordInterviewPacingCommand(
+        command_id=command_id,
+        thread_id=thread_id,
+        session_id=session_id,
+        expected_session_version=expected_session_version,
+        event=event,
     )
 
 
@@ -4539,6 +4590,55 @@ def read_owner_truth_interview_session_orchestration(
             "vaultId": context.vault_id,
             "orchestration": result.value_free_summary(),
         },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/pacing",
+    include_in_schema=False,
+)
+def record_owner_truth_interview_pacing(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Persist one bounded QA-only pacing fact for an active private interview.
+
+    The route accepts only `deepeningCompleted` and `summaryCompleted`.
+    It carries no transcript, topic, candidate, provider or client policy
+    override.  Summary completion is additionally constrained by the domain's
+    two-to-four follow-up budget before it can reset that budget.
+    """
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        command = _owner_truth_interview_pacing_command(
+            payload=payload,
+            session_id=session_id,
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-pacing:"
+                f"{context.vault_id}:{command.session_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = OwnerTruthConversationService(
+                store.owner_truth_conversation_repository()
+            ).record_pacing(
+                command=command,
+                context=context,
+            )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_owner_truth_interview_session_command_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
         headers={"Cache-Control": "no-store"},
     )
 

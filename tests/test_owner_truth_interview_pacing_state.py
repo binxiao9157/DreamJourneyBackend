@@ -116,6 +116,30 @@ class OwnerTruthInterviewPacingStateTests(unittest.TestCase):
         self.assertEqual(bridged.persisted_candidate_batch_turn_count, 1)
         self.assertEqual(bridged.persisted_fatigue, InterviewFatigue.GUARDED)
 
+    def test_summary_requires_two_completed_deepening_turns_and_resets_the_budget(self) -> None:
+        with self.assertRaises(OwnerTruthConversationConflict):
+            self._record(
+                command_id="pacing-summary-too-early",
+                event=InterviewPacingEvent.SUMMARY_COMPLETED,
+            )
+
+        self._record(
+            command_id="pacing-summary-deepening-one",
+            event=InterviewPacingEvent.DEEPENING_COMPLETED,
+        )
+        self._record(
+            command_id="pacing-summary-deepening-two",
+            event=InterviewPacingEvent.DEEPENING_COMPLETED,
+        )
+        summary = self._record(
+            command_id="pacing-summary-completed",
+            event=InterviewPacingEvent.SUMMARY_COMPLETED,
+        )
+
+        self.assertEqual(summary.outcome, "created")
+        snapshot = self.service.read_session(session_id=self.session_id, context=self.context)
+        self.assertEqual(snapshot.deepening_turn_count, 0)
+
     def test_skip_once_consumption_is_explicit_idempotent_and_never_promotes_authority(self) -> None:
         boundary = self.service.set_boundary(
             command=SetInterviewBoundaryCommand(
