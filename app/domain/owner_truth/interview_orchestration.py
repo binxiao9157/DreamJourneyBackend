@@ -90,6 +90,7 @@ class InterviewOrchestrationInput:
     user_changed_topic: bool
     user_boundary: InterviewBoundary
     is_sensitive: bool
+    user_reopened_do_not_ask_topic: bool = False
     fatigue: InterviewFatigue = InterviewFatigue.NORMAL
     has_pending_review_batch: bool = False
     accepted_broaden_recommendation: bool = False
@@ -124,6 +125,7 @@ class InterviewOrchestrationInput:
             "topic_incomplete",
             "needs_clarification",
             "user_changed_topic",
+            "user_reopened_do_not_ask_topic",
             "is_sensitive",
             "has_pending_review_batch",
             "accepted_broaden_recommendation",
@@ -195,6 +197,19 @@ class InterviewOrchestrator:
 
         if state.session_state is InterviewSessionState.ENDING:
             return self._pause("sessionEnding", batch_due=batch_due)
+        if (
+            state.user_boundary is InterviewBoundary.DO_NOT_ASK
+            and state.user_reopened_do_not_ask_topic
+        ):
+            # This is only an advisory confirmation request. It must not reopen
+            # the persisted boundary or resume the interview by itself.
+            return InterviewDecision(
+                action=InterviewAction.CLARIFY,
+                reason_code="doNotAskRestoreConfirmationRequired",
+                max_followups_remaining=0,
+                review_batch_due=batch_due,
+                next_session_state=InterviewSessionState.PAUSED,
+            )
         if state.session_state is not InterviewSessionState.ACTIVE:
             return self._pause("sessionNotActive", batch_due=batch_due)
         if state.user_boundary is InterviewBoundary.DO_NOT_ASK:

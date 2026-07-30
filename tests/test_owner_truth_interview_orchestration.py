@@ -135,6 +135,20 @@ class OwnerTruthInterviewOrchestrationTests(unittest.TestCase):
         self.assertEqual(cooldown.reason_code, "userCooldown")
         self.assertEqual(do_not_ask.next_session_state, InterviewSessionState.PAUSED)
 
+    def test_reopened_do_not_ask_topic_requires_confirmation_without_restoring_boundary(self) -> None:
+        decision = self.orchestrator.decide(
+            make_input(
+                user_boundary=InterviewBoundary.DO_NOT_ASK,
+                user_reopened_do_not_ask_topic=True,
+            )
+        )
+
+        self.assertEqual(decision.action, InterviewAction.CLARIFY)
+        self.assertEqual(decision.reason_code, "doNotAskRestoreConfirmationRequired")
+        self.assertEqual(decision.max_followups_remaining, 0)
+        self.assertEqual(decision.next_session_state, InterviewSessionState.PAUSED)
+        self.assertFalse(decision.consumes_one_shot_boundary)
+
     def test_skip_once_listens_without_a_new_main_question_and_consumes_only_the_current_boundary(self) -> None:
         decision = self.orchestrator.decide(
             make_input(user_boundary=InterviewBoundary.SKIP_ONCE)

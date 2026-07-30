@@ -1089,6 +1089,16 @@ _OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_PAYLOAD_FIELDS = frozenset(
         "topicIncomplete",
         "needsClarification",
         "userChangedTopic",
+        "userReopenedDoNotAskTopic",
+        "isSensitive",
+        "acceptedBroadenRecommendation",
+    }
+)
+_OWNER_TRUTH_INTERVIEW_ORCHESTRATION_REQUIRED_PAYLOAD_FIELDS = frozenset(
+    {
+        "topicIncomplete",
+        "needsClarification",
+        "userChangedTopic",
         "isSensitive",
         "acceptedBroadenRecommendation",
     }
@@ -1252,11 +1262,20 @@ def _owner_truth_interview_orchestration_read_signals(
 
     The policy service needs an opaque topic identifier only to satisfy its
     deterministic input contract.  QA callers never control that identifier;
-    this read uses a stable server-owned opaque value and accepts only five
-    boolean hints.  It remains a read and cannot change the interview session.
+    this read uses a stable server-owned opaque value and accepts five required
+    boolean hints plus one backward-compatible optional hint. It remains a read
+    and cannot change the interview session.
     """
 
-    if set(payload) != _OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_PAYLOAD_FIELDS:
+    payload_fields = set(payload)
+    if (
+        not _OWNER_TRUTH_INTERVIEW_ORCHESTRATION_REQUIRED_PAYLOAD_FIELDS.issubset(
+            payload_fields
+        )
+        or not payload_fields.issubset(
+            _OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_PAYLOAD_FIELDS
+        )
+    ):
         raise HTTPException(
             status_code=400,
             detail={"code": "ownerTruthInterviewOrchestrationInvalid"},
@@ -1265,6 +1284,9 @@ def _owner_truth_interview_orchestration_read_signals(
         "topic_incomplete": payload.get("topicIncomplete"),
         "needs_clarification": payload.get("needsClarification"),
         "user_changed_topic": payload.get("userChangedTopic"),
+        "user_reopened_do_not_ask_topic": payload.get(
+            "userReopenedDoNotAskTopic", False
+        ),
         "is_sensitive": payload.get("isSensitive"),
         "accepted_broaden_recommendation": payload.get(
             "acceptedBroadenRecommendation"

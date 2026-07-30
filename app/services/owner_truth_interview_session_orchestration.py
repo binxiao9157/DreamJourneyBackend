@@ -52,6 +52,7 @@ class InterviewSessionOrchestrationSignals:
     topic_incomplete: bool = False
     needs_clarification: bool = False
     user_changed_topic: bool = False
+    user_reopened_do_not_ask_topic: bool = False
     is_sensitive: bool = False
     accepted_broaden_recommendation: bool = False
 
@@ -60,6 +61,7 @@ class InterviewSessionOrchestrationSignals:
             "topic_incomplete",
             "needs_clarification",
             "user_changed_topic",
+            "user_reopened_do_not_ask_topic",
             "is_sensitive",
             "accepted_broaden_recommendation",
         ):
@@ -167,6 +169,7 @@ class OwnerTruthInterviewSessionOrchestrationService:
                 topic_incomplete=signals.topic_incomplete,
                 needs_clarification=signals.needs_clarification,
                 user_changed_topic=signals.user_changed_topic,
+                user_reopened_do_not_ask_topic=signals.user_reopened_do_not_ask_topic,
                 user_boundary=policy_boundary,
                 is_sensitive=signals.is_sensitive,
                 fatigue=persisted.fatigue,

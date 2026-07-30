@@ -7,8 +7,11 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.domain.owner_truth.conversation import InterviewBoundary, SetInterviewBoundaryCommand
+from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
+from app.services.owner_truth_conversation import OwnerTruthConversationService
 
 
 client = TestClient(app)
@@ -81,6 +84,7 @@ class OwnerTruthInterviewOrchestrationAPITests(unittest.TestCase):
             "topicIncomplete": False,
             "needsClarification": False,
             "userChangedTopic": False,
+            "userReopenedDoNotAskTopic": False,
             "isSensitive": False,
             "acceptedBroadenRecommendation": False,
         }
@@ -190,7 +194,58 @@ class OwnerTruthInterviewOrchestrationAPITests(unittest.TestCase):
         self.assertEqual(state_after.status_code, 200, state_after.text)
         self.assertEqual(state_after.json(), state_before.json())
 
-    def test_owner_requires_exact_boolean_signal_payload_and_other_owner_is_denied(self) -> None:
+    def test_reopened_do_not_ask_topic_requires_confirmation_without_restoring_session(self) -> None:
+        owner_id, headers = self._login("13800139705")
+        vault_id = "vault-interview-orchestration-do-not-ask"
+        thread_id, session_id = self._start_session(vault_id=vault_id, headers=headers)
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        with self.store.request_unit_of_work(
+            correlation_id=f"orchestration-do-not-ask:{vault_id}:{session_id}",
+            command_id="seed-interview-orchestration-do-not-ask",
+        ):
+            OwnerTruthConversationService(
+                self.store.owner_truth_conversation_repository()
+            ).set_boundary(
+                command=SetInterviewBoundaryCommand(
+                    command_id="seed-interview-orchestration-do-not-ask-boundary",
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    expected_session_version=1,
+                    boundary=InterviewBoundary.DO_NOT_ASK,
+                ),
+                context=context,
+            )
+
+        response = client.post(
+            self._read_path(vault_id, session_id),
+            headers=headers,
+            json=self._signals(userReopenedDoNotAskTopic=True),
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        orchestration = response.json()["orchestration"]
+        self.assertEqual(orchestration["decision"]["action"], "clarify")
+        self.assertEqual(
+            orchestration["decision"]["reasonCode"],
+            "doNotAskRestoreConfirmationRequired",
+        )
+        self.assertEqual(orchestration["decision"]["nextSessionState"], "paused")
+        self.assertEqual(orchestration["persistedSession"]["boundary"], "doNotAsk")
+        self.assertEqual(orchestration["persistedSession"]["state"], "paused")
+        self.assertEqual(
+            self.store.owner_truth_conversation_repository().snapshot(vault_id=vault_id)[
+                "candidateCount"
+            ],
+            0,
+        )
+
+    def test_owner_accepts_legacy_signal_payload_and_rejects_unknown_or_non_boolean_fields(
+        self,
+    ) -> None:
         _, owner_headers = self._login("13800139703")
         vault_id = "vault-interview-orchestration-controls"
         _, session_id = self._start_session(vault_id=vault_id, headers=owner_headers)
@@ -200,6 +255,13 @@ class OwnerTruthInterviewOrchestrationAPITests(unittest.TestCase):
             self._read_path(vault_id, session_id),
             headers=other_headers,
             json=self._signals(),
+        )
+        legacy_payload = self._signals()
+        legacy_payload.pop("userReopenedDoNotAskTopic")
+        legacy = client.post(
+            self._read_path(vault_id, session_id),
+            headers=owner_headers,
+            json=legacy_payload,
         )
         malformed = client.post(
             self._read_path(vault_id, session_id),
@@ -217,6 +279,8 @@ class OwnerTruthInterviewOrchestrationAPITests(unittest.TestCase):
             denied.json()["detail"]["code"],
             "ownerTruthInterviewOrchestrationDenied",
         )
+        self.assertEqual(legacy.status_code, 200, legacy.text)
+        self.assertEqual(legacy.json()["orchestration"]["decision"]["action"], "listen")
         self.assertEqual(malformed.status_code, 400, malformed.text)
         self.assertEqual(
             malformed.json()["detail"]["code"],
