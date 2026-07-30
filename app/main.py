@@ -227,6 +227,10 @@ from app.services.owner_truth_interview_review_batch_automation import (
     OwnerTruthInterviewReviewBatchAutomationService,
     review_batch_automation_summary,
 )
+from app.services.owner_truth_interview_review_batch_inbox import (
+    OWNER_TRUTH_INTERVIEW_PENDING_REVIEW_BATCH_INBOX_SCHEMA_VERSION,
+    OwnerTruthInterviewPendingReviewBatchInboxReadService,
+)
 from app.services.owner_truth_answer_citation import (
     OwnerTruthAnswerCitationCommand,
     OwnerTruthAnswerCitationConflict,
@@ -1078,6 +1082,46 @@ def _owner_truth_interview_natural_input_context(
         feature="echoTextInput",
         route=f"{request.method.upper()} /v2/vaults/*/interview-sessions",
         user_session_required_code="ownerTruthInterviewNaturalInputUserSessionRequired",
+    )
+
+
+def _owner_truth_interview_pending_review_batch_inbox_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize formal batch discovery without treating a QA header as a bypass."""
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="echoTextInput",
+        route=(
+            f"{request.method.upper()} /v2/vaults/*/"
+            "interview-review-batches/pending"
+        ),
+        user_session_required_code="ownerTruthInterviewPendingReviewBatchUserSessionRequired",
+    )
+
+
+def _owner_truth_interview_review_batch_acknowledgement_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Preserve QA acknowledgement while adding the captured formal path."""
+
+    if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
+        return _owner_truth_candidate_review_context(request, vault_id=vault_id)
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="echoTextInput",
+        route=(
+            f"{request.method.upper()} /v2/vaults/*/"
+            "interview-review-batches/*/acknowledgement"
+        ),
+        user_session_required_code="ownerTruthInterviewReviewBatchAcknowledgementUserSessionRequired",
     )
 
 
@@ -2820,6 +2864,20 @@ def _owner_truth_interview_candidate_confirmation_inbox_response(
         "schemaVersion": "owner-truth-interview-candidate-confirmation-inbox-v1",
         "vaultId": vault_id,
         "confirmations": [item.public_summary() for item in inbox.items],
+    }
+
+
+def _owner_truth_interview_pending_review_batch_inbox_response(
+    *,
+    vault_id: str,
+    inbox: Any,
+) -> Dict[str, Any]:
+    """Return same-owner batch handles only; text and Candidates stay private."""
+
+    return {
+        "schemaVersion": OWNER_TRUTH_INTERVIEW_PENDING_REVIEW_BATCH_INBOX_SCHEMA_VERSION,
+        "vaultId": vault_id,
+        "reviewBatches": [item.public_summary() for item in inbox.items],
     }
 
 
@@ -5565,6 +5623,41 @@ def restore_owner_truth_interview_cooldown(
 
 
 @app.get(
+    "/v2/vaults/{vault_id}/interview-review-batches/pending",
+    include_in_schema=False,
+)
+def list_owner_truth_interview_pending_review_batches(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """Discover only same-owner formal batches awaiting acknowledgement.
+
+    This is not Candidate discovery: the response contains operational handles
+    for the existing acknowledgement command, never narratives, Sources,
+    Candidates, MemoryVersions or Provider state.
+    """
+
+    try:
+        context = _owner_truth_interview_pending_review_batch_inbox_context(
+            request,
+            vault_id=vault_id,
+        )
+        inbox = OwnerTruthInterviewPendingReviewBatchInboxReadService(store).read(
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=_owner_truth_interview_pending_review_batch_inbox_response(
+            vault_id=context.vault_id,
+            inbox=inbox,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
     "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/candidate-review",
     include_in_schema=False,
 )
@@ -5603,15 +5696,20 @@ def acknowledge_owner_truth_interview_review_batch(
     review_batch_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """QA-only explicit acknowledgement of one frozen interview review batch.
+    """Acknowledge one frozen batch through QA or captured formal natural input.
 
-    The owner confirms that the five-turn/session-exit boundary is frozen. This
-    action only advances the private conversation state; it does not create a
-    Source, Candidate, DecisionReceipt, MemoryVersion, or Provider effect.
+    The owner confirms that the five-turn/session-exit boundary is frozen. A
+    QA header retains the existing QA lane; otherwise the route requires a
+    captured ``echoTextInput`` decision. The action only advances private
+    conversation state; it does not create a Source, Candidate, DecisionReceipt,
+    MemoryVersion, or Provider effect.
     """
 
     try:
-        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        context = _owner_truth_interview_review_batch_acknowledgement_context(
+            request,
+            vault_id=vault_id,
+        )
         command = _owner_truth_acknowledge_interview_review_batch_command(
             payload=payload,
             review_batch_id=review_batch_id,

@@ -409,6 +409,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthInterviewSessionRestoreCooldown",
             ),
             _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/interview-review-batches/pending",
+                session,
+                "ownerTruthInterviewPendingReviewBatchInboxRead",
+            ),
+            _rule(
                 "POST",
                 "/v2/vaults/{vault_id}/interview-review-batches/{review_batch_id}/acknowledgement",
                 session,

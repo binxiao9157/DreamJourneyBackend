@@ -119,6 +119,15 @@ class OwnerTruthConversationRepository(Protocol):
     ) -> tuple[OwnerTruthInterviewReviewBatchSnapshot, ...]:
         ...
 
+    def list_pending_interview_review_batches(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewReviewBatchSnapshot, ...]:
+        """List only current owner-scoped pending review boundaries."""
+
+        ...
+
     def get_interview_session(
         self,
         *,
@@ -318,6 +327,16 @@ class OwnerTruthConversationService:
             session_id=session_id,
             context=context,
         )
+
+    def list_pending_review_batches(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewReviewBatchSnapshot, ...]:
+        """Return current actionable batches without reading conversation text."""
+
+        _assert_owner_context(context)
+        return self._repository.list_pending_interview_review_batches(context=context)
 
     def read_session(
         self,
@@ -644,6 +663,50 @@ class InMemoryOwnerTruthConversationRepository:
                 for (vault_id, _), item in self._review_batches.items()
                 if vault_id == context.vault_id and item["sessionId"] == session_id
             ]
+            return tuple(
+                sorted(
+                    rows,
+                    key=lambda item: (
+                        item.owner_turn_end_count,
+                        item.review_batch_id,
+                    ),
+                )
+            )
+
+    def list_pending_interview_review_batches(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewReviewBatchSnapshot, ...]:
+        _assert_owner_context(context)
+        with self._lock:
+            vault = self._ensure_active_vault(
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+            )
+            rows: list[OwnerTruthInterviewReviewBatchSnapshot] = []
+            for (vault_id, _), item in self._review_batches.items():
+                if (
+                    vault_id != context.vault_id
+                    or item["state"] is not InterviewReviewBatchState.PENDING_ACKNOWLEDGEMENT
+                    or item["ownerSubjectId"] != context.owner_subject_id
+                    or int(item["authorityEpoch"]) != int(vault["authorityEpoch"])
+                ):
+                    continue
+                session = self._sessions.get((context.vault_id, item["sessionId"]))
+                thread = self._threads.get((context.vault_id, item["threadId"]))
+                if (
+                    session is None
+                    or thread is None
+                    or session["ownerSubjectId"] != context.owner_subject_id
+                    or thread["ownerSubjectId"] != context.owner_subject_id
+                    or session["threadId"] != item["threadId"]
+                    or session["pendingReviewBatchId"] != item["id"]
+                    or int(session["authorityEpoch"]) != int(vault["authorityEpoch"])
+                    or int(thread["authorityEpoch"]) != int(vault["authorityEpoch"])
+                ):
+                    continue
+                rows.append(self._review_batch_snapshot_from_item(item))
             return tuple(
                 sorted(
                     rows,
@@ -2599,6 +2662,56 @@ class PostgresOwnerTruthConversationRepository:
                 (
                     context.vault_id,
                     session_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            rows = cursor.fetchall()
+        return tuple(self._review_batch_snapshot_from_row(row) for row in rows)
+
+    def list_pending_interview_review_batches(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthInterviewReviewBatchSnapshot, ...]:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            vault = self._active_vault(
+                cursor,
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                lock=False,
+            )
+            cursor.execute(
+                """
+                SELECT b.id, b.vault_id, b.owner_subject_id, b.session_id, b.thread_id,
+                    b.trigger, b.state, b.captured_candidate_batch_turn_count,
+                    b.owner_turn_start_count, b.owner_turn_end_count,
+                    b.through_message_sequence, b.row_version, b.authority_epoch
+                FROM owner_truth.interview_review_batches AS b
+                JOIN owner_truth.interview_sessions AS s
+                  ON s.vault_id = b.vault_id AND s.id = b.session_id
+                JOIN owner_truth.conversation_threads AS t
+                  ON t.vault_id = b.vault_id AND t.id = b.thread_id
+                WHERE b.vault_id = %s
+                  AND b.owner_subject_id = %s
+                  AND b.authority_epoch = %s
+                  AND b.state = %s
+                  AND s.owner_subject_id = %s
+                  AND s.thread_id = b.thread_id
+                  AND s.authority_epoch = %s
+                  AND s.pending_review_batch_id = b.id
+                  AND t.owner_subject_id = %s
+                  AND t.authority_epoch = %s
+                ORDER BY b.owner_turn_end_count ASC, b.id ASC
+                """,
+                (
+                    context.vault_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    InterviewReviewBatchState.PENDING_ACKNOWLEDGEMENT.value,
                     context.owner_subject_id,
                     int(vault["authority_epoch"]),
                     context.owner_subject_id,

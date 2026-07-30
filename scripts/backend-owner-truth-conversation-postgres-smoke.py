@@ -477,6 +477,26 @@ def main() -> None:
             replayed_review_batch.outcome == "deduplicated",
             "review batch command replay must deduplicate",
         )
+        pending_review_batches = invoke(
+            store,
+            command_id="list-pending-conversation-review-batches-smoke",
+            operation=lambda service: service.list_pending_review_batches(
+                context=context,
+            ),
+        )
+        require(
+            len(pending_review_batches) == 1,
+            "pending review batch inbox query must return the active owner boundary",
+        )
+        pending_review_batch = pending_review_batches[0]
+        require(
+            pending_review_batch.review_batch_id
+            == review_batch.review_batch.review_batch_id
+            and pending_review_batch.session_id == session_id
+            and pending_review_batch.thread_id == thread_id
+            and pending_review_batch.state is InterviewReviewBatchState.PENDING_ACKNOWLEDGEMENT,
+            "pending review batch inbox query must return only the current boundary handle",
+        )
 
         acknowledged_review_batch = invoke(
             store,
@@ -519,6 +539,17 @@ def main() -> None:
         require(
             replayed_acknowledgement.outcome == "deduplicated",
             "review acknowledgement replay must deduplicate",
+        )
+        cleared_pending_review_batches = invoke(
+            store,
+            command_id="list-cleared-conversation-review-batches-smoke",
+            operation=lambda service: service.list_pending_review_batches(
+                context=context,
+            ),
+        )
+        require(
+            not cleared_pending_review_batches,
+            "acknowledged review batches must leave the pending inbox query",
         )
 
         with psycopg.connect(test_dsn) as connection:
