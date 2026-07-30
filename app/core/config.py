@@ -110,6 +110,10 @@ class Settings:
     # A server-side, value-free audit writer for successful natural-input
     # appends. It has no public API surface and remains default-off.
     owner_truth_interview_decision_audit_enabled: bool = False
+    # A conservative, deterministic topic-shift detector may inspect the
+    # current natural-input message only while the audit lane is enabled. It
+    # writes no text and only shadows the existing pause decision.
+    owner_truth_topic_shift_shadow_enabled: bool = False
     # A separate server-only M0-A cadence writer. When enabled, a formally
     # authorized owner transition may atomically create one pending ReviewBatch
     # at the persisted threshold or paused-session boundary. It never exposes
@@ -326,6 +330,10 @@ class Settings:
             owner_truth_interview_decision_audit_enabled=_env_bool(
                 "OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED",
                 cls.owner_truth_interview_decision_audit_enabled,
+            ),
+            owner_truth_topic_shift_shadow_enabled=_env_bool(
+                "OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED",
+                cls.owner_truth_topic_shift_shadow_enabled,
             ),
             owner_truth_interview_review_batch_automation_enabled=_env_bool(
                 "OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED",

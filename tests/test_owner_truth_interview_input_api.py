@@ -31,6 +31,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.previous_decision_audit_enabled = (
             main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED
         )
+        self.previous_topic_shift_shadow_enabled = (
+            main_module.OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED
+        )
         self.previous_review_batch_automation_enabled = (
             main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED
         )
@@ -42,6 +45,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
         main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = False
+        main_module.OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED = False
         main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = False
 
     def tearDown(self) -> None:
@@ -53,6 +57,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = self.previous_qa_enabled
         main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = (
             self.previous_decision_audit_enabled
+        )
+        main_module.OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED = (
+            self.previous_topic_shift_shadow_enabled
         )
         main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = (
             self.previous_review_batch_automation_enabled
@@ -1354,6 +1361,133 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertNotIn(private_text, rendered_audit)
         self.assertNotIn(thread_id, rendered_audit)
         self.assertNotIn(message_id, rendered_audit)
+
+    def test_formal_natural_input_topic_shift_shadow_is_independent_and_non_mutating(self) -> None:
+        owner_id, headers, auth_session_id = self._login("13800139626", qa=False)
+        headers.update(
+            {
+                "X-DreamJourney-Feature": "echoTextInput",
+                "X-DreamJourney-Feature-Decision-Id": "decision-interview-topic-shift-shadow",
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": hashlib.sha256(
+                    auth_session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        vault_id = "vault-interview-topic-shift-shadow"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        started = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+
+        audit_context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+            policy_version="release-policy-v1",
+        )
+        repository = self.store.owner_truth_interview_decision_audit_repository()
+        main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = True
+
+        disabled_text = "我们换个话题吧，聊聊我第一份工作的经历。"
+        disabled_command_id = str(uuid4())
+        disabled_message_id = str(uuid4())
+        disabled = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": disabled_command_id,
+                "threadId": thread_id,
+                "messageId": disabled_message_id,
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": disabled_text,
+            },
+        )
+        self.assertEqual(disabled.status_code, 201, disabled.text)
+        disabled_audit_command = OwnerTruthInterviewDecisionAuditCommand(
+            command_id=(
+                "owner-truth-interview-append-decision-audit:"
+                f"{disabled_command_id}"
+            ),
+            thread_id=thread_id,
+            session_id=session_id,
+            message_id=disabled_message_id,
+            expected_session_version=2,
+        )
+        disabled_audit = repository.find_by_command(
+            context=audit_context,
+            command_id_hash=disabled_audit_command.command_id_hash,
+            request_payload_hash=disabled_audit_command.request_payload_hash,
+        )
+        self.assertIsNotNone(disabled_audit)
+        assert disabled_audit is not None
+        self.assertEqual(disabled_audit.action.value, "listen")
+        self.assertEqual(disabled_audit.reason_code, "noSafePrimaryQuestion")
+
+        main_module.OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED = True
+        shadow_text = "先不聊这个了，我想说说外婆年轻时的故事。"
+        shadow_command_id = str(uuid4())
+        shadow_message_id = str(uuid4())
+        shadow = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": shadow_command_id,
+                "threadId": thread_id,
+                "messageId": shadow_message_id,
+                "expectedThreadVersion": 2,
+                "expectedSessionVersion": 2,
+                "text": shadow_text,
+            },
+        )
+        self.assertEqual(shadow.status_code, 201, shadow.text)
+        self.assertNotIn(shadow_text, shadow.text)
+        shadow_audit_command = OwnerTruthInterviewDecisionAuditCommand(
+            command_id=(
+                "owner-truth-interview-append-decision-audit:"
+                f"{shadow_command_id}"
+            ),
+            thread_id=thread_id,
+            session_id=session_id,
+            message_id=shadow_message_id,
+            expected_session_version=3,
+        )
+        shadow_audit = repository.find_by_command(
+            context=audit_context,
+            command_id_hash=shadow_audit_command.command_id_hash,
+            request_payload_hash=shadow_audit_command.request_payload_hash,
+        )
+        self.assertIsNotNone(shadow_audit)
+        assert shadow_audit is not None
+        self.assertEqual(shadow_audit.action.value, "pause")
+        self.assertEqual(shadow_audit.reason_code, "topicChanged")
+        rendered_audit = json.dumps(
+            shadow_audit.value_free_summary(),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        self.assertNotIn(shadow_text, rendered_audit)
+        self.assertNotIn(thread_id, rendered_audit)
+        self.assertNotIn(session_id, rendered_audit)
+
+        # Shadowing only audits the next policy action. The existing session
+        # remains active until a later, explicitly gated product command owns
+        # the actual pause/create-thread transition.
+        state = client.get(
+            f"{self._start_path(vault_id)}/{session_id}/state",
+            headers=headers,
+        )
+        self.assertEqual(state.status_code, 200, state.text)
+        self.assertEqual(state.json()["session"]["state"], "active")
+        self.assertEqual(state.json()["session"]["rowVersion"], 3)
 
     def test_formal_review_batch_automation_is_default_off_and_value_free_when_enabled(self) -> None:
         owner_id, headers, auth_session_id = self._login("13800139621", qa=False)

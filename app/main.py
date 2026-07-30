@@ -141,6 +141,7 @@ from app.domain.owner_truth.knowledge_recommendations import RecommendationCandi
 from app.domain.owner_truth.life_map import OwnerTruthLifeMapError
 from app.domain.owner_truth.search_documents import OwnerTruthMemorySearchReadError
 from app.domain.owner_truth.thread_summary import OwnerTruthThreadSummaryError
+from app.domain.owner_truth.topic_shift_detection import TopicShiftDetector
 from app.domain.owner_truth.source_commands import (
     OwnerTruthCommandAuthorizationCapture,
     OwnerTruthCommandContext,
@@ -485,6 +486,9 @@ OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = bool(
 )
 OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = bool(
     settings.owner_truth_interview_decision_audit_enabled
+)
+OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED = bool(
+    settings.owner_truth_topic_shift_shadow_enabled
 )
 OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = bool(
     settings.owner_truth_interview_review_batch_automation_enabled
@@ -1446,6 +1450,15 @@ def _record_owner_truth_interview_append_decision_audit(
         raise OwnerTruthConversationError(
             "interview append result cannot bind a decision audit"
         )
+    signals = InterviewSessionOrchestrationSignals(
+        topic_id=_OWNER_TRUTH_INTERVIEW_APPEND_DECISION_AUDIT_TOPIC_ID,
+    )
+    if OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED:
+        detection = TopicShiftDetector().detect(command.text)
+        signals = InterviewSessionOrchestrationSignals(
+            topic_id=_OWNER_TRUTH_INTERVIEW_APPEND_DECISION_AUDIT_TOPIC_ID,
+            user_changed_topic=detection.user_changed_topic,
+        )
     OwnerTruthInterviewDecisionAuditService(
         store,
         enabled=True,
@@ -1461,9 +1474,7 @@ def _record_owner_truth_interview_append_decision_audit(
             expected_session_version=session_version,
         ),
         context=context,
-        signals=InterviewSessionOrchestrationSignals(
-            topic_id=_OWNER_TRUTH_INTERVIEW_APPEND_DECISION_AUDIT_TOPIC_ID,
-        ),
+        signals=signals,
     )
 
 
