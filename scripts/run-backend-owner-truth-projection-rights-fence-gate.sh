@@ -7,6 +7,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 cd "$ROOT_DIR"
 
 PYTHONPATH=. "$PYTHON_BIN" -m unittest \
+  tests.test_async_effect_target_admission \
   tests.test_owner_truth_projection_rights_fence \
   tests.test_owner_truth_projection_rights_async_effect \
   tests.test_owner_truth_memory_projection_worker

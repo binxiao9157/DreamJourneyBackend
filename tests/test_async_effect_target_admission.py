@@ -15,6 +15,8 @@ from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
     MEMORY_PROJECTION_REBUILD_JOB_TYPE,
     MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+    MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE,
+    MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE,
 )
 
 
@@ -289,6 +291,111 @@ class MemoryProjectionTargetAdmissionTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual(result.reason_code, "targetAuthorized")
         self.assertEqual(len(cursor.executions), 3)
+
+
+class ProjectionRightsRebuildTargetAdmissionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.owner_subject_id = "owner-projection-rights-admission"
+        self.vault_id = "vault-projection-rights-admission"
+        self.authority_epoch = 5
+        self.revision = 7
+        self.event_hash = digest("projection-rights-admission-event")
+
+    def intent(
+        self,
+        *,
+        resource_version: int | None = None,
+        payload_hash: str | None = None,
+    ) -> AsyncEffectIntent:
+        revision = self.revision if resource_version is None else resource_version
+        return AsyncEffectIntent(
+            operation_type=MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE,
+            target=AsyncEffectTarget(
+                owner_subject_id=self.owner_subject_id,
+                vault_id=self.vault_id,
+                resource_type="projectionRightsRevision",
+                resource_id=f"projectionRightsRevision:{revision}",
+                resource_version=revision,
+                purpose="compatibilityProjectionRights",
+                authority_epoch=self.authority_epoch,
+            ),
+            payload_hash=payload_hash or self.event_hash,
+            event_type=MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE,
+            job_type=MEMORY_PROJECTION_REBUILD_JOB_TYPE,
+        )
+
+    def _repository(self, rights_row):
+        cursor = _PostgresCursor(
+            [
+                {
+                    "owner_subject_id": self.owner_subject_id,
+                    "authority_epoch": self.authority_epoch,
+                    "status": "active",
+                },
+                rights_row,
+            ]
+        )
+        return PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository(
+            _PostgresConnection(cursor)
+        ), cursor
+
+    def _current_rights_row(self, **overrides):
+        row = {
+            "owner_subject_id": self.owner_subject_id,
+            "authority_epoch": self.authority_epoch,
+            "revision": self.revision,
+            "rights_state": "active",
+            "event_hash": self.event_hash,
+        }
+        row.update(overrides)
+        return row
+
+    def test_postgres_admits_only_the_current_active_rights_revision(self):
+        repository, cursor = self._repository(self._current_rights_row())
+
+        result = repository.admit_owner_truth_projection_rights_rebuild(self.intent())
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.reason_code, "targetAuthorized")
+        self.assertEqual(result.authority_epoch, self.authority_epoch)
+        self.assertEqual(result.resource_version, self.revision)
+        self.assertEqual(len(cursor.executions), 2)
+        self.assertIn("projection_rights_events", cursor.executions[1][0])
+        self.assertIn("FOR SHARE", cursor.executions[1][0])
+        self.assertEqual(
+            cursor.executions[1][1],
+            (self.vault_id, self.authority_epoch),
+        )
+
+    def test_postgres_blocks_a_newer_rights_revision(self):
+        repository, _cursor = self._repository(
+            self._current_rights_row(revision=self.revision + 1)
+        )
+
+        result = repository.admit_owner_truth_projection_rights_rebuild(self.intent())
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason_code, "projectionRightsRevisionChanged")
+
+    def test_postgres_blocks_a_revoked_rights_revision(self):
+        repository, _cursor = self._repository(
+            self._current_rights_row(rights_state="revoked")
+        )
+
+        result = repository.admit_owner_truth_projection_rights_rebuild(self.intent())
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason_code, "projectionRightsNotActive")
+
+    def test_postgres_blocks_a_replayed_rights_event_hash(self):
+        repository, _cursor = self._repository(
+            self._current_rights_row(event_hash=digest("different-rights-event"))
+        )
+
+        result = repository.admit_owner_truth_projection_rights_rebuild(self.intent())
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason_code, "projectionRightsEventChanged")
 
 
 if __name__ == "__main__":
