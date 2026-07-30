@@ -20,7 +20,12 @@ from app.domain.owner_truth.contracts import (
 )
 from app.domain.owner_truth.memory_projection import OwnerTruthMemoryProjectionAccessDenied
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.projection_rights import (
+    OwnerTruthProjectionRightsRevisionCommand,
+    ProjectionRightsState,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.async_effects.repository import InMemoryEffectKernelRepository
 from app.services.owner_truth_answer_citation import (
     InMemoryOwnerTruthAnswerCitationRepository,
     OwnerTruthAnswerCitationCommand,
@@ -46,6 +51,10 @@ from app.services.owner_truth_memory_projection import (
 from app.services.owner_truth_memory_search_projection import (
     InMemoryOwnerTruthMemorySearchDocumentProjectionRepository,
 )
+from app.services.owner_truth_projection_rights import (
+    InMemoryOwnerTruthProjectionRightsRepository,
+    OwnerTruthProjectionRightsService,
+)
 
 
 def _hash(value: object) -> str:
@@ -57,8 +66,11 @@ def _hash(value: object) -> str:
 class _Store:
     def __init__(self) -> None:
         self.review_repository = InMemoryOwnerTruthCandidateReviewRepository()
+        self.rights_repository = InMemoryOwnerTruthProjectionRightsRepository()
+        self.effect_repository = InMemoryEffectKernelRepository()
         self.projection_repository = InMemoryOwnerTruthMemoryProjectionRepository(
-            self.review_repository
+            self.review_repository,
+            rights_repository=self.rights_repository,
         )
         self.search_projection_repository = (
             InMemoryOwnerTruthMemorySearchDocumentProjectionRepository(
@@ -77,6 +89,12 @@ class _Store:
 
     def owner_truth_memory_projection_repository(self):
         return self.projection_repository
+
+    def owner_truth_projection_rights_repository(self):
+        return self.rights_repository
+
+    def effect_kernel_repository(self):
+        return self.effect_repository
 
     def owner_truth_memory_search_document_projection_repository(self):
         return self.search_projection_repository
@@ -100,6 +118,7 @@ class OwnerTruthAnswerFeedbackTests(unittest.TestCase):
         self.store = _Store()
         self.review_service = OwnerTruthCandidateReviewService(self.store)
         self.projection_service = OwnerTruthMemoryProjectionService(self.store)
+        self.rights_service = OwnerTruthProjectionRightsService(self.store)
         self.answer_service = OwnerTruthAnswerCitationService(self.store, enabled=True)
         self.feedback_service = OwnerTruthAnswerFeedbackService(self.store, enabled=True)
         self.citation_read_service = OwnerTruthAnswerCitationReadService(self.store, enabled=True)
@@ -154,6 +173,24 @@ class OwnerTruthAnswerFeedbackTests(unittest.TestCase):
                 answer_text=answer_text,
             ),
             context_payload={"intent": "echo_chat", "query": "私密问题不得进入反馈回执"},
+        )
+
+    def _record_rights(
+        self,
+        *,
+        expected_revision: int,
+        state: ProjectionRightsState,
+        suffix: str,
+    ):
+        return self.rights_service.record(
+            context=self.context,
+            command=OwnerTruthProjectionRightsRevisionCommand(
+                command_id=f"answer-feedback-rights-{suffix}",
+                authority_epoch=0,
+                expected_revision=expected_revision,
+                state=state,
+                event_hash=_hash({"event": suffix, "state": state.value}),
+            ),
         )
 
     def test_current_citations_can_record_one_metric_eligible_feedback_receipt(self) -> None:
@@ -291,6 +328,72 @@ class OwnerTruthAnswerFeedbackTests(unittest.TestCase):
         self.assertEqual(citation_read.citations[0]["currentness"], "projectionInputsChanged")
         self.assertFalse(feedback.metric_eligible)
         self.assertEqual(feedback.eligibility_reason, "projectionUnavailable")
+
+    def test_rights_revision_feedback_retains_the_value_free_stale_reason(self) -> None:
+        candidate = self._candidate(summary="权利修订后引用需要重新构建")
+        self._activate(candidate, command_id="answer-feedback-activate-rights-revision")
+        self.projection_service.rebuild(context=self.context)
+        answer = self._record_answer(
+            command_id="answer-feedback-answer-rights-revision",
+            answer_text="这条回答的引用受当前权利状态保护。",
+        )
+        self._record_rights(
+            expected_revision=0,
+            state=ProjectionRightsState.ACTIVE,
+            suffix="active-revision-001",
+        )
+
+        citation_read = self.citation_read_service.read(
+            context=self.context,
+            answer_id=answer.answer_id,
+        )
+        feedback = self.feedback_service.record(
+            context=self.context,
+            command=OwnerTruthAnswerFeedbackCommand(
+                command_id="answer-feedback-rights-revision-001",
+                answer_id=answer.answer_id,
+                helpful=True,
+            ),
+        )
+
+        self.assertEqual(citation_read.projection_state, "rebuilding")
+        self.assertEqual(citation_read.current_citation_count, 0)
+        self.assertEqual(citation_read.citations[0]["currentness"], "rightsRevisionChanged")
+        self.assertFalse(feedback.metric_eligible)
+        self.assertEqual(feedback.eligibility_reason, "rightsRevisionChanged")
+
+    def test_rights_revocation_feedback_retains_the_value_free_block_reason(self) -> None:
+        candidate = self._candidate(summary="权利撤销后引用不得继续计量")
+        self._activate(candidate, command_id="answer-feedback-activate-rights-revocation")
+        self.projection_service.rebuild(context=self.context)
+        answer = self._record_answer(
+            command_id="answer-feedback-answer-rights-revocation",
+            answer_text="撤销后不应继续使用旧引用。",
+        )
+        self._record_rights(
+            expected_revision=0,
+            state=ProjectionRightsState.REVOKED,
+            suffix="revoked-001",
+        )
+
+        citation_read = self.citation_read_service.read(
+            context=self.context,
+            answer_id=answer.answer_id,
+        )
+        feedback = self.feedback_service.record(
+            context=self.context,
+            command=OwnerTruthAnswerFeedbackCommand(
+                command_id="answer-feedback-rights-revocation-001",
+                answer_id=answer.answer_id,
+                helpful=True,
+            ),
+        )
+
+        self.assertEqual(citation_read.projection_state, "rebuilding")
+        self.assertEqual(citation_read.current_citation_count, 0)
+        self.assertEqual(citation_read.citations[0]["currentness"], "rightsRevoked")
+        self.assertFalse(feedback.metric_eligible)
+        self.assertEqual(feedback.eligibility_reason, "rightsRevoked")
 
     def test_non_owner_cannot_read_or_feedback_on_an_answer(self) -> None:
         candidate = self._candidate(summary="跨 Owner 不能读取回答反馈证据")

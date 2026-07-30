@@ -41,6 +41,8 @@ _ELIGIBILITY_REASONS = {
     "noCitations",
     "projectionUnavailable",
     "citationNotCurrent",
+    "rightsRevisionChanged",
+    "rightsRevoked",
 }
 _CITATION_CURRENTNESS_REASONS = {
     "current",
@@ -655,7 +657,12 @@ class OwnerTruthAnswerFeedbackService:
         if not citations:
             reason = "noCitations"
         elif projection_signatures is None:
-            reason = "projectionUnavailable"
+            currentness_reason = _projection_currentness_reason(projection)
+            reason = (
+                currentness_reason
+                if currentness_reason in {"rightsRevisionChanged", "rightsRevoked"}
+                else "projectionUnavailable"
+            )
         elif answer_authority_epoch is None or answer_authority_epoch != projection_authority_epoch:
             reason = "citationNotCurrent"
         elif eligible_count != len(citations):

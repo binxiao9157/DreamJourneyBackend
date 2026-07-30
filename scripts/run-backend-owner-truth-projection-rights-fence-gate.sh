@@ -10,13 +10,15 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
   tests.test_async_effect_target_admission \
   tests.test_owner_truth_projection_rights_fence \
   tests.test_owner_truth_projection_rights_async_effect \
-  tests.test_owner_truth_memory_projection_worker
+  tests.test_owner_truth_memory_projection_worker \
+  tests.test_owner_truth_answer_feedback
 "$PYTHON_BIN" -m py_compile \
   app/domain/owner_truth/projection_rights.py \
   app/domain/owner_truth/memory_projection.py \
   app/services/owner_truth_projection_rights.py \
   app/services/owner_truth_memory_projection.py \
   app/services/owner_truth_memory_projection_effects.py \
+  app/services/owner_truth_answer_feedback.py \
   app/async_effects/target_admission.py \
   app/async_effects/consumer_repository.py \
   app/async_effects/owner_truth_memory_projection_worker.py \
@@ -32,6 +34,7 @@ effects = Path("app/services/owner_truth_memory_projection_effects.py").read_tex
 admission = Path("app/async_effects/target_admission.py").read_text(encoding="utf-8")
 consumer = Path("app/async_effects/consumer_repository.py").read_text(encoding="utf-8")
 worker = Path("app/async_effects/owner_truth_memory_projection_worker.py").read_text(encoding="utf-8")
+answer_feedback = Path("app/services/owner_truth_answer_feedback.py").read_text(encoding="utf-8")
 postgres_smoke = Path("scripts/backend-owner-truth-postgres-smoke.py").read_text(encoding="utf-8")
 migration = Path("db/migrations/0061_owner_truth_projection_rights_fence.sql").read_text(
     encoding="utf-8"
@@ -81,6 +84,12 @@ for required in (
     "admit_owner_truth_projection_rights_rebuild",
 ):
     assert required in worker, required
+for required in (
+    "rightsRevisionChanged",
+    "rightsRevoked",
+    "_projection_currentness_reason(projection)",
+):
+    assert required in answer_feedback, required
 for required in (
     "OwnerTruthProjectionRightsService",
     "MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE",
