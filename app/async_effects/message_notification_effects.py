@@ -100,6 +100,26 @@ def _identifier(value: object, *, field: str, max_length: int = 127) -> str:
     return normalized
 
 
+def _resource_identifier(value: object, *, field: str, max_length: int = 127) -> str:
+    """Accept public-style IDs plus canonical opaque hash resource coordinates.
+
+    The async-effect kernel intentionally allows a resource ID to be a stable
+    SHA-256 target key.  Message and notification projections preserve that
+    identity, so rejecting a hash merely because its first character is a
+    digit would make delivery probabilistically fail after the business effect
+    has already completed.
+    """
+
+    normalized = str(value or "").strip()
+    if len(normalized) > max_length or not (
+        _IDENTIFIER_PATTERN.fullmatch(normalized) or _SHA256_PATTERN.fullmatch(normalized)
+    ):
+        raise BusinessMessageNotificationContractError(
+            f"{field} must be an opaque resource identifier"
+        )
+    return normalized
+
+
 def _non_negative_int(value: object, *, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise BusinessMessageNotificationContractError(
@@ -284,7 +304,7 @@ class InAppMessageProjection:
         object.__setattr__(
             self,
             "resource_id",
-            _identifier(self.resource_id, field="resource_id"),
+            _resource_identifier(self.resource_id, field="resource_id"),
         )
         object.__setattr__(
             self,
@@ -763,7 +783,7 @@ class DeviceSubscriptionNotificationBinding:
             )
             platform = str(route.get("deviceSubscriptionPlatform") or "").strip().lower()
             resource_type = _identifier(route.get("resourceType"), field="route.resourceType")
-            resource_id = _identifier(route.get("resourceId"), field="route.resourceId")
+            resource_id = _resource_identifier(route.get("resourceId"), field="route.resourceId")
             resource_version = _non_negative_int(
                 route.get("resourceVersion"),
                 field="route.resourceVersion",

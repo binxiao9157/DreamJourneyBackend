@@ -203,6 +203,32 @@ class BusinessMessageRecipientAdmissionTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, serialized)
 
+    def test_enabled_shadow_accepts_a_numeric_leading_time_letter_target_hash(self) -> None:
+        target = self._target(
+            snapshot=TimeLetterSealedSnapshot(
+                owner_subject_id=self.owner_subject_id,
+                vault_id=self.owner_vault_id,
+                letter_id="letter_numeric_0",
+                sealed_version=3,
+                authority_epoch=5,
+                sealed_payload_hash=_hash("sealed-letter"),
+                open_at="2026-07-30T07:00:00Z",
+            )
+        )
+        self.assertTrue(target.stable_target_key[0].isdigit())
+        self._grant(letter_id="letter_numeric_0")
+
+        result = self._service().evaluate_shadow(self._input(target=target), enabled=True)
+
+        self.assertTrue(result.would_admit)
+        summary = result.value_free_summary()
+        admission = summary["admission"]
+        self.assertIsInstance(admission, dict)
+        self.assertEqual(
+            admission["source"]["resourceIdHash"],
+            _hash(target.stable_target_key),
+        )
+
     def test_accepted_relationship_without_exact_grant_is_denied(self) -> None:
         result = self._service().evaluate_shadow(self._input(), enabled=True)
 

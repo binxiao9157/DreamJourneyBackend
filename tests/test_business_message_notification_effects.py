@@ -25,14 +25,14 @@ from app.async_effects.message_notification_effects import (
 )
 
 
-def _intent() -> AsyncEffectIntent:
+def _intent(*, resource_id: str = "letter-001") -> AsyncEffectIntent:
     return AsyncEffectIntent(
         operation_type="asyncEffect.synthetic.messageNotification.fixture",
         target=AsyncEffectTarget(
             owner_subject_id="owner-001",
             vault_id="vault-001",
             resource_type="timeLetter",
-            resource_id="letter-001",
+            resource_id=resource_id,
             resource_version=4,
             purpose="timeLetterDelivery",
             authority_epoch=3,
@@ -46,8 +46,9 @@ def _source(
     outcome: str = "completed",
     inbox_subject_id=None,
     inbox_vault_id=None,
+    resource_id: str = "letter-001",
 ) -> BusinessCompletionMessageSource:
-    intent = _intent()
+    intent = _intent(resource_id=resource_id)
     receipt = InMemoryAsyncEffectConsumerRepository().consume(
         AsyncEffectSyntheticConsumerCommand(
             intent=intent,
@@ -92,6 +93,19 @@ def _subscription(
 
 
 class BusinessMessageNotificationPlanTests(unittest.TestCase):
+    def test_canonical_hash_resource_id_is_valid_for_message_and_notification_routes(self):
+        resource_id = "0" * 64
+        source = _source(resource_id=resource_id)
+
+        plan = build_business_completion_message_notification_plan(
+            source,
+            notification_channels=(NotificationChannel.LOCAL,),
+            generation=2,
+        )
+
+        self.assertEqual(plan.message.resource_id, resource_id)
+        self.assertEqual(plan.notification_intents[0].route_contract()["resourceId"], resource_id)
+
     def test_completed_business_receipt_creates_one_redacted_message_and_channel_intents(self):
         source = _source()
 
