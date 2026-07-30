@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
+import json
 import os
 import sys
 import uuid
@@ -29,24 +30,13 @@ from app.async_effects.consumer_repository import (
     OwnerTruthSourceBlockedConsumerCommand,
 )
 from app.async_effects.lease_repository import AsyncEffectLeaseCancelled, AsyncEffectLeaseLost
+from app.async_effects.owner_truth_candidate_extraction_worker import (
+    OwnerTruthCandidateExtractionWorkerRuntime,
+)
 from app.async_effects.scheduler_repository import AsyncEffectSchedulerLeaseLost
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
-from app.domain.owner_truth.candidate_extraction import (
-    CandidateEvidenceSpan,
-    CandidateProposal,
-    CandidateReviewMode,
-    ExtractionResultStatus,
-    SyntheticCandidateExtractionCommand,
-)
-from app.domain.owner_truth.contracts import (
-    EpistemicStatus,
-    MemoryKind,
-    PerspectiveType,
-    SensitivityLevel,
-)
 from app.domain.owner_truth.source_commands import CreateTextSourceCommand, OwnerTruthCommandContext
-from app.services.owner_truth_candidate_extraction import OwnerTruthCandidateExtractionService
 from app.services.owner_truth_source import (
     OwnerTruthSourceAsyncEffectCommandService,
     build_source_created_effect_intent,
@@ -212,8 +202,10 @@ def main() -> None:
     )
 
     store: PostgresStore | None = None
+    database_created = False
     try:
         create_database(admin_dsn, database_name)
+        database_created = True
         migrator = PostgresMigrator(
             dsn=test_dsn,
             migrations_dir=default_migrations_dir(),
@@ -293,52 +285,55 @@ def main() -> None:
             record=source_command.write_record(context=source_context),
             source=source_created.source,
         )
-        candidate_extraction_service = OwnerTruthCandidateExtractionService(store)
-        candidate_extraction_command = SyntheticCandidateExtractionCommand(
-            intent=source_effect_intent,
-            extractor_id="deterministicFake",
-            model_id="fixture-v1",
-            prompt_version="candidate-prompt-v1",
-            policy_version="owner-truth-v1",
-            source_content_hash=source_created.source.content_hash,
-            status=ExtractionResultStatus.SUCCEEDED,
-            proposals=(
-                CandidateProposal(
-                    memory_kind=MemoryKind.EXPERIENCE,
-                    perspective_type=PerspectiveType.FIRST_PERSON,
-                    epistemic_status=EpistemicStatus.RECALLED,
-                    sensitivity=SensitivityLevel.STANDARD,
-                    content={"summary": "Synthetic source has an atomic extraction result."},
-                    evidence_span=CandidateEvidenceSpan(start=0, end=9),
-                    confidence=0.75,
-                    review_mode=CandidateReviewMode.BATCH,
-                ),
+        candidate_worker = OwnerTruthCandidateExtractionWorkerRuntime(
+            settings=Settings(
+                async_effect_v1_enabled=True,
+                async_effect_worker_enabled=True,
+                owner_truth_candidate_extraction_worker_enabled=True,
             ),
+            store=store,
+            worker_id="async-effect-candidate-extraction-smoke",
+            retry_seconds=1,
         )
-        candidate_created = candidate_extraction_service.record(candidate_extraction_command)
-        candidate_replayed = candidate_extraction_service.record(candidate_extraction_command)
+        candidate_created = candidate_worker.run_once()
         require(
-            candidate_created.outcome == "created" and candidate_replayed.outcome == "deduplicated",
-            "same Source extraction must persist one immutable result and replay",
+            candidate_created["status"] == "completed"
+            and candidate_created["reason"] == "candidateExtractionProposalsPersisted",
+            "default-disabled Source worker must terminalize one live extraction job",
         )
         require(
-            candidate_created.status is ExtractionResultStatus.SUCCEEDED
-            and len(candidate_created.candidate_ids) == 1,
-            "synthetic extraction must create one pending Candidate",
+            candidate_created["candidateCount"] == 1
+            and candidate_created["extractionStatus"] == "succeeded",
+            "Source worker must create one restricted pending Candidate",
+        )
+        require(
+            candidate_created["jobState"] == "succeeded"
+            and candidate_created["consumerOutcome"] == "accepted"
+            and candidate_created["consumerInboxState"] == "completed",
+            "worker must complete its lease and retain one typed Consumer receipt",
+        )
+        require(
+            source_command.text not in json.dumps(candidate_created, ensure_ascii=False, sort_keys=True),
+            "worker result must not echo private Source text",
         )
         require(
             count_candidate_rows(
                 test_dsn,
                 vault_id=source_context.vault_id,
-                extraction_id=candidate_created.extraction_id or "",
+                extraction_id=str(candidate_created["extractionId"]),
             )
             == 1,
-            "synthetic extraction must persist one pending Candidate in Postgres",
+            "Source worker must persist one pending Candidate in Postgres",
         )
         require(
-            candidate_created.consumer.outcome == "accepted"
-            and candidate_replayed.consumer.outcome == "deduplicated",
-            "candidate extraction must retain one Consumer Inbox completion receipt",
+            job_attempt_states(test_dsn, job_id=str(candidate_created["jobId"])) == {1: "succeeded"},
+            "Source worker must retain one terminal lease attempt",
+        )
+        candidate_replayed = candidate_worker.run_once()
+        require(
+            candidate_replayed["status"] == "idle"
+            and candidate_replayed["reason"] == "noEligibleCandidateExtractionJob",
+            "terminal Source worker job must not replay without a new effect",
         )
         with store.request_unit_of_work(
             correlation_id="async-effect-source-target-admission",
@@ -807,14 +802,15 @@ def main() -> None:
         print(
             "Async effect Postgres smoke passed: "
             f"schemaHead={verified['expectedHead']} outcomes={sorted(outcomes)} "
-            "sourceOutbox=true candidateExtraction=true sourceTargetAdmission=true sourceBlockedCompletion=true "
+            "sourceOutbox=true candidateWorker=true sourceTargetAdmission=true sourceBlockedCompletion=true "
             "workerLease=true schedulerLease=true consumerInbox=true rollback=true "
             "terminalGuard=true receiptsAppendOnly=true"
         )
     finally:
         if store is not None:
             store.close_pool()
-        drop_database(admin_dsn, database_name)
+        if database_created:
+            drop_database(admin_dsn, database_name)
 
 
 if __name__ == "__main__":

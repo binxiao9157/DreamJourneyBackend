@@ -50,6 +50,24 @@ PYTHON_BIN=.venv/bin/python \
 The standard `scripts/verify_backend.sh` also invokes this gate. No migration,
 deployment, or production flag change is part of G0.
 
+## G2 Disposable Postgres Smoke
+
+`scripts/backend-async-effects-postgres-smoke.py` now enables the worker only
+inside its randomly named disposable database. It verifies the typed effect
+job, current Source read, restricted pending Candidate, typed consumer receipt,
+terminal lease attempt, private worker output, and a subsequent idle rerun.
+The script applies migrations to that temporary database and drops it only if
+creation succeeded.
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/backend-async-effects-postgres-smoke.py
+```
+
+The runner must be able to resolve and connect to `DATABASE_URL` and create a
+temporary database. This is not a deployment or production-worker enablement
+command. Local static verification is present even when the workstation cannot
+reach the container-only PostgreSQL hostname.
+
 ## Observability Status
 
 The worker is explicitly cataloged as `NOT_INSTRUMENTED` in
