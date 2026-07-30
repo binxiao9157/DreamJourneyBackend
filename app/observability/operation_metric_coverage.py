@@ -65,6 +65,15 @@ CRITICAL_WORKER_COVERAGE = (
         status=OperationMetricCoverageStatus.NOT_INSTRUMENTED,
         reason_code="workerRecorderNotAttached",
     ),
+    OperationMetricCoverageEntry(
+        component_id=(
+            "app.async_effects.owner_truth_candidate_extraction_worker."
+            "OwnerTruthCandidateExtractionWorkerRuntime"
+        ),
+        component_kind="worker",
+        status=OperationMetricCoverageStatus.NOT_INSTRUMENTED,
+        reason_code="workerRecorderNotAttached",
+    ),
 )
 
 

@@ -79,6 +79,9 @@ class Settings:
     release_policy_emergency_disabled_features: Optional[str] = None
     async_effect_v1_enabled: bool = False
     async_effect_worker_enabled: bool = False
+    # Candidate extraction is a separate, deterministic QA worker. It remains
+    # off unless all async-effect flags and this explicit switch are enabled.
+    owner_truth_candidate_extraction_worker_enabled: bool = False
     owner_truth_memory_projection_worker_enabled: bool = False
     # SearchDocument rebuilds are an optional private derived step after the
     # default-off MemoryProjection worker succeeds. This never exposes search
@@ -275,6 +278,10 @@ class Settings:
             async_effect_worker_enabled=_env_bool(
                 "ASYNC_EFFECT_WORKER_ENABLED",
                 cls.async_effect_worker_enabled,
+            ),
+            owner_truth_candidate_extraction_worker_enabled=_env_bool(
+                "OWNER_TRUTH_CANDIDATE_EXTRACTION_WORKER_ENABLED",
+                cls.owner_truth_candidate_extraction_worker_enabled,
             ),
             owner_truth_memory_projection_worker_enabled=_env_bool(
                 "OWNER_TRUTH_MEMORY_PROJECTION_WORKER_ENABLED",

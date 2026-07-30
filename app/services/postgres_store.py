@@ -109,6 +109,7 @@ from app.async_effects.target_admission import (
     PostgresOwnerTruthSourceTargetAdmissionRepository,
 )
 from app.services.owner_truth_candidate_extraction import (
+    PostgresOwnerTruthCandidateExtractionInputRepository,
     PostgresOwnerTruthCandidateExtractionRepository,
 )
 from app.services.owner_truth_candidate_review import (
@@ -401,6 +402,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth candidate extraction requires an active unit of work")
         return PostgresOwnerTruthCandidateExtractionRepository(active.connection)
+
+    def owner_truth_candidate_extraction_input_repository(
+        self,
+    ) -> PostgresOwnerTruthCandidateExtractionInputRepository:
+        """Read private Source text only while a candidate worker UoW is open."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth candidate extraction input requires an active unit of work")
+        return PostgresOwnerTruthCandidateExtractionInputRepository(active.connection)
 
     def owner_truth_candidate_review_repository(
         self,

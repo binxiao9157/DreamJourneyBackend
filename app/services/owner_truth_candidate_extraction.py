@@ -13,12 +13,14 @@ from dataclasses import dataclass
 import json
 from threading import RLock
 from typing import Any, ContextManager, Mapping, Protocol
+from uuid import UUID
 
 from app.async_effects.consumer_repository import (
     AsyncEffectConsumerReceipt,
     OwnerTruthSourceBlockedConsumerCommand,
     OwnerTruthSourceCandidateExtractionConsumerCommand,
 )
+from app.async_effects.contracts import AsyncEffectIntent
 from app.async_effects.target_admission import AsyncEffectTargetAdmission
 from app.domain.owner_truth.candidate_extraction import (
     ExtractionResultStatus,
@@ -30,6 +32,10 @@ from app.domain.owner_truth.candidate_extraction import (
 
 class OwnerTruthCandidateExtractionIncomplete(RuntimeError):
     """A persisted extraction does not retain exactly its pending candidates."""
+
+
+class OwnerTruthCandidateExtractionInputUnavailable(RuntimeError):
+    """The worker cannot read one current private Source extraction input."""
 
 
 @dataclass(frozen=True)
@@ -49,6 +55,29 @@ class OwnerTruthCandidateExtractionResult:
     candidate_ids: tuple[str, ...]
     admission: AsyncEffectTargetAdmission
     consumer: AsyncEffectConsumerReceipt
+
+
+@dataclass(frozen=True)
+class OwnerTruthCandidateExtractionInput:
+    """Private, in-process Source material for deterministic candidate extraction.
+
+    This is deliberately not an async-effect payload, public response, or
+    observability record.  The worker may inspect the text only while its
+    current Source lease is held and must never emit it in its result payload.
+    """
+
+    source_content_hash: str
+    source_text: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_content_hash, str) or len(self.source_content_hash) != 64:
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction Source content hash is unavailable"
+            )
+        if not isinstance(self.source_text, str):
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction Source text has an invalid type"
+            )
 
 
 class OwnerTruthCandidateExtractionStore(Protocol):
@@ -405,6 +434,78 @@ class PostgresOwnerTruthCandidateExtractionRepository:
         return self._connection.cursor(row_factory=dict_row)
 
 
+class PostgresOwnerTruthCandidateExtractionInputRepository:
+    """Read one private, already-admitted text Source inside the active UoW."""
+
+    def __init__(self, connection: Any) -> None:
+        if connection is None:
+            raise ValueError("an active database connection is required")
+        self._connection = connection
+
+    def read_for_candidate_extraction(
+        self,
+        intent: AsyncEffectIntent,
+    ) -> OwnerTruthCandidateExtractionInput:
+        if not isinstance(intent, AsyncEffectIntent):
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction input requires an async effect intent"
+            )
+        target = intent.target
+        if (
+            intent.operation_type != "ownerTruth.source.created"
+            or target.resource_type != "source"
+            or target.purpose != "candidateExtraction"
+        ):
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction input requires its typed Source effect"
+            )
+        try:
+            source_id = str(UUID(target.resource_id))
+        except (TypeError, ValueError) as exc:
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction Source id is invalid"
+            ) from exc
+
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT source_version, content_hash, content_payload
+                FROM owner_truth.sources
+                WHERE vault_id = %s AND id = %s
+                FOR SHARE
+                """,
+                (target.vault_id, source_id),
+            )
+            source = cursor.fetchone()
+        if source is None:
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction Source disappeared"
+            )
+        if int(source["source_version"]) != int(target.resource_version):
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction Source version changed"
+            )
+
+        payload = source.get("content_payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                payload = None
+        text = payload.get("text") if isinstance(payload, Mapping) else ""
+        return OwnerTruthCandidateExtractionInput(
+            source_content_hash=str(source["content_hash"]),
+            source_text=text if isinstance(text, str) else "",
+        )
+
+    def _cursor(self):
+        try:
+            from psycopg.rows import dict_row
+        except ImportError:  # pragma: no cover - production dependency
+            dict_row = None
+        return self._connection.cursor(row_factory=dict_row)
+
+
 class OwnerTruthCandidateExtractionService:
     """Record a synthetic extraction only after a live Source authority recheck."""
 
@@ -414,51 +515,67 @@ class OwnerTruthCandidateExtractionService:
     def record(self, command: SyntheticCandidateExtractionCommand) -> OwnerTruthCandidateExtractionResult:
         if not isinstance(command, SyntheticCandidateExtractionCommand):
             raise TypeError("synthetic candidate extraction command is required")
-        record = command.write_record()
         with self._store.request_unit_of_work(
-            correlation_id=f"owner-truth-candidate-extraction-{record.extraction_id}",
-            command_id=record.extraction_id,
+            correlation_id=f"owner-truth-candidate-extraction-{command.extraction_id}",
+            command_id=command.extraction_id,
         ):
-            admission = self._store.owner_truth_source_target_admission_repository().admit_owner_truth_source(
-                record.intent
-            )
-            consumer_repository = self._store.async_effect_consumer_repository()
-            if not admission.allowed:
-                consumer = consumer_repository.consume(
-                    OwnerTruthSourceBlockedConsumerCommand(
-                        intent=record.intent,
-                        consumer_name="ownerTruth.source.blocked",
-                        business_target_key=record.intent.business_target_key,
-                        outcome="blocked",
-                        reason_code=admission.reason_code,
-                        result_ref_hash=record.result_hash,
-                        admission=admission,
-                    )
-                )
-                return OwnerTruthCandidateExtractionResult(
-                    outcome="blocked",
-                    status=None,
-                    reason_code=admission.reason_code,
-                    extraction_id=None,
-                    candidate_ids=(),
-                    admission=admission,
-                    consumer=consumer,
-                )
+            return self.record_in_unit_of_work(command)
 
-            persisted = self._store.owner_truth_candidate_extraction_repository().persist(record)
+    def record_in_unit_of_work(
+        self,
+        command: SyntheticCandidateExtractionCommand,
+    ) -> OwnerTruthCandidateExtractionResult:
+        """Persist one result inside a caller-owned worker transaction.
+
+        The public service method above retains its standalone transaction.  A
+        typed worker can call this method while its lease is current so the
+        Candidate result, Consumer completion, and lease terminalization share
+        one transaction.
+        """
+
+        if not isinstance(command, SyntheticCandidateExtractionCommand):
+            raise TypeError("synthetic candidate extraction command is required")
+        record = command.write_record()
+        admission = self._store.owner_truth_source_target_admission_repository().admit_owner_truth_source(
+            record.intent
+        )
+        consumer_repository = self._store.async_effect_consumer_repository()
+        if not admission.allowed:
             consumer = consumer_repository.consume(
-                OwnerTruthSourceCandidateExtractionConsumerCommand(
+                OwnerTruthSourceBlockedConsumerCommand(
                     intent=record.intent,
-                    consumer_name="ownerTruth.source.extraction",
-                    business_target_key=record.business_target_key,
-                    outcome=record.completion_outcome,
-                    reason_code=record.completion_reason_code,
+                    consumer_name="ownerTruth.source.blocked",
+                    business_target_key=record.intent.business_target_key,
+                    outcome="blocked",
+                    reason_code=admission.reason_code,
                     result_ref_hash=record.result_hash,
                     admission=admission,
-                    extraction_id=record.extraction_id,
-                    extraction_status=record.status.value,
                 )
             )
+            return OwnerTruthCandidateExtractionResult(
+                outcome="blocked",
+                status=None,
+                reason_code=admission.reason_code,
+                extraction_id=None,
+                candidate_ids=(),
+                admission=admission,
+                consumer=consumer,
+            )
+
+        persisted = self._store.owner_truth_candidate_extraction_repository().persist(record)
+        consumer = consumer_repository.consume(
+            OwnerTruthSourceCandidateExtractionConsumerCommand(
+                intent=record.intent,
+                consumer_name="ownerTruth.source.extraction",
+                business_target_key=record.business_target_key,
+                outcome=record.completion_outcome,
+                reason_code=record.completion_reason_code,
+                result_ref_hash=record.result_hash,
+                admission=admission,
+                extraction_id=record.extraction_id,
+                extraction_status=record.status.value,
+            )
+        )
         return OwnerTruthCandidateExtractionResult(
             outcome=persisted.outcome,
             status=persisted.status,
@@ -472,9 +589,12 @@ class OwnerTruthCandidateExtractionService:
 
 __all__ = [
     "InMemoryOwnerTruthCandidateExtractionRepository",
+    "OwnerTruthCandidateExtractionInput",
+    "OwnerTruthCandidateExtractionInputUnavailable",
     "OwnerTruthCandidateExtractionIncomplete",
     "OwnerTruthCandidateExtractionPersistenceResult",
     "OwnerTruthCandidateExtractionResult",
     "OwnerTruthCandidateExtractionService",
+    "PostgresOwnerTruthCandidateExtractionInputRepository",
     "PostgresOwnerTruthCandidateExtractionRepository",
 ]

@@ -31,6 +31,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-knowledge-recommendatio
 echo "== Owner Truth SearchDocument projection worker gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-memory-search-projection-worker-gate.sh
 
+echo "== Owner Truth Candidate extraction worker G0 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-candidate-extraction-worker-g0-gate.sh
+
 echo "== Owner Truth memory-search offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-memory-search-offline-evaluation-gate.sh
 
@@ -262,6 +265,10 @@ test -f scripts/run-backend-async-effects-postgres-smoke.sh
 	test -f tests/test_owner_truth_answer_feedback.py
 	test -f tests/test_owner_truth_answer_feedback_migration_contract.py
 	test -f scripts/run-backend-owner-truth-answer-feedback-g0-gate.sh
+	test -f app/async_effects/owner_truth_candidate_extraction_worker.py
+	test -f tests/test_owner_truth_candidate_extraction_worker.py
+	test -f scripts/run-backend-owner-truth-candidate-extraction-worker-g0-gate.sh
+	test -f docs/backend/2026-07-30-owner-truth-candidate-extraction-worker-g0.md
 	test -f db/migrations/0063_owner_truth_interview_session_end.sql
 	test -f db/migrations/0063_owner_truth_interview_session_end.json
 	test -f tests/test_owner_truth_interview_session_end_migration_contract.py
