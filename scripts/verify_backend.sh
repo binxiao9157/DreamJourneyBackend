@@ -385,6 +385,9 @@ test -f tests/test_business_message_projection_postgres_smoke_contract.py
 test -f scripts/backend-legacy-identity-inbox-bridge-postgres-smoke.py
 test -f scripts/run-backend-legacy-identity-inbox-bridge-postgres-smoke.sh
 test -f tests/test_legacy_identity_inbox_bridge_postgres_smoke_contract.py
+test -f scripts/backend-time-letter-recipient-admission-postgres-smoke.py
+test -f scripts/run-backend-time-letter-recipient-admission-postgres-smoke.sh
+test -f tests/test_time_letter_recipient_admission_postgres_smoke_contract.py
 test -f app/async_effects/dead_letter_effects.py
 test -f tests/test_async_effect_dead_letter_contract.py
 test -f scripts/run-backend-async-effect-dead-letter-contract-gate.sh

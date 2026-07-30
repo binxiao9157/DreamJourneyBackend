@@ -6,10 +6,17 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 cd "$ROOT_DIR"
 
-"$PYTHON_BIN" -m unittest tests.test_business_message_recipient_admission
+"$PYTHON_BIN" -m unittest \
+  tests.test_business_message_recipient_admission \
+  tests.test_time_letter_recipient_admission_postgres_smoke_contract
 "$PYTHON_BIN" -m py_compile \
   app/async_effects/business_message_recipient_admission.py \
+  scripts/backend-time-letter-recipient-admission-postgres-smoke.py \
   app/async_effects/legacy_identity_inbox_bridge.py
+
+if [[ "${RUN_TIME_LETTER_RECIPIENT_ADMISSION_POSTGRES_SMOKE:-0}" == "1" ]]; then
+  PYTHONPATH=. "$PYTHON_BIN" scripts/backend-time-letter-recipient-admission-postgres-smoke.py
+fi
 
 "$PYTHON_BIN" - <<'PY'
 from pathlib import Path
