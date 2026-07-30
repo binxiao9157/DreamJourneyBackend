@@ -943,10 +943,54 @@ def main() -> None:
             f"/v2/vaults/{vault_id}/interview-review-batches/"
             f"{review_batch_id}/confirmation/batch-accept"
         )
+        inbox_path = f"/v2/vaults/{vault_id}/interview-candidate-confirmations"
         payload = {
             "commandId": "formal-confirmation-postgres-smoke-accept",
             "selections": [{"candidateId": candidate_id, "expectedCandidateVersion": 1}],
         }
+
+        inbox_qa_only = client.get(
+            inbox_path,
+            headers={**owner_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+        )
+        require(
+            inbox_qa_only.status_code == 403
+            and route_code(inbox_qa_only) == "release_policy_denied",
+            "QA header must not bypass formal confirmation inbox policy",
+        )
+        inbox = client.get(
+            inbox_path,
+            headers=formal_headers(
+                owner_headers,
+                session_id=session_id,
+                decision_id="formal-confirmation-postgres-smoke-inbox",
+            ),
+        )
+        require(inbox.status_code == 200, f"formal confirmation inbox failed: {inbox.text}")
+        require(inbox.headers.get("cache-control") == "no-store", "formal inbox must remain no-store")
+        inbox_body = inbox.json()
+        require(
+            inbox_body.get("schemaVersion")
+            == "owner-truth-interview-candidate-confirmation-inbox-v1",
+            "formal inbox must return its typed schema",
+        )
+        confirmations = inbox_body.get("confirmations")
+        require(
+            isinstance(confirmations, list)
+            and len(confirmations) == 1
+            and confirmations[0].get("reviewBatchId") == review_batch_id
+            and confirmations[0].get("readiness") == "reviewReady"
+            and confirmations[0].get("batchCandidateCount") == 1
+            and confirmations[0].get("singleCandidateCount") == 0,
+            "formal inbox must expose only the actionable batch summary",
+        )
+        rendered_inbox = json.dumps(inbox_body, ensure_ascii=False, sort_keys=True)
+        require(
+            "candidateId" not in rendered_inbox
+            and "sourceId" not in rendered_inbox
+            and "Synthetic batch Candidate" not in rendered_inbox,
+            "formal inbox must not expose Candidate or Source content",
+        )
 
         qa_only = client.post(
             path,
@@ -968,6 +1012,19 @@ def main() -> None:
         require(accepted.json().get("status") == "created", "formal confirmation must create once")
         require(counts(test_dsn, vault_id=vault_id) == (1, 1, 1), "formal command must atomically create root, receipt and link")
         require(memory_counts(test_dsn, vault_id=vault_id) == (0, 0), "formal batch confirmation must remain receipt-only")
+        inbox_after_confirmation = client.get(
+            inbox_path,
+            headers=formal_headers(
+                owner_headers,
+                session_id=session_id,
+                decision_id="formal-confirmation-postgres-smoke-inbox-after-confirmation",
+            ),
+        )
+        require(
+            inbox_after_confirmation.status_code == 200
+            and inbox_after_confirmation.json().get("confirmations") == [],
+            "completed batch must not remain in the formal confirmation inbox",
+        )
         assert_persisted_authority_evidence(
             test_dsn,
             vault_id=vault_id,
@@ -1320,6 +1377,8 @@ def main() -> None:
             "historicalUpgrade0037=true currentMigrationHeadReady=true "
             "legacyQaUpgradeCompatible=true "
             "wrongFeatureAuthorityRejected=true qaBypassDenied=true "
+            "formalConfirmationInboxContentFree=true "
+            "formalConfirmationInboxCompletionFiltered=true "
             "authorityCapturePersisted=true "
             "receiptLinkPersisted=true receiptLinkTamperDenied=true "
             "replayDeduplicated=true concurrentCommandDeduplicated=true "

@@ -154,6 +154,7 @@ from app.services.owner_truth_interview_candidate_memory_activation import (
     OwnerTruthInterviewCandidateMemoryActivationService,
 )
 from app.services.owner_truth_interview_candidate_review import (
+    OwnerTruthInterviewCandidateConfirmationInboxReadService,
     OwnerTruthInterviewCandidateReviewReadService,
 )
 from app.services.owner_truth_interview_candidate_proposal import (
@@ -1578,6 +1579,25 @@ def _owner_truth_interview_candidate_confirmation_context(
     )
 
 
+def _owner_truth_interview_candidate_confirmation_inbox_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize formal confirmation discovery without accepting QA headers."""
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=(
+            f"{request.method.upper()} /v2/vaults/*/"
+            "interview-candidate-confirmations"
+        ),
+        user_session_required_code="ownerTruthInterviewCandidateConfirmationUserSessionRequired",
+    )
+
+
 def _owner_truth_interview_candidate_confirmation_write_context(
     request: Request,
     *,
@@ -2565,6 +2585,20 @@ def _owner_truth_interview_candidate_confirmation_read_response(
             _owner_truth_interview_candidate_review_item_response(item)
             for item in result.single_candidates
         ],
+    }
+
+
+def _owner_truth_interview_candidate_confirmation_inbox_response(
+    *,
+    vault_id: str,
+    inbox: Any,
+) -> Dict[str, Any]:
+    """Return discovery metadata only; Candidate text stays per-batch."""
+
+    return {
+        "schemaVersion": "owner-truth-interview-candidate-confirmation-inbox-v1",
+        "vaultId": vault_id,
+        "confirmations": [item.public_summary() for item in inbox.items],
     }
 
 
@@ -5342,6 +5376,41 @@ def read_owner_truth_interview_review_batch_candidate_proposal_status(
         content=_owner_truth_interview_candidate_proposal_status_response(
             vault_id=context.vault_id,
             status=status,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/interview-candidate-confirmations",
+    include_in_schema=False,
+)
+def list_owner_truth_interview_candidate_confirmations(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """List actionable formal confirmation batches for the active Vault Owner.
+
+    The route returns no Candidate, Source, message or receipt data. A client
+    must select one opaque batch handle and issue the existing per-batch read
+    under the same captured release-policy feature.
+    """
+
+    try:
+        context = _owner_truth_interview_candidate_confirmation_inbox_context(
+            request,
+            vault_id=vault_id,
+        )
+        inbox = OwnerTruthInterviewCandidateConfirmationInboxReadService(store).read(
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=_owner_truth_interview_candidate_confirmation_inbox_response(
+            vault_id=context.vault_id,
+            inbox=inbox,
         ),
         headers={"Cache-Control": "no-store"},
     )

@@ -320,6 +320,50 @@ class InMemoryOwnerTruthInterviewCandidateReviewRepository:
             single_candidates=single_candidates,
         )
 
+    def list_review_batch_ids(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[str, ...]:
+        """Return only live admitted batch handles for the formal inbox.
+
+        This is deliberately provenance-only. Candidate content remains behind
+        the existing per-batch confirmation read, and stale/revoked admissions
+        must never become discoverable through the product route.
+        """
+
+        _assert_owner_context(context)
+        with self._lock:
+            vault = self._vaults.get(context.vault_id)
+            if (
+                vault is None
+                or vault[0] != context.owner_subject_id
+                or vault[1] != "active"
+            ):
+                raise OwnerTruthInterviewCandidateReviewAccessDenied(
+                    "Vault is not active for this Owner"
+                )
+            review_batch_ids: list[str] = []
+            for admission in self._admissions.values():
+                if (
+                    admission.vault_id != context.vault_id
+                    or admission.owner_subject_id != context.owner_subject_id
+                ):
+                    continue
+                try:
+                    self._assert_live_admission(
+                        admission=admission,
+                        vault_epoch=int(vault[2]),
+                    )
+                except (
+                    OwnerTruthInterviewCandidateReviewAccessDenied,
+                    OwnerTruthInterviewCandidateReviewConflict,
+                    OwnerTruthInterviewCandidateReviewSourceInactive,
+                ):
+                    continue
+                review_batch_ids.append(admission.review_batch_id)
+            return tuple(sorted(review_batch_ids))
+
     @staticmethod
     def _assert_live_admission(*, admission: _InMemoryAdmission, vault_epoch: int) -> None:
         metadata = dict(admission.source_metadata)
@@ -453,6 +497,57 @@ class PostgresOwnerTruthInterviewCandidateReviewRepository:
             batch_candidates=batch_candidates,
             single_candidates=single_candidates,
         )
+
+    def list_review_batch_ids(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[str, ...]:
+        """List only current, owner-scoped admission handles.
+
+        The query repeats the live provenance constraints from ``compose`` so
+        an inbox never reveals a stale source, a revoked epoch or another
+        Owner's batch before the per-batch confirmation read runs.
+        """
+
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT a.review_batch_id
+                FROM owner_truth.interview_review_batch_candidate_admissions AS a
+                JOIN owner_truth.interview_review_batches AS b
+                  ON b.vault_id = a.vault_id AND b.id = a.review_batch_id
+                JOIN owner_truth.sources AS s
+                  ON s.vault_id = a.vault_id AND s.id = a.source_id
+                JOIN owner_truth.vaults AS v ON v.vault_id = a.vault_id
+                WHERE a.vault_id = %s
+                  AND a.owner_subject_id = %s
+                  AND v.owner_subject_id = %s
+                  AND v.status = 'active'
+                  AND b.owner_subject_id = %s
+                  AND b.state = 'acknowledged'
+                  AND s.owner_subject_id = %s
+                  AND s.state = 'active'
+                  AND a.authority_epoch = v.authority_epoch
+                  AND b.authority_epoch = v.authority_epoch
+                  AND s.authority_epoch = v.authority_epoch
+                  AND s.source_kind = 'conversation'
+                  AND COALESCE(s.metadata ->> 'origin', '')
+                        = 'interviewReviewBatchCandidateProposal'
+                  AND COALESCE(s.metadata ->> 'reviewBatchId', '')
+                        = a.review_batch_id::TEXT
+                ORDER BY a.created_at ASC, a.review_batch_id ASC
+                """,
+                (
+                    context.vault_id,
+                    context.owner_subject_id,
+                    context.owner_subject_id,
+                    context.owner_subject_id,
+                    context.owner_subject_id,
+                ),
+            )
+            return tuple(str(row["review_batch_id"]) for row in cursor.fetchall())
 
     def _load_admission(
         self,
@@ -675,8 +770,127 @@ class OwnerTruthInterviewCandidateReviewReadService:
         return tuple(paired)
 
 
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateConfirmationInboxItem:
+    """Content-free discovery metadata for one formal confirmation batch."""
+
+    review_batch_id: str
+    readiness: InterviewCandidateReviewReadiness
+    batch_candidate_count: int
+    single_candidate_count: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "review_batch_id",
+            require_uuid(self.review_batch_id, field="review_batch_id"),
+        )
+        try:
+            object.__setattr__(
+                self,
+                "readiness",
+                InterviewCandidateReviewReadiness(self.readiness),
+            )
+        except (TypeError, ValueError) as exc:
+            raise OwnerTruthInterviewCandidateReviewError(
+                "confirmation inbox readiness is not supported"
+            ) from exc
+        for field in ("batch_candidate_count", "single_candidate_count"):
+            value = getattr(self, field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise OwnerTruthInterviewCandidateReviewError(
+                    f"{field} must be a non-negative integer"
+                )
+
+    @classmethod
+    def from_composition(
+        cls,
+        composition: OwnerTruthInterviewCandidateReviewComposition,
+    ) -> "OwnerTruthInterviewCandidateConfirmationInboxItem":
+        return cls(
+            review_batch_id=composition.review_batch_id,
+            readiness=composition.readiness,
+            batch_candidate_count=len(composition.batch_candidates),
+            single_candidate_count=len(composition.single_candidates),
+        )
+
+    def public_summary(self) -> dict[str, Any]:
+        return {
+            "reviewBatchId": self.review_batch_id,
+            "readiness": self.readiness.value,
+            "batchCandidateCount": self.batch_candidate_count,
+            "singleCandidateCount": self.single_candidate_count,
+        }
+
+
+@dataclass(frozen=True)
+class OwnerTruthInterviewCandidateConfirmationInbox:
+    """The formal Owner discovery read for pending interview confirmations."""
+
+    items: tuple[OwnerTruthInterviewCandidateConfirmationInboxItem, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+        if any(
+            not isinstance(item, OwnerTruthInterviewCandidateConfirmationInboxItem)
+            for item in self.items
+        ):
+            raise OwnerTruthInterviewCandidateReviewError(
+                "confirmation inbox items are required"
+            )
+        identifiers = [item.review_batch_id for item in self.items]
+        if len(identifiers) != len(set(identifiers)):
+            raise OwnerTruthInterviewCandidateReviewError(
+                "confirmation inbox cannot repeat a review batch"
+            )
+
+
+class OwnerTruthInterviewCandidateConfirmationInboxReadService:
+    """Discover formal review batches without returning Candidate content.
+
+    The caller still has to use the existing per-batch confirmation read under
+    the same captured policy before it can render a Candidate. Empty completed
+    batches are intentionally omitted so the inbox cannot retain historical
+    DecisionReceipt state as an actionable pending item.
+    """
+
+    def __init__(self, store: Any):
+        self._store = store
+
+    def read(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthInterviewCandidateConfirmationInbox:
+        _assert_owner_context(context)
+        with self._store.request_unit_of_work(
+            correlation_id=(
+                "owner-truth-interview-candidate-confirmation-inbox-"
+                f"{context.vault_id}"
+            ),
+            command_id=f"read:confirmation-inbox:{context.vault_id}",
+        ):
+            repository = self._store.owner_truth_interview_candidate_review_repository()
+            items = tuple(
+                OwnerTruthInterviewCandidateConfirmationInboxItem.from_composition(
+                    repository.compose(review_batch_id=review_batch_id, context=context)
+                )
+                for review_batch_id in repository.list_review_batch_ids(context=context)
+            )
+        return OwnerTruthInterviewCandidateConfirmationInbox(
+            items=tuple(
+                item
+                for item in items
+                if item.readiness is not InterviewCandidateReviewReadiness.NO_CANDIDATES
+            )
+        )
+
+
 __all__ = [
     "InMemoryOwnerTruthInterviewCandidateReviewRepository",
+    "OwnerTruthInterviewCandidateConfirmationInbox",
+    "OwnerTruthInterviewCandidateConfirmationInboxItem",
+    "OwnerTruthInterviewCandidateConfirmationInboxReadService",
     "OwnerTruthInterviewCandidateReviewCompositionService",
     "OwnerTruthInterviewCandidateReviewReadItem",
     "OwnerTruthInterviewCandidateReviewReadResult",

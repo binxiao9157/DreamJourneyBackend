@@ -203,6 +203,10 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
             f"{review_batch_id}/confirmation"
         )
 
+    @staticmethod
+    def _confirmation_inbox_path(vault_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/interview-candidate-confirmations"
+
     @classmethod
     def _confirmation_batch_accept_path(cls, vault_id: str, review_batch_id: str) -> str:
         return f"{cls._confirmation_path(vault_id, review_batch_id)}/batch-accept"
@@ -323,6 +327,85 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
                     other_headers,
                     session_id=other_session_id,
                     decision_id="candidate-confirmation-other-owner",
+                ),
+            )
+            self.assertEqual(denied.status_code, 403)
+            self.assertEqual(
+                denied.json()["detail"]["code"],
+                "ownerTruthInterviewCandidateReviewDenied",
+            )
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
+    def test_product_confirmation_inbox_discovers_only_live_owner_batches(self) -> None:
+        owner_id, owner_headers, owner_session_id = self._login_release_policy("13800139410")
+        vault_id = "vault-interview-confirmation-inbox"
+        first_batch_id, _, _ = self._seed_review_batch(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        second_batch_id, _, _ = self._seed_review_batch(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        path = self._confirmation_inbox_path(vault_id)
+
+        qa_header_only = client.get(
+            path,
+            headers={**owner_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+        )
+        self.assertEqual(qa_header_only.status_code, 403)
+        self.assertEqual(
+            qa_header_only.json()["detail"]["code"],
+            "release_policy_denied",
+        )
+
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthCandidateReview"
+        }
+        try:
+            response = client.get(
+                path,
+                headers=self._confirmation_policy_headers(
+                    owner_headers,
+                    session_id=owner_session_id,
+                    decision_id="candidate-confirmation-inbox-owner",
+                ),
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            payload = response.json()
+            self.assertEqual(
+                payload["schemaVersion"],
+                "owner-truth-interview-candidate-confirmation-inbox-v1",
+            )
+            self.assertEqual(payload["vaultId"], vault_id)
+            self.assertEqual(
+                {item["reviewBatchId"] for item in payload["confirmations"]},
+                {first_batch_id, second_batch_id},
+            )
+            self.assertTrue(
+                all(item["readiness"] == "reviewReady" for item in payload["confirmations"])
+            )
+            self.assertTrue(
+                all(item["batchCandidateCount"] == 1 for item in payload["confirmations"])
+            )
+            self.assertTrue(
+                all(item["singleCandidateCount"] == 1 for item in payload["confirmations"])
+            )
+            rendered = json.dumps(payload, ensure_ascii=False)
+            for forbidden in ("candidateId", "sourceId", "content", "receipt", "admissionId"):
+                self.assertNotIn(forbidden, rendered)
+
+            _, other_headers, other_session_id = self._login_release_policy("13800139409")
+            denied = client.get(
+                path,
+                headers=self._confirmation_policy_headers(
+                    other_headers,
+                    session_id=other_session_id,
+                    decision_id="candidate-confirmation-inbox-other-owner",
                 ),
             )
             self.assertEqual(denied.status_code, 403)
