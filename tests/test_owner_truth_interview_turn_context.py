@@ -134,7 +134,13 @@ class OwnerTruthInterviewTurnContextTests(unittest.TestCase):
         self.thread_version = 1
         self.session_version = 1
 
-    def _candidate(self, *, summary: str) -> OwnerTruthCandidateSnapshot:
+    def _candidate(
+        self,
+        *,
+        summary: str,
+        perspective_type: PerspectiveType = PerspectiveType.FIRST_PERSON,
+        epistemic_status: EpistemicStatus = EpistemicStatus.RECALLED,
+    ) -> OwnerTruthCandidateSnapshot:
         source_id = str(uuid4())
         content = {"summary": summary}
         return OwnerTruthCandidateSnapshot(
@@ -143,8 +149,8 @@ class OwnerTruthInterviewTurnContextTests(unittest.TestCase):
             owner_subject_id=self.owner_id,
             source_id=source_id,
             memory_kind=MemoryKind.EXPERIENCE,
-            perspective_type=PerspectiveType.FIRST_PERSON,
-            epistemic_status=EpistemicStatus.RECALLED,
+            perspective_type=perspective_type,
+            epistemic_status=epistemic_status,
             sensitivity=SensitivityLevel.STANDARD,
             decision=CandidateDecision.PENDING,
             policy_version=OWNER_TRUTH_SCHEMA_VERSION,
@@ -259,6 +265,32 @@ class OwnerTruthInterviewTurnContextTests(unittest.TestCase):
 
         with self.assertRaises(OwnerTruthConversationVersionConflict):
             self._prepare(expectedSessionVersion=self.session_version - 1)
+
+    def test_turn_context_never_materializes_ai_only_inferred_memory(self) -> None:
+        inferred_summary = "AI 推断的回忆不能作为访谈上下文"
+        owner_message = "这是有效叙述，但不能让推断记忆混入上下文"
+        self._activate_and_rebuild(
+            self._candidate(
+                summary=inferred_summary,
+                epistemic_status=EpistemicStatus.INFERRED,
+            )
+        )
+        self._start_and_append(text=owner_message)
+
+        result = self._prepare()
+        summary = interview_turn_context_summary(result)
+
+        self.assertEqual(result["state"], "ready")
+        self.assertTrue(result["readyForServerTurn"])
+        self.assertEqual(result["generationContext"]["text"], "")
+        self.assertEqual(result["generationContext"]["sourceCount"], 0)
+        self.assertEqual(
+            result["materialization"]["filteredContext"][0]["reason"],
+            "ai_only_epistemic_status_not_context_eligible",
+        )
+        rendered_summary = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn(inferred_summary, rendered_summary)
+        self.assertNotIn(owner_message, rendered_summary)
 
     def test_rejects_paused_session_before_materializing_personal_context(self) -> None:
         self._activate_and_rebuild(self._candidate(summary="暂停访谈不能继续准备上下文"))

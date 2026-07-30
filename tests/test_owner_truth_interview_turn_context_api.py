@@ -76,17 +76,24 @@ class OwnerTruthInterviewTurnContextAPITests(unittest.TestCase):
         }
 
     @staticmethod
-    def _candidate(*, vault_id: str, owner_subject_id: str) -> OwnerTruthCandidateSnapshot:
+    def _candidate(
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        summary: str = "确认记忆只应在私有回合上下文内物化",
+        perspective_type: PerspectiveType = PerspectiveType.FIRST_PERSON,
+        epistemic_status: EpistemicStatus = EpistemicStatus.RECALLED,
+    ) -> OwnerTruthCandidateSnapshot:
         source_id = str(uuid4())
-        content = {"summary": "确认记忆只应在私有回合上下文内物化"}
+        content = {"summary": summary}
         return OwnerTruthCandidateSnapshot(
             candidate_id=str(uuid4()),
             vault_id=vault_id,
             owner_subject_id=owner_subject_id,
             source_id=source_id,
             memory_kind=MemoryKind.EXPERIENCE,
-            perspective_type=PerspectiveType.FIRST_PERSON,
-            epistemic_status=EpistemicStatus.RECALLED,
+            perspective_type=perspective_type,
+            epistemic_status=epistemic_status,
             sensitivity=SensitivityLevel.STANDARD,
             decision=CandidateDecision.PENDING,
             policy_version=OWNER_TRUTH_SCHEMA_VERSION,
@@ -109,8 +116,22 @@ class OwnerTruthInterviewTurnContextAPITests(unittest.TestCase):
             },
         )
 
-    def _activate_projection(self, *, vault_id: str, owner_id: str) -> str:
-        candidate = self._candidate(vault_id=vault_id, owner_subject_id=owner_id)
+    def _activate_projection(
+        self,
+        *,
+        vault_id: str,
+        owner_id: str,
+        summary: str = "确认记忆只应在私有回合上下文内物化",
+        perspective_type: PerspectiveType = PerspectiveType.FIRST_PERSON,
+        epistemic_status: EpistemicStatus = EpistemicStatus.RECALLED,
+    ) -> str:
+        candidate = self._candidate(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            summary=summary,
+            perspective_type=perspective_type,
+            epistemic_status=epistemic_status,
+        )
         self.store.owner_truth_candidate_review_repository().seed(candidate)
         context = OwnerTruthCommandContext(
             vault_id=vault_id,
@@ -230,6 +251,70 @@ class OwnerTruthInterviewTurnContextAPITests(unittest.TestCase):
         )
         self.assertEqual(stale.status_code, 409)
         self.assertEqual(stale.json()["detail"]["code"], "ownerTruthInterviewSessionConflict")
+
+    def test_turn_context_api_excludes_ai_only_inferred_memory(self) -> None:
+        owner_id, headers = self._login("13800139723")
+        vault_id = "vault-turn-context-ai-only"
+        inferred_summary = "AI 推断的记忆不得进入访谈上下文"
+        self._activate_projection(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            summary=inferred_summary,
+            epistemic_status=EpistemicStatus.INFERRED,
+        )
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        message_id = str(uuid4())
+        owner_message = "这是一段有效的本人叙述"
+        query = "不应把推断记忆提供给后续回答"
+
+        started = client.post(
+            f"/v2/vaults/{vault_id}/interview-sessions",
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "sessionId": session_id,
+            },
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+        appended = client.post(
+            f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/messages",
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": message_id,
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": owner_message,
+            },
+        )
+        self.assertEqual(appended.status_code, 201, appended.text)
+
+        prepared = client.post(
+            self._prepare_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "messageId": message_id,
+                "expectedSessionVersion": 2,
+                "query": query,
+            },
+        )
+
+        self.assertEqual(prepared.status_code, 200, prepared.text)
+        preparation = prepared.json()["interviewTurnContext"]
+        self.assertTrue(preparation["readyForServerTurn"])
+        materialization = preparation["contextMaterialization"]
+        self.assertEqual(materialization["generationContext"]["sourceCount"], 0)
+        self.assertEqual(materialization["selectedContext"], [])
+        self.assertEqual(
+            materialization["filteredContext"][0]["reason"],
+            "ai_only_epistemic_status_not_context_eligible",
+        )
+        rendered = json.dumps(prepared.json(), ensure_ascii=False, sort_keys=True)
+        for forbidden in (inferred_summary, owner_message, query):
+            self.assertNotIn(forbidden, rendered)
 
 
 if __name__ == "__main__":

@@ -100,6 +100,8 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
         kind: MemoryKind,
         content: dict[str, str],
         sensitivity: SensitivityLevel = SensitivityLevel.STANDARD,
+        perspective_type: PerspectiveType = PerspectiveType.FIRST_PERSON,
+        epistemic_status: EpistemicStatus = EpistemicStatus.RECALLED,
     ) -> OwnerTruthCandidateSnapshot:
         source_id = str(uuid4())
         return OwnerTruthCandidateSnapshot(
@@ -108,8 +110,8 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
             owner_subject_id=self.owner_id,
             source_id=source_id,
             memory_kind=kind,
-            perspective_type=PerspectiveType.FIRST_PERSON,
-            epistemic_status=EpistemicStatus.RECALLED,
+            perspective_type=perspective_type,
+            epistemic_status=epistemic_status,
             sensitivity=sensitivity,
             decision=CandidateDecision.PENDING,
             policy_version=OWNER_TRUTH_SCHEMA_VERSION,
@@ -236,6 +238,76 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
         self.assertEqual(result["selectedContext"], [])
         self.assertEqual(result["filteredContext"], [])
         self.assertIsNone(result["contextHash"])
+
+    def test_shadow_and_materialization_exclude_ai_only_projection_entries(self) -> None:
+        confirmed = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "已确认的回忆可以进入访谈上下文"},
+        )
+        inferred_perspective = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "AI 推断视角绝不能进入访谈上下文"},
+            perspective_type=PerspectiveType.INFERRED,
+        )
+        inferred_epistemic = self._candidate(
+            kind=MemoryKind.KNOWLEDGE,
+            content={"claim": "AI 推断认识状态绝不能进入访谈上下文"},
+            epistemic_status=EpistemicStatus.INFERRED,
+        )
+        self._activate(confirmed, command_id="context-shadow-ai-only-confirmed")
+        self._activate(
+            inferred_perspective,
+            command_id="context-shadow-ai-only-perspective",
+        )
+        self._activate(
+            inferred_epistemic,
+            command_id="context-shadow-ai-only-epistemic",
+        )
+        self.projection_service.rebuild(context=self.context)
+
+        shadow = OwnerTruthContextShadowReadService(self.store, enabled=True).read(
+            context=self.context
+        )
+        materialization = OwnerTruthContextMaterializationService(
+            self.store,
+            enabled=True,
+        ).build(
+            context=self.context,
+            payload={"intent": "echo_chat"},
+        )
+        summary = context_materialization_summary(materialization)
+
+        self.assertEqual(
+            {item["citation"]["sourceId"] for item in shadow["selectedContext"]},
+            {confirmed.source_id},
+        )
+        self.assertEqual(
+            {
+                item["citation"]["sourceId"]: item["reason"]
+                for item in shadow["filteredContext"]
+            },
+            {
+                inferred_perspective.source_id: "ai_only_perspective_not_context_eligible",
+                inferred_epistemic.source_id: "ai_only_epistemic_status_not_context_eligible",
+            },
+        )
+        self.assertEqual(materialization["generationContext"]["sourceCount"], 1)
+        self.assertIn(confirmed.content["summary"], materialization["generationContext"]["text"])
+        self.assertNotIn(
+            inferred_perspective.content["summary"],
+            materialization["generationContext"]["text"],
+        )
+        self.assertNotIn(
+            inferred_epistemic.content["claim"],
+            materialization["generationContext"]["text"],
+        )
+        rendered_summary = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+        for forbidden in (
+            confirmed.content["summary"],
+            inferred_perspective.content["summary"],
+            inferred_epistemic.content["claim"],
+        ):
+            self.assertNotIn(forbidden, rendered_summary)
 
     def test_shadow_build_uses_only_confirmed_citations_and_never_keeps_raw_query(self) -> None:
         experience = self._candidate(

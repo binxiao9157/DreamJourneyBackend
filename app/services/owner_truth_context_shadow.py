@@ -30,6 +30,16 @@ OWNER_TRUTH_CONTEXT_SHADOW_SCHEMA_VERSION = "owner-truth-context-shadow-v1"
 OWNER_TRUTH_CONTEXT_SHADOW_SOURCE = "owner-truth-memory-projection"
 OWNER_TRUTH_CONTEXT_SHADOW_POLICY_VERSION = "owner-truth-context-shadow-policy-v1"
 
+# The projection may retain Owner-confirmed records with inferred metadata for
+# review and audit. That does not make them admissible Context evidence: a
+# reply path must not present an AI-only inference as the Owner's memory.
+# Keeping this fence at the Shadow boundary makes read, build, materialization,
+# and interview-turn preparation share the same decision.
+_CONTEXT_ELIGIBLE_PERSPECTIVE_TYPES = frozenset({"firstPerson", "reported"})
+_CONTEXT_ELIGIBLE_EPISTEMIC_STATUSES = frozenset(
+    {"observed", "recalled", "reported", "uncertain"}
+)
+
 
 def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
     if not isinstance(context, OwnerTruthCommandContext):
@@ -103,9 +113,10 @@ def _context_hash(
 class OwnerTruthContextShadowReadService:
     """Build a default-off, owner-only Context selection plan with citations.
 
-    Until persona/sensitivity policy is promoted, only ``standard`` current
-    memories are selected.  Sensitive and restricted records are retained as
-    value-free filter evidence instead of being silently injected into Echo.
+    Until persona/sensitivity policy is promoted, only standard, non-inferred
+    current memories are selected. Sensitive, restricted, and AI-only records
+    remain value-free filter evidence instead of being silently injected into
+    Echo.
     """
 
     def __init__(self, store: OwnerTruthMemoryProjectionStore, *, enabled: bool = False) -> None:
@@ -208,6 +219,10 @@ class OwnerTruthContextShadowReadService:
                 reason = "content_schema_not_supported"
             elif sensitivity != "standard":
                 reason = "sensitivity_not_context_eligible"
+            elif perspective_type not in _CONTEXT_ELIGIBLE_PERSPECTIVE_TYPES:
+                reason = "ai_only_perspective_not_context_eligible"
+            elif epistemic_status not in _CONTEXT_ELIGIBLE_EPISTEMIC_STATUSES:
+                reason = "ai_only_epistemic_status_not_context_eligible"
             else:
                 position = len(selected_context) + 1
                 selected_context.append(
