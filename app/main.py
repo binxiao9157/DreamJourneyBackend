@@ -161,6 +161,11 @@ from app.services.owner_truth_interview_candidate_proposal import (
 from app.services.owner_truth_interview_session_read import (
     OwnerTruthInterviewSessionReadService,
 )
+from app.services.owner_truth_interview_session_orchestration import (
+    InterviewSessionOrchestrationSignals,
+    OwnerTruthInterviewSessionOrchestrationError,
+    OwnerTruthInterviewSessionOrchestrationService,
+)
 from app.services.owner_truth_interview_session_outcome_read import (
     OwnerTruthInterviewSessionOutcomeReadAccessDenied,
     OwnerTruthInterviewSessionOutcomeReadError,
@@ -1077,6 +1082,16 @@ _OWNER_TRUTH_INTERVIEW_TOPIC_SWITCH_PAYLOAD_FIELDS = frozenset(
         "expectedSessionVersion",
     }
 )
+_OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_PAYLOAD_FIELDS = frozenset(
+    {
+        "topicIncomplete",
+        "needsClarification",
+        "userChangedTopic",
+        "isSensitive",
+        "acceptedBroadenRecommendation",
+    }
+)
+_OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_TOPIC_ID = "qa-interview-orchestration"
 _OWNER_TRUTH_DEFER_WITH_CONTINUATION_PAYLOAD_FIELDS = frozenset(
     {
         "commandId",
@@ -1210,6 +1225,43 @@ def _owner_truth_pause_interview_for_topic_switch_command(
         session_id=session_id,
         expected_thread_version=expected_thread_version,
         expected_session_version=expected_session_version,
+    )
+
+
+def _owner_truth_interview_orchestration_read_signals(
+    *,
+    payload: Dict[str, Any],
+) -> InterviewSessionOrchestrationSignals:
+    """Decode bounded policy hints without accepting topic or message content.
+
+    The policy service needs an opaque topic identifier only to satisfy its
+    deterministic input contract.  QA callers never control that identifier;
+    this read uses a stable server-owned opaque value and accepts only five
+    boolean hints.  It remains a read and cannot change the interview session.
+    """
+
+    if set(payload) != _OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_PAYLOAD_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewOrchestrationInvalid"},
+        )
+    values = {
+        "topic_incomplete": payload.get("topicIncomplete"),
+        "needs_clarification": payload.get("needsClarification"),
+        "user_changed_topic": payload.get("userChangedTopic"),
+        "is_sensitive": payload.get("isSensitive"),
+        "accepted_broaden_recommendation": payload.get(
+            "acceptedBroadenRecommendation"
+        ),
+    }
+    if any(type(value) is not bool for value in values.values()):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthInterviewOrchestrationInvalid"},
+        )
+    return InterviewSessionOrchestrationSignals(
+        topic_id=_OWNER_TRUTH_INTERVIEW_ORCHESTRATION_READ_TOPIC_ID,
+        **values,
     )
 
 
@@ -1958,6 +2010,34 @@ def _owner_truth_interview_session_state_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthInterviewSessionInvalid"},
+    )
+
+
+def _owner_truth_interview_orchestration_http_error(
+    error: Exception,
+) -> HTTPException:
+    """Keep QA policy reads value-free and independent from public Echo APIs."""
+
+    if isinstance(error, OwnerTruthConversationAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthInterviewOrchestrationDenied"},
+        )
+    if isinstance(
+        error,
+        (
+            OwnerTruthConversationConflict,
+            OwnerTruthConversationVersionConflict,
+            OwnerTruthInterviewSessionStateConflict,
+        ),
+    ):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthInterviewOrchestrationConflict"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthInterviewOrchestrationInvalid"},
     )
 
 
@@ -4416,6 +4496,49 @@ def read_owner_truth_interview_session_state(
             vault_id=context.vault_id,
             snapshot=snapshot,
         ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/orchestration/read",
+    include_in_schema=False,
+)
+def read_owner_truth_interview_session_orchestration(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Read one QA-only, content-free interview policy decision.
+
+    This is deliberately separate from public Echo generation.  It reads only
+    persisted session controls plus bounded Boolean QA signals, then returns a
+    value-free decision summary.  The route cannot write pacing, messages,
+    Candidates, MemoryVersions, or provider effects.
+    """
+
+    try:
+        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        signals = _owner_truth_interview_orchestration_read_signals(payload=payload)
+        result = OwnerTruthInterviewSessionOrchestrationService(
+            conversation_service=OwnerTruthConversationService(
+                store.owner_truth_conversation_repository()
+            )
+        ).decide(
+            session_id=session_id,
+            context=context,
+            signals=signals,
+        )
+    except (OwnerTruthContractError, OwnerTruthInterviewSessionOrchestrationError) as error:
+        raise _owner_truth_interview_orchestration_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-interview-session-orchestration-read-response-v1",
+            "vaultId": context.vault_id,
+            "orchestration": result.value_free_summary(),
+        },
         headers={"Cache-Control": "no-store"},
     )
 
