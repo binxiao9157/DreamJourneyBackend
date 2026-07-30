@@ -444,6 +444,8 @@ test -f scripts/backend-owner-truth-knowledge-recommendation-plan-postgres-smoke
 test -f scripts/run-backend-owner-truth-knowledge-recommendation-plan-postgres-smoke.sh
 test -f db/migrations/0046_owner_truth_search_document_projection.sql
 test -f db/migrations/0046_owner_truth_search_document_projection.json
+test -f db/migrations/0064_owner_truth_search_document_checkpoint_qualification.sql
+test -f db/migrations/0064_owner_truth_search_document_checkpoint_qualification.json
 test -f app/services/owner_truth_memory_search_projection.py
 test -f tests/test_owner_truth_memory_search_projection.py
 test -f tests/test_owner_truth_memory_search_projection_migration_contract.py

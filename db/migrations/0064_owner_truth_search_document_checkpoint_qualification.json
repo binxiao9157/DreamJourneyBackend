@@ -1,0 +1,13 @@
+{
+  "version": "0064",
+  "name": "owner_truth_search_document_checkpoint_qualification",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthSearchDocumentCheckpointQualification",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthMemorySearchProjectionQa": false,
+    "ownerTruthMemorySearchReadQa": false
+  }
+}
