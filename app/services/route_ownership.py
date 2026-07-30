@@ -260,6 +260,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/guided-recommendations/activate",
+                session,
+                "ownerTruthGuidedRecommendationActivationPresentation",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/guided-recommendations/feedback",
                 session,
                 "ownerTruthGuidedRecommendationFeedbackPresentation",

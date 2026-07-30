@@ -156,6 +156,10 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
         return f"/v2/vaults/{vault_id}/guided-recommendations/feedback"
 
     @staticmethod
+    def _guided_presentation_activation_path(vault_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/guided-recommendations/activate"
+
+    @staticmethod
     def _guided_presentation_policy_headers(
         headers: dict[str, str],
         *,
@@ -772,6 +776,133 @@ class OwnerTruthKnowledgeRecommendationReadAPITests(unittest.TestCase):
             self.assertEqual(
                 stale.json()["detail"]["code"],
                 "ownerTruthGuidedRecommendationFeedbackStale",
+            )
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
+    def test_product_guided_recommendation_activation_binds_slot_without_writing_prompt_as_owner_input(self) -> None:
+        owner_id, headers, session_id = self._login_release_policy("13800139424")
+        vault_id = "vault-guided-recommendation-activation-presentation"
+        memory_version_id, content_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            content={"claim": "The displayed assistant question is never an Owner narrative."},
+            command_id="guided-activation-activate-decision",
+        )
+        self._confirm(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            memory_version_id=memory_version_id,
+            content_hash=content_hash,
+            dimension="keyDecisions",
+            facets=("choice", "reason"),
+            command_id="guided-activation-confirm-decision",
+        )
+        self._seed_thread(
+            vault_id=vault_id,
+            owner_id=owner_id,
+            command_id="guided-activation-thread",
+        )
+        presentation_path = self._guided_presentation_path(vault_id)
+        activation_path = self._guided_presentation_activation_path(vault_id)
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "echoGuidedRecommendations"
+        }
+        policy_headers = self._guided_presentation_policy_headers(
+            headers,
+            session_id=session_id,
+            decision_id="guided-activation-owner",
+        )
+        try:
+            presentation = client.get(presentation_path, headers=policy_headers)
+            self.assertEqual(presentation.status_code, 200, presentation.text)
+            presentation_body = presentation.json()
+            self.assertEqual(presentation_body["state"], "ready")
+            self.assertEqual(len(presentation_body["recommendations"]), 1)
+            prompt = presentation_body["recommendations"][0]
+            payload = {
+                "commandId": "guided-activation-replay-safe",
+                "recommendationSetId": presentation_body["recommendationSetId"],
+                "slot": prompt["slot"],
+            }
+            message_count_before = len(
+                self.store.owner_truth_conversation_repository()._messages
+            )
+
+            unsupported = client.post(
+                activation_path,
+                headers=policy_headers,
+                json={**payload, "question": prompt["question"]},
+            )
+            self.assertEqual(unsupported.status_code, 400, unsupported.text)
+            self.assertEqual(
+                unsupported.json()["detail"]["code"],
+                "ownerTruthGuidedRecommendationActivationInvalid",
+            )
+
+            created = client.post(activation_path, headers=policy_headers, json=payload)
+            self.assertEqual(created.status_code, 201, created.text)
+            self.assertEqual(created.headers["cache-control"], "no-store")
+            self.assertEqual(
+                created.json(),
+                {
+                    "schemaVersion": "owner-truth-guided-recommendation-activation-response-v1",
+                    "vaultId": vault_id,
+                    "activation": {
+                        "status": "created",
+                        "slot": prompt["slot"],
+                        "nextAction": "broaden",
+                        "inputState": "awaitingOwnerNarrative",
+                    },
+                },
+            )
+            self.assertEqual(
+                len(self.store.owner_truth_conversation_repository()._messages),
+                message_count_before,
+            )
+            rendered = json.dumps(created.json(), ensure_ascii=False)
+            for forbidden in (
+                "candidateId",
+                "evidenceRef",
+                "reasonCode",
+                "targetDimension",
+                "threadId",
+                "sessionId",
+                "The displayed assistant question",
+                prompt["question"],
+            ):
+                self.assertNotIn(forbidden, rendered)
+
+            replayed = client.post(activation_path, headers=policy_headers, json=payload)
+            self.assertEqual(replayed.status_code, 200, replayed.text)
+            self.assertEqual(replayed.json()["activation"]["status"], "deduplicated")
+
+            conflicting_replay = client.post(
+                activation_path,
+                headers=policy_headers,
+                json={**payload, "slot": "continuity"},
+            )
+            self.assertEqual(conflicting_replay.status_code, 409, conflicting_replay.text)
+            self.assertEqual(
+                conflicting_replay.json()["detail"]["code"],
+                "ownerTruthGuidedRecommendationActivationConflict",
+            )
+
+            stale = client.post(
+                activation_path,
+                headers=policy_headers,
+                json={
+                    **payload,
+                    "commandId": "guided-activation-stale-selection",
+                    "recommendationSetId": "0" * 64,
+                },
+            )
+            self.assertEqual(stale.status_code, 409, stale.text)
+            self.assertEqual(
+                stale.json()["detail"]["code"],
+                "ownerTruthGuidedRecommendationActivationStale",
             )
         finally:
             policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible

@@ -155,6 +155,7 @@ class OwnerTruthKnowledgeRecommendationActivationCommand:
     expected_candidate_id: str
     slot: RecommendationSlot | str
     expected_session_version: int
+    guided_recommendation_set_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
@@ -168,6 +169,15 @@ class OwnerTruthKnowledgeRecommendationActivationCommand:
         except (TypeError, ValueError) as exc:
             raise OwnerTruthKnowledgeRecommendationActivationError("slot is not supported") from exc
         _positive_int(self.expected_session_version, field="expected_session_version")
+        if self.guided_recommendation_set_id is not None:
+            object.__setattr__(
+                self,
+                "guided_recommendation_set_id",
+                _hash(
+                    self.guided_recommendation_set_id,
+                    field="guided_recommendation_set_id",
+                ),
+            )
 
     @property
     def command_id_hash(self) -> str:
@@ -175,15 +185,19 @@ class OwnerTruthKnowledgeRecommendationActivationCommand:
 
     @property
     def payload_hash(self) -> str:
-        return _digest(
-            {
-                "schemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_SCHEMA_VERSION,
-                "expectedCandidateId": self.expected_candidate_id,
-                "slot": self.slot.value,
-                "expectedSessionVersion": self.expected_session_version,
-                "uiSchemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_UI_SCHEMA_VERSION,
-            }
-        )
+        payload: dict[str, Any] = {
+            "schemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_SCHEMA_VERSION,
+            "expectedCandidateId": self.expected_candidate_id,
+            "slot": self.slot.value,
+            "expectedSessionVersion": self.expected_session_version,
+            "uiSchemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_UI_SCHEMA_VERSION,
+        }
+        # Keep the historical QA command digest stable when no formal guided
+        # selection binding exists. Formal product activation adds this opaque
+        # binding so command-id replay cannot cross recommendation sets.
+        if self.guided_recommendation_set_id is not None:
+            payload["guidedRecommendationSetId"] = self.guided_recommendation_set_id
+        return _digest(payload)
 
 
 @dataclass(frozen=True)
@@ -246,6 +260,16 @@ class OwnerTruthKnowledgeRecommendationActivationRepository(Protocol):
         *,
         context: OwnerTruthCommandContext,
         command: OwnerTruthKnowledgeRecommendationActivationCommand,
+    ) -> OwnerTruthKnowledgeRecommendationActivationResult | None:
+        ...
+
+    def replay_guided(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command_id_hash: str,
+        recommendation_set_id: str,
+        slot: RecommendationSlot,
     ) -> OwnerTruthKnowledgeRecommendationActivationResult | None:
         ...
 
@@ -344,6 +368,33 @@ class InMemoryOwnerTruthKnowledgeRecommendationActivationRepository:
                 )
             return _result_from_record(existing, outcome="deduplicated")
 
+    def replay_guided(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command_id_hash: str,
+        recommendation_set_id: str,
+        slot: RecommendationSlot,
+    ) -> OwnerTruthKnowledgeRecommendationActivationResult | None:
+        _assert_owner_context(context)
+        normalized_command_hash = _hash(command_id_hash, field="command_id_hash")
+        normalized_set_id = _hash(
+            recommendation_set_id,
+            field="recommendation_set_id",
+        )
+        with self._lock:
+            existing = self._records_by_command.get((context.vault_id, normalized_command_hash))
+            if existing is None:
+                return None
+            if (
+                str(existing.get("guidedRecommendationSetId") or "") != normalized_set_id
+                or str(existing.get("slot") or "") != slot.value
+            ):
+                raise OwnerTruthKnowledgeRecommendationActivationConflict(
+                    "commandId cannot be reused with a different guided recommendation"
+                )
+            return _result_from_record(existing, outcome="deduplicated")
+
     def record(
         self,
         *,
@@ -435,7 +486,8 @@ class PostgresOwnerTruthKnowledgeRecommendationActivationRepository:
                 SELECT id, vault_id, owner_subject_id, actor_subject_id, authority_epoch,
                     candidate_id, slot, next_action, thread_id, session_id,
                     expected_session_version, target_dimension, missing_facet,
-                    evidence_ref_count, reason_code, command_id_hash, command_payload_hash
+                    evidence_ref_count, reason_code, command_id_hash, command_payload_hash,
+                    guided_recommendation_set_id
                 FROM owner_truth.knowledge_recommendation_activation_receipts
                 WHERE vault_id = %s AND command_id_hash = %s
                 FOR UPDATE
@@ -448,6 +500,54 @@ class PostgresOwnerTruthKnowledgeRecommendationActivationRepository:
         if str(existing["command_payload_hash"]) != command.payload_hash:
             raise OwnerTruthKnowledgeRecommendationActivationConflict(
                 "commandId cannot be reused with different recommendation acceptance"
+            )
+        return _result_from_record(self._row_to_record(existing), outcome="deduplicated")
+
+    def replay_guided(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command_id_hash: str,
+        recommendation_set_id: str,
+        slot: RecommendationSlot,
+    ) -> OwnerTruthKnowledgeRecommendationActivationResult | None:
+        _assert_owner_context(context)
+        normalized_command_hash = _hash(command_id_hash, field="command_id_hash")
+        normalized_set_id = _hash(
+            recommendation_set_id,
+            field="recommendation_set_id",
+        )
+        with self._cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS locked",
+                (
+                    "owner-truth-recommendation-activation-command:"
+                    f"{context.vault_id}:{normalized_command_hash}",
+                ),
+            )
+            cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT id, vault_id, owner_subject_id, actor_subject_id, authority_epoch,
+                    candidate_id, slot, next_action, thread_id, session_id,
+                    expected_session_version, target_dimension, missing_facet,
+                    evidence_ref_count, reason_code, command_id_hash, command_payload_hash,
+                    guided_recommendation_set_id
+                FROM owner_truth.knowledge_recommendation_activation_receipts
+                WHERE vault_id = %s AND command_id_hash = %s
+                FOR UPDATE
+                """,
+                (context.vault_id, normalized_command_hash),
+            )
+            existing = cursor.fetchone()
+        if existing is None:
+            return None
+        if (
+            str(existing["guided_recommendation_set_id"] or "") != normalized_set_id
+            or str(existing["slot"]) != slot.value
+        ):
+            raise OwnerTruthKnowledgeRecommendationActivationConflict(
+                "commandId cannot be reused with a different guided recommendation"
             )
         return _result_from_record(self._row_to_record(existing), outcome="deduplicated")
 
@@ -477,7 +577,8 @@ class PostgresOwnerTruthKnowledgeRecommendationActivationRepository:
                 SELECT id, vault_id, owner_subject_id, actor_subject_id, authority_epoch,
                     candidate_id, slot, next_action, thread_id, session_id,
                     expected_session_version, target_dimension, missing_facet,
-                    evidence_ref_count, reason_code, command_id_hash, command_payload_hash
+                    evidence_ref_count, reason_code, command_id_hash, command_payload_hash,
+                    guided_recommendation_set_id
                 FROM owner_truth.knowledge_recommendation_activation_receipts
                 WHERE vault_id = %s AND command_id_hash = %s
                 FOR UPDATE
@@ -522,10 +623,12 @@ class PostgresOwnerTruthKnowledgeRecommendationActivationRepository:
                     expected_session_version, target_dimension, missing_facet,
                     selection_policy_version, orchestration_policy_version,
                     evidence_ref_count, evidence_ref_digest, reason_code,
-                    command_id_hash, command_payload_hash, schema_version, ui_schema_version
+                    command_id_hash, command_payload_hash, guided_recommendation_set_id,
+                    schema_version, ui_schema_version
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s
                 )
                 """,
                 (
@@ -549,6 +652,7 @@ class PostgresOwnerTruthKnowledgeRecommendationActivationRepository:
                     normalized["reasonCode"],
                     command_hash,
                     payload_hash,
+                    normalized.get("guidedRecommendationSetId"),
                     normalized["schemaVersion"],
                     normalized["uiSchemaVersion"],
                 ),
@@ -655,6 +759,7 @@ class PostgresOwnerTruthKnowledgeRecommendationActivationRepository:
             "reasonCode": str(row["reason_code"]),
             "commandIdHash": str(row["command_id_hash"]),
             "payloadHash": str(row["command_payload_hash"]),
+            "guidedRecommendationSetId": row.get("guided_recommendation_set_id"),
         }
 
     def _cursor(self):
@@ -792,6 +897,7 @@ class OwnerTruthKnowledgeRecommendationActivationService:
                 "reasonCode": orchestration.decision.reason_code,
                 "commandIdHash": command.command_id_hash,
                 "payloadHash": command.payload_hash,
+                "guidedRecommendationSetId": command.guided_recommendation_set_id,
                 "schemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_SCHEMA_VERSION,
                 "uiSchemaVersion": OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_ACTIVATION_UI_SCHEMA_VERSION,
             }

@@ -275,7 +275,12 @@ from app.services.owner_truth_knowledge_recommendation_activation import (
     OwnerTruthKnowledgeRecommendationActivationError,
     OwnerTruthKnowledgeRecommendationActivationService,
     OwnerTruthKnowledgeRecommendationActivationStale,
+    OwnerTruthKnowledgeRecommendationActivationUnavailable,
     knowledge_recommendation_activation_summary,
+)
+from app.services.owner_truth_guided_recommendation_activation import (
+    OwnerTruthGuidedRecommendationActivationCommand,
+    OwnerTruthGuidedRecommendationActivationService,
 )
 from app.services.owner_truth_knowledge_recommendation_feedback import (
     OwnerTruthGuidedRecommendationFeedbackCommand,
@@ -2055,11 +2060,13 @@ def _owner_truth_guided_recommendation_presentation_context(
 ) -> OwnerTruthCommandContext:
     """Authorize the default-off product presentation without accepting QA."""
 
-    route_suffix = (
-        "/guided-recommendations/feedback"
-        if request.method.upper() == "POST"
-        else "/guided-recommendations"
-    )
+    normalized_path = request.url.path.rstrip("/")
+    if normalized_path.endswith("/guided-recommendations/feedback"):
+        route_suffix = "/guided-recommendations/feedback"
+    elif normalized_path.endswith("/guided-recommendations/activate"):
+        route_suffix = "/guided-recommendations/activate"
+    else:
+        route_suffix = "/guided-recommendations"
     return _owner_truth_captured_release_policy_context(
         request,
         vault_id=vault_id,
@@ -2650,6 +2657,35 @@ def _owner_truth_guided_recommendation_feedback_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthGuidedRecommendationFeedbackInvalid"},
+    )
+
+
+def _owner_truth_guided_recommendation_activation_http_error(
+    error: OwnerTruthKnowledgeRecommendationActivationError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthKnowledgeRecommendationActivationAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "ownerTruthGuidedRecommendationActivationDenied"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeRecommendationActivationStale):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthGuidedRecommendationActivationStale"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeRecommendationActivationUnavailable):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthGuidedRecommendationActivationUnavailable"},
+        )
+    if isinstance(error, OwnerTruthKnowledgeRecommendationActivationConflict):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthGuidedRecommendationActivationConflict"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthGuidedRecommendationActivationInvalid"},
     )
 
 
@@ -6766,6 +6802,13 @@ _OWNER_TRUTH_GUIDED_RECOMMENDATION_FEEDBACK_FIELDS = frozenset(
         "feedbackReason",
     }
 )
+_OWNER_TRUTH_GUIDED_RECOMMENDATION_ACTIVATION_FIELDS = frozenset(
+    {
+        "commandId",
+        "recommendationSetId",
+        "slot",
+    }
+)
 _OWNER_TRUTH_SAVED_CONTINUATION_CUE_FIELDS = frozenset(
     {
         "commandId",
@@ -7004,6 +7047,58 @@ def get_owner_truth_guided_recommendations(
             "state": result.state.value,
             "recommendationSetId": recommendation_set_id,
             "recommendations": recommendations,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/guided-recommendations/activate",
+    include_in_schema=False,
+)
+def activate_owner_truth_guided_recommendation(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Bind one display-safe prompt without treating it as Owner narration.
+
+    The public client may name only an opaque recommendation-set binding and
+    slot. The server re-plans, derives the private candidate/session authority,
+    and stores the existing append-only selection receipt. It never accepts or
+    writes the rendered assistant question, free-form user text, evidence, or
+    internal conversation identifiers.
+    """
+
+    try:
+        context = _owner_truth_guided_recommendation_presentation_context(
+            request,
+            vault_id=vault_id,
+        )
+        unsupported = sorted(
+            set(payload).difference(_OWNER_TRUTH_GUIDED_RECOMMENDATION_ACTIVATION_FIELDS)
+        )
+        if unsupported:
+            raise OwnerTruthKnowledgeRecommendationActivationError(
+                "guided recommendation activation contains unsupported fields"
+            )
+        command = OwnerTruthGuidedRecommendationActivationCommand(
+            command_id=str(payload.get("commandId") or ""),
+            recommendation_set_id=str(payload.get("recommendationSetId") or ""),
+            slot=payload.get("slot"),
+        )
+        result = OwnerTruthGuidedRecommendationActivationService(store).activate(
+            context=context,
+            command=command,
+        )
+    except OwnerTruthKnowledgeRecommendationActivationError as error:
+        raise _owner_truth_guided_recommendation_activation_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-guided-recommendation-activation-response-v1",
+            "vaultId": context.vault_id,
+            "activation": result.value_free_summary(),
         },
         headers={"Cache-Control": "no-store"},
     )

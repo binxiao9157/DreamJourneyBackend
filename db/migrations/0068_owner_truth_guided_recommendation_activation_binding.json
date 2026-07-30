@@ -1,0 +1,11 @@
+{
+  "version": "0068",
+  "name": "owner_truth_guided_recommendation_activation_binding",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthGuidedRecommendationActivationDefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "echoGuidedRecommendations": false
+  }
+}

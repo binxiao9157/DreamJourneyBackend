@@ -823,6 +823,7 @@ class ReleasePolicyCommandGate:
             and (
                 normalized_path.endswith("/guided-recommendations")
                 or normalized_path.endswith("/guided-recommendations/feedback")
+                or normalized_path.endswith("/guided-recommendations/activate")
             )
         ):
             return "echoGuidedRecommendations"
@@ -871,13 +872,15 @@ class ReleasePolicyCommandGate:
             and (
                 normalized_path.endswith("/guided-recommendations")
                 or normalized_path.endswith("/guided-recommendations/feedback")
+                or normalized_path.endswith("/guided-recommendations/activate")
             )
         ):
-            suffix = (
-                "/guided-recommendations/feedback"
-                if normalized_path.endswith("/guided-recommendations/feedback")
-                else "/guided-recommendations"
-            )
+            if normalized_path.endswith("/guided-recommendations/feedback"):
+                suffix = "/guided-recommendations/feedback"
+            elif normalized_path.endswith("/guided-recommendations/activate"):
+                suffix = "/guided-recommendations/activate"
+            else:
+                suffix = "/guided-recommendations"
             return f"{normalized_method} /v2/vaults/*{suffix}"
         if (
             normalized_method == "GET"
