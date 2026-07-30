@@ -78,6 +78,15 @@ The worker processes at most one job per invocation, never calls a Provider,
 does not expose MemoryVersion content in its result, and does not change
 `/context/build`, legacy KBLite writes, or public Echo.
 
+Each claimed rebuild now also emits a value-free shadow operation metric. It
+contains only HMAC-protected job and operation identifiers, component code,
+attempt, outcome, and duration; it never contains a checkpoint, MemoryVersion
+content, Source data, Candidate data, or a synthetic HTTP route. Metric sink
+failures are ignored, so they cannot change the worker's rebuild, retry, or
+terminal lease semantics. The generic async worker remains separately
+`NOT_INSTRUMENTED`; this scoped record is not an SLO or production-readiness
+claim.
+
 Before it rebuilds, it locks and rechecks the active Vault, current
 MemoryVersion, content hash, source state/version and authority epoch. A stale
 or revoked target writes a terminal `blocked` consumer/coordination receipt;

@@ -93,6 +93,20 @@ class _SearchDocumentProjectionRepository:
         )
 
 
+class _RecordingMetricRecorder:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def record_attempt(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(dict(kwargs))
+        return {"sinkOutcome": "notConfigured"}
+
+
+class _FailingMetricRecorder:
+    def record_attempt(self, **_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("metric sink unavailable")
+
+
 class _Store:
     def __init__(self, *, projection: _ProjectionRepository | None = None) -> None:
         self.lease_repository = InMemoryAsyncEffectLeaseRepository()
@@ -178,6 +192,7 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
         *,
         enabled: bool = True,
         search_projection_enabled: bool = False,
+        operation_metric_recorder=None,
     ) -> OwnerTruthMemoryProjectionWorkerRuntime:
         return OwnerTruthMemoryProjectionWorkerRuntime(
             settings=Settings(
@@ -189,6 +204,7 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
             store=self.store,
             worker_id="projection-worker-test",
             retry_seconds=5,
+            operation_metric_recorder=operation_metric_recorder,
         )
 
     def test_default_disabled_worker_does_not_claim_a_projection_rebuild(self):
@@ -322,6 +338,29 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
             "retryableFailed",
         )
         self.assertEqual(self.store.consumer_repository._inbox, {})
+
+    def test_claimed_job_records_value_free_worker_attempt_metric(self):
+        recorder = _RecordingMetricRecorder()
+
+        result = self.worker(operation_metric_recorder=recorder).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(recorder.calls), 1)
+        call = recorder.calls[0]
+        self.assertEqual(call["component_kind"], "worker")
+        self.assertEqual(call["component_id"], "ownerTruthMemoryProjectionWorker")
+        self.assertEqual(call["operation"], "ownerTruthMemoryProjection")
+        self.assertEqual(call["outcome"], "succeeded")
+        self.assertEqual(call["feedback_state"], "notApplicable")
+        self.assertEqual(call["request_key"], result["jobId"])
+        self.assertEqual(call["operation_key"], result["operationId"])
+        self.assertNotIn(self.content_hash, json.dumps(call, sort_keys=True))
+
+    def test_metric_failure_does_not_change_projection_rebuild_result(self):
+        result = self.worker(operation_metric_recorder=_FailingMetricRecorder()).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["projectionOutcome"], "rebuilt")
 
 
 if __name__ == "__main__":

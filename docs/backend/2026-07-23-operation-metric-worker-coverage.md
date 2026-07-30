@@ -54,3 +54,20 @@ Truth、ReleasePolicy、Provider、async-effect、Postgres backup 等 gate。
 后续如需提升该项，只能逐个为 Worker 增加等价的 value-free attempt 记录、重跑
 Postgres persistence / restart smoke，并完成 retention、阈值和 Operations owner
 审阅。完成本清单不关闭这些 Gate。
+
+## 2026-07-30 更新：已执行 Worker 的 scoped attempt 覆盖
+
+两个真实执行的 Owner Truth worker 已接入同一份 value-free attempt 合同：
+
+- `OwnerTruthCandidateExtractionWorkerRuntime`
+- `OwnerTruthMemoryProjectionWorkerRuntime`
+
+它们只在成功领取一个 typed job 后记录 HMAC-protected job/operation 标识、attempt、
+component、outcome 和耗时；不会记录 Source、Candidate、Memory、Projection checkpoint、
+owner identity 或 HTTP route。记录 sink 失败不会改变 worker 的完成、重试或终态 lease。
+
+`AsyncEffectWorkerRuntime` 继续为 `notInstrumented`，原因不是漏接，而是它没有业务
+handler、从不领取或执行 job；为它生成 synthetic attempt 会伪造分母。覆盖清单仍为
+`coverageComplete=false`，`sloClaimAllowed=false`。下一步只有在 generic shell 真正注册
+typed consumer 后，才能为该执行路径设计独立指标，且仍需真实 Postgres persistence/restart
+smoke、保留期、阈值和 Operations 审阅。

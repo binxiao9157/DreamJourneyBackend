@@ -62,8 +62,8 @@ CRITICAL_WORKER_COVERAGE = (
             "OwnerTruthMemoryProjectionWorkerRuntime"
         ),
         component_kind="worker",
-        status=OperationMetricCoverageStatus.NOT_INSTRUMENTED,
-        reason_code="workerRecorderNotAttached",
+        status=OperationMetricCoverageStatus.INSTRUMENTED,
+        reason_code="workerAttemptRecorderAttached",
     ),
     OperationMetricCoverageEntry(
         component_id=(

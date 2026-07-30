@@ -42,19 +42,27 @@ class OperationMetricCoverageTests(unittest.TestCase):
 
         catalog = {entry.component_id for entry in CRITICAL_WORKER_COVERAGE}
         self.assertEqual(discovered, catalog)
-        candidate_worker = next(
+        instrumented_workers = [
             entry
             for entry in CRITICAL_WORKER_COVERAGE
-            if entry.component_id.endswith("OwnerTruthCandidateExtractionWorkerRuntime")
+            if entry.status is OperationMetricCoverageStatus.INSTRUMENTED
+        ]
+        self.assertEqual(
+            {entry.component_id.rsplit(".", maxsplit=1)[-1] for entry in instrumented_workers},
+            {
+                "OwnerTruthCandidateExtractionWorkerRuntime",
+                "OwnerTruthMemoryProjectionWorkerRuntime",
+            },
         )
-        self.assertIs(candidate_worker.status, OperationMetricCoverageStatus.INSTRUMENTED)
-        self.assertEqual(candidate_worker.reason_code, "workerAttemptRecorderAttached")
+        self.assertTrue(
+            all(entry.reason_code == "workerAttemptRecorderAttached" for entry in instrumented_workers)
+        )
         self.assertEqual(
             sum(
                 entry.status is OperationMetricCoverageStatus.NOT_INSTRUMENTED
                 for entry in CRITICAL_WORKER_COVERAGE
             ),
-            2,
+            1,
         )
 
     def test_worker_gap_is_fail_closed_and_observation_summary_is_value_free(self) -> None:
@@ -63,8 +71,8 @@ class OperationMetricCoverageTests(unittest.TestCase):
 
         self.assertEqual(summary["schemaVersion"], OPERATION_METRIC_COVERAGE_SCHEMA_VERSION)
         self.assertEqual(summary["httpRouteCoverage"]["instrumentedCount"], 1)
-        self.assertEqual(summary["criticalWorkerCoverage"]["instrumentedCount"], 1)
-        self.assertEqual(summary["criticalWorkerCoverage"]["notInstrumentedCount"], 2)
+        self.assertEqual(summary["criticalWorkerCoverage"]["instrumentedCount"], 2)
+        self.assertEqual(summary["criticalWorkerCoverage"]["notInstrumentedCount"], 1)
         self.assertFalse(summary["coverageComplete"])
         self.assertFalse(summary["sloClaimAllowed"])
         self.assertTrue(summary["valueFree"])
