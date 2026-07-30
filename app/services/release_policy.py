@@ -416,6 +416,9 @@ class ReleasePolicyService:
         # M0-B selector. It remains default closed until its product Gate is
         # explicitly approved; it must not inherit echoTextInput visibility.
         "echoGuidedRecommendations": ("G0", "G1", "G2"),
+        # The life map is a separate read-only M0-B surface. It intentionally
+        # has no visibility inheritance from natural input or recommendations.
+        "ownerTruthLifeMap": ("G0", "G1", "G2"),
         "echoImageInput": ("G0", "G1", "G2"),
         "timeLetters": ("G0", "G1", "G2", "G4"),
         "profileSettings": ("G0", "G1"),
@@ -815,6 +818,12 @@ class ReleasePolicyCommandGate:
             )
         ):
             return "echoGuidedRecommendations"
+        if (
+            method.upper() == "GET"
+            and normalized_path.startswith("/v2/vaults/")
+            and normalized_path.endswith("/life-map")
+        ):
+            return "ownerTruthLifeMap"
         if method.upper() == "GET" and normalized_path.startswith("/archive/items/"):
             return "archiveRemoteFetch"
         return None
@@ -850,6 +859,12 @@ class ReleasePolicyCommandGate:
                 else "/guided-recommendations"
             )
             return f"{normalized_method} /v2/vaults/*{suffix}"
+        if (
+            normalized_method == "GET"
+            and normalized_path.startswith("/v2/vaults/")
+            and normalized_path.endswith("/life-map")
+        ):
+            return "GET /v2/vaults/*/life-map"
         if normalized_method == "GET" and normalized_path.startswith("/archive/items/"):
             return "GET /archive/items/*"
         feature = self.feature_for_request(method, path, payload)

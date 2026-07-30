@@ -175,8 +175,10 @@ from app.services.owner_truth_interview_session_outcome_read import (
     OwnerTruthInterviewSessionOutcomeReadService,
 )
 from app.services.owner_truth_life_map_read import (
+    OWNER_TRUTH_LIFE_MAP_PRESENTATION_SCHEMA_VERSION,
     OwnerTruthLifeMapReadAccessDenied,
     OwnerTruthLifeMapReadService,
+    life_map_presentation,
 )
 from app.services.owner_truth_memory_search_read import (
     OwnerTruthMemorySearchReadAccessDenied,
@@ -1840,6 +1842,22 @@ def _owner_truth_guided_recommendation_presentation_context(
         feature="echoGuidedRecommendations",
         route=f"{request.method.upper()} /v2/vaults/*{route_suffix}",
         user_session_required_code="ownerTruthGuidedRecommendationUserSessionRequired",
+    )
+
+
+def _owner_truth_life_map_presentation_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the independent default-off M0-B life-map surface."""
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthLifeMap",
+        route=f"{request.method.upper()} /v2/vaults/*/life-map",
+        user_session_required_code="ownerTruthLifeMapUserSessionRequired",
     )
 
 
@@ -6580,6 +6598,37 @@ def read_owner_truth_life_map(
             "schemaVersion": "owner-truth-life-map-read-response-v1",
             "vaultId": context.vault_id,
             "lifeMap": result.value_free_summary(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/life-map",
+    include_in_schema=False,
+)
+def get_owner_truth_life_map_presentation(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """Return the default-off product life map without diagnostic identifiers.
+
+    The route is separately captured by ReleasePolicy. It does not accept a QA
+    bypass, mutate any Owner Truth data, expose raw memory text, or disclose
+    internal thread/association/checkpoint identifiers.
+    """
+
+    try:
+        context = _owner_truth_life_map_presentation_context(request, vault_id=vault_id)
+        result = OwnerTruthLifeMapReadService(store).read(context=context)
+    except OwnerTruthContractError as error:
+        raise _owner_truth_life_map_read_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": OWNER_TRUTH_LIFE_MAP_PRESENTATION_SCHEMA_VERSION,
+            "vaultId": context.vault_id,
+            "lifeMap": life_map_presentation(result),
         },
         headers={"Cache-Control": "no-store"},
     )

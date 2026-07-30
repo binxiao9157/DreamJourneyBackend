@@ -22,6 +22,11 @@ from app.domain.owner_truth.life_map import (
 )
 
 
+OWNER_TRUTH_LIFE_MAP_PRESENTATION_SCHEMA_VERSION = (
+    "owner-truth-life-map-presentation-response-v1"
+)
+
+
 class OwnerTruthLifeMapReadAccessDenied(OwnerTruthLifeMapError):
     """The caller cannot read this Owner/Vault life-map projection."""
 
@@ -101,8 +106,48 @@ class OwnerTruthLifeMapReadService:
             raise OwnerTruthLifeMapError(str(error)) from error
 
 
+def life_map_presentation(result: OwnerTruthLifeMapReadResult) -> dict[str, object]:
+    """Return the display-safe subset used by the default-off product route.
+
+    The QA read exposes a value-free diagnostic projection with opaque internal
+    thread/association identifiers. The product surface needs neither those
+    identifiers nor checkpoints/policy metadata, so it receives only stable
+    dimension counts and aggregate navigation counts. This remains a read-only
+    projection, not a second memory store or a completion score.
+    """
+
+    if not isinstance(result, OwnerTruthLifeMapReadResult):
+        raise OwnerTruthLifeMapError("life-map presentation requires a typed result")
+
+    presentation: dict[str, object] = {
+        "state": result.state.value,
+        "storyCount": 0,
+        "associatedStoryCount": 0,
+        "dimensions": [],
+    }
+    projection = result.projection
+    if projection is None:
+        return presentation
+
+    presentation["storyCount"] = len(projection.threads)
+    presentation["associatedStoryCount"] = len(projection.associations)
+    presentation["dimensions"] = [
+        {
+            "dimension": item.dimension.value,
+            "confirmedEvidenceCount": item.evidence_count,
+            "coveredFacetCount": item.covered_facet_count,
+            "unfilledFacetCount": item.missing_facet_count,
+            "relatedStoryCount": item.anchored_thread_count,
+        }
+        for item in projection.dimensions
+    ]
+    return presentation
+
+
 __all__ = [
+    "OWNER_TRUTH_LIFE_MAP_PRESENTATION_SCHEMA_VERSION",
     "OwnerTruthLifeMapReadAccessDenied",
     "OwnerTruthLifeMapReadService",
     "OwnerTruthLifeMapReadStore",
+    "life_map_presentation",
 ]

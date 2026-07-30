@@ -283,6 +283,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthLifeMapRead",
             ),
             _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/life-map",
+                session,
+                "ownerTruthLifeMapPresentation",
+            ),
+            _rule(
                 "POST",
                 "/v2/vaults/{vault_id}/memory-search/read",
                 session,

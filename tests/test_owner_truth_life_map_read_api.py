@@ -85,6 +85,40 @@ class OwnerTruthLifeMapReadAPITests(unittest.TestCase):
             "X-DreamJourney-QA-Owner-Truth": "1",
         }
 
+    @staticmethod
+    def _login_release_policy(phone: str) -> tuple[str, dict[str, str], str]:
+        response = client.post(
+            "/auth/login",
+            json={"phone": phone, "nickname": "人生地图展示测试", "password": "password123"},
+        )
+        if response.status_code != 200:
+            raise AssertionError(response.text)
+        body = response.json()
+        return (
+            str(body["user"]["id"]),
+            {"Authorization": f"Bearer {body['auth']['accessToken']}"},
+            str(body["auth"]["sessionId"]),
+        )
+
+    @staticmethod
+    def _life_map_presentation_policy_headers(
+        headers: dict[str, str],
+        *,
+        session_id: str,
+        decision_id: str,
+    ) -> dict[str, str]:
+        return {
+            **headers,
+            "X-DreamJourney-Feature": "ownerTruthLifeMap",
+            "X-DreamJourney-Feature-Decision-Id": decision_id,
+            "X-DreamJourney-Feature-Allowed": "true",
+            "X-DreamJourney-Policy-Version": "release-policy-v1",
+            "X-DreamJourney-Policy-Revision": "1",
+            "X-DreamJourney-Account-Generation": sha256(
+                session_id.encode("utf-8")
+            ).hexdigest()[:24],
+        }
+
     def _activate_memory(self, *, vault_id: str, owner_id: str) -> tuple[str, str]:
         source_id = str(uuid4())
         content = {"claim": "private life-map API content must not leak"}
@@ -189,6 +223,95 @@ class OwnerTruthLifeMapReadAPITests(unittest.TestCase):
         self.assertNotIn("private life-map API", rendered)
         self.assertNotIn("memoryVersionId", rendered)
         self.assertNotIn("sourceId", rendered)
+
+    def test_product_life_map_requires_its_own_policy_and_is_display_safe(self) -> None:
+        owner_id, headers, session_id = self._login_release_policy("13800139605")
+        vault_id = "vault-life-map-presentation"
+        memory_version_id, content_hash = self._activate_memory(
+            vault_id=vault_id,
+            owner_id=owner_id,
+        )
+        confirmation = client.post(
+            f"/v2/vaults/{vault_id}/memory-versions/{memory_version_id}"
+            "/knowledge-dimension-confirmations",
+            headers={**headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+            json={
+                "commandId": "life-map-presentation-confirm-001",
+                "expectedContentHash": content_hash,
+                "dimension": "keyDecisions",
+                "coveredFacets": ["choice"],
+            },
+        )
+        self.assertEqual(confirmation.status_code, 201, confirmation.text)
+        path = f"/v2/vaults/{vault_id}/life-map"
+
+        denied = client.get(
+            path,
+            headers={**headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+        )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(denied.json()["detail"]["code"], "release_policy_denied")
+        self.assertEqual(denied.json()["detail"]["feature"], "ownerTruthLifeMap")
+
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {"ownerTruthLifeMap"}
+        try:
+            response = client.get(
+                path,
+                headers=self._life_map_presentation_policy_headers(
+                    headers,
+                    session_id=session_id,
+                    decision_id="life-map-presentation-owner",
+                ),
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            body = response.json()
+            self.assertEqual(
+                body["schemaVersion"],
+                "owner-truth-life-map-presentation-response-v1",
+            )
+            self.assertEqual(body["vaultId"], vault_id)
+            life_map = body["lifeMap"]
+            self.assertEqual(
+                set(life_map),
+                {
+                    "state",
+                    "storyCount",
+                    "associatedStoryCount",
+                    "dimensions",
+                },
+            )
+            self.assertEqual(life_map["state"], "ready")
+            self.assertEqual(len(life_map["dimensions"]), 6)
+            decision = next(
+                item for item in life_map["dimensions"] if item["dimension"] == "keyDecisions"
+            )
+            self.assertEqual(
+                set(decision),
+                {
+                    "dimension",
+                    "confirmedEvidenceCount",
+                    "coveredFacetCount",
+                    "unfilledFacetCount",
+                    "relatedStoryCount",
+                },
+            )
+            self.assertEqual(decision["confirmedEvidenceCount"], 1)
+            rendered = json.dumps(body, ensure_ascii=False)
+            for forbidden in (
+                "private life-map API",
+                "memoryVersionId",
+                "sourceId",
+                "threadId",
+                "associationId",
+                "checkpoint",
+                "policyVersion",
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 
     def test_payload_is_rejected_and_another_owner_cannot_read(self) -> None:
         owner_id, headers = self._login("13800139603")

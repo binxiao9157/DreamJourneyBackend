@@ -106,6 +106,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertTrue(decisions["accountDeletion"].releaseVisible)
         for feature in [
             "echoGuidedRecommendations",
+            "ownerTruthLifeMap",
             "familyManagement",
             "timeLetters",
             "voiceCloneShell",
