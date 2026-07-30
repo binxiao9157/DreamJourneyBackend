@@ -10,10 +10,12 @@ from app.domain.owner_truth.interview_candidate_proposal import (
     AdmitInterviewReviewBatchForCandidateProposalCommand,
     OwnerTruthInterviewCandidateProposalAccessDenied,
     OwnerTruthInterviewCandidateProposalConflict,
+    OwnerTruthInterviewCandidateProposalError,
     OwnerTruthInterviewCandidateProposalVersionConflict,
 )
 from app.domain.owner_truth.source_commands import (
     CreateTextSourceCommand,
+    OwnerTruthCommandAuthorizationCapture,
     OwnerTruthCommandContext,
     OwnerTruthSourceCommandResult,
 )
@@ -197,6 +199,60 @@ class OwnerTruthInterviewCandidateProposalTests(unittest.TestCase):
         self.assertEqual(conversation_source.source_kind, SourceKind.CONVERSATION)
         self.assertEqual(conversation_source.content_payload["sourceKind"], "conversation")
         self.assertNotEqual(text_source.content_hash, conversation_source.content_hash)
+
+    def test_formal_admission_requires_candidate_review_capture_and_keeps_it_off_source_metadata(self) -> None:
+        formal_context = OwnerTruthCommandContext(
+            vault_id=self.context.vault_id,
+            owner_subject_id=self.context.owner_subject_id,
+            actor_subject_id=self.context.owner_subject_id,
+            policy_version="owner-truth-v1",
+            authorization_capture=OwnerTruthCommandAuthorizationCapture(
+                feature="ownerTruthCandidateReview",
+                policy_version="release-policy-v1",
+                policy_revision=1,
+                emergency_revision=0,
+                account_generation_hash="a" * 24,
+                decision_id_hash="b" * 64,
+                audience="owner",
+                cohort="closedPilotAdultSelf",
+                client_build=1,
+                expires_at="2030-01-01T00:00:00+00:00",
+            ),
+        )
+        created = self.service.admit_review_batch(
+            command=self._command(command_id="formal-admission"),
+            context=formal_context,
+        )
+        admission = next(
+            iter(self.store.repository.snapshot()["admissionsByBatch"].values())
+        )
+        self.assertEqual(admission["authorizationCapture"].feature, "ownerTruthCandidateReview")
+        source = self.store.sources[(self.context.vault_id, created.source_id)]
+        self.assertNotIn("authorizationCapture", source["metadata"])
+        self.assertNotIn("ownerTruthCandidateReview", str(source["metadata"]))
+
+        wrong_context = OwnerTruthCommandContext(
+            vault_id=self.context.vault_id,
+            owner_subject_id=self.context.owner_subject_id,
+            actor_subject_id=self.context.owner_subject_id,
+            policy_version="owner-truth-v1",
+            authorization_capture=OwnerTruthCommandAuthorizationCapture(
+                feature="echoTextInput",
+                policy_version="release-policy-v1",
+                policy_revision=1,
+                emergency_revision=0,
+                account_generation_hash="c" * 24,
+                decision_id_hash="d" * 64,
+                audience="owner",
+                cohort="closedPilotAdultSelf",
+                client_build=1,
+                expires_at="2030-01-01T00:00:00+00:00",
+            ),
+        )
+        with self.assertRaises(OwnerTruthInterviewCandidateProposalError):
+            self._command(command_id="wrong-formal-admission").write_record(
+                context=wrong_context
+            )
 
     def test_status_reflects_durable_extraction_outcome_without_enabling_worker(self) -> None:
         extraction_status: OwnerTruthInterviewCandidateProposalExtractionStatus | None = None

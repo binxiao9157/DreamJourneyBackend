@@ -72,7 +72,10 @@ from app.domain.owner_truth.contracts import (
     SensitivityLevel,
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
-from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.domain.owner_truth.source_commands import (
+    OwnerTruthCommandAuthorizationCapture,
+    OwnerTruthCommandContext,
+)
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
 from app.services.owner_truth_candidate_extraction import (
     OwnerTruthCandidateExtractionService,
@@ -211,6 +214,42 @@ def main() -> None:
             owner_subject_id="conversation-owner-a",
             actor_subject_id="conversation-owner-a",
             policy_version="owner-truth-v1",
+        )
+        formal_candidate_proposal_context = OwnerTruthCommandContext(
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            actor_subject_id=context.owner_subject_id,
+            policy_version=context.policy_version,
+            authorization_capture=OwnerTruthCommandAuthorizationCapture(
+                feature="ownerTruthCandidateReview",
+                policy_version="release-policy-v1",
+                policy_revision=1,
+                emergency_revision=0,
+                account_generation_hash="a" * 24,
+                decision_id_hash="b" * 64,
+                audience="owner",
+                cohort="closedPilotAdultSelf",
+                client_build=1,
+                expires_at="2030-01-01T00:00:00+00:00",
+            ),
+        )
+        formal_candidate_proposal_retry_context = OwnerTruthCommandContext(
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            actor_subject_id=context.owner_subject_id,
+            policy_version=context.policy_version,
+            authorization_capture=OwnerTruthCommandAuthorizationCapture(
+                feature="ownerTruthCandidateReview",
+                policy_version="release-policy-v1",
+                policy_revision=2,
+                emergency_revision=0,
+                account_generation_hash="a" * 24,
+                decision_id_hash="c" * 64,
+                audience="owner",
+                cohort="closedPilotAdultSelf",
+                client_build=2,
+                expires_at="2030-01-02T00:00:00+00:00",
+            ),
         )
         thread_id = str(uuid.uuid4())
         session_id = str(uuid.uuid4())
@@ -569,7 +608,7 @@ def main() -> None:
                     review_batch_id=review_batch.review_batch.review_batch_id,
                     expected_review_batch_version=2,
                 ),
-                context=context,
+                context=formal_candidate_proposal_context,
             ),
         )
         require(candidate_proposal.outcome == "created", "explicit review admission must create one Source effect")
@@ -586,7 +625,7 @@ def main() -> None:
                     review_batch_id=review_batch.review_batch.review_batch_id,
                     expected_review_batch_version=2,
                 ),
-                context=context,
+                context=formal_candidate_proposal_retry_context,
             ),
         )
         require(
@@ -866,13 +905,32 @@ def main() -> None:
                 )
                 cursor.execute(
                     """
-                    SELECT COUNT(*)
+                    SELECT authorization_evidence
                     FROM owner_truth.interview_review_batch_candidate_admissions
                     WHERE vault_id = %s AND review_batch_id = %s
                     """,
                     (context.vault_id, review_batch.review_batch.review_batch_id),
                 )
-                require(cursor.fetchone()[0] == 1, "one review batch must have one admission record")
+                admission_row = cursor.fetchone()
+                require(admission_row is not None, "one review batch must have one admission record")
+                authorization_evidence = admission_row[0]
+                if isinstance(authorization_evidence, str):
+                    authorization_evidence = json.loads(authorization_evidence)
+                require(
+                    isinstance(authorization_evidence, dict)
+                    and authorization_evidence.get("feature") == "ownerTruthCandidateReview",
+                    "formal candidate proposal admission must persist its release-policy feature",
+                )
+                evidence_text = str(authorization_evidence)
+                require(
+                    "b" * 64 in evidence_text
+                    and "owner-truth-command-authorization-capture-v1" in evidence_text,
+                    "admission ledger must retain value-minimized formal authorization evidence",
+                )
+                require(
+                    "ownerTruthCandidateReview" not in str(admitted_source),
+                    "formal admission evidence must not be copied to Source metadata",
+                )
                 cursor.execute(
                     """
                     SELECT COUNT(*)

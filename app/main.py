@@ -1125,6 +1125,33 @@ def _owner_truth_interview_review_batch_acknowledgement_context(
     )
 
 
+def _owner_truth_interview_candidate_proposal_admission_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Preserve QA admission while adding its separately-captured formal path.
+
+    Formal Candidate proposal staging must not borrow ``echoTextInput`` from
+    the interview/acknowledgement boundary. It is an independent action under
+    ``ownerTruthCandidateReview`` and its authorization capture is persisted
+    only in the admission ledger.
+    """
+
+    if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
+        return _owner_truth_candidate_review_context(request, vault_id=vault_id)
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=(
+            f"{request.method.upper()} /v2/vaults/*/interview-review-batches/*/"
+            "candidate-proposal/admit"
+        ),
+        user_session_required_code="ownerTruthInterviewCandidateProposalAdmissionUserSessionRequired",
+    )
+
+
 _OWNER_TRUTH_INTERVIEW_BOUNDARY_PAYLOAD_FIELDS = frozenset(
     {
         "commandId",
@@ -5754,7 +5781,7 @@ def admit_owner_truth_interview_review_batch_candidate_proposal(
     review_batch_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """QA-only admission of one acknowledged batch into Source/effect staging.
+    """Stage one acknowledged batch through a QA or captured formal boundary.
 
     This is intentionally after, not part of, acknowledgement.  It can create
     one immutable private conversation Source and one default-off extraction
@@ -5763,7 +5790,10 @@ def admit_owner_truth_interview_review_batch_candidate_proposal(
     """
 
     try:
-        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        context = _owner_truth_interview_candidate_proposal_admission_context(
+            request,
+            vault_id=vault_id,
+        )
         command = _owner_truth_admit_interview_review_batch_candidate_proposal_command(
             payload=payload,
             review_batch_id=review_batch_id,

@@ -25,6 +25,9 @@ class OwnerTruthInterviewFormalReviewBatchInboxAPITests(unittest.TestCase):
         self.previous_review_batch_automation_enabled = (
             main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED
         )
+        self.previous_candidate_review_qa_enabled = (
+            main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        )
         self.store = InMemoryStore()
         main_module.store = self.store
         main_module.BACKEND_API_TOKEN = ""
@@ -32,6 +35,7 @@ class OwnerTruthInterviewFormalReviewBatchInboxAPITests(unittest.TestCase):
         main_module.AUTH_ROUTE_MODE = "enforce"
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
         main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = False
+        main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = False
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -41,6 +45,9 @@ class OwnerTruthInterviewFormalReviewBatchInboxAPITests(unittest.TestCase):
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
         main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = (
             self.previous_review_batch_automation_enabled
+        )
+        main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = (
+            self.previous_candidate_review_qa_enabled
         )
 
     @staticmethod
@@ -85,6 +92,28 @@ class OwnerTruthInterviewFormalReviewBatchInboxAPITests(unittest.TestCase):
         return captured
 
     @staticmethod
+    def _with_candidate_review_capture(
+        headers: dict[str, str],
+        *,
+        auth_session_id: str,
+        decision_id: str,
+    ) -> dict[str, str]:
+        captured = dict(headers)
+        captured.update(
+            {
+                "X-DreamJourney-Feature": "ownerTruthCandidateReview",
+                "X-DreamJourney-Feature-Decision-Id": decision_id,
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": hashlib.sha256(
+                    auth_session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        return captured
+
+    @staticmethod
     def _start_path(vault_id: str) -> str:
         return f"/v2/vaults/{vault_id}/interview-sessions"
 
@@ -101,6 +130,13 @@ class OwnerTruthInterviewFormalReviewBatchInboxAPITests(unittest.TestCase):
         return (
             f"/v2/vaults/{vault_id}/interview-review-batches/"
             f"{review_batch_id}/acknowledgement"
+        )
+
+    @staticmethod
+    def _candidate_proposal_admission_path(vault_id: str, review_batch_id: str) -> str:
+        return (
+            f"/v2/vaults/{vault_id}/interview-review-batches/"
+            f"{review_batch_id}/candidate-proposal/admit"
         )
 
     def _create_formal_pending_batch(
@@ -263,6 +299,124 @@ class OwnerTruthInterviewFormalReviewBatchInboxAPITests(unittest.TestCase):
         denied = client.get(self._pending_path(vault_id), headers=other_headers)
         self.assertEqual(denied.status_code, 403, denied.text)
         self.assertEqual(denied.json()["detail"]["code"], "ownerTruthInterviewSessionDenied")
+
+    def test_formal_candidate_proposal_admission_persists_its_own_capture(self) -> None:
+        _owner_id, auth_headers, auth_session_id = self._login("13800139626")
+        echo_headers = self._with_echo_capture(
+            auth_headers,
+            auth_session_id=auth_session_id,
+            decision_id="decision-formal-candidate-proposal-echo",
+        )
+        vault_id = "vault-formal-candidate-proposal-admission"
+        thread_id, session_id, _session_version = self._create_formal_pending_batch(
+            vault_id=vault_id,
+            headers=echo_headers,
+        )
+        pending = client.get(self._pending_path(vault_id), headers=echo_headers)
+        self.assertEqual(pending.status_code, 200, pending.text)
+        item = pending.json()["reviewBatches"][0]
+        review_batch_id = str(item["reviewBatchId"])
+        acknowledged = client.post(
+            self._acknowledgement_path(vault_id, review_batch_id),
+            headers=echo_headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "sessionId": session_id,
+                "expectedSessionVersion": int(item["sessionVersion"]),
+                "expectedReviewBatchVersion": int(item["reviewBatchVersion"]),
+            },
+        )
+        self.assertEqual(acknowledged.status_code, 201, acknowledged.text)
+        review_batch_version = int(acknowledged.json()["reviewBatch"]["rowVersion"])
+        admission_path = self._candidate_proposal_admission_path(vault_id, review_batch_id)
+        command_id = str(uuid4())
+        payload = {
+            "commandId": command_id,
+            "expectedReviewBatchVersion": review_batch_version,
+        }
+
+        missing = client.post(admission_path, headers=auth_headers, json=payload)
+        self.assertEqual(missing.status_code, 403, missing.text)
+        self.assertEqual(missing.json()["detail"]["code"], "release_policy_denied")
+        wrong_feature = client.post(admission_path, headers=echo_headers, json=payload)
+        self.assertEqual(wrong_feature.status_code, 403, wrong_feature.text)
+        self.assertEqual(wrong_feature.json()["detail"]["code"], "release_policy_denied")
+
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthCandidateReview"
+        }
+        try:
+            formal_headers = self._with_candidate_review_capture(
+                auth_headers,
+                auth_session_id=auth_session_id,
+                decision_id="decision-formal-candidate-proposal-admit",
+            )
+            admitted = client.post(admission_path, headers=formal_headers, json=payload)
+            self.assertEqual(admitted.status_code, 201, admitted.text)
+            body = admitted.json()
+            self.assertEqual(body["status"], "created")
+            self.assertEqual(body["source"], {"status": "admitted", "kind": "conversation", "version": 1})
+            self.assertEqual(body["candidate"], {"status": "notCreated"})
+            rendered = json.dumps(body, ensure_ascii=False, sort_keys=True)
+            for forbidden in (
+                "正式批次收件箱私有叙述",
+                "sourceId",
+                "effectOperationId",
+                "candidateId",
+                "memoryVersionId",
+                "provider",
+                "authorization",
+            ):
+                self.assertNotIn(forbidden, rendered)
+
+            admissions = self.store.owner_truth_interview_candidate_proposal_repository().snapshot()
+            self.assertEqual(len(admissions["admissionsByBatch"]), 1)
+            admission = next(iter(admissions["admissionsByBatch"].values()))
+            capture = admission["authorizationCapture"]
+            self.assertIsNotNone(capture)
+            self.assertEqual(capture.feature, "ownerTruthCandidateReview")
+            evidence = str(capture.value_minimized_payload())
+            self.assertNotIn(auth_session_id, evidence)
+            self.assertNotIn("decision-formal-candidate-proposal-admit", evidence)
+
+            source = next(
+                source
+                for (source_vault_id, _source_id), source in self.store._owner_truth_sources.items()
+                if source_vault_id == vault_id
+            )
+            self.assertNotIn("authorizationCapture", source["metadata"])
+            self.assertNotIn("ownerTruthCandidateReview", str(source["metadata"]))
+            effect = next(iter(self.store.effect_kernel_repository().snapshot().values()))["intent"]
+            self.assertNotIn("ownerTruthCandidateReview", str(effect))
+
+            replay = client.post(
+                admission_path,
+                headers=self._with_candidate_review_capture(
+                    auth_headers,
+                    auth_session_id=auth_session_id,
+                    decision_id="decision-formal-candidate-proposal-retry",
+                ),
+                json=payload,
+            )
+            self.assertEqual(replay.status_code, 200, replay.text)
+            self.assertEqual(replay.json()["status"], "deduplicated")
+
+            main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
+            qa_cross_replay = client.post(
+                admission_path,
+                headers={**auth_headers, "X-DreamJourney-QA-Owner-Truth": "1"},
+                json=payload,
+            )
+            self.assertEqual(qa_cross_replay.status_code, 409, qa_cross_replay.text)
+            self.assertEqual(
+                qa_cross_replay.json()["detail"]["code"],
+                "ownerTruthInterviewCandidateProposalConflict",
+            )
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 
 
 if __name__ == "__main__":

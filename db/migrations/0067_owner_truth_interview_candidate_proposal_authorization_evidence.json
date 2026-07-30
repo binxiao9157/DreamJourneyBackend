@@ -1,0 +1,13 @@
+{
+  "version": "0067",
+  "name": "owner_truth_interview_candidate_proposal_authorization_evidence",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthInterviewCandidateProposalFormalAuthorityEvidence",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthCandidateReview": false,
+    "ownerTruthInterviewCandidateProposalM0A": false
+  }
+}

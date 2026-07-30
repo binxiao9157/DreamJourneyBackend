@@ -17,7 +17,10 @@ from typing import Any, Mapping
 from uuid import UUID, uuid5
 
 from .contracts import OwnerTruthContractError, require_nonblank, require_uuid
-from .source_commands import OwnerTruthCommandContext
+from .source_commands import (
+    OwnerTruthCommandAuthorizationCapture,
+    OwnerTruthCommandContext,
+)
 
 
 OWNER_TRUTH_INTERVIEW_CANDIDATE_PROPOSAL_SCHEMA_VERSION = (
@@ -25,6 +28,7 @@ OWNER_TRUTH_INTERVIEW_CANDIDATE_PROPOSAL_SCHEMA_VERSION = (
 )
 _ADMISSION_NAMESPACE = UUID("08c7d44f-a75c-4d79-8d3d-cb70b1b3a4d1")
 _SOURCE_NAMESPACE = UUID("049c9b72-4e8e-450b-afb5-3c33d2aeba61")
+_FORMAL_CANDIDATE_PROPOSAL_FEATURE = "ownerTruthCandidateReview"
 
 
 class OwnerTruthInterviewCandidateProposalError(OwnerTruthContractError):
@@ -134,6 +138,7 @@ class AdmitInterviewReviewBatchForCandidateProposalCommand:
             owner_subject_id=context.owner_subject_id,
             actor_subject_id=context.actor_subject_id,
             policy_version=context.policy_version,
+            authorization_capture=context.authorization_capture,
         )
 
 
@@ -149,6 +154,7 @@ class OwnerTruthInterviewCandidateProposalWriteRecord:
     owner_subject_id: str
     actor_subject_id: str
     policy_version: str
+    authorization_capture: OwnerTruthCommandAuthorizationCapture | None = None
 
     def __post_init__(self) -> None:
         for field in ("admission_id", "review_batch_id", "source_id"):
@@ -166,6 +172,17 @@ class OwnerTruthInterviewCandidateProposalWriteRecord:
         )
         for field in ("vault_id", "owner_subject_id", "actor_subject_id", "policy_version"):
             object.__setattr__(self, field, require_nonblank(getattr(self, field), field=field))
+        capture = self.authorization_capture
+        if capture is not None:
+            if not isinstance(capture, OwnerTruthCommandAuthorizationCapture):
+                raise OwnerTruthInterviewCandidateProposalError(
+                    "authorization_capture must be an OwnerTruthCommandAuthorizationCapture"
+                )
+            if capture.feature != _FORMAL_CANDIDATE_PROPOSAL_FEATURE:
+                raise OwnerTruthInterviewCandidateProposalError(
+                    "formal interview Candidate proposal admission requires "
+                    "ownerTruthCandidateReview authorization"
+                )
 
     @property
     def source_command_id(self) -> str:

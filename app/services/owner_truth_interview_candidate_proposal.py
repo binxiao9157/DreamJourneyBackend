@@ -17,7 +17,7 @@ from threading import RLock
 from typing import Any, Callable, ContextManager, Mapping, Protocol
 
 from app.async_effects.contracts import EffectReceiptSummary
-from app.domain.owner_truth.contracts import SourceKind, require_uuid
+from app.domain.owner_truth.contracts import OwnerTruthContractError, SourceKind, require_uuid
 from app.domain.owner_truth.interview_candidate_proposal import (
     AdmitInterviewReviewBatchForCandidateProposalCommand,
     OwnerTruthInterviewCandidateProposalAccessDenied,
@@ -30,11 +30,15 @@ from app.domain.owner_truth.interview_candidate_proposal import (
 )
 from app.domain.owner_truth.source_commands import (
     CreateTextSourceCommand,
+    OwnerTruthCommandAuthorizationCapture,
     OwnerTruthCommandContext,
     OwnerTruthSourceCommandResult,
     OwnerTruthSourceWriteRecord,
 )
 from app.services.owner_truth_source import build_source_created_effect_intent
+
+
+FORMAL_INTERVIEW_CANDIDATE_PROPOSAL_FEATURE = "ownerTruthCandidateReview"
 
 
 class OwnerTruthInterviewCandidateProposalRepository(Protocol):
@@ -445,6 +449,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 "ownerMessageCount": preparation.owner_message_count,
                 "actorSubjectId": record.actor_subject_id,
                 "policyVersion": record.policy_version,
+                "authorizationCapture": record.authorization_capture,
             }
             self._admissions_by_command[(record.vault_id, record.command_id_hash)] = item
             self._admissions_by_batch[(record.vault_id, record.review_batch_id)] = item
@@ -738,6 +743,10 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
             raise OwnerTruthInterviewCandidateProposalConflict(
                 "commandId cannot be reused with a different review batch candidate proposal admission"
             )
+        _assert_replay_authorization_capture(
+            existing=item.get("authorizationCapture"),
+            expected=record.authorization_capture,
+        )
 
     @staticmethod
     def _result_from_item(
@@ -866,9 +875,9 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                     id, vault_id, owner_subject_id, review_batch_id,
                     source_id, source_version, source_content_hash,
                     effect_operation_id, command_id_hash, payload_hash,
-                    actor_subject_id, policy_version, authority_epoch,
+                    actor_subject_id, policy_version, authorization_evidence, authority_epoch,
                     owner_message_count, first_message_sequence, last_message_sequence
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, review_batch_id, source_id, source_version,
                     source_content_hash, effect_operation_id, owner_message_count
                 """,
@@ -885,6 +894,7 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                     record.payload_hash,
                     record.actor_subject_id,
                     record.policy_version,
+                    _authorization_capture_json(record.authorization_capture),
                     source.authority_epoch,
                     preparation.owner_message_count,
                     preparation.first_message_sequence,
@@ -1202,7 +1212,8 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
             """
             SELECT id, review_batch_id, source_id, source_version,
                 source_content_hash, effect_operation_id, owner_message_count,
-                command_id_hash, payload_hash, actor_subject_id, policy_version
+                command_id_hash, payload_hash, actor_subject_id, policy_version,
+                authorization_evidence
             FROM owner_truth.interview_review_batch_candidate_admissions
             WHERE vault_id = %s AND command_id_hash = %s
             FOR UPDATE
@@ -1225,6 +1236,10 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
             raise OwnerTruthInterviewCandidateProposalConflict(
                 "commandId cannot be reused with a different review batch candidate proposal admission"
             )
+        _assert_replay_authorization_capture(
+            existing=_authorization_capture_from_database(row.get("authorization_evidence")),
+            expected=record.authorization_capture,
+        )
         return row
 
     @staticmethod
@@ -1237,7 +1252,8 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
             """
             SELECT id, review_batch_id, source_id, source_version,
                 source_content_hash, effect_operation_id, owner_message_count,
-                command_id_hash, payload_hash, actor_subject_id, policy_version
+                command_id_hash, payload_hash, actor_subject_id, policy_version,
+                authorization_evidence
             FROM owner_truth.interview_review_batch_candidate_admissions
             WHERE vault_id = %s AND review_batch_id = %s
             FOR UPDATE
@@ -1271,6 +1287,74 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
             dict_row = None
         with self._connection.cursor(row_factory=dict_row) as cursor:
             yield cursor
+
+
+def _assert_replay_authorization_capture(
+    *,
+    existing: OwnerTruthCommandAuthorizationCapture | None,
+    expected: OwnerTruthCommandAuthorizationCapture | None,
+) -> None:
+    """Keep legacy QA admissions and formal admissions non-interchangeable.
+
+    An idempotent formal retry may carry a fresh release-policy decision or
+    expiry. The immutable admission root only needs to prove the same formal
+    feature was used originally; it must never let a QA-only replay impersonate
+    that root, or vice versa.
+    """
+
+    if (existing is None) != (expected is None):
+        raise OwnerTruthInterviewCandidateProposalConflict(
+            "commandId cannot replay between QA-only and formally authorized candidate proposal admission"
+        )
+    if (
+        existing is not None
+        and expected is not None
+        and existing.feature != expected.feature
+    ):
+        raise OwnerTruthInterviewCandidateProposalConflict(
+            "commandId cannot replay under a different authorization feature"
+        )
+
+
+def _authorization_capture_json(
+    capture: OwnerTruthCommandAuthorizationCapture | None,
+) -> Any:
+    payload = {} if capture is None else capture.value_minimized_payload()
+    try:
+        from psycopg.types.json import Jsonb
+    except ImportError:  # pragma: no cover - production dependency
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return Jsonb(payload)
+
+
+def _authorization_capture_from_database(
+    value: object,
+) -> OwnerTruthCommandAuthorizationCapture | None:
+    if value is None or value == {}:
+        return None
+    payload = value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise OwnerTruthInterviewCandidateProposalConflict(
+                "stored candidate proposal authorization evidence is not valid JSON"
+            ) from exc
+    if not isinstance(payload, Mapping):
+        raise OwnerTruthInterviewCandidateProposalConflict(
+            "stored candidate proposal authorization evidence must be an object"
+        )
+    try:
+        capture = OwnerTruthCommandAuthorizationCapture.from_value_minimized_payload(payload)
+    except (OwnerTruthContractError, TypeError, ValueError) as exc:
+        raise OwnerTruthInterviewCandidateProposalConflict(
+            "stored candidate proposal authorization evidence is malformed"
+        ) from exc
+    if capture.feature != FORMAL_INTERVIEW_CANDIDATE_PROPOSAL_FEATURE:
+        raise OwnerTruthInterviewCandidateProposalConflict(
+            "stored candidate proposal authorization evidence has an unsupported feature"
+        )
+    return capture
 
 
 __all__ = [
