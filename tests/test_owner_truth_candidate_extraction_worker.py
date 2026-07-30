@@ -111,6 +111,20 @@ class _FailingExtractor:
         raise RuntimeError("deterministic extractor fixture failure")
 
 
+class _RecordingMetricRecorder:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def record_attempt(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(dict(kwargs))
+        return {"sinkOutcome": "notConfigured"}
+
+
+class _FailingMetricRecorder:
+    def record_attempt(self, **_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("metric sink unavailable")
+
+
 class _PostgresInputCursor:
     def __init__(self, row: dict[str, object]) -> None:
         self.row = row
@@ -180,6 +194,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         store: _Store | None = None,
         enabled: bool = True,
         extractor=None,
+        operation_metric_recorder=None,
     ) -> OwnerTruthCandidateExtractionWorkerRuntime:
         return OwnerTruthCandidateExtractionWorkerRuntime(
             settings=Settings(
@@ -191,6 +206,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
             worker_id="candidate-extraction-worker-test",
             retry_seconds=5,
             extractor=extractor,
+            operation_metric_recorder=operation_metric_recorder,
         )
 
     def test_default_disabled_worker_does_not_claim_a_candidate_extraction_job(self) -> None:
@@ -303,6 +319,29 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         )
         self.assertEqual(self.store.candidate_repository.snapshot()["extractions"], {})
         self.assertEqual(self.store.consumer_repository._inbox, {})
+
+    def test_claimed_job_records_value_free_worker_attempt_metric(self) -> None:
+        recorder = _RecordingMetricRecorder()
+
+        result = self._worker(operation_metric_recorder=recorder).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(recorder.calls), 1)
+        call = recorder.calls[0]
+        self.assertEqual(call["component_kind"], "worker")
+        self.assertEqual(call["component_id"], "ownerTruthCandidateExtractionWorker")
+        self.assertEqual(call["operation"], "ownerTruthCandidateExtraction")
+        self.assertEqual(call["outcome"], "succeeded")
+        self.assertEqual(call["feedback_state"], "notApplicable")
+        self.assertEqual(call["request_key"], result["jobId"])
+        self.assertEqual(call["operation_key"], result["operationId"])
+        self.assertNotIn(self.source_text, json.dumps(call, ensure_ascii=False, sort_keys=True))
+
+    def test_metric_failure_does_not_change_private_extraction_result(self) -> None:
+        result = self._worker(operation_metric_recorder=_FailingMetricRecorder()).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["candidateCount"], 1)
 
     def test_postgres_input_repository_reads_source_text_only_under_share_lock(self) -> None:
         connection = _PostgresInputConnection(

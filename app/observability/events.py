@@ -130,7 +130,9 @@ class OperationMetricEvidenceEvent(EvidenceEventBase):
     requestIdHash: Digest
     attemptIdHash: Digest
     operation: MachineCode
-    route: RouteCode
+    componentKind: Literal["httpRoute", "worker"] = "httpRoute"
+    route: Optional[RouteCode] = None
+    componentId: Optional[MachineCode] = None
     outcome: OperationMetricOutcome
     feedbackState: OperationMetricFeedbackState
     latencyMs: Optional[int] = Field(default=None, ge=0, le=86_400_000)
@@ -141,6 +143,16 @@ class OperationMetricEvidenceEvent(EvidenceEventBase):
         expected_state = _OPERATION_METRIC_OUTCOME_STATES[self.outcome]
         if self.state != expected_state:
             raise ValueError("operation metric state does not match outcome")
+        if self.componentKind == "httpRoute":
+            if self.route is None or self.componentId is not None:
+                raise ValueError("http route metrics require route and forbid componentId")
+            if self.resourceType not in {None, "httpRoute"}:
+                raise ValueError("http route metrics require httpRoute resourceType")
+        else:
+            if self.route is not None or self.componentId is None:
+                raise ValueError("worker metrics require componentId and forbid route")
+            if self.resourceType not in {None, "workerRuntime"}:
+                raise ValueError("worker metrics require workerRuntime resourceType")
         return self
 
 

@@ -82,7 +82,15 @@ reach the container-only PostgreSQL hostname.
 
 ## Observability Status
 
-The worker is explicitly cataloged as `NOT_INSTRUMENTED` in
-`app/observability/operation_metric_coverage.py`. It therefore cannot support
-an SLO or production-readiness claim until a value-free worker recorder is
-attached in a later observability slice.
+Each claimed worker attempt now emits a value-free shadow metric through
+`OperationMetricRecorder`. The record contains only HMAC-protected job and
+operation identifiers, component code, outcome, attempt, and duration. It
+never contains Source text, Candidate payloads, owner identity, or a synthetic
+HTTP route. Metric failures are ignored so they cannot alter extraction, lease,
+or Candidate outcomes.
+
+Only this worker is cataloged as `INSTRUMENTED` in
+`app/observability/operation_metric_coverage.py`. The generic async worker and
+MemoryProjection worker remain `NOT_INSTRUMENTED`; coverage is incomplete and
+this is neither an SLO claim nor a production-readiness claim. No runtime flag
+is enabled by this observability work.

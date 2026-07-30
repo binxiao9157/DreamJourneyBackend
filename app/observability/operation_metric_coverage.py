@@ -71,8 +71,8 @@ CRITICAL_WORKER_COVERAGE = (
             "OwnerTruthCandidateExtractionWorkerRuntime"
         ),
         component_kind="worker",
-        status=OperationMetricCoverageStatus.NOT_INSTRUMENTED,
-        reason_code="workerRecorderNotAttached",
+        status=OperationMetricCoverageStatus.INSTRUMENTED,
+        reason_code="workerAttemptRecorderAttached",
     ),
 )
 

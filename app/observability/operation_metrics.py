@@ -82,15 +82,27 @@ class OperationMetricRecorder:
         request_key: str,
         operation_key: str,
         attempt: int,
-        route: str,
         operation: str,
         outcome: str,
         feedback_state: str,
+        route: Optional[str] = None,
+        component_kind: str = "httpRoute",
+        component_id: Optional[str] = None,
         occurred_at: Optional[datetime] = None,
         latency_ms: Optional[int] = None,
         http_status: Optional[int] = None,
         correlation_key: Optional[str] = None,
     ) -> OperationMetricEvidenceEvent:
+        normalized_component_kind = str(component_kind or "").strip()
+        if normalized_component_kind not in {"httpRoute", "worker"}:
+            raise ValueError("operation metric component_kind is unsupported")
+        normalized_route = str(route or "").strip() or None
+        normalized_component_id = str(component_id or "").strip() or None
+        if normalized_component_kind == "httpRoute":
+            if normalized_route is None or normalized_component_id is not None:
+                raise ValueError("http route metric requires route and forbids component_id")
+        elif normalized_route is not None or normalized_component_id is None:
+            raise ValueError("worker metric requires component_id and forbids route")
         instant = _utc_timestamp(occurred_at)
         request_hash = self._identifier_hash("request", request_key)
         operation_id = self._machine_code_hash("opm", "operation", operation_key)
@@ -122,7 +134,9 @@ class OperationMetricRecorder:
             operationId=operation_id,
             correlationId=correlation_id,
             principalHash=None,
-            resourceType="httpRoute",
+            resourceType=(
+                "httpRoute" if normalized_component_kind == "httpRoute" else "workerRuntime"
+            ),
             resourceIdHash=None,
             state=state,
             reason=reason,
@@ -133,7 +147,9 @@ class OperationMetricRecorder:
             requestIdHash=request_hash,
             attemptIdHash=attempt_hash,
             operation=operation,
-            route=route,
+            componentKind=normalized_component_kind,
+            route=normalized_route,
+            componentId=normalized_component_id,
             outcome=normalized_outcome,
             feedbackState=feedback_state,
             latencyMs=latency_ms,
@@ -233,6 +249,7 @@ def summarize_operation_metrics(
     request_ids = {event.requestIdHash for event in events}
     operation_attempts: dict[str, list[OperationMetricEvidenceEvent]] = defaultdict(list)
     route_counts: Counter[str] = Counter()
+    worker_component_counts: Counter[str] = Counter()
     outcome_counts: Counter[str] = Counter()
     feedback_counts: Counter[str] = Counter()
     environments: Counter[str] = Counter()
@@ -240,7 +257,12 @@ def summarize_operation_metrics(
     redaction_versions: Counter[str] = Counter()
     for event in events:
         operation_attempts[event.operationId].append(event)
-        route_counts[event.route] += 1
+        if event.componentKind == "httpRoute":
+            assert event.route is not None
+            route_counts[event.route] += 1
+        else:
+            assert event.componentId is not None
+            worker_component_counts[event.componentId] += 1
         outcome_counts[event.outcome] += 1
         feedback_counts[event.feedbackState] += 1
         environments[event.env] += 1
@@ -286,6 +308,7 @@ def summarize_operation_metrics(
         "finalOperationOutcomeCounts": dict(sorted(final_outcomes.items())),
         "feedbackCounts": dict(sorted(feedback_counts.items())),
         "routeCounts": dict(sorted(route_counts.items())),
+        "workerComponentCounts": dict(sorted(worker_component_counts.items())),
         "routeCoverage": {
             "expectedRouteCount": len(expected_route_set),
             "coveredRouteCount": len(covered_routes & expected_route_set)
@@ -339,6 +362,7 @@ def summarize_operation_metrics_for_observations(
         "outcomeCounts": dict(summary.get("outcomeCounts") or {}),
         "finalOperationOutcomeCounts": dict(summary.get("finalOperationOutcomeCounts") or {}),
         "feedbackCounts": dict(summary.get("feedbackCounts") or {}),
+        "workerComponentCount": len(dict(summary.get("workerComponentCounts") or {})),
         "routeCoverage": {
             "expectedRouteCount": int(coverage.get("expectedRouteCount") or 0),
             "coveredRouteCount": int(coverage.get("coveredRouteCount") or 0),

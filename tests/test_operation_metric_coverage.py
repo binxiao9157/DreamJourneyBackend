@@ -28,7 +28,7 @@ class OperationMetricCoverageTests(unittest.TestCase):
             all(entry.status is OperationMetricCoverageStatus.INSTRUMENTED for entry in route_entries)
         )
 
-    def test_all_worker_runtimes_are_explicitly_cataloged_and_not_overclaimed(self) -> None:
+    def test_all_worker_runtimes_are_explicitly_cataloged_with_scoped_coverage(self) -> None:
         root = Path(__file__).resolve().parents[1] / "app" / "async_effects"
         discovered: set[str] = set()
         for path in root.rglob("*.py"):
@@ -42,11 +42,19 @@ class OperationMetricCoverageTests(unittest.TestCase):
 
         catalog = {entry.component_id for entry in CRITICAL_WORKER_COVERAGE}
         self.assertEqual(discovered, catalog)
-        self.assertTrue(
-            all(
+        candidate_worker = next(
+            entry
+            for entry in CRITICAL_WORKER_COVERAGE
+            if entry.component_id.endswith("OwnerTruthCandidateExtractionWorkerRuntime")
+        )
+        self.assertIs(candidate_worker.status, OperationMetricCoverageStatus.INSTRUMENTED)
+        self.assertEqual(candidate_worker.reason_code, "workerAttemptRecorderAttached")
+        self.assertEqual(
+            sum(
                 entry.status is OperationMetricCoverageStatus.NOT_INSTRUMENTED
                 for entry in CRITICAL_WORKER_COVERAGE
-            )
+            ),
+            2,
         )
 
     def test_worker_gap_is_fail_closed_and_observation_summary_is_value_free(self) -> None:
@@ -55,7 +63,8 @@ class OperationMetricCoverageTests(unittest.TestCase):
 
         self.assertEqual(summary["schemaVersion"], OPERATION_METRIC_COVERAGE_SCHEMA_VERSION)
         self.assertEqual(summary["httpRouteCoverage"]["instrumentedCount"], 1)
-        self.assertEqual(summary["criticalWorkerCoverage"]["notInstrumentedCount"], 3)
+        self.assertEqual(summary["criticalWorkerCoverage"]["instrumentedCount"], 1)
+        self.assertEqual(summary["criticalWorkerCoverage"]["notInstrumentedCount"], 2)
         self.assertFalse(summary["coverageComplete"])
         self.assertFalse(summary["sloClaimAllowed"])
         self.assertTrue(summary["valueFree"])

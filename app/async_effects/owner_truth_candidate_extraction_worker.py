@@ -13,6 +13,7 @@ import argparse
 from hashlib import sha256
 import json
 import socket
+from time import perf_counter
 from typing import Any, Optional, Protocol
 
 from app.async_effects.consumer_repository import OwnerTruthSourceBlockedConsumerCommand
@@ -41,6 +42,7 @@ from app.domain.owner_truth.contracts import (
     SensitivityLevel,
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.observability.operation_metrics import OperationMetricRecorder
 from app.services.owner_truth_candidate_extraction import (
     OwnerTruthCandidateExtractionInput,
     OwnerTruthCandidateExtractionResult,
@@ -53,6 +55,7 @@ _CONSUMER_NAME = "ownerTruth.source.extraction"
 _SOURCE_CANDIDATE_EXTRACTION_JOB_TYPE = "ownerTruth.source.created"
 _DEFAULT_LEASE_SECONDS = 60
 _DEFAULT_RETRY_SECONDS = 30
+_WORKER_METRIC_COMPONENT_ID = "ownerTruthCandidateExtractionWorker"
 
 
 class OwnerTruthCandidateExtractionWorkerError(RuntimeError):
@@ -142,6 +145,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
         lease_seconds: int = _DEFAULT_LEASE_SECONDS,
         retry_seconds: int = _DEFAULT_RETRY_SECONDS,
         extractor: OwnerTruthCandidateExtractor | None = None,
+        operation_metric_recorder: OperationMetricRecorder | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
@@ -151,8 +155,10 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
         self._lease_seconds = max(1, int(lease_seconds))
         self._retry_seconds = max(1, int(retry_seconds))
         self._extractor = extractor or DeterministicOwnerTruthCandidateExtractor()
+        self._operation_metric_recorder = operation_metric_recorder or self._make_metric_recorder()
 
     def run_once(self) -> dict[str, Any]:
+        started_at = perf_counter()
         reason = self._runtime_block_reason()
         if reason is not None:
             return self._payload(status="blocked", reason=reason)
@@ -169,21 +175,66 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 correlation_id=f"owner-truth-candidate-extraction-worker-{lease.job_id}",
                 command_id=f"ownerTruthCandidateExtractionWorker:{lease.operation_id}",
             ):
-                return self._consume_current_lease(lease)
+                result = self._consume_current_lease(lease)
         except AsyncEffectLeaseCancelled:
-            return self._payload(
+            result = self._payload(
                 status="cancelled",
                 reason="candidateExtractionCancelled",
                 lease=lease,
             )
         except AsyncEffectLeaseLost:
-            return self._payload(
+            result = self._payload(
                 status="lost",
                 reason="candidateExtractionLeaseLost",
                 lease=lease,
             )
         except Exception:
-            return self._release_retryable(lease)
+            result = self._release_retryable(lease)
+        self._record_attempt(lease=lease, result=result, started_at=started_at)
+        return result
+
+    def _make_metric_recorder(self) -> OperationMetricRecorder:
+        sink = getattr(self._store, "append_evidence_event", None)
+        return OperationMetricRecorder(
+            environment=self._settings.environment,
+            build="backend-owner-truth-candidate-worker",
+            event_sink=sink if callable(sink) else None,
+            retention_days=self._settings.evidence_rollout_retention_days,
+            identifier_hmac_key=self._settings.operations_evidence_hmac_key,
+        )
+
+    def _record_attempt(
+        self,
+        *,
+        lease: AsyncEffectJobLease,
+        result: dict[str, Any],
+        started_at: float,
+    ) -> None:
+        # Shadow observability must never alter a private extraction outcome.
+        try:
+            status = str(result.get("status") or "").strip()
+            outcome = {
+                "completed": "succeeded",
+                "blocked": "cancelled",
+                "cancelled": "cancelled",
+                "lost": "unknown",
+                "retryWait": "failed",
+                "failed": "failed",
+            }.get(status, "unknown")
+            self._operation_metric_recorder.record_attempt(
+                request_key=lease.job_id,
+                operation_key=lease.operation_id,
+                attempt=lease.attempt,
+                component_kind="worker",
+                component_id=_WORKER_METRIC_COMPONENT_ID,
+                operation="ownerTruthCandidateExtraction",
+                outcome=outcome,
+                feedback_state="notApplicable",
+                latency_ms=max(0, int((perf_counter() - started_at) * 1000)),
+                correlation_key=f"ownerTruthCandidateExtraction:{lease.operation_id}",
+            )
+        except Exception:
+            return
 
     def _consume_current_lease(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
         lease_repository = self._store.async_effect_lease_repository()

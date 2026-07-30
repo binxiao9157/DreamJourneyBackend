@@ -110,6 +110,44 @@ class OperationMetricContractTests(unittest.TestCase):
         self.assertEqual(summary["cancelledOperationCount"], 1)
         self.assertEqual(summary["timedOutOperationCount"], 1)
 
+    def test_worker_attempt_has_no_synthetic_route_and_stays_value_free(self):
+        recorder = OperationMetricRecorder(
+            environment="test",
+            build="backend-test",
+            identifier_hmac_key="operation-metrics-test-key-" + ("y" * 32),
+        )
+        event = recorder.build_event(
+            request_key="private-job-id",
+            operation_key="private-operation-id",
+            attempt=2,
+            component_kind="worker",
+            component_id="ownerTruthCandidateExtractionWorker",
+            operation="ownerTruthCandidateExtraction",
+            outcome="succeeded",
+            feedback_state="notApplicable",
+            occurred_at=self.occurred_at,
+            latency_ms=17,
+        )
+
+        summary = summarize_operation_metrics(
+            [event.model_dump(mode="json")],
+            expected_routes={"POST /context/build"},
+        )
+
+        self.assertEqual(event.componentKind, "worker")
+        self.assertIsNone(event.route)
+        self.assertEqual(event.componentId, "ownerTruthCandidateExtractionWorker")
+        self.assertEqual(event.resourceType, "workerRuntime")
+        self.assertEqual(summary["routeCounts"], {})
+        self.assertEqual(
+            summary["workerComponentCounts"],
+            {"ownerTruthCandidateExtractionWorker": 1},
+        )
+        self.assertEqual(summary["routeCoverage"]["coveredRouteCount"], 0)
+        serialized = event.model_dump_json()
+        self.assertNotIn("private-job-id", serialized)
+        self.assertNotIn("private-operation-id", serialized)
+
     def test_event_schema_rejects_body_prompt_media_and_identity_fields(self):
         event = OperationMetricRecorder(environment="test", build="backend-test").build_event(
             request_key="request-1",
