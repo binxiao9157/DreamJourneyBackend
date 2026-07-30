@@ -19,7 +19,8 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
   app/services/owner_truth_memory_projection_effects.py \
   app/async_effects/target_admission.py \
   app/async_effects/consumer_repository.py \
-  app/async_effects/owner_truth_memory_projection_worker.py
+  app/async_effects/owner_truth_memory_projection_worker.py \
+  scripts/backend-owner-truth-postgres-smoke.py
 
 "$PYTHON_BIN" - <<'PY'
 from pathlib import Path
@@ -31,6 +32,7 @@ effects = Path("app/services/owner_truth_memory_projection_effects.py").read_tex
 admission = Path("app/async_effects/target_admission.py").read_text(encoding="utf-8")
 consumer = Path("app/async_effects/consumer_repository.py").read_text(encoding="utf-8")
 worker = Path("app/async_effects/owner_truth_memory_projection_worker.py").read_text(encoding="utf-8")
+postgres_smoke = Path("scripts/backend-owner-truth-postgres-smoke.py").read_text(encoding="utf-8")
 migration = Path("db/migrations/0061_owner_truth_projection_rights_fence.sql").read_text(
     encoding="utf-8"
 )
@@ -80,6 +82,13 @@ for required in (
 ):
     assert required in worker, required
 for required in (
+    "OwnerTruthProjectionRightsService",
+    "MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE",
+    "projectionRightsNotActive",
+    "rights rebuild effects must persist one completed and one fail-closed terminal receipt",
+):
+    assert required in postgres_smoke, required
+for required in (
     "CREATE TABLE owner_truth.projection_rights_events",
     "rights_revision",
     "rights_event_hash",
@@ -91,3 +100,7 @@ for forbidden in ("APIRouter", "@router", "/context/build", "provider"):
     assert forbidden not in service, forbidden
 print("Owner Truth projection rights fence G0 contract gate passed")
 PY
+
+if [[ "${RUN_OWNER_TRUTH_PROJECTION_RIGHTS_POSTGRES_SMOKE:-0}" == "1" ]]; then
+  PYTHONPATH=. "$PYTHON_BIN" scripts/backend-owner-truth-postgres-smoke.py
+fi

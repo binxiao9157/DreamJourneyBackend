@@ -49,6 +49,10 @@ from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateReviewSourceInactive,
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.projection_rights import (
+    OwnerTruthProjectionRightsRevisionCommand,
+    ProjectionRightsState,
+)
 from app.services.owner_truth_source import (
     ArchiveOwnerTruthCompatibilityFacade,
     OwnerTruthSourceCommandService,
@@ -94,7 +98,10 @@ from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
     MEMORY_PROJECTION_REBUILD_JOB_TYPE,
     MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
+    MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE,
+    MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE,
 )
+from app.services.owner_truth_projection_rights import OwnerTruthProjectionRightsService
 from app.services.postgres_store import PostgresStore
 
 
@@ -873,6 +880,98 @@ def main() -> None:
                 and projection_ready["checkpoint"]
                 == first_projection_worker_result["projectionCheckpoint"],
                 "accepted and corrected MemoryVersions must be projection-visible",
+            )
+
+            projection_rights_service = OwnerTruthProjectionRightsService(store)
+            active_rights = projection_rights_service.record(
+                context=review_context,
+                command=OwnerTruthProjectionRightsRevisionCommand(
+                    command_id="owner-truth-projection-rights-active-smoke",
+                    authority_epoch=0,
+                    expected_revision=0,
+                    state=ProjectionRightsState.ACTIVE,
+                    event_hash=canonical_hash({"kind": "projection-rights-active"}),
+                ),
+            )
+            active_rights_replay = projection_rights_service.record(
+                context=review_context,
+                command=OwnerTruthProjectionRightsRevisionCommand(
+                    command_id="owner-truth-projection-rights-active-smoke",
+                    authority_epoch=0,
+                    expected_revision=0,
+                    state=ProjectionRightsState.ACTIVE,
+                    event_hash=canonical_hash({"kind": "projection-rights-active"}),
+                ),
+            )
+            require(
+                active_rights.outcome == "recorded"
+                and active_rights.snapshot.revision == 1
+                and active_rights.snapshot.state is ProjectionRightsState.ACTIVE
+                and active_rights_replay.outcome == "deduplicated",
+                "active rights revision must persist one idempotent projection rebuild request",
+            )
+            projection_rights_pending = projection_service.read(context=review_context)
+            require(
+                projection_rights_pending["state"] == "rebuilding"
+                and projection_rights_pending["rebuildReason"] == "rightsRevisionChanged"
+                and projection_rights_pending["entries"] == [],
+                "a recorded active rights revision must invalidate the prior projection checkpoint",
+            )
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT operation_type, resource_type, resource_id, resource_version,
+                            purpose, authority_epoch, payload_hash, state
+                        FROM async_effects.operations
+                        WHERE vault_id = %s AND operation_type = %s
+                        """,
+                        (review_vault_id, MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE),
+                    )
+                    active_rights_operations = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT event_type, state
+                        FROM async_effects.outbox_events
+                        WHERE vault_id = %s AND event_type = %s
+                        """,
+                        (review_vault_id, MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE),
+                    )
+                    active_rights_events = cursor.fetchall()
+            require(
+                active_rights_operations
+                == [
+                    (
+                        MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE,
+                        "projectionRightsRevision",
+                        "projectionRightsRevision:1",
+                        1,
+                        "compatibilityProjectionRights",
+                        0,
+                        active_rights.snapshot.event_hash,
+                        "accepted",
+                    )
+                ]
+                and active_rights_events
+                == [(MEMORY_PROJECTION_RIGHTS_REBUILD_EVENT_TYPE, "pending")],
+                "rights rebuild intent must remain opaque, typed and pending before the worker runs",
+            )
+            active_rights_worker_result = projection_worker.run_once()
+            require(
+                active_rights_worker_result["status"] == "completed"
+                and active_rights_worker_result["reason"] == "memoryProjectionRebuilt"
+                and active_rights_worker_result["projectionOutcome"] == "rebuilt"
+                and active_rights_worker_result["jobState"] == "succeeded"
+                and active_rights_worker_result["operationState"] == "completed"
+                and active_rights_worker_result["consumerInboxState"] == "completed",
+                "the current active rights revision must rebuild and complete through the typed worker",
+            )
+            projection_rights_ready = projection_service.read(context=review_context)
+            require(
+                projection_rights_ready["state"] == "ready"
+                and projection_rights_ready["rightsRevision"] == 1
+                and projection_rights_ready["rightsEventHash"] == active_rights.snapshot.event_hash,
+                "active rights rebuild must persist the current rights fence into the checkpoint",
             )
             with store.request_unit_of_work(
                 correlation_id="owner-truth-projection-worker-search-read",
@@ -1956,6 +2055,76 @@ def main() -> None:
                 projection_revoked["state"] == "rebuilding"
                 and projection_revoked["entries"] == [],
                 "Source revocation must fail closed instead of serving a stale projection",
+            )
+            revoked_rights = projection_rights_service.record(
+                context=review_context,
+                command=OwnerTruthProjectionRightsRevisionCommand(
+                    command_id="owner-truth-projection-rights-revoked-smoke",
+                    authority_epoch=0,
+                    expected_revision=1,
+                    state=ProjectionRightsState.REVOKED,
+                    event_hash=canonical_hash({"kind": "projection-rights-revoked"}),
+                ),
+            )
+            require(
+                revoked_rights.outcome == "recorded"
+                and revoked_rights.snapshot.revision == 2
+                and revoked_rights.snapshot.state is ProjectionRightsState.REVOKED,
+                "revoked rights must enqueue one terminally blocked rebuild request",
+            )
+            rights_revoked_projection = projection_service.read(context=review_context)
+            require(
+                rights_revoked_projection["state"] == "rebuilding"
+                and rights_revoked_projection["rebuildReason"] == "rightsRevoked"
+                and rights_revoked_projection["entries"] == [],
+                "revoked rights must fail closed before any derived projection read",
+            )
+            revoked_rights_worker_result = projection_worker.run_once()
+            require(
+                revoked_rights_worker_result["status"] == "blocked"
+                and revoked_rights_worker_result["reason"] == "projectionRightsNotActive"
+                and revoked_rights_worker_result["jobState"] == "blocked"
+                and revoked_rights_worker_result["operationState"] == "blocked"
+                and revoked_rights_worker_result["consumerInboxState"] == "skipped",
+                "revoked rights must terminalize without rebuilding a Projection",
+            )
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT operation.resource_id, operation.state, job.state,
+                            receipt.outcome, receipt.reason_code
+                        FROM async_effects.operations AS operation
+                        JOIN async_effects.jobs AS job
+                          ON job.operation_id = operation.operation_id
+                        JOIN async_effects.business_receipts AS receipt
+                          ON receipt.operation_id = operation.operation_id
+                         AND receipt.receipt_type = 'consumer.ownerTruth.memoryProjection.rebuild.completion'
+                        WHERE operation.vault_id = %s AND operation.operation_type = %s
+                        ORDER BY operation.resource_version ASC
+                        """,
+                        (review_vault_id, MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE),
+                    )
+                    rights_terminal_receipts = cursor.fetchall()
+            require(
+                rights_terminal_receipts
+                == [
+                    (
+                        "projectionRightsRevision:1",
+                        "completed",
+                        "succeeded",
+                        "completed",
+                        "memoryProjectionRebuilt",
+                    ),
+                    (
+                        "projectionRightsRevision:2",
+                        "blocked",
+                        "blocked",
+                        "blocked",
+                        "projectionRightsNotActive",
+                    ),
+                ],
+                "rights rebuild effects must persist one completed and one fail-closed terminal receipt",
             )
         finally:
             store.close_pool()
