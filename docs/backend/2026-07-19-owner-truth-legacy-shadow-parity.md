@@ -36,6 +36,11 @@ lineage mapping”的结果误判为核心证据不完整。
 计算；原始 Owner ID 不会进入响应。后续 cutover shadow 必须复算并比对这个 hash，任何
 Owner scope 不一致都停在 `context_mismatch`，不能进入 `external_go_required`。
 
+当报告为 `legacyEvidenceIncomplete` 时，cutover shadow 会返回
+`parity_evidence_incomplete` 与仅含枚举的修复原因；它不能被解释为“只要补 G2/G4
+批准即可切换”。必须先恢复缺失的核心旧域或补足旧记录证据，再进入后续独立的外部
+Gate 评估。
+
 所有路径都固定输出：
 
 ```text

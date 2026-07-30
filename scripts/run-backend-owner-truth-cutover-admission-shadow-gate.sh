@@ -44,6 +44,7 @@ for required in (
     '"legacyWriterRetired": self.legacy_writer_retired',
     '"separateProductionGoRecordRequired"',
     '"ownerScopeMismatch"',
+    '"legacyParityEvidenceRemediationRequired"',
 ):
     assert required in source, f"missing fail-closed cutover invariant: {required}"
 

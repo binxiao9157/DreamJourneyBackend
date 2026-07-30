@@ -16,6 +16,7 @@ from enum import Enum
 import re
 
 from app.domain.owner_truth.legacy_migration import (
+    LegacyShadowParityComparisonStatus,
     LegacyShadowParityReport,
     build_legacy_shadow_parity_owner_scope_hash,
 )
@@ -33,6 +34,7 @@ class OwnerTruthCutoverAdmissionDisposition(str, Enum):
     SHADOW_DISABLED = "shadow_disabled"
     INVALID_ENVELOPE = "invalid_envelope"
     CONTEXT_MISMATCH = "context_mismatch"
+    PARITY_EVIDENCE_INCOMPLETE = "parity_evidence_incomplete"
     EXTERNAL_GO_REQUIRED = "external_go_required"
 
 
@@ -183,6 +185,23 @@ def observe_owner_truth_cutover_admission(
             enabled=True,
             disposition=OwnerTruthCutoverAdmissionDisposition.CONTEXT_MISMATCH,
             reason_codes=("ownerScopeMismatch", "separateProductionGoRecordRequired"),
+            scope_hash=scope_hash,
+            parity_report_hash=parity_report.report_hash,
+        )
+    if (
+        parity_report.comparison_status
+        is LegacyShadowParityComparisonStatus.LEGACY_EVIDENCE_INCOMPLETE
+    ):
+        reason_codes = {
+            "legacyEvidenceIncomplete",
+            "legacyParityEvidenceRemediationRequired",
+        }
+        if "legacyRequiredDomainUnavailable" in parity_report.reason_codes:
+            reason_codes.add("legacyRequiredDomainUnavailable")
+        return OwnerTruthCutoverAdmissionShadow(
+            enabled=True,
+            disposition=OwnerTruthCutoverAdmissionDisposition.PARITY_EVIDENCE_INCOMPLETE,
+            reason_codes=tuple(reason_codes),
             scope_hash=scope_hash,
             parity_report_hash=parity_report.report_hash,
         )

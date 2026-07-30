@@ -45,6 +45,7 @@ def _parity_report(
     vault_id: str = "vault-cutover-a",
     owner_subject_id: str = "owner-cutover-a",
     authority_epoch: int = 0,
+    unavailable_domains: tuple[LegacyMigrationDomain, ...] = (),
 ):
     inventory = build_legacy_migration_inventory(
         vault_id=vault_id,
@@ -62,6 +63,7 @@ def _parity_report(
                 revision_evidence_id="revision-evidence-a",
             ),
         ),
+        unavailable_domains=unavailable_domains,
     )
     return build_legacy_shadow_parity_report(
         inventory_run_id="cutover-admission-run-a",
@@ -176,6 +178,27 @@ class OwnerTruthCutoverAdmissionShadowTests(unittest.TestCase):
         self.assertIn("ownerScopeMismatch", owner_mismatch.reason_codes)
         self.assertEqual(owner_mismatch.value_free_summary()["status"], "context_mismatch")
         self.assertNotIn("owner-cutover-b", repr(owner_mismatch.value_free_summary()))
+
+    def test_incomplete_legacy_parity_requires_remediation_before_external_go(self) -> None:
+        result = observe_owner_truth_cutover_admission(
+            _parity_report(unavailable_domains=(LegacyMigrationDomain.ARCHIVE_ITEM,)),
+            context=_context(),
+            enabled=True,
+        )
+
+        self.assertEqual(
+            result.disposition,
+            OwnerTruthCutoverAdmissionDisposition.PARITY_EVIDENCE_INCOMPLETE,
+        )
+        self.assertFalse(result.cutover_allowed)
+        self.assertIn("legacyEvidenceIncomplete", result.reason_codes)
+        self.assertIn("legacyRequiredDomainUnavailable", result.reason_codes)
+        self.assertIn("legacyParityEvidenceRemediationRequired", result.reason_codes)
+        self.assertNotIn("separateProductionGoRecordRequired", result.reason_codes)
+        summary = result.value_free_summary()
+        self.assertEqual(summary["status"], "parity_evidence_incomplete")
+        self.assertNotIn("vault-cutover-a", repr(summary))
+        self.assertNotIn("owner-cutover-a", repr(summary))
 
 
 if __name__ == "__main__":

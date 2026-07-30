@@ -112,11 +112,12 @@ class OwnerTruthLegacyShadowParityServiceTests(unittest.TestCase):
         self.assertFalse(summary["cutoverAllowed"])
         self.assertFalse(summary["authorityEpochChanged"])
         self.assertFalse(summary["legacyWriterRetired"])
-        self.assertEqual(summary["cutoverAdmission"]["status"], "external_go_required")
+        self.assertEqual(summary["cutoverAdmission"]["status"], "parity_evidence_incomplete")
         self.assertFalse(summary["cutoverAdmission"]["cutoverAllowed"])
         self.assertFalse(summary["cutoverAdmission"]["authorityEpochChanged"])
         self.assertFalse(summary["cutoverAdmission"]["legacyWriterRetired"])
-        self.assertIn(
+        self.assertIn("legacyParityEvidenceRemediationRequired", summary["cutoverAdmission"]["reasonCodes"])
+        self.assertNotIn(
             "separateProductionGoRecordRequired",
             summary["cutoverAdmission"]["reasonCodes"],
         )
