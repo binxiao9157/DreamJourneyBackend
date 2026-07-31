@@ -27,14 +27,28 @@ OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED=true
 
 该保守 shadow 为后续自然话题识别的误触发评估提供最小证据。语义主题聚类、自动恢复提示和公开切流仍未完成。
 
+## QA-only 写前预检
+
+后续增量增加了独立默认关闭的开关：
+
+    OWNER_TRUTH_TOPIC_SHIFT_PREFLIGHT_QA_ENABLED=false
+
+它只对带 X-DreamJourney-QA-Owner-Truth: 1 的自然输入请求生效。命中明确换话题提示时，
+在旧 Thread 写入前返回 409、persisted: false 和 nextAction: pauseForTopicSwitch。
+调用方只能继续调用已有的显式暂停命令，再新建 Thread；预检本身不会暂停、创建或恢复 Session，
+不会写入 Message、Source、Candidate 或 MemoryVersion，也不返回输入正文。非 QA 的已有自然输入路径
+不受该 flag 影响。
+
 ## 本地验证
 
 ```bash
 PYTHONPATH=. .venv/bin/python -m unittest \
   tests.test_owner_truth_topic_shift_detection \
+  tests.test_owner_truth_topic_shift_preflight \
   tests.test_owner_truth_interview_orchestration \
   tests.test_owner_truth_interview_session_orchestration \
-  tests.test_owner_truth_interview_input_api.OwnerTruthInterviewInputAPITests.test_formal_natural_input_topic_shift_shadow_is_independent_and_non_mutating
+  tests.test_owner_truth_interview_input_api.OwnerTruthInterviewInputAPITests.test_formal_natural_input_topic_shift_shadow_is_independent_and_non_mutating \
+  tests.test_owner_truth_interview_input_api.OwnerTruthInterviewInputAPITests.test_topic_shift_preflight_is_default_off_qa_only_and_write_free
 ```
 
 覆盖点：明确换话题命中、连续叙述/歧义表达不误触发、原文不进入 audit 摘要、独立默认关闭、shadow 命中后 Session 仍为 `active`。

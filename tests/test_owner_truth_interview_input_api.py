@@ -34,6 +34,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.previous_topic_shift_shadow_enabled = (
             main_module.OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED
         )
+        self.previous_topic_shift_preflight_qa_enabled = (
+            main_module.OWNER_TRUTH_TOPIC_SHIFT_PREFLIGHT_QA_ENABLED
+        )
         self.previous_do_not_ask_reactivation_preflight_enabled = (
             main_module.OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED
         )
@@ -49,6 +52,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
         main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = False
         main_module.OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED = False
+        main_module.OWNER_TRUTH_TOPIC_SHIFT_PREFLIGHT_QA_ENABLED = False
         main_module.OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED = False
         main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = False
 
@@ -64,6 +68,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         )
         main_module.OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED = (
             self.previous_topic_shift_shadow_enabled
+        )
+        main_module.OWNER_TRUTH_TOPIC_SHIFT_PREFLIGHT_QA_ENABLED = (
+            self.previous_topic_shift_preflight_qa_enabled
         )
         main_module.OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED = (
             self.previous_do_not_ask_reactivation_preflight_enabled
@@ -1495,6 +1502,126 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(state.status_code, 200, state.text)
         self.assertEqual(state.json()["session"]["state"], "active")
         self.assertEqual(state.json()["session"]["rowVersion"], 3)
+
+    def test_topic_shift_preflight_is_default_off_qa_only_and_write_free(self) -> None:
+        _, qa_headers, _ = self._login("13800139628")
+        qa_vault_id = "vault-interview-topic-shift-preflight-qa"
+        qa_thread_id = str(uuid4())
+        qa_session_id = str(uuid4())
+        started = self._start_session(
+            vault_id=qa_vault_id,
+            headers=qa_headers,
+            thread_id=qa_thread_id,
+            session_id=qa_session_id,
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+        topic_change_text = "我们换个话题吧，聊聊我第一份工作的经历。"
+
+        default_off = client.post(
+            self._append_path(qa_vault_id, qa_session_id),
+            headers=qa_headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": qa_thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": topic_change_text,
+            },
+        )
+        self.assertEqual(default_off.status_code, 201, default_off.text)
+
+        preflight_vault_id = "vault-interview-topic-shift-preflight-enabled"
+        preflight_thread_id = str(uuid4())
+        preflight_session_id = str(uuid4())
+        started_preflight = self._start_session(
+            vault_id=preflight_vault_id,
+            headers=qa_headers,
+            thread_id=preflight_thread_id,
+            session_id=preflight_session_id,
+        )
+        self.assertEqual(started_preflight.status_code, 201, started_preflight.text)
+        main_module.OWNER_TRUTH_TOPIC_SHIFT_PREFLIGHT_QA_ENABLED = True
+        blocked = client.post(
+            self._append_path(preflight_vault_id, preflight_session_id),
+            headers=qa_headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": preflight_thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": topic_change_text,
+            },
+        )
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertEqual(blocked.headers["cache-control"], "no-store")
+        self.assertNotIn(topic_change_text, blocked.text)
+        self.assertEqual(
+            blocked.json(),
+            {
+                "schemaVersion": (
+                    "owner-truth-interview-topic-switch-preflight-response-v1"
+                ),
+                "vaultId": preflight_vault_id,
+                "persisted": False,
+                "retryable": False,
+                "nextAction": "pauseForTopicSwitch",
+                "preflight": {
+                    "schemaVersion": "owner-truth-topic-shift-preflight-v1",
+                    "status": "topicSwitchRequired",
+                    "requiresTopicSwitch": True,
+                    "reasonCode": "explicitTopicSwitchRequired",
+                },
+            },
+        )
+        preflight_state = client.get(
+            f"{self._start_path(preflight_vault_id)}/{preflight_session_id}/state",
+            headers=qa_headers,
+        )
+        self.assertEqual(preflight_state.status_code, 200, preflight_state.text)
+        self.assertEqual(preflight_state.json()["session"]["state"], "active")
+        self.assertEqual(preflight_state.json()["session"]["rowVersion"], 1)
+        self.assertEqual(preflight_state.json()["session"]["ownerTurnCount"], 0)
+
+        _, formal_headers, formal_auth_session_id = self._login("13800139629", qa=False)
+        formal_headers.update(
+            {
+                "X-DreamJourney-Feature": "echoTextInput",
+                "X-DreamJourney-Feature-Decision-Id": (
+                    "decision-interview-topic-shift-preflight-formal"
+                ),
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": hashlib.sha256(
+                    formal_auth_session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        formal_vault_id = "vault-interview-topic-shift-preflight-formal"
+        formal_thread_id = str(uuid4())
+        formal_session_id = str(uuid4())
+        formal_started = self._start_session(
+            vault_id=formal_vault_id,
+            headers=formal_headers,
+            thread_id=formal_thread_id,
+            session_id=formal_session_id,
+        )
+        self.assertEqual(formal_started.status_code, 201, formal_started.text)
+        formal_append = client.post(
+            self._append_path(formal_vault_id, formal_session_id),
+            headers=formal_headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": formal_thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": topic_change_text,
+            },
+        )
+        self.assertEqual(formal_append.status_code, 201, formal_append.text)
 
     def test_natural_input_do_not_ask_reactivation_preflight_is_default_off_and_write_free(self) -> None:
         _, headers, auth_session_id = self._login("13800139627", qa=False)

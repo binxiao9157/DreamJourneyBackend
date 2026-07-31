@@ -178,6 +178,9 @@ from app.services.owner_truth_interview_decision_audit import (
 from app.services.owner_truth_do_not_ask_reactivation_preflight import (
     OwnerTruthDoNotAskReactivationPreflightService,
 )
+from app.services.owner_truth_topic_shift_preflight import (
+    OwnerTruthTopicShiftPreflightService,
+)
 from app.services.owner_truth_interview_session_read import (
     OwnerTruthInterviewSessionReadService,
 )
@@ -514,6 +517,9 @@ OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = bool(
 )
 OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED = bool(
     settings.owner_truth_topic_shift_shadow_enabled
+)
+OWNER_TRUTH_TOPIC_SHIFT_PREFLIGHT_QA_ENABLED = bool(
+    settings.owner_truth_topic_shift_preflight_qa_enabled
 )
 OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED = bool(
     settings.owner_truth_do_not_ask_reactivation_preflight_enabled
@@ -3524,6 +3530,27 @@ def _owner_truth_do_not_ask_reactivation_preflight_response(
     )
 
 
+def _owner_truth_topic_shift_preflight_response(
+    *,
+    vault_id: str,
+    preflight: Any,
+) -> JSONResponse:
+    """Return the existing explicit topic-switch next action without writing."""
+
+    return JSONResponse(
+        status_code=409,
+        content={
+            "schemaVersion": "owner-truth-interview-topic-switch-preflight-response-v1",
+            "vaultId": vault_id,
+            "persisted": False,
+            "retryable": False,
+            "nextAction": "pauseForTopicSwitch",
+            "preflight": preflight.value_free_summary(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _owner_truth_interview_candidate_review_receipt_response(review: Any) -> Dict[str, Any]:
     return {
         "receiptId": review.receipt_id,
@@ -5557,6 +5584,25 @@ def append_owner_truth_interview_narrative(
             )
             if preflight.requires_confirmation:
                 return _owner_truth_do_not_ask_reactivation_preflight_response(
+                    vault_id=context.vault_id,
+                    preflight=preflight,
+                )
+        if (
+            OWNER_TRUTH_TOPIC_SHIFT_PREFLIGHT_QA_ENABLED
+            and str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip()
+            == "1"
+        ):
+            preflight = OwnerTruthTopicShiftPreflightService(
+                conversation_service=OwnerTruthConversationService(
+                    store.owner_truth_conversation_repository()
+                )
+            ).preflight(
+                session_id=session_id,
+                context=context,
+                user_text=narrative_text,
+            )
+            if preflight.requires_topic_switch:
+                return _owner_truth_topic_shift_preflight_response(
                     vault_id=context.vault_id,
                     preflight=preflight,
                 )

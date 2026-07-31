@@ -118,6 +118,9 @@ class Settings:
     # current natural-input message only while the audit lane is enabled. It
     # writes no text and only shadows the existing pause decision.
     owner_truth_topic_shift_shadow_enabled: bool = False
+    # A QA-only, write-free preflight may stop an explicit topic-change message
+    # before it lands in the old Thread. It never pauses or starts a session.
+    owner_truth_topic_shift_preflight_qa_enabled: bool = False
     # A separate write-free preflight may ask an Owner to explicitly confirm a
     # do-not-ask restore after an unambiguous natural-language reactivation.
     # It does not reopen the session or persist the attempted message.
@@ -350,6 +353,10 @@ class Settings:
             owner_truth_topic_shift_shadow_enabled=_env_bool(
                 "OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED",
                 cls.owner_truth_topic_shift_shadow_enabled,
+            ),
+            owner_truth_topic_shift_preflight_qa_enabled=_env_bool(
+                "OWNER_TRUTH_TOPIC_SHIFT_PREFLIGHT_QA_ENABLED",
+                cls.owner_truth_topic_shift_preflight_qa_enabled,
             ),
             owner_truth_do_not_ask_reactivation_preflight_enabled=_env_bool(
                 "OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED",
