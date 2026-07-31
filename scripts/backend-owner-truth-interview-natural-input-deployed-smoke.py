@@ -826,6 +826,149 @@ def exercise_formal_natural_input(
             "doNotAsk restore replay must preserve the original active/open result",
         )
 
+        # Exercise the formal exit independently from the pause/restore path.
+        # The automation is enabled only in this isolated TestClient process;
+        # it never changes the running deployed API configuration.
+        formal_exit_thread_id = str(uuid.uuid4())
+        formal_exit_session_id = str(uuid.uuid4())
+        formal_exit_start_status, formal_exit_start_body, _ = app_request(
+            "POST",
+            start_path,
+            token=access_token,
+            payload={
+                "commandId": str(uuid.uuid4()),
+                "threadId": formal_exit_thread_id,
+                "sessionId": formal_exit_session_id,
+            },
+            policy_headers=policy_headers,
+        )
+        formal_exit_start_receipt = formal_exit_start_body.get("receipt")
+        require(
+            formal_exit_start_status == 201
+            and isinstance(formal_exit_start_receipt, dict)
+            and formal_exit_start_receipt.get("state") == "active"
+            and formal_exit_start_receipt.get("boundary") == "open"
+            and formal_exit_start_receipt.get("threadVersion") == 1
+            and formal_exit_start_receipt.get("sessionVersion") == 1,
+            "formal exit smoke must start an isolated active session",
+        )
+        formal_exit_append_status, formal_exit_append_body, _ = app_request(
+            "POST",
+            f"{start_path}/{formal_exit_session_id}/messages",
+            token=access_token,
+            payload={
+                "commandId": str(uuid.uuid4()),
+                "threadId": formal_exit_thread_id,
+                "messageId": str(uuid.uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": "正式结束 smoke 的私有叙述不得出现在任何回执。",
+            },
+            policy_headers=policy_headers,
+        )
+        formal_exit_append_receipt = formal_exit_append_body.get("receipt")
+        require(
+            formal_exit_append_status == 201
+            and isinstance(formal_exit_append_receipt, dict)
+            and formal_exit_append_receipt.get("messageSequence") == 1
+            and formal_exit_append_receipt.get("threadVersion") == 2
+            and formal_exit_append_receipt.get("sessionVersion") == 2,
+            "formal exit smoke must persist one owner narrative before ending",
+        )
+        previous_review_batch_automation_enabled = (
+            main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED
+        )
+        main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = True
+        try:
+            formal_exit_command_id = str(uuid.uuid4())
+            formal_exit_status, formal_exit_body, formal_exit_headers = app_request(
+                "POST",
+                f"{start_path}/{formal_exit_session_id}/end",
+                token=access_token,
+                payload={
+                    "commandId": formal_exit_command_id,
+                    "threadId": formal_exit_thread_id,
+                    "expectedThreadVersion": 2,
+                    "expectedSessionVersion": 2,
+                },
+                policy_headers=policy_headers,
+            )
+        finally:
+            main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = (
+                previous_review_batch_automation_enabled
+            )
+        formal_exit_receipt = formal_exit_body.get("receipt")
+        require(
+            formal_exit_status == 201
+            and formal_exit_headers.get("cache-control") == "no-store"
+            and isinstance(formal_exit_receipt, dict)
+            and formal_exit_receipt == {
+                "status": "created",
+                "threadId": formal_exit_thread_id,
+                "sessionId": formal_exit_session_id,
+                "threadVersion": 3,
+                "sessionVersion": 4,
+                "state": "ended",
+                "boundary": "open",
+            },
+            "formal exit must return only the ended value-minimized receipt",
+        )
+        formal_exit_serialized = json.dumps(
+            formal_exit_body,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        for forbidden in (
+            "正式结束 smoke",
+            "candidate",
+            "memory",
+            "reviewBatchAutomation",
+        ):
+            require(
+                forbidden not in formal_exit_serialized,
+                "formal exit response must not expose private input or review internals",
+            )
+        formal_exit_replay_status, formal_exit_replay_body, _ = app_request(
+            "POST",
+            f"{start_path}/{formal_exit_session_id}/end",
+            token=access_token,
+            payload={
+                "commandId": formal_exit_command_id,
+                "threadId": formal_exit_thread_id,
+                "expectedThreadVersion": 2,
+                "expectedSessionVersion": 2,
+            },
+            policy_headers=policy_headers,
+        )
+        formal_exit_replay_receipt = formal_exit_replay_body.get("receipt")
+        require(
+            formal_exit_replay_status == 200
+            and isinstance(formal_exit_replay_receipt, dict)
+            and formal_exit_replay_receipt.get("status") == "deduplicated"
+            and formal_exit_replay_receipt.get("state") == "ended"
+            and formal_exit_replay_receipt.get("sessionVersion") == 4,
+            "formal exit replay must retain the hidden review-batch session version",
+        )
+        formal_exit_presentation_status, formal_exit_presentation_body, _ = app_request(
+            "GET",
+            f"{start_path}/{formal_exit_session_id}/presentation",
+            token=access_token,
+            policy_headers=policy_headers,
+        )
+        require(
+            formal_exit_presentation_status == 200
+            and formal_exit_presentation_body == {
+                "schemaVersion": "owner-truth-interview-session-presentation-v1",
+                "vaultId": vault_id,
+                "presentation": {
+                    "state": "reviewPending",
+                    "canContinue": False,
+                    "canContinueLater": False,
+                },
+            },
+            "formal exit must expose only review-pending continuation guidance",
+        )
+
         return {
             "formalMissingCaptureDenied": True,
             "formalMatchingCaptureStarted": True,
@@ -846,6 +989,9 @@ def exercise_formal_natural_input(
             "formalDoNotAskRestoreRequiresConfirmation": True,
             "formalDoNotAskRestoreConfirmed": True,
             "formalDoNotAskRestoreDeduplicated": True,
+            "formalSessionExitCreatedHiddenReviewBatch": True,
+            "formalSessionExitDeduplicated": True,
+            "formalSessionExitReviewPendingPresentation": True,
             "contentFreeStateVerified": True,
             "contentFreePresentationVerified": True,
             "deployedCandidateReviewPolicyDefaultClosed": True,
