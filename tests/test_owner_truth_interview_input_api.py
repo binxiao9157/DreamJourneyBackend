@@ -1871,6 +1871,106 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             1,
         )
 
+    def test_formal_end_requires_captured_policy_and_creates_hidden_session_exit_batch(self) -> None:
+        owner_id, headers, auth_session_id = self._login("13800139623", qa=False)
+        headers.update(
+            {
+                "X-DreamJourney-Feature": "echoTextInput",
+                "X-DreamJourney-Feature-Decision-Id": "decision-interview-formal-end",
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": hashlib.sha256(
+                    auth_session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        vault_id = "vault-interview-formal-end"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+
+        self.assertEqual(
+            self._start_session(
+                vault_id=vault_id,
+                headers=headers,
+                thread_id=thread_id,
+                session_id=session_id,
+            ).status_code,
+            201,
+        )
+        appended = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": "正式结束前的私有叙述不得出现在结束回执。",
+            },
+        )
+        self.assertEqual(appended.status_code, 201, appended.text)
+
+        missing_capture_headers = {
+            key: value
+            for key, value in headers.items()
+            if not key.lower().startswith("x-dreamjourney-feature")
+            and key not in {
+                "X-DreamJourney-Policy-Version",
+                "X-DreamJourney-Policy-Revision",
+                "X-DreamJourney-Account-Generation",
+            }
+        }
+        missing_capture = self._end_session(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=2,
+            expected_session_version=2,
+            headers=missing_capture_headers,
+        )
+        self.assertEqual(missing_capture.status_code, 403, missing_capture.text)
+        self.assertEqual(
+            missing_capture.json()["detail"]["code"],
+            "release_policy_denied",
+        )
+
+        main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = False
+        main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = True
+        ended = self._end_session(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=2,
+            expected_session_version=2,
+            headers=headers,
+        )
+        self.assertEqual(ended.status_code, 201, ended.text)
+        payload = ended.json()
+        self.assertEqual(payload["receipt"]["state"], "ended")
+        self.assertEqual(payload["receipt"]["threadVersion"], 3)
+        self.assertEqual(payload["receipt"]["sessionVersion"], 4)
+        self.assertNotIn("reviewBatchAutomation", payload)
+        rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn("正式结束前", rendered)
+        self.assertNotIn("candidate", rendered.lower())
+        self.assertNotIn("memory", rendered.lower())
+
+        batches = OwnerTruthConversationService(
+            self.store.owner_truth_conversation_repository()
+        ).list_review_batches(
+            session_id=session_id,
+            context=OwnerTruthCommandContext(
+                vault_id=vault_id,
+                owner_subject_id=owner_id,
+                actor_subject_id=owner_id,
+            ),
+        )
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0].trigger.value, "sessionExit")
+        self.assertEqual(batches[0].captured_candidate_batch_turn_count, 1)
+
     def test_formal_pause_boundary_creates_hidden_session_exit_batch_when_enabled(self) -> None:
         owner_id, headers, auth_session_id = self._login("13800139622", qa=False)
         headers.update(

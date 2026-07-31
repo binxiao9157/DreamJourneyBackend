@@ -34,6 +34,10 @@ migration = Path("db/migrations/0063_owner_truth_interview_session_end.sql").rea
 )
 ownership = Path("app/services/route_ownership.py").read_text(encoding="utf-8")
 
+endpoint_start = main.index("def end_owner_truth_interview_session(")
+next_route = main.index("@app.post(", endpoint_start + 1)
+endpoint = main[endpoint_start:next_route]
+
 for required in (
     "EndInterviewSessionCommand",
     "EndInterviewSessionWriteRecord",
@@ -51,11 +55,19 @@ for required in (
 for required in (
     "/v2/vaults/{vault_id}/interview-sessions/{session_id}/end",
     "_owner_truth_end_interview_session_command",
-    "_owner_truth_candidate_review_context",
-    "_owner_truth_review_batch_automation_after_qa_transition",
     "include_in_schema=False",
 ):
     assert required in main, required
+for required in (
+    "_owner_truth_interview_natural_input_context(request, vault_id=vault_id)",
+    "_owner_truth_formal_review_batch_automation_in_active_unit_of_work",
+    "_attach_owner_truth_formal_review_batch_session_version",
+    "_owner_truth_review_batch_automation_after_qa_transition",
+):
+    assert required in endpoint, required
+assert "_owner_truth_candidate_review_context" not in endpoint
+assert '"candidates"' not in endpoint
+assert '"privateText"' not in endpoint
 for required in (
     "endInterviewSession",
     "expected_thread_version IS NOT NULL",

@@ -5684,19 +5684,22 @@ def end_owner_truth_interview_session(
     session_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """End a private interview session behind the existing Owner QA gate.
+    """End a private interview session through the natural-input policy gate.
 
     This route records no transcript or decision. It only closes the private
-    thread/session pair, then allows the existing QA-only automation to create
-    one value-free ``sessionExit`` review batch when pending owner turns exist.
+    thread/session pair. Captured formal ``echoTextInput`` requests create one
+    hidden ``sessionExit`` review batch in the same unit of work when pending
+    owner turns exist; the response keeps that batch value-free. The older QA
+    path remains available for its explicit QA-only automation summary.
     """
 
     try:
-        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
         command = _owner_truth_end_interview_session_command(
             payload=payload,
             session_id=session_id,
         )
+        formal_review_batch_session_version: Optional[int] = None
         with store.request_unit_of_work(
             correlation_id=(
                 "owner-truth-interview-end:"
@@ -5710,6 +5713,13 @@ def end_owner_truth_interview_session(
                 command=command,
                 context=context,
             )
+            formal_review_batch_session_version = (
+                _owner_truth_formal_review_batch_automation_in_active_unit_of_work(
+                    session_id=command.session_id,
+                    transition_command_id=command.command_id,
+                    context=context,
+                )
+            )
         automation = _owner_truth_review_batch_automation_after_qa_transition(
             request=request,
             session_id=command.session_id,
@@ -5721,6 +5731,10 @@ def end_owner_truth_interview_session(
     response = _owner_truth_interview_session_command_response(
         vault_id=context.vault_id,
         result=result,
+    )
+    response = _attach_owner_truth_formal_review_batch_session_version(
+        response=response,
+        session_version=formal_review_batch_session_version,
     )
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
