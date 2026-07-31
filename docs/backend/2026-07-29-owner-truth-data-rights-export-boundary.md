@@ -11,14 +11,17 @@
 - MemoryVersion 的当前与历史版本载荷。
 - Answer/Citation 的哈希、长度、引用关系和 fallback 摘要。
 - Correction 请求及其已存在的 resolution。
+- 家庭贡献授权的最小状态记录：授权 ID、Vault/关系 ID、关系 epoch、scope、状态、版本、创建/更新/撤销时间和撤销原因。
 
 查询始终以 `owner_truth.vaults.owner_subject_id` 为边界；调用方不能通过 Vault ID 读取其他账号的数据。通用导出脱敏器继续会移除 token、凭据、密码、签名和类似敏感字段。
+
+家庭贡献授权导出不会包含贡献者 subject、家庭私有资料、create/revoke command hash 或 payload hash。该记录只用于让 Vault Owner 知道“曾授予或撤销过何种写入权限”，不会形成家庭成员的 Vault 读取权，也不会改变 Candidate、Memory、Projection 或 Context 的准入规则。
 
 每一类 Owner Truth 记录的数据库读取最多返回 1000 条。导出会同时读取精确总数；若总数超过当前导出窗口，资源会标记为 `partial`，携带 `reasonCode=ownerTruthExportBoundedAt1000` 和 `totalItemCount`，不会被描述为完整副本。
 
 ## 终端清理口径
 
-`ownerTruth / appendOnlyAuthorityLedger` 已加入账户 30 天终端清理的资源统计和 rights execution。其结果固定为 `pending`，不会生成“已删除”回执。
+`ownerTruth / appendOnlyAuthorityLedger` 已加入账户 30 天终端清理的资源统计和 rights execution，其中包含家庭贡献授权记录。其结果固定为 `pending`，不会生成“已删除”回执。
 
 原因是 Owner Truth 的 Source、DecisionReceipt、MemoryVersion、Answer/Citation 和 Correction 等记录使用 append-only 约束、外键和保留语义。直接删除这些行会破坏权威链与审计证据，也会与 V4 的“先撤访问、再按模块收敛、partial/unknown 不得伪装成功”规则冲突。
 
@@ -41,7 +44,7 @@
 cd /Users/yxj/Documents/Codex/Video/DreamJourneyBackend
 .venv/bin/python -m unittest \
   tests.test_data_rights_module_inventory \
-  tests.test_owner_truth_data_rights_projection
+  tests.test_owner_truth_data_rights
 ```
 
-测试覆盖：本人导出、跨账号隔离、敏感字段脱敏、终端清理把 Owner Truth 正确保留为 `pending`、Postgres 投影查询只读及资源统计参数化。
+测试覆盖：本人导出、跨账号隔离、敏感字段脱敏、家庭贡献授权的最小投影与 bounded 声明、终端清理把 Owner Truth 正确保留为 `pending`、Postgres 投影查询只读及资源统计参数化。

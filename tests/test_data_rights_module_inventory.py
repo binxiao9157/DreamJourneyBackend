@@ -18,7 +18,10 @@ from app.domain.owner_truth.contracts import (
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.domain.owner_truth.source_commands import OwnerTruthSourceWriteRecord
-from app.services.data_rights_module_inventory import build_module_owned_data_export
+from app.services.data_rights_module_inventory import (
+    build_module_owned_data_export,
+    build_terminal_cleanup_plan,
+)
 from app.services.in_memory_store import InMemoryStore
 from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 
@@ -70,7 +73,7 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
             json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
 
-    def _seed_owner_truth_candidate(self, user_id: str, *, summary: str) -> None:
+    def _seed_owner_truth_candidate(self, user_id: str, *, summary: str) -> str:
         vault_id = f"vault-rights-{uuid4()}"
         source_id = str(uuid4())
         candidate_id = str(uuid4())
@@ -123,6 +126,46 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
                 payload=candidate_payload,
             )
         )
+        return vault_id
+
+    def _seed_owner_truth_family_contribution_grant(
+        self,
+        *,
+        user_id: str,
+        vault_id: str,
+        marker: str,
+        revoked: bool = False,
+    ) -> dict:
+        grant = {
+            "id": str(uuid4()),
+            "vaultId": vault_id,
+            "ownerSubjectId": user_id,
+            "contributorSubjectId": f"private-contributor-{marker}",
+            "relationshipId": f"relationship-{marker}",
+            "relationshipEpoch": 1,
+            "scope": "submitTextSource",
+            "status": "active",
+            "rowVersion": 1,
+            "createCommandIdHash": self._hash({"privateCreateCommand": marker}),
+            "createPayloadHash": self._hash({"privateCreatePayload": marker}),
+            "createdAt": "2026-07-31T08:00:00+00:00",
+            "updatedAt": "2026-07-31T08:00:00+00:00",
+        }
+        created = self.store.create_owner_truth_family_contribution_grant(grant)
+        if not revoked:
+            return created
+        revoked_record = self.store.revoke_owner_truth_family_contribution_grant(
+            vault_id=vault_id,
+            owner_subject_id=user_id,
+            grant_id=grant["id"],
+            expected_version=1,
+            revoke_command_id_hash=self._hash({"privateRevokeCommand": marker}),
+            revoke_payload_hash=self._hash({"privateRevokePayload": marker}),
+            revoked_at_iso="2026-07-31T09:00:00+00:00",
+            reason="ownerRequested",
+        )
+        self.assertIsNotNone(revoked_record)
+        return revoked_record
 
     def test_owner_export_contains_module_data_but_redacts_credentials_and_media_boundary(self):
         login = self._login()
@@ -214,6 +257,147 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
         self.assertIn("仅导出给本人的一段确认前记忆", serialized)
         self.assertNotIn("不得出现在本人导出中的其他用户记忆", serialized)
 
+    def test_owner_truth_export_includes_minimized_family_contribution_grants(self):
+        owner_login = self._login("13900007777")
+        other_login = self._login("13900007778")
+        owner_id = owner_login["user"]["id"]
+        other_id = other_login["user"]["id"]
+        owner_vault_id = self._seed_owner_truth_candidate(
+            owner_id,
+            summary="家庭授权披露依附于本人的私有 Vault。",
+        )
+        other_vault_id = self._seed_owner_truth_candidate(
+            other_id,
+            summary="其他用户的家庭授权不得出现在本人导出中。",
+        )
+        active = self._seed_owner_truth_family_contribution_grant(
+            user_id=owner_id,
+            vault_id=owner_vault_id,
+            marker="owner-active-private-marker",
+        )
+        revoked = self._seed_owner_truth_family_contribution_grant(
+            user_id=owner_id,
+            vault_id=owner_vault_id,
+            marker="owner-revoked-private-marker",
+            revoked=True,
+        )
+        other = self._seed_owner_truth_family_contribution_grant(
+            user_id=other_id,
+            vault_id=other_vault_id,
+            marker="other-private-marker",
+        )
+
+        export = build_module_owned_data_export(
+            self.store,
+            user_id=owner_id,
+            generated_at="2026-07-31T12:00:00+00:00",
+        )
+        serialized = json.dumps(export, ensure_ascii=False, sort_keys=True)
+        owner_truth_records = {
+            item["resourceType"]: item
+            for item in export["machineReadable"]["objects"]
+            if item["moduleId"] == "ownerTruth"
+        }
+        grants = owner_truth_records["ownerTruthFamilyContributionGrant"]
+        grant_by_id = {item["grantId"]: item for item in grants["items"]}
+
+        self.assertEqual(grants["status"], "completed")
+        self.assertEqual(grants["itemCount"], 2)
+        self.assertEqual(grants["totalItemCount"], 2)
+        self.assertEqual(
+            set(grant_by_id[active["id"]]),
+            {
+                "grantId",
+                "vaultId",
+                "relationshipId",
+                "relationshipEpoch",
+                "scope",
+                "status",
+                "rowVersion",
+                "createdAt",
+                "updatedAt",
+                "revokedAt",
+                "revocationReason",
+            },
+        )
+        self.assertEqual(grant_by_id[active["id"]]["status"], "active")
+        self.assertIsNone(grant_by_id[active["id"]]["revokedAt"])
+        self.assertEqual(grant_by_id[revoked["id"]]["status"], "revoked")
+        self.assertEqual(
+            grant_by_id[revoked["id"]]["revocationReason"],
+            "ownerRequested",
+        )
+        self.assertNotIn(other["id"], grant_by_id)
+        self.assertNotIn("private-contributor-owner-active-private-marker", serialized)
+        self.assertNotIn(active["createCommandIdHash"], serialized)
+        self.assertNotIn(active["createPayloadHash"], serialized)
+        self.assertNotIn(revoked["revokeCommandIdHash"], serialized)
+        self.assertNotIn(revoked["revokePayloadHash"], serialized)
+        self.assertNotIn("other-private-marker", serialized)
+        boundary = owner_truth_records["appendOnlyAuthorityLedgerBoundary"]["items"][0]
+        self.assertIn(
+            "ownerTruthFamilyContributionGrant",
+            boundary["includedResourceTypes"],
+        )
+
+    def test_owner_truth_family_contribution_export_discloses_bounded_read(self):
+        login = self._login("13900007779")
+        user_id = login["user"]["id"]
+        vault_id = self._seed_owner_truth_candidate(
+            user_id,
+            summary="当前导出窗口中的家庭授权记录。",
+        )
+        for index in range(1001):
+            self._seed_owner_truth_family_contribution_grant(
+                user_id=user_id,
+                vault_id=vault_id,
+                marker=f"bounded-private-marker-{index}",
+            )
+
+        export = build_module_owned_data_export(
+            self.store,
+            user_id=user_id,
+            generated_at="2026-07-31T12:00:00+00:00",
+        )
+
+        grant_record = next(
+            item
+            for item in export["machineReadable"]["objects"]
+            if item["resourceType"] == "ownerTruthFamilyContributionGrant"
+        )
+        self.assertEqual(grant_record["status"], "partial")
+        self.assertEqual(
+            grant_record["reasonCode"],
+            "ownerTruthExportBoundedAt1000",
+        )
+        self.assertEqual(grant_record["itemCount"], 1000)
+        self.assertEqual(grant_record["totalItemCount"], 1001)
+
+    def test_owner_truth_terminal_cleanup_counts_family_contribution_grants_as_pending(self):
+        login = self._login("13900007780")
+        user_id = login["user"]["id"]
+        vault_id = self._seed_owner_truth_candidate(
+            user_id,
+            summary="终端清理前披露的家庭授权记录。",
+        )
+        self._seed_owner_truth_family_contribution_grant(
+            user_id=user_id,
+            vault_id=vault_id,
+            marker="cleanup-private-marker",
+        )
+
+        plans = build_terminal_cleanup_plan(
+            request_id="rights-family-contribution-cleanup",
+            terminal_purge_receipt_id="purge-family-contribution-cleanup",
+            updated_at="2026-07-31T12:00:00+00:00",
+            resource_counts=self.store._terminal_account_cleanup_counts_locked(user_id),
+        )
+        owner_truth_plan = next(item for item in plans if item["moduleId"] == "ownerTruth")
+
+        self.assertEqual(owner_truth_plan["outcome"], "pending")
+        counts = self.store._terminal_account_cleanup_counts_locked(user_id)
+        self.assertEqual(counts["ownerTruthFamilyContributionGrant"], 1)
+
     def test_owner_truth_export_discloses_when_a_bounded_read_omits_records(self):
         login = self._login("13900007776")
         user_id = login["user"]["id"]
@@ -231,6 +415,7 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
                 "ownerTruthAnswerCitation": 0,
                 "ownerTruthAnswerFeedback": 0,
                 "ownerTruthCorrection": 0,
+                "ownerTruthFamilyContributionGrant": 0,
             },
         ):
             export = build_module_owned_data_export(

@@ -321,6 +321,7 @@ _LOCAL_CLEANUP_MODULES = (
             "ownerTruthAnswerCitation",
             "ownerTruthAnswerFeedback",
             "ownerTruthCorrection",
+            "ownerTruthFamilyContributionGrant",
         ),
         "pending",
     ),
@@ -361,8 +362,9 @@ def _module_record(
 def _owner_truth_module_records(store: Any, subject_id: str) -> List[Dict[str, Any]]:
     """Append the Owner Truth data-copy boundary without overstating deletion.
 
-    Canonical Source/Candidate/MemoryVersion/Citation/Feedback/Correction values are
-    owner-readable.  The broader immutable ledger, conversation transcript and
+    Canonical Source/Candidate/MemoryVersion/Citation/Feedback/Correction values
+    and the owner's minimized family-contribution authorization records are
+    owner-readable. The broader immutable ledger, conversation transcript and
     rebuildable derived projections intentionally remain a partial boundary
     until their own rights reconciler is implemented.
     """
@@ -383,6 +385,11 @@ def _owner_truth_module_records(store: Any, subject_id: str) -> List[Dict[str, A
         ("ownerTruthAnswerCitation", "owner_truth.answers", "answerCitation"),
         ("ownerTruthAnswerFeedback", "owner_truth.answer_feedback", "answerFeedback"),
         ("ownerTruthCorrection", "owner_truth.correction_requests", "correction"),
+        (
+            "ownerTruthFamilyContributionGrant",
+            "owner_truth.family_contribution_grants",
+            "familyContributionGrant",
+        ),
     )
     module_records = []
     for resource_type, source, record_key in specifications:

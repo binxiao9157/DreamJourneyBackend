@@ -2771,6 +2771,26 @@ class InMemoryStore:
                 item["resolution"] = resolution
             corrections.append(item)
 
+        with self._delegated_access_lock:
+            family_contribution_grants = [
+                {
+                    "grantId": str(grant.get("id") or ""),
+                    "vaultId": str(grant.get("vaultId") or ""),
+                    "relationshipId": str(grant.get("relationshipId") or ""),
+                    "relationshipEpoch": int(grant.get("relationshipEpoch") or 0),
+                    "scope": str(grant.get("scope") or ""),
+                    "status": str(grant.get("status") or ""),
+                    "rowVersion": int(grant.get("rowVersion") or 0),
+                    "createdAt": grant.get("createdAt"),
+                    "updatedAt": grant.get("updatedAt"),
+                    "revokedAt": grant.get("revokedAt"),
+                    "revocationReason": grant.get("revocationReason"),
+                }
+                for grant in self._owner_truth_family_contribution_grants.values()
+                if str(grant.get("ownerSubjectId") or "") == subject_id
+                and str(grant.get("vaultId") or "") in vault_ids
+            ]
+
         return {
             "vault": self._sorted_owner_truth_data_rights_records(vault_by_id.values()),
             "source": self._sorted_owner_truth_data_rights_records(sources),
@@ -2780,10 +2800,27 @@ class InMemoryStore:
             "answerCitation": self._sorted_owner_truth_data_rights_records(answer_citations),
             "answerFeedback": self._sorted_owner_truth_data_rights_records(answer_feedback),
             "correction": self._sorted_owner_truth_data_rights_records(corrections),
+            "familyContributionGrant": self._sorted_owner_truth_data_rights_records(
+                family_contribution_grants
+            )[:1000],
         }
 
     def owner_truth_data_rights_counts(self, user_id: str) -> Dict[str, int]:
         records = self.list_owner_truth_data_rights_records(user_id)
+        subject_id = str(user_id or "").strip()
+        with self._owner_truth_lock:
+            owner_vault_ids = {
+                str(vault.get("vaultId") or "")
+                for vault in self._owner_truth_vaults.values()
+                if str(vault.get("ownerSubjectId") or "") == subject_id
+            }
+        with self._delegated_access_lock:
+            family_contribution_grant_count = sum(
+                1
+                for grant in self._owner_truth_family_contribution_grants.values()
+                if str(grant.get("ownerSubjectId") or "") == subject_id
+                and str(grant.get("vaultId") or "") in owner_vault_ids
+            )
         return {
             "ownerTruthVault": len(records["vault"]),
             "ownerTruthSource": len(records["source"]),
@@ -2793,6 +2830,7 @@ class InMemoryStore:
             "ownerTruthAnswerCitation": len(records["answerCitation"]),
             "ownerTruthAnswerFeedback": len(records["answerFeedback"]),
             "ownerTruthCorrection": len(records["correction"]),
+            "ownerTruthFamilyContributionGrant": family_contribution_grant_count,
         }
 
     @staticmethod
@@ -2806,6 +2844,7 @@ class InMemoryStore:
             "answerCitation": [],
             "answerFeedback": [],
             "correction": [],
+            "familyContributionGrant": [],
         }
 
     @staticmethod
@@ -2822,6 +2861,7 @@ class InMemoryStore:
                     or record.get("memoryVersionId")
                     or record.get("answerId")
                     or record.get("correctionRequestId")
+                    or record.get("grantId")
                     or ""
                 ),
             ),

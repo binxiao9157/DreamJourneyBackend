@@ -28,6 +28,7 @@ def empty_owner_truth_data_rights_records() -> Dict[str, List[Dict[str, Any]]]:
         "answerCitation": [],
         "answerFeedback": [],
         "correction": [],
+        "familyContributionGrant": [],
     }
 
 
@@ -306,6 +307,30 @@ def read_owner_truth_data_rights_records(
             LIMIT 1000
             """
         ),
+        "familyContributionGrant": rows(
+            """
+            SELECT jsonb_build_object(
+                'grantId', grant.id,
+                'vaultId', grant.vault_id,
+                'relationshipId', grant.relationship_id,
+                'relationshipEpoch', grant.relationship_epoch,
+                'scope', grant.scope,
+                'status', grant.status,
+                'rowVersion', grant.row_version,
+                'createdAt', grant.created_at,
+                'updatedAt', grant.updated_at,
+                'revokedAt', grant.revoked_at,
+                'revocationReason', grant.revocation_reason
+            ) AS payload
+            FROM owner_truth.family_contribution_grants AS grant
+            INNER JOIN owner_truth.vaults AS vault
+                ON vault.vault_id = grant.vault_id
+            WHERE vault.owner_subject_id = %s
+              AND grant.owner_subject_id = vault.owner_subject_id
+            ORDER BY grant.created_at, grant.id
+            LIMIT 1000
+            """
+        ),
     }
 
 
@@ -326,6 +351,7 @@ def count_owner_truth_data_rights_records(
         "ownerTruthAnswerCitation",
         "ownerTruthAnswerFeedback",
         "ownerTruthCorrection",
+        "ownerTruthFamilyContributionGrant",
     )
     if not owner_id:
         return {key: 0 for key in keys}
@@ -403,6 +429,15 @@ def count_owner_truth_data_rights_records(
             INNER JOIN owner_truth.vaults AS vault ON vault.vault_id = request.vault_id
             WHERE vault.owner_subject_id = %s
               AND request.owner_subject_id = vault.owner_subject_id
+            """
+        ),
+        "ownerTruthFamilyContributionGrant": count(
+            """
+            SELECT COUNT(*) AS count
+            FROM owner_truth.family_contribution_grants AS grant
+            INNER JOIN owner_truth.vaults AS vault ON vault.vault_id = grant.vault_id
+            WHERE vault.owner_subject_id = %s
+              AND grant.owner_subject_id = vault.owner_subject_id
             """
         ),
     }
