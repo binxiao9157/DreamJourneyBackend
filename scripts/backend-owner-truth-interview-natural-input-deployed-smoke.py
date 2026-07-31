@@ -826,32 +826,13 @@ def exercise_formal_natural_input(
             "doNotAsk restore replay must preserve the original active/open result",
         )
 
-        # Exercise the formal exit independently from the pause/restore path.
-        # The automation is enabled only in this isolated TestClient process;
-        # it never changes the running deployed API configuration.
-        formal_exit_thread_id = str(uuid.uuid4())
-        formal_exit_session_id = str(uuid.uuid4())
-        formal_exit_start_status, formal_exit_start_body, _ = app_request(
-            "POST",
-            start_path,
-            token=access_token,
-            payload={
-                "commandId": str(uuid.uuid4()),
-                "threadId": formal_exit_thread_id,
-                "sessionId": formal_exit_session_id,
-            },
-            policy_headers=policy_headers,
-        )
-        formal_exit_start_receipt = formal_exit_start_body.get("receipt")
-        require(
-            formal_exit_start_status == 201
-            and isinstance(formal_exit_start_receipt, dict)
-            and formal_exit_start_receipt.get("state") == "active"
-            and formal_exit_start_receipt.get("boundary") == "open"
-            and formal_exit_start_receipt.get("threadVersion") == 1
-            and formal_exit_start_receipt.get("sessionVersion") == 1,
-            "formal exit smoke must start an isolated active session",
-        )
+        # Reuse the restored active session. A Vault may have only one active
+        # interview at a time, so starting another session here would weaken
+        # rather than validate the production constraint.
+        # The automation below is enabled only in this isolated TestClient
+        # process; it never changes the running deployed API configuration.
+        formal_exit_thread_id = do_not_ask_thread_id
+        formal_exit_session_id = do_not_ask_session_id
         formal_exit_append_status, formal_exit_append_body, _ = app_request(
             "POST",
             f"{start_path}/{formal_exit_session_id}/messages",
@@ -861,7 +842,7 @@ def exercise_formal_natural_input(
                 "threadId": formal_exit_thread_id,
                 "messageId": str(uuid.uuid4()),
                 "expectedThreadVersion": 1,
-                "expectedSessionVersion": 1,
+                "expectedSessionVersion": 3,
                 "text": "正式结束 smoke 的私有叙述不得出现在任何回执。",
             },
             policy_headers=policy_headers,
@@ -872,7 +853,7 @@ def exercise_formal_natural_input(
             and isinstance(formal_exit_append_receipt, dict)
             and formal_exit_append_receipt.get("messageSequence") == 1
             and formal_exit_append_receipt.get("threadVersion") == 2
-            and formal_exit_append_receipt.get("sessionVersion") == 2,
+            and formal_exit_append_receipt.get("sessionVersion") == 4,
             "formal exit smoke must persist one owner narrative before ending",
         )
         previous_review_batch_automation_enabled = (
@@ -889,7 +870,7 @@ def exercise_formal_natural_input(
                     "commandId": formal_exit_command_id,
                     "threadId": formal_exit_thread_id,
                     "expectedThreadVersion": 2,
-                    "expectedSessionVersion": 2,
+                    "expectedSessionVersion": 4,
                 },
                 policy_headers=policy_headers,
             )
@@ -907,7 +888,7 @@ def exercise_formal_natural_input(
                 "threadId": formal_exit_thread_id,
                 "sessionId": formal_exit_session_id,
                 "threadVersion": 3,
-                "sessionVersion": 4,
+                "sessionVersion": 6,
                 "state": "ended",
                 "boundary": "open",
             },
@@ -936,7 +917,7 @@ def exercise_formal_natural_input(
                 "commandId": formal_exit_command_id,
                 "threadId": formal_exit_thread_id,
                 "expectedThreadVersion": 2,
-                "expectedSessionVersion": 2,
+                "expectedSessionVersion": 4,
             },
             policy_headers=policy_headers,
         )
@@ -946,7 +927,7 @@ def exercise_formal_natural_input(
             and isinstance(formal_exit_replay_receipt, dict)
             and formal_exit_replay_receipt.get("status") == "deduplicated"
             and formal_exit_replay_receipt.get("state") == "ended"
-            and formal_exit_replay_receipt.get("sessionVersion") == 4,
+            and formal_exit_replay_receipt.get("sessionVersion") == 6,
             "formal exit replay must retain the hidden review-batch session version",
         )
         formal_exit_presentation_status, formal_exit_presentation_body, _ = app_request(
