@@ -74,6 +74,13 @@ from app.services.privacy import (
     sanitize_mailbox_letter_payload,
 )
 from app.services.owner_truth_source import ArchiveOwnerTruthCompatibilityFacade
+from app.services.owner_truth_family_contribution import (
+    CreateFamilyContributionGrantCommand,
+    OwnerTruthFamilyContributionError,
+    OwnerTruthFamilyContributionService,
+    RevokeFamilyContributionGrantCommand,
+    SubmitFamilyContributionTextCommand,
+)
 from app.domain.owner_truth.candidate_decisions import (
     CandidateReviewAction,
     OwnerTruthCandidateReviewAccessDenied,
@@ -499,6 +506,9 @@ DELEGATED_ACCESS_CONTRACT_API_ENABLED = bool(
 OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = bool(
     settings.owner_truth_candidate_review_qa_enabled
 )
+OWNER_TRUTH_FAMILY_CONTRIBUTION_QA_ENABLED = bool(
+    settings.owner_truth_family_contribution_qa_enabled
+)
 OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = bool(
     settings.owner_truth_interview_decision_audit_enabled
 )
@@ -581,6 +591,26 @@ def _require_owner_truth_candidate_review_qa(request: Request) -> str:
         raise HTTPException(
             status_code=401,
             detail={"code": "ownerTruthCandidateReviewUserSessionRequired"},
+        )
+    return user_id
+
+
+def _require_owner_truth_family_contribution_qa(request: Request) -> str:
+    """Keep family material contribution off every normal product surface."""
+
+    if (
+        not OWNER_TRUTH_FAMILY_CONTRIBUTION_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthFamilyContributionUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthFamilyContributionUserSessionRequired"},
         )
     return user_id
 
@@ -2278,6 +2308,41 @@ def _owner_truth_candidate_review_http_error(
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthCandidateReviewInvalid"},
+    )
+
+
+def _owner_truth_family_contribution_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    code = getattr(error, "code", "ownerTruthFamilyContributionInvalid")
+    if code in {
+        "familyContributionVaultNotFound",
+        "familyContributionRelationshipNotFound",
+        "familyContributionGrantNotFound",
+    }:
+        return HTTPException(status_code=404, detail={"code": code})
+    if code in {
+        "familyContributionGrantOwnerMismatch",
+        "familyContributionGrantContributorMismatch",
+        "familyContributionRelationshipOwnerMismatch",
+        "familyContributionRelationshipSubjectMismatch",
+        "familyContributionOwnerContextRequired",
+        "familyContributionVaultOwnerMismatch",
+    }:
+        return HTTPException(status_code=403, detail={"code": code})
+    if code in {
+        "familyContributionVaultInactive",
+        "familyContributionRelationshipInactive",
+        "familyContributionRelationshipEpochMismatch",
+        "familyContributionGrantInactive",
+        "familyContributionGrantVersionMismatch",
+        "familyContributionGrantCommandConflict",
+        "familyContributionGrantScopeInvalid",
+    }:
+        return HTTPException(status_code=409, detail={"code": code})
+    return HTTPException(
+        status_code=400,
+        detail={"code": "ownerTruthFamilyContributionInvalid"},
     )
 
 
@@ -5082,6 +5147,117 @@ def owner_truth_candidate_inbox(
             _owner_truth_candidate_inbox_item_response(item) for item in items
         ],
     }
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/family-contribution-grants",
+    include_in_schema=False,
+)
+def create_owner_truth_family_contribution_grant(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only Owner grant for one accepted family member to submit static text."""
+
+    try:
+        owner_subject_id = _require_owner_truth_family_contribution_qa(request)
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_subject_id,
+            actor_subject_id=owner_subject_id,
+        )
+        command = CreateFamilyContributionGrantCommand(
+            command_id=str(payload.get("commandId") or ""),
+            relationship_id=str(payload.get("relationshipId") or ""),
+            contributor_subject_id=str(payload.get("contributorSubjectId") or ""),
+        )
+        result = OwnerTruthFamilyContributionService(store).create_grant(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_family_contribution_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=result.public_contract(),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/family-contribution-grants/{grant_id}/revoke",
+    include_in_schema=False,
+)
+def revoke_owner_truth_family_contribution_grant(
+    request: Request,
+    vault_id: str,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only Owner revocation; it cannot remove an already contributed Source."""
+
+    try:
+        owner_subject_id = _require_owner_truth_family_contribution_qa(request)
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_subject_id,
+            actor_subject_id=owner_subject_id,
+        )
+        command = RevokeFamilyContributionGrantCommand(
+            command_id=str(payload.get("commandId") or ""),
+            grant_id=grant_id,
+            expected_version=payload.get("expectedVersion"),
+            reason=str(payload.get("reason") or "ownerRequested"),
+        )
+        result = OwnerTruthFamilyContributionService(store).revoke_grant(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_family_contribution_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=result.public_contract(),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/family-contribution-grants/{grant_id}/sources",
+    include_in_schema=False,
+)
+def submit_owner_truth_family_contribution_source(
+    request: Request,
+    vault_id: str,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only contributor write. It does not expose any Vault read endpoint."""
+
+    try:
+        actor_subject_id = _require_owner_truth_family_contribution_qa(request)
+        service = OwnerTruthFamilyContributionService(store)
+        context = service.contributor_context(
+            vault_id=vault_id,
+            grant_id=grant_id,
+            actor_subject_id=actor_subject_id,
+        )
+        command = SubmitFamilyContributionTextCommand(
+            grant_id=grant_id,
+            expected_grant_version=payload.get("expectedGrantVersion"),
+            source_command_id=str(payload.get("sourceCommandId") or ""),
+            source_id=str(payload.get("sourceId") or ""),
+            text=str(payload.get("text") or ""),
+        )
+        result = service.submit_text_source(command=command, context=context)
+    except OwnerTruthContractError as error:
+        raise _owner_truth_family_contribution_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.source.outcome == "created" else 200,
+        content=result.public_contract(),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post(

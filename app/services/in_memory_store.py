@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from math import ceil
 import secrets
 from threading import RLock
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 import uuid
 
 from app.services.knowledge_store import (
@@ -157,6 +157,8 @@ class InMemoryStore:
         self._owner_truth_vaults: Dict[str, Dict[str, Any]] = {}
         self._owner_truth_sources: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._owner_truth_source_receipts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._owner_truth_family_contribution_grants: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._owner_truth_family_contribution_grant_commands: Dict[Tuple[str, str], str] = {}
         self._effect_kernel_repository = InMemoryEffectKernelRepository()
         self._owner_truth_candidate_review_repository = (
             InMemoryOwnerTruthCandidateReviewRepository(
@@ -2512,14 +2514,115 @@ class InMemoryStore:
             }
             self._owner_truth_sources[source_key] = source
             self._owner_truth_source_receipts[receipt_key] = receipt
-            return OwnerTruthSourceCommandResult(
-                outcome="created",
-                receipt_id=record.receipt_id,
-                source_id=record.source_id,
-                source_version=1,
-                authority_epoch=int(vault["authorityEpoch"]),
-                content_hash=record.content_hash,
+        return OwnerTruthSourceCommandResult(
+            outcome="created",
+            receipt_id=record.receipt_id,
+            source_id=record.source_id,
+            source_version=1,
+            authority_epoch=int(vault["authorityEpoch"]),
+            content_hash=record.content_hash,
+        )
+
+    def get_owner_truth_vault(self, vault_id: str) -> Optional[Dict[str, Any]]:
+        with self._owner_truth_lock:
+            vault = self._owner_truth_vaults.get(str(vault_id))
+            if vault is None:
+                return None
+            payload = deepcopy(vault)
+            payload.setdefault("status", "active")
+            return payload
+
+    def create_owner_truth_family_contribution_grant(
+        self,
+        grant: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        candidate = deepcopy(dict(grant))
+        vault_id = str(candidate.get("vaultId") or "").strip()
+        grant_id = str(candidate.get("id") or "").strip()
+        command_id_hash = str(candidate.get("createCommandIdHash") or "").strip()
+        payload_hash = str(candidate.get("createPayloadHash") or "").strip()
+        if not all((vault_id, grant_id, command_id_hash, payload_hash)):
+            raise ValueError("family contribution grant is incomplete")
+        with self._delegated_access_lock:
+            command_key = (vault_id, command_id_hash)
+            existing_id = self._owner_truth_family_contribution_grant_commands.get(command_key)
+            if existing_id is not None:
+                existing = self._owner_truth_family_contribution_grants[(vault_id, existing_id)]
+                if (
+                    str(existing.get("createPayloadHash") or "") != payload_hash
+                    or str(existing.get("id") or "") != grant_id
+                ):
+                    raise ValueError("family contribution command conflict")
+                result = deepcopy(existing)
+                result["deduplicated"] = True
+                return result
+            key = (vault_id, grant_id)
+            if key in self._owner_truth_family_contribution_grants:
+                raise ValueError("family contribution grant id conflict")
+            with self._owner_truth_lock:
+                vault = self._owner_truth_vaults.get(vault_id)
+                if vault is None or str(vault.get("ownerSubjectId") or "") != str(
+                    candidate.get("ownerSubjectId") or ""
+                ):
+                    raise ValueError("family contribution vault conflict")
+            candidate.setdefault("status", "active")
+            candidate.setdefault("rowVersion", 1)
+            candidate.setdefault("revokedAt", None)
+            candidate.setdefault("revocationReason", None)
+            candidate.setdefault("revokeCommandIdHash", None)
+            candidate.setdefault("revokePayloadHash", None)
+            self._owner_truth_family_contribution_grants[key] = candidate
+            self._owner_truth_family_contribution_grant_commands[command_key] = grant_id
+            return deepcopy(candidate)
+
+    def get_owner_truth_family_contribution_grant(
+        self,
+        vault_id: str,
+        grant_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            grant = self._owner_truth_family_contribution_grants.get(
+                (str(vault_id), str(grant_id))
             )
+            return None if grant is None else deepcopy(grant)
+
+    def revoke_owner_truth_family_contribution_grant(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        grant_id: str,
+        expected_version: int,
+        revoke_command_id_hash: str,
+        revoke_payload_hash: str,
+        revoked_at_iso: str,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            grant = self._owner_truth_family_contribution_grants.get(
+                (str(vault_id), str(grant_id))
+            )
+            if grant is None or grant.get("ownerSubjectId") != owner_subject_id:
+                return None
+            if grant.get("status") == "revoked":
+                if (
+                    grant.get("revokeCommandIdHash") == revoke_command_id_hash
+                    and grant.get("revokePayloadHash") == revoke_payload_hash
+                ):
+                    result = deepcopy(grant)
+                    result["deduplicated"] = True
+                    return result
+                return None
+            if int(grant.get("rowVersion") or 0) != expected_version:
+                return None
+            grant["status"] = "revoked"
+            grant["rowVersion"] = expected_version + 1
+            grant["revokeCommandIdHash"] = revoke_command_id_hash
+            grant["revokePayloadHash"] = revoke_payload_hash
+            grant["revokedAt"] = revoked_at_iso
+            grant["updatedAt"] = revoked_at_iso
+            grant["revocationReason"] = reason
+            return deepcopy(grant)
 
     def owner_truth_source_count(self, vault_id: str) -> int:
         with self._owner_truth_lock:

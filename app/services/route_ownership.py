@@ -236,6 +236,24 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/family-contribution-grants",
+                session,
+                "ownerTruthFamilyContributionGrant",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/family-contribution-grants/{grant_id}/revoke",
+                session,
+                "ownerTruthFamilyContributionRevoke",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/family-contribution-grants/{grant_id}/sources",
+                session,
+                "ownerTruthFamilyContributionSource",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/memory-versions/{memory_version_id}/knowledge-dimension-confirmations",
                 session,
                 "ownerTruthKnowledgeDimensionConfirmation",

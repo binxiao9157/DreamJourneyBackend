@@ -91,6 +91,10 @@ class Settings:
     # Candidate review is an Owner Truth QA contract only until the M0 review
     # UI, release policy, and external gates are complete.
     owner_truth_candidate_review_qa_enabled: bool = False
+    # Owner-controlled family reports remain a separate QA-only contract. An
+    # accepted relationship still requires this explicit grant; it never opens
+    # Vault read, Candidate decision, Voice, Digital Human, or public UI paths.
+    owner_truth_family_contribution_qa_enabled: bool = False
     # A separate, default-off Owner-confirmed knowledge classification receipt
     # lane. It must never be enabled merely by exposing Candidate review QA.
     owner_truth_knowledge_dimension_confirmation_qa_enabled: bool = False
@@ -318,6 +322,10 @@ class Settings:
             owner_truth_candidate_review_qa_enabled=_env_bool(
                 "OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED",
                 cls.owner_truth_candidate_review_qa_enabled,
+            ),
+            owner_truth_family_contribution_qa_enabled=_env_bool(
+                "OWNER_TRUTH_FAMILY_CONTRIBUTION_QA_ENABLED",
+                cls.owner_truth_family_contribution_qa_enabled,
             ),
             owner_truth_knowledge_dimension_confirmation_qa_enabled=_env_bool(
                 "OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED",

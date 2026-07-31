@@ -5093,6 +5093,165 @@ class PostgresStore:
             content_hash=str(source["content_hash"]),
         )
 
+    def get_owner_truth_vault(self, vault_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT vault_id, owner_subject_id, authority_epoch, status, created_at, updated_at
+            FROM owner_truth.vaults
+            WHERE vault_id = %s
+            """,
+            (vault_id,),
+        )
+        if row is None:
+            return None
+        return {
+            "vaultId": str(row["vault_id"]),
+            "ownerSubjectId": str(row["owner_subject_id"]),
+            "authorityEpoch": int(row.get("authority_epoch") or 0),
+            "status": str(row.get("status") or "active"),
+            "createdAt": self._iso_value(row.get("created_at")),
+            "updatedAt": self._iso_value(row.get("updated_at")),
+        }
+
+    def create_owner_truth_family_contribution_grant(
+        self,
+        grant: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        row = self._fetchone(
+            """
+            INSERT INTO owner_truth.family_contribution_grants (
+                id, vault_id, owner_subject_id, contributor_subject_id,
+                relationship_id, relationship_epoch, scope, status, row_version,
+                create_command_id_hash, create_payload_hash, created_at, updated_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, 'active', 1, %s, %s, %s, %s
+            )
+            ON CONFLICT (vault_id, create_command_id_hash) DO NOTHING
+            RETURNING id, vault_id, owner_subject_id, contributor_subject_id,
+                relationship_id, relationship_epoch, scope, status, row_version,
+                create_command_id_hash, create_payload_hash, revoke_command_id_hash,
+                revoke_payload_hash, revoked_at, revocation_reason, created_at, updated_at
+            """,
+            (
+                grant["id"],
+                grant["vaultId"],
+                grant["ownerSubjectId"],
+                grant["contributorSubjectId"],
+                grant["relationshipId"],
+                grant["relationshipEpoch"],
+                grant["scope"],
+                grant["createCommandIdHash"],
+                grant["createPayloadHash"],
+                grant["createdAt"],
+                grant["updatedAt"],
+            ),
+        )
+        if row is not None:
+            return self._owner_truth_family_contribution_grant_payload(row)
+        existing = self._fetchone(
+            """
+            SELECT id, vault_id, owner_subject_id, contributor_subject_id,
+                relationship_id, relationship_epoch, scope, status, row_version,
+                create_command_id_hash, create_payload_hash, revoke_command_id_hash,
+                revoke_payload_hash, revoked_at, revocation_reason, created_at, updated_at
+            FROM owner_truth.family_contribution_grants
+            WHERE vault_id = %s AND create_command_id_hash = %s
+            """,
+            (grant["vaultId"], grant["createCommandIdHash"]),
+        )
+        if (
+            existing is None
+            or str(existing.get("id") or "") != str(grant["id"])
+            or str(existing.get("create_payload_hash") or "")
+            != str(grant["createPayloadHash"])
+        ):
+            raise ValueError("family contribution command conflict")
+        result = self._owner_truth_family_contribution_grant_payload(existing)
+        result["deduplicated"] = True
+        return result
+
+    def get_owner_truth_family_contribution_grant(
+        self,
+        vault_id: str,
+        grant_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT id, vault_id, owner_subject_id, contributor_subject_id,
+                relationship_id, relationship_epoch, scope, status, row_version,
+                create_command_id_hash, create_payload_hash, revoke_command_id_hash,
+                revoke_payload_hash, revoked_at, revocation_reason, created_at, updated_at
+            FROM owner_truth.family_contribution_grants
+            WHERE vault_id = %s AND id = %s
+            """,
+            (vault_id, grant_id),
+        )
+        return None if row is None else self._owner_truth_family_contribution_grant_payload(row)
+
+    def revoke_owner_truth_family_contribution_grant(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        grant_id: str,
+        expected_version: int,
+        revoke_command_id_hash: str,
+        revoke_payload_hash: str,
+        revoked_at_iso: str,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT id, vault_id, owner_subject_id, contributor_subject_id,
+                relationship_id, relationship_epoch, scope, status, row_version,
+                create_command_id_hash, create_payload_hash, revoke_command_id_hash,
+                revoke_payload_hash, revoked_at, revocation_reason, created_at, updated_at
+            FROM owner_truth.family_contribution_grants
+            WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+            FOR UPDATE
+            """,
+            (vault_id, grant_id, owner_subject_id),
+        )
+        if row is None:
+            return None
+        if str(row.get("status") or "") == "revoked":
+            if (
+                str(row.get("revoke_command_id_hash") or "") == revoke_command_id_hash
+                and str(row.get("revoke_payload_hash") or "") == revoke_payload_hash
+            ):
+                result = self._owner_truth_family_contribution_grant_payload(row)
+                result["deduplicated"] = True
+                return result
+            return None
+        if int(row.get("row_version") or 0) != expected_version:
+            return None
+        updated = self._fetchone(
+            """
+            UPDATE owner_truth.family_contribution_grants
+            SET status = 'revoked', row_version = row_version + 1,
+                revoke_command_id_hash = %s, revoke_payload_hash = %s,
+                revoked_at = %s, revocation_reason = %s, updated_at = %s
+            WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+                AND status = 'active' AND row_version = %s
+            RETURNING id, vault_id, owner_subject_id, contributor_subject_id,
+                relationship_id, relationship_epoch, scope, status, row_version,
+                create_command_id_hash, create_payload_hash, revoke_command_id_hash,
+                revoke_payload_hash, revoked_at, revocation_reason, created_at, updated_at
+            """,
+            (
+                revoke_command_id_hash,
+                revoke_payload_hash,
+                revoked_at_iso,
+                reason,
+                revoked_at_iso,
+                vault_id,
+                grant_id,
+                owner_subject_id,
+                expected_version,
+            ),
+        )
+        return None if updated is None else self._owner_truth_family_contribution_grant_payload(updated)
+
     def list_owner_truth_data_rights_records(self, user_id: str) -> Dict[str, List[Dict[str, Any]]]:
         return read_owner_truth_data_rights_records(
             subject_id=user_id,
@@ -6856,6 +7015,31 @@ class PostgresStore:
             "expiresAt": cls._iso_value(row.get("expires_at")),
             "revokedAt": cls._iso_value(row.get("revoked_at")),
             "rowVersion": int(row.get("row_version") or 1),
+            "createdAt": cls._iso_value(row.get("created_at")),
+            "updatedAt": cls._iso_value(row.get("updated_at")),
+        }
+
+    @classmethod
+    def _owner_truth_family_contribution_grant_payload(
+        cls,
+        row: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "vaultId": str(row["vault_id"]),
+            "ownerSubjectId": str(row["owner_subject_id"]),
+            "contributorSubjectId": str(row["contributor_subject_id"]),
+            "relationshipId": str(row["relationship_id"]),
+            "relationshipEpoch": int(row.get("relationship_epoch") or 0),
+            "scope": str(row["scope"]),
+            "status": str(row["status"]),
+            "rowVersion": int(row.get("row_version") or 1),
+            "createCommandIdHash": str(row["create_command_id_hash"]),
+            "createPayloadHash": str(row["create_payload_hash"]),
+            "revokeCommandIdHash": row.get("revoke_command_id_hash"),
+            "revokePayloadHash": row.get("revoke_payload_hash"),
+            "revokedAt": cls._iso_value(row.get("revoked_at")),
+            "revocationReason": row.get("revocation_reason"),
             "createdAt": cls._iso_value(row.get("created_at")),
             "updatedAt": cls._iso_value(row.get("updated_at")),
         }

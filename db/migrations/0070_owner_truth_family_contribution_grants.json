@@ -1,0 +1,11 @@
+{
+  "version": "0070",
+  "name": "owner_truth_family_contribution_grants",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthFamilyContributionDefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthFamilyContributionQA": false
+  }
+}
