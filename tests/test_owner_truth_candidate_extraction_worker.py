@@ -55,6 +55,7 @@ class _Store:
         source_content_hash: str,
         source_text: str,
         candidate_repository: InMemoryOwnerTruthCandidateExtractionRepository | None = None,
+        candidate_extraction_allowed: bool = True,
     ) -> None:
         self.lease_repository = InMemoryAsyncEffectLeaseRepository()
         self.consumer_repository = InMemoryAsyncEffectConsumerRepository()
@@ -80,6 +81,7 @@ class _Store:
             authority_epoch=7,
             source_version=1,
             state="active",
+            candidate_extraction_allowed=candidate_extraction_allowed,
         )
 
     def readiness_probe(self):
@@ -178,6 +180,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self,
         *,
         candidate_repository: InMemoryOwnerTruthCandidateExtractionRepository | None = None,
+        candidate_extraction_allowed: bool = True,
     ) -> _Store:
         return _Store(
             vault_id=self.vault_id,
@@ -186,6 +189,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
             source_content_hash=self.source_content_hash,
             source_text=self.source_text,
             candidate_repository=candidate_repository,
+            candidate_extraction_allowed=candidate_extraction_allowed,
         )
 
     def _worker(
@@ -293,6 +297,19 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
                 self.assertEqual(result["jobState"], "blocked")
                 self.assertEqual(store.candidate_repository.snapshot()["extractions"], {})
                 self.assertEqual(store.input_repository.intents, [])
+
+    def test_default_off_source_is_terminally_blocked_before_input_or_candidate(self) -> None:
+        store = self._new_store(candidate_extraction_allowed=False)
+        store.lease_repository.seed(self.intent)
+
+        result = self._worker(store=store).run_once()
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "sourceCandidateExtractionDisabled")
+        self.assertEqual(result["jobState"], "blocked")
+        self.assertEqual(store.candidate_repository.snapshot()["extractions"], {})
+        self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
+        self.assertEqual(store.input_repository.intents, [])
 
     def test_invalid_source_text_is_quarantined_without_a_candidate(self) -> None:
         self.store.input_repository.source_text = "   "

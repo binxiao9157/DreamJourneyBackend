@@ -228,6 +228,44 @@ class OwnerTruthFamilyContributionServiceTests(unittest.TestCase):
                 context=self.contributor_context(),
             )
 
+    def test_relationship_resume_does_not_reactivate_an_old_contribution_grant(self) -> None:
+        self.seed_vault()
+        relationship = self.accepted_relationship()
+        grant = self.create_grant(relationship["id"]).grant
+        paused = self.delegated_access.change_relationship(
+            RelationshipLifecycleCommand(
+                ownerSubjectId=self.owner,
+                relationshipId=relationship["id"],
+                operation=RelationshipOperation.PAUSE,
+                expectedEpoch=relationship["relationshipEpoch"],
+            )
+        )
+        resumed = self.delegated_access.change_relationship(
+            RelationshipLifecycleCommand(
+                ownerSubjectId=self.owner,
+                relationshipId=relationship["id"],
+                operation=RelationshipOperation.RESUME,
+                expectedEpoch=paused["relationshipEpoch"],
+            )
+        )
+
+        self.assertEqual(resumed["status"], "accepted")
+        self.assertGreater(resumed["relationshipEpoch"], grant["relationshipEpoch"])
+        with self.assertRaisesRegex(
+            OwnerTruthFamilyContributionError,
+            "familyContributionRelationshipEpochMismatch",
+        ):
+            self.service.submit_text_source(
+                command=SubmitFamilyContributionTextCommand(
+                    grant_id=grant["id"],
+                    expected_grant_version=grant["rowVersion"],
+                    source_command_id="resumed-old-grant-source",
+                    source_id=str(uuid4()),
+                    text="恢复关系后旧授权不得重新生效。",
+                ),
+                context=self.contributor_context(),
+            )
+
     def test_revoke_is_idempotent_but_command_reuse_with_different_meaning_is_not(self) -> None:
         self.seed_vault()
         relationship = self.accepted_relationship()

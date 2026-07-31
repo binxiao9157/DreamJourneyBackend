@@ -13,6 +13,8 @@ fi
 
 cd "$ROOT_DIR"
 PYTHONPATH=. "$PYTHON_BIN" -m unittest \
+  tests.test_async_effect_target_admission \
+  tests.test_owner_truth_candidate_extraction_worker \
   tests.test_owner_truth_family_contribution \
   tests.test_owner_truth_family_contribution_api \
   tests.test_owner_truth_family_contribution_migration_contract \
@@ -24,6 +26,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
   app/main.py \
   app/core/config.py \
   app/services/owner_truth_family_contribution.py \
+  app/async_effects/target_admission.py \
   app/services/in_memory_store.py \
   app/services/postgres_store.py \
   app/services/route_ownership.py
@@ -47,6 +50,14 @@ for required in (
     "familyContributionGrantInactive",
 ):
     assert required in service, required
+
+admission = Path("app/async_effects/target_admission.py").read_text(encoding="utf-8")
+for required in (
+    '"candidateExtraction") == "defaultOff"',
+    "sourceCandidateExtractionDisabled",
+    "candidate_extraction_allowed",
+):
+    assert required in admission, required
 
 for forbidden in (
     "build_source_created_effect_intent",

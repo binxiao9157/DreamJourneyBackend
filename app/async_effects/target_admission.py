@@ -66,6 +66,7 @@ class _SourceSnapshot:
     authority_epoch: int
     source_version: int
     state: str
+    candidate_extraction_allowed: bool = True
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,19 @@ def _source_target_precondition(intent: AsyncEffectIntent) -> str | None:
     except (TypeError, ValueError, AttributeError):
         return "invalidSourceTarget"
     return None
+
+
+def _source_candidate_extraction_allowed(metadata: object) -> bool:
+    """Keep family-contributed Sources out of generic Candidate extraction.
+
+    Admission retains only this execution policy bit. It must not expose the
+    Source metadata itself to the async-effect worker or its receipts.
+    """
+
+    return not (
+        isinstance(metadata, Mapping)
+        and metadata.get("candidateExtraction") == "defaultOff"
+    )
 
 
 def _memory_projection_target_precondition(intent: AsyncEffectIntent) -> str | None:
@@ -197,6 +211,8 @@ def _evaluate_owner_truth_source(
         return _blocked(intent, "sourceAuthorityEpochChanged")
     if source.source_version != target.resource_version:
         return _blocked(intent, "sourceVersionChanged")
+    if not source.candidate_extraction_allowed:
+        return _blocked(intent, "sourceCandidateExtractionDisabled")
     return _admitted(
         intent,
         authority_epoch=vault.authority_epoch,
@@ -322,6 +338,7 @@ class InMemoryOwnerTruthSourceTargetAdmissionRepository:
         authority_epoch: int,
         source_version: int,
         state: str,
+        candidate_extraction_allowed: bool = True,
     ) -> None:
         with self._lock:
             self._sources[(str(vault_id), str(source_id))] = _SourceSnapshot(
@@ -329,6 +346,7 @@ class InMemoryOwnerTruthSourceTargetAdmissionRepository:
                 authority_epoch=int(authority_epoch),
                 source_version=int(source_version),
                 state=str(state),
+                candidate_extraction_allowed=bool(candidate_extraction_allowed),
             )
 
     def admit_owner_truth_source(self, intent: AsyncEffectIntent) -> AsyncEffectTargetAdmission:
@@ -489,7 +507,7 @@ class PostgresOwnerTruthSourceTargetAdmissionRepository:
             vault_row = cursor.fetchone()
             cursor.execute(
                 """
-                SELECT owner_subject_id, authority_epoch, source_version, state
+                SELECT owner_subject_id, authority_epoch, source_version, state, metadata
                 FROM owner_truth.sources
                 WHERE vault_id = %s AND id = %s
                 FOR SHARE
@@ -511,6 +529,9 @@ class PostgresOwnerTruthSourceTargetAdmissionRepository:
                 authority_epoch=int(source_row["authority_epoch"]),
                 source_version=int(source_row["source_version"]),
                 state=str(source_row["state"]),
+                candidate_extraction_allowed=_source_candidate_extraction_allowed(
+                    source_row.get("metadata")
+                ),
             )
         return _evaluate_owner_truth_source(intent=intent, vault=vault, source=source)
 

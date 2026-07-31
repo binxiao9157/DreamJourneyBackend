@@ -19,7 +19,9 @@ Candidate、MemoryVersion、Voice、数字人、发布或 Memorial 权限。
 - 提交时在同一 relationship lock 内重新验证 Vault Owner、relationship 接受状态、成员主体和
   epoch。暂停、撤销、换人或 epoch 变化都会 fail closed。
 - 贡献 Source 被服务器标记为 `familyContributionGrant/familyReport/reported`，候选提取明确为
-  `notRequested`，不会创建 async effect。
+  `notRequested`，不会创建 async effect。即使未来重放或内部错误创建了
+  `source/candidateExtraction` effect，执行期 target admission 也会在读取 Source 正文前以
+  `sourceCandidateExtractionDisabled` 终止，不能写入 ExtractionResult 或 Candidate。
 - 撤销只阻止后续提交；已经写入的 Source 保持不可变。贡献者退出、撤回、数据权利和 Memorial
   继承规则不在本 G0 的范围内，不能据此宣称已经完成。
 
@@ -38,7 +40,8 @@ git diff --check
 ```
 
 该 gate 覆盖默认隐藏、Owner 授权、家庭成员提交、无正文回执、撤销、跨账号拒绝、关系状态/epoch
-失效、无候选提取 effect、迁移 additive/default-off 合同和路由认证登记。
+失效、无候选提取 effect、默认关闭 Source 的执行期 admission、读取前阻断、迁移
+additive/default-off 合同和路由认证登记。
 
 ## 未关闭的 Gate
 

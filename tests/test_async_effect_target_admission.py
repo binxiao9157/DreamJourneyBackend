@@ -10,6 +10,7 @@ from app.async_effects.target_admission import (
     InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository,
     InMemoryOwnerTruthSourceTargetAdmissionRepository,
     PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository,
+    PostgresOwnerTruthSourceTargetAdmissionRepository,
 )
 from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
@@ -152,6 +153,51 @@ class AsyncEffectTargetAdmissionTests(unittest.TestCase):
         self.assertEqual(result.reason_code, "sourceInactive")
         self.assertFalse(hasattr(result, "content"))
         self.assertFalse(hasattr(result, "metadata"))
+
+    def test_default_off_source_is_blocked_before_candidate_extraction(self):
+        self.repository.seed_source(
+            vault_id=self.vault_id,
+            source_id=self.source_id,
+            owner_subject_id=self.owner_subject_id,
+            authority_epoch=7,
+            source_version=3,
+            state="active",
+            candidate_extraction_allowed=False,
+        )
+
+        result = self.repository.admit_owner_truth_source(self.intent())
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason_code, "sourceCandidateExtractionDisabled")
+        self.assertFalse(hasattr(result, "metadata"))
+
+    def test_postgres_default_off_source_is_blocked_before_candidate_extraction(self):
+        cursor = _PostgresCursor(
+            [
+                {
+                    "owner_subject_id": self.owner_subject_id,
+                    "authority_epoch": 7,
+                    "status": "active",
+                },
+                {
+                    "owner_subject_id": self.owner_subject_id,
+                    "authority_epoch": 7,
+                    "source_version": 3,
+                    "state": "active",
+                    "metadata": {"candidateExtraction": "defaultOff"},
+                },
+            ]
+        )
+        repository = PostgresOwnerTruthSourceTargetAdmissionRepository(
+            _PostgresConnection(cursor)
+        )
+
+        result = repository.admit_owner_truth_source(self.intent())
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason_code, "sourceCandidateExtractionDisabled")
+        self.assertEqual(len(cursor.executions), 2)
+        self.assertIn("metadata", cursor.executions[1][0])
 
     def test_wrong_operation_or_target_shape_is_fail_closed(self):
         operation_result = self.repository.admit_owner_truth_source(
