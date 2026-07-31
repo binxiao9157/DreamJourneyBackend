@@ -944,7 +944,7 @@ def exercise_formal_natural_input(
                 "presentation": {
                     "state": "reviewPending",
                     "canContinue": False,
-                    "canContinueLater": False,
+                    "canContinueLater": True,
                 },
             },
             "formal exit must expose only review-pending continuation guidance",
