@@ -27,13 +27,16 @@ from app.domain.owner_truth.knowledge_recommendations import (
     ServerPlannedContinuationCue,
 )
 from app.domain.owner_truth.memory_projection import (
+    OwnerTruthMemoryProjectionAccessDenied,
     OwnerTruthMemoryProjectionInput,
     build_ready_memory_projection,
     build_rebuilding_memory_projection,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_interview_session_outcome_read import (
+    OwnerTruthInterviewSessionOutcomeReadAccessDenied,
     OwnerTruthInterviewSessionOutcomeReadService,
+    interview_session_outcome_presentation,
 )
 from app.services.owner_truth_knowledge_dimension_confirmation import (
     InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository,
@@ -55,6 +58,12 @@ class _ProjectionReader:
     def read(self, *, context: OwnerTruthCommandContext) -> dict[str, object]:
         del context
         return self.snapshot
+
+
+class _UnmaterializedProjectionReader:
+    def read(self, *, context: OwnerTruthCommandContext) -> dict[str, object]:
+        del context
+        raise OwnerTruthMemoryProjectionAccessDenied("Vault is not active for this Owner")
 
 
 class _ConversationRepository:
@@ -124,17 +133,19 @@ class _Store:
     def __init__(
         self,
         *,
-        reader: _ProjectionReader,
+        reader: _ProjectionReader | _UnmaterializedProjectionReader,
         confirmations: InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository,
         conversation: _ConversationRepository,
         candidate_reviews: _CandidateReviewRepository,
         cues: _CueRepository,
+        owner_truth_vault: dict[str, object] | None,
     ) -> None:
         self.reader = reader
         self.confirmations = confirmations
         self.conversation = conversation
         self.candidate_reviews = candidate_reviews
         self.cues = cues
+        self.owner_truth_vault = owner_truth_vault
 
     @contextmanager
     def request_unit_of_work(self, *, correlation_id: str, command_id: str):
@@ -155,6 +166,13 @@ class _Store:
 
     def owner_truth_saved_continuation_cue_repository(self):
         return self.cues
+
+    def get_owner_truth_vault(self, vault_id: str):
+        if self.owner_truth_vault is None:
+            return None
+        if self.owner_truth_vault["vaultId"] != vault_id:
+            return None
+        return self.owner_truth_vault
 
 
 class OwnerTruthInterviewSessionOutcomeReadTests(unittest.TestCase):
@@ -268,21 +286,27 @@ class OwnerTruthInterviewSessionOutcomeReadTests(unittest.TestCase):
         session: OwnerTruthInterviewSessionSnapshot,
         batches: tuple[OwnerTruthInterviewReviewBatchSnapshot, ...],
         snapshot: dict[str, object] | None = None,
+        reader: _ProjectionReader | _UnmaterializedProjectionReader | None = None,
+        vault_materialized: bool = True,
         confirm_memory: OwnerTruthMemoryProjectionInput | None = None,
         compositions: dict[str, OwnerTruthInterviewCandidateReviewComposition] | None = None,
         cues: tuple[ServerPlannedContinuationCue, ...] = (),
     ) -> _Store:
-        reader = _ProjectionReader(snapshot or self.snapshot)
+        projection_reader = reader or _ProjectionReader(snapshot or self.snapshot)
         confirmations = InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository()
         confirmation_store = type(
             "ConfirmationStore",
             (),
             {
-                "owner_truth_memory_projection_repository": lambda _: reader,
+                "owner_truth_memory_projection_repository": lambda _: projection_reader,
                 "owner_truth_knowledge_dimension_confirmation_repository": lambda _: confirmations,
             },
         )()
-        if confirm_memory is not None and str(reader.snapshot.get("state") or "") == "ready":
+        if (
+            confirm_memory is not None
+            and isinstance(projection_reader, _ProjectionReader)
+            and str(projection_reader.snapshot.get("state") or "") == "ready"
+        ):
             OwnerTruthKnowledgeDimensionConfirmationService(confirmation_store, enabled=True).confirm(
                 context=self.context,
                 memory_version_id=confirm_memory.memory_version_id,
@@ -294,11 +318,21 @@ class OwnerTruthInterviewSessionOutcomeReadTests(unittest.TestCase):
                 ),
             )
         return _Store(
-            reader=reader,
+            reader=projection_reader,
             confirmations=confirmations,
             conversation=_ConversationRepository(session=session, batches=batches),
             candidate_reviews=_CandidateReviewRepository(compositions or {}),
             cues=_CueRepository(cues),
+            owner_truth_vault=(
+                {
+                    "vaultId": self.vault_id,
+                    "ownerSubjectId": self.owner_id,
+                    "authorityEpoch": 5,
+                    "status": "active",
+                }
+                if vault_materialized
+                else None
+            ),
         )
 
     def test_counts_only_confirmed_memory_from_this_sessions_admitted_source(self) -> None:
@@ -412,6 +446,54 @@ class OwnerTruthInterviewSessionOutcomeReadTests(unittest.TestCase):
         self.assertEqual(result.confirmation_state, OwnerTruthKnowledgeDimensionReadState.REBUILDING)
         self.assertIsNone(result.confirmed_memory_version_count)
         self.assertIsNone(result.eligible_saved_continuation_cue_count)
+
+    def test_unmaterialized_owner_vault_returns_rebuilding_pending_summary(self) -> None:
+        batch = self._batch(state=InterviewReviewBatchState.PENDING_ACKNOWLEDGEMENT)
+        store = self._store(
+            session=self._session(pending_review_batch_id=batch.review_batch_id),
+            batches=(batch,),
+            reader=_UnmaterializedProjectionReader(),
+            vault_materialized=False,
+        )
+
+        result = OwnerTruthInterviewSessionOutcomeReadService(store).read(
+            session_id=self.session_id,
+            context=self.context,
+        )
+
+        self.assertEqual(result.confirmation_state, OwnerTruthKnowledgeDimensionReadState.REBUILDING)
+        self.assertEqual(result.pending_review_batch_count, 1)
+        self.assertIsNone(result.confirmed_memory_version_count)
+        self.assertIsNone(result.eligible_saved_continuation_cue_count)
+        self.assertEqual(
+            interview_session_outcome_presentation(result),
+            {
+                "state": "rebuilding",
+                "thisSession": {
+                    "confirmedMemoryCount": 0,
+                    "pendingReviewBatchCount": 1,
+                },
+                "laterContinue": {
+                    "canContinueLater": True,
+                    "eligibleCueCount": 0,
+                },
+            },
+        )
+
+    def test_existing_vault_projection_denial_remains_fail_closed(self) -> None:
+        batch = self._batch(state=InterviewReviewBatchState.PENDING_ACKNOWLEDGEMENT)
+        store = self._store(
+            session=self._session(pending_review_batch_id=batch.review_batch_id),
+            batches=(batch,),
+            reader=_UnmaterializedProjectionReader(),
+            vault_materialized=True,
+        )
+
+        with self.assertRaises(OwnerTruthInterviewSessionOutcomeReadAccessDenied):
+            OwnerTruthInterviewSessionOutcomeReadService(store).read(
+                session_id=self.session_id,
+                context=self.context,
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover

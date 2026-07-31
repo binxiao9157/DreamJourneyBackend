@@ -48,6 +48,9 @@ class OwnerTruthInterviewSessionOutcomeReadAPITests(unittest.TestCase):
         self.previous_outcome_qa = (
             main_module.OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED
         )
+        self.previous_review_batch_automation_enabled = (
+            main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED
+        )
         self.store = InMemoryStore()
         main_module.store = self.store
         main_module.BACKEND_API_TOKEN = ""
@@ -57,6 +60,7 @@ class OwnerTruthInterviewSessionOutcomeReadAPITests(unittest.TestCase):
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
         main_module.OWNER_TRUTH_KNOWLEDGE_DIMENSION_CONFIRMATION_QA_ENABLED = True
         main_module.OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED = True
+        main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = False
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -70,6 +74,9 @@ class OwnerTruthInterviewSessionOutcomeReadAPITests(unittest.TestCase):
         )
         main_module.OWNER_TRUTH_INTERVIEW_SESSION_OUTCOME_READ_QA_ENABLED = (
             self.previous_outcome_qa
+        )
+        main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = (
+            self.previous_review_batch_automation_enabled
         )
 
     @staticmethod
@@ -111,6 +118,25 @@ class OwnerTruthInterviewSessionOutcomeReadAPITests(unittest.TestCase):
         return {
             **headers,
             "X-DreamJourney-Feature": "ownerTruthInterviewOutcome",
+            "X-DreamJourney-Feature-Decision-Id": decision_id,
+            "X-DreamJourney-Feature-Allowed": "true",
+            "X-DreamJourney-Policy-Version": "release-policy-v1",
+            "X-DreamJourney-Policy-Revision": "1",
+            "X-DreamJourney-Account-Generation": sha256(
+                session_id.encode("utf-8")
+            ).hexdigest()[:24],
+        }
+
+    @staticmethod
+    def _echo_text_input_policy_headers(
+        headers: dict[str, str],
+        *,
+        session_id: str,
+        decision_id: str,
+    ) -> dict[str, str]:
+        return {
+            **headers,
+            "X-DreamJourney-Feature": "echoTextInput",
             "X-DreamJourney-Feature-Decision-Id": decision_id,
             "X-DreamJourney-Feature-Allowed": "true",
             "X-DreamJourney-Policy-Version": "release-policy-v1",
@@ -294,6 +320,112 @@ class OwnerTruthInterviewSessionOutcomeReadAPITests(unittest.TestCase):
                 self.assertNotIn(forbidden, rendered)
         finally:
             policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
+    def test_formal_exit_outcome_presentation_is_value_minimized_and_policy_isolated(self) -> None:
+        owner_id, headers, auth_session_id = self._login_release_policy("13800139647")
+        vault_id = "vault-session-outcome-formal-exit"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        interview_headers = self._echo_text_input_policy_headers(
+            headers,
+            session_id=auth_session_id,
+            decision_id="interview-formal-exit-outcome",
+        )
+        start_path = f"/v2/vaults/{vault_id}/interview-sessions"
+
+        started = client.post(
+            start_path,
+            headers=interview_headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "sessionId": session_id,
+            },
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+        appended = client.post(
+            f"{start_path}/{session_id}/messages",
+            headers=interview_headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": "结束后的回顾不应泄露这段私有叙述。",
+            },
+        )
+        self.assertEqual(appended.status_code, 201, appended.text)
+
+        main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = True
+        ended = client.post(
+            f"{start_path}/{session_id}/end",
+            headers=interview_headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "expectedThreadVersion": 2,
+                "expectedSessionVersion": 2,
+            },
+        )
+        self.assertEqual(ended.status_code, 201, ended.text)
+
+        outcome_path = f"{start_path}/{session_id}/outcome"
+        denied = client.get(outcome_path, headers=interview_headers)
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(denied.json()["detail"]["feature"], "ownerTruthInterviewOutcome")
+
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {
+            "ownerTruthInterviewOutcome"
+        }
+        try:
+            response = client.get(
+                outcome_path,
+                headers=self._outcome_presentation_policy_headers(
+                    headers,
+                    session_id=auth_session_id,
+                    decision_id="interview-formal-exit-outcome-presentation",
+                ),
+            )
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        body = response.json()
+        self.assertEqual(
+            body,
+            {
+                "schemaVersion": "owner-truth-interview-session-outcome-presentation-v1",
+                "vaultId": vault_id,
+                "sessionOutcome": {
+                    "state": "rebuilding",
+                    "thisSession": {
+                        "confirmedMemoryCount": 0,
+                        "pendingReviewBatchCount": 1,
+                    },
+                    "laterContinue": {
+                        "canContinueLater": True,
+                        "eligibleCueCount": 0,
+                    },
+                },
+            },
+        )
+        rendered = json.dumps(body, ensure_ascii=False, sort_keys=True)
+        for forbidden in (
+            session_id,
+            thread_id,
+            "结束后的回顾",
+            "candidateId",
+            "memoryVersionId",
+            "sourceId",
+            "reviewBatchId",
+            "authorityEpoch",
+            "policyVersion",
+        ):
+            self.assertNotIn(forbidden, rendered)
 
     def test_owner_cannot_submit_extra_fields(self) -> None:
         owner_id, headers = self._login("13800139643")

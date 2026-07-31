@@ -33,6 +33,7 @@ from app.domain.owner_truth.interview_candidate_review import (
     OwnerTruthInterviewCandidateReviewSourceInactive,
 )
 from app.domain.owner_truth.knowledge_dimension_read import (
+    OwnerTruthKnowledgeDimensionReadResult,
     OwnerTruthKnowledgeDimensionReadService,
     OwnerTruthKnowledgeDimensionReadState,
 )
@@ -211,12 +212,13 @@ def interview_session_outcome_presentation(
         pending_review_batch_count = result.pending_review_batch_count
         eligible_cue_count = result.eligible_saved_continuation_cue_count
     else:
-        # A rebuilding projection must never leak a prior count as though it
-        # were a current confirmed fact.  The client receives only a neutral
-        # rebuilding state and no stale session-derived values.
+        # A rebuilding projection must never leak a prior confirmed count as
+        # though it were current. The pending-review count comes from the
+        # scoped, current interview session read, so it remains safe while
+        # confirmed coverage is absent or rebuilding.
         state = "rebuilding"
         confirmed_memory_count = 0
-        pending_review_batch_count = 0
+        pending_review_batch_count = result.pending_review_batch_count
         eligible_cue_count = 0
 
     return {
@@ -254,6 +256,9 @@ class OwnerTruthInterviewSessionOutcomeReadStore(Protocol):
         ...
 
     def owner_truth_saved_continuation_cue_repository(self) -> Any:
+        ...
+
+    def get_owner_truth_vault(self, vault_id: str) -> Mapping[str, Any] | None:
         ...
 
 
@@ -305,18 +310,15 @@ class OwnerTruthInterviewSessionOutcomeReadService:
                 session=session,
                 context=context,
             )
-            try:
-                dimension_read = OwnerTruthKnowledgeDimensionReadService(
-                    self._store.owner_truth_memory_projection_repository(),
-                    self._store.owner_truth_knowledge_dimension_confirmation_repository(),
-                ).read(context=context)
-            except OwnerTruthMemoryProjectionAccessDenied as error:
-                raise OwnerTruthInterviewSessionOutcomeReadAccessDenied(str(error)) from error
+            dimension_read = self._read_dimension_or_unmaterialized(context=context)
             admitted_source_versions = self._current_admitted_source_versions(
                 review_batches=review_batches,
                 context=context,
             )
-            if dimension_read.state is OwnerTruthKnowledgeDimensionReadState.READY:
+            if (
+                dimension_read is not None
+                and dimension_read.state is OwnerTruthKnowledgeDimensionReadState.READY
+            ):
                 assert dimension_read.coverage is not None
                 confirmed_memory_version_count = self._confirmed_memory_version_count(
                     admitted_source_versions=admitted_source_versions,
@@ -356,10 +358,38 @@ class OwnerTruthInterviewSessionOutcomeReadService:
                 pending_review_batch_count=pending_count,
                 acknowledged_review_batch_count=acknowledged_count,
                 admitted_review_batch_count=len(admitted_source_versions),
-                confirmation_state=dimension_read.state,
+                confirmation_state=(
+                    dimension_read.state
+                    if dimension_read is not None
+                    else OwnerTruthKnowledgeDimensionReadState.REBUILDING
+                ),
                 confirmed_memory_version_count=confirmed_memory_version_count,
                 eligible_saved_continuation_cue_count=eligible_cue_count,
             )
+
+    def _read_dimension_or_unmaterialized(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthKnowledgeDimensionReadResult | None:
+        """Allow a new, verified Owner session to report a neutral outcome.
+
+        The conversation and review-batch scopes are checked before this
+        helper runs. If no Owner Truth vault exists yet, no Source or
+        MemoryVersion has been materialized, which is distinct from a revoked
+        or mismatched vault. Existing vaults preserve the fail-closed
+        projection access behaviour.
+        """
+
+        try:
+            return OwnerTruthKnowledgeDimensionReadService(
+                self._store.owner_truth_memory_projection_repository(),
+                self._store.owner_truth_knowledge_dimension_confirmation_repository(),
+            ).read(context=context)
+        except OwnerTruthMemoryProjectionAccessDenied as error:
+            if self._store.get_owner_truth_vault(context.vault_id) is None:
+                return None
+            raise OwnerTruthInterviewSessionOutcomeReadAccessDenied(str(error)) from error
 
     @staticmethod
     def _assert_session_scope(

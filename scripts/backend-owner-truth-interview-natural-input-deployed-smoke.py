@@ -950,6 +950,89 @@ def exercise_formal_natural_input(
             "formal exit must expose only review-pending continuation guidance",
         )
 
+        formal_exit_outcome_path = (
+            f"{start_path}/{formal_exit_session_id}/outcome"
+        )
+        formal_exit_outcome_denied_status, formal_exit_outcome_denied_body, _ = app_request(
+            "GET",
+            formal_exit_outcome_path,
+            token=access_token,
+            policy_headers=policy_headers,
+        )
+        require(
+            formal_exit_outcome_denied_status == 403
+            and detail_code(formal_exit_outcome_denied_body) == "release_policy_denied"
+            and isinstance(formal_exit_outcome_denied_body.get("detail"), dict)
+            and formal_exit_outcome_denied_body["detail"].get("feature")
+            == "ownerTruthInterviewOutcome",
+            "formal exit outcome must not inherit the natural-input policy",
+        )
+        policy_service = main_module.RELEASE_POLICY_SERVICE
+        previous_outcome_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_outcome_visible | {
+            "ownerTruthInterviewOutcome"
+        }
+        try:
+            formal_exit_outcome_status, formal_exit_outcome_body, formal_exit_outcome_headers = app_request(
+                "GET",
+                formal_exit_outcome_path,
+                token=access_token,
+                policy_headers={
+                    "X-DreamJourney-Feature": "ownerTruthInterviewOutcome",
+                    "X-DreamJourney-Feature-Decision-Id": (
+                        f"smoke-interview-outcome-{suffix}"
+                    ),
+                    "X-DreamJourney-Feature-Allowed": "true",
+                    "X-DreamJourney-Policy-Version": str(policy_snapshot["policyVersion"]),
+                    "X-DreamJourney-Policy-Revision": str(policy_snapshot["policyRevision"]),
+                    "X-DreamJourney-Account-Generation": account_generation,
+                    "X-DreamJourney-Policy-Audience": "owner",
+                    "X-DreamJourney-Policy-Cohort": "closedPilotAdultSelf",
+                },
+            )
+        finally:
+            policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_outcome_visible
+        require(
+            formal_exit_outcome_status == 200
+            and formal_exit_outcome_headers.get("cache-control") == "no-store"
+            and formal_exit_outcome_body == {
+                "schemaVersion": "owner-truth-interview-session-outcome-presentation-v1",
+                "vaultId": vault_id,
+                "sessionOutcome": {
+                    "state": "rebuilding",
+                    "thisSession": {
+                        "confirmedMemoryCount": 0,
+                        "pendingReviewBatchCount": 1,
+                    },
+                    "laterContinue": {
+                        "canContinueLater": True,
+                        "eligibleCueCount": 0,
+                    },
+                },
+            },
+            "formal exit outcome must expose only the current bounded review summary",
+        )
+        formal_exit_outcome_serialized = json.dumps(
+            formal_exit_outcome_body,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        for forbidden in (
+            formal_exit_session_id,
+            formal_exit_thread_id,
+            "正式结束 smoke",
+            "candidateId",
+            "memoryVersionId",
+            "sourceId",
+            "reviewBatchId",
+            "authorityEpoch",
+            "policyVersion",
+        ):
+            require(
+                forbidden not in formal_exit_outcome_serialized,
+                "formal exit outcome must remain content and identifier free",
+            )
+
         return {
             "formalMissingCaptureDenied": True,
             "formalMatchingCaptureStarted": True,
@@ -973,6 +1056,8 @@ def exercise_formal_natural_input(
             "formalSessionExitCreatedHiddenReviewBatch": True,
             "formalSessionExitDeduplicated": True,
             "formalSessionExitReviewPendingPresentation": True,
+            "formalSessionExitOutcomeRequiresDedicatedPolicy": True,
+            "formalSessionExitOutcomePresentation": True,
             "contentFreeStateVerified": True,
             "contentFreePresentationVerified": True,
             "deployedCandidateReviewPolicyDefaultClosed": True,
