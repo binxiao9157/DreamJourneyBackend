@@ -96,6 +96,10 @@ class Settings:
     # default-off MemoryProjection worker succeeds. This never exposes search
     # or enables a public retrieval surface by itself.
     owner_truth_memory_search_projection_worker_enabled: bool = False
+    # A server-owned closed-pilot can opt into confirmed V4 Projection Context
+    # for personal Echo only. It remains off until the worker/profile and
+    # allowlist rollout are separately verified in the target environment.
+    owner_truth_context_authority_closed_pilot_enabled: bool = False
     delegated_access_contract_api_enabled: bool = False
     # Candidate review is an Owner Truth QA contract only until the M0 review
     # UI, release policy, and external gates are complete.
@@ -339,6 +343,10 @@ class Settings:
             owner_truth_memory_search_projection_worker_enabled=_env_bool(
                 "OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_WORKER_ENABLED",
                 cls.owner_truth_memory_search_projection_worker_enabled,
+            ),
+            owner_truth_context_authority_closed_pilot_enabled=_env_bool(
+                "OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED",
+                cls.owner_truth_context_authority_closed_pilot_enabled,
             ),
             delegated_access_contract_api_enabled=_env_bool(
                 "DELEGATED_ACCESS_CONTRACT_API_ENABLED",

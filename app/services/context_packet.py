@@ -3,7 +3,7 @@ import time
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from app.core.config import Settings
 from app.services.delegated_access import (
@@ -246,6 +246,280 @@ class ContextPacketBuilder:
                 "latencyMs": latency_ms,
             },
         }
+
+    @staticmethod
+    def safety_allows_persona(query: str) -> bool:
+        """Expose the existing pre-read safety decision to a server authority adapter."""
+
+        return bool(SafetyPolicy().evaluate(query).effects.personaAllowed)
+
+    def build_from_owner_truth_materialization(
+        self,
+        payload: Dict[str, Any],
+        *,
+        materialization: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Build a normal Echo packet from confirmed V4 Projection Context only.
+
+        This deliberately avoids the legacy ``build`` path after its safety
+        boundary: no Archive, KBLite, Care, or delegated-family lookup may run
+        for the closed-pilot personal-self authority mode.
+        """
+
+        started = time.perf_counter()
+        user_id = self._required_text(payload, "userId")
+        intent = self._text(payload.get("intent"), "echo_chat")
+        query = self._text(payload.get("query"), "")
+        persona_scope = self._normal_persona_scope(payload.get("personaScope"))
+        digital_human_id = self._text(payload.get("digitalHumanId"), user_id)
+        lifecycle_mode = self._text(payload.get("lifecycleMode"), "sunlight")
+        viewer_family_member_id = self._optional_text(payload.get("viewerFamilyMemberID"))
+        safety_decision = SafetyPolicy().evaluate(query)
+        if not safety_decision.effects.personaAllowed:
+            return self._neutral_safety_packet(
+                started=started,
+                user_id=user_id,
+                intent=intent,
+                query=query,
+                persona_scope=persona_scope,
+                digital_human_id=digital_human_id,
+                lifecycle_mode=lifecycle_mode,
+                viewer_family_member_id=viewer_family_member_id,
+                safety_decision=safety_decision,
+            )
+        if (
+            persona_scope != "personal"
+            or digital_human_id != user_id
+            or viewer_family_member_id is not None
+        ):
+            raise ValueError("owner truth context requires personal self persona")
+        if not isinstance(materialization, Mapping):
+            raise ValueError("owner truth context materialization is required")
+
+        request = materialization.get("request")
+        authority = materialization.get("authority")
+        generation = materialization.get("generationContext")
+        if not all(isinstance(value, Mapping) for value in (request, authority, generation)):
+            raise ValueError("owner truth context materialization metadata is invalid")
+        expected_correlation = self._request_correlation(intent=intent, query=query)
+        if (
+            str(request.get("intent") or "") != expected_correlation["intent"]
+            or request.get("queryHash") != expected_correlation["queryHash"]
+            or request.get("queryLength") != expected_correlation["queryLength"]
+        ):
+            raise ValueError("owner truth context materialization request does not match")
+        if str(authority.get("vaultId") or "") != user_id:
+            raise ValueError("owner truth context authority vault does not match authenticated owner")
+        if str(authority.get("source") or "") != "owner-truth-memory-projection":
+            raise ValueError("owner truth context authority source is invalid")
+
+        selected_context = self._owner_truth_context_items(
+            materialization.get("selectedContext"),
+            field="selectedContext",
+        )
+        filtered_context = self._owner_truth_context_items(
+            materialization.get("filteredContext"),
+            field="filteredContext",
+        )
+        typed_citations = self._owner_truth_context_items(
+            materialization.get("typedCitations"),
+            field="typedCitations",
+        )
+        fallbacks = self._owner_truth_fallbacks(materialization.get("fallbacks"))
+        generation_text = generation.get("text")
+        if not isinstance(generation_text, str):
+            raise ValueError("owner truth generation context text is invalid")
+        source_count = generation.get("sourceCount")
+        if isinstance(source_count, bool) or not isinstance(source_count, int) or source_count < 0:
+            raise ValueError("owner truth generation context sourceCount is invalid")
+        if source_count > len(selected_context):
+            raise ValueError("owner truth generation context sourceCount exceeds selected Context")
+        if not isinstance(generation.get("contentHash"), str) or not generation.get("contentHash"):
+            raise ValueError("owner truth generation context contentHash is invalid")
+        if isinstance(generation.get("maxChars"), bool) or not isinstance(generation.get("maxChars"), int):
+            raise ValueError("owner truth generation context maxChars is invalid")
+
+        selected_for_generation = selected_context[:source_count]
+        source_refs = [
+            {
+                "source": "ownerTruthMemoryProjection",
+                "refId": str(item.get("refId") or ""),
+                "kind": str(item.get("kind") or "memory"),
+            }
+            for item in selected_for_generation
+        ]
+        if any(not item["refId"] for item in source_refs):
+            raise ValueError("owner truth selected Context item lacks refId")
+        ranking_trace = [
+            {
+                "refId": str(item.get("refId") or ""),
+                "source": str(item.get("source") or "owner-truth-memory-projection"),
+                "selected": True,
+                "reason": str(item.get("reason") or "confirmed_current_memory_version"),
+                "rank": deepcopy(dict(item.get("rank") or {})),
+            }
+            for item in selected_context
+        ]
+        generation_context = {
+            "version": str(generation.get("version") or "echo-context-v4-owner"),
+            "text": generation_text,
+            "sourceRefs": source_refs,
+            "sourceCounts": {
+                "archive": 0,
+                "kbFact": 0,
+                "persona": 0,
+                "care": 0,
+                "ownerTruthMemoryProjection": source_count,
+            },
+            "contentHash": str(generation["contentHash"]),
+            "maxChars": int(generation["maxChars"]),
+            "truncated": bool(generation.get("truncated")),
+        }
+
+        voice_profiles = self.store.list_voice_profiles(user_id)
+        usable_voice_profile = self._first_usable_voice_profile(
+            voice_profiles,
+            persona_scope,
+            digital_human_id,
+            user_id,
+        )
+        runtime_config = RuntimeConfigService(self.settings).public_config()
+        voice_runtime = runtime_config.get("voiceClone") or {}
+        tencent_audio_drive = voice_runtime.get("tencentAudioDrive") or {}
+        digital_human_runtime = runtime_config.get("digitalHuman") or {}
+        synthesis_ready = bool(
+            voice_runtime.get("synthesisProviderReady") and tencent_audio_drive.get("supported")
+        )
+        clone_ready = usable_voice_profile is not None and synthesis_ready
+        digital_human_ready = bool(digital_human_runtime.get("realProviderReady"))
+        if not selected_context and "owner_truth_context_no_eligible_personal_memory" not in fallbacks:
+            fallbacks.append("owner_truth_context_no_eligible_personal_memory")
+        if not clone_ready:
+            fallbacks.append("voice_clone_not_ready")
+        if not digital_human_ready:
+            fallbacks.append("digital_human_not_ready")
+
+        privacy_scope = self._privacy_scope(
+            user_id=user_id,
+            persona_scope="personal",
+            digital_human_id=user_id,
+            viewer_family_member_id=None,
+            cross_scope_archive_included=False,
+            family_viewer_active=False,
+        )
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        trace = self._trace_summary(
+            archive_items=[],
+            kb_graph={"facts": []},
+            usable_voice_profile=usable_voice_profile,
+            clone_ready=clone_ready,
+            digital_human_ready=digital_human_ready,
+            digital_human_provider_mode=digital_human_runtime.get("providerMode") or "mockContract",
+            privacy_scope=privacy_scope,
+            fallbacks=fallbacks,
+            latency_ms=latency_ms,
+            selected_context=selected_context,
+            filtered_context=filtered_context,
+            ranking_trace=ranking_trace,
+        )
+        context_authority = {
+            "mode": "ownerTruthConfirmedProjection",
+            "state": str(materialization.get("state") or authority.get("state") or "unavailable"),
+            "source": str(authority["source"]),
+            "vaultId": user_id,
+            "authorityEpoch": authority.get("authorityEpoch"),
+            "projectionCheckpoint": authority.get("projectionCheckpoint"),
+            "contextHash": materialization.get("contextHash"),
+            "materializationHash": materialization.get("materializationHash"),
+            "legacyContextRead": False,
+        }
+        trace["contextAuthority"] = deepcopy(context_authority)
+        return {
+            "schemaVersion": self.schema_version,
+            "contextVersion": "echo-context-v4-owner",
+            "traceId": "ctx_" + uuid.uuid4().hex[:24],
+            "intent": intent,
+            "userId": user_id,
+            "query": query,
+            "requestCorrelation": expected_correlation,
+            "aiDisclosure": safety_decision.disclosure.model_dump(mode="json"),
+            "safetyPolicy": safety_decision.model_dump(mode="json"),
+            "persona": {
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "lifecycleMode": lifecycle_mode,
+                "viewerFamilyMemberID": None,
+            },
+            "memory": {
+                "archiveItems": [],
+                "kbPeople": [],
+                "kbPlaces": [],
+                "kbEvents": [],
+                "kbFacts": [],
+                "confirmedMemoryCitations": typed_citations,
+            },
+            "selectedContext": selected_context,
+            "filteredContext": filtered_context,
+            "rankingTrace": ranking_trace,
+            "generationContext": generation_context,
+            "care": {"latest": None, "viewerFamilyMemberID": None},
+            "voice": {
+                "cloneReady": clone_ready,
+                "voiceProfileId": usable_voice_profile.get("voiceProfileId") if usable_voice_profile else None,
+                "sampleStatus": usable_voice_profile.get("sampleStatus") if usable_voice_profile else "notProvided",
+                "qualityAcceptanceRequired": bool(
+                    usable_voice_profile.get("qualityAcceptanceRequired") if usable_voice_profile else False
+                ),
+                "synthesisProviderReady": synthesis_ready,
+                "outputMode": "tencentAudioDrive",
+            },
+            "digitalHuman": {
+                "sessionReady": digital_human_ready,
+                "provider": digital_human_runtime.get("provider") or "tencent",
+                "providerMode": digital_human_runtime.get("providerMode") or "mockContract",
+                "driveModes": digital_human_runtime.get("driveModes") or [],
+                "fallbackMode": digital_human_runtime.get("fallbackMode") or "audioOnly",
+            },
+            "policy": {
+                "privacyMode": "standard",
+                "canUseFamilyData": False,
+                "familyViewerActive": False,
+                "familyPersonaGrantActive": False,
+                "careGrantActive": False,
+                "canUseVoiceClone": clone_ready,
+                "crossScopeArchiveIncluded": False,
+                "privacyScope": privacy_scope,
+                "contextAuthority": "ownerTruthConfirmedProjection",
+            },
+            "contextAuthority": context_authority,
+            "trace": trace,
+            "fallbacks": fallbacks,
+            "debug": {
+                "sourceCounts": {
+                    "archiveItemsAvailable": 0,
+                    "archiveItemsIncluded": 0,
+                    "archiveItemsFiltered": 0,
+                    "rankingTraceItems": len(ranking_trace),
+                    "selectedContextTotal": len(selected_context),
+                    "selectedContextOwnerTruthProjection": len(selected_context),
+                    "voiceProfiles": len(voice_profiles),
+                    "careSnapshotAvailable": 0,
+                },
+                "latencyMs": latency_ms,
+            },
+        }
+
+    @staticmethod
+    def _owner_truth_context_items(value: Any, *, field: str) -> List[Dict[str, Any]]:
+        if not isinstance(value, list) or not all(isinstance(item, Mapping) for item in value):
+            raise ValueError(f"owner truth context materialization {field} is invalid")
+        return [deepcopy(dict(item)) for item in value]
+
+    @staticmethod
+    def _owner_truth_fallbacks(value: Any) -> List[str]:
+        if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+            raise ValueError("owner truth context materialization fallbacks are invalid")
+        return list(value)
 
     def _neutral_safety_packet(
         self,

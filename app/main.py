@@ -240,6 +240,7 @@ from app.services.owner_truth_context_materialization import (
     OwnerTruthContextMaterializationService,
     context_materialization_summary,
 )
+from app.services.owner_truth_context_authority import OwnerTruthContextAuthorityService
 from app.services.owner_truth_interview_turn_context import (
     OwnerTruthInterviewTurnContextService,
     interview_turn_context_summary,
@@ -509,6 +510,9 @@ DELEGATED_ACCESS_CONTRACT_API_ENABLED = bool(
 )
 OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = bool(
     settings.owner_truth_candidate_review_qa_enabled
+)
+OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = bool(
+    settings.owner_truth_context_authority_closed_pilot_enabled
 )
 OWNER_TRUTH_FAMILY_CONTRIBUTION_QA_ENABLED = bool(
     settings.owner_truth_family_contribution_qa_enabled
@@ -4259,6 +4263,44 @@ def _release_policy_server_cohort(principal: RequestPrincipal) -> str:
     ):
         return "closedPilotAdultSelf"
     return "unassigned"
+
+
+def _owner_truth_context_authority_context(
+    request: Request,
+    *,
+    owner_subject_id: str,
+    payload: Dict[str, Any],
+) -> Optional[OwnerTruthCommandContext]:
+    """Grant production V4 Context only to a server-owned personal-self pilot."""
+
+    if not OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED:
+        return None
+    principal = getattr(request.state, "auth_principal", None)
+    if (
+        not isinstance(principal, RequestPrincipal)
+        or principal.kind != PrincipalKind.USER
+        or str(principal.principal_id or "").strip() != owner_subject_id
+        or _release_policy_server_cohort(principal) != "closedPilotAdultSelf"
+    ):
+        return None
+    persona_scope = str(payload.get("personaScope") or "personal").strip()
+    digital_human_id = str(payload.get("digitalHumanId") or owner_subject_id).strip() or owner_subject_id
+    viewer_family_member_id = str(payload.get("viewerFamilyMemberID") or "").strip()
+    if persona_scope == "family" or digital_human_id != owner_subject_id or viewer_family_member_id:
+        return None
+    decision = RELEASE_POLICY_SERVICE.build_snapshot(
+        audience="owner",
+        cohort="closedPilotAdultSelf",
+        client_build=RELEASE_POLICY_SERVICE.min_client_build,
+        requested_feature="ownerTruthCandidateReview",
+    ).features[0]
+    if not decision.enabled:
+        return None
+    return OwnerTruthCommandContext(
+        vault_id=owner_subject_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
 
 
 def _set_release_policy_diagnostic_headers(response: Any, diagnostic: Dict[str, str]) -> Any:
@@ -9816,9 +9858,26 @@ def runtime_config() -> Dict[str, Any]:
 
 @app.post("/context/build")
 def build_context(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
-    _, payload = _principal_owned_payload(request, payload)
+    owner_subject_id, payload = _principal_owned_payload(request, payload)
+    authority_context = _owner_truth_context_authority_context(
+        request,
+        owner_subject_id=owner_subject_id,
+        payload=payload,
+    )
     try:
-        packet = ContextPacketBuilder(store, settings).build(payload)
+        if authority_context is None:
+            packet = ContextPacketBuilder(store, settings).build(payload)
+        else:
+            packet = OwnerTruthContextAuthorityService(
+                store,
+                settings=settings,
+                enabled=True,
+            ).build_packet(
+                context=authority_context,
+                payload=payload,
+            )
+    except OwnerTruthMemoryProjectionError as exc:
+        raise _owner_truth_memory_projection_http_error(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "built", "contextPacket": packet}
