@@ -526,16 +526,20 @@ def main() -> None:
             "closed-pilot decision receipt must not echo private Source text",
         )
 
-        projection_result = OwnerTruthMemoryProjectionWorkerRuntime(
+        projection_worker = OwnerTruthMemoryProjectionWorkerRuntime(
             settings=worker_settings,
             store=store,
             worker_id="closed-pilot-source-candidate-projection-smoke",
             retry_seconds=1,
-        ).run_once()
+        )
+        projection_results = [projection_worker.run_once() for _ in range(2)]
         require(
-            projection_result.get("status") == "completed"
-            and projection_result.get("projectionOutcome") in {"rebuilt", "unchanged"},
-            "accepted closed-pilot Candidate must rebuild confirmed Projection",
+            all(
+                result.get("status") == "completed"
+                and result.get("projectionOutcome") in {"rebuilt", "unchanged"}
+                for result in projection_results
+            ),
+            "accepted closed-pilot Candidate must drain queued confirmed Projection rebuilds",
         )
 
         context_response = client.post(
