@@ -273,14 +273,17 @@ def main() -> None:
         )
 
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
-        missing_qa_header = client.get(
+        missing_policy_capture = client.get(
             f"/v2/vaults/{vault_id}/candidates",
             headers={"Authorization": owner_headers["Authorization"]},
         )
-        require(missing_qa_header.status_code == 404, "candidate route must require the QA header")
         require(
-            route_code(missing_qa_header) == "ownerTruthCandidateReviewUnavailable",
-            "missing QA header must not expose the candidate route",
+            missing_policy_capture.status_code == 403,
+            "normal candidate route must reject a missing server policy capture",
+        )
+        require(
+            route_code(missing_policy_capture) == "release_policy_denied",
+            "normal candidate route must fail closed without a policy capture",
         )
 
         inbox = client.get(f"/v2/vaults/{vault_id}/candidates", headers=owner_headers)

@@ -349,6 +349,18 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         vault_id = "vault-api-formal-owner-review"
         candidate = self._candidate(vault_id=vault_id, owner_subject_id=owner_id)
         self._seed(candidate)
+
+        missing_capture = client.get(
+            f"/v2/vaults/{vault_id}/candidates",
+            headers=auth_headers,
+        )
+        self.assertEqual(missing_capture.status_code, 403, missing_capture.text)
+        self.assertEqual(missing_capture.json()["detail"]["code"], "release_policy_denied")
+        self.assertEqual(
+            missing_capture.json()["detail"]["reason"],
+            "missingCapturedPolicy",
+        )
+
         headers = self._formal_policy_headers(auth_headers, session_id=session_id)
 
         inbox = client.get(f"/v2/vaults/{vault_id}/candidates", headers=headers)

@@ -20,7 +20,7 @@ class OwnerTruthCandidateRoutePostgresSmokeContractTests(unittest.TestCase):
         self.assertIn('"/v2/vaults/{vault_id}/candidates"', source)
         self.assertIn("candidates/{candidate_id}/decisions", source)
         self.assertIn("candidate route must remain hidden by default", source)
-        self.assertIn("candidate route must require the QA header", source)
+        self.assertIn("normal candidate route must reject a missing server policy capture", source)
         self.assertIn("owner QA inbox must return the reviewable candidate preview", source)
         self.assertIn("cross-vault candidate lookup must be denied", source)
         self.assertIn("non-owner candidate lookup must be denied", source)
@@ -43,6 +43,7 @@ class OwnerTruthCandidateRoutePostgresSmokeContractTests(unittest.TestCase):
         self.assertIn("corrected Context must cite the replacement Source instead of the superseded Source", source)
         self.assertIn("closed-pilot correction DecisionReceipt must retain release-policy evidence", source)
         self.assertIn("closedPilotCitationCorrection=true", source)
+        self.assertIn('route_code(missing_policy_capture) == "release_policy_denied"', source)
         self.assertIn("backend-owner-truth-candidate-route-postgres-smoke.py", runner)
         self.assertIn("DATABASE_URL is required", runner)
 
