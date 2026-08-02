@@ -32,6 +32,15 @@ from app.domain.owner_truth.source_commands import (
 
 OWNER_TRUTH_FAMILY_CONTRIBUTION_SCHEMA_VERSION = "owner-truth-family-contribution-v1"
 FAMILY_CONTRIBUTION_SCOPE = "submitTextSource"
+FAMILY_CONTRIBUTION_FORMAL_FEATURE = "ownerTruthFamilyContribution"
+FAMILY_CONTRIBUTION_ADMISSION_QA = "qa"
+FAMILY_CONTRIBUTION_ADMISSION_CLOSED_PILOT = "closedPilot"
+_FAMILY_CONTRIBUTION_ADMISSION_MODES = frozenset(
+    {
+        FAMILY_CONTRIBUTION_ADMISSION_QA,
+        FAMILY_CONTRIBUTION_ADMISSION_CLOSED_PILOT,
+    }
+)
 _GRANT_NAMESPACE = UUID("7cbbf18a-32a5-434a-a1a8-3d4046bb5ced")
 
 
@@ -82,13 +91,20 @@ class CreateFamilyContributionGrantCommand:
             require_nonblank(self.contributor_subject_id, field="contributor_subject_id"),
         )
 
-    def write_record(self, *, context: OwnerTruthCommandContext) -> "FamilyContributionGrantWriteRecord":
+    def write_record(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        admission_mode: str,
+        authorization_evidence: Mapping[str, Any],
+    ) -> "FamilyContributionGrantWriteRecord":
         command_id_hash = _sha256(self.command_id)
         payload = {
             "schemaVersion": OWNER_TRUTH_FAMILY_CONTRIBUTION_SCHEMA_VERSION,
             "relationshipId": self.relationship_id,
             "contributorSubjectId": self.contributor_subject_id,
             "scope": FAMILY_CONTRIBUTION_SCOPE,
+            "admissionMode": admission_mode,
         }
         return FamilyContributionGrantWriteRecord(
             grant_id=str(uuid5(_GRANT_NAMESPACE, f"{context.vault_id}:{command_id_hash}")),
@@ -98,6 +114,8 @@ class CreateFamilyContributionGrantCommand:
             relationship_id=self.relationship_id,
             command_id_hash=command_id_hash,
             payload_hash=_sha256(_canonical_json(payload)),
+            admission_mode=admission_mode,
+            authorization_evidence=dict(authorization_evidence),
         )
 
 
@@ -110,6 +128,8 @@ class FamilyContributionGrantWriteRecord:
     relationship_id: str
     command_id_hash: str
     payload_hash: str
+    admission_mode: str
+    authorization_evidence: Mapping[str, Any]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "grant_id", require_uuid(self.grant_id, field="grant_id"))
@@ -122,6 +142,17 @@ class FamilyContributionGrantWriteRecord:
             "payload_hash",
         ):
             object.__setattr__(self, field, require_nonblank(getattr(self, field), field=field))
+        if self.admission_mode not in _FAMILY_CONTRIBUTION_ADMISSION_MODES:
+            raise OwnerTruthFamilyContributionError("familyContributionAdmissionModeInvalid")
+        if not isinstance(self.authorization_evidence, Mapping):
+            raise OwnerTruthFamilyContributionError("familyContributionAuthorizationCaptureInvalid")
+        evidence = dict(self.authorization_evidence)
+        if self.admission_mode == FAMILY_CONTRIBUTION_ADMISSION_QA:
+            if evidence:
+                raise OwnerTruthFamilyContributionError("familyContributionAuthorizationCaptureInvalid")
+        elif str(evidence.get("feature") or "") != FAMILY_CONTRIBUTION_FORMAL_FEATURE:
+            raise OwnerTruthFamilyContributionError("familyContributionAuthorizationCaptureInvalid")
+        object.__setattr__(self, "authorization_evidence", evidence)
 
 
 @dataclass(frozen=True)
@@ -279,7 +310,12 @@ class OwnerTruthFamilyContributionService:
         context: OwnerTruthCommandContext,
     ) -> FamilyContributionGrantResult:
         self._require_owner_context(context)
-        record = command.write_record(context=context)
+        admission_mode, authorization_evidence = self._grant_admission(context)
+        record = command.write_record(
+            context=context,
+            admission_mode=admission_mode,
+            authorization_evidence=authorization_evidence,
+        )
         with self._relationship_scope(
             owner_subject_id=context.owner_subject_id,
             relationship_id=record.relationship_id,
@@ -307,6 +343,8 @@ class OwnerTruthFamilyContributionService:
                     "rowVersion": 1,
                     "createCommandIdHash": record.command_id_hash,
                     "createPayloadHash": record.payload_hash,
+                    "admissionMode": record.admission_mode,
+                    "authorizationEvidence": record.authorization_evidence,
                     "createdAt": now_iso,
                     "updatedAt": now_iso,
                 }
@@ -328,6 +366,7 @@ class OwnerTruthFamilyContributionService:
         self._require_owner_context(context)
         existing = self._require_grant(vault_id=context.vault_id, grant_id=command.grant_id)
         self._assert_grant_owner(existing, context.owner_subject_id)
+        self._assert_grant_admission_context(existing, context)
         with self._relationship_scope(
             owner_subject_id=context.owner_subject_id,
             relationship_id=str(existing.get("relationshipId") or ""),
@@ -359,6 +398,7 @@ class OwnerTruthFamilyContributionService:
         *,
         command: SubmitFamilyContributionTextCommand,
         context: OwnerTruthCommandContext,
+        required_admission_mode: str | None = None,
     ) -> FamilyContributionSubmissionResult:
         existing = self._require_grant(vault_id=context.vault_id, grant_id=command.grant_id)
         relationship_id = require_nonblank(
@@ -382,6 +422,7 @@ class OwnerTruthFamilyContributionService:
                     grant=grant,
                     context=context,
                     expected_grant_version=command.expected_grant_version,
+                    required_admission_mode=required_admission_mode,
                 )
                 source_command = CreateTextSourceCommand(
                     command_id=command.source_command_id,
@@ -396,6 +437,9 @@ class OwnerTruthFamilyContributionService:
                         "familyContributionGrantVersion": int(grant["rowVersion"]),
                         "relationshipId": str(grant["relationshipId"]),
                         "relationshipEpoch": int(grant["relationshipEpoch"]),
+                        "familyContributionAdmissionMode": str(
+                            grant.get("admissionMode") or FAMILY_CONTRIBUTION_ADMISSION_QA
+                        ),
                         "candidateExtraction": "defaultOff",
                     },
                     source_kind=SourceKind.TEXT,
@@ -415,6 +459,7 @@ class OwnerTruthFamilyContributionService:
         vault_id: str,
         grant_id: str,
         actor_subject_id: str,
+        required_admission_mode: str | None = None,
     ) -> OwnerTruthCommandContext:
         """Resolve the Owner server-side before a contributor submits material.
 
@@ -424,6 +469,7 @@ class OwnerTruthFamilyContributionService:
         """
 
         grant = self._require_grant(vault_id=vault_id, grant_id=grant_id)
+        self._assert_grant_admission_mode(grant, required_admission_mode)
         return OwnerTruthCommandContext(
             vault_id=vault_id,
             owner_subject_id=require_nonblank(
@@ -467,6 +513,7 @@ class OwnerTruthFamilyContributionService:
         grant: Mapping[str, Any],
         context: OwnerTruthCommandContext,
         expected_grant_version: int,
+        required_admission_mode: str | None,
     ) -> None:
         if str(grant.get("status") or "") != "active":
             raise OwnerTruthFamilyContributionError("familyContributionGrantInactive")
@@ -474,6 +521,7 @@ class OwnerTruthFamilyContributionService:
             raise OwnerTruthFamilyContributionError("familyContributionGrantVersionMismatch")
         if str(grant.get("scope") or "") != FAMILY_CONTRIBUTION_SCOPE:
             raise OwnerTruthFamilyContributionError("familyContributionGrantScopeInvalid")
+        self._assert_grant_admission_mode(grant, required_admission_mode)
         if context.actor_subject_id != str(grant.get("contributorSubjectId") or ""):
             raise OwnerTruthFamilyContributionError("familyContributionGrantContributorMismatch")
         if context.owner_subject_id != str(grant.get("ownerSubjectId") or ""):
@@ -492,6 +540,49 @@ class OwnerTruthFamilyContributionService:
         if grant is None:
             raise OwnerTruthFamilyContributionError("familyContributionGrantNotFound")
         return grant
+
+    @staticmethod
+    def _grant_admission(
+        context: OwnerTruthCommandContext,
+    ) -> tuple[str, Mapping[str, Any]]:
+        """Separate old QA fixtures from server-authorized product grants.
+
+        A family relationship is not sufficient authority.  The formal lane
+        carries only the existing value-minimized release decision; no bearer
+        token, session ID, or raw policy decision is persisted with a grant.
+        """
+
+        capture = context.authorization_capture
+        if capture is None:
+            return FAMILY_CONTRIBUTION_ADMISSION_QA, {}
+        if capture.feature != FAMILY_CONTRIBUTION_FORMAL_FEATURE:
+            raise OwnerTruthFamilyContributionError("familyContributionAuthorizationCaptureInvalid")
+        return (
+            FAMILY_CONTRIBUTION_ADMISSION_CLOSED_PILOT,
+            capture.value_minimized_payload(),
+        )
+
+    @staticmethod
+    def _assert_grant_admission_mode(
+        grant: Mapping[str, Any],
+        required_admission_mode: str | None,
+    ) -> None:
+        if required_admission_mode is None:
+            return
+        stored_mode = str(
+            grant.get("admissionMode") or FAMILY_CONTRIBUTION_ADMISSION_QA
+        )
+        if stored_mode != required_admission_mode:
+            raise OwnerTruthFamilyContributionError("familyContributionGrantAdmissionModeMismatch")
+
+    @classmethod
+    def _assert_grant_admission_context(
+        cls,
+        grant: Mapping[str, Any],
+        context: OwnerTruthCommandContext,
+    ) -> None:
+        expected_mode, _evidence = cls._grant_admission(context)
+        cls._assert_grant_admission_mode(grant, expected_mode)
 
     @staticmethod
     def _require_owner_context(context: OwnerTruthCommandContext) -> None:
@@ -524,6 +615,9 @@ def _public_grant(value: Mapping[str, Any]) -> dict[str, Any]:
         "relationshipId": str(value.get("relationshipId") or ""),
         "relationshipEpoch": int(value.get("relationshipEpoch") or 0),
         "scope": str(value.get("scope") or ""),
+        "admissionMode": str(
+            value.get("admissionMode") or FAMILY_CONTRIBUTION_ADMISSION_QA
+        ),
         "status": str(value.get("status") or ""),
         "rowVersion": int(value.get("rowVersion") or 0),
         "createdAt": value.get("createdAt"),
@@ -535,6 +629,9 @@ def _public_grant(value: Mapping[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "CreateFamilyContributionGrantCommand",
+    "FAMILY_CONTRIBUTION_ADMISSION_CLOSED_PILOT",
+    "FAMILY_CONTRIBUTION_ADMISSION_QA",
+    "FAMILY_CONTRIBUTION_FORMAL_FEATURE",
     "FAMILY_CONTRIBUTION_SCOPE",
     "FamilyContributionGrantResult",
     "FamilyContributionSubmissionResult",

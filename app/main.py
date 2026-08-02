@@ -1124,6 +1124,67 @@ def _owner_truth_text_capture_state_context(
     )
 
 
+def _owner_truth_family_contribution_product_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize an Owner's formal, default-off family material grant.
+
+    This deliberately does not reuse the QA helper: a client needs the
+    current server-issued release-policy capture before it can admit another
+    person to submit a static source into its private Vault.
+    """
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthFamilyContribution",
+        route=f"{request.method.upper()} /v2/vaults/*/family-contribution/grants",
+        user_session_required_code="ownerTruthFamilyContributionUserSessionRequired",
+    )
+
+
+def _owner_truth_family_contribution_product_contributor_context(
+    request: Request,
+    *,
+    vault_id: str,
+    grant_id: str,
+) -> OwnerTruthCommandContext:
+    """Resolve a formal contributor without turning family membership into read access.
+
+    The persistent grant is the narrow contributor capability.  The service
+    validates its relationship epoch on every submission; this helper also
+    checks the server-owned Owner allowlist and feature toggle so emergency
+    rollout disablement immediately stops old grants without trusting a
+    contributor-supplied cohort or release header.
+    """
+
+    actor_subject_id = _request_user_principal_id(request)
+    if actor_subject_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthFamilyContributionUserSessionRequired"},
+        )
+    service = OwnerTruthFamilyContributionService(store)
+    context = service.contributor_context(
+        vault_id=vault_id,
+        grant_id=grant_id,
+        actor_subject_id=actor_subject_id,
+        required_admission_mode="closedPilot",
+    )
+    if (
+        context.owner_subject_id not in RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+        or "ownerTruthFamilyContribution"
+        not in RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthFamilyContributionUnavailable"},
+        )
+    return context
+
+
 _OWNER_TRUTH_TEXT_CAPTURE_PAYLOAD_FIELDS = frozenset(
     {
         "commandId",
@@ -2647,8 +2708,11 @@ def _owner_truth_family_contribution_http_error(
         "familyContributionGrantVersionMismatch",
         "familyContributionGrantCommandConflict",
         "familyContributionGrantScopeInvalid",
+        "familyContributionGrantAdmissionModeMismatch",
     }:
         return HTTPException(status_code=409, detail={"code": code})
+    if code in {"familyContributionAuthorizationCaptureInvalid"}:
+        return HTTPException(status_code=403, detail={"code": code})
     return HTTPException(
         status_code=400,
         detail={"code": "ownerTruthFamilyContributionInvalid"},
@@ -5709,6 +5773,115 @@ def submit_owner_truth_family_contribution_source(
             text=str(payload.get("text") or ""),
         )
         result = service.submit_text_source(command=command, context=context)
+    except OwnerTruthContractError as error:
+        raise _owner_truth_family_contribution_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.source.outcome == "created" else 200,
+        content=result.public_contract(),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/family-contribution/grants",
+    include_in_schema=False,
+)
+def create_owner_truth_family_contribution_product_grant(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Closed-pilot Owner grant for one static, non-readable family contribution."""
+
+    try:
+        context = _owner_truth_family_contribution_product_context(
+            request,
+            vault_id=vault_id,
+        )
+        command = CreateFamilyContributionGrantCommand(
+            command_id=str(payload.get("commandId") or ""),
+            relationship_id=str(payload.get("relationshipId") or ""),
+            contributor_subject_id=str(payload.get("contributorSubjectId") or ""),
+        )
+        result = OwnerTruthFamilyContributionService(store).create_grant(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_family_contribution_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=result.public_contract(),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/revoke",
+    include_in_schema=False,
+)
+def revoke_owner_truth_family_contribution_product_grant(
+    request: Request,
+    vault_id: str,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Closed-pilot Owner revocation; previous source material remains immutable."""
+
+    try:
+        context = _owner_truth_family_contribution_product_context(
+            request,
+            vault_id=vault_id,
+        )
+        command = RevokeFamilyContributionGrantCommand(
+            command_id=str(payload.get("commandId") or ""),
+            grant_id=grant_id,
+            expected_version=payload.get("expectedVersion"),
+            reason=str(payload.get("reason") or "ownerRequested"),
+        )
+        result = OwnerTruthFamilyContributionService(store).revoke_grant(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_family_contribution_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=result.public_contract(),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/sources",
+    include_in_schema=False,
+)
+def submit_owner_truth_family_contribution_product_source(
+    request: Request,
+    vault_id: str,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Formal contributor write; no private Vault reads are added to this lane."""
+
+    try:
+        context = _owner_truth_family_contribution_product_contributor_context(
+            request,
+            vault_id=vault_id,
+            grant_id=grant_id,
+        )
+        command = SubmitFamilyContributionTextCommand(
+            grant_id=grant_id,
+            expected_grant_version=payload.get("expectedGrantVersion"),
+            source_command_id=str(payload.get("sourceCommandId") or ""),
+            source_id=str(payload.get("sourceId") or ""),
+            text=str(payload.get("text") or ""),
+        )
+        result = OwnerTruthFamilyContributionService(store).submit_text_source(
+            command=command,
+            context=context,
+            required_admission_mode="closedPilot",
+        )
     except OwnerTruthContractError as error:
         raise _owner_truth_family_contribution_http_error(error) from error
     return JSONResponse(

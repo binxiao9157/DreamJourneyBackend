@@ -450,6 +450,10 @@ class ReleasePolicyService:
         "archiveRemoteFetch": ("G0", "G1", "G2"),
         "archiveLocalAnalysis": ("G0", "G1", "G4"),
         "familyManagement": ("G0", "G1", "G2", "G4"),
+        # A family relationship grants nothing by itself. This separately
+        # controlled feature admits only static source contributions under an
+        # explicit Owner grant; it never exposes private Vault reads.
+        "ownerTruthFamilyContribution": ("G0", "G1", "G2", "G4"),
         "familySpace": ("G0", "G1", "G2", "G4"),
         "legalCenter": ("G0", "G1"),
         "accountDeletion": ("G0", "G1", "G2"),
@@ -492,6 +496,7 @@ class ReleasePolicyService:
         # closed-pilot rollout once their release gates are approved.
         "echoGuidedRecommendations",
         "ownerTruthLifeMap",
+        "ownerTruthFamilyContribution",
     }
 
     def __init__(

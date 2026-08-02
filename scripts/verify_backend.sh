@@ -575,6 +575,13 @@ test -f scripts/backend-owner-truth-legacy-migration-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-legacy-migration-postgres-smoke.sh
 test -f scripts/backend-owner-truth-legacy-shadow-parity-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-legacy-shadow-parity-postgres-smoke.sh
+test -f db/migrations/0072_owner_truth_family_contribution_formal_authorization.sql
+test -f db/migrations/0072_owner_truth_family_contribution_formal_authorization.json
+test -f tests/test_owner_truth_family_contribution_formal_api.py
+test -f tests/test_owner_truth_family_contribution_formal_migration_contract.py
+test -f scripts/run-backend-owner-truth-family-contribution-formal-gate.sh
+test -f scripts/backend-owner-truth-family-contribution-formal-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-family-contribution-formal-postgres-smoke.sh
 	grep -q "COPY db ./db" Dockerfile
 grep -q "psycopg" requirements.txt
 

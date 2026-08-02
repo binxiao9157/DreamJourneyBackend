@@ -2581,6 +2581,8 @@ class InMemoryStore:
             candidate.setdefault("revocationReason", None)
             candidate.setdefault("revokeCommandIdHash", None)
             candidate.setdefault("revokePayloadHash", None)
+            candidate.setdefault("admissionMode", "qa")
+            candidate.setdefault("authorizationEvidence", {})
             self._owner_truth_family_contribution_grants[key] = candidate
             self._owner_truth_family_contribution_grant_commands[command_key] = grant_id
             return deepcopy(candidate)

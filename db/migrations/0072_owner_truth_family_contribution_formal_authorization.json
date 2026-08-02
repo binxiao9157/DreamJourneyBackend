@@ -1,0 +1,12 @@
+{
+  "version": "0072",
+  "name": "owner_truth_family_contribution_formal_authorization",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthFamilyContributionClosedPilotDefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthFamilyContribution": false,
+    "ownerTruthFamilyContributionQA": false
+  }
+}

@@ -5132,15 +5132,17 @@ class PostgresStore:
             INSERT INTO owner_truth.family_contribution_grants (
                 id, vault_id, owner_subject_id, contributor_subject_id,
                 relationship_id, relationship_epoch, scope, status, row_version,
-                create_command_id_hash, create_payload_hash, created_at, updated_at
+                create_command_id_hash, create_payload_hash, admission_mode,
+                authorization_evidence, created_at, updated_at
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, 'active', 1, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, 'active', 1, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (vault_id, create_command_id_hash) DO NOTHING
             RETURNING id, vault_id, owner_subject_id, contributor_subject_id,
                 relationship_id, relationship_epoch, scope, status, row_version,
                 create_command_id_hash, create_payload_hash, revoke_command_id_hash,
-                revoke_payload_hash, revoked_at, revocation_reason, created_at, updated_at
+                revoke_payload_hash, admission_mode, authorization_evidence,
+                revoked_at, revocation_reason, created_at, updated_at
             """,
             (
                 grant["id"],
@@ -5152,6 +5154,8 @@ class PostgresStore:
                 grant["scope"],
                 grant["createCommandIdHash"],
                 grant["createPayloadHash"],
+                grant.get("admissionMode", "qa"),
+                Jsonb(dict(grant.get("authorizationEvidence") or {})),
                 grant["createdAt"],
                 grant["updatedAt"],
             ),
@@ -5163,7 +5167,8 @@ class PostgresStore:
             SELECT id, vault_id, owner_subject_id, contributor_subject_id,
                 relationship_id, relationship_epoch, scope, status, row_version,
                 create_command_id_hash, create_payload_hash, revoke_command_id_hash,
-                revoke_payload_hash, revoked_at, revocation_reason, created_at, updated_at
+                revoke_payload_hash, admission_mode, authorization_evidence,
+                revoked_at, revocation_reason, created_at, updated_at
             FROM owner_truth.family_contribution_grants
             WHERE vault_id = %s AND create_command_id_hash = %s
             """,
@@ -5190,7 +5195,8 @@ class PostgresStore:
             SELECT id, vault_id, owner_subject_id, contributor_subject_id,
                 relationship_id, relationship_epoch, scope, status, row_version,
                 create_command_id_hash, create_payload_hash, revoke_command_id_hash,
-                revoke_payload_hash, revoked_at, revocation_reason, created_at, updated_at
+                revoke_payload_hash, admission_mode, authorization_evidence,
+                revoked_at, revocation_reason, created_at, updated_at
             FROM owner_truth.family_contribution_grants
             WHERE vault_id = %s AND id = %s
             """,
@@ -5215,7 +5221,8 @@ class PostgresStore:
             SELECT id, vault_id, owner_subject_id, contributor_subject_id,
                 relationship_id, relationship_epoch, scope, status, row_version,
                 create_command_id_hash, create_payload_hash, revoke_command_id_hash,
-                revoke_payload_hash, revoked_at, revocation_reason, created_at, updated_at
+                revoke_payload_hash, admission_mode, authorization_evidence,
+                revoked_at, revocation_reason, created_at, updated_at
             FROM owner_truth.family_contribution_grants
             WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
             FOR UPDATE
@@ -5246,7 +5253,8 @@ class PostgresStore:
             RETURNING id, vault_id, owner_subject_id, contributor_subject_id,
                 relationship_id, relationship_epoch, scope, status, row_version,
                 create_command_id_hash, create_payload_hash, revoke_command_id_hash,
-                revoke_payload_hash, revoked_at, revocation_reason, created_at, updated_at
+                revoke_payload_hash, admission_mode, authorization_evidence,
+                revoked_at, revocation_reason, created_at, updated_at
             """,
             (
                 revoke_command_id_hash,
@@ -7046,6 +7054,8 @@ class PostgresStore:
             "rowVersion": int(row.get("row_version") or 1),
             "createCommandIdHash": str(row["create_command_id_hash"]),
             "createPayloadHash": str(row["create_payload_hash"]),
+            "admissionMode": str(row.get("admission_mode") or "qa"),
+            "authorizationEvidence": dict(row.get("authorization_evidence") or {}),
             "revokeCommandIdHash": row.get("revoke_command_id_hash"),
             "revokePayloadHash": row.get("revoke_payload_hash"),
             "revokedAt": cls._iso_value(row.get("revoked_at")),
