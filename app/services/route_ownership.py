@@ -223,6 +223,12 @@ class RouteOwnershipRegistry:
             ),
             _rule("GET", "/v2/release-policy", public, "publicReleasePolicy"),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/sources",
+                session,
+                "ownerTruthTextCapture",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/candidates",
                 session,

@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Any, Dict, Optional, Tuple
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import ValidationError
 
@@ -73,7 +73,10 @@ from app.services.privacy import (
     sanitize_knowledge_extraction_payload,
     sanitize_mailbox_letter_payload,
 )
-from app.services.owner_truth_source import ArchiveOwnerTruthCompatibilityFacade
+from app.services.owner_truth_source import (
+    ArchiveOwnerTruthCompatibilityFacade,
+    OwnerTruthSourceAsyncEffectCommandService,
+)
 from app.services.owner_truth_family_contribution import (
     CreateFamilyContributionGrantCommand,
     OwnerTruthFamilyContributionError,
@@ -150,8 +153,12 @@ from app.domain.owner_truth.search_documents import OwnerTruthMemorySearchReadEr
 from app.domain.owner_truth.thread_summary import OwnerTruthThreadSummaryError
 from app.domain.owner_truth.topic_shift_detection import TopicShiftDetector
 from app.domain.owner_truth.source_commands import (
+    CreateTextSourceCommand,
     OwnerTruthCommandAuthorizationCapture,
     OwnerTruthCommandContext,
+    OwnerTruthSourceAuthorityEpochConflict,
+    OwnerTruthSourceCommandConflict,
+    OwnerTruthSourceVersionConflict,
 )
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.owner_truth_interview_candidate_batch_decision import (
@@ -1045,6 +1052,157 @@ def _owner_truth_candidate_review_context(
         owner_subject_id=owner_subject_id,
         actor_subject_id=owner_subject_id,
     )
+
+
+def _owner_truth_text_capture_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize explicit personal text capture through a server policy capture.
+
+    This is intentionally independent from Echo natural input and Candidate
+    review. A durable Source/outbox write requires its own closed-pilot grant;
+    a QA header can neither enable nor bypass this path.
+    """
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTextCaptureV1",
+        route=f"{request.method.upper()} /v2/vaults/*/sources",
+        user_session_required_code="ownerTruthTextCaptureUserSessionRequired",
+    )
+
+
+_OWNER_TRUTH_TEXT_CAPTURE_PAYLOAD_FIELDS = frozenset(
+    {
+        "commandId",
+        "expectedAuthorityEpoch",
+        "kind",
+        "content",
+        "purpose",
+        "clientCreatedAt",
+    }
+)
+
+
+def _owner_truth_text_capture_command(
+    *,
+    payload: Dict[str, Any],
+    vault_id: str,
+) -> CreateTextSourceCommand:
+    """Decode the narrow, owner-authored V4 text Source command.
+
+    The client supplies a replay-safe command ID and its cached authority
+    epoch, but never supplies an owner, source ID, receipt, effect, or
+    provider data. Source ID is derived deterministically from the scoped
+    command so retries cannot create a second original.
+    """
+
+    if set(payload) != _OWNER_TRUTH_TEXT_CAPTURE_PAYLOAD_FIELDS:
+        raise HTTPException(status_code=400, detail={"code": "ownerTruthTextCaptureInvalid"})
+    raw_command_id = payload.get("commandId")
+    raw_expected_epoch = payload.get("expectedAuthorityEpoch")
+    raw_kind = payload.get("kind")
+    raw_content = payload.get("content")
+    raw_purpose = payload.get("purpose")
+    raw_client_created_at = payload.get("clientCreatedAt")
+    if (
+        not isinstance(raw_command_id, str)
+        or type(raw_expected_epoch) is not int
+        or raw_expected_epoch < 0
+        or raw_kind != "text"
+        or not isinstance(raw_content, str)
+        or not isinstance(raw_purpose, str)
+        or not isinstance(raw_client_created_at, str)
+    ):
+        raise HTTPException(status_code=400, detail={"code": "ownerTruthTextCaptureInvalid"})
+    try:
+        command_id = str(UUID(raw_command_id))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthTextCaptureInvalid"},
+        ) from error
+
+    purpose = raw_purpose.strip()
+    if not purpose or len(purpose) > 80 or re.fullmatch(r"[A-Za-z0-9._-]+", purpose) is None:
+        raise HTTPException(status_code=400, detail={"code": "ownerTruthTextCaptureInvalid"})
+    client_created_at = raw_client_created_at.strip()
+    if not client_created_at or len(client_created_at) > 64:
+        raise HTTPException(status_code=400, detail={"code": "ownerTruthTextCaptureInvalid"})
+    try:
+        parsed_created_at = datetime.fromisoformat(client_created_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ownerTruthTextCaptureInvalid"},
+        ) from error
+    if parsed_created_at.tzinfo is None:
+        raise HTTPException(status_code=400, detail={"code": "ownerTruthTextCaptureInvalid"})
+
+    source_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            f"dreamjourney-owner-truth-text-source-v1:{vault_id}:{command_id}",
+        )
+    )
+    return CreateTextSourceCommand(
+        command_id=command_id,
+        source_id=source_id,
+        expected_version=0,
+        expected_authority_epoch=raw_expected_epoch,
+        text=raw_content,
+        metadata={
+            "origin": "ownerTextCaptureV1",
+            "purpose": purpose,
+            "clientCreatedAt": parsed_created_at.astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        },
+    )
+
+
+def _owner_truth_text_capture_preflight(
+    *,
+    context: OwnerTruthCommandContext,
+    command: CreateTextSourceCommand,
+) -> None:
+    """Fail closed for another owner's Vault before the atomic store command.
+
+    The store repeats the epoch check in its transaction for a new command,
+    which covers a concurrent epoch change after this value-minimized read.
+    Exact command replays remain idempotent even after a later epoch change.
+    """
+
+    reader = getattr(store, "get_owner_truth_vault", None)
+    if not callable(reader):
+        raise HTTPException(status_code=503, detail={"code": "ownerTruthTextCaptureUnavailable"})
+    vault = reader(context.vault_id)
+    if vault is None:
+        if command.expected_authority_epoch != 0:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ownerTruthSourceAuthorityEpochConflict",
+                    "expectedAuthorityEpoch": command.expected_authority_epoch,
+                    "currentAuthorityEpoch": 0,
+                },
+            )
+        return
+    if str(vault.get("ownerSubjectId") or "") != context.owner_subject_id:
+        raise HTTPException(status_code=404, detail={"code": "ownerTruthVaultNotFound"})
+    current_epoch = int(vault.get("authorityEpoch") or 0)
+    if command.expected_authority_epoch != current_epoch:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ownerTruthSourceAuthorityEpochConflict",
+                "expectedAuthorityEpoch": command.expected_authority_epoch,
+                "currentAuthorityEpoch": current_epoch,
+            },
+        )
 
 
 def _owner_truth_captured_release_policy_context(
@@ -2317,6 +2475,32 @@ def _owner_truth_candidate_review_http_error(
         status_code=400,
         detail={"code": "ownerTruthCandidateReviewInvalid"},
     )
+
+
+def _owner_truth_text_capture_http_error(
+    error: OwnerTruthContractError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthSourceAuthorityEpochConflict):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "ownerTruthSourceAuthorityEpochConflict",
+                "expectedAuthorityEpoch": error.expected_epoch,
+                "currentAuthorityEpoch": error.current_epoch,
+            },
+        )
+    if isinstance(error, OwnerTruthSourceVersionConflict):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "ownerTruthSourceVersionConflict",
+                "expectedSourceVersion": error.expected_version,
+                "currentSourceVersion": error.current_version,
+            },
+        )
+    if isinstance(error, OwnerTruthSourceCommandConflict):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthSourceCommandConflict"})
+    return HTTPException(status_code=400, detail={"code": "ownerTruthTextCaptureInvalid"})
 
 
 def _owner_truth_family_contribution_http_error(
@@ -5222,6 +5406,47 @@ def release_policy(
                 "knownPolicyRevision": error.known_revision,
             },
         ) from error
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/sources",
+    include_in_schema=False,
+)
+def create_owner_truth_text_source(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Accept one explicit owner-authored text Source for the closed pilot.
+
+    The request produces a durable Source and a value-free extraction outbox
+    request atomically. It never returns the submitted text, accepts a client
+    supplied owner/source/effect, or treats a QA header as a release grant.
+    """
+
+    try:
+        context = _owner_truth_text_capture_context(request, vault_id=vault_id)
+        command = _owner_truth_text_capture_command(payload=payload, vault_id=vault_id)
+        _owner_truth_text_capture_preflight(context=context, command=command)
+        result = OwnerTruthSourceAsyncEffectCommandService(store).create_text_source(
+            command=command,
+            context=context,
+        )
+    except HTTPException:
+        raise
+    except OwnerTruthContractError as error:
+        raise _owner_truth_text_capture_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.source.outcome == "created" else 200,
+        content={
+            "schemaVersion": "owner-truth-text-capture-response-v1",
+            "vaultId": context.vault_id,
+            "source": result.source.public_receipt(),
+            "candidateExtraction": {"status": "requested"},
+            "acceptedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get(

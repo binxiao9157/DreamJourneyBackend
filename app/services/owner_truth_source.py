@@ -91,10 +91,11 @@ def build_source_created_effect_intent(
 
 
 class OwnerTruthSourceAsyncEffectCommandService:
-    """Writes a shadow CreateSource and its effect records in the same UoW.
+    """Writes a CreateSource and its durable extraction effect in one UoW.
 
-    The service is intentionally not attached to a public route yet. It proves
-    the atomic producer boundary while the async-effect worker remains disabled.
+    The caller still owns the release-policy boundary. This service only
+    guarantees that a successfully accepted Source and its extraction request
+    cannot be split by a partial transaction.
     """
 
     def __init__(self, store: OwnerTruthSourceEffectCommandStore):

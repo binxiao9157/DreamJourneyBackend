@@ -421,6 +421,10 @@ class ReleasePolicyService:
 
     _FEATURE_GATES: dict[str, tuple[Gate, ...]] = {
         "echoTextInput": ("G0", "G1"),
+        # Owner-authored text capture is an independent write capability. It
+        # must not inherit Echo visibility, because its durable Source/outbox
+        # write has a different release and recovery boundary.
+        "ownerTextCaptureV1": ("G0", "G1"),
         "ownerTruthCandidateReview": ("G0", "G1", "G2"),
         # This is a read-only, display-safe presentation of the server-owned
         # M0-B selector. It remains default closed until its product Gate is
@@ -480,7 +484,10 @@ class ReleasePolicyService:
         "legalCenter",
         "accountDeletion",
     }
-    _CLOSED_PILOT_OPT_IN_FEATURES = {"ownerTruthCandidateReview"}
+    _CLOSED_PILOT_OPT_IN_FEATURES = {
+        "ownerTextCaptureV1",
+        "ownerTruthCandidateReview",
+    }
 
     def __init__(
         self,
@@ -852,6 +859,12 @@ class ReleasePolicyCommandGate:
         if (
             method.upper() in {"GET", "POST"}
             and normalized_path.startswith("/v2/vaults/")
+            and normalized_path.endswith("/sources")
+        ):
+            return "ownerTextCaptureV1"
+        if (
+            method.upper() in {"GET", "POST"}
+            and normalized_path.startswith("/v2/vaults/")
             and (
                 normalized_path.endswith("/guided-recommendations")
                 or normalized_path.endswith("/guided-recommendations/feedback")
@@ -898,6 +911,12 @@ class ReleasePolicyCommandGate:
                 return f"{normalized_method} {prefix}/*"
         if normalized_path in {"/archive/media/upload-intent", "/archive/items"}:
             return f"{normalized_method} {normalized_path}"
+        if (
+            normalized_method == "POST"
+            and normalized_path.startswith("/v2/vaults/")
+            and normalized_path.endswith("/sources")
+        ):
+            return "POST /v2/vaults/*/sources"
         if (
             normalized_method in {"GET", "POST"}
             and normalized_path.startswith("/v2/vaults/")

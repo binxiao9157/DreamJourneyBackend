@@ -50,6 +50,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-context-capacity-prefli
 echo "== Owner Truth closed-pilot Context Authority gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-context-authority-gate.sh
 
+echo "== Owner Truth closed-pilot text capture gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-text-capture-gate.sh
+
 echo "== Owner Truth authority-epoch offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-authority-epoch-offline-evaluation-gate.sh
 

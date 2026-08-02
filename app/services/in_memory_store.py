@@ -45,6 +45,7 @@ from app.services.archive_store import (
     is_sealed_time_letter,
 )
 from app.domain.owner_truth.source_commands import (
+    OwnerTruthSourceAuthorityEpochConflict,
     OwnerTruthSourceCommandConflict,
     OwnerTruthSourceCommandResult,
     OwnerTruthSourceVersionConflict,
@@ -2478,6 +2479,15 @@ class InMemoryStore:
                     source_version=int(source["sourceVersion"]),
                     authority_epoch=int(source["authorityEpoch"]),
                     content_hash=str(source["contentHash"]),
+                )
+
+            if (
+                record.expected_authority_epoch is not None
+                and record.expected_authority_epoch != int(vault["authorityEpoch"])
+            ):
+                raise OwnerTruthSourceAuthorityEpochConflict(
+                    expected_epoch=record.expected_authority_epoch,
+                    current_epoch=int(vault["authorityEpoch"]),
                 )
 
             if record.expected_version != 0:

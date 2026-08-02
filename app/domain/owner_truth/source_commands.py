@@ -41,6 +41,15 @@ class OwnerTruthSourceVersionConflict(OwnerTruthContractError):
         super().__init__("owner truth source version does not match expectedVersion")
 
 
+class OwnerTruthSourceAuthorityEpochConflict(OwnerTruthContractError):
+    """A new Source command was issued against a stale Vault authority epoch."""
+
+    def __init__(self, *, expected_epoch: int, current_epoch: int):
+        self.expected_epoch = expected_epoch
+        self.current_epoch = current_epoch
+        super().__init__("owner truth source authority epoch does not match")
+
+
 def _canonical_json(value: Mapping[str, Any]) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -189,6 +198,7 @@ class CreateTextSourceCommand:
     text: str
     metadata: Mapping[str, Any]
     source_kind: SourceKind = SourceKind.TEXT
+    expected_authority_epoch: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
@@ -207,6 +217,13 @@ class CreateTextSourceCommand:
         if source_kind not in {SourceKind.TEXT, SourceKind.CONVERSATION}:
             raise OwnerTruthContractError("CreateTextSourceCommand supports text or conversation sources")
         object.__setattr__(self, "source_kind", source_kind)
+        if self.expected_authority_epoch is not None and (
+            type(self.expected_authority_epoch) is not int
+            or self.expected_authority_epoch < 0
+        ):
+            raise OwnerTruthContractError(
+                "expected_authority_epoch must be a non-negative integer when provided"
+            )
 
     def write_record(self, *, context: OwnerTruthCommandContext) -> "OwnerTruthSourceWriteRecord":
         payload = {
@@ -221,6 +238,8 @@ class CreateTextSourceCommand:
         # their distinct kind in the immutable command/source hashes.
         if self.source_kind is not SourceKind.TEXT:
             payload["sourceKind"] = self.source_kind.value
+        if self.expected_authority_epoch is not None:
+            payload["expectedAuthorityEpoch"] = self.expected_authority_epoch
         payload_hash = _sha256(_canonical_json(payload))
         command_id_hash = _sha256(self.command_id)
         receipt_id = str(
@@ -249,6 +268,7 @@ class CreateTextSourceCommand:
             content_payload=source_payload,
             metadata=self.metadata,
             source_kind=self.source_kind,
+            expected_authority_epoch=self.expected_authority_epoch,
         )
 
 
@@ -267,6 +287,7 @@ class OwnerTruthSourceWriteRecord:
     content_payload: Mapping[str, Any]
     metadata: Mapping[str, Any]
     source_kind: SourceKind = SourceKind.TEXT
+    expected_authority_epoch: int | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -276,6 +297,13 @@ class OwnerTruthSourceWriteRecord:
         if source_kind not in {SourceKind.TEXT, SourceKind.CONVERSATION}:
             raise OwnerTruthContractError("OwnerTruthSourceWriteRecord supports text or conversation sources")
         object.__setattr__(self, "source_kind", source_kind)
+        if self.expected_authority_epoch is not None and (
+            type(self.expected_authority_epoch) is not int
+            or self.expected_authority_epoch < 0
+        ):
+            raise OwnerTruthContractError(
+                "expected_authority_epoch must be a non-negative integer when provided"
+            )
 
 
 @dataclass(frozen=True)
@@ -304,6 +332,7 @@ __all__ = [
     "OWNER_TRUTH_CREATE_SOURCE_SCHEMA_VERSION",
     "OwnerTruthCommandAuthorizationCapture",
     "OwnerTruthCommandContext",
+    "OwnerTruthSourceAuthorityEpochConflict",
     "OwnerTruthSourceCommandConflict",
     "OwnerTruthSourceCommandResult",
     "OwnerTruthSourceVersionConflict",

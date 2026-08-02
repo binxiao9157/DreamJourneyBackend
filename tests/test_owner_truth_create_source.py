@@ -8,6 +8,7 @@ from app import main as main_module
 from app.domain.owner_truth.source_commands import (
     CreateTextSourceCommand,
     OwnerTruthCommandContext,
+    OwnerTruthSourceAuthorityEpochConflict,
     OwnerTruthSourceCommandConflict,
     OwnerTruthSourceVersionConflict,
 )
@@ -36,6 +37,7 @@ class OwnerTruthCreateSourceCommandTests(unittest.TestCase):
         command_id: str = "command-source-1",
         source_id: Optional[str] = None,
         expected_version: int = 0,
+        expected_authority_epoch: Optional[int] = None,
         text: str = "我小时候常在河边听外公讲故事。",
     ) -> CreateTextSourceCommand:
         return CreateTextSourceCommand(
@@ -44,6 +46,7 @@ class OwnerTruthCreateSourceCommandTests(unittest.TestCase):
             expected_version=expected_version,
             text=text,
             metadata={"title": "一段回忆"},
+            expected_authority_epoch=expected_authority_epoch,
         )
 
     def test_same_command_replays_the_original_receipt_without_duplicate_source(self):
@@ -77,6 +80,27 @@ class OwnerTruthCreateSourceCommandTests(unittest.TestCase):
         with self.assertRaises(OwnerTruthSourceVersionConflict):
             self.service.create_text_source(
                 command=self.command(expected_version=1),
+                context=self.context,
+            )
+
+    def test_new_source_rejects_stale_authority_epoch_but_replays_existing_command(self):
+        command = self.command(
+            command_id="command-source-epoch",
+            expected_authority_epoch=0,
+        )
+        created = self.service.create_text_source(command=command, context=self.context)
+        self.store._owner_truth_vaults[self.context.vault_id]["authorityEpoch"] = 1
+
+        replayed = self.service.create_text_source(command=command, context=self.context)
+        self.assertEqual(replayed.outcome, "deduplicated")
+        self.assertEqual(replayed.receipt_id, created.receipt_id)
+
+        with self.assertRaises(OwnerTruthSourceAuthorityEpochConflict):
+            self.service.create_text_source(
+                command=self.command(
+                    command_id="command-source-stale-epoch",
+                    expected_authority_epoch=0,
+                ),
                 context=self.context,
             )
 
