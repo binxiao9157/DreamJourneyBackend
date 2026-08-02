@@ -35,7 +35,10 @@ from app.services.postgres_store import PostgresStore
 
 BASE_URL = os.environ.get("BACKEND_BASE_URL", "").strip().rstrip("/")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "").strip()
-MIGRATION_VERSION = "0009"
+# Terminal purge semantics first landed in this migration.  The deployed head
+# will advance as new schema migrations are added, so the smoke must require
+# this capability migration without pinning production to an obsolete head.
+REQUIRED_MIGRATION_VERSION = "0009"
 
 
 def require(condition, message):
@@ -418,12 +421,14 @@ def main():
         verified = migrator.verify()
         require(verified.get("status") == "ready", "temporary schema is not ready")
         require(
-            verified.get("expectedHead") == MIGRATION_VERSION,
-            "temporary schema must include migration 0009",
-        )
-        require(
-            MIGRATION_VERSION in (applied.get("appliedVersions") or []),
+            REQUIRED_MIGRATION_VERSION in (applied.get("appliedVersions") or []),
             "temporary database must apply migration 0009",
+        )
+        applied_versions = applied.get("appliedVersions") or []
+        require(applied_versions, "temporary schema must apply at least one migration")
+        require(
+            verified.get("expectedHead") == applied_versions[-1],
+            "temporary schema head must match the deployed migration set",
         )
         result = {
             "status": "passed",
