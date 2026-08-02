@@ -188,6 +188,9 @@ class ClientCompatibilityAPITests(unittest.TestCase):
         )
         self.previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
         self.previous_release_policy_gate = main_module.RELEASE_POLICY_COMMAND_GATE
+        self.previous_closed_pilot_owner_ids = (
+            main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+        )
 
         main_module.store = InMemoryStore()
         main_module.BACKEND_API_TOKEN = "compat-machine-token"
@@ -203,6 +206,7 @@ class ClientCompatibilityAPITests(unittest.TestCase):
         )
         main_module.RELEASE_POLICY_SERVICE = release_policy
         main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(release_policy)
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset()
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -219,6 +223,9 @@ class ClientCompatibilityAPITests(unittest.TestCase):
         )
         main_module.RELEASE_POLICY_SERVICE = self.previous_release_policy_service
         main_module.RELEASE_POLICY_COMMAND_GATE = self.previous_release_policy_gate
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = (
+            self.previous_closed_pilot_owner_ids
+        )
 
     def set_compatibility_mode(self, mode: str) -> None:
         main_module.CLIENT_COMPATIBILITY_POLICY = ClientCompatibilityPolicy(
@@ -240,7 +247,12 @@ class ClientCompatibilityAPITests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 200, response.text)
-        return response.json()
+        body = response.json()
+        owner_id = str(body["user"]["id"])
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
+            set(main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS) | {owner_id}
+        )
+        return body
 
     @staticmethod
     def user_headers(login_body: dict, client_build: str | None = None) -> dict:

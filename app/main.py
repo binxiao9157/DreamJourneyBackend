@@ -445,6 +445,7 @@ from app.services.release_policy import (
     ReleasePolicyVersionDowngrade,
     normalize_release_policy_audience,
     parse_release_policy_feature_set,
+    parse_release_policy_subject_id_set,
 )
 from app.services.context_packet import ContextPacketBuilder
 from app.db.pool import ConnectionPoolExhausted
@@ -1073,10 +1074,7 @@ def _owner_truth_captured_release_policy_context(
         captured = RELEASE_POLICY_COMMAND_GATE.capture(
             feature=feature,
             audience=_release_policy_audience(request, principal),
-            cohort=str(
-                request.headers.get("x-dreamjourney-policy-cohort")
-                or "closedPilotAdultSelf"
-            ).strip(),
+            cohort=_release_policy_server_cohort(principal),
             client_build=observed_client_build,
             client_policy_version=str(
                 request.headers.get("x-dreamjourney-policy-version") or ""
@@ -3693,7 +3691,13 @@ RELEASE_POLICY_SERVICE = ReleasePolicyService(
     enforced_features=parse_release_policy_feature_set(
         settings.release_policy_enforced_features
     ),
+    closed_pilot_enabled_features=parse_release_policy_feature_set(
+        settings.release_policy_closed_pilot_features
+    ),
     shadow_mode=RELEASE_POLICY_COMMAND_MODE != "enforce",
+)
+RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
+    parse_release_policy_subject_id_set(settings.release_policy_closed_pilot_owner_ids)
 )
 RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(RELEASE_POLICY_SERVICE)
 _release_policy_event_sink = getattr(store, "append_evidence_event", None)
@@ -4245,6 +4249,18 @@ def _release_policy_audience(request: Request, principal: RequestPrincipal) -> s
     )
 
 
+def _release_policy_server_cohort(principal: RequestPrincipal) -> str:
+    """Resolve pilot membership from server configuration, never client input."""
+
+    if (
+        principal.kind == PrincipalKind.USER
+        and str(principal.principal_id or "").strip()
+        in RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+    ):
+        return "closedPilotAdultSelf"
+    return "unassigned"
+
+
 def _set_release_policy_diagnostic_headers(response: Any, diagnostic: Dict[str, str]) -> Any:
     if not diagnostic:
         return response
@@ -4394,10 +4410,7 @@ def _evaluate_release_policy_command(
         captured = RELEASE_POLICY_COMMAND_GATE.capture(
             feature=feature,
             audience=_release_policy_audience(request, principal),
-            cohort=str(
-                request.headers.get("x-dreamjourney-policy-cohort")
-                or "closedPilotAdultSelf"
-            ).strip(),
+            cohort=_release_policy_server_cohort(principal),
             client_build=evaluation_client_build,
             client_policy_version=str(
                 request.headers.get("x-dreamjourney-policy-version") or ""
@@ -5126,16 +5139,33 @@ def ready() -> JSONResponse:
 
 @app.get("/v2/release-policy", response_model=ReleasePolicySnapshot)
 def release_policy(
+    request: Request,
     audience: str = Query(default="owner", pattern="^(owner|family|visitor|qa)$"),
     cohort: str = Query(default="closedPilotAdultSelf", min_length=1, max_length=80),
     clientBuild: int = Query(default=1, ge=0),
     knownPolicyRevision: int = Query(default=0, ge=0),
     feature: Optional[str] = Query(default=None, min_length=1, max_length=100),
 ) -> ReleasePolicySnapshot:
+    # Retain the legacy query field for older clients, but never trust it.
+    # A user receives a closed-pilot snapshot only when their authenticated
+    # server principal is explicitly allowlisted in deployment configuration.
+    _ = cohort
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, RequestPrincipal):
+        principal = RequestPrincipal.anonymous()
+    resolved_audience = (
+        "owner"
+        if principal.kind == PrincipalKind.USER
+        else normalize_release_policy_audience(
+            audience,
+            environment=settings.environment,
+            principal_kind=str(principal.get("kind") or "anonymous"),
+        )
+    )
     try:
         return RELEASE_POLICY_SERVICE.build_snapshot(
-            audience=audience,  # type: ignore[arg-type]
-            cohort=cohort,
+            audience=resolved_audience,  # type: ignore[arg-type]
+            cohort=_release_policy_server_cohort(principal),
             client_build=clientBuild,
             known_policy_revision=knownPolicyRevision,
             requested_feature=feature,

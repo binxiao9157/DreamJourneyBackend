@@ -63,6 +63,7 @@
 - `AUTH_OWNERSHIP_MODE=enforce` 会对 mismatch 返回 `403`，只能在 shadow 证据审阅和跨账号规则补齐后启用。
 - `RELEASE_POLICY_COMMAND_MODE=observe` 会为受控 command 重新计算服务端发布策略并输出诊断响应头，但暂不拦截旧客户端；这是默认迁移模式。
 - `RELEASE_POLICY_COMMAND_MODE=enforce` 会在受控 command 缺少有效 captured decision、账号代际不匹配或服务端策略拒绝时返回 `403 release_policy_denied`。只能在 observe mismatch 与旧客户端覆盖完成后按 cohort 切换。
+- `RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS` 是服务端维护的 closed-pilot 用户 ID 白名单；客户端传入的 cohort header 或 query 不会授予资格。`RELEASE_POLICY_CLOSED_PILOT_FEATURES=ownerTruthCandidateReview` 只在该白名单内显式开启 M0 候选确认，其他功能名会使服务启动失败。
 - `DELEGATED_ACCESS_CONTRACT_API_ENABLED=false` 默认关闭 Family/Care/TimeLetter 的 Grant/Relationship 管理接口；安全合同和数据库迁移可以先部署，但在 G4 产品政策通过前不得在常驻服务进程中开启。部署 smoke 仅在独立进程内临时开启该合同。
 - `OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED=false` 默认关闭 V4 Candidate Inbox/Owner 决策、Projection、KBLite compatibility 与 Context shadow QA 接口。即使临时开启，也必须携带认证后的用户会话和 `X-DreamJourney-QA-Owner-Truth: 1`；这些接口仅用于 QA，不代表 Candidate、Projection 或 Context 已对公开产品开放。
 - `OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED=false` 默认关闭成功自然输入追加后的服务端无正文审计。开启时，它只在同一数据库事务中记录确定性动作、原因码和版本等回执；不返回给客户端、不保存叙述文本或话题名、不创建 Candidate、MemoryVersion 或 Provider 效果。

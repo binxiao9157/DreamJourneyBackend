@@ -22,6 +22,9 @@ class OwnerTruthInterviewFormalReviewBatchInboxAPITests(unittest.TestCase):
         self.previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
         self.previous_route_mode = main_module.AUTH_ROUTE_MODE
         self.previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
+        self.previous_closed_pilot_owner_ids = (
+            main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+        )
         self.previous_review_batch_automation_enabled = (
             main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED
         )
@@ -34,6 +37,7 @@ class OwnerTruthInterviewFormalReviewBatchInboxAPITests(unittest.TestCase):
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         main_module.AUTH_ROUTE_MODE = "enforce"
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset()
         main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = False
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = False
 
@@ -43,6 +47,9 @@ class OwnerTruthInterviewFormalReviewBatchInboxAPITests(unittest.TestCase):
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = self.previous_legacy_phone_login
         main_module.AUTH_ROUTE_MODE = self.previous_route_mode
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = (
+            self.previous_closed_pilot_owner_ids
+        )
         main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = (
             self.previous_review_batch_automation_enabled
         )
@@ -63,8 +70,12 @@ class OwnerTruthInterviewFormalReviewBatchInboxAPITests(unittest.TestCase):
         if response.status_code != 200:
             raise AssertionError(response.text)
         payload = response.json()
+        owner_id = str(payload["user"]["id"])
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
+            set(main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS) | {owner_id}
+        )
         return (
-            str(payload["user"]["id"]),
+            owner_id,
             {"Authorization": f"Bearer {payload['auth']['accessToken']}"},
             str(payload["auth"]["sessionId"]),
         )

@@ -47,6 +47,9 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
         self.previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
         self.previous_route_mode = main_module.AUTH_ROUTE_MODE
         self.previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
+        self.previous_closed_pilot_owner_ids = (
+            main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+        )
         self.previous_candidate_qa = main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
         self.previous_memory_search_qa = main_module.OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED
         self.previous_memory_search_projection_qa = (
@@ -58,6 +61,7 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         main_module.AUTH_ROUTE_MODE = "enforce"
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset()
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
         main_module.OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED = True
         main_module.OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_QA_ENABLED = True
@@ -68,6 +72,9 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = self.previous_legacy_phone_login
         main_module.AUTH_ROUTE_MODE = self.previous_route_mode
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = (
+            self.previous_closed_pilot_owner_ids
+        )
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = self.previous_candidate_qa
         main_module.OWNER_TRUTH_MEMORY_SEARCH_READ_QA_ENABLED = self.previous_memory_search_qa
         main_module.OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_QA_ENABLED = (
@@ -83,7 +90,11 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
         if response.status_code != 200:
             raise AssertionError(response.text)
         body = response.json()
-        return str(body["user"]["id"]), {
+        owner_id = str(body["user"]["id"])
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
+            set(main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS) | {owner_id}
+        )
+        return owner_id, {
             "Authorization": f"Bearer {body['auth']['accessToken']}",
             "X-DreamJourney-QA-Owner-Truth": "1",
         }
@@ -97,8 +108,12 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
         if response.status_code != 200:
             raise AssertionError(response.text)
         body = response.json()
+        owner_id = str(body["user"]["id"])
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
+            set(main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS) | {owner_id}
+        )
         return (
-            str(body["user"]["id"]),
+            owner_id,
             {"Authorization": f"Bearer {body['auth']['accessToken']}"},
             str(body["auth"]["sessionId"]),
         )

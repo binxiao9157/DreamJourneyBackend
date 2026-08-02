@@ -27,6 +27,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
         self.previous_route_mode = main_module.AUTH_ROUTE_MODE
         self.previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
+        self.previous_closed_pilot_owner_ids = (
+            main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+        )
         self.previous_qa_enabled = main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
         self.previous_decision_audit_enabled = (
             main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED
@@ -49,6 +52,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         main_module.AUTH_ROUTE_MODE = "enforce"
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset()
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
         main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = False
         main_module.OWNER_TRUTH_TOPIC_SHIFT_SHADOW_ENABLED = False
@@ -62,6 +66,9 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = self.previous_legacy_phone_login
         main_module.AUTH_ROUTE_MODE = self.previous_route_mode
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = (
+            self.previous_closed_pilot_owner_ids
+        )
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = self.previous_qa_enabled
         main_module.OWNER_TRUTH_INTERVIEW_DECISION_AUDIT_ENABLED = (
             self.previous_decision_audit_enabled
@@ -92,12 +99,16 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         if response.status_code != 200:
             raise AssertionError(response.text)
         payload = response.json()
+        owner_id = str(payload["user"]["id"])
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
+            set(main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS) | {owner_id}
+        )
         headers = {
             "Authorization": f"Bearer {payload['auth']['accessToken']}",
         }
         if qa:
             headers["X-DreamJourney-QA-Owner-Truth"] = "1"
-        return payload["user"]["id"], headers, payload["auth"]["sessionId"]
+        return owner_id, headers, payload["auth"]["sessionId"]
 
     @staticmethod
     def _start_path(vault_id: str) -> str:

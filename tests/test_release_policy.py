@@ -45,6 +45,11 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ReleasePolicyService(emergency_disabled_features={"voiceCloneEnabled"})
 
+        with self.assertRaises(ValueError):
+            ReleasePolicyService(
+                closed_pilot_enabled_features={"digitalHumanLivePanel"}
+            )
+
     def test_qa_audience_requires_nonproduction_system_principal(self):
         self.assertEqual(
             normalize_release_policy_audience(
@@ -139,6 +144,20 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertFalse(decision.releaseVisible)
         self.assertEqual(decision.requiredGates, ("G0", "G1", "G2"))
         self.assertEqual(decision.reason, "notApprovedForClosedPilot")
+
+    def test_owner_truth_candidate_review_requires_explicit_closed_pilot_feature_grant(self):
+        decision = ReleasePolicyService(
+            closed_pilot_enabled_features={"ownerTruthCandidateReview"}
+        ).build_snapshot(
+            audience="owner",
+            cohort="closedPilotAdultSelf",
+            client_build=1,
+            requested_feature="ownerTruthCandidateReview",
+        ).features[0]
+
+        self.assertTrue(decision.enabled)
+        self.assertTrue(decision.releaseVisible)
+        self.assertEqual(decision.reason, "closedPilotOwnerCore")
 
     def test_m1_through_m4_are_explicit_default_closed_stages_during_shadow_rollout(self):
         service = ReleasePolicyService(shadow_mode=True)
@@ -323,15 +342,43 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
         self.previous_store = main_module.store
         self.previous_backend_token = main_module.BACKEND_API_TOKEN
         self.previous_recorder = main_module.RELEASE_POLICY_DECISION_RECORDER
+        self.previous_policy_service = main_module.RELEASE_POLICY_SERVICE
+        self.previous_policy_gate = main_module.RELEASE_POLICY_COMMAND_GATE
+        self.previous_closed_pilot_owner_ids = (
+            main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+        )
+        self.previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
         main_module.store = InMemoryStore()
         main_module.BACKEND_API_TOKEN = ""
         main_module.RELEASE_POLICY_DECISION_RECORDER = ReleasePolicyDecisionRecorder()
+        main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         self.client = TestClient(app)
 
     def tearDown(self):
         main_module.store = self.previous_store
         main_module.BACKEND_API_TOKEN = self.previous_backend_token
         main_module.RELEASE_POLICY_DECISION_RECORDER = self.previous_recorder
+        main_module.RELEASE_POLICY_SERVICE = self.previous_policy_service
+        main_module.RELEASE_POLICY_COMMAND_GATE = self.previous_policy_gate
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = (
+            self.previous_closed_pilot_owner_ids
+        )
+        main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = self.previous_legacy_phone_login
+
+    def _login(self, phone: str) -> tuple[str, dict[str, str]]:
+        response = self.client.post(
+            "/auth/login",
+            json={
+                "phone": phone,
+                "nickname": "发布策略测试",
+                "password": "release-policy-test",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        return str(body["user"]["id"]), {
+            "Authorization": f"Bearer {body['auth']['accessToken']}",
+        }
 
     def test_release_policy_endpoint_is_anonymous_typed_and_no_store(self):
         response = self.client.get(
@@ -354,9 +401,54 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
         )
         self.assertFalse(payload["publicationVisitorPolicy"]["publication"]["enabled"])
         self.assertFalse(payload["publicationVisitorPolicy"]["visitor"]["enabled"])
+        self.assertEqual(payload["cohort"], "unassigned")
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertNotIn("token", str(payload).lower())
         self.assertNotIn("credential", str(payload).lower())
+
+    def test_release_policy_endpoint_uses_server_owned_closed_pilot_allowlist(self):
+        main_module.RELEASE_POLICY_SERVICE = ReleasePolicyService(
+            closed_pilot_enabled_features={"ownerTruthCandidateReview"}
+        )
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(
+            main_module.RELEASE_POLICY_SERVICE
+        )
+        allowed_owner_id, allowed_headers = self._login("13800139501")
+        _, denied_headers = self._login("13800139502")
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
+            {allowed_owner_id}
+        )
+        params = {
+            "audience": "owner",
+            "cohort": "closedPilotAdultSelf",
+            "clientBuild": 1,
+            "feature": "ownerTruthCandidateReview",
+        }
+
+        allowed = self.client.get(
+            "/v2/release-policy",
+            params=params,
+            headers=allowed_headers,
+        )
+        denied = self.client.get(
+            "/v2/release-policy",
+            params=params,
+            headers={
+                **denied_headers,
+                "X-DreamJourney-Policy-Cohort": "closedPilotAdultSelf",
+            },
+        )
+
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(allowed.json()["cohort"], "closedPilotAdultSelf")
+        self.assertTrue(allowed.json()["features"][0]["enabled"])
+        self.assertEqual(denied.status_code, 200)
+        self.assertEqual(denied.json()["cohort"], "unassigned")
+        self.assertFalse(denied.json()["features"][0]["enabled"])
+        self.assertEqual(
+            denied.json()["features"][0]["reason"],
+            "notApprovedForClosedPilot",
+        )
 
     def test_release_policy_endpoint_rejects_version_downgrade(self):
         response = self.client.get(
@@ -482,6 +574,9 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
         )
         self.assertEqual(login.status_code, 200)
         body = login.json()
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
+            {str(body["user"]["id"])}
+        )
         session_id = body["auth"]["sessionId"]
         account_generation = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
         headers = {

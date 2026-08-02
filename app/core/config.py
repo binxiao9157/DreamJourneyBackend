@@ -77,6 +77,12 @@ class Settings:
     release_policy_emergency_revision: int = 0
     release_policy_enforced_features: Optional[str] = None
     release_policy_emergency_disabled_features: Optional[str] = None
+    # Closed-pilot exposure is granted only by the server. The client may
+    # request a policy snapshot, but cannot nominate itself into this cohort.
+    release_policy_closed_pilot_owner_ids: Optional[str] = None
+    # Additional M0 features explicitly approved for server-granted pilot
+    # owners. Unsupported or later-stage feature names fail at boot.
+    release_policy_closed_pilot_features: Optional[str] = None
     async_effect_v1_enabled: bool = False
     async_effect_worker_enabled: bool = False
     # Candidate extraction is a separate, deterministic QA worker. It remains
@@ -297,6 +303,12 @@ class Settings:
             release_policy_enforced_features=_env("RELEASE_POLICY_ENFORCED_FEATURES"),
             release_policy_emergency_disabled_features=_env(
                 "RELEASE_POLICY_EMERGENCY_DISABLED_FEATURES"
+            ),
+            release_policy_closed_pilot_owner_ids=_env(
+                "RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS"
+            ),
+            release_policy_closed_pilot_features=_env(
+                "RELEASE_POLICY_CLOSED_PILOT_FEATURES"
             ),
             async_effect_v1_enabled=_env_bool(
                 "ASYNC_EFFECT_V1_ENABLED",

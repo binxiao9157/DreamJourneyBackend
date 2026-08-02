@@ -25,6 +25,16 @@ def parse_release_policy_feature_set(value: Optional[str]) -> Set[str]:
     }
 
 
+def parse_release_policy_subject_id_set(value: Optional[str]) -> Set[str]:
+    """Parse a server-owned subject allowlist without accepting blank values."""
+
+    return {
+        item.strip()
+        for item in (value or "").split(",")
+        if item.strip()
+    }
+
+
 def normalize_release_policy_audience(
     requested: str,
     *,
@@ -470,6 +480,7 @@ class ReleasePolicyService:
         "legalCenter",
         "accountDeletion",
     }
+    _CLOSED_PILOT_OPT_IN_FEATURES = {"ownerTruthCandidateReview"}
 
     def __init__(
         self,
@@ -480,6 +491,7 @@ class ReleasePolicyService:
         emergency_revision: int = 0,
         emergency_disabled_features: Optional[Iterable[str]] = None,
         enforced_features: Optional[Iterable[str]] = None,
+        closed_pilot_enabled_features: Optional[Iterable[str]] = None,
         shadow_mode: bool = True,
         enforce_default_closed_stages: bool = True,
     ) -> None:
@@ -489,13 +501,26 @@ class ReleasePolicyService:
         self.emergency_revision = max(0, emergency_revision)
         self.emergency_disabled_features: Set[str] = set(emergency_disabled_features or ())
         self.enforced_features: Set[str] = set(enforced_features or ())
+        self.closed_pilot_enabled_features: Set[str] = set(
+            closed_pilot_enabled_features or ()
+        )
         unknown_rollout_features = (
-            self.emergency_disabled_features | self.enforced_features
+            self.emergency_disabled_features
+            | self.enforced_features
+            | self.closed_pilot_enabled_features
         ).difference(self._FEATURE_GATES)
         if unknown_rollout_features:
             raise ValueError(
                 "unknown release policy rollout feature(s): "
                 + ", ".join(sorted(unknown_rollout_features))
+            )
+        unsupported_closed_pilot_features = self.closed_pilot_enabled_features.difference(
+            self._CLOSED_PILOT_OPT_IN_FEATURES
+        )
+        if unsupported_closed_pilot_features:
+            raise ValueError(
+                "unsupported closed-pilot feature(s): "
+                + ", ".join(sorted(unsupported_closed_pilot_features))
             )
         self.shadow_mode = shadow_mode
         self.enforce_default_closed_stages = enforce_default_closed_stages
@@ -517,7 +542,11 @@ class ReleasePolicyService:
         return cls._FEATURE_STAGES.get(feature, "unknown")
 
     def minimum_client_access_mode(self, feature: str) -> str:
-        return "readOnly" if feature in self._CLOSED_PILOT_OWNER_VISIBLE else "deny"
+        return "readOnly" if feature in self._closed_pilot_owner_visible_features else "deny"
+
+    @property
+    def _closed_pilot_owner_visible_features(self) -> Set[str]:
+        return self._CLOSED_PILOT_OWNER_VISIBLE | self.closed_pilot_enabled_features
 
     def public_descriptor(self) -> dict[str, object]:
         return {
@@ -534,6 +563,9 @@ class ReleasePolicyService:
             "rolloutContractVersion": 1,
             "runtimeContractVersion": ReleasePolicyDecisionRecorder.RUNTIME_CONTRACT_VERSION,
             "canaryFeatures": sorted(self.enforced_features),
+            "closedPilotOwnerFeatures": sorted(
+                self._closed_pilot_owner_visible_features
+            ),
             "killSwitchFeatures": sorted(self.emergency_disabled_features),
             "defaultClosedStages": ["M1", "M2", "M3", "M4"],
             "defaultClosedStageEffectsEnforced": self.enforce_default_closed_stages,
@@ -642,7 +674,7 @@ class ReleasePolicyService:
         elif (
             audience == "owner"
             and cohort == "closedPilotAdultSelf"
-            and feature in self._CLOSED_PILOT_OWNER_VISIBLE
+            and feature in self._closed_pilot_owner_visible_features
         ):
             reason = "closedPilotOwnerCore"
             allowed = True
