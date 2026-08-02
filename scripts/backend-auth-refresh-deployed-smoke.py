@@ -56,6 +56,67 @@ def request_json(method, path, *, payload=None, token=None, expected=200):
     return json.loads(raw) if raw else {}
 
 
+def assert_identity_admission_boundary(suffix):
+    """Record why this smoke may issue only an in-container fixture session.
+
+    Production intentionally has no synthetic SMS adapter.  Until a real
+    identity provider is configured, a deployed refresh smoke must prove that
+    both public login paths fail closed and then use its explicit internal
+    fixture mode to exercise refresh rotation.  It must never silently fall
+    back to legacy phone login.
+    """
+
+    runtime = request_json("GET", "/config/runtime")
+    identity = (runtime.get("auth") or {}).get("identityChallenge") or {}
+    challenge_enabled = identity.get("clientFlowEnabled") is True
+    legacy_enabled = identity.get("legacyPhoneLoginEnabled") is True
+
+    if not challenge_enabled:
+        target = f"+1555555{secrets.randbelow(10**7):07d}"
+        challenge = request_json(
+            "POST",
+            "/v2/auth/challenges",
+            payload={
+                "identityType": "phone",
+                "target": target,
+                "purpose": "login",
+            },
+            expected=503,
+        )
+        require(
+            (challenge.get("detail") or {}).get("code")
+            == "identity_challenge_unavailable",
+            "disabled identity provider must fail closed",
+        )
+        require(target not in json.dumps(challenge, ensure_ascii=False), "challenge leaked target")
+
+    if not legacy_enabled:
+        legacy = request_json(
+            "POST",
+            "/auth/login",
+            payload={
+                "phone": f"196{secrets.randbelow(10**8):08d}",
+                "password": f"retired-login-{suffix}",
+            },
+            expected=426,
+        )
+        require(
+            (legacy.get("detail") or {}).get("reason") == "legacyIdentityFlowRetired",
+            "retired legacy login must not be re-enabled by the refresh smoke",
+        )
+
+    if not DIRECT_ISSUE and (not challenge_enabled or not legacy_enabled):
+        raise AssertionError(
+            "BACKEND_AUTH_REFRESH_SMOKE_DIRECT_ISSUE=1 is required when the "
+            "deployed identity provider is intentionally unavailable"
+        )
+    return {
+        "identityChallengeEnabled": challenge_enabled,
+        "legacyLoginEnabled": legacy_enabled,
+        "fixtureSessionRequired": DIRECT_ISSUE,
+    }
+
+
 def issue_initial_session(suffix):
     if DIRECT_ISSUE:
         from app.main import _auth_session_service, store
@@ -84,6 +145,7 @@ def issue_initial_session(suffix):
 def main():
     require(BASE_URL, "BACKEND_BASE_URL is required")
     suffix = secrets.token_hex(6)
+    identity_boundary = assert_identity_admission_boundary(suffix)
     user_id, first = issue_initial_session(suffix)
     require(first["contractVersion"] == 2, "login must issue typed session v2")
     require(first["subjectId"] == user_id, "login subject must match canonical user")
@@ -126,6 +188,9 @@ def main():
             {
                 "status": "passed",
                 "contractVersion": second["contractVersion"],
+                "identityChallengeEnabled": identity_boundary["identityChallengeEnabled"],
+                "legacyLoginEnabled": identity_boundary["legacyLoginEnabled"],
+                "fixtureSessionRequired": identity_boundary["fixtureSessionRequired"],
                 "sessionVersion": second["sessionVersion"],
                 "reuseCode": detail["code"],
             },
