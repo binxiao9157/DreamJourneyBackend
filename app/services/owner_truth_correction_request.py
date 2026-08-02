@@ -1,4 +1,4 @@
-"""QA-only Answer/Citation correction-request boundary for Owner Truth.
+"""Answer/Citation correction-request boundary for Owner Truth.
 
 This module deliberately stops before a correction is accepted.  A request
 captures an immutable answer/citation reference, preserves the Owner's raw
@@ -71,7 +71,7 @@ _MAX_CORRECTION_TEXT_CHARS = 20_000
 
 
 class OwnerTruthCorrectionRequestError(OwnerTruthMemoryProjectionError):
-    """A correction request cannot safely enter the Owner Truth QA lane."""
+    """A correction request cannot safely enter the Owner Truth boundary."""
 
 
 class OwnerTruthCorrectionRequestConflict(OwnerTruthCorrectionRequestError):
@@ -1552,12 +1552,12 @@ class OwnerTruthCorrectionRequestService:
     ) -> OwnerTruthCorrectionResolutionResult:
         """Resolve one pending correction and enqueue a derived rebuild intent.
 
-        This remains QA-only and is intentionally separate from the ordinary
-        Candidate review route.  A corrected request creates v(N+1) of the
-        same MemoryRecord; a rejected request keeps the authoritative version
-        untouched.  The effect write shares the request UoW so an effect
-        persistence failure rolls the resolution back rather than leaving a
-        stale projection silently visible.
+        This remains intentionally separate from the ordinary Candidate review
+        route.  A corrected request creates v(N+1) of the same MemoryRecord;
+        a rejected request keeps the authoritative version untouched.  The
+        effect write shares the request UoW so an effect persistence failure
+        rolls the resolution back rather than leaving a stale projection
+        silently visible.
         """
 
         _assert_owner_context(context)

@@ -20,6 +20,7 @@ from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
+from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 
 
 client = TestClient(app)
@@ -387,6 +388,117 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(
             replay.json()["receipt"]["receiptId"],
             created.json()["receipt"]["receiptId"],
+        )
+
+    def test_server_authorized_owner_records_citation_and_resolves_correction_without_qa_header(
+        self,
+    ) -> None:
+        owner_id, auth_headers, session_id = self._formal_login("13800139106")
+        self._allow_closed_pilot_owner(owner_id)
+        vault_id = "vault-api-formal-correction"
+        candidate = self._candidate(vault_id=vault_id, owner_subject_id=owner_id)
+        self._seed(candidate)
+
+        accepted = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
+            headers=self._formal_policy_headers(auth_headers, session_id=session_id),
+            json={
+                "commandId": "candidate-api-formal-correction-accept-001",
+                "expectedCandidateVersion": 1,
+                "action": "accept",
+                "reasonCode": "ownerReviewed",
+            },
+        )
+        self.assertEqual(accepted.status_code, 201, accepted.text)
+        memory_activation = accepted.json()["memoryActivation"]
+        OwnerTruthMemoryProjectionService(main_module.store).rebuild(
+            context=OwnerTruthCommandContext(
+                vault_id=vault_id,
+                owner_subject_id=owner_id,
+                actor_subject_id=owner_id,
+            )
+        )
+
+        answer_text = "我只根据你已经确认的记忆回答。"
+        citation_response = client.post(
+            f"/v2/vaults/{vault_id}/answer-citation-receipts",
+            headers=self._formal_policy_headers(auth_headers, session_id=session_id),
+            json={
+                "commandId": "answer-citation-formal-correction-001",
+                "intent": "echo_chat",
+                "query": "请说说这段经历。",
+                "answerText": answer_text,
+            },
+        )
+        self.assertEqual(citation_response.status_code, 201, citation_response.text)
+        citation_summary = citation_response.json()["answerCitation"]
+        self.assertEqual(citation_summary["citationCount"], 1)
+        self.assertEqual(citation_summary["contextVersion"], "echo-context-v4-owner-qa")
+        self.assertNotIn(answer_text, str(citation_summary))
+
+        citation_read = client.get(
+            f"/v2/vaults/{vault_id}/answers/{citation_summary['answerId']}/citations",
+            headers=self._formal_policy_headers(auth_headers, session_id=session_id),
+        )
+        self.assertEqual(citation_read.status_code, 200, citation_read.text)
+        citation = citation_read.json()["answerCitation"]["citations"][0]
+
+        correction_text = "不是父亲，是外祖父讲了这段故事。"
+        requested = client.post(
+            f"/v2/vaults/{vault_id}/memories/{citation['citation']['memoryId']}/corrections",
+            headers=self._formal_policy_headers(auth_headers, session_id=session_id),
+            json={
+                "commandId": "correction-api-formal-001",
+                "answerId": citation_summary["answerId"],
+                "citationId": citation["citationId"],
+                "expectedMemoryVersionId": citation["citation"]["memoryVersionId"],
+                "correctionText": correction_text,
+                "reasonCode": "ownerReportedCorrection",
+            },
+        )
+        self.assertEqual(requested.status_code, 201, requested.text)
+        request_summary = requested.json()["correctionRequest"]
+        self.assertNotIn(correction_text, str(request_summary))
+
+        resolved = client.post(
+            f"/v2/vaults/{vault_id}/correction-requests/{request_summary['correctionRequestId']}/resolve",
+            headers=self._formal_policy_headers(auth_headers, session_id=session_id),
+            json={
+                "commandId": "correction-resolution-formal-001",
+                "expectedCandidateVersion": request_summary["candidateVersion"],
+                "expectedMemoryVersionId": request_summary["expectedMemoryVersionId"],
+                "action": "correct",
+                "correctedValue": {"summary": "外祖父在院子里讲故事"},
+                "correctedValueSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION,
+                "reasonCode": "ownerConfirmedCorrection",
+            },
+        )
+        self.assertEqual(resolved.status_code, 201, resolved.text)
+        self.assertEqual(resolved.json()["correctionResolution"]["decision"], "corrected")
+        self.assertEqual(
+            resolved.json()["correctionResolution"]["supersededMemoryVersionId"],
+            memory_activation["memoryVersionId"],
+        )
+
+        receipts = main_module.store.owner_truth_candidate_review_repository().snapshot()["receipts"]
+        correction_receipt = next(
+            receipt
+            for receipt in receipts.values()
+            if receipt["candidateId"] == request_summary["candidateId"]
+        )
+        evidence = correction_receipt["authorizationCapture"]
+        self.assertEqual(evidence["feature"], "ownerTruthCandidateReview")
+        self.assertNotIn("X-DreamJourney-QA-Owner-Truth", json.dumps(receipts, sort_keys=True))
+
+        feedback = client.post(
+            f"/v2/vaults/{vault_id}/answers/{citation_summary['answerId']}/feedback",
+            headers=self._formal_policy_headers(auth_headers, session_id=session_id),
+            json={"commandId": "answer-feedback-formal-hidden-001", "helpful": True},
+        )
+        self.assertEqual(feedback.status_code, 404)
+        self.assertEqual(
+            feedback.json()["detail"]["code"],
+            "ownerTruthAnswerCitationUnavailable",
         )
 
     def test_cross_vault_stale_and_corrected_value_boundaries(self) -> None:

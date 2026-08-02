@@ -1,9 +1,10 @@
-"""QA-only immutable Answer/Citation evidence over Owner Truth Context V4.
+"""Immutable Answer/Citation evidence over confirmed Owner Truth Context V4.
 
-This is deliberately a shadow persistence boundary.  It records only hashes,
-typed citations, and policy metadata after the Context shadow has selected
-current confirmed MemoryVersions.  It neither stores raw question/answer text
-nor changes the legacy public Echo route.
+The legacy QA lane keeps using the Context shadow.  A server-authorized
+closed-pilot Owner uses the same confirmed-projection materialization that
+drives the production Context authority.  Both paths persist only hashes and
+typed citations; neither retains raw question/answer text or changes a legacy
+public Echo response.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from app.domain.owner_truth.memory_projection import (
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_context_shadow_build import OwnerTruthContextShadowBuildService
+from app.services.owner_truth_context_materialization import OwnerTruthContextMaterializationService
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 
 
@@ -43,7 +45,7 @@ class OwnerTruthAnswerCitationConflict(OwnerTruthAnswerCitationError):
 
 
 class OwnerTruthAnswerCitationUnavailable(OwnerTruthAnswerCitationError):
-    """The QA-only persistence boundary is disabled."""
+    """The Answer/Citation persistence boundary is disabled."""
 
 
 def _canonical_json(value: Any) -> str:
@@ -156,7 +158,7 @@ def _citation_record(
 
 @dataclass(frozen=True)
 class OwnerTruthAnswerCitationCommand:
-    """One idempotent, QA-only answer evidence write.
+    """One idempotent answer evidence write.
 
     ``answer_text`` exists only while hashing this command.  Repositories are
     forbidden from retaining it; persisted records carry a digest and length.
@@ -681,7 +683,7 @@ class PostgresOwnerTruthAnswerCitationRepository:
 
 
 class OwnerTruthAnswerCitationService:
-    """Build Context V4 shadow and persist its immutable citation evidence."""
+    """Persist immutable citations from the applicable confirmed-memory Context."""
 
     def __init__(self, store: OwnerTruthAnswerCitationStore, *, enabled: bool = False) -> None:
         self._store = store
@@ -701,12 +703,9 @@ class OwnerTruthAnswerCitationService:
             correlation_id=f"owner-truth-answer-citation-{command.command_id_hash}",
             command_id=command.command_id_hash,
         ):
-            context_build = OwnerTruthContextShadowBuildService(
-                self._store,
-                enabled=True,
-            ).build(
+            context_build = self._build_context_evidence(
                 context=context,
-                payload=context_payload,
+                context_payload=context_payload,
             )
             self._assert_context_build_is_current(
                 context=context,
@@ -721,6 +720,36 @@ class OwnerTruthAnswerCitationService:
                 context=context,
                 record=record,
             )
+
+    def _build_context_evidence(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        context_payload: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any]:
+        """Use the production materialization only after server policy capture.
+
+        A client cannot select this branch: ``authorization_capture`` is set
+        exclusively by the server-side release-policy gate.  The older
+        explicit-QA route remains compatible with its shadow builder so
+        existing regression fixtures keep their original semantics.
+        """
+
+        if context.authorization_capture is not None:
+            return OwnerTruthContextMaterializationService(
+                self._store,
+                enabled=True,
+            ).build(
+                context=context,
+                payload=context_payload,
+            )
+        return OwnerTruthContextShadowBuildService(
+            self._store,
+            enabled=True,
+        ).build(
+            context=context,
+            payload=context_payload,
+        )
 
     def _assert_context_build_is_current(
         self,

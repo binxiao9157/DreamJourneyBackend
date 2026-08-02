@@ -2249,7 +2249,29 @@ def _owner_truth_answer_citation_context(
     request: Request,
     *,
     vault_id: str,
+    allow_closed_pilot: bool = False,
 ) -> OwnerTruthCommandContext:
+    """Authorize citation evidence without widening the feedback QA surface."""
+
+    if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
+        owner_subject_id = _require_owner_truth_answer_citation_qa(request)
+        return OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_subject_id,
+            actor_subject_id=owner_subject_id,
+        )
+    if allow_closed_pilot:
+        return _owner_truth_captured_release_policy_context(
+            request,
+            vault_id=vault_id,
+            feature="ownerTruthCandidateReview",
+            route=(
+                f"{request.method.upper()} /v2/vaults/*/answer-citation-receipts"
+                if request.method.upper() == "POST"
+                else f"{request.method.upper()} /v2/vaults/*/answers/*/citations"
+            ),
+            user_session_required_code="ownerTruthAnswerCitationUserSessionRequired",
+        )
     owner_subject_id = _require_owner_truth_answer_citation_qa(request)
     return OwnerTruthCommandContext(
         vault_id=vault_id,
@@ -2506,11 +2528,26 @@ def _owner_truth_correction_request_context(
     *,
     vault_id: str,
 ) -> OwnerTruthCommandContext:
-    owner_subject_id = _require_owner_truth_correction_request_qa(request)
-    return OwnerTruthCommandContext(
+    """Authorize correction commands with QA or captured closed-pilot policy."""
+
+    if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
+        owner_subject_id = _require_owner_truth_correction_request_qa(request)
+        return OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_subject_id,
+            actor_subject_id=owner_subject_id,
+        )
+    route = (
+        f"{request.method.upper()} /v2/vaults/*/correction-requests/*/resolve"
+        if "/correction-requests/" in request.url.path
+        else f"{request.method.upper()} /v2/vaults/*/memories/*/corrections"
+    )
+    return _owner_truth_captured_release_policy_context(
+        request,
         vault_id=vault_id,
-        owner_subject_id=owner_subject_id,
-        actor_subject_id=owner_subject_id,
+        feature="ownerTruthCandidateReview",
+        route=route,
+        user_session_required_code="ownerTruthCorrectionRequestUserSessionRequired",
     )
 
 
@@ -7301,15 +7338,19 @@ def record_owner_truth_answer_citation(
     vault_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """Persist hash-only Answer/Citation proof for the Context V4 QA lane.
+    """Persist hash-only citation proof for QA or server-authorized pilot Echo.
 
-    This endpoint deliberately does not generate an answer or expose an Echo
-    feature.  It proves that a future answer can be bound to exactly the typed
-    MemoryVersion citations selected by the default-off Context shadow.
+    This endpoint never generates an answer.  The normal closed-pilot path is
+    bound to the same confirmed Projection materialization as Context
+    authority; the explicit QA header retains its existing shadow behavior.
     """
 
     try:
-        context = _owner_truth_answer_citation_context(request, vault_id=vault_id)
+        context = _owner_truth_answer_citation_context(
+            request,
+            vault_id=vault_id,
+            allow_closed_pilot=True,
+        )
         command = OwnerTruthAnswerCitationCommand(
             command_id=payload.get("commandId"),
             answer_text=payload.get("answerText"),
@@ -7386,15 +7427,14 @@ def read_owner_truth_answer_citations(
     vault_id: str,
     answer_id: str,
 ) -> JSONResponse:
-    """Read typed citation currentness for one QA-only Answer receipt.
-
-    This reuses the explicit Owner QA gate.  It returns no question, answer,
-    projection body, or legacy Echo state; the response is limited to the
-    immutable typed citation IDs/hashes and their currentness at read time.
-    """
+    """Read value-minimized citation currentness for QA or closed-pilot Echo."""
 
     try:
-        context = _owner_truth_answer_citation_context(request, vault_id=vault_id)
+        context = _owner_truth_answer_citation_context(
+            request,
+            vault_id=vault_id,
+            allow_closed_pilot=True,
+        )
         result = OwnerTruthAnswerCitationReadService(store, enabled=True).read(
             context=context,
             answer_id=answer_id,
@@ -8462,11 +8502,10 @@ def resolve_owner_truth_answer_citation_correction(
     correction_request_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """QA-only terminal correction resolver for one cited Owner Truth answer.
+    """Resolve a cited correction for QA or server-authorized pilot Owner.
 
-    This route is hidden by the same explicit Owner Truth QA gate as the
-    request endpoint.  It does not expose raw correction text and it never
-    creates a separate MemoryRecord for a correction.
+    The response remains value-free and a successful correction replaces only
+    the cited MemoryVersion; it never creates a separate MemoryRecord.
     """
 
     try:

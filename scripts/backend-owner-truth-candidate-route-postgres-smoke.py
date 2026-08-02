@@ -5,8 +5,8 @@ The running service never has its QA flag changed.  This script runs in a
 separate Python process, creates a temporary database, applies migrations,
 and removes the database on exit.  It proves both the legacy explicit-QA
 boundary and the server-authorized closed-pilot path from Source capture,
-through both typed workers, to confirmed-projection Context.  It is not a
-production-account smoke.
+through both typed workers, to confirmed-projection Context, citation evidence
+and immutable correction.  It is not a production-account smoke.
 """
 
 from __future__ import annotations
@@ -557,12 +557,217 @@ def main() -> None:
             "closed-pilot Context must cite the confirmed Source through Projection",
         )
 
+        answer_text = "我只会依据已经确认的个人记忆回答。"
+        citation_response = client.post(
+            f"/v2/vaults/{formal_vault_id}/answer-citation-receipts",
+            headers=policy_headers(
+                formal_auth_headers,
+                session_id=formal_session_id,
+                feature="ownerTruthCandidateReview",
+            ),
+            json={
+                "commandId": "closed-pilot-answer-citation-v1",
+                "intent": "echo_chat",
+                "query": "请说说这段已经确认的个人经历。",
+                "answerText": answer_text,
+            },
+        )
+        require(
+            citation_response.status_code == 201,
+            f"closed-pilot Answer/Citation failed: {citation_response.text}",
+        )
+        citation_summary = citation_response.json().get("answerCitation") or {}
+        require(
+            citation_summary.get("citationCount") == 1
+            and citation_summary.get("contextVersion") == "echo-context-v4-owner-qa",
+            "closed-pilot citation must use confirmed-projection materialization",
+        )
+        require(
+            source_content not in json.dumps(citation_summary, ensure_ascii=False, sort_keys=True)
+            and answer_text not in json.dumps(citation_summary, ensure_ascii=False, sort_keys=True),
+            "closed-pilot citation receipt must remain value-minimized",
+        )
+
+        citation_read = client.get(
+            f"/v2/vaults/{formal_vault_id}/answers/{citation_summary['answerId']}/citations",
+            headers=policy_headers(
+                formal_auth_headers,
+                session_id=formal_session_id,
+                feature="ownerTruthCandidateReview",
+            ),
+        )
+        require(
+            citation_read.status_code == 200,
+            f"closed-pilot citation read failed: {citation_read.text}",
+        )
+        citation_records = (citation_read.json().get("answerCitation") or {}).get("citations") or []
+        require(len(citation_records) == 1, "closed-pilot citation read must return one typed citation")
+        typed_citation = citation_records[0]
+        typed_citation_payload = typed_citation.get("citation") or {}
+        require(
+            typed_citation_payload.get("sourceId") == formal_source_id,
+            "closed-pilot citation read must bind the Source selected by Context",
+        )
+
+        denied_correction = client.post(
+            f"/v2/vaults/{formal_vault_id}/memories/{typed_citation_payload['memoryId']}/corrections",
+            headers=policy_headers(
+                formal_other_headers,
+                session_id=formal_other_session_id,
+                feature="ownerTruthCandidateReview",
+            ),
+            json={
+                "commandId": "closed-pilot-correction-denied-v1",
+                "answerId": citation_summary["answerId"],
+                "citationId": typed_citation["citationId"],
+                "expectedMemoryVersionId": typed_citation_payload["memoryVersionId"],
+                "correctionText": "非 allowlist 账号不得创建纠错。",
+                "reasonCode": "ownerReportedCorrection",
+            },
+        )
+        require(
+            denied_correction.status_code == 403
+            and route_code(denied_correction) == "release_policy_denied",
+            "non-allowlisted account must not create a closed-pilot correction",
+        )
+
+        correction_text = "不是父亲，而是外祖父讲起了从前的故事。"
+        correction_request = client.post(
+            f"/v2/vaults/{formal_vault_id}/memories/{typed_citation_payload['memoryId']}/corrections",
+            headers=policy_headers(
+                formal_auth_headers,
+                session_id=formal_session_id,
+                feature="ownerTruthCandidateReview",
+            ),
+            json={
+                "commandId": "closed-pilot-correction-request-v1",
+                "answerId": citation_summary["answerId"],
+                "citationId": typed_citation["citationId"],
+                "expectedMemoryVersionId": typed_citation_payload["memoryVersionId"],
+                "correctionText": correction_text,
+                "reasonCode": "ownerReportedCorrection",
+            },
+        )
+        require(
+            correction_request.status_code == 201,
+            f"closed-pilot correction request failed: {correction_request.text}",
+        )
+        correction_summary = correction_request.json().get("correctionRequest") or {}
+        require(
+            correction_summary.get("status") == "pendingReview"
+            and correction_summary.get("candidateVersion") == 1
+            and correction_summary.get("correctionSourceId"),
+            "closed-pilot correction must create a pending Candidate backed by a private Source",
+        )
+        require(
+            correction_text not in json.dumps(correction_summary, ensure_ascii=False, sort_keys=True),
+            "closed-pilot correction request must not echo private correction text",
+        )
+
+        correction_resolution = client.post(
+            (
+                f"/v2/vaults/{formal_vault_id}/correction-requests/"
+                f"{correction_summary['correctionRequestId']}/resolve"
+            ),
+            headers=policy_headers(
+                formal_auth_headers,
+                session_id=formal_session_id,
+                feature="ownerTruthCandidateReview",
+            ),
+            json={
+                "commandId": "closed-pilot-correction-resolve-v1",
+                "expectedCandidateVersion": correction_summary["candidateVersion"],
+                "expectedMemoryVersionId": correction_summary["expectedMemoryVersionId"],
+                "action": "correct",
+                "correctedValue": {"summary": "外祖父在河边讲起从前的故事"},
+                "correctedValueSchemaVersion": "owner-truth-v1",
+                "reasonCode": "ownerConfirmedCorrection",
+            },
+        )
+        require(
+            correction_resolution.status_code == 201,
+            f"closed-pilot correction resolution failed: {correction_resolution.text}",
+        )
+        correction_resolution_summary = correction_resolution.json().get("correctionResolution") or {}
+        require(
+            correction_resolution_summary.get("decision") == "corrected"
+            and correction_resolution_summary.get("replacementMemoryVersionId")
+            and correction_resolution_summary.get("supersededMemoryVersionId")
+            == typed_citation_payload["memoryVersionId"],
+            "closed-pilot correction must replace exactly the cited MemoryVersion",
+        )
+
+        correction_projection_result = OwnerTruthMemoryProjectionWorkerRuntime(
+            settings=worker_settings,
+            store=store,
+            worker_id="closed-pilot-source-candidate-correction-projection-smoke",
+            retry_seconds=1,
+        ).run_once()
+        require(
+            correction_projection_result.get("status") == "completed"
+            and correction_projection_result.get("projectionOutcome") in {"rebuilt", "unchanged"},
+            "corrected closed-pilot Candidate must rebuild confirmed Projection",
+        )
+
+        corrected_context_response = client.post(
+            "/context/build",
+            headers=policy_headers(
+                formal_auth_headers,
+                session_id=formal_session_id,
+                feature="echoTextInput",
+            ),
+            json={
+                "userId": formal_owner_id,
+                "intent": "echo_chat",
+                "query": "请只使用已经确认的个人回忆陪我聊聊。",
+                "personaScope": "personal",
+                "digitalHumanId": formal_owner_id,
+            },
+        )
+        require(
+            corrected_context_response.status_code == 200,
+            f"corrected closed-pilot Context failed: {corrected_context_response.text}",
+        )
+        corrected_selected_context = (
+            (corrected_context_response.json().get("contextPacket") or {}).get("selectedContext") or []
+        )
+        require(
+            len(corrected_selected_context) == 1
+            and ((corrected_selected_context[0].get("citation") or {}).get("sourceId")
+                 == correction_summary["correctionSourceId"]),
+            "corrected Context must cite the replacement Source instead of the superseded Source",
+        )
+
+        with psycopg.connect(test_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT authorization_evidence
+                    FROM owner_truth.decision_receipts
+                    WHERE vault_id = %s AND candidate_id = %s
+                    """,
+                    (formal_vault_id, correction_summary["candidateId"]),
+                )
+                row = cursor.fetchone()
+        require(row is not None, "closed-pilot correction must persist a DecisionReceipt")
+        evidence = row[0]
+        require(
+            isinstance(evidence, dict)
+            and evidence.get("feature") == "ownerTruthCandidateReview",
+            "closed-pilot correction DecisionReceipt must retain release-policy evidence",
+        )
+        require(
+            correction_text not in json.dumps(evidence, ensure_ascii=False, sort_keys=True),
+            "closed-pilot correction authorization evidence must remain value-minimized",
+        )
+
         print(
             "owner truth candidate route postgres smoke passed "
             f"schemaHead={verified['expectedHead']} defaultHidden=true qaHeaderRequired=true "
             "ownerInbox=true crossVaultDenied=true crossOwnerDenied=true "
             "decisionCreated=true decisionDeduplicated=true pendingRemoved=true "
-            "closedPilotSourceCandidate=true closedPilotProjectionContext=true"
+            "closedPilotSourceCandidate=true closedPilotProjectionContext=true "
+            "closedPilotCitationCorrection=true"
         )
     finally:
         main_module.store = previous_store

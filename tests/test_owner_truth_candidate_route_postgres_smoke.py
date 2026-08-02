@@ -36,6 +36,13 @@ class OwnerTruthCandidateRoutePostgresSmokeContractTests(unittest.TestCase):
         self.assertIn("accepted closed-pilot Candidate must rebuild confirmed Projection", source)
         self.assertIn("closed-pilot Context must use confirmed Projection authority", source)
         self.assertIn("closedPilotSourceCandidate=true", source)
+        self.assertIn("closed-pilot citation must use confirmed-projection materialization", source)
+        self.assertIn("non-allowlisted account must not create a closed-pilot correction", source)
+        self.assertIn("closed-pilot correction must create a pending Candidate backed by a private Source", source)
+        self.assertIn("closed-pilot correction must replace exactly the cited MemoryVersion", source)
+        self.assertIn("corrected Context must cite the replacement Source instead of the superseded Source", source)
+        self.assertIn("closed-pilot correction DecisionReceipt must retain release-policy evidence", source)
+        self.assertIn("closedPilotCitationCorrection=true", source)
         self.assertIn("backend-owner-truth-candidate-route-postgres-smoke.py", runner)
         self.assertIn("DATABASE_URL is required", runner)
 
