@@ -405,7 +405,11 @@ def main() -> None:
             "closed-pilot smoke identities must be distinct",
         )
         main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset({formal_owner_id})
-        formal_vault_id = "vault-closed-pilot-source-candidate"
+        # The production iOS AccountLease derives the personal Vault from the
+        # authenticated user ID.  Context authority uses the same canonical
+        # personal Vault, so the end-to-end lane must not invent a separate
+        # fixture-only Vault identifier here.
+        formal_vault_id = formal_owner_id
         source_command_id = str(
             uuid.uuid5(
                 uuid.NAMESPACE_URL,
