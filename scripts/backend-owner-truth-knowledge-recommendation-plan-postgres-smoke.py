@@ -782,7 +782,10 @@ def main() -> None:
             and str(formal_prompts[0].get("question") or "").endswith("？"),
             "formal guided presentation must remain display-safe",
         )
-        formal_guided_rendered = json.dumps(formal_guided_body, ensure_ascii=False)
+        # The response envelope includes the disposable Vault ID. Inspect only
+        # display fields so a test fixture name cannot be mistaken for a
+        # private-memory leak.
+        formal_guided_rendered = json.dumps(formal_prompts, ensure_ascii=False)
         for forbidden in (
             "candidateId",
             "evidenceRef",
@@ -821,7 +824,7 @@ def main() -> None:
             and isinstance(formal_map.get("dimensions"), list),
             "formal life-map presentation must remain aggregate-only",
         )
-        formal_life_map_rendered = json.dumps(formal_life_map_body, ensure_ascii=False)
+        formal_life_map_rendered = json.dumps(formal_map, ensure_ascii=False)
         for forbidden in (
             "memoryVersionId",
             "threadId",
