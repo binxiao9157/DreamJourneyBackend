@@ -1,0 +1,12 @@
+{
+  "version": "0071",
+  "name": "owner_truth_candidate_decision_authorization_evidence",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthCandidateDecisionFormalAuthorityEvidence",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthCandidateReviewQa": false,
+    "ownerTruthCandidateReview": false
+  }
+}

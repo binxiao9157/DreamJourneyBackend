@@ -22,6 +22,7 @@ from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateVersionConflict,
 )
 from app.domain.owner_truth.contracts import CandidateDecision
+from app.domain.owner_truth.contracts import OwnerTruthContractError
 from app.domain.owner_truth.memory_activation import (
     OwnerTruthMemoryActivationError,
     OwnerTruthMemoryActivationResult,
@@ -38,7 +39,10 @@ from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionError,
     OwnerTruthMemoryProjectionInput,
 )
-from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.domain.owner_truth.source_commands import (
+    OwnerTruthCommandAuthorizationCapture,
+    OwnerTruthCommandContext,
+)
 from app.services.owner_truth_memory_projection_effects import (
     build_memory_projection_rebuild_effect_intent,
 )
@@ -50,6 +54,63 @@ def _canonical_json(value: Mapping[str, Any]) -> str:
 
 def _reason_hash(reason_code: str) -> str:
     return sha256(reason_code.encode("utf-8")).hexdigest()
+
+
+def _authorization_capture_payload(
+    capture: OwnerTruthCommandAuthorizationCapture | None,
+) -> dict[str, Any]:
+    return {} if capture is None else capture.value_minimized_payload()
+
+
+def _authorization_capture_from_value(
+    value: Any,
+) -> OwnerTruthCommandAuthorizationCapture | None:
+    if value is None or value == {}:
+        return None
+    payload = value
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise OwnerTruthCandidateReviewConflict(
+                "stored authorization evidence is malformed"
+            ) from exc
+    if not isinstance(payload, Mapping):
+        raise OwnerTruthCandidateReviewConflict(
+            "stored authorization evidence is malformed"
+        )
+    try:
+        capture = OwnerTruthCommandAuthorizationCapture.from_value_minimized_payload(payload)
+    except (OwnerTruthContractError, TypeError, ValueError) as exc:
+        raise OwnerTruthCandidateReviewConflict(
+            "stored authorization evidence is malformed"
+        ) from exc
+    if capture.feature != "ownerTruthCandidateReview":
+        raise OwnerTruthCandidateReviewConflict(
+            "stored authorization evidence has an unsupported feature"
+        )
+    return capture
+
+
+def _assert_replay_authorization_capture(
+    *,
+    existing: OwnerTruthCommandAuthorizationCapture | None,
+    expected: OwnerTruthCommandAuthorizationCapture | None,
+) -> None:
+    """Keep legacy QA replays separate from formally authorized replays."""
+
+    if (existing is None) != (expected is None):
+        raise OwnerTruthCandidateReviewConflict(
+            "commandId cannot replay between QA-only and formally authorized Candidate review"
+        )
+    if (
+        existing is not None
+        and expected is not None
+        and existing.feature != expected.feature
+    ):
+        raise OwnerTruthCandidateReviewConflict(
+            "commandId cannot replay under a different authorization feature"
+        )
 
 
 @dataclass(frozen=True)
@@ -389,6 +450,9 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 "payloadHash": record.payload_hash,
                 "actorSubjectId": record.actor_subject_id,
                 "policyVersion": record.policy_version,
+                "authorizationCapture": _authorization_capture_payload(
+                    record.authorization_capture
+                ),
             }
             self._candidates[candidate.candidate_id] = decided
             self._receipts[record.command_id_hash] = receipt
@@ -800,6 +864,10 @@ class InMemoryOwnerTruthCandidateReviewRepository:
             raise OwnerTruthCandidateReviewConflict(
                 "commandId cannot be reused with a different Candidate decision"
             )
+        _assert_replay_authorization_capture(
+            existing=_authorization_capture_from_value(existing.get("authorizationCapture")),
+            expected=context.authorization_capture,
+        )
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -955,8 +1023,9 @@ class PostgresOwnerTruthCandidateReviewRepository:
                     id, vault_id, candidate_id, decision, actor_subject_id,
                     authority_epoch, policy_version, rationale_hash,
                     command_id_hash, payload_hash, expected_candidate_version,
-                    candidate_before_hash, candidate_after_hash, decision_basis
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    candidate_before_hash, candidate_after_hash, decision_basis,
+                    authorization_evidence
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 self._adapt_params(
                     (
@@ -974,6 +1043,7 @@ class PostgresOwnerTruthCandidateReviewRepository:
                         record.candidate_before_hash,
                         record.candidate_after_hash,
                         dict(record.decision_basis),
+                        _authorization_capture_payload(record.authorization_capture),
                     )
                 ),
             )
@@ -1417,6 +1487,12 @@ class PostgresOwnerTruthCandidateReviewRepository:
             raise OwnerTruthCandidateReviewConflict(
                 "commandId cannot be reused with a different Candidate decision"
             )
+        _assert_replay_authorization_capture(
+            existing=_authorization_capture_from_value(
+                existing.get("authorization_evidence")
+            ),
+            expected=context.authorization_capture,
+        )
         candidate = self._locked_candidate(cursor, candidate_id=command.candidate_id, context=context)
         if candidate.decision.value != str(existing["decision"]):
             raise OwnerTruthCandidateReviewConflict(
@@ -1560,7 +1636,7 @@ class PostgresOwnerTruthCandidateReviewRepository:
             """
             SELECT id, candidate_id, decision, actor_subject_id, policy_version,
                 payload_hash, expected_candidate_version,
-                candidate_before_hash, candidate_after_hash
+                candidate_before_hash, candidate_after_hash, authorization_evidence
             FROM owner_truth.decision_receipts
             WHERE vault_id = %s AND command_id_hash = %s
             FOR UPDATE

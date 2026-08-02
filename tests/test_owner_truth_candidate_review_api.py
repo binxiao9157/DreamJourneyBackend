@@ -41,12 +41,20 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.previous_route_mode = main_module.AUTH_ROUTE_MODE
         self.previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
         self.previous_qa_enabled = main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+        self.previous_closed_pilot_owner_ids = main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+        self.previous_closed_pilot_features = set(
+            main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
+        )
         main_module.store = InMemoryStore()
         main_module.BACKEND_API_TOKEN = ""
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         main_module.AUTH_ROUTE_MODE = "enforce"
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset()
+        main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features = {
+            "ownerTruthCandidateReview"
+        }
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -55,6 +63,10 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         main_module.AUTH_ROUTE_MODE = self.previous_route_mode
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = self.previous_qa_enabled
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = self.previous_closed_pilot_owner_ids
+        main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features = (
+            self.previous_closed_pilot_features
+        )
 
     @staticmethod
     def _login(phone: str) -> tuple[str, dict[str, str]]:
@@ -69,6 +81,48 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             "Authorization": f"Bearer {payload['auth']['accessToken']}",
             "X-DreamJourney-QA-Owner-Truth": "1",
         }
+
+    @staticmethod
+    def _formal_login(phone: str) -> tuple[str, dict[str, str], str]:
+        response = client.post(
+            "/auth/login",
+            json={"phone": phone, "nickname": "正式候选审核测试", "password": "password123"},
+        )
+        if response.status_code != 200:
+            raise AssertionError(response.text)
+        payload = response.json()
+        return (
+            str(payload["user"]["id"]),
+            {"Authorization": f"Bearer {payload['auth']['accessToken']}"},
+            str(payload["auth"]["sessionId"]),
+        )
+
+    @staticmethod
+    def _formal_policy_headers(
+        headers: dict[str, str],
+        *,
+        session_id: str,
+    ) -> dict[str, str]:
+        captured = dict(headers)
+        captured.update(
+            {
+                "X-DreamJourney-Feature": "ownerTruthCandidateReview",
+                "X-DreamJourney-Feature-Decision-Id": f"decision-{uuid4()}",
+                "X-DreamJourney-Feature-Allowed": "true",
+                "X-DreamJourney-Policy-Version": "release-policy-v1",
+                "X-DreamJourney-Policy-Revision": "1",
+                "X-DreamJourney-Account-Generation": sha256(
+                    session_id.encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+        return captured
+
+    @staticmethod
+    def _allow_closed_pilot_owner(owner_id: str) -> None:
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
+            set(main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS) | {owner_id}
+        )
 
     @staticmethod
     def _candidate(*, vault_id: str, owner_subject_id: str) -> OwnerTruthCandidateSnapshot:
@@ -286,6 +340,53 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(
             client.get(f"/v2/vaults/{vault_id}/candidates", headers=headers).json()["candidates"],
             [],
+        )
+
+    def test_server_authorized_owner_reviews_candidate_without_qa_header(self) -> None:
+        owner_id, auth_headers, session_id = self._formal_login("13800139105")
+        self._allow_closed_pilot_owner(owner_id)
+        vault_id = "vault-api-formal-owner-review"
+        candidate = self._candidate(vault_id=vault_id, owner_subject_id=owner_id)
+        self._seed(candidate)
+        headers = self._formal_policy_headers(auth_headers, session_id=session_id)
+
+        inbox = client.get(f"/v2/vaults/{vault_id}/candidates", headers=headers)
+        self.assertEqual(inbox.status_code, 200, inbox.text)
+        self.assertEqual([item["candidateId"] for item in inbox.json()["candidates"]], [candidate.candidate_id])
+
+        command = {
+            "commandId": "candidate-api-formal-review-001",
+            "expectedCandidateVersion": 1,
+            "action": "accept",
+            "reasonCode": "ownerReviewed",
+        }
+        created = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
+            headers=headers,
+            json=command,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()["receipt"]["decision"], "accepted")
+
+        snapshot = main_module.store.owner_truth_candidate_review_repository().snapshot()
+        receipt = next(iter(snapshot["receipts"].values()))
+        evidence = receipt["authorizationCapture"]
+        self.assertEqual(evidence["feature"], "ownerTruthCandidateReview")
+        self.assertEqual(evidence["schemaVersion"], "owner-truth-command-authorization-capture-v1")
+        rendered = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn("X-DreamJourney-QA-Owner-Truth", rendered)
+        self.assertNotIn(auth_headers["Authorization"], rendered)
+
+        replay = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
+            headers=self._formal_policy_headers(auth_headers, session_id=session_id),
+            json=command,
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["status"], "deduplicated")
+        self.assertEqual(
+            replay.json()["receipt"]["receiptId"],
+            created.json()["receipt"]["receiptId"],
         )
 
     def test_cross_vault_stale_and_corrected_value_boundaries(self) -> None:

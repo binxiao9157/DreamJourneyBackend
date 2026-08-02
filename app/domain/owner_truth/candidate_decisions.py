@@ -27,10 +27,11 @@ from .contracts import (
     require_uuid,
 )
 from .ontology import OWNER_TRUTH_SCHEMA_VERSION, validate_memory_payload
-from .source_commands import OwnerTruthCommandContext
+from .source_commands import OwnerTruthCommandAuthorizationCapture, OwnerTruthCommandContext
 
 
 OWNER_TRUTH_DECISION_BASIS_SCHEMA_VERSION = "owner-truth-decision-basis-v1"
+OWNER_TRUTH_CANDIDATE_REVIEW_FEATURE = "ownerTruthCandidateReview"
 _RECEIPT_NAMESPACE = UUID("883e786a-2e66-49a4-9dac-7406cb3e9df2")
 _CORRECTED_VALUE_NAMESPACE = UUID("6973375d-851d-4713-8e37-f22036bbcf5e")
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
@@ -340,6 +341,7 @@ class OwnerTruthCandidateReviewCommand:
                 self.corrected_value_schema_version if corrected_value is not None else None
             ),
             corrected_value=corrected_value,
+            authorization_capture=context.authorization_capture,
         )
 
 
@@ -363,6 +365,7 @@ class OwnerTruthCandidateDecisionWriteRecord:
     decision_basis: Mapping[str, Any]
     corrected_value_schema_version: str | None
     corrected_value: Mapping[str, Any] | None
+    authorization_capture: OwnerTruthCommandAuthorizationCapture | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "receipt_id", require_uuid(self.receipt_id, field="receipt_id"))
@@ -398,6 +401,20 @@ class OwnerTruthCandidateDecisionWriteRecord:
             raise OwnerTruthCandidateReviewError("candidate version or authority epoch is invalid")
         object.__setattr__(self, "policy_version", require_nonblank(self.policy_version, field="policy_version"))
         object.__setattr__(self, "reason_code", _identifier(self.reason_code, field="reason_code"))
+        if self.authorization_capture is not None and not isinstance(
+            self.authorization_capture,
+            OwnerTruthCommandAuthorizationCapture,
+        ):
+            raise OwnerTruthCandidateReviewError(
+                "authorization_capture has an invalid type"
+            )
+        if (
+            self.authorization_capture is not None
+            and self.authorization_capture.feature != OWNER_TRUTH_CANDIDATE_REVIEW_FEATURE
+        ):
+            raise OwnerTruthCandidateReviewError(
+                "authorization_capture must use ownerTruthCandidateReview"
+            )
         for field in (
             "command_id_hash",
             "payload_hash",

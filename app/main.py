@@ -1054,6 +1054,34 @@ def _owner_truth_candidate_review_context(
     )
 
 
+def _owner_truth_direct_candidate_review_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the generic Candidate lane without promoting its QA bypass.
+
+    Existing QA scenarios keep their explicit header-only lane for regression
+    coverage. Every normal request must instead carry a fresh, server-issued
+    ``ownerTruthCandidateReview`` policy capture.
+    """
+
+    if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
+        return _owner_truth_candidate_review_context(request, vault_id=vault_id)
+    route = (
+        f"{request.method.upper()} /v2/vaults/*/candidates"
+        if request.method.upper() == "GET"
+        else f"{request.method.upper()} /v2/vaults/*/candidates/*/decisions"
+    )
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=route,
+        user_session_required_code="ownerTruthCandidateReviewUserSessionRequired",
+    )
+
+
 def _owner_truth_text_capture_context(
     request: Request,
     *,
@@ -5526,10 +5554,10 @@ def owner_truth_candidate_inbox(
     request: Request,
     vault_id: str,
 ) -> Dict[str, Any]:
-    """QA-only Owner Candidate Inbox; never a public M0 read surface."""
+    """Default-off Owner Candidate Inbox for QA or a server-owned pilot."""
 
     try:
-        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        context = _owner_truth_direct_candidate_review_context(request, vault_id=vault_id)
         items = OwnerTruthCandidateReviewService(store).list_pending(context=context)
     except OwnerTruthContractError as error:
         raise _owner_truth_candidate_review_http_error(error) from error
@@ -5663,10 +5691,10 @@ def review_owner_truth_candidate(
     candidate_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """QA-only review plus receipt-derived initial MemoryVersion activation."""
+    """Default-off review plus receipt-derived initial MemoryVersion activation."""
 
     try:
-        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        context = _owner_truth_direct_candidate_review_context(request, vault_id=vault_id)
         command = OwnerTruthCandidateReviewCommand(
             command_id=str(payload.get("commandId") or ""),
             candidate_id=candidate_id,
