@@ -406,6 +406,12 @@ def main() -> None:
         )
         main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset({formal_owner_id})
         formal_vault_id = "vault-closed-pilot-source-candidate"
+        source_command_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"dreamjourney-owner-truth-route-smoke:{formal_vault_id}:source",
+            )
+        )
         source_content = "在河边散步时，听家人讲起从前的故事。"
         source_response = client.post(
             f"/v2/vaults/{formal_vault_id}/sources",
@@ -415,7 +421,7 @@ def main() -> None:
                 feature="ownerTextCaptureV1",
             ),
             json={
-                "commandId": "closed-pilot-source-capture-v1",
+                "commandId": source_command_id,
                 "expectedAuthorityEpoch": 0,
                 "kind": "text",
                 "content": source_content,
