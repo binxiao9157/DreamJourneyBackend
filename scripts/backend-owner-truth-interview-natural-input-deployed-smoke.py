@@ -135,10 +135,13 @@ def assert_deployed_readiness_and_policy() -> dict[str, object]:
     require(len(features) == 1 and isinstance(features[0], dict), "echoTextInput policy missing")
     decision = features[0]
     require(decision.get("feature") == "echoTextInput", "unexpected policy feature")
-    require(decision.get("enabled") is True, "echoTextInput must be policy enabled")
+    # The public endpoint deliberately ignores a caller-supplied cohort. An
+    # anonymous probe must not be able to discover or grant closed-pilot
+    # access; the authenticated, allowlisted path is exercised below against
+    # the disposable database.
     require(
-        decision.get("releaseVisible") is True,
-        "echoTextInput must be visible to the closed-pilot owner cohort",
+        decision.get("enabled") is False and decision.get("releaseVisible") is False,
+        "anonymous release-policy probe must not receive closed-pilot access",
     )
     require(
         str(snapshot.get("policyVersion") or ""),
@@ -236,6 +239,7 @@ def exercise_formal_natural_input(
     )
     store.open_pool(wait=True)
     previous_store = main_module.store
+    previous_closed_pilot_owner_ids = main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
     main_module.store = store
     try:
         suffix = secrets.token_hex(8)
@@ -243,6 +247,11 @@ def exercise_formal_natural_input(
             phone=f"196{secrets.randbelow(100_000_000):08d}",
             nickname=f"natural input smoke {suffix}",
         )
+        # This process owns an isolated database and is separate from the
+        # running API process. Temporarily enrol only its disposable user so
+        # the route exercises the same authenticated server-side cohort check
+        # as production without changing deployed runtime policy.
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset({str(user["id"])})
         auth = issue_access(store, str(user["id"]))
         access_token = str(auth["accessToken"])
         account_generation = hashlib.sha256(
@@ -1066,6 +1075,7 @@ def exercise_formal_natural_input(
         }
     finally:
         main_module.store = previous_store
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = previous_closed_pilot_owner_ids
         store.close_pool()
 
 
@@ -1095,7 +1105,8 @@ def main() -> None:
             "status": "passed",
             "schemaVersion": 1,
             "deployedReadiness": True,
-            "deployedPolicySnapshot": True,
+            "deployedAnonymousPolicyDefaultDenied": True,
+            "isolatedAuthenticatedClosedPilotPolicyVerified": True,
             "deployedContainer": True,
             "temporaryDatabase": True,
             "productionBusinessDataMutated": False,
