@@ -183,6 +183,25 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertTrue(decision.releaseVisible)
         self.assertEqual(decision.reason, "closedPilotOwnerCore")
 
+    def test_m0b_recommendations_and_life_map_require_explicit_closed_pilot_grants(self):
+        service = ReleasePolicyService(
+            closed_pilot_enabled_features={
+                "echoGuidedRecommendations",
+                "ownerTruthLifeMap",
+            }
+        )
+
+        for feature in ("echoGuidedRecommendations", "ownerTruthLifeMap"):
+            decision = service.build_snapshot(
+                audience="owner",
+                cohort="closedPilotAdultSelf",
+                client_build=1,
+                requested_feature=feature,
+            ).features[0]
+            self.assertTrue(decision.enabled, feature)
+            self.assertTrue(decision.releaseVisible, feature)
+            self.assertEqual(decision.reason, "closedPilotOwnerCore")
+
     def test_m1_through_m4_are_explicit_default_closed_stages_during_shadow_rollout(self):
         service = ReleasePolicyService(shadow_mode=True)
 

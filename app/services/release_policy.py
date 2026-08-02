@@ -487,6 +487,11 @@ class ReleasePolicyService:
     _CLOSED_PILOT_OPT_IN_FEATURES = {
         "ownerTextCaptureV1",
         "ownerTruthCandidateReview",
+        # Both M0-B read surfaces have their own typed, value-minimized
+        # product routes. Keep them default closed, but allow a server-owned
+        # closed-pilot rollout once their release gates are approved.
+        "echoGuidedRecommendations",
+        "ownerTruthLifeMap",
     }
 
     def __init__(

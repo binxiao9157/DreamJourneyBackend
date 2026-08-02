@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Exercise the QA-only M0-B recommendation lifecycle in disposable Postgres.
+"""Exercise M0-B recommendation paths in disposable Postgres.
 
-The smoke enables the hidden route only in-process. It proves that planning is
-derived from current Owner-confirmed coverage plus one active/open interview
-session, accepts no client-supplied candidate state, and writes no product
-records while it plans. It also proves the additive QA-only lifecycle from a
-server plan through replacement feedback to a server-revalidated activation.
-The temporary database is dropped after the run.
+The smoke proves that planning is derived from current Owner-confirmed coverage
+plus one active/open interview session, accepts no client-supplied candidate
+state, and writes no product records while it plans. It covers the additive
+QA-only lifecycle from a server plan through replacement feedback to a
+server-revalidated activation, then separately exercises the formal
+closed-pilot recommendation and life-map presentation routes without a QA
+header. The temporary database is dropped after the run.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_conversation import OwnerTruthConversationService
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 from app.services.postgres_store import PostgresStore
+from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 
 
 def require(condition: bool, message: str) -> None:
@@ -77,22 +79,48 @@ def drop_database(admin_dsn: str, database_name: str) -> None:
             cursor.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database_name)))
 
 
-def login(client: TestClient, *, phone: str) -> tuple[str, dict[str, str]]:
+def login(client: TestClient, *, phone: str) -> tuple[str, dict[str, str], str]:
     response = client.post(
         "/auth/login",
         json={"phone": phone, "nickname": "recommendation planner smoke", "password": "planner-smoke"},
     )
     require(response.status_code == 200, f"temporary owner login failed: {response.text}")
     body = response.json()
-    return str(body["user"]["id"]), {
-        "Authorization": f"Bearer {body['auth']['accessToken']}",
-        "X-DreamJourney-QA-Owner-Truth": "1",
-    }
+    return (
+        str(body["user"]["id"]),
+        {
+            "Authorization": f"Bearer {body['auth']['accessToken']}",
+            "X-DreamJourney-QA-Owner-Truth": "1",
+        },
+        str(body["auth"]["sessionId"]),
+    )
 
 
 def route_code(response: Any) -> str:
     detail = response.json().get("detail") if response.content else None
     return str(detail.get("code") or "") if isinstance(detail, dict) else ""
+
+
+def captured_product_headers(
+    authorization: str,
+    *,
+    feature: str,
+    session_id: str,
+    decision_id: str,
+) -> dict[str, str]:
+    """Build the client capture required by formal owner-only read routes."""
+
+    return {
+        "Authorization": authorization,
+        "X-DreamJourney-Feature": feature,
+        "X-DreamJourney-Feature-Decision-Id": decision_id,
+        "X-DreamJourney-Feature-Allowed": "true",
+        "X-DreamJourney-Policy-Version": "release-policy-v1",
+        "X-DreamJourney-Policy-Revision": "1",
+        "X-DreamJourney-Account-Generation": sha256(
+            session_id.encode("utf-8")
+        ).hexdigest()[:24],
+    }
 
 
 def invoke_conversation(
@@ -409,6 +437,9 @@ def main() -> None:
     previous_feedback_qa = main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_QA_ENABLED
     previous_thread_preference_qa = main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED
     previous_cooldown_seconds = main_module.OWNER_TRUTH_THREAD_COOLDOWN_SECONDS
+    previous_closed_pilot_owner_ids = main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+    previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
+    previous_release_policy_command_gate = main_module.RELEASE_POLICY_COMMAND_GATE
 
     try:
         create_database(admin_dsn, database_name)
@@ -440,7 +471,7 @@ def main() -> None:
         main_module.OWNER_TRUTH_THREAD_COOLDOWN_SECONDS = 60
 
         client = TestClient(main_module.app)
-        owner_id, owner_headers = login(client, phone="13900000136")
+        owner_id, owner_headers, owner_session_id = login(client, phone="13900000136")
         vault_id = "vault-knowledge-recommendation-plan-smoke"
         memory_id, memory_version_id, content_hash = seed_current_knowledge_memory(
             test_dsn,
@@ -702,6 +733,104 @@ def main() -> None:
             context=lifecycle_context,
             label="lifecycle",
         )
+
+        # Formal product reads remain default closed in production. This
+        # isolated process temporarily configures the same server-owned
+        # allowlist and feature grants a deployment would use, then proves the
+        # routes need authenticated policy capture and expose only display-safe
+        # fields. It never mutates the running API process or business data.
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset({owner_id})
+        main_module.RELEASE_POLICY_SERVICE = ReleasePolicyService(
+            closed_pilot_enabled_features={
+                "echoGuidedRecommendations",
+                "ownerTruthLifeMap",
+            }
+        )
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(
+            main_module.RELEASE_POLICY_SERVICE
+        )
+        authorization = owner_headers["Authorization"]
+        guided_product_headers = captured_product_headers(
+            authorization,
+            feature="echoGuidedRecommendations",
+            session_id=owner_session_id,
+            decision_id="recommendation-product-presentation",
+        )
+        formal_guided = client.get(
+            f"/v2/vaults/{lifecycle_vault_id}/guided-recommendations",
+            headers=guided_product_headers,
+        )
+        require(
+            formal_guided.status_code == 200,
+            f"formal guided recommendation presentation failed: {formal_guided.text}",
+        )
+        formal_guided_body = formal_guided.json()
+        require(
+            formal_guided_body.get("schemaVersion")
+            == "owner-truth-guided-recommendation-presentation-response-v2",
+            "formal guided recommendation schema changed",
+        )
+        formal_prompts = formal_guided_body.get("recommendations") or []
+        require(
+            0 < len(formal_prompts) <= 2
+            and {item.get("slot") for item in formal_prompts} == {"breadth"},
+            "formal guided presentation must expose at most one safe breadth prompt",
+        )
+        require(
+            set(formal_prompts[0]) == {"slot", "label", "question"}
+            and formal_prompts[0].get("label") == "换个角度"
+            and str(formal_prompts[0].get("question") or "").endswith("？"),
+            "formal guided presentation must remain display-safe",
+        )
+        formal_guided_rendered = json.dumps(formal_guided_body, ensure_ascii=False)
+        for forbidden in (
+            "candidateId",
+            "evidenceRef",
+            "reasonCode",
+            "targetDimension",
+            "policyVersion",
+            "recommendation-lifecycle",
+            "claim",
+        ):
+            require(forbidden not in formal_guided_rendered, f"formal guided route leaked {forbidden}")
+
+        life_map_product_headers = captured_product_headers(
+            authorization,
+            feature="ownerTruthLifeMap",
+            session_id=owner_session_id,
+            decision_id="recommendation-product-life-map",
+        )
+        formal_life_map = client.get(
+            f"/v2/vaults/{lifecycle_vault_id}/life-map",
+            headers=life_map_product_headers,
+        )
+        require(
+            formal_life_map.status_code == 200,
+            f"formal life-map presentation failed: {formal_life_map.text}",
+        )
+        formal_life_map_body = formal_life_map.json()
+        require(
+            formal_life_map_body.get("schemaVersion")
+            == "owner-truth-life-map-presentation-response-v1",
+            "formal life-map schema changed",
+        )
+        formal_map = formal_life_map_body.get("lifeMap") or {}
+        require(
+            set(formal_map) == {"state", "storyCount", "associatedStoryCount", "dimensions"}
+            and formal_map.get("state") == "ready"
+            and isinstance(formal_map.get("dimensions"), list),
+            "formal life-map presentation must remain aggregate-only",
+        )
+        formal_life_map_rendered = json.dumps(formal_life_map_body, ensure_ascii=False)
+        for forbidden in (
+            "memoryVersionId",
+            "threadId",
+            "sourceId",
+            "recommendation-lifecycle",
+            "claim",
+        ):
+            require(forbidden not in formal_life_map_rendered, f"formal life-map route leaked {forbidden}")
+
         lifecycle_plan_path = f"/v2/vaults/{lifecycle_vault_id}/knowledge-recommendations/plan"
         feedback_path = f"/v2/vaults/{lifecycle_vault_id}/knowledge-recommendations/feedback"
         activation_path = f"/v2/vaults/{lifecycle_vault_id}/knowledge-recommendations/activate"
@@ -853,7 +982,8 @@ def main() -> None:
             "breadthOnly=true deterministic=true clientInjectionRejected=true "
             "elapsedCooldownContinuity=true doNotAskSuppressed=true "
             "supersededEvidenceExcluded=true readOnly=true "
-            "replacementFeedback=true activationBroaden=true activationReplay=true"
+            "replacementFeedback=true activationBroaden=true activationReplay=true "
+            "formalGuidedPresentation=true formalLifeMapPresentation=true"
         )
     finally:
         main_module.store = previous_store
@@ -869,6 +999,9 @@ def main() -> None:
         main_module.OWNER_TRUTH_KNOWLEDGE_RECOMMENDATION_FEEDBACK_QA_ENABLED = previous_feedback_qa
         main_module.OWNER_TRUTH_THREAD_PREFERENCE_QA_ENABLED = previous_thread_preference_qa
         main_module.OWNER_TRUTH_THREAD_COOLDOWN_SECONDS = previous_cooldown_seconds
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = previous_closed_pilot_owner_ids
+        main_module.RELEASE_POLICY_SERVICE = previous_release_policy_service
+        main_module.RELEASE_POLICY_COMMAND_GATE = previous_release_policy_command_gate
         if store is not None:
             store.close_pool()
         try:
