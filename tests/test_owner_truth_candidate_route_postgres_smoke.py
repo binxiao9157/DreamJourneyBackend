@@ -8,7 +8,7 @@ RUNNER = ROOT / "scripts/run-backend-owner-truth-candidate-route-postgres-smoke.
 
 
 class OwnerTruthCandidateRoutePostgresSmokeContractTests(unittest.TestCase):
-    def test_smoke_is_isolated_and_covers_hidden_route_decision_boundaries(self):
+    def test_smoke_is_isolated_and_covers_qa_and_closed_pilot_route_boundaries(self):
         source = SCRIPT.read_text(encoding="utf-8")
         runner = RUNNER.read_text(encoding="utf-8")
 
@@ -27,6 +27,15 @@ class OwnerTruthCandidateRoutePostgresSmokeContractTests(unittest.TestCase):
         self.assertIn("same command must replay instead of writing again", source)
         self.assertIn("terminal candidate must leave pending inbox", source)
         self.assertIn("proposal_summary not in str(decision_body)", source)
+        self.assertIn("ownerTextCaptureV1", source)
+        self.assertIn("OwnerTruthCandidateExtractionWorkerRuntime", source)
+        self.assertIn("OwnerTruthMemoryProjectionWorkerRuntime", source)
+        self.assertIn("closed-pilot Source must persist one extraction request", source)
+        self.assertIn("closed-pilot worker must create one pending Candidate from Source", source)
+        self.assertIn("closed-pilot Candidate review must not use a QA header", source)
+        self.assertIn("accepted closed-pilot Candidate must rebuild confirmed Projection", source)
+        self.assertIn("closed-pilot Context must use confirmed Projection authority", source)
+        self.assertIn("closedPilotSourceCandidate=true", source)
         self.assertIn("backend-owner-truth-candidate-route-postgres-smoke.py", runner)
         self.assertIn("DATABASE_URL is required", runner)
 

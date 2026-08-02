@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Exercise the hidden Owner Truth Candidate routes in a disposable Postgres DB.
+"""Exercise Owner Truth Candidate routes in a disposable Postgres DB.
 
 The running service never has its QA flag changed.  This script runs in a
 separate Python process, creates a temporary database, applies migrations,
-temporarily enables the route contract only inside that process, and removes
-the database on exit.  It is a route/transaction proof, not a public-release
-or production-account smoke.
+and removes the database on exit.  It proves both the legacy explicit-QA
+boundary and the server-authorized closed-pilot path from Source capture,
+through both typed workers, to confirmed-projection Context.  It is not a
+production-account smoke.
 """
 
 from __future__ import annotations
@@ -29,9 +30,16 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.json import Jsonb
 
 import app.main as main_module
-from app.core.config import settings
+from app.async_effects.owner_truth_candidate_extraction_worker import (
+    OwnerTruthCandidateExtractionWorkerRuntime,
+)
+from app.async_effects.owner_truth_memory_projection_worker import (
+    OwnerTruthMemoryProjectionWorkerRuntime,
+)
+from app.core.config import Settings, settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.services.postgres_store import PostgresStore
+from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 
 
 def require(condition: bool, message: str) -> None:
@@ -70,17 +78,49 @@ def content_hash(value: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def login(client: TestClient, *, phone: str, nickname: str) -> tuple[str, dict[str, str]]:
+def login(
+    client: TestClient,
+    *,
+    phone: str,
+    nickname: str,
+    qa: bool = False,
+) -> tuple[str, dict[str, str], str]:
     response = client.post(
         "/auth/login",
         json={"phone": phone, "nickname": nickname, "password": "candidate-route-smoke"},
     )
     require(response.status_code == 200, f"temporary owner login failed: {response.text}")
     body = response.json()
-    return str(body["user"]["id"]), {
+    headers = {
         "Authorization": f"Bearer {body['auth']['accessToken']}",
-        "X-DreamJourney-QA-Owner-Truth": "1",
     }
+    if qa:
+        headers["X-DreamJourney-QA-Owner-Truth"] = "1"
+    return str(body["user"]["id"]), headers, str(body["auth"]["sessionId"])
+
+
+def policy_headers(
+    headers: dict[str, str],
+    *,
+    session_id: str,
+    feature: str,
+) -> dict[str, str]:
+    """Produce the same value-minimized policy capture required from iOS."""
+
+    captured = dict(headers)
+    captured.update(
+        {
+            "X-DreamJourney-Feature": feature,
+            "X-DreamJourney-Feature-Decision-Id": f"decision-{uuid.uuid4()}",
+            "X-DreamJourney-Feature-Allowed": "true",
+            "X-DreamJourney-Policy-Version": "release-policy-v1",
+            "X-DreamJourney-Policy-Revision": "1",
+            "X-DreamJourney-Account-Generation": sha256(
+                session_id.encode("utf-8")
+            ).hexdigest()[:24],
+        }
+    )
+    return captured
 
 
 def seed_pending_candidate(
@@ -178,6 +218,13 @@ def main() -> None:
     previous_route_mode = main_module.AUTH_ROUTE_MODE
     previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
     previous_qa_enabled = main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED
+    previous_command_mode = main_module.RELEASE_POLICY_COMMAND_MODE
+    previous_pilot_owner_ids = main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+    previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
+    previous_release_policy_command_gate = main_module.RELEASE_POLICY_COMMAND_GATE
+    previous_context_authority_enabled = (
+        main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED
+    )
 
     try:
         create_database(admin_dsn, database_name)
@@ -201,10 +248,11 @@ def main() -> None:
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
 
         client = TestClient(main_module.app)
-        owner_id, owner_headers = login(
+        owner_id, owner_headers, _owner_session_id = login(
             client,
             phone="13900000101",
             nickname="Candidate route smoke owner",
+            qa=True,
         )
         vault_id = "vault-candidate-route-smoke"
         candidate_id, proposal_summary = seed_pending_candidate(
@@ -262,10 +310,11 @@ def main() -> None:
             "cross-vault denial must remain typed",
         )
 
-        other_owner_id, other_owner_headers = login(
+        other_owner_id, other_owner_headers, _other_session_id = login(
             client,
             phone="13900000102",
             nickname="Candidate route smoke observer",
+            qa=True,
         )
         require(other_owner_id != owner_id, "temporary smoke identities must be distinct")
         other_owner = client.get(f"/v2/vaults/{vault_id}/candidates", headers=other_owner_headers)
@@ -320,11 +369,200 @@ def main() -> None:
         require(empty_inbox.status_code == 200, "post-decision inbox lookup failed")
         require(empty_inbox.json().get("candidates") == [], "terminal candidate must leave pending inbox")
 
+        # Closed-pilot must use the same Postgres store and the real workers,
+        # never a QA header or a manually seeded Candidate.
+        main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = False
+        main_module.RELEASE_POLICY_COMMAND_MODE = "enforce"
+        closed_pilot_policy = ReleasePolicyService(
+            policy_revision=1,
+            min_client_build=1,
+            ttl_seconds=300,
+            closed_pilot_enabled_features={
+                "ownerTextCaptureV1",
+                "ownerTruthCandidateReview",
+            },
+            shadow_mode=False,
+        )
+        main_module.RELEASE_POLICY_SERVICE = closed_pilot_policy
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(closed_pilot_policy)
+        main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = True
+
+        formal_owner_id, formal_auth_headers, formal_session_id = login(
+            client,
+            phone="13900000103",
+            nickname="Closed pilot source owner",
+        )
+        formal_other_owner_id, formal_other_headers, formal_other_session_id = login(
+            client,
+            phone="13900000104",
+            nickname="Closed pilot source observer",
+        )
+        require(
+            formal_owner_id != formal_other_owner_id,
+            "closed-pilot smoke identities must be distinct",
+        )
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset({formal_owner_id})
+        formal_vault_id = "vault-closed-pilot-source-candidate"
+        source_content = "在河边散步时，听家人讲起从前的故事。"
+        source_response = client.post(
+            f"/v2/vaults/{formal_vault_id}/sources",
+            headers=policy_headers(
+                formal_auth_headers,
+                session_id=formal_session_id,
+                feature="ownerTextCaptureV1",
+            ),
+            json={
+                "commandId": "closed-pilot-source-capture-v1",
+                "expectedAuthorityEpoch": 0,
+                "kind": "text",
+                "content": source_content,
+                "purpose": "memoryCapture",
+                "clientCreatedAt": "2026-08-02T12:00:00Z",
+            },
+        )
+        require(source_response.status_code == 201, f"closed-pilot Source failed: {source_response.text}")
+        source_body = source_response.json()
+        require(
+            source_body.get("candidateExtraction") == {"status": "requested"},
+            "closed-pilot Source must persist one extraction request",
+        )
+        require(
+            source_content not in json.dumps(source_body, ensure_ascii=False, sort_keys=True),
+            "Source write receipt must not echo private text",
+        )
+
+        worker_settings = Settings(
+            async_effect_v1_enabled=True,
+            async_effect_worker_enabled=True,
+            owner_truth_candidate_extraction_worker_enabled=True,
+            owner_truth_memory_projection_worker_enabled=True,
+        )
+        extraction_result = OwnerTruthCandidateExtractionWorkerRuntime(
+            settings=worker_settings,
+            store=store,
+            worker_id="closed-pilot-source-candidate-extraction-smoke",
+            retry_seconds=1,
+        ).run_once()
+        require(
+            extraction_result.get("status") == "completed"
+            and extraction_result.get("candidateCount") == 1,
+            "closed-pilot worker must create one pending Candidate from Source",
+        )
+        require(
+            source_content
+            not in json.dumps(extraction_result, ensure_ascii=False, sort_keys=True),
+            "candidate worker result must not echo private Source text",
+        )
+
+        formal_candidate_headers = policy_headers(
+            formal_auth_headers,
+            session_id=formal_session_id,
+            feature="ownerTruthCandidateReview",
+        )
+        formal_inbox = client.get(
+            f"/v2/vaults/{formal_vault_id}/candidates",
+            headers=formal_candidate_headers,
+        )
+        require(formal_inbox.status_code == 200, f"closed-pilot inbox failed: {formal_inbox.text}")
+        formal_candidates = formal_inbox.json().get("candidates") or []
+        require(len(formal_candidates) == 1, "closed-pilot Source must reach the Owner inbox")
+        formal_candidate = formal_candidates[0]
+        formal_candidate_id = str(formal_candidate.get("candidateId") or "")
+        formal_candidate_version = int(formal_candidate.get("candidateVersion") or 0)
+        formal_source_id = str(formal_candidate.get("sourceId") or "")
+        require(
+            formal_candidate_id and formal_candidate_version == 1 and formal_source_id,
+            "closed-pilot Candidate must retain stable review identifiers",
+        )
+        require(
+            "X-DreamJourney-QA-Owner-Truth" not in formal_candidate_headers,
+            "closed-pilot Candidate review must not use a QA header",
+        )
+        denied_other_owner = client.get(
+            f"/v2/vaults/{formal_vault_id}/candidates",
+            headers=policy_headers(
+                formal_other_headers,
+                session_id=formal_other_session_id,
+                feature="ownerTruthCandidateReview",
+            ),
+        )
+        require(
+            denied_other_owner.status_code == 403,
+            "non-allowlisted account must not read closed-pilot Candidate inbox",
+        )
+
+        formal_decision = client.post(
+            f"/v2/vaults/{formal_vault_id}/candidates/{formal_candidate_id}/decisions",
+            headers=policy_headers(
+                formal_auth_headers,
+                session_id=formal_session_id,
+                feature="ownerTruthCandidateReview",
+            ),
+            json={
+                "commandId": "closed-pilot-source-candidate-accept-v1",
+                "expectedCandidateVersion": formal_candidate_version,
+                "action": "accept",
+                "reasonCode": "ownerReviewed",
+            },
+        )
+        require(formal_decision.status_code == 201, f"closed-pilot decision failed: {formal_decision.text}")
+        formal_decision_body = formal_decision.json()
+        require(
+            (formal_decision_body.get("receipt") or {}).get("decision") == "accepted"
+            and (formal_decision_body.get("memoryActivation") or {}).get("status") == "created",
+            "closed-pilot Candidate decision must atomically create its MemoryVersion",
+        )
+        require(
+            source_content not in json.dumps(formal_decision_body, ensure_ascii=False, sort_keys=True),
+            "closed-pilot decision receipt must not echo private Source text",
+        )
+
+        projection_result = OwnerTruthMemoryProjectionWorkerRuntime(
+            settings=worker_settings,
+            store=store,
+            worker_id="closed-pilot-source-candidate-projection-smoke",
+            retry_seconds=1,
+        ).run_once()
+        require(
+            projection_result.get("status") == "completed"
+            and projection_result.get("projectionOutcome") in {"rebuilt", "unchanged"},
+            "accepted closed-pilot Candidate must rebuild confirmed Projection",
+        )
+
+        context_response = client.post(
+            "/context/build",
+            headers=policy_headers(
+                formal_auth_headers,
+                session_id=formal_session_id,
+                feature="echoTextInput",
+            ),
+            json={
+                "userId": formal_owner_id,
+                "intent": "echo_chat",
+                "query": "请只使用已经确认的个人回忆陪我聊聊。",
+                "personaScope": "personal",
+                "digitalHumanId": formal_owner_id,
+            },
+        )
+        require(context_response.status_code == 200, f"closed-pilot Context failed: {context_response.text}")
+        context_packet = context_response.json().get("contextPacket") or {}
+        require(
+            context_packet.get("contextVersion") == "echo-context-v4-owner",
+            "closed-pilot Context must use confirmed Projection authority",
+        )
+        selected_context = context_packet.get("selectedContext") or []
+        require(
+            len(selected_context) == 1
+            and ((selected_context[0].get("citation") or {}).get("sourceId") == formal_source_id),
+            "closed-pilot Context must cite the confirmed Source through Projection",
+        )
+
         print(
             "owner truth candidate route postgres smoke passed "
             f"schemaHead={verified['expectedHead']} defaultHidden=true qaHeaderRequired=true "
             "ownerInbox=true crossVaultDenied=true crossOwnerDenied=true "
-            "decisionCreated=true decisionDeduplicated=true pendingRemoved=true"
+            "decisionCreated=true decisionDeduplicated=true pendingRemoved=true "
+            "closedPilotSourceCandidate=true closedPilotProjectionContext=true"
         )
     finally:
         main_module.store = previous_store
@@ -333,6 +571,13 @@ def main() -> None:
         main_module.AUTH_ROUTE_MODE = previous_route_mode
         main_module.AUTH_OWNERSHIP_MODE = previous_ownership_mode
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = previous_qa_enabled
+        main_module.RELEASE_POLICY_COMMAND_MODE = previous_command_mode
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = previous_pilot_owner_ids
+        main_module.RELEASE_POLICY_SERVICE = previous_release_policy_service
+        main_module.RELEASE_POLICY_COMMAND_GATE = previous_release_policy_command_gate
+        main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = (
+            previous_context_authority_enabled
+        )
         if store is not None:
             store.close_pool()
         try:
