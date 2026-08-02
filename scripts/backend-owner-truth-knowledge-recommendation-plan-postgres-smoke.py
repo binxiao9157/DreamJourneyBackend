@@ -864,8 +864,13 @@ def main() -> None:
             str(initial_candidate.get("candidateId") or "").startswith("server-plan-breadth-"),
             "lifecycle plan must preserve an opaque server candidate identifier",
         )
+        # The envelope carries the disposable Vault ID, so inspect the
+        # recommendation payload instead of treating a fixture name as
+        # owner-memory content.
+        lifecycle_selected_rendered = json.dumps(initial_selected, ensure_ascii=False)
         require(
-            "claim" not in lifecycle_plan.text and "recommendation-lifecycle" not in lifecycle_plan.text,
+            "claim" not in lifecycle_selected_rendered
+            and "recommendation-lifecycle" not in lifecycle_selected_rendered,
             "lifecycle plan must not leak memory content",
         )
         require(
