@@ -172,14 +172,27 @@ PYTHONPATH=. scripts/run-voice-clone-2-contract-smoke.sh
 - `ttsResourceId=seed-icl-2.0`
 - `ttsHasXApiResourceId=false`
 
-## 6. 重建并启动容器
+## 6. 构建、迁移并启动容器
 
-代码或 `.env` 更新后，执行重建：
+代码更新可能包含版本化 Postgres migration。API 镜像不会在启动时自动执行 migration，
+因此必须先构建镜像、应用并验证 schema head，再重建 API。这样 `/ready` 不会因
+`migrationHeadMismatch` 长时间返回 `503`。
 
 ```bash
 cd /opt/services/dreamjourney/DreamJourneyBackend
-sudo docker compose up -d --build
+export DEPLOY_BUILD_ID="$(git rev-parse --short HEAD)"
+sudo docker compose up -d postgres redis
+sudo docker compose build api
+sudo docker compose run --rm --no-deps api \
+  python scripts/migrate_db.py --apply --build-id "$DEPLOY_BUILD_ID"
+sudo docker compose run --rm --no-deps api \
+  python scripts/migrate_db.py --verify
+sudo docker compose up -d api
 ```
+
+`--apply` 的输出必须满足 `status=ready`，且 `pendingVersions=[]`；随后 `--verify`
+必须返回相同的 `expectedHead` 与 `appliedHead`。已有 schema head 时不会重放旧 migration，
+只会记录为空的 `appliedVersions`。
 
 如果只改了 `.env`，也不要只用 `docker compose restart api`。`env_file` 需要重新创建容器才会读到新值：
 
