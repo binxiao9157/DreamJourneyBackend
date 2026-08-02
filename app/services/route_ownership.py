@@ -230,6 +230,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/source-capture-state",
+                session,
+                "ownerTruthTextCaptureState",
+            ),
+            _rule(
+                "GET",
                 "/v2/vaults/{vault_id}/candidates",
                 session,
                 "ownerTruthCandidateInbox",

@@ -1075,6 +1075,27 @@ def _owner_truth_text_capture_context(
     )
 
 
+def _owner_truth_text_capture_state_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the value-minimized Source capture preflight read.
+
+    The state read shares the same server-granted closed-pilot feature as the
+    write. It is not a QA route and does not reveal Source/Candidate content,
+    owner IDs, or Vault metadata.
+    """
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTextCaptureV1",
+        route=f"{request.method.upper()} /v2/vaults/*/source-capture-state",
+        user_session_required_code="ownerTruthTextCaptureUserSessionRequired",
+    )
+
+
 _OWNER_TRUTH_TEXT_CAPTURE_PAYLOAD_FIELDS = frozenset(
     {
         "commandId",
@@ -1203,6 +1224,37 @@ def _owner_truth_text_capture_preflight(
                 "currentAuthorityEpoch": current_epoch,
             },
         )
+
+
+def _owner_truth_text_capture_state(
+    *,
+    context: OwnerTruthCommandContext,
+) -> dict[str, Any]:
+    """Return only the authority epoch needed to issue the next Source command.
+
+    A missing Vault is intentionally represented as the valid initial epoch
+    rather than created by the read. A Vault owned by another subject remains
+    indistinguishable from a missing Vault to the caller.
+    """
+
+    reader = getattr(store, "get_owner_truth_vault", None)
+    if not callable(reader):
+        raise HTTPException(status_code=503, detail={"code": "ownerTruthTextCaptureUnavailable"})
+    vault = reader(context.vault_id)
+    if vault is None:
+        authority_epoch = 0
+    else:
+        if str(vault.get("ownerSubjectId") or "") != context.owner_subject_id:
+            raise HTTPException(status_code=404, detail={"code": "ownerTruthVaultNotFound"})
+        raw_epoch = vault.get("authorityEpoch")
+        if type(raw_epoch) is not int or raw_epoch < 0:
+            raise HTTPException(status_code=503, detail={"code": "ownerTruthTextCaptureUnavailable"})
+        authority_epoch = raw_epoch
+    return {
+        "schemaVersion": "owner-truth-text-capture-state-v1",
+        "vaultId": context.vault_id,
+        "authorityEpoch": authority_epoch,
+    }
 
 
 def _owner_truth_captured_release_policy_context(
@@ -5445,6 +5497,23 @@ def create_owner_truth_text_source(
             "candidateExtraction": {"status": "requested"},
             "acceptedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/source-capture-state",
+    include_in_schema=False,
+)
+def get_owner_truth_text_source_capture_state(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """Read the current Source authority epoch for one authorized Owner Vault."""
+
+    context = _owner_truth_text_capture_state_context(request, vault_id=vault_id)
+    return JSONResponse(
+        content=_owner_truth_text_capture_state(context=context),
         headers={"Cache-Control": "no-store"},
     )
 

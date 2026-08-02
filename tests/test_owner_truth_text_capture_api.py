@@ -90,6 +90,10 @@ class OwnerTruthTextCaptureAPITests(unittest.TestCase):
         return f"/v2/vaults/{vault_id}/sources"
 
     @staticmethod
+    def _state_path(vault_id: str) -> str:
+        return f"/v2/vaults/{vault_id}/source-capture-state"
+
+    @staticmethod
     def _payload(*, command_id: str | None = None, expected_epoch: int = 0) -> dict[str, object]:
         return {
             "commandId": command_id or str(uuid4()),
@@ -191,6 +195,67 @@ class OwnerTruthTextCaptureAPITests(unittest.TestCase):
             "ownerTruthSourceAuthorityEpochConflict",
         )
         self.assertEqual(self.store.owner_truth_source_count(vault_id), 1)
+
+    def test_authorized_owner_reads_value_minimized_source_capture_state(self) -> None:
+        owner_a, headers_a, session_a = self._login("13800139955")
+        owner_b, headers_b, session_b = self._login("13800139956")
+        self._allow_owner(owner_a)
+        self._allow_owner(owner_b)
+        vault_id = "vault-text-capture-state"
+
+        initial = client.get(
+            self._state_path(vault_id),
+            headers=self._capture_headers(headers_a, session_id=session_a),
+        )
+        self.assertEqual(initial.status_code, 200, initial.text)
+        self.assertEqual(
+            initial.json(),
+            {
+                "schemaVersion": "owner-truth-text-capture-state-v1",
+                "vaultId": vault_id,
+                "authorityEpoch": 0,
+            },
+        )
+
+        created = client.post(
+            self._path(vault_id),
+            headers=self._capture_headers(headers_a, session_id=session_a),
+            json=self._payload(),
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        self.store._owner_truth_vaults[vault_id]["authorityEpoch"] = 2
+
+        current = client.get(
+            self._state_path(vault_id),
+            headers=self._capture_headers(headers_a, session_id=session_a),
+        )
+        self.assertEqual(current.status_code, 200, current.text)
+        self.assertEqual(
+            current.json(),
+            {
+                "schemaVersion": "owner-truth-text-capture-state-v1",
+                "vaultId": vault_id,
+                "authorityEpoch": 2,
+            },
+        )
+        self.assertNotIn(owner_a, json.dumps(current.json(), ensure_ascii=False))
+
+        cross_owner = client.get(
+            self._state_path(vault_id),
+            headers=self._capture_headers(headers_b, session_id=session_b),
+        )
+        self.assertEqual(cross_owner.status_code, 404, cross_owner.text)
+        self.assertEqual(cross_owner.json()["detail"]["code"], "ownerTruthVaultNotFound")
+
+        qa_only = client.get(
+            self._state_path(vault_id),
+            headers={
+                **headers_b,
+                "X-DreamJourney-QA-Owner-Truth": "1",
+            },
+        )
+        self.assertEqual(qa_only.status_code, 403, qa_only.text)
+        self.assertEqual(qa_only.json()["detail"]["code"], "release_policy_denied")
 
 
 if __name__ == "__main__":  # pragma: no cover
