@@ -40,7 +40,8 @@ class OwnerTruthDataRightsTests(unittest.TestCase):
         self.assertEqual(records["familyContributionGrant"], [family_grant])
         self.assertEqual(len(queries), 1)
         query = queries[0]
-        self.assertIn("grant.owner_subject_id = vault.owner_subject_id", query)
+        self.assertIn("family_grant.owner_subject_id = vault.owner_subject_id", query)
+        self.assertNotIn(" AS grant", query)
         self.assertIn("LIMIT 1000", query)
         self.assertNotIn("contributor_subject_id", query)
         self.assertNotIn("create_command_id_hash", query)
@@ -65,7 +66,11 @@ class OwnerTruthDataRightsTests(unittest.TestCase):
 
         self.assertEqual(counts["ownerTruthFamilyContributionGrant"], 2)
         self.assertEqual(len(queries), 1)
-        self.assertIn("grant.owner_subject_id = vault.owner_subject_id", queries[0])
+        self.assertIn(
+            "family_grant.owner_subject_id = vault.owner_subject_id",
+            queries[0],
+        )
+        self.assertNotIn(" AS grant", queries[0])
 
 
 if __name__ == "__main__":

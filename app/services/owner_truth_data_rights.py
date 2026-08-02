@@ -310,24 +310,24 @@ def read_owner_truth_data_rights_records(
         "familyContributionGrant": rows(
             """
             SELECT jsonb_build_object(
-                'grantId', grant.id,
-                'vaultId', grant.vault_id,
-                'relationshipId', grant.relationship_id,
-                'relationshipEpoch', grant.relationship_epoch,
-                'scope', grant.scope,
-                'status', grant.status,
-                'rowVersion', grant.row_version,
-                'createdAt', grant.created_at,
-                'updatedAt', grant.updated_at,
-                'revokedAt', grant.revoked_at,
-                'revocationReason', grant.revocation_reason
+                'grantId', family_grant.id,
+                'vaultId', family_grant.vault_id,
+                'relationshipId', family_grant.relationship_id,
+                'relationshipEpoch', family_grant.relationship_epoch,
+                'scope', family_grant.scope,
+                'status', family_grant.status,
+                'rowVersion', family_grant.row_version,
+                'createdAt', family_grant.created_at,
+                'updatedAt', family_grant.updated_at,
+                'revokedAt', family_grant.revoked_at,
+                'revocationReason', family_grant.revocation_reason
             ) AS payload
-            FROM owner_truth.family_contribution_grants AS grant
+            FROM owner_truth.family_contribution_grants AS family_grant
             INNER JOIN owner_truth.vaults AS vault
-                ON vault.vault_id = grant.vault_id
+                ON vault.vault_id = family_grant.vault_id
             WHERE vault.owner_subject_id = %s
-              AND grant.owner_subject_id = vault.owner_subject_id
-            ORDER BY grant.created_at, grant.id
+              AND family_grant.owner_subject_id = vault.owner_subject_id
+            ORDER BY family_grant.created_at, family_grant.id
             LIMIT 1000
             """
         ),
@@ -434,10 +434,10 @@ def count_owner_truth_data_rights_records(
         "ownerTruthFamilyContributionGrant": count(
             """
             SELECT COUNT(*) AS count
-            FROM owner_truth.family_contribution_grants AS grant
-            INNER JOIN owner_truth.vaults AS vault ON vault.vault_id = grant.vault_id
+            FROM owner_truth.family_contribution_grants AS family_grant
+            INNER JOIN owner_truth.vaults AS vault ON vault.vault_id = family_grant.vault_id
             WHERE vault.owner_subject_id = %s
-              AND grant.owner_subject_id = vault.owner_subject_id
+              AND family_grant.owner_subject_id = vault.owner_subject_id
             """
         ),
     }
