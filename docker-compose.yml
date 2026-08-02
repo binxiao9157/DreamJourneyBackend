@@ -46,6 +46,34 @@ services:
       redis:
         condition: service_started
 
+  owner-truth-candidate-extraction-worker:
+    build: .
+    profiles:
+      - owner-truth-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.async_effects.owner_truth_candidate_extraction_worker", "--loop"]
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  owner-truth-memory-projection-worker:
+    build: .
+    profiles:
+      - owner-truth-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.async_effects.owner_truth_memory_projection_worker", "--loop"]
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
   postgres:
     image: mirror.ccs.tencentyun.com/library/postgres:16-alpine
     restart: unless-stopped

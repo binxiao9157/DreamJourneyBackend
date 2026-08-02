@@ -13,7 +13,7 @@ import argparse
 from hashlib import sha256
 import json
 import socket
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any, Mapping, Optional
 
 from app.async_effects.consumer_repository import (
@@ -448,10 +448,18 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="DreamJourney default-disabled Owner Truth projection worker"
     )
-    parser.add_argument("--once", action="store_true", help="claim and consume at most one typed job")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true", help="claim and consume at most one typed job")
+    mode.add_argument("--loop", action="store_true", help="continuously claim typed jobs")
     parser.add_argument("--worker-id", default=None, help="opaque worker identifier")
     parser.add_argument("--lease-seconds", type=int, default=_DEFAULT_LEASE_SECONDS)
     parser.add_argument("--retry-seconds", type=int, default=_DEFAULT_RETRY_SECONDS)
+    parser.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=None,
+        help="idle delay between loop iterations; defaults to OWNER_TRUTH_WORKER_POLL_SECONDS",
+    )
     return parser
 
 
@@ -468,9 +476,27 @@ def main(argv: Optional[list[str]] = None) -> int:
             lease_seconds=args.lease_seconds,
             retry_seconds=args.retry_seconds,
         )
-        payload = worker.run_once()
-        print(json.dumps(payload, sort_keys=True))
-        return 0
+        poll_seconds = max(
+            0.1,
+            float(
+                args.poll_seconds
+                if args.poll_seconds is not None
+                else settings.owner_truth_worker_poll_seconds
+            ),
+        )
+        last_result_key: tuple[str, str] | None = None
+        try:
+            while True:
+                payload = worker.run_once()
+                result_key = (str(payload.get("status") or ""), str(payload.get("reason") or ""))
+                if not args.loop or result_key != last_result_key:
+                    print(json.dumps(payload, sort_keys=True))
+                    last_result_key = result_key
+                if not args.loop:
+                    return 0
+                sleep(poll_seconds)
+        except KeyboardInterrupt:
+            return 0
     finally:
         close_store(store)
 

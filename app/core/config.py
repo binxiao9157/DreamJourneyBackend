@@ -85,6 +85,9 @@ class Settings:
     release_policy_closed_pilot_features: Optional[str] = None
     async_effect_v1_enabled: bool = False
     async_effect_worker_enabled: bool = False
+    # Both typed Owner Truth workers use this bounded idle delay when their
+    # explicitly selected Compose profile is running.
+    owner_truth_worker_poll_seconds: float = 2.0
     # Candidate extraction is a separate, deterministic QA worker. It remains
     # off unless all async-effect flags and this explicit switch are enabled.
     owner_truth_candidate_extraction_worker_enabled: bool = False
@@ -317,6 +320,13 @@ class Settings:
             async_effect_worker_enabled=_env_bool(
                 "ASYNC_EFFECT_WORKER_ENABLED",
                 cls.async_effect_worker_enabled,
+            ),
+            owner_truth_worker_poll_seconds=max(
+                0.1,
+                _env_float(
+                    "OWNER_TRUTH_WORKER_POLL_SECONDS",
+                    cls.owner_truth_worker_poll_seconds,
+                ),
             ),
             owner_truth_candidate_extraction_worker_enabled=_env_bool(
                 "OWNER_TRUTH_CANDIDATE_EXTRACTION_WORKER_ENABLED",

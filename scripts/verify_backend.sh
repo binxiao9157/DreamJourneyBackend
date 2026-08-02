@@ -36,6 +36,8 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-memory-search-projectio
 
 echo "== Owner Truth Candidate extraction worker G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-candidate-extraction-worker-g0-gate.sh
+echo "== Owner Truth worker process gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-worker-process-gate.sh
 
 echo "== Owner Truth memory-search offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-memory-search-offline-evaluation-gate.sh
