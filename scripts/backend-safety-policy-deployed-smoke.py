@@ -13,6 +13,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.auth_sessions import AuthSessionService
 from app.services.postgres_store import PostgresStore
+from app.services.safety_policy import (
+    HighRiskCapability,
+    SubjectEligibilityEvidence,
+    SubjectEligibilityReason,
+    evaluate_subject_eligibility,
+)
 
 
 BASE_URL = os.environ.get("BACKEND_BASE_URL", "").rstrip("/")
@@ -102,8 +108,9 @@ def make_user_fixture():
                 command_id="cleanupSafetyPolicySmoke",
             ) as unit_of_work:
                 with unit_of_work.connection.cursor() as cursor:
-                    for table in ("auth_sessions", "token_families", "users"):
+                    for table in ("auth_sessions", "token_families"):
                         cursor.execute(f"DELETE FROM {table} WHERE user_id = %s", (user_id,))
+                    cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
         finally:
             store.close_pool()
 
@@ -182,10 +189,31 @@ def main():
             },
             expected=(403,),
         )
-        require(
-            (minor_dh.get("detail") or {}).get("code") == "subject_eligibility_hard_denied",
-            "minor digital human must hard deny before provider",
+        local_minor = evaluate_subject_eligibility(
+            SubjectEligibilityEvidence.model_validate(
+                {
+                    **eligibility("digitalHuman", age_status="minor"),
+                    "capability": HighRiskCapability.DIGITAL_HUMAN,
+                }
+            )
         )
+        require(local_minor.allowed is False, "minor digital human must never be eligible")
+        require(
+            local_minor.reason == SubjectEligibilityReason.MINOR,
+            "minor digital human eligibility reason changed",
+        )
+        minor_detail = minor_dh.get("detail") or {}
+        minor_code = minor_detail.get("code")
+        if minor_code == "release_policy_denied":
+            require(
+                minor_detail.get("feature") == "digitalHumanLivePanel",
+                "default-closed M2 route must identify the digital human feature",
+            )
+        else:
+            require(
+                minor_code == "subject_eligibility_hard_denied",
+                "enabled digital human route must hard deny minor eligibility",
+            )
     finally:
         fixture["cleanup"]()
 
