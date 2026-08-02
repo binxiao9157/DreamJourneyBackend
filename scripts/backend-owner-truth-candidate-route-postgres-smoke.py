@@ -488,6 +488,12 @@ def main() -> None:
             "closed-pilot Candidate must retain stable review identifiers",
         )
         require(
+            formal_candidate.get("perspectiveType") == "firstPerson"
+            and formal_candidate.get("epistemicStatus") == "recalled"
+            and formal_candidate.get("sensitivity") == "standard",
+            "owner-authored Source Candidate must retain Context-eligible metadata until review",
+        )
+        require(
             "X-DreamJourney-QA-Owner-Truth" not in formal_candidate_headers,
             "closed-pilot Candidate review must not use a QA header",
         )

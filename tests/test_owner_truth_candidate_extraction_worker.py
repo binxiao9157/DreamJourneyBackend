@@ -225,7 +225,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         )
         self.assertIsNotNone(lease)
 
-    def test_current_source_creates_one_restricted_pending_candidate_without_raw_worker_output(self) -> None:
+    def test_owner_authored_source_creates_one_pending_first_person_candidate_without_raw_worker_output(self) -> None:
         result = self._worker().run_once()
 
         self.assertEqual(result["status"], "completed")
@@ -242,9 +242,9 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         candidate = next(iter(snapshot["candidates"].values()))
         self.assertEqual(candidate["decisionStatus"], "pending")
         self.assertEqual(candidate["payload"]["candidateKind"], "experience")
-        self.assertEqual(candidate["payload"]["perspectiveType"], "inferred")
-        self.assertEqual(candidate["payload"]["epistemicStatus"], "uncertain")
-        self.assertEqual(candidate["payload"]["sensitivity"], "restricted")
+        self.assertEqual(candidate["payload"]["perspectiveType"], "firstPerson")
+        self.assertEqual(candidate["payload"]["epistemicStatus"], "recalled")
+        self.assertEqual(candidate["payload"]["sensitivity"], "standard")
         self.assertEqual(candidate["payload"]["reviewMode"], "single")
         self.assertEqual(candidate["payload"]["evidenceRefs"][0]["span"], {"start": 0, "end": len(self.source_text)})
 

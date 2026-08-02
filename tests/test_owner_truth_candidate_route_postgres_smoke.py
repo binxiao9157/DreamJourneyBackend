@@ -36,6 +36,7 @@ class OwnerTruthCandidateRoutePostgresSmokeContractTests(unittest.TestCase):
         self.assertIn("production iOS AccountLease derives the personal Vault", source)
         self.assertIn("closed-pilot Source must persist one extraction request", source)
         self.assertIn("closed-pilot worker must create one pending Candidate from Source", source)
+        self.assertIn("owner-authored Source Candidate must retain Context-eligible metadata until review", source)
         self.assertIn("closed-pilot Candidate review must not use a QA header", source)
         self.assertIn("accepted closed-pilot Candidate must drain queued confirmed Projection rebuilds", source)
         self.assertIn("closed-pilot Context must use confirmed Projection authority", source)

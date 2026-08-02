@@ -79,17 +79,18 @@ class OwnerTruthCandidateExtractor(Protocol):
 
 
 class DeterministicOwnerTruthCandidateExtractor:
-    """Conservative QA adapter that never asserts Source content as fact.
+    """Create one reviewable Candidate from an explicit owner-authored Source.
 
-    The first execution slice intentionally creates a single restricted,
-    inferred, single-review Candidate.  It proves the durable Source ->
-    Candidate handoff without calling an LLM or silently promoting the source
-    to a confirmed MemoryVersion.
+    This worker is reached only from the closed-pilot ``/sources`` command,
+    which accepts text authored and explicitly submitted by the authenticated
+    Vault Owner.  The proposal therefore preserves that first-person recalled
+    perspective, but remains pending until the Owner accepts it.  It does not
+    turn a model inference into a fact, call a provider, or bypass review.
     """
 
     _EXTRACTOR_ID = "deterministicSourceEcho"
-    _MODEL_ID = "deterministic-source-echo-v1"
-    _PROMPT_VERSION = "owner-truth-candidate-extraction-qa-v1"
+    _MODEL_ID = "deterministic-owner-source-v2"
+    _PROMPT_VERSION = "owner-truth-candidate-extraction-owner-source-v2"
 
     def extract(
         self,
@@ -113,9 +114,9 @@ class DeterministicOwnerTruthCandidateExtractor:
 
         proposal = CandidateProposal(
             memory_kind=MemoryKind.EXPERIENCE,
-            perspective_type=PerspectiveType.INFERRED,
-            epistemic_status=EpistemicStatus.UNCERTAIN,
-            sensitivity=SensitivityLevel.RESTRICTED,
+            perspective_type=PerspectiveType.FIRST_PERSON,
+            epistemic_status=EpistemicStatus.RECALLED,
+            sensitivity=SensitivityLevel.STANDARD,
             content={"summary": normalized_text},
             evidence_span=CandidateEvidenceSpan(start=0, end=len(source.source_text)),
             confidence=0.0,
