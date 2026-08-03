@@ -51,6 +51,11 @@ from app.services.owner_truth_context_materialization import (
 from app.services.postgres_store import PostgresStore
 
 
+FORMAL_SMOKE_BATCH_CANDIDATE_SUMMARY = (
+    "Synthetic batch Candidate for formal confirmation."
+)
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -181,7 +186,11 @@ def seed_reviewable_batch(
     candidate_id = str(uuid.uuid4())
     source_payload = {"text": "Formal confirmation Postgres smoke source"}
     candidate_content = {
-        "summary": f"Synthetic {review_mode} Candidate for formal confirmation."
+        "summary": (
+            FORMAL_SMOKE_BATCH_CANDIDATE_SUMMARY
+            if review_mode == "batch"
+            else f"Synthetic {review_mode} Candidate for formal confirmation."
+        )
     }
     candidate_payload = {
         "schemaVersion": "owner-truth-candidate-proposal-v1",
@@ -503,7 +512,7 @@ def candidate_decisions(dsn: str, *, vault_id: str) -> dict[str, str]:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id::text AS id, decision
+                SELECT id::text AS id, decision_status AS decision
                 FROM owner_truth.memory_candidates
                 WHERE vault_id = %s
                 ORDER BY id
@@ -569,7 +578,12 @@ def assert_concurrent_formal_replay_is_idempotent(
     barrier = Barrier(2)
 
     def post_once(decision_id: str) -> Any:
-        with TestClient(main_module.app, raise_server_exceptions=False) as concurrent_client:
+        # Do not enter TestClient's app lifespan here. Its shutdown hook closes
+        # the disposable Store pool shared by the rest of this smoke, which
+        # would turn the following account-generation denial check into a pool
+        # lifecycle failure instead of a request-contract assertion.
+        concurrent_client = TestClient(main_module.app, raise_server_exceptions=False)
+        try:
             barrier.wait(timeout=10)
             return concurrent_client.post(
                 path,
@@ -580,6 +594,8 @@ def assert_concurrent_formal_replay_is_idempotent(
                 ),
                 json=payload,
             )
+        finally:
+            concurrent_client.close()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         responses = list(
@@ -1244,7 +1260,10 @@ def main() -> None:
         materialization_payload = {
             "intent": "echo_chat",
             "query": "formal confirmation",
-            "selectionMode": "deterministicTextFallback",
+            # This smoke rebuilds the Memory Projection itself. Query-ranked
+            # retrieval is validated by the separate SearchDocument smoke and
+            # must not make formal confirmation depend on an unrelated index.
+            "selectionMode": "projectionCitationOrder",
         }
         materialization_before_projection = OwnerTruthContextMaterializationService(
             store,
@@ -1320,7 +1339,7 @@ def main() -> None:
             == projection_result["projectionCheckpoint"]
             and len(materialization_after_projection["typedCitations"]) == 1
             and materialization_after_projection["generationContext"]["sourceCount"] == 1
-            and candidate_content["summary"]
+            and FORMAL_SMOKE_BATCH_CANDIDATE_SUMMARY
             in materialization_after_projection["generationContext"]["text"],
             "formal activation must materialize exactly one confirmed Projection citation after rebuild",
         )
@@ -1330,7 +1349,7 @@ def main() -> None:
             sort_keys=True,
         )
         require(
-            candidate_content["summary"] not in serialized_materialization_summary
+            FORMAL_SMOKE_BATCH_CANDIDATE_SUMMARY not in serialized_materialization_summary
             and materialization_payload["query"] not in serialized_materialization_summary
             and "'text':" not in serialized_materialization_summary,
             "formal Context evidence must remain value-free",
