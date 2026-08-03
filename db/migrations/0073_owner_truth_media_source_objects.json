@@ -1,0 +1,11 @@
+{
+  "version": "0073",
+  "name": "owner_truth_media_source_objects",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthMediaCaptureClosedPilotDefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerMediaCaptureV1": false
+  }
+}

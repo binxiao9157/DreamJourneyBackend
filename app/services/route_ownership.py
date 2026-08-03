@@ -229,6 +229,24 @@ class RouteOwnershipRegistry:
                 "ownerTruthTextCapture",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/source-objects/upload-intents",
+                session,
+                "ownerTruthMediaUploadIntent",
+            ),
+            _rule(
+                "PUT",
+                "/v2/vaults/{vault_id}/source-objects/upload-intents/{intent_id}/content",
+                session,
+                "ownerTruthMediaUploadContent",
+            ),
+            _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/source-objects/{source_object_id}",
+                session,
+                "ownerTruthMediaSourceObjectRead",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/source-capture-state",
                 session,

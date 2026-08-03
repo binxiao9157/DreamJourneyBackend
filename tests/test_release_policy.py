@@ -111,6 +111,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertTrue(decisions["accountDeletion"].releaseVisible)
         for feature in [
             "ownerTextCaptureV1",
+            "ownerMediaCaptureV1",
             "echoGuidedRecommendations",
             "ownerTruthLifeMap",
             "ownerTruthMemorySearch",
@@ -167,6 +168,28 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertEqual(disabled.reason, "notApprovedForClosedPilot")
         self.assertTrue(enabled.enabled)
         self.assertTrue(enabled.releaseVisible)
+        self.assertEqual(enabled.reason, "closedPilotOwnerCore")
+
+    def test_owner_media_capture_requires_an_independent_closed_pilot_feature_grant(self):
+        disabled = ReleasePolicyService().build_snapshot(
+            audience="owner",
+            cohort="closedPilotAdultSelf",
+            client_build=1,
+            requested_feature="ownerMediaCaptureV1",
+        ).features[0]
+        enabled = ReleasePolicyService(
+            closed_pilot_enabled_features={"ownerMediaCaptureV1"}
+        ).build_snapshot(
+            audience="owner",
+            cohort="closedPilotAdultSelf",
+            client_build=1,
+            requested_feature="ownerMediaCaptureV1",
+        ).features[0]
+
+        self.assertFalse(disabled.enabled)
+        self.assertEqual(disabled.requiredGates, ("G0", "G1", "G2"))
+        self.assertEqual(disabled.releaseStage, "M1")
+        self.assertTrue(enabled.enabled)
         self.assertEqual(enabled.reason, "closedPilotOwnerCore")
 
     def test_owner_truth_candidate_review_requires_explicit_closed_pilot_feature_grant(self):

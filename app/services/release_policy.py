@@ -425,6 +425,10 @@ class ReleasePolicyService:
         # must not inherit Echo visibility, because its durable Source/outbox
         # write has a different release and recovery boundary.
         "ownerTextCaptureV1": ("G0", "G1"),
+        # Stage 2 media capture writes only a private SourceObject and requires
+        # independent integrity/safety/worker evidence. It does not inherit
+        # text capture visibility or expose a public media browser.
+        "ownerMediaCaptureV1": ("G0", "G1", "G2"),
         "ownerTruthCandidateReview": ("G0", "G1", "G2"),
         # This is a read-only, display-safe presentation of the server-owned
         # M0-B selector. It remains default closed until its product Gate is
@@ -470,6 +474,7 @@ class ReleasePolicyService:
     }
     _FEATURE_STAGES: dict[str, ReleaseStage] = {
         **{feature: "M0" for feature in _FEATURE_GATES},
+        "ownerMediaCaptureV1": "M1",
         "voiceCloneShell": "M1",
         "personaSettings": "M2",
         "digitalHumanLivePanel": "M2",
@@ -490,6 +495,7 @@ class ReleasePolicyService:
     }
     _CLOSED_PILOT_OPT_IN_FEATURES = {
         "ownerTextCaptureV1",
+        "ownerMediaCaptureV1",
         "ownerTruthCandidateReview",
         # Both M0-B read surfaces have their own typed, value-minimized
         # product routes. Keep them default closed, but allow a server-owned
@@ -867,6 +873,11 @@ class ReleasePolicyCommandGate:
         if normalized_path == "/archive/items" and method.upper() == "POST":
             return self._archive_item_feature(body)
         if (
+            normalized_path.startswith("/v2/vaults/")
+            and "/source-objects" in normalized_path
+        ):
+            return "ownerMediaCaptureV1"
+        if (
             method.upper() in {"GET", "POST"}
             and normalized_path.startswith("/v2/vaults/")
             and normalized_path.endswith("/sources")
@@ -921,6 +932,16 @@ class ReleasePolicyCommandGate:
                 return f"{normalized_method} {prefix}/*"
         if normalized_path in {"/archive/media/upload-intent", "/archive/items"}:
             return f"{normalized_method} {normalized_path}"
+        if (
+            normalized_path.startswith("/v2/vaults/")
+            and "/source-objects" in normalized_path
+        ):
+            suffix = normalized_path.split("/source-objects", 1)[1]
+            if suffix.endswith("/upload-intents"):
+                return f"{normalized_method} /v2/vaults/*/source-objects/upload-intents"
+            if suffix.endswith("/content"):
+                return f"{normalized_method} /v2/vaults/*/source-objects/upload-intents/*/content"
+            return f"{normalized_method} /v2/vaults/*/source-objects/*"
         if (
             normalized_method == "POST"
             and normalized_path.startswith("/v2/vaults/")

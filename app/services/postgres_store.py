@@ -113,6 +113,9 @@ from app.services.owner_truth_candidate_extraction import (
     PostgresOwnerTruthCandidateExtractionInputRepository,
     PostgresOwnerTruthCandidateExtractionRepository,
 )
+from app.services.owner_truth_media_source_object import (
+    PostgresOwnerTruthMediaSourceObjectRepository,
+)
 from app.services.owner_truth_candidate_review import (
     PostgresOwnerTruthCandidateReviewRepository,
 )
@@ -386,6 +389,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("async effect target admission requires an active unit of work")
         return PostgresOwnerTruthSourceTargetAdmissionRepository(active.connection)
+
+    def owner_truth_media_source_object_repository(
+        self,
+    ) -> PostgresOwnerTruthMediaSourceObjectRepository:
+        """Return the private Stage 2 media object writer in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth media source object requires an active unit of work")
+        return PostgresOwnerTruthMediaSourceObjectRepository(active.connection)
 
     def owner_truth_memory_projection_target_admission_repository(
         self,

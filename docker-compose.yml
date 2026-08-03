@@ -6,6 +6,8 @@ services:
       - .env
     ports:
       - "127.0.0.1:3100:8080"
+    volumes:
+      - archive_media_data:/var/lib/dreamjourney/media
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,3 +97,4 @@ services:
 
 volumes:
   postgres_data:
+  archive_media_data:

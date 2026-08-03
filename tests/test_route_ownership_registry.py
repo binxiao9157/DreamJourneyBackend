@@ -29,7 +29,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 153)
+        self.assertEqual(len(app_routes), 156)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
 
@@ -68,6 +68,9 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
             ("POST", "/family/relationships/{user_id}/{relationship_id}/lifecycle"): RouteOwnershipCategory.OWNER_PATH,
             ("GET", "/v2/vaults/{vault_id}/candidates"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/sources"): RouteOwnershipCategory.USER_SESSION,
+            ("POST", "/v2/vaults/{vault_id}/source-objects/upload-intents"): RouteOwnershipCategory.USER_SESSION,
+            ("PUT", "/v2/vaults/{vault_id}/source-objects/upload-intents/{intent_id}/content"): RouteOwnershipCategory.USER_SESSION,
+            ("GET", "/v2/vaults/{vault_id}/source-objects/{source_object_id}"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/source-capture-state"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/candidates/{candidate_id}/decisions"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/family-contribution-grants"): RouteOwnershipCategory.USER_SESSION,
@@ -143,8 +146,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 153)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 153)
+        self.assertEqual(summary["routeCount"], 156)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 156)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)

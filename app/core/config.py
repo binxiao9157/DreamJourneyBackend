@@ -100,6 +100,15 @@ class Settings:
     # for personal Echo only. It remains off until the worker/profile and
     # allowlist rollout are separately verified in the target environment.
     owner_truth_context_authority_closed_pilot_enabled: bool = False
+    # Stage 2 media ingestion stays separately default-off. When enabled it
+    # writes only into a server-private object adapter and still requires a
+    # configured safety scanner before bytes can become verified input.
+    owner_truth_media_capture_enabled: bool = False
+    owner_truth_media_storage_provider: str = "disabled"
+    owner_truth_media_storage_root: str = "/var/lib/dreamjourney/media"
+    owner_truth_media_upload_intent_ttl_seconds: int = 900
+    owner_truth_media_max_upload_bytes: int = 50 * 1024 * 1024
+    owner_truth_media_content_safety_provider: str = "disabled"
     delegated_access_contract_api_enabled: bool = False
     # Candidate review is an Owner Truth QA contract only until the M0 review
     # UI, release policy, and external gates are complete.
@@ -348,6 +357,36 @@ class Settings:
                 "OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED",
                 cls.owner_truth_context_authority_closed_pilot_enabled,
             ),
+            owner_truth_media_capture_enabled=_env_bool(
+                "OWNER_TRUTH_MEDIA_CAPTURE_ENABLED",
+                cls.owner_truth_media_capture_enabled,
+            ),
+            owner_truth_media_storage_provider=_env(
+                "OWNER_TRUTH_MEDIA_STORAGE_PROVIDER",
+                cls.owner_truth_media_storage_provider,
+            ) or cls.owner_truth_media_storage_provider,
+            owner_truth_media_storage_root=_env(
+                "OWNER_TRUTH_MEDIA_STORAGE_ROOT",
+                cls.owner_truth_media_storage_root,
+            ) or cls.owner_truth_media_storage_root,
+            owner_truth_media_upload_intent_ttl_seconds=max(
+                60,
+                _env_int(
+                    "OWNER_TRUTH_MEDIA_UPLOAD_INTENT_TTL_SECONDS",
+                    cls.owner_truth_media_upload_intent_ttl_seconds,
+                ),
+            ),
+            owner_truth_media_max_upload_bytes=max(
+                1,
+                _env_int(
+                    "OWNER_TRUTH_MEDIA_MAX_UPLOAD_BYTES",
+                    cls.owner_truth_media_max_upload_bytes,
+                ),
+            ),
+            owner_truth_media_content_safety_provider=_env(
+                "OWNER_TRUTH_MEDIA_CONTENT_SAFETY_PROVIDER",
+                cls.owner_truth_media_content_safety_provider,
+            ) or cls.owner_truth_media_content_safety_provider,
             delegated_access_contract_api_enabled=_env_bool(
                 "DELEGATED_ACCESS_CONTRACT_API_ENABLED",
                 cls.delegated_access_contract_api_enabled,

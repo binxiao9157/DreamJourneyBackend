@@ -77,6 +77,21 @@ from app.services.owner_truth_source import (
     ArchiveOwnerTruthCompatibilityFacade,
     OwnerTruthSourceAsyncEffectCommandService,
 )
+from app.services.owner_truth_media_source_object import (
+    MediaUploadIntentCommand,
+    OwnerTruthMediaAuthorityEpochConflict,
+    OwnerTruthMediaCaptureUnavailable,
+    OwnerTruthMediaIngestionError,
+    OwnerTruthMediaIngestionService,
+    OwnerTruthMediaUploadConflict,
+    OwnerTruthMediaUploadExpired,
+    OwnerTruthMediaUploadInvalid,
+    OwnerTruthMediaUploadNotFound,
+    OwnerTruthMediaUploadTokenInvalid,
+    OwnerTruthMediaVaultNotFound,
+    build_media_content_safety_scanner,
+    build_private_media_object_store,
+)
 from app.services.owner_truth_family_contribution import (
     CreateFamilyContributionGrantCommand,
     OwnerTruthFamilyContributionError,
@@ -477,6 +492,26 @@ from app.services.user_identity import stable_user_id
 app = FastAPI(title=settings.app_name, version="0.1.0")
 store = make_store(settings)
 logger = logging.getLogger(__name__)
+
+
+def _make_owner_truth_media_ingestion_service() -> OwnerTruthMediaIngestionService:
+    return OwnerTruthMediaIngestionService(
+        store=store,
+        object_store=build_private_media_object_store(
+            provider=settings.owner_truth_media_storage_provider,
+            root=settings.owner_truth_media_storage_root,
+        ),
+        safety_scanner=build_media_content_safety_scanner(
+            provider=settings.owner_truth_media_content_safety_provider,
+            environment=settings.environment,
+        ),
+        enabled=settings.owner_truth_media_capture_enabled,
+        max_upload_bytes=settings.owner_truth_media_max_upload_bytes,
+        upload_intent_ttl_seconds=settings.owner_truth_media_upload_intent_ttl_seconds,
+    )
+
+
+OWNER_TRUTH_MEDIA_INGESTION_SERVICE = _make_owner_truth_media_ingestion_service()
 
 
 def _delegated_access_service() -> DelegatedAccessService:
@@ -1124,6 +1159,29 @@ def _owner_truth_text_capture_state_context(
     )
 
 
+def _owner_truth_media_capture_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize one closed-pilot private media operation for its Vault Owner."""
+
+    normalized_path = request.url.path
+    if request.method.upper() == "POST" and normalized_path.endswith("/upload-intents"):
+        route = "POST /v2/vaults/*/source-objects/upload-intents"
+    elif request.method.upper() == "PUT" and normalized_path.endswith("/content"):
+        route = "PUT /v2/vaults/*/source-objects/upload-intents/*/content"
+    else:
+        route = "GET /v2/vaults/*/source-objects/*"
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerMediaCaptureV1",
+        route=route,
+        user_session_required_code="ownerTruthMediaCaptureUserSessionRequired",
+    )
+
+
 def _owner_truth_family_contribution_product_context(
     request: Request,
     *,
@@ -1309,6 +1367,42 @@ def _owner_truth_text_capture_preflight(
             status_code=409,
             detail={
                 "code": "ownerTruthSourceAuthorityEpochConflict",
+                "expectedAuthorityEpoch": command.expected_authority_epoch,
+                "currentAuthorityEpoch": current_epoch,
+            },
+        )
+
+
+def _owner_truth_media_capture_preflight(
+    *,
+    context: OwnerTruthCommandContext,
+    command: MediaUploadIntentCommand,
+) -> None:
+    """Apply the same owner/epoch fence before creating a media SourceObject."""
+
+    reader = getattr(store, "get_owner_truth_vault", None)
+    if not callable(reader):
+        raise HTTPException(status_code=503, detail={"code": "ownerTruthMediaCaptureUnavailable"})
+    vault = reader(context.vault_id)
+    if vault is None:
+        if command.expected_authority_epoch != 0:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ownerTruthMediaAuthorityEpochConflict",
+                    "expectedAuthorityEpoch": command.expected_authority_epoch,
+                    "currentAuthorityEpoch": 0,
+                },
+            )
+        return
+    if str(vault.get("ownerSubjectId") or "") != context.owner_subject_id:
+        raise HTTPException(status_code=404, detail={"code": "ownerTruthMediaVaultNotFound"})
+    current_epoch = int(vault.get("authorityEpoch") or 0)
+    if command.expected_authority_epoch != current_epoch:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ownerTruthMediaAuthorityEpochConflict",
                 "expectedAuthorityEpoch": command.expected_authority_epoch,
                 "currentAuthorityEpoch": current_epoch,
             },
@@ -2679,6 +2773,41 @@ def _owner_truth_text_capture_http_error(
     if isinstance(error, OwnerTruthSourceCommandConflict):
         return HTTPException(status_code=409, detail={"code": "ownerTruthSourceCommandConflict"})
     return HTTPException(status_code=400, detail={"code": "ownerTruthTextCaptureInvalid"})
+
+
+def _owner_truth_media_capture_http_error(
+    error: OwnerTruthMediaIngestionError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthMediaAuthorityEpochConflict):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": error.code,
+                "expectedAuthorityEpoch": error.expected_epoch,
+                "currentAuthorityEpoch": error.current_epoch,
+            },
+        )
+    if isinstance(error, OwnerTruthMediaCaptureUnavailable):
+        return HTTPException(
+            status_code=503,
+            detail={"code": error.code, "retryable": True},
+        )
+    if isinstance(error, OwnerTruthMediaVaultNotFound):
+        return HTTPException(status_code=404, detail={"code": error.code})
+    if isinstance(error, OwnerTruthMediaUploadNotFound):
+        return HTTPException(status_code=404, detail={"code": error.code})
+    if isinstance(error, OwnerTruthMediaUploadExpired):
+        return HTTPException(
+            status_code=409,
+            detail={"code": error.code, "retryable": True},
+        )
+    if isinstance(error, OwnerTruthMediaUploadTokenInvalid):
+        return HTTPException(status_code=403, detail={"code": error.code})
+    if isinstance(error, OwnerTruthMediaUploadConflict):
+        return HTTPException(status_code=409, detail={"code": error.code})
+    if isinstance(error, OwnerTruthMediaUploadInvalid):
+        return HTTPException(status_code=400, detail={"code": error.code})
+    return HTTPException(status_code=400, detail={"code": "ownerTruthMediaIngestionInvalid"})
 
 
 def _owner_truth_family_contribution_http_error(
@@ -5625,6 +5754,110 @@ def create_owner_truth_text_source(
             "source": result.source.public_receipt(),
             "candidateExtraction": {"status": "requested"},
             "acceptedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/source-objects/upload-intents",
+    include_in_schema=False,
+)
+def create_owner_truth_media_upload_intent(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Issue a one-time token for one private Stage 2 media object upload.
+
+    The response intentionally contains no object-store URL. The client sends
+    bytes only to the authenticated content route, and a token is returned once
+    on initial intent creation rather than on idempotent command replay.
+    """
+
+    try:
+        context = _owner_truth_media_capture_context(request, vault_id=vault_id)
+        command = MediaUploadIntentCommand.from_payload(payload)
+        _owner_truth_media_capture_preflight(context=context, command=command)
+        result = OWNER_TRUTH_MEDIA_INGESTION_SERVICE.create_upload_intent(
+            context=context,
+            command=command,
+        )
+    except HTTPException:
+        raise
+    except OwnerTruthMediaIngestionError as error:
+        raise _owner_truth_media_capture_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            **OWNER_TRUTH_MEDIA_INGESTION_SERVICE.public_upload_intent_response(result),
+            "vaultId": context.vault_id,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.put(
+    "/v2/vaults/{vault_id}/source-objects/upload-intents/{intent_id}/content",
+    include_in_schema=False,
+)
+async def upload_owner_truth_media_source_object_content(
+    request: Request,
+    vault_id: str,
+    intent_id: str,
+) -> JSONResponse:
+    """Receive one bounded private media body after server-side safety checks."""
+
+    try:
+        context = _owner_truth_media_capture_context(request, vault_id=vault_id)
+        upload_token = str(request.headers.get("x-dreamjourney-upload-token") or "")
+        outcome, source_object = OWNER_TRUTH_MEDIA_INGESTION_SERVICE.upload_content(
+            context=context,
+            intent_id=intent_id,
+            upload_token=upload_token,
+            payload=await request.body(),
+            request_content_type=request.headers.get("content-type"),
+        )
+    except HTTPException:
+        raise
+    except OwnerTruthMediaIngestionError as error:
+        raise _owner_truth_media_capture_http_error(error) from error
+    return JSONResponse(
+        status_code=202 if outcome == "quarantined" else 200,
+        content={
+            **OWNER_TRUTH_MEDIA_INGESTION_SERVICE.public_source_object_response(source_object),
+            "vaultId": context.vault_id,
+            "status": outcome,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/source-objects/{source_object_id}",
+    include_in_schema=False,
+)
+def get_owner_truth_media_source_object(
+    request: Request,
+    vault_id: str,
+    source_object_id: str,
+) -> JSONResponse:
+    """Read a value-minimized status receipt for one Owner-owned media object."""
+
+    try:
+        context = _owner_truth_media_capture_context(request, vault_id=vault_id)
+        source_object = OWNER_TRUTH_MEDIA_INGESTION_SERVICE.get_source_object(
+            context=context,
+            source_object_id=source_object_id,
+        )
+    except HTTPException:
+        raise
+    except OwnerTruthMediaIngestionError as error:
+        raise _owner_truth_media_capture_http_error(error) from error
+    return JSONResponse(
+        content={
+            **OWNER_TRUTH_MEDIA_INGESTION_SERVICE.public_source_object_response(source_object),
+            "vaultId": context.vault_id,
         },
         headers={"Cache-Control": "no-store"},
     )

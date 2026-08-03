@@ -54,6 +54,9 @@ from app.domain.owner_truth.source_commands import (
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
 )
+from app.services.owner_truth_media_source_object import (
+    InMemoryOwnerTruthMediaSourceObjectRepository,
+)
 from app.services.owner_truth_conversation import (
     InMemoryOwnerTruthConversationRepository,
 )
@@ -158,6 +161,12 @@ class InMemoryStore:
         self._owner_truth_vaults: Dict[str, Dict[str, Any]] = {}
         self._owner_truth_sources: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._owner_truth_source_receipts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._owner_truth_media_source_object_repository = (
+            InMemoryOwnerTruthMediaSourceObjectRepository(
+                vaults=self._owner_truth_vaults,
+                lock=self._owner_truth_lock,
+            )
+        )
         self._owner_truth_family_contribution_grants: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._owner_truth_family_contribution_grant_commands: Dict[Tuple[str, str], str] = {}
         self._effect_kernel_repository = InMemoryEffectKernelRepository()
@@ -339,6 +348,11 @@ class InMemoryStore:
 
     def effect_kernel_repository(self) -> InMemoryEffectKernelRepository:
         return self._effect_kernel_repository
+
+    def owner_truth_media_source_object_repository(
+        self,
+    ) -> InMemoryOwnerTruthMediaSourceObjectRepository:
+        return self._owner_truth_media_source_object_repository
 
     @contextmanager
     def request_unit_of_work(
