@@ -185,7 +185,7 @@ def persisted_summary(
     require(str(media[5] or ""), "server must retain an internal private storage key")
     require(source[0] == source_text, "derived Source text changed during processing")
     require(isinstance(metadata, dict), "derived Source metadata must be structured")
-    require(metadata.get("origin") == "ownerTruthMediaProcessing", "derived Source origin changed")
+    require(metadata.get("origin") == "mediaSourceObjectProcessing", "derived Source origin changed")
     require(len(candidates) == 1, "media Source must create exactly one review Candidate")
     require(candidates[0][1] == "pending", "media Candidate must remain pending Owner review")
     require(len(results) == 1 and results[0][0] == "succeeded", "processing receipt missing")

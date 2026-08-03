@@ -269,6 +269,44 @@ class OwnerTruthCandidateExtractionTests(unittest.TestCase):
             record,
         )
 
+    def test_text_bearing_import_source_is_admitted_for_extraction(self) -> None:
+        record = self._command().write_record()
+        owner_subject_id = self.owner_subject_id
+        source_text = self.source_text
+
+        class _Cursor:
+            def __init__(self):
+                self._rows = [
+                    {
+                        "owner_subject_id": owner_subject_id,
+                        "authority_epoch": 2,
+                        "status": "active",
+                    },
+                    {
+                        "owner_subject_id": owner_subject_id,
+                        "authority_epoch": 2,
+                        "source_version": 1,
+                        "state": "active",
+                        "content_hash": record.source_content_hash,
+                        "source_kind": "import",
+                        "content_payload": {
+                            "sourceKind": "import",
+                            "text": source_text,
+                        },
+                    },
+                ]
+
+            def execute(self, *_args, **_kwargs):
+                return None
+
+            def fetchone(self):
+                return self._rows.pop(0)
+
+        PostgresOwnerTruthCandidateExtractionRepository(object())._assert_live_source(
+            _Cursor(),
+            record,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

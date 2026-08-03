@@ -318,7 +318,7 @@ class PostgresOwnerTruthCandidateExtractionRepository:
             raise OwnerTruthCandidateExtractionConflict(
                 "Source target changed before extraction result persistence"
             )
-        if str(source["source_kind"]) not in {"text", "conversation"}:
+        if str(source["source_kind"]) not in {"text", "conversation", "import"}:
             raise OwnerTruthCandidateExtractionConflict(
                 "synthetic Candidate extraction requires a text-bearing Source"
             )
