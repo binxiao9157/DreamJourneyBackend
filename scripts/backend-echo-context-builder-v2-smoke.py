@@ -65,6 +65,8 @@ def generation_refs(packet: Dict[str, Any]) -> List[str]:
 def main() -> None:
     previous_store = main_module.store
     previous_settings = main_module.settings
+    previous_backend_api_token = main_module.BACKEND_API_TOKEN
+    previous_auth_route_mode = main_module.AUTH_ROUTE_MODE
     previous_release_policy_command_mode = main_module.RELEASE_POLICY_COMMAND_MODE
     previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
     previous_release_policy_command_gate = main_module.RELEASE_POLICY_COMMAND_GATE
@@ -79,7 +81,10 @@ def main() -> None:
     )
     # This smoke exercises the deterministic in-memory Context V2 policy, not
     # the deployment's default-off command rollout. Isolate all rollout state
-    # so production enforcement cannot prevent setup of private fixture data.
+    # and route authentication so production enforcement cannot prevent setup
+    # of private fixture data.
+    main_module.BACKEND_API_TOKEN = ""
+    main_module.AUTH_ROUTE_MODE = "shadow"
     main_module.RELEASE_POLICY_COMMAND_MODE = "observe"
     main_module.RELEASE_POLICY_SERVICE = ReleasePolicyService(
         shadow_mode=True,
@@ -409,6 +414,8 @@ def main() -> None:
     finally:
         main_module.store = previous_store
         main_module.settings = previous_settings
+        main_module.BACKEND_API_TOKEN = previous_backend_api_token
+        main_module.AUTH_ROUTE_MODE = previous_auth_route_mode
         main_module.RELEASE_POLICY_COMMAND_MODE = previous_release_policy_command_mode
         main_module.RELEASE_POLICY_SERVICE = previous_release_policy_service
         main_module.RELEASE_POLICY_COMMAND_GATE = previous_release_policy_command_gate
