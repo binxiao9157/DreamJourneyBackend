@@ -27,6 +27,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/services/owner_truth_media_source_object.py \
   app/services/owner_truth_media_processing.py \
   app/async_effects/owner_truth_media_processing_worker.py \
+  scripts/backend-owner-truth-media-processing-postgres-smoke.py \
   app/services/route_ownership.py \
   app/services/release_policy.py \
   app/main.py
@@ -58,3 +59,6 @@ assert "ownerTruthMediaProcessingWorker" in worker
 assert "def _record_attempt(" in worker
 print("Owner Truth Stage 2 private media processing gate passed")
 PY
+
+bash -n scripts/run-backend-owner-truth-media-processing-postgres-smoke.sh
+bash -n scripts/run-backend-owner-truth-media-processing-deployed-smoke.sh
