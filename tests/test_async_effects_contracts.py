@@ -67,6 +67,23 @@ class AsyncEffectContractsTests(unittest.TestCase):
                 payload_hash="the private letter body must not be stored here",
             )
 
+    def test_max_attempts_is_bounded_and_part_of_the_effect_policy(self):
+        intent = AsyncEffectIntent(
+            operation_type="timeLetter.delivery",
+            target=self.target(),
+            payload_hash=payload_hash("metadata-v1"),
+            max_attempts=3,
+        )
+        self.assertEqual(intent.max_attempts, 3)
+
+        with self.assertRaises(AsyncEffectContractError):
+            AsyncEffectIntent(
+                operation_type="timeLetter.delivery",
+                target=self.target(),
+                payload_hash=payload_hash("metadata-v1"),
+                max_attempts=0,
+            )
+
     def test_public_receipt_summary_does_not_expose_payload_hash_or_body(self):
         intent = AsyncEffectIntent(
             operation_type="timeLetter.delivery",

@@ -217,6 +217,7 @@ class InMemoryAsyncEffectLeaseRepository:
                     "jobType": intent.job_type,
                     "state": AsyncEffectJobState.PENDING.value,
                     "attempt": 0,
+                    "maxAttempts": intent.max_attempts,
                     "availableAt": available_at or self._now(),
                     "leaseOwner": None,
                     "leaseUntil": None,
@@ -567,6 +568,7 @@ class PostgresAsyncEffectLeaseRepository:
                     job.stable_key,
                     job.job_type,
                     job.payload_hash AS job_payload_hash,
+                    job.max_attempts,
                     operation.operation_type,
                     operation.payload_hash AS operation_payload_hash,
                     outbox.event_id,
@@ -615,6 +617,7 @@ class PostgresAsyncEffectLeaseRepository:
                 payload_hash=str(row["job_payload_hash"]),
                 event_type=str(row["event_type"]),
                 job_type=str(row["job_type"]),
+                max_attempts=int(row["max_attempts"]),
             )
             if (
                 intent.operation_id != str(row["operation_id"])

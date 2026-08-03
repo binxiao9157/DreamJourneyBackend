@@ -214,8 +214,10 @@ class CreateTextSourceCommand:
             source_kind = SourceKind(self.source_kind)
         except (TypeError, ValueError) as exc:
             raise OwnerTruthContractError("source_kind is not supported") from exc
-        if source_kind not in {SourceKind.TEXT, SourceKind.CONVERSATION}:
-            raise OwnerTruthContractError("CreateTextSourceCommand supports text or conversation sources")
+        if source_kind not in {SourceKind.TEXT, SourceKind.CONVERSATION, SourceKind.IMPORT}:
+            raise OwnerTruthContractError(
+                "CreateTextSourceCommand supports text, conversation, or import sources"
+            )
         object.__setattr__(self, "source_kind", source_kind)
         if self.expected_authority_epoch is not None and (
             type(self.expected_authority_epoch) is not int
@@ -294,8 +296,10 @@ class OwnerTruthSourceWriteRecord:
             source_kind = SourceKind(self.source_kind)
         except (TypeError, ValueError) as exc:
             raise OwnerTruthContractError("source_kind is not supported") from exc
-        if source_kind not in {SourceKind.TEXT, SourceKind.CONVERSATION}:
-            raise OwnerTruthContractError("OwnerTruthSourceWriteRecord supports text or conversation sources")
+        if source_kind not in {SourceKind.TEXT, SourceKind.CONVERSATION, SourceKind.IMPORT}:
+            raise OwnerTruthContractError(
+                "OwnerTruthSourceWriteRecord supports text, conversation, or import sources"
+            )
         object.__setattr__(self, "source_kind", source_kind)
         if self.expected_authority_epoch is not None and (
             type(self.expected_authority_epoch) is not int

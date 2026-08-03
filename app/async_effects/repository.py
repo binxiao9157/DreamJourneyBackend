@@ -161,6 +161,7 @@ class PostgresEffectKernelRepository:
                 if existing is None:
                     raise RuntimeError("effect operation insert did not produce a row")
                 self._assert_immutable_match(existing, intent)
+                self._assert_job_policy_match(cursor, intent)
                 return _summary(intent, outcome="deduplicated")
 
             self._insert_initial_records(cursor, intent)
@@ -204,6 +205,23 @@ class PostgresEffectKernelRepository:
             )
 
     @staticmethod
+    def _assert_job_policy_match(cursor: Any, intent: AsyncEffectIntent) -> None:
+        cursor.execute(
+            """
+            SELECT max_attempts
+            FROM async_effects.jobs
+            WHERE operation_id = %s AND job_type = %s
+            FOR UPDATE
+            """,
+            (intent.operation_id, intent.job_type),
+        )
+        row = cursor.fetchone()
+        if row is None or int(row["max_attempts"]) != intent.max_attempts:
+            raise AsyncEffectConflict(
+                "stable effect key cannot be reused with a different job retry policy"
+            )
+
+    @staticmethod
     def _insert_initial_records(cursor: Any, intent: AsyncEffectIntent) -> None:
         target = intent.target
         common = (
@@ -236,10 +254,10 @@ class PostgresEffectKernelRepository:
                 resource_id, resource_version, purpose, authority_epoch, stable_key,
                 job_type, payload_hash, state, attempt, max_attempts
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', 0, 1)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', 0, %s)
             ON CONFLICT (operation_id, job_type) DO NOTHING
             """,
-            (intent.job_id, *common, intent.job_type, intent.payload_hash),
+            (intent.job_id, *common, intent.job_type, intent.payload_hash, intent.max_attempts),
         )
         cursor.execute(
             """

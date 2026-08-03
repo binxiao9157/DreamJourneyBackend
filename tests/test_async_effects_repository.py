@@ -128,7 +128,10 @@ class PostgresEffectKernelRepositoryContractTests(unittest.TestCase):
         self.assertIn("async_effects.outbox_events", calls[1][0])
         self.assertEqual(calls[1][1][-2:], (intent.event_type, intent.payload_hash))
         self.assertIn("async_effects.jobs", calls[2][0])
-        self.assertEqual(calls[2][1][-2:], (intent.job_type, intent.payload_hash))
+        self.assertEqual(
+            calls[2][1][-3:],
+            (intent.job_type, intent.payload_hash, intent.max_attempts),
+        )
         self.assertIn("async_effects.business_receipts", calls[3][0])
         self.assertEqual(
             calls[3][1][-2:],

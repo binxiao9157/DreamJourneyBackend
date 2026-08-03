@@ -107,6 +107,14 @@ def _require_non_negative_int(value: object, *, field: str) -> int:
     return value
 
 
+def _require_positive_int(value: object, *, field: str, maximum: int = 100) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+        raise AsyncEffectContractError(
+            f"{field} must be an integer between 1 and {maximum}"
+        )
+    return value
+
+
 def _require_sha256(value: object, *, field: str) -> str:
     normalized = _require_nonblank(value, field=field).lower()
     if not _SHA256_PATTERN.fullmatch(normalized):
@@ -193,6 +201,7 @@ class AsyncEffectIntent:
     payload_hash: str
     event_type: str | None = None
     job_type: str | None = None
+    max_attempts: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -207,6 +216,11 @@ class AsyncEffectIntent:
         job_type = self.job_type or self.operation_type
         object.__setattr__(self, "event_type", _require_identifier(event_type, field="event_type"))
         object.__setattr__(self, "job_type", _require_identifier(job_type, field="job_type"))
+        object.__setattr__(
+            self,
+            "max_attempts",
+            _require_positive_int(self.max_attempts, field="max_attempts"),
+        )
 
     @property
     def stable_key(self) -> str:
@@ -245,6 +259,7 @@ class AsyncEffectIntent:
                 {
                     "eventType": self.event_type,
                     "jobType": self.job_type,
+                    "maxAttempts": self.max_attempts,
                     "operationType": self.operation_type,
                     "payloadHash": self.payload_hash,
                     "stableKey": self.stable_key,
