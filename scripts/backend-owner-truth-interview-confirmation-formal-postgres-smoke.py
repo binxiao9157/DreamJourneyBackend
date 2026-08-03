@@ -1316,7 +1316,7 @@ def main() -> None:
             and materialization_after_projection["shadowOnly"] is True
             and materialization_after_projection["legacyContextUnchanged"] is True
             and materialization_after_projection["legacyContextRead"] is False
-            and materialization_after_projection["authority"]["checkpoint"]
+            and materialization_after_projection["authority"]["projectionCheckpoint"]
             == projection_result["projectionCheckpoint"]
             and len(materialization_after_projection["typedCitations"]) == 1
             and materialization_after_projection["generationContext"]["sourceCount"] == 1
