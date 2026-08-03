@@ -1268,7 +1268,7 @@ def main() -> None:
             "a failed retry must not hide the prior reviewable Candidate",
         )
         proposal_status_after_failed_refresh = (
-            OwnerTruthInterviewCandidateProposalStatusService(store).read_status(
+            OwnerTruthInterviewCandidateProposalStatusService(restarted_store).read_status(
                 review_batch_id=review_batch.review_batch.review_batch_id,
                 context=context,
             )
