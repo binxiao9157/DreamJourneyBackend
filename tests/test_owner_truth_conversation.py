@@ -20,6 +20,7 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_conversation import (
     InMemoryOwnerTruthConversationRepository,
     OwnerTruthConversationService,
+    PostgresOwnerTruthConversationRepository,
 )
 
 
@@ -309,6 +310,58 @@ class OwnerTruthConversationTests(unittest.TestCase):
                 ),
                 context=self.context,
             )
+
+
+class PostgresOwnerTruthConversationRepositoryTests(unittest.TestCase):
+    def test_pending_review_query_binds_batch_to_current_session_thread(self) -> None:
+        class CapturingCursor:
+            def __init__(self) -> None:
+                self.statements: list[tuple[str, tuple[object, ...]]] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                return None
+
+            def execute(self, statement: str, params: tuple[object, ...]) -> None:
+                self.statements.append((statement, params))
+
+            def fetchone(self):
+                return {
+                    "owner_subject_id": "owner-a",
+                    "authority_epoch": 4,
+                    "status": "active",
+                }
+
+            def fetchall(self):
+                return []
+
+        class CapturingConnection:
+            def __init__(self, cursor: CapturingCursor) -> None:
+                self.cursor_value = cursor
+
+            def cursor(self, *, row_factory=None):
+                return self.cursor_value
+
+        cursor = CapturingCursor()
+        repository = PostgresOwnerTruthConversationRepository(CapturingConnection(cursor))
+        context = OwnerTruthCommandContext(
+            vault_id="vault-a",
+            owner_subject_id="owner-a",
+            actor_subject_id="owner-a",
+            policy_version="owner-truth-v1",
+        )
+
+        self.assertEqual(repository.list_pending_interview_review_batches(context=context), ())
+
+        pending_query = next(
+            statement
+            for statement, _ in cursor.statements
+            if "FROM owner_truth.interview_review_batches AS b" in statement
+        )
+        self.assertIn("AND s.current_thread_id = b.thread_id", pending_query)
+        self.assertNotIn("AND s.thread_id = b.thread_id", pending_query)
 
 
 if __name__ == "__main__":

@@ -2700,7 +2700,7 @@ class PostgresOwnerTruthConversationRepository:
                   AND b.authority_epoch = %s
                   AND b.state = %s
                   AND s.owner_subject_id = %s
-                  AND s.thread_id = b.thread_id
+                  AND s.current_thread_id = b.thread_id
                   AND s.authority_epoch = %s
                   AND s.pending_review_batch_id = b.id
                   AND t.owner_subject_id = %s
