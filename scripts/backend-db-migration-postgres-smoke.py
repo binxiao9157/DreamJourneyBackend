@@ -54,12 +54,12 @@ def drop_database(admin_dsn, database_name):
             )
 
 
-def migrator(dsn, build_id, migrations_dir=None):
+def migrator(dsn, build_id, migrations_dir=None, *, lock_timeout_ms=1000):
     return PostgresMigrator(
         dsn=dsn,
         migrations_dir=migrations_dir or default_migrations_dir(),
         build_id=build_id,
-        lock_timeout_ms=1000,
+        lock_timeout_ms=lock_timeout_ms,
         statement_timeout_ms=15000,
     )
 
@@ -164,6 +164,10 @@ def main():
                     lambda index: migrator(
                         concurrent_dsn,
                         f"g2-concurrent-{index}",
+                        # The second migrator must wait for the first full
+                        # schema apply on slower deployed Postgres instances.
+                        # A one-second probe only tests scheduling luck.
+                        lock_timeout_ms=30_000,
                     ).apply(),
                     range(2),
                 )
