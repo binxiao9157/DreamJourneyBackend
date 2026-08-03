@@ -93,4 +93,20 @@ scripts/run-backend-owner-truth-media-processing-gate.sh
 
 该 Gate 覆盖：私有上传、跨 Owner 隔离、S3/COS 无公共 ACL、文本/PDF/DOCX 解析、OCR/ASR 授权合同、三次重试、人工新代次重试、迁移合同、路由归属和发布策略。
 
-本轮没有配置真实 OCR/ASR Provider，也没有部署到服务器；真实 Provider 和 Postgres closed-pilot smoke 应在部署审批后单独执行并保留证据。
+部署容器内执行：
+
+```bash
+DREAMJOURNEY_DEPLOYED_CONTAINER_SMOKE=1 \
+BACKEND_BASE_URL=https://dreamjourney-api.liftora.cn \
+scripts/run-backend-owner-truth-media-processing-deployed-smoke.sh
+```
+
+## 2026-08-03 部署证据
+
+- 服务器后端版本：`98898cd`。
+- PostgreSQL 已从 `0072` 迁移到 `0074`，`0073`、`0074` 均成功执行；迁移校验结果为 `status=ready`、`pendingVersions=[]`。
+- 公网 `/ready` 验证通过：database、schema、auth、incident 均为 `ready`。
+- 部署态 smoke 在服务器容器内创建一次性 PostgreSQL 数据库，完成后自动删除，没有写入生产业务表。
+- E2E 已证明：公开默认关闭、Owner 绑定上传、命令幂等、跨 Owner 隐藏、私有文件落盘、媒体处理成功、派生 `import` Source、生成一条 `pending` Candidate、处理回执持久化及响应脱敏。
+- E2E 首轮发现并修复了 PostgreSQL Candidate 层未接纳合法 `import` Source 的差异；回归测试已覆盖该来源类型。
+- 生产环境仍未启动 `owner-truth-media-worker` profile，也未打开媒体摄入、图片 OCR 或音频 ASR；真实 Provider 验收不在本次证据范围内。
