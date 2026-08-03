@@ -67,25 +67,33 @@ def main():
         if item.get("enabled") is True and item.get("releaseVisible") is True
     }
     hidden_features = {item.get("feature") for item in decisions if item.get("enabled") is not True}
-    require(public_features == OWNER_CORE, "deployed owner core differs from Closed Pilot baseline")
-    require(hidden_features.isdisjoint(OWNER_CORE), "owner core must not be hidden")
+    # This deployed smoke uses the backend machine credential. A machine can
+    # inspect the policy contract, but must never self-enrol into an Owner
+    # closed pilot merely by sending a cohort query parameter.
+    require(policy.get("cohort") == "unassigned", "machine caller must not self-enrol into Closed Pilot")
+    require(not public_features, "unassigned machine caller must not receive Owner-visible features")
+    require(OWNER_CORE.issubset(hidden_features), "Owner core must remain hidden from an unassigned machine caller")
+    require(
+        bool(policy.get("shadowMode")) is (EXPECTED_MODE != "enforce"),
+        "deployed policy shadow mode differs from the expected command mode",
+    )
 
     _, profile_headers, _ = request_json(
         "/profile",
         method="POST",
         payload={},
         extra_headers={"X-DreamJourney-Policy-Audience": "qa"},
-        expected=(400,),
+        expected=(403,),
     )
-    require(profile_headers.get("x-dreamjourney-release-policy-decision") == "allow", "forged QA must normalize to owner core")
+    require(
+        profile_headers.get("x-dreamjourney-route-auth-decision") == "deny",
+        "machine credential must not bypass the user-only profile route",
+    )
+    require(
+        profile_headers.get("x-dreamjourney-route-auth-reason") == "userPrincipalRequired",
+        "profile route must reject a machine credential as a user principal",
+    )
 
-    family_mode = (
-        "enforce"
-        if EXPECTED_MODE == "enforce"
-        or "familyManagement" in EXPECTED_CANARY | EXPECTED_KILL_SWITCH
-        else "observe"
-    )
-    expected_family_status = (400,) if family_mode == "observe" else (403,)
     _, family_headers, _ = request_json(
         "/family/invite",
         method="POST",
@@ -94,13 +102,15 @@ def main():
             "X-DreamJourney-Policy-Audience": "qa",
             "X-DreamJourney-Feature-Allowed": "true",
         },
-        expected=expected_family_status,
+        expected=(403,),
     )
-    hidden_decision = "observeDeny" if family_mode == "observe" else "deny"
-    require(family_headers.get("x-dreamjourney-release-policy-decision") == hidden_decision, "hidden command must remain denied")
     require(
-        family_headers.get("x-dreamjourney-release-policy-mode") == family_mode,
-        "hidden command mode must match feature rollout",
+        family_headers.get("x-dreamjourney-route-auth-decision") == "deny",
+        "machine credential must not bypass the user-only family route",
+    )
+    require(
+        family_headers.get("x-dreamjourney-route-auth-reason") == "userPrincipalRequired",
+        "family route must reject a machine credential as a user principal",
     )
 
     _, _, unknown = request_json("/v2/release-policy?" + urllib.parse.urlencode({"feature": "futureUnknownFeature"}))
@@ -116,7 +126,8 @@ def main():
         "canaryFeatures": sorted(EXPECTED_CANARY),
         "killSwitchFeatures": sorted(EXPECTED_KILL_SWITCH),
         "features": {
-            "publicOwnerCore": sorted(public_features),
+            "visibleForUnassignedMachine": sorted(public_features),
+            "closedPilotOwnerCore": sorted(OWNER_CORE),
             "hiddenCount": len(hidden_features),
             "unknownDenied": True,
         },
@@ -125,8 +136,8 @@ def main():
             "hiddenRouteBypassCount": 0,
         },
         "commands": [
-            {"feature": "profileSettings", "forgedAudience": "qa", "effectiveAudience": "owner", "decision": "allow"},
-            {"feature": "familyManagement", "forgedAudience": "qa", "decision": hidden_decision},
+            {"feature": "profileSettings", "forgedAudience": "qa", "routeAuthentication": "userPrincipalRequired"},
+            {"feature": "familyManagement", "forgedAudience": "qa", "routeAuthentication": "userPrincipalRequired"},
         ],
     }
     if OUTPUT_PATH:
