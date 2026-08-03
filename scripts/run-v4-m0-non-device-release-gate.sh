@@ -21,6 +21,9 @@ MANIFEST_PATH="$OUTPUT_DIR/manifest.json"
 RUN_FULL_VERIFY="${RUN_FULL_VERIFY:-1}"
 RUN_ISOLATED_POSTGRES="${RUN_ISOLATED_POSTGRES:-1}"
 RUN_DEPLOYED="${RUN_DEPLOYED:-1}"
+RUN_WORKTREE_DIFF_CHECK="${RUN_WORKTREE_DIFF_CHECK:-$RUN_FULL_VERIFY}"
+FULL_VERIFY_EVIDENCE_PATH="${FULL_VERIFY_EVIDENCE_PATH:-}"
+BACKEND_COMMIT="${BACKEND_COMMIT:-}"
 
 BACKEND_BASE_URL="${BACKEND_BASE_URL:-${DREAMJOURNEY_BACKEND_BASE_URL:-}}"
 BACKEND_API_TOKEN="${BACKEND_API_TOKEN:-${DREAMJOURNEY_BACKEND_API_TOKEN:-}}"
@@ -90,6 +93,36 @@ require_isolated_postgres_environment() {
   }
 }
 
+verify_external_full_verify_evidence() {
+  [[ -n "$FULL_VERIFY_EVIDENCE_PATH" ]] || {
+    printf '%s\n' 'FULL_VERIFY_EVIDENCE_PATH is required when RUN_FULL_VERIFY=0' >&2
+    exit 2
+  }
+  [[ -f "$FULL_VERIFY_EVIDENCE_PATH" ]] || {
+    printf 'Full verify evidence does not exist: %s\n' "$FULL_VERIFY_EVIDENCE_PATH" >&2
+    exit 2
+  }
+  FULL_VERIFY_EVIDENCE_PATH="$FULL_VERIFY_EVIDENCE_PATH" \
+  BACKEND_COMMIT="$BACKEND_COMMIT" \
+    "$PYTHON_BIN" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+payload = json.loads(Path(os.environ["FULL_VERIFY_EVIDENCE_PATH"]).read_text(encoding="utf-8"))
+config = payload.get("configuration") or {}
+steps = {str(step.get("name")): str(step.get("status")) for step in payload.get("steps") or []}
+if config.get("fullVerify") is not True:
+    raise SystemExit("full verify evidence did not run the complete backend verifier")
+for name in ("backend-verify", "backend-git-diff-check"):
+    if steps.get(name) != "passed":
+        raise SystemExit(f"full verify evidence missing passing {name}")
+expected_commit = os.environ.get("BACKEND_COMMIT", "").strip()
+if expected_commit and payload.get("backendCommit") != expected_commit:
+    raise SystemExit("full verify evidence commit does not match deployed commit")
+PY
+}
+
 finalize_evidence() {
   local exit_status=$?
   V4_ROOT_DIR="$ROOT_DIR" \
@@ -98,6 +131,9 @@ finalize_evidence() {
   V4_RUN_FULL_VERIFY="$RUN_FULL_VERIFY" \
   V4_RUN_ISOLATED_POSTGRES="$RUN_ISOLATED_POSTGRES" \
   V4_RUN_DEPLOYED="$RUN_DEPLOYED" \
+  V4_RUN_WORKTREE_DIFF_CHECK="$RUN_WORKTREE_DIFF_CHECK" \
+  V4_FULL_VERIFY_EVIDENCE_PATH="$FULL_VERIFY_EVIDENCE_PATH" \
+  V4_BACKEND_COMMIT="$BACKEND_COMMIT" \
   V4_BACKEND_BASE_URL="$BACKEND_BASE_URL" \
   V4_GATE_EXIT_STATUS="$exit_status" \
   "$PYTHON_BIN" - "$STEP_FILE" "$MANIFEST_PATH" "$REPORT_PATH" <<'PY'
@@ -113,10 +149,18 @@ manifest_path = Path(sys.argv[2])
 report_path = Path(sys.argv[3])
 root = Path(os.environ["V4_ROOT_DIR"])
 steps = [json.loads(line) for line in steps_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-commit = subprocess.check_output(
-    ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
-).strip()
+commit = os.environ.get("V4_BACKEND_COMMIT", "").strip()
+if not commit:
+    try:
+        commit = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+        ).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        commit = "unavailable-in-runtime-image"
+full_verify_proven = os.environ["V4_RUN_FULL_VERIFY"] == "1" or bool(os.environ["V4_FULL_VERIFY_EVIDENCE_PATH"])
 complete = (
+    full_verify_proven
+    and
     os.environ["V4_RUN_ISOLATED_POSTGRES"] == "1"
     and os.environ["V4_RUN_DEPLOYED"] == "1"
     and os.environ["V4_GATE_EXIT_STATUS"] == "0"
@@ -129,7 +173,9 @@ manifest = {
     "backendCommit": commit,
     "backendBaseUrlConfigured": bool(os.environ["V4_BACKEND_BASE_URL"]),
     "configuration": {
-        "fullVerify": os.environ["V4_RUN_FULL_VERIFY"] == "1",
+        "fullVerify": full_verify_proven,
+        "fullVerifyExecutedHere": os.environ["V4_RUN_FULL_VERIFY"] == "1",
+        "worktreeDiffExecutedHere": os.environ["V4_RUN_WORKTREE_DIFF_CHECK"] == "1",
         "isolatedPostgres": os.environ["V4_RUN_ISOLATED_POSTGRES"] == "1",
         "deployed": os.environ["V4_RUN_DEPLOYED"] == "1",
     },
@@ -178,8 +224,12 @@ cd "$ROOT_DIR"
 
 if [[ "$RUN_FULL_VERIFY" == "1" ]]; then
   run_step "backend-verify" bash scripts/verify_backend.sh
+else
+  run_step "external-full-verify-evidence" verify_external_full_verify_evidence
 fi
-run_step "backend-git-diff-check" git diff --check
+if [[ "$RUN_WORKTREE_DIFF_CHECK" == "1" ]]; then
+  run_step "backend-git-diff-check" git diff --check
+fi
 
 if [[ "$RUN_ISOLATED_POSTGRES" == "1" ]]; then
   require_isolated_postgres_environment
@@ -206,4 +256,4 @@ if [[ "$RUN_DEPLOYED" == "1" ]]; then
   run_step "deployed-public-release-scope" env BACKEND_BASE_URL="$BACKEND_BASE_URL" BACKEND_API_TOKEN="$BACKEND_API_TOKEN" EXPECTED_RELEASE_POLICY_COMMAND_MODE=observe OUTPUT_PATH="$OUTPUT_DIR/public-release-scope.json" bash scripts/run-backend-public-release-scope-deployed-smoke.sh
 fi
 
-printf 'V4 M0 non-device backend gate passed: %s\n' "$REPORT_PATH"
+printf 'V4 M0 non-device backend gate finished: %s\n' "$REPORT_PATH"

@@ -13,6 +13,17 @@
 
 ## 服务器执行
 
+生产镜像不会携带 `tests/` 或 Git 工作区。先在受控开发环境执行一次完整验证，并把生成的 `manifest.json` 复制到服务器，再在后端容器运行 Postgres 与已部署 API 部分：
+
+```bash
+RUN_FULL_VERIFY=1 \
+RUN_ISOLATED_POSTGRES=0 \
+RUN_DEPLOYED=0 \
+RUN_ID="v4-m0-local-$(date +%Y%m%d-%H%M%S)" \
+OUTPUT_ROOT=/tmp/dreamjourney-v4-m0-local \
+scripts/run-v4-m0-non-device-release-gate.sh
+```
+
 后端容器已取得 `.env` 中的数据库连接和机器 token 时，在服务器项目目录执行：
 
 ```bash
@@ -20,7 +31,11 @@ sudo docker compose exec -T api sh -lc '
   cd /app && \
   RUN_ID="v4-m0-non-device-$(date +%Y%m%d-%H%M%S)" \
   OUTPUT_ROOT=/tmp/dreamjourney-v4-m0-gate \
+  FULL_VERIFY_EVIDENCE_PATH=/tmp/v4-m0-local-manifest.json \
+  BACKEND_COMMIT=<已验证且已部署的提交> \
   BACKEND_BASE_URL=http://127.0.0.1:8080 \
+  RUN_FULL_VERIFY=0 \
+  RUN_WORKTREE_DIFF_CHECK=0 \
   RUN_ISOLATED_POSTGRES=1 \
   RUN_DEPLOYED=1 \
   scripts/run-v4-m0-non-device-release-gate.sh
