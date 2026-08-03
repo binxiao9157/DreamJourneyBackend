@@ -106,9 +106,35 @@ class Settings:
     owner_truth_media_capture_enabled: bool = False
     owner_truth_media_storage_provider: str = "disabled"
     owner_truth_media_storage_root: str = "/var/lib/dreamjourney/media"
+    # ``s3`` is an S3-compatible private bucket, including Tencent COS through
+    # its S3 endpoint. Credentials stay server-side and no public object URL
+    # is issued by the media API.
+    owner_truth_media_s3_bucket: Optional[str] = None
+    owner_truth_media_s3_prefix: str = "dreamjourney/private-media"
+    owner_truth_media_s3_region: Optional[str] = None
+    owner_truth_media_s3_endpoint_url: Optional[str] = None
+    owner_truth_media_s3_access_key_id: Optional[str] = None
+    owner_truth_media_s3_secret_access_key: Optional[str] = None
+    owner_truth_media_s3_server_side_encryption: Optional[str] = None
+    owner_truth_media_s3_kms_key_id: Optional[str] = None
     owner_truth_media_upload_intent_ttl_seconds: int = 900
     owner_truth_media_max_upload_bytes: int = 50 * 1024 * 1024
     owner_truth_media_content_safety_provider: str = "disabled"
+    # The private parser/OCR/ASR queue is a separate worker lane. It remains
+    # off until capture, storage and the selected processor rollout are ready.
+    owner_truth_media_processing_worker_enabled: bool = False
+    # Image OCR and audio ASR stay provider-neutral. ``httpJson`` sends only
+    # user-consented bytes to a server-configured HTTPS adapter and expects a
+    # JSON ``text`` or ``transcript`` response. No mobile credential or object
+    # URL is ever used here; the default remains disabled.
+    owner_truth_media_image_ocr_provider: str = "disabled"
+    owner_truth_media_image_ocr_url: Optional[str] = None
+    owner_truth_media_image_ocr_api_key: Optional[str] = None
+    owner_truth_media_audio_asr_provider: str = "disabled"
+    owner_truth_media_audio_asr_url: Optional[str] = None
+    owner_truth_media_audio_asr_api_key: Optional[str] = None
+    owner_truth_media_external_processor_timeout_seconds: float = 30.0
+    owner_truth_media_external_processor_max_payload_bytes: int = 10 * 1024 * 1024
     delegated_access_contract_api_enabled: bool = False
     # Candidate review is an Owner Truth QA contract only until the M0 review
     # UI, release policy, and external gates are complete.
@@ -369,6 +395,19 @@ class Settings:
                 "OWNER_TRUTH_MEDIA_STORAGE_ROOT",
                 cls.owner_truth_media_storage_root,
             ) or cls.owner_truth_media_storage_root,
+            owner_truth_media_s3_bucket=_env("OWNER_TRUTH_MEDIA_S3_BUCKET"),
+            owner_truth_media_s3_prefix=_env(
+                "OWNER_TRUTH_MEDIA_S3_PREFIX",
+                cls.owner_truth_media_s3_prefix,
+            ) or cls.owner_truth_media_s3_prefix,
+            owner_truth_media_s3_region=_env("OWNER_TRUTH_MEDIA_S3_REGION"),
+            owner_truth_media_s3_endpoint_url=_env("OWNER_TRUTH_MEDIA_S3_ENDPOINT_URL"),
+            owner_truth_media_s3_access_key_id=_env("OWNER_TRUTH_MEDIA_S3_ACCESS_KEY_ID"),
+            owner_truth_media_s3_secret_access_key=_env("OWNER_TRUTH_MEDIA_S3_SECRET_ACCESS_KEY"),
+            owner_truth_media_s3_server_side_encryption=_env(
+                "OWNER_TRUTH_MEDIA_S3_SERVER_SIDE_ENCRYPTION"
+            ),
+            owner_truth_media_s3_kms_key_id=_env("OWNER_TRUTH_MEDIA_S3_KMS_KEY_ID"),
             owner_truth_media_upload_intent_ttl_seconds=max(
                 60,
                 _env_int(
@@ -387,6 +426,42 @@ class Settings:
                 "OWNER_TRUTH_MEDIA_CONTENT_SAFETY_PROVIDER",
                 cls.owner_truth_media_content_safety_provider,
             ) or cls.owner_truth_media_content_safety_provider,
+            owner_truth_media_processing_worker_enabled=_env_bool(
+                "OWNER_TRUTH_MEDIA_PROCESSING_WORKER_ENABLED",
+                cls.owner_truth_media_processing_worker_enabled,
+            ),
+            owner_truth_media_image_ocr_provider=_env(
+                "OWNER_TRUTH_MEDIA_IMAGE_OCR_PROVIDER",
+                cls.owner_truth_media_image_ocr_provider,
+            ) or cls.owner_truth_media_image_ocr_provider,
+            owner_truth_media_image_ocr_url=_env("OWNER_TRUTH_MEDIA_IMAGE_OCR_URL"),
+            owner_truth_media_image_ocr_api_key=_env("OWNER_TRUTH_MEDIA_IMAGE_OCR_API_KEY"),
+            owner_truth_media_audio_asr_provider=_env(
+                "OWNER_TRUTH_MEDIA_AUDIO_ASR_PROVIDER",
+                cls.owner_truth_media_audio_asr_provider,
+            ) or cls.owner_truth_media_audio_asr_provider,
+            owner_truth_media_audio_asr_url=_env("OWNER_TRUTH_MEDIA_AUDIO_ASR_URL"),
+            owner_truth_media_audio_asr_api_key=_env("OWNER_TRUTH_MEDIA_AUDIO_ASR_API_KEY"),
+            owner_truth_media_external_processor_timeout_seconds=max(
+                1.0,
+                min(
+                    120.0,
+                    _env_float(
+                        "OWNER_TRUTH_MEDIA_EXTERNAL_PROCESSOR_TIMEOUT_SECONDS",
+                        cls.owner_truth_media_external_processor_timeout_seconds,
+                    ),
+                ),
+            ),
+            owner_truth_media_external_processor_max_payload_bytes=max(
+                1,
+                min(
+                    50 * 1024 * 1024,
+                    _env_int(
+                        "OWNER_TRUTH_MEDIA_EXTERNAL_PROCESSOR_MAX_PAYLOAD_BYTES",
+                        cls.owner_truth_media_external_processor_max_payload_bytes,
+                    ),
+                ),
+            ),
             delegated_access_contract_api_enabled=_env_bool(
                 "DELEGATED_ACCESS_CONTRACT_API_ENABLED",
                 cls.delegated_access_contract_api_enabled,

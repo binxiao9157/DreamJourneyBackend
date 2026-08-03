@@ -150,6 +150,20 @@ class AsyncEffectLeaseRepositoryTests(unittest.TestCase):
         self.assertEqual(completion.operation_state, "blocked")
         self.assertEqual(self.repository.attempt_state(lease.job_id, 1), "terminalFailed")
 
+    def test_failed_completion_records_a_terminal_retry_exhaustion_outcome(self):
+        lease = self.claim()
+        self.assertIsNotNone(lease)
+
+        completion = self.repository.complete(
+            lease,
+            outcome="failed",
+            error_code="mediaProcessingRetriesExhausted",
+        )
+
+        self.assertEqual(completion.job_state, "failed")
+        self.assertEqual(completion.operation_state, "failed")
+        self.assertEqual(self.repository.attempt_state(lease.job_id, 1), "terminalFailed")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -967,6 +967,14 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
             "POST /v2/vaults/*/guided-recommendations/activate",
         )
         self.assertEqual(
+            gate.route_label_for_request(
+                "POST",
+                "/v2/vaults/vault-a/source-objects/object-a/processing-retries",
+                {},
+            ),
+            "POST /v2/vaults/*/source-objects/*/processing-retries",
+        )
+        self.assertEqual(
             gate.feature_for_request("POST", "/echo/delayed-replies/dispatch-due", {}),
             "echoTextInput",
         )

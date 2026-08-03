@@ -22,7 +22,7 @@ import secrets
 import shutil
 import subprocess
 from threading import RLock
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, Callable, Mapping, Optional, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 import zipfile
 
@@ -189,10 +189,11 @@ class MediaUploadIntentCommand:
     content_sha256: str
     purpose: str
     client_created_at: datetime
+    external_processing_allowed: bool = False
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "MediaUploadIntentCommand":
-        expected_fields = {
+        required_fields = {
             "commandId",
             "expectedAuthorityEpoch",
             "mediaKind",
@@ -203,7 +204,8 @@ class MediaUploadIntentCommand:
             "purpose",
             "clientCreatedAt",
         }
-        if set(payload) != expected_fields:
+        allowed_fields = required_fields | {"allowExternalProcessing"}
+        if not required_fields.issubset(payload) or not set(payload).issubset(allowed_fields):
             raise OwnerTruthMediaUploadInvalid("media upload intent payload is invalid")
         raw_command_id = payload.get("commandId")
         try:
@@ -217,6 +219,11 @@ class MediaUploadIntentCommand:
         if type(file_size_bytes) is not int or file_size_bytes < 1:
             raise OwnerTruthMediaUploadInvalid("file size is invalid")
         media_kind = _normalize_media_kind(payload.get("mediaKind"))
+        external_processing_allowed = payload.get("allowExternalProcessing", False)
+        if type(external_processing_allowed) is not bool:
+            raise OwnerTruthMediaUploadInvalid("external processing permission is invalid")
+        if external_processing_allowed and media_kind not in {"image", "audio"}:
+            raise OwnerTruthMediaUploadInvalid("external processing is not supported for media kind")
         content_type = _normalize_content_type(payload.get("contentType"))
         if content_type not in _MIME_TYPES_BY_KIND[media_kind]:
             raise OwnerTruthMediaUploadInvalid("content type is not supported for media kind")
@@ -232,6 +239,7 @@ class MediaUploadIntentCommand:
             file_size_bytes=file_size_bytes,
             content_sha256=_normalize_sha256(payload.get("contentSha256")),
             purpose=purpose,
+            external_processing_allowed=external_processing_allowed,
             client_created_at=_parse_iso(payload.get("clientCreatedAt")),
         )
 
@@ -268,6 +276,11 @@ class MediaUploadIntentCommand:
                     "contentSha256": self.content_sha256,
                     "purpose": self.purpose,
                     "clientCreatedAt": _utc_iso(self.client_created_at),
+                    **(
+                        {"allowExternalProcessing": True}
+                        if self.external_processing_allowed
+                        else {}
+                    ),
                 }
             )
         )
@@ -420,24 +433,163 @@ class FilesystemPrivateMediaObjectStore:
         return self._resolve(storage_key).read_bytes()
 
     def _resolve(self, storage_key: str) -> Path:
-        normalized = str(storage_key or "").strip()
+        normalized = _private_storage_key(storage_key)
         path = PurePosixPath(normalized)
-        if not normalized or path.is_absolute() or ".." in path.parts:
-            raise OwnerTruthMediaUploadInvalid("storage key is invalid")
         target = (self._root / Path(*path.parts)).resolve()
         if target != self._root and self._root not in target.parents:
             raise OwnerTruthMediaUploadInvalid("storage key escapes private root")
         return target
 
 
+class S3PrivateMediaObjectStore:
+    """Private S3-compatible object adapter for the Stage 2 media boundary.
+
+    This works with an S3 API compatible bucket, including a private Tencent
+    COS bucket configured through its S3 endpoint. Public ACLs and presigned
+    URLs are deliberately not part of this adapter: the API owns all byte
+    transfer and keeps the bucket/key implementation detail server-side.
+    """
+
+    provider_name = "s3"
+
+    def __init__(
+        self,
+        *,
+        bucket: str,
+        prefix: str = "dreamjourney/private-media",
+        region: Optional[str] = None,
+        endpoint_url: Optional[str] = None,
+        access_key_id: Optional[str] = None,
+        secret_access_key: Optional[str] = None,
+        server_side_encryption: Optional[str] = None,
+        kms_key_id: Optional[str] = None,
+        client: Any = None,
+    ) -> None:
+        self._bucket = _private_bucket_name(bucket)
+        self._prefix = _private_storage_prefix(prefix)
+        self._server_side_encryption = _optional_identifier(
+            server_side_encryption,
+            field="server side encryption",
+        )
+        self._kms_key_id = _optional_identifier(kms_key_id, field="kms key id")
+        if self._server_side_encryption not in {None, "AES256", "aws:kms"}:
+            raise OwnerTruthMediaUploadInvalid("server side encryption is invalid")
+        if self._kms_key_id is not None and self._server_side_encryption != "aws:kms":
+            raise OwnerTruthMediaUploadInvalid("kms key requires aws:kms encryption")
+        if client is None:
+            try:
+                import boto3
+            except ImportError as exc:  # pragma: no cover - dependency is packaged in production
+                raise OwnerTruthMediaCaptureUnavailable("s3 media storage client is unavailable") from exc
+            client = boto3.client(
+                "s3",
+                region_name=str(region or "").strip() or None,
+                endpoint_url=str(endpoint_url or "").strip() or None,
+                aws_access_key_id=str(access_key_id or "").strip() or None,
+                aws_secret_access_key=str(secret_access_key or "").strip() or None,
+            )
+        self._client = client
+
+    def write(self, *, storage_key: str, payload: bytes) -> None:
+        request: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": self._object_key(storage_key),
+            "Body": payload,
+        }
+        if self._server_side_encryption is not None:
+            request["ServerSideEncryption"] = self._server_side_encryption
+        if self._kms_key_id is not None:
+            request["SSEKMSKeyId"] = self._kms_key_id
+        try:
+            self._client.put_object(**request)
+        except Exception as exc:
+            raise OwnerTruthMediaCaptureUnavailable("private media object write is unavailable") from exc
+
+    def delete(self, *, storage_key: str) -> None:
+        try:
+            self._client.delete_object(Bucket=self._bucket, Key=self._object_key(storage_key))
+        except Exception:
+            # Cleanup is best effort; callers are already handling the original
+            # metadata transition failure and must not receive provider details.
+            return
+
+    def read(self, *, storage_key: str) -> bytes:
+        try:
+            response = self._client.get_object(Bucket=self._bucket, Key=self._object_key(storage_key))
+            body = response["Body"]
+            payload = body.read()
+        except Exception as exc:
+            raise OwnerTruthMediaCaptureUnavailable("private media object read is unavailable") from exc
+        if not isinstance(payload, bytes):
+            raise OwnerTruthMediaCaptureUnavailable("private media object read is unavailable")
+        return payload
+
+    def _object_key(self, storage_key: str) -> str:
+        normalized = _private_storage_key(storage_key)
+        return f"{self._prefix}/{normalized}" if self._prefix else normalized
+
+
+def _private_storage_key(value: object) -> str:
+    normalized = str(value or "").strip()
+    path = PurePosixPath(normalized)
+    if not normalized or path.is_absolute() or ".." in path.parts:
+        raise OwnerTruthMediaUploadInvalid("storage key is invalid")
+    return normalized
+
+
+def _private_storage_prefix(value: object) -> str:
+    normalized = str(value or "").strip().strip("/")
+    if not normalized:
+        return ""
+    return _private_storage_key(normalized)
+
+
+def _private_bucket_name(value: object) -> str:
+    bucket = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{1,126}[A-Za-z0-9]", bucket):
+        raise OwnerTruthMediaUploadInvalid("private media bucket is invalid")
+    return bucket
+
+
+def _optional_identifier(value: object, *, field: str) -> Optional[str]:
+    normalized = str(value or "").strip() or None
+    if normalized is not None and (len(normalized) > 512 or any(character.isspace() for character in normalized)):
+        raise OwnerTruthMediaUploadInvalid(f"{field} is invalid")
+    return normalized
+
+
 def build_private_media_object_store(
     *,
     provider: str,
     root: str,
+    s3_bucket: Optional[str] = None,
+    s3_prefix: str = "dreamjourney/private-media",
+    s3_region: Optional[str] = None,
+    s3_endpoint_url: Optional[str] = None,
+    s3_access_key_id: Optional[str] = None,
+    s3_secret_access_key: Optional[str] = None,
+    s3_server_side_encryption: Optional[str] = None,
+    s3_kms_key_id: Optional[str] = None,
 ) -> PrivateMediaObjectStore:
     normalized = str(provider or "").strip().lower()
     if normalized == "filesystem":
         return FilesystemPrivateMediaObjectStore(root=root)
+    if normalized in {"s3", "cos"}:
+        if not str(s3_bucket or "").strip():
+            return DisabledPrivateMediaObjectStore()
+        try:
+            return S3PrivateMediaObjectStore(
+                bucket=str(s3_bucket),
+                prefix=s3_prefix,
+                region=s3_region,
+                endpoint_url=s3_endpoint_url,
+                access_key_id=s3_access_key_id,
+                secret_access_key=s3_secret_access_key,
+                server_side_encryption=s3_server_side_encryption,
+                kms_key_id=s3_kms_key_id,
+            )
+        except OwnerTruthMediaIngestionError:
+            return DisabledPrivateMediaObjectStore()
     return DisabledPrivateMediaObjectStore()
 
 
@@ -573,6 +725,45 @@ class OwnerTruthMediaSourceObjectRepository(Protocol):
     ) -> Mapping[str, Any]:
         ...
 
+    def queue_processing(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+    ) -> Mapping[str, Any]:
+        ...
+
+    def begin_processing(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        expected_authority_epoch: int,
+        expected_processing_generation: int,
+        attempt: int,
+    ) -> Mapping[str, Any]:
+        ...
+
+    def record_processing_outcome(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        processing_generation: int,
+        attempt: int,
+        processor_id: str,
+        processor_version: str,
+        outcome: str,
+        result_hash: str,
+        extracted_text_sha256: Optional[str] = None,
+        derived_source_id: Optional[str] = None,
+        failure_code: Optional[str] = None,
+    ) -> Mapping[str, Any]:
+        ...
+
 
 def _object_public_receipt(record: Mapping[str, Any]) -> dict[str, Any]:
     return {
@@ -587,8 +778,11 @@ def _object_public_receipt(record: Mapping[str, Any]) -> dict[str, Any]:
         "safetyStatus": str(record["safetyStatus"]),
         "safetyProvider": record.get("safetyProvider"),
         "processingStatus": str(record["processingStatus"]),
+        "processingGeneration": int(record.get("processingGeneration") or 0),
+        "externalProcessingAllowed": bool(record.get("externalProcessingAllowed", False)),
         "retryable": bool(record.get("retryable", False)),
         "failureCode": record.get("failureCode"),
+        "derivedSourceId": record.get("derivedSourceId"),
         "updatedAt": str(record["updatedAt"]),
     }
 
@@ -617,6 +811,7 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
         self._objects: dict[tuple[str, str], dict[str, Any]] = {}
         self._intents: dict[tuple[str, str], dict[str, Any]] = {}
         self._intent_by_command: dict[tuple[str, str], str] = {}
+        self._processing_results: dict[str, dict[str, Any]] = {}
 
     def create_upload_intent(
         self,
@@ -670,9 +865,13 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
                 "safetyStatus": "pending",
                 "safetyProvider": None,
                 "processingStatus": "notQueued",
+                "processingGeneration": 0,
+                "externalProcessingAllowed": command.external_processing_allowed,
                 "processingAttempt": 0,
                 "retryable": False,
                 "failureCode": None,
+                "derivedSourceId": None,
+                "lastProcessingResultId": None,
                 "authorityEpoch": current_epoch,
                 "policyVersion": context.authorization_capture.policy_version
                 if context.authorization_capture is not None
@@ -821,12 +1020,245 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
                 raise OwnerTruthMediaVaultNotFound("source object was not found")
             return deepcopy(source_object)
 
+    def queue_processing(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+    ) -> Mapping[str, Any]:
+        with self._lock:
+            source_object = self._owned_source_object(
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+            )
+            if source_object["state"] != "verified" or source_object["safetyStatus"] != "clean":
+                raise OwnerTruthMediaUploadConflict("media source object is not verified for processing")
+            if source_object["mediaKind"] == "video":
+                return self._record_processing_outcome_locked(
+                    source_object=source_object,
+                    processing_generation=0,
+                    attempt=0,
+                    processor_id="videoStorageOnly",
+                    processor_version="v1",
+                    outcome="notApplicable",
+                    result_hash=_sha256(
+                        f"video-storage-only:{source_object['sourceObjectId']}:{source_object['contentSha256']}"
+                    ),
+                )
+            if source_object["processingStatus"] in {"queued", "processing", "retryableFailed", "succeeded"}:
+                return deepcopy(source_object)
+            now = _utc_now()
+            source_object.update(
+                processingStatus="queued",
+                processingGeneration=int(source_object.get("processingGeneration") or 0) + 1,
+                retryable=False,
+                failureCode=None,
+                updatedAt=_utc_iso(now),
+                rowVersion=int(source_object["rowVersion"]) + 1,
+            )
+            return deepcopy(source_object)
+
+    def begin_processing(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        expected_authority_epoch: int,
+        expected_processing_generation: int,
+        attempt: int,
+    ) -> Mapping[str, Any]:
+        if type(attempt) is not int or attempt < 1:
+            raise OwnerTruthMediaUploadInvalid("processing attempt is invalid")
+        with self._lock:
+            source_object = self._owned_source_object(
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+            )
+            if int(source_object["authorityEpoch"]) != expected_authority_epoch:
+                raise OwnerTruthMediaAuthorityEpochConflict(
+                    expected_epoch=expected_authority_epoch,
+                    current_epoch=int(source_object["authorityEpoch"]),
+                )
+            if int(source_object.get("processingGeneration") or 0) != expected_processing_generation:
+                raise OwnerTruthMediaUploadConflict("media processing generation is no longer current")
+            if (
+                source_object["state"] != "verified"
+                or source_object["safetyStatus"] != "clean"
+                or source_object["processingStatus"] not in {"queued", "retryableFailed"}
+            ):
+                raise OwnerTruthMediaUploadConflict("media source object is not eligible for processing")
+            now = _utc_now()
+            source_object.update(
+                state="processing",
+                processingStatus="processing",
+                processingAttempt=attempt,
+                retryable=False,
+                failureCode=None,
+                updatedAt=_utc_iso(now),
+                rowVersion=int(source_object["rowVersion"]) + 1,
+            )
+            return deepcopy(source_object)
+
+    def record_processing_outcome(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        processing_generation: int,
+        attempt: int,
+        processor_id: str,
+        processor_version: str,
+        outcome: str,
+        result_hash: str,
+        extracted_text_sha256: Optional[str] = None,
+        derived_source_id: Optional[str] = None,
+        failure_code: Optional[str] = None,
+    ) -> Mapping[str, Any]:
+        with self._lock:
+            source_object = self._owned_source_object(
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+            )
+            return self._record_processing_outcome_locked(
+                source_object=source_object,
+                processing_generation=processing_generation,
+                attempt=attempt,
+                processor_id=processor_id,
+                processor_version=processor_version,
+                outcome=outcome,
+                result_hash=result_hash,
+                extracted_text_sha256=extracted_text_sha256,
+                derived_source_id=derived_source_id,
+                failure_code=failure_code,
+            )
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "sourceObjects": deepcopy(self._objects),
                 "uploadIntents": deepcopy(self._intents),
+                "processingResults": deepcopy(self._processing_results),
             }
+
+    def _owned_source_object(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+    ) -> dict[str, Any]:
+        source_object = self._objects.get((vault_id, source_object_id))
+        if source_object is None or source_object["ownerSubjectId"] != owner_subject_id:
+            raise OwnerTruthMediaVaultNotFound("source object was not found")
+        return source_object
+
+    def _record_processing_outcome_locked(
+        self,
+        *,
+        source_object: dict[str, Any],
+        processing_generation: int,
+        attempt: int,
+        processor_id: str,
+        processor_version: str,
+        outcome: str,
+        result_hash: str,
+        extracted_text_sha256: Optional[str] = None,
+        derived_source_id: Optional[str] = None,
+        failure_code: Optional[str] = None,
+    ) -> Mapping[str, Any]:
+        if type(processing_generation) is not int or processing_generation < 0:
+            raise OwnerTruthMediaUploadInvalid("media processing generation is invalid")
+        if int(source_object.get("processingGeneration") or 0) != processing_generation:
+            raise OwnerTruthMediaUploadConflict("media processing generation is no longer current")
+        if type(attempt) is not int or attempt < 0:
+            raise OwnerTruthMediaUploadInvalid("processing attempt is invalid")
+        normalized_processor_id = str(processor_id or "").strip()
+        normalized_processor_version = str(processor_version or "").strip()
+        if not _PURPOSE_PATTERN.fullmatch(normalized_processor_id) or not _PURPOSE_PATTERN.fullmatch(
+            normalized_processor_version
+        ):
+            raise OwnerTruthMediaUploadInvalid("media processor identity is invalid")
+        normalized_outcome = str(outcome or "").strip()
+        if normalized_outcome not in {"succeeded", "retryableFailed", "failed", "notApplicable"}:
+            raise OwnerTruthMediaUploadInvalid("media processing outcome is invalid")
+        normalized_result_hash = _normalize_sha256(result_hash)
+        normalized_text_hash = (
+            None if extracted_text_sha256 is None else _normalize_sha256(extracted_text_sha256)
+        )
+        normalized_source_id = None
+        if derived_source_id is not None:
+            try:
+                normalized_source_id = str(UUID(str(derived_source_id)))
+            except (TypeError, ValueError) as exc:
+                raise OwnerTruthMediaUploadInvalid("derived source id is invalid") from exc
+        normalized_failure_code = str(failure_code or "").strip() or None
+        if normalized_failure_code is not None and not _PURPOSE_PATTERN.fullmatch(normalized_failure_code):
+            raise OwnerTruthMediaUploadInvalid("media processing failure code is invalid")
+        if normalized_outcome == "succeeded":
+            if normalized_text_hash is None or normalized_source_id is None or normalized_failure_code is not None:
+                raise OwnerTruthMediaUploadInvalid("successful media processing result is incomplete")
+            state, processing_status, retryable = "processed", "succeeded", False
+        elif normalized_outcome == "retryableFailed":
+            if normalized_text_hash is not None or normalized_source_id is not None or normalized_failure_code is None:
+                raise OwnerTruthMediaUploadInvalid("retryable media processing result is incomplete")
+            state, processing_status, retryable = "verified", "retryableFailed", True
+        elif normalized_outcome == "failed":
+            if normalized_text_hash is not None or normalized_source_id is not None or normalized_failure_code is None:
+                raise OwnerTruthMediaUploadInvalid("failed media processing result is incomplete")
+            # The private object remains valid and readable to future verified
+            # processors.  Only this processing request failed terminally.
+            state, processing_status, retryable = "verified", "failed", False
+        else:
+            if normalized_text_hash is not None or normalized_source_id is not None or normalized_failure_code is not None:
+                raise OwnerTruthMediaUploadInvalid("not applicable media processing result is invalid")
+            state, processing_status, retryable = "verified", "notApplicable", False
+
+        result_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "dreamjourney-owner-truth-media-processing-v1:"
+                f"{source_object['sourceObjectId']}:{normalized_processor_id}:"
+                f"{normalized_processor_version}:{processing_generation}:{attempt}",
+            )
+        )
+        result = {
+            "processingResultId": result_id,
+            "vaultId": source_object["vaultId"],
+            "sourceObjectId": source_object["sourceObjectId"],
+            "ownerSubjectId": source_object["ownerSubjectId"],
+            "processorId": normalized_processor_id,
+            "processorVersion": normalized_processor_version,
+            "state": normalized_outcome,
+            "processingGeneration": processing_generation,
+            "attempt": attempt,
+            "resultHash": normalized_result_hash,
+            "extractedTextSha256": normalized_text_hash,
+            "derivedSourceId": normalized_source_id,
+            "failureCode": normalized_failure_code,
+        }
+        existing = self._processing_results.get(result_id)
+        if existing is not None and existing != result:
+            raise OwnerTruthMediaUploadConflict("media processing result cannot change immutable meaning")
+        self._processing_results[result_id] = result
+        now = _utc_now()
+        source_object.update(
+            state=state,
+            processingStatus=processing_status,
+            processingAttempt=attempt,
+            retryable=retryable,
+            failureCode=normalized_failure_code,
+            derivedSourceId=normalized_source_id,
+            lastProcessingResultId=result_id,
+            updatedAt=_utc_iso(now),
+            rowVersion=int(source_object["rowVersion"]) + 1,
+        )
+        return deepcopy(source_object)
 
     def _ensure_owned_vault(self, context: OwnerTruthCommandContext) -> dict[str, Any]:
         vault = self._vaults.get(context.vault_id)
@@ -935,12 +1367,12 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
                 INSERT INTO owner_truth.media_source_objects (
                     id, vault_id, owner_subject_id, media_kind, state, content_type,
                     file_name, file_size_bytes, content_sha256, safety_status,
-                    processing_status, processing_attempt, retryable, authority_epoch,
+                    processing_status, processing_attempt, retryable, external_processing_allowed, authority_epoch,
                     policy_version, origin_command_id_hash, row_version
                 ) VALUES (
                     %s, %s, %s, %s, 'uploadPending', %s,
                     %s, %s, %s, 'pending',
-                    'notQueued', 0, FALSE, %s,
+                    'notQueued', 0, FALSE, %s, %s,
                     %s, %s, 1
                 )
                 RETURNING *
@@ -954,6 +1386,7 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
                     command.file_name,
                     command.file_size_bytes,
                     command.content_sha256,
+                    command.external_processing_allowed,
                     current_epoch,
                     policy_version,
                     command.command_id_hash,
@@ -1148,6 +1581,135 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
                 raise OwnerTruthMediaVaultNotFound("source object was not found")
             return self._source_object_record(row)
 
+    def queue_processing(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+    ) -> Mapping[str, Any]:
+        with self._cursor() as cursor:
+            source_object = self._fetch_owned_source_object(
+                cursor=cursor,
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+                for_update=True,
+            )
+            if source_object["state"] != "verified" or source_object["safetyStatus"] != "clean":
+                raise OwnerTruthMediaUploadConflict("media source object is not verified for processing")
+            if source_object["mediaKind"] == "video":
+                return self._record_processing_outcome_cursor(
+                    cursor=cursor,
+                    source_object=source_object,
+                    processing_generation=0,
+                    attempt=0,
+                    processor_id="videoStorageOnly",
+                    processor_version="v1",
+                    outcome="notApplicable",
+                    result_hash=_sha256(
+                        f"video-storage-only:{source_object['sourceObjectId']}:{source_object['contentSha256']}"
+                    ),
+                )
+            if source_object["processingStatus"] in {"queued", "processing", "retryableFailed", "succeeded"}:
+                return source_object
+            cursor.execute(
+                """
+                UPDATE owner_truth.media_source_objects
+                SET processing_status = 'queued', processing_generation = processing_generation + 1,
+                    retryable = FALSE, failure_code = NULL,
+                    updated_at = NOW(), row_version = row_version + 1
+                WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+                RETURNING *
+                """,
+                (vault_id, source_object_id, owner_subject_id),
+            )
+            return self._source_object_record(cursor.fetchone())
+
+    def begin_processing(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        expected_authority_epoch: int,
+        expected_processing_generation: int,
+        attempt: int,
+    ) -> Mapping[str, Any]:
+        if type(attempt) is not int or attempt < 1:
+            raise OwnerTruthMediaUploadInvalid("processing attempt is invalid")
+        with self._cursor() as cursor:
+            source_object = self._fetch_owned_source_object(
+                cursor=cursor,
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+                for_update=True,
+            )
+            if int(source_object["authorityEpoch"]) != expected_authority_epoch:
+                raise OwnerTruthMediaAuthorityEpochConflict(
+                    expected_epoch=expected_authority_epoch,
+                    current_epoch=int(source_object["authorityEpoch"]),
+                )
+            if int(source_object.get("processingGeneration") or 0) != expected_processing_generation:
+                raise OwnerTruthMediaUploadConflict("media processing generation is no longer current")
+            if (
+                source_object["state"] != "verified"
+                or source_object["safetyStatus"] != "clean"
+                or source_object["processingStatus"] not in {"queued", "retryableFailed"}
+            ):
+                raise OwnerTruthMediaUploadConflict("media source object is not eligible for processing")
+            cursor.execute(
+                """
+                UPDATE owner_truth.media_source_objects
+                SET state = 'processing', processing_status = 'processing',
+                    processing_attempt = %s, retryable = FALSE, failure_code = NULL,
+                    updated_at = NOW(), row_version = row_version + 1
+                WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+                RETURNING *
+                """,
+                (attempt, vault_id, source_object_id, owner_subject_id),
+            )
+            return self._source_object_record(cursor.fetchone())
+
+    def record_processing_outcome(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        processing_generation: int,
+        attempt: int,
+        processor_id: str,
+        processor_version: str,
+        outcome: str,
+        result_hash: str,
+        extracted_text_sha256: Optional[str] = None,
+        derived_source_id: Optional[str] = None,
+        failure_code: Optional[str] = None,
+    ) -> Mapping[str, Any]:
+        with self._cursor() as cursor:
+            source_object = self._fetch_owned_source_object(
+                cursor=cursor,
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+                for_update=True,
+            )
+            return self._record_processing_outcome_cursor(
+                cursor=cursor,
+                source_object=source_object,
+                processing_generation=processing_generation,
+                attempt=attempt,
+                processor_id=processor_id,
+                processor_version=processor_version,
+                outcome=outcome,
+                result_hash=result_hash,
+                extracted_text_sha256=extracted_text_sha256,
+                derived_source_id=derived_source_id,
+                failure_code=failure_code,
+            )
+
     def _ensure_owned_vault(self, *, cursor: Any, context: OwnerTruthCommandContext) -> Mapping[str, Any]:
         cursor.execute(
             """
@@ -1211,6 +1773,187 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
             raise OwnerTruthMediaUploadNotFound("source object was not found")
         return self._source_object_record(row)
 
+    def _fetch_owned_source_object(
+        self,
+        *,
+        cursor: Any,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        for_update: bool,
+    ) -> Mapping[str, Any]:
+        cursor.execute(
+            f"""
+            SELECT *
+            FROM owner_truth.media_source_objects
+            WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+            {'FOR UPDATE' if for_update else ''}
+            """,
+            (vault_id, source_object_id, owner_subject_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise OwnerTruthMediaVaultNotFound("source object was not found")
+        return self._source_object_record(row)
+
+    def _record_processing_outcome_cursor(
+        self,
+        *,
+        cursor: Any,
+        source_object: Mapping[str, Any],
+        processing_generation: int,
+        attempt: int,
+        processor_id: str,
+        processor_version: str,
+        outcome: str,
+        result_hash: str,
+        extracted_text_sha256: Optional[str] = None,
+        derived_source_id: Optional[str] = None,
+        failure_code: Optional[str] = None,
+    ) -> Mapping[str, Any]:
+        if type(processing_generation) is not int or processing_generation < 0:
+            raise OwnerTruthMediaUploadInvalid("media processing generation is invalid")
+        if int(source_object.get("processingGeneration") or 0) != processing_generation:
+            raise OwnerTruthMediaUploadConflict("media processing generation is no longer current")
+        if type(attempt) is not int or attempt < 0:
+            raise OwnerTruthMediaUploadInvalid("processing attempt is invalid")
+        normalized_processor_id = str(processor_id or "").strip()
+        normalized_processor_version = str(processor_version or "").strip()
+        if not _PURPOSE_PATTERN.fullmatch(normalized_processor_id) or not _PURPOSE_PATTERN.fullmatch(
+            normalized_processor_version
+        ):
+            raise OwnerTruthMediaUploadInvalid("media processor identity is invalid")
+        normalized_outcome = str(outcome or "").strip()
+        if normalized_outcome not in {"succeeded", "retryableFailed", "failed", "notApplicable"}:
+            raise OwnerTruthMediaUploadInvalid("media processing outcome is invalid")
+        normalized_result_hash = _normalize_sha256(result_hash)
+        normalized_text_hash = (
+            None if extracted_text_sha256 is None else _normalize_sha256(extracted_text_sha256)
+        )
+        normalized_source_id = None
+        if derived_source_id is not None:
+            try:
+                normalized_source_id = str(UUID(str(derived_source_id)))
+            except (TypeError, ValueError) as exc:
+                raise OwnerTruthMediaUploadInvalid("derived source id is invalid") from exc
+        normalized_failure_code = str(failure_code or "").strip() or None
+        if normalized_failure_code is not None and not _PURPOSE_PATTERN.fullmatch(normalized_failure_code):
+            raise OwnerTruthMediaUploadInvalid("media processing failure code is invalid")
+        if normalized_outcome == "succeeded":
+            if normalized_text_hash is None or normalized_source_id is None or normalized_failure_code is not None:
+                raise OwnerTruthMediaUploadInvalid("successful media processing result is incomplete")
+            state, processing_status, retryable = "processed", "succeeded", False
+        elif normalized_outcome == "retryableFailed":
+            if normalized_text_hash is not None or normalized_source_id is not None or normalized_failure_code is None:
+                raise OwnerTruthMediaUploadInvalid("retryable media processing result is incomplete")
+            state, processing_status, retryable = "verified", "retryableFailed", True
+        elif normalized_outcome == "failed":
+            if normalized_text_hash is not None or normalized_source_id is not None or normalized_failure_code is None:
+                raise OwnerTruthMediaUploadInvalid("failed media processing result is incomplete")
+            state, processing_status, retryable = "verified", "failed", False
+        else:
+            if normalized_text_hash is not None or normalized_source_id is not None or normalized_failure_code is not None:
+                raise OwnerTruthMediaUploadInvalid("not applicable media processing result is invalid")
+            state, processing_status, retryable = "verified", "notApplicable", False
+        result_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "dreamjourney-owner-truth-media-processing-v1:"
+                f"{source_object['sourceObjectId']}:{normalized_processor_id}:"
+                f"{normalized_processor_version}:{processing_generation}:{attempt}",
+            )
+        )
+        cursor.execute(
+            """
+            INSERT INTO owner_truth.media_source_object_processing_results (
+                id, vault_id, source_object_id, owner_subject_id, processor_id,
+                processor_version, state, processing_generation, attempt, result_hash, extracted_text_sha256,
+                derived_source_id, failure_code
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (
+                vault_id, source_object_id, processor_id, processor_version,
+                processing_generation, attempt
+            )
+            DO NOTHING
+            RETURNING id, state, processing_generation, result_hash, extracted_text_sha256, derived_source_id, failure_code
+            """,
+            (
+                result_id,
+                source_object["vaultId"],
+                source_object["sourceObjectId"],
+                source_object["ownerSubjectId"],
+                normalized_processor_id,
+                normalized_processor_version,
+                normalized_outcome,
+                processing_generation,
+                attempt,
+                normalized_result_hash,
+                normalized_text_hash,
+                normalized_source_id,
+                normalized_failure_code,
+            ),
+        )
+        persisted = cursor.fetchone()
+        if persisted is None:
+            cursor.execute(
+                """
+                SELECT id, state, processing_generation, result_hash, extracted_text_sha256, derived_source_id, failure_code
+                FROM owner_truth.media_source_object_processing_results
+                WHERE vault_id = %s AND source_object_id = %s AND processor_id = %s
+                  AND processor_version = %s AND processing_generation = %s AND attempt = %s
+                FOR UPDATE
+                """,
+                (
+                    source_object["vaultId"],
+                    source_object["sourceObjectId"],
+                    normalized_processor_id,
+                    normalized_processor_version,
+                    processing_generation,
+                    attempt,
+                ),
+            )
+            persisted = cursor.fetchone()
+            expected = {
+                "id": result_id,
+                "state": normalized_outcome,
+                "processing_generation": processing_generation,
+                "result_hash": normalized_result_hash,
+                "extracted_text_sha256": normalized_text_hash,
+                "derived_source_id": normalized_source_id,
+                "failure_code": normalized_failure_code,
+            }
+            if persisted is None or any(
+                str(persisted.get(key) or "") != str(value or "")
+                for key, value in expected.items()
+            ):
+                raise OwnerTruthMediaUploadConflict(
+                    "media processing result cannot change immutable meaning"
+                )
+        cursor.execute(
+            """
+            UPDATE owner_truth.media_source_objects
+            SET state = %s, processing_status = %s, processing_attempt = %s,
+                retryable = %s, failure_code = %s, derived_source_id = %s,
+                last_processing_result_id = %s, updated_at = NOW(),
+                row_version = row_version + 1
+            WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+            RETURNING *
+            """,
+            (
+                state,
+                processing_status,
+                attempt,
+                retryable,
+                normalized_failure_code,
+                normalized_source_id,
+                result_id,
+                source_object["vaultId"],
+                source_object["sourceObjectId"],
+                source_object["ownerSubjectId"],
+            ),
+        )
+        return self._source_object_record(cursor.fetchone())
+
     @staticmethod
     def _assert_upload_token(*, intent: Mapping[str, Any], upload_token_hash: str) -> None:
         if not secrets.compare_digest(str(intent["upload_token_hash"]), upload_token_hash):
@@ -1252,9 +1995,17 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
             "safetyStatus": str(row["safety_status"]),
             "safetyProvider": row.get("safety_provider"),
             "processingStatus": str(row["processing_status"]),
+            "processingGeneration": int(row.get("processing_generation") or 0),
+            "externalProcessingAllowed": bool(row.get("external_processing_allowed", False)),
             "processingAttempt": int(row.get("processing_attempt") or 0),
             "retryable": bool(row.get("retryable", False)),
             "failureCode": row.get("failure_code"),
+            "derivedSourceId": str(row["derived_source_id"])
+            if row.get("derived_source_id")
+            else None,
+            "lastProcessingResultId": str(row["last_processing_result_id"])
+            if row.get("last_processing_result_id")
+            else None,
             "authorityEpoch": int(row["authority_epoch"]),
             "rowVersion": int(row["row_version"]),
             "createdAt": _utc_iso(row["created_at"]),
@@ -1289,6 +2040,7 @@ class OwnerTruthMediaIngestionService:
         enabled: bool,
         max_upload_bytes: int,
         upload_intent_ttl_seconds: int,
+        on_verified: Optional[Callable[[OwnerTruthCommandContext, Mapping[str, Any]], Mapping[str, Any]]] = None,
         now: Optional[callable] = None,
     ) -> None:
         self._store = store
@@ -1297,6 +2049,10 @@ class OwnerTruthMediaIngestionService:
         self._enabled = bool(enabled)
         self._max_upload_bytes = max(1, int(max_upload_bytes))
         self._upload_intent_ttl_seconds = max(60, int(upload_intent_ttl_seconds))
+        # The storage transaction remains authoritative.  The optional callback
+        # only queues a value-free processing effect after a clean upload, and
+        # must run inside the caller's existing Unit of Work.
+        self._on_verified = on_verified
         self._now = now or _utc_now
 
     def create_upload_intent(
@@ -1391,7 +2147,7 @@ class OwnerTruthMediaIngestionService:
         )
         self._object_store.write(storage_key=storage_key, payload=payload)
         try:
-            return repository.complete_upload(
+            outcome, completed = repository.complete_upload(
                 vault_id=context.vault_id,
                 intent_id=normalized_intent_id,
                 owner_subject_id=context.owner_subject_id,
@@ -1401,6 +2157,9 @@ class OwnerTruthMediaIngestionService:
                 storage_key=storage_key,
                 safety_verdict=verdict,
             )
+            if outcome == "uploaded" and self._on_verified is not None:
+                completed = self._on_verified(context, completed)
+            return outcome, completed
         except Exception:
             self._object_store.delete(storage_key=storage_key)
             raise

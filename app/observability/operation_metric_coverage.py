@@ -74,6 +74,15 @@ CRITICAL_WORKER_COVERAGE = (
         status=OperationMetricCoverageStatus.INSTRUMENTED,
         reason_code="workerAttemptRecorderAttached",
     ),
+    OperationMetricCoverageEntry(
+        component_id=(
+            "app.async_effects.owner_truth_media_processing_worker."
+            "OwnerTruthMediaProcessingWorkerRuntime"
+        ),
+        component_kind="worker",
+        status=OperationMetricCoverageStatus.INSTRUMENTED,
+        reason_code="workerAttemptRecorderAttached",
+    ),
 )
 
 

@@ -941,6 +941,8 @@ class ReleasePolicyCommandGate:
                 return f"{normalized_method} /v2/vaults/*/source-objects/upload-intents"
             if suffix.endswith("/content"):
                 return f"{normalized_method} /v2/vaults/*/source-objects/upload-intents/*/content"
+            if suffix.endswith("/processing-retries"):
+                return f"{normalized_method} /v2/vaults/*/source-objects/*/processing-retries"
             return f"{normalized_method} /v2/vaults/*/source-objects/*"
         if (
             normalized_method == "POST"

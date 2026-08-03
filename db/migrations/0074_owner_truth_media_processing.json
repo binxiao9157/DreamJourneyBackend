@@ -1,0 +1,11 @@
+{
+  "version": "0074",
+  "name": "owner_truth_media_processing",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthMediaProcessingClosedPilotDefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerMediaCaptureV1": false
+  }
+}

@@ -8,12 +8,16 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app.async_effects import owner_truth_candidate_extraction_worker
+from app.async_effects import owner_truth_media_processing_worker
 from app.async_effects import owner_truth_memory_projection_worker
 from app.async_effects.owner_truth_candidate_extraction_worker import (
     _parser as candidate_worker_parser,
 )
 from app.async_effects.owner_truth_memory_projection_worker import (
     _parser as projection_worker_parser,
+)
+from app.async_effects.owner_truth_media_processing_worker import (
+    _parser as media_processing_worker_parser,
 )
 from app.core.config import Settings
 
@@ -23,7 +27,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class OwnerTruthWorkerProcessTests(unittest.TestCase):
     def test_typed_workers_accept_explicit_loop_mode_and_keep_once_compatible(self) -> None:
-        for parser in (candidate_worker_parser(), projection_worker_parser()):
+        for parser in (
+            candidate_worker_parser(),
+            projection_worker_parser(),
+            media_processing_worker_parser(),
+        ):
             once = parser.parse_args(["--once"])
             loop = parser.parse_args(["--loop", "--poll-seconds", "1.25"])
 
@@ -48,6 +56,10 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
             (
                 owner_truth_memory_projection_worker,
                 owner_truth_memory_projection_worker.OwnerTruthMemoryProjectionWorkerRuntime,
+            ),
+            (
+                owner_truth_media_processing_worker,
+                owner_truth_media_processing_worker.OwnerTruthMediaProcessingWorkerRuntime,
             ),
         ):
             fake_store = object()
@@ -78,13 +90,19 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
 
         self.assertIn("owner-truth-candidate-extraction-worker:", compose)
         self.assertIn("owner-truth-memory-projection-worker:", compose)
+        self.assertIn("owner-truth-media-processing-worker:", compose)
         self.assertIn("- owner-truth-worker", compose)
+        self.assertIn("- owner-truth-media-worker", compose)
         self.assertIn(
             '"app.async_effects.owner_truth_candidate_extraction_worker", "--loop"',
             compose,
         )
         self.assertIn(
             '"app.async_effects.owner_truth_memory_projection_worker", "--loop"',
+            compose,
+        )
+        self.assertIn(
+            '"app.async_effects.owner_truth_media_processing_worker", "--loop"',
             compose,
         )
         self.assertIn("restart: unless-stopped", compose)

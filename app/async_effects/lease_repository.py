@@ -192,7 +192,13 @@ def _terminal_completion_fields(
         if not _WORKER_IDENTIFIER_PATTERN.fullmatch(normalized_error):
             raise AsyncEffectLeaseError("blocked completion error code must be an opaque identifier")
         return ("blocked", "blocked", "terminalFailed", normalized_error)
-    raise AsyncEffectLeaseError("completion outcome must be succeeded or blocked")
+    if normalized_outcome == "failed":
+        if normalized_error is None:
+            raise AsyncEffectLeaseError("failed completion requires an error code")
+        if not _WORKER_IDENTIFIER_PATTERN.fullmatch(normalized_error):
+            raise AsyncEffectLeaseError("failed completion error code must be an opaque identifier")
+        return ("failed", "failed", "terminalFailed", normalized_error)
+    raise AsyncEffectLeaseError("completion outcome must be succeeded, blocked, or failed")
 
 
 class InMemoryAsyncEffectLeaseRepository:

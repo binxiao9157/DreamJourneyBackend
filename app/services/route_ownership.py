@@ -247,6 +247,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthMediaSourceObjectRead",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/source-objects/{source_object_id}/processing-retries",
+                session,
+                "ownerTruthMediaProcessingRetry",
+            ),
+            _rule(
                 "GET",
                 "/v2/vaults/{vault_id}/source-capture-state",
                 session,

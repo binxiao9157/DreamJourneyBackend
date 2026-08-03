@@ -7,7 +7,7 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import ValidationError
@@ -91,6 +91,10 @@ from app.services.owner_truth_media_source_object import (
     OwnerTruthMediaVaultNotFound,
     build_media_content_safety_scanner,
     build_private_media_object_store,
+)
+from app.services.owner_truth_media_processing import (
+    OwnerTruthMediaProcessingCoordinator,
+    OwnerTruthMediaProcessingError,
 )
 from app.services.owner_truth_family_contribution import (
     CreateFamilyContributionGrantCommand,
@@ -494,12 +498,62 @@ store = make_store(settings)
 logger = logging.getLogger(__name__)
 
 
+def _queue_verified_owner_truth_media_processing(
+    context: OwnerTruthCommandContext,
+    source_object: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Queue the private processor after verified metadata is written in the request UoW.
+
+    The callback never returns an effect ID, upload URL, or media bytes to the
+    client. A queue failure aborts the same request transaction so an object
+    cannot be presented as verified without its mandatory processing state.
+    """
+
+    try:
+        result = OwnerTruthMediaProcessingCoordinator(store).queue_verified_source_object(
+            context=context,
+            source_object=source_object,
+        )
+    except OwnerTruthMediaProcessingError as error:
+        raise OwnerTruthMediaUploadConflict("media processing could not be queued") from error
+    return result.source_object
+
+
+def _request_owner_truth_media_processing_retry(
+    *,
+    context: OwnerTruthCommandContext,
+    source_object_id: str,
+) -> Mapping[str, Any]:
+    """Start a new auditable processing generation after a terminal failure.
+
+    Automatic retries keep their existing effect/job. This endpoint is only for
+    a later user-directed retry, so it refuses to create a second live job for
+    an object which is already queued, processing, or successfully handled.
+    """
+
+    source_object = OWNER_TRUTH_MEDIA_INGESTION_SERVICE.get_source_object(
+        context=context,
+        source_object_id=source_object_id,
+    )
+    if str(source_object.get("processingStatus") or "") not in {"failed", "notQueued"}:
+        raise OwnerTruthMediaUploadConflict("media processing retry is not eligible")
+    return _queue_verified_owner_truth_media_processing(context, source_object)
+
+
 def _make_owner_truth_media_ingestion_service() -> OwnerTruthMediaIngestionService:
     return OwnerTruthMediaIngestionService(
         store=store,
         object_store=build_private_media_object_store(
             provider=settings.owner_truth_media_storage_provider,
             root=settings.owner_truth_media_storage_root,
+            s3_bucket=settings.owner_truth_media_s3_bucket,
+            s3_prefix=settings.owner_truth_media_s3_prefix,
+            s3_region=settings.owner_truth_media_s3_region,
+            s3_endpoint_url=settings.owner_truth_media_s3_endpoint_url,
+            s3_access_key_id=settings.owner_truth_media_s3_access_key_id,
+            s3_secret_access_key=settings.owner_truth_media_s3_secret_access_key,
+            s3_server_side_encryption=settings.owner_truth_media_s3_server_side_encryption,
+            s3_kms_key_id=settings.owner_truth_media_s3_kms_key_id,
         ),
         safety_scanner=build_media_content_safety_scanner(
             provider=settings.owner_truth_media_content_safety_provider,
@@ -508,6 +562,7 @@ def _make_owner_truth_media_ingestion_service() -> OwnerTruthMediaIngestionServi
         enabled=settings.owner_truth_media_capture_enabled,
         max_upload_bytes=settings.owner_truth_media_max_upload_bytes,
         upload_intent_ttl_seconds=settings.owner_truth_media_upload_intent_ttl_seconds,
+        on_verified=_queue_verified_owner_truth_media_processing,
     )
 
 
@@ -1171,6 +1226,8 @@ def _owner_truth_media_capture_context(
         route = "POST /v2/vaults/*/source-objects/upload-intents"
     elif request.method.upper() == "PUT" and normalized_path.endswith("/content"):
         route = "PUT /v2/vaults/*/source-objects/upload-intents/*/content"
+    elif request.method.upper() == "POST" and normalized_path.endswith("/processing-retries"):
+        route = "POST /v2/vaults/*/source-objects/*/processing-retries"
     else:
         route = "GET /v2/vaults/*/source-objects/*"
     return _owner_truth_captured_release_policy_context(
@@ -5858,6 +5915,38 @@ def get_owner_truth_media_source_object(
         content={
             **OWNER_TRUTH_MEDIA_INGESTION_SERVICE.public_source_object_response(source_object),
             "vaultId": context.vault_id,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/source-objects/{source_object_id}/processing-retries",
+    include_in_schema=False,
+)
+def request_owner_truth_media_processing_retry(
+    request: Request,
+    vault_id: str,
+    source_object_id: str,
+) -> JSONResponse:
+    """Queue a new private processing generation for a terminally failed object."""
+
+    try:
+        context = _owner_truth_media_capture_context(request, vault_id=vault_id)
+        source_object = _request_owner_truth_media_processing_retry(
+            context=context,
+            source_object_id=source_object_id,
+        )
+    except HTTPException:
+        raise
+    except OwnerTruthMediaIngestionError as error:
+        raise _owner_truth_media_capture_http_error(error) from error
+    return JSONResponse(
+        status_code=202,
+        content={
+            **OWNER_TRUTH_MEDIA_INGESTION_SERVICE.public_source_object_response(source_object),
+            "vaultId": context.vault_id,
+            "status": "processingRequested",
         },
         headers={"Cache-Control": "no-store"},
     )
