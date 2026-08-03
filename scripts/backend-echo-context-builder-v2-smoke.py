@@ -9,6 +9,11 @@ import app.main as main_module
 from app.core.config import Settings
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
+from app.services.release_policy import (
+    ReleasePolicyCommandGate,
+    ReleasePolicyDecisionRecorder,
+    ReleasePolicyService,
+)
 
 
 def post_archive(client: TestClient, payload: Dict[str, Any]) -> None:
@@ -60,6 +65,10 @@ def generation_refs(packet: Dict[str, Any]) -> List[str]:
 def main() -> None:
     previous_store = main_module.store
     previous_settings = main_module.settings
+    previous_release_policy_command_mode = main_module.RELEASE_POLICY_COMMAND_MODE
+    previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
+    previous_release_policy_command_gate = main_module.RELEASE_POLICY_COMMAND_GATE
+    previous_release_policy_decision_recorder = main_module.RELEASE_POLICY_DECISION_RECORDER
     main_module.store = InMemoryStore()
     main_module.settings = Settings(
         store_backend="memory",
@@ -67,6 +76,20 @@ def main() -> None:
         tencent_digital_human_app_key="dh-appkey",
         tencent_digital_human_access_token="fixture-digital-human-access-token",
         tencent_digital_human_virtualman_project_id="dh-project",
+    )
+    # This smoke exercises the deterministic in-memory Context V2 policy, not
+    # the deployment's default-off command rollout. Isolate all rollout state
+    # so production enforcement cannot prevent setup of private fixture data.
+    main_module.RELEASE_POLICY_COMMAND_MODE = "observe"
+    main_module.RELEASE_POLICY_SERVICE = ReleasePolicyService(
+        shadow_mode=True,
+        enforce_default_closed_stages=False,
+    )
+    main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(
+        main_module.RELEASE_POLICY_SERVICE
+    )
+    main_module.RELEASE_POLICY_DECISION_RECORDER = ReleasePolicyDecisionRecorder(
+        environment="test"
     )
 
     try:
@@ -386,6 +409,10 @@ def main() -> None:
     finally:
         main_module.store = previous_store
         main_module.settings = previous_settings
+        main_module.RELEASE_POLICY_COMMAND_MODE = previous_release_policy_command_mode
+        main_module.RELEASE_POLICY_SERVICE = previous_release_policy_service
+        main_module.RELEASE_POLICY_COMMAND_GATE = previous_release_policy_command_gate
+        main_module.RELEASE_POLICY_DECISION_RECORDER = previous_release_policy_decision_recorder
 
 
 if __name__ == "__main__":
