@@ -47,6 +47,17 @@ class OwnerTruthInterviewConfirmationFormalPostgresSmokeTests(unittest.TestCase)
         self.assertIn('final_version="0035"', smoke)
         self.assertIn('"0036", "0037"', smoke)
         self.assertIn('candidate_command_id_hash', smoke)
+        self.assertIn('"contentSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION', smoke)
+        self.assertIn(
+            "payload_schema_version, payload\n"
+            "                ) VALUES",
+            smoke,
+        )
+        self.assertIn(
+            "OWNER_TRUTH_SCHEMA_VERSION,\n"
+            "                    Jsonb(candidate_payload),",
+            smoke,
+        )
         self.assertIn('memory_counts', smoke)
         self.assertIn('formalMemoryActivationCreated=true', smoke)
         self.assertIn('formalMemoryActivationReplayDeduplicated=true', smoke)

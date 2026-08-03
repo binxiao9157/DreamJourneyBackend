@@ -329,7 +329,10 @@ def seed_reviewable_batch(
                     sensitivity,
                     OWNER_TRUTH_SCHEMA_VERSION,
                     canonical_hash(candidate_content),
-                    "owner-truth-candidate-proposal-v1",
+                    # ``payload_schema_version`` is the admitted Memory
+                    # content schema, not the enclosing Candidate payload
+                    # format declared inside ``candidate_payload``.
+                    OWNER_TRUTH_SCHEMA_VERSION,
                     Jsonb(candidate_payload),
                 ),
             )
