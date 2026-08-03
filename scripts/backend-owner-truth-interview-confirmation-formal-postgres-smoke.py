@@ -859,6 +859,7 @@ def main() -> None:
     previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
     previous_route_mode = main_module.AUTH_ROUTE_MODE
     previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
+    previous_closed_pilot_owner_ids = main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
     policy_service = main_module.RELEASE_POLICY_SERVICE
     previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
 
@@ -927,6 +928,12 @@ def main() -> None:
 
         client = TestClient(main_module.app)
         owner_id, owner_headers, session_id = login(client, phone="13900000361")
+        # The formal route must be exercised as an actual server-authorized
+        # closed-pilot owner. Keep the synthetic owner allowlist scoped to this
+        # disposable TestClient process and restore it below.
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
+            {*previous_closed_pilot_owner_ids, owner_id}
+        )
         vault_id = "vault-formal-confirmation-postgres-smoke"
         review_batch_id, candidate_id = seed_reviewable_batch(
             test_dsn,
@@ -1542,6 +1549,7 @@ def main() -> None:
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = previous_legacy_phone_login
         main_module.AUTH_ROUTE_MODE = previous_route_mode
         main_module.AUTH_OWNERSHIP_MODE = previous_ownership_mode
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = previous_closed_pilot_owner_ids
         policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
         if store is not None:
             store.close_pool()
