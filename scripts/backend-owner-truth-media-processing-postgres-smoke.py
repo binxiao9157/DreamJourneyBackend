@@ -135,7 +135,7 @@ def persisted_summary(
 
             cursor.execute(
                 """
-                SELECT source_text, metadata
+                SELECT content_payload, metadata
                 FROM owner_truth.sources
                 WHERE vault_id = %s AND id = %s
                 """,
@@ -143,6 +143,9 @@ def persisted_summary(
             )
             source = cursor.fetchone()
             require(source is not None, "derived private Source persistence is missing")
+            content_payload = source[0]
+            if isinstance(content_payload, str):
+                content_payload = json.loads(content_payload)
             metadata = source[1]
             if isinstance(metadata, str):
                 metadata = json.loads(metadata)
@@ -183,7 +186,8 @@ def persisted_summary(
     require(int(media[2]) == 1, "initial processing generation must remain one")
     require(media[4] == "filesystem", "disposable smoke must use private filesystem storage")
     require(str(media[5] or ""), "server must retain an internal private storage key")
-    require(source[0] == source_text, "derived Source text changed during processing")
+    require(isinstance(content_payload, dict), "derived Source payload must be structured")
+    require(content_payload.get("text") == source_text, "derived Source text changed during processing")
     require(isinstance(metadata, dict), "derived Source metadata must be structured")
     require(metadata.get("origin") == "mediaSourceObjectProcessing", "derived Source origin changed")
     require(len(candidates) == 1, "media Source must create exactly one review Candidate")
