@@ -95,3 +95,16 @@ IDENTITY_CHALLENGE_ADAPTER=disabled
 ```
 
 因此本次部署可安全上线代码，而不会意外发送短信或开放生产手机号登录。
+
+## 本次部署证据
+
+部署版本：`main@e2d18e4`。
+
+服务器完成 API 镜像重建和重启后：
+
+- `/ready` 返回 `status=ready`，database、schema、auth、incident 均为 ready；
+- `BACKEND_BASE_URL=https://dreamjourney-api.liftora.cn bash scripts/run-backend-identity-challenge-deployed-smoke.sh` 通过，确认生产仍为 fail-closed；
+- API 容器内执行 `scripts/backend-identity-challenge-provider-smoke.py` 通过；
+- API 容器内执行 `IDENTITY_CHALLENGE_PROVIDER_POSTGRES_SMOKE=1 scripts/run-backend-identity-challenge-provider-postgres-smoke.sh` 通过。
+
+该部署没有设置 `IDENTITY_CHALLENGE_ADAPTER=httpJson`，没有接入真实 gateway，也没有投递真实短信。
