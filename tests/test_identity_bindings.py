@@ -12,13 +12,16 @@ from app.core.config import Settings
 from app.main import app
 from app.services.auth_sessions import AuthSessionService
 from app.services.identity_bindings import (
+    HttpJsonIdentityChallengeAdapter,
     IdentityBindingService,
     IdentityChallengeConfigurationError,
+    IdentityChallengeDeliveryError,
     IdentityChallengeRateLimited,
     IdentityChallengeValidationError,
     IdentityChallengeVerificationFailed,
     SyntheticIdentityChallengeAdapter,
     UnavailableIdentityChallengeAdapter,
+    make_identity_challenge_adapter,
 )
 from app.services.in_memory_store import InMemoryStore
 from app.services.postgres_store import PostgresStore
@@ -33,6 +36,26 @@ NOW = datetime(2026, 7, 17, 8, 0, tzinfo=timezone.utc)
 HMAC_KEY = "identity-binding-test-key-" + ("x" * 40)
 SYNTHETIC_CODE = "246810"
 TARGET = "+86 138-0013-8000"
+
+
+class RecordingIdentityChallengeDeliveryTransport:
+    def __init__(self, *, result=None, failure=False):
+        self.requests = []
+        self.result = {"accepted": True} if result is None else result
+        self.failure = failure
+
+    def post_json(self, *, url, headers, payload, timeout_seconds):
+        self.requests.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "payload": deepcopy(payload),
+                "timeoutSeconds": timeout_seconds,
+            }
+        )
+        if self.failure:
+            raise IdentityChallengeDeliveryError()
+        return deepcopy(self.result)
 
 
 class IdentityPostgresCursor:
@@ -451,6 +474,61 @@ class IdentityBindingServiceTests(unittest.TestCase):
         )
         self.assertEqual(store._auth_challenges, {})
 
+    def test_http_json_provider_delivers_then_verifies_server_owned_code(self):
+        transport = RecordingIdentityChallengeDeliveryTransport()
+        adapter = HttpJsonIdentityChallengeAdapter(
+            endpoint="https://sms.example.test/v1/challenges",
+            api_key="test-server-only-api-key",
+            timeout_seconds=8,
+            transport=transport,
+        )
+        store, service = self.make_service(adapter=adapter)
+
+        challenge = self.create(service)
+        challenge_id = self.challenge_id(challenge)
+
+        self.assertEqual(len(transport.requests), 1)
+        delivered = transport.requests[0]
+        self.assertEqual(delivered["url"], "https://sms.example.test/v1/challenges")
+        self.assertEqual(delivered["payload"]["challengeId"], challenge_id)
+        self.assertEqual(delivered["payload"]["identityType"], "phone")
+        self.assertEqual(delivered["payload"]["purpose"], "login")
+        self.assertEqual(delivered["payload"]["target"], "8613800138000")
+        delivered_code = delivered["payload"]["code"]
+        self.assertRegex(delivered_code, r"^\d{6}$")
+        self.assertEqual(
+            delivered["headers"]["Authorization"],
+            "Bearer test-server-only-api-key",
+        )
+
+        verified = service.verify_challenge(challenge_id, delivered_code, now=NOW)
+        record = store.get_auth_challenge(challenge_id)
+
+        self.assertFalse(adapter.internal_verification_enabled)
+        self.assertTrue(adapter.production_ready)
+        self.assertEqual(record["providerMode"], "httpJson")
+        self.assertTrue(record["internalVerificationEnabled"])
+        self.assertEqual(verified["status"], "verified")
+        serialized = json.dumps({"record": record, "response": challenge}, sort_keys=True)
+        for raw_value in (TARGET, "8613800138000", delivered_code):
+            self.assertNotIn(raw_value, serialized)
+
+    def test_provider_delivery_failure_persists_no_challenge(self):
+        transport = RecordingIdentityChallengeDeliveryTransport(failure=True)
+        adapter = HttpJsonIdentityChallengeAdapter(
+            endpoint="https://sms.example.test/v1/challenges",
+            api_key="test-server-only-api-key",
+            timeout_seconds=8,
+            transport=transport,
+        )
+        store, service = self.make_service(adapter=adapter)
+
+        with self.assertRaises(IdentityChallengeDeliveryError):
+            self.create(service)
+
+        self.assertEqual(len(transport.requests), 1)
+        self.assertEqual(store._auth_challenges, {})
+
     def test_disabled_adapter_cannot_verify_a_persisted_synthetic_challenge(self):
         store, enabled = self.make_service()
         challenge = self.create(enabled)
@@ -814,6 +892,43 @@ class IdentityBindingEndpointTests(unittest.TestCase):
             self.assertNotIn(SYNTHETIC_CODE, response.text)
             self.assertNotIn("sent", response.text.lower())
 
+    def test_provider_delivery_failure_is_neutral_and_does_not_persist(self):
+        store = InMemoryStore()
+        service = IdentityBindingService(
+            store,
+            hmac_key=HMAC_KEY,
+            hmac_key_version="v1",
+            adapter=HttpJsonIdentityChallengeAdapter(
+                endpoint="https://sms.example.test/v1/challenges",
+                api_key="test-server-only-api-key",
+                timeout_seconds=8,
+                transport=RecordingIdentityChallengeDeliveryTransport(failure=True),
+            ),
+            challenge_ttl_seconds=60,
+            max_attempts=3,
+        )
+        with (
+            patch.object(main_module, "store", store),
+            patch.object(main_module, "_identity_binding_service", return_value=service),
+        ):
+            client = TestClient(app)
+            response = client.post(
+                "/v2/auth/challenges",
+                json={"identityType": "phone", "target": TARGET, "purpose": "login"},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["detail"],
+            {
+                "code": "identity_challenge_delivery_failed",
+                "message": "identity challenge is temporarily unavailable",
+            },
+        )
+        self.assertNotIn(TARGET, response.text)
+        self.assertNotIn("8613800138000", response.text)
+        self.assertEqual(store._auth_challenges, {})
+
 
 class IdentityBindingRuntimeAndSchemaTests(unittest.TestCase):
     def test_production_without_real_provider_is_not_ready_even_if_synthetic_requested(self):
@@ -835,6 +950,42 @@ class IdentityBindingRuntimeAndSchemaTests(unittest.TestCase):
         self.assertEqual(identity["providerMode"], "unavailable")
         self.assertEqual(identity["deliverySemantics"], "acceptedOnly")
         self.assertFalse(identity["legacyPhoneLoginEnabled"])
+
+    def test_http_json_provider_is_production_ready_only_with_valid_server_config(self):
+        ready_settings = Settings(
+            environment="production",
+            identity_binding_hmac_key=HMAC_KEY,
+            identity_binding_hmac_key_version="v1",
+            identity_challenge_adapter="httpJson",
+            identity_challenge_http_json_url="https://sms.example.test/v1/challenges",
+            identity_challenge_http_json_api_key="test-server-only-api-key",
+            identity_challenge_http_json_timeout_seconds=8,
+        )
+        ready_adapter = make_identity_challenge_adapter(ready_settings)
+        ready = RuntimeConfigService(ready_settings).public_config()["auth"]["identityChallenge"]
+
+        self.assertIsInstance(ready_adapter, HttpJsonIdentityChallengeAdapter)
+        self.assertTrue(ready["enabled"])
+        self.assertTrue(ready["clientFlowEnabled"])
+        self.assertTrue(ready["productionReady"])
+        self.assertFalse(ready["internalVerificationEnabled"])
+        self.assertEqual(ready["providerMode"], "httpJson")
+
+        invalid_settings = Settings(
+            environment="production",
+            identity_binding_hmac_key=HMAC_KEY,
+            identity_binding_hmac_key_version="v1",
+            identity_challenge_adapter="httpJson",
+            identity_challenge_http_json_url="http://sms.example.test/v1/challenges",
+            identity_challenge_http_json_api_key="test-server-only-api-key",
+        )
+        invalid_adapter = make_identity_challenge_adapter(invalid_settings)
+        invalid = RuntimeConfigService(invalid_settings).public_config()["auth"]["identityChallenge"]
+
+        self.assertIsInstance(invalid_adapter, UnavailableIdentityChallengeAdapter)
+        self.assertFalse(invalid["enabled"])
+        self.assertFalse(invalid["productionReady"])
+        self.assertEqual(invalid["providerMode"], "unavailable")
 
     def test_dynamic_challenge_routes_are_registered_as_public(self):
         registry = RouteOwnershipRegistry()

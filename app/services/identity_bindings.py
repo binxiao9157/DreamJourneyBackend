@@ -1,10 +1,14 @@
 import hashlib
 import hmac
+import json
 import math
 import re
 import secrets
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Protocol
+from urllib.parse import urlparse
 
 from app.core.config import Settings
 from app.observability.events import hash_evidence_identifier
@@ -34,19 +38,96 @@ class IdentityChallengeRateLimited(ValueError):
         super().__init__("identity challenge rate limited")
 
 
+class IdentityChallengeDeliveryError(RuntimeError):
+    """A provider could not accept an OTP without exposing provider details."""
+
+    def __init__(self) -> None:
+        super().__init__("identity challenge delivery failed")
+
+
+class IdentityChallengeDeliveryTransport(Protocol):
+    """Minimal server-side boundary for an external OTP delivery provider."""
+
+    def post_json(
+        self,
+        *,
+        url: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        timeout_seconds: float,
+    ) -> Dict[str, Any]:
+        ...
+
+
+class UrllibIdentityChallengeDeliveryTransport:
+    """HTTPS JSON transport; errors are normalized before reaching callers."""
+
+    def post_json(
+        self,
+        *,
+        url: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        timeout_seconds: float,
+    ) -> Dict[str, Any]:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                status = int(getattr(response, "status", response.getcode()))
+                raw_payload = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            # Consume the body so the connection can close; provider content is
+            # intentionally never surfaced to API callers or application logs.
+            exc.read()
+            raise IdentityChallengeDeliveryError() from exc
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            raise IdentityChallengeDeliveryError() from exc
+
+        if status < 200 or status >= 300:
+            raise IdentityChallengeDeliveryError()
+        try:
+            decoded = json.loads(raw_payload) if raw_payload else {}
+        except json.JSONDecodeError as exc:
+            raise IdentityChallengeDeliveryError() from exc
+        return decoded if isinstance(decoded, dict) else {}
+
+
 class IdentityChallengeAdapter:
     provider_mode = "unavailable"
     internal_verification_enabled = False
     production_ready = False
+    server_code_verification_enabled = False
 
     def verification_code(self) -> str:
         return f"{secrets.randbelow(1_000_000):06d}"
+
+    def deliver(
+        self,
+        *,
+        identity_type: str,
+        target: str,
+        purpose: str,
+        challenge_id: str,
+        verification_code: str,
+    ) -> None:
+        raise IdentityChallengeConfigurationError(
+            "identity challenge provider is unavailable"
+        )
 
 
 class SyntheticIdentityChallengeAdapter(IdentityChallengeAdapter):
     provider_mode = "synthetic"
     internal_verification_enabled = True
     production_ready = False
+    server_code_verification_enabled = True
 
     def __init__(self, code: str):
         candidate = str(code or "").strip()
@@ -58,6 +139,107 @@ class SyntheticIdentityChallengeAdapter(IdentityChallengeAdapter):
 
     def verification_code(self) -> str:
         return self._code
+
+    def deliver(
+        self,
+        *,
+        identity_type: str,
+        target: str,
+        purpose: str,
+        challenge_id: str,
+        verification_code: str,
+    ) -> None:
+        # The synthetic adapter never emits an external message. It exists only
+        # in local/test environments and verifies its configured code locally.
+        return None
+
+
+class HttpJsonIdentityChallengeAdapter(IdentityChallengeAdapter):
+    """Server-side OTP delivery adapter for an HTTPS JSON SMS gateway.
+
+    The backend owns code generation and hash verification. The configured
+    gateway only accepts a delivery request, so no SMS credential or OTP is
+    ever exposed to the iOS client or stored in raw form.
+    """
+
+    provider_mode = "httpJson"
+    internal_verification_enabled = False
+    production_ready = True
+    server_code_verification_enabled = True
+
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        api_key: str,
+        timeout_seconds: float,
+        transport: Optional[IdentityChallengeDeliveryTransport] = None,
+    ) -> None:
+        candidate_endpoint = self._endpoint(endpoint)
+        candidate_api_key = str(api_key or "").strip()
+        if not candidate_api_key:
+            raise IdentityChallengeConfigurationError(
+                "identity challenge HTTP JSON API key must be configured"
+            )
+        candidate_timeout = float(timeout_seconds)
+        if candidate_timeout < 1 or candidate_timeout > 60:
+            raise IdentityChallengeConfigurationError(
+                "identity challenge HTTP JSON timeout must be between 1 and 60 seconds"
+            )
+        self._endpoint = candidate_endpoint
+        self._api_key = candidate_api_key
+        self._timeout_seconds = candidate_timeout
+        self._transport = transport or UrllibIdentityChallengeDeliveryTransport()
+
+    def deliver(
+        self,
+        *,
+        identity_type: str,
+        target: str,
+        purpose: str,
+        challenge_id: str,
+        verification_code: str,
+    ) -> None:
+        try:
+            result = self._transport.post_json(
+                url=self._endpoint,
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                payload={
+                    "challengeId": challenge_id,
+                    "code": verification_code,
+                    "identityType": identity_type,
+                    "purpose": purpose,
+                    "target": target,
+                },
+                timeout_seconds=self._timeout_seconds,
+            )
+        except IdentityChallengeDeliveryError:
+            raise
+        except Exception as exc:  # Defensive normalization at the provider boundary.
+            raise IdentityChallengeDeliveryError() from exc
+        if result.get("accepted") is not True:
+            raise IdentityChallengeDeliveryError()
+
+    @staticmethod
+    def _endpoint(value: str) -> str:
+        candidate = str(value or "").strip()
+        parsed = urlparse(candidate)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise IdentityChallengeConfigurationError(
+                "identity challenge HTTP JSON endpoint must be a clean HTTPS URL"
+            )
+        return candidate
 
 
 class UnavailableIdentityChallengeAdapter(IdentityChallengeAdapter):
@@ -75,6 +257,17 @@ def make_identity_challenge_adapter(settings: Settings) -> IdentityChallengeAdap
         return SyntheticIdentityChallengeAdapter(
             settings.identity_challenge_synthetic_code
         )
+    if requested in {"httpjson", "http_json"}:
+        try:
+            return HttpJsonIdentityChallengeAdapter(
+                endpoint=str(settings.identity_challenge_http_json_url or ""),
+                api_key=str(settings.identity_challenge_http_json_api_key or ""),
+                timeout_seconds=settings.identity_challenge_http_json_timeout_seconds,
+            )
+        except IdentityChallengeConfigurationError:
+            # A partially configured production provider must be indistinguishable
+            # from a disabled one to clients and must never open the OTP flow.
+            return UnavailableIdentityChallengeAdapter()
     return UnavailableIdentityChallengeAdapter()
 
 
@@ -230,6 +423,24 @@ class IdentityBindingService:
                 )
         challenge_id = self._opaque_id("ach")
         verification_code = self.adapter.verification_code()
+        try:
+            self.adapter.deliver(
+                identity_type=normalized_type,
+                target=normalized_target,
+                purpose=normalized_purpose,
+                challenge_id=challenge_id,
+                verification_code=verification_code,
+            )
+        except IdentityChallengeDeliveryError:
+            self._record_event(
+                operation_id=challenge_id,
+                resource_id=target_hash,
+                state="failed",
+                reason="providerDeliveryFailed",
+                decision="createDeliveryFailed",
+                occurred_at=created_at,
+            )
+            raise
         record = {
             "challengeId": challenge_id,
             "identityType": normalized_type,
@@ -243,8 +454,11 @@ class IdentityBindingService:
             "status": "active",
             "attempts": 0,
             "maxAttempts": self.max_attempts,
+            # This historical persistence field controls whether the server can
+            # compare its OTP hash. It is distinct from the public runtime flag
+            # `internalVerificationEnabled`, which only identifies synthetic use.
             "internalVerificationEnabled": bool(
-                self.adapter.internal_verification_enabled
+                self.adapter.server_code_verification_enabled
             ),
             "createdAt": created_at.isoformat(),
             "expiresAt": expires_at.isoformat(),

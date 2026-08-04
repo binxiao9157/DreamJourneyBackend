@@ -59,6 +59,7 @@ from app.services.delegated_access import (
 )
 from app.services.identity_bindings import (
     IdentityChallengeConfigurationError,
+    IdentityChallengeDeliveryError,
     IdentityChallengeRateLimited,
     IdentityChallengeValidationError,
     IdentityChallengeVerificationFailed,
@@ -9451,6 +9452,15 @@ def create_identity_challenge(
                 "retryAfterSeconds": exc.retry_after_seconds,
             },
             headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+    except IdentityChallengeDeliveryError as exc:
+        logger.warning("identity_challenge_delivery_failed")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "identity_challenge_delivery_failed",
+                "message": "identity challenge is temporarily unavailable",
+            },
         ) from exc
     except IdentityChallengeConfigurationError as exc:
         logger.error("identity_challenge_configuration_unavailable")

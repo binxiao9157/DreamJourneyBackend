@@ -16,6 +16,9 @@ fi
 echo "== Backend unittest =="
 STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" -m unittest discover tests
 
+echo "== Identity challenge provider C1 gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-identity-challenge-provider-gate.sh
+
 echo "== Owner Truth Answer feedback G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-answer-feedback-g0-gate.sh
 

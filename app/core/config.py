@@ -59,6 +59,9 @@ class Settings:
     identity_binding_hmac_key_version: str = "v1"
     identity_challenge_adapter: str = "disabled"
     identity_challenge_synthetic_code: Optional[str] = None
+    identity_challenge_http_json_url: Optional[str] = None
+    identity_challenge_http_json_api_key: Optional[str] = None
+    identity_challenge_http_json_timeout_seconds: float = 10.0
     identity_challenge_ttl_seconds: int = 300
     identity_challenge_max_attempts: int = 5
     identity_challenge_retry_after_seconds: int = 30
@@ -277,6 +280,16 @@ class Settings:
             ) or cls.identity_challenge_adapter,
             identity_challenge_synthetic_code=_env(
                 "IDENTITY_CHALLENGE_SYNTHETIC_CODE"
+            ),
+            identity_challenge_http_json_url=_env(
+                "IDENTITY_CHALLENGE_HTTP_JSON_URL"
+            ),
+            identity_challenge_http_json_api_key=_env(
+                "IDENTITY_CHALLENGE_HTTP_JSON_API_KEY"
+            ),
+            identity_challenge_http_json_timeout_seconds=_env_float(
+                "IDENTITY_CHALLENGE_HTTP_JSON_TIMEOUT_SECONDS",
+                cls.identity_challenge_http_json_timeout_seconds,
             ),
             identity_challenge_ttl_seconds=_env_int(
                 "IDENTITY_CHALLENGE_TTL_SECONDS",
