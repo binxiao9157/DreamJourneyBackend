@@ -101,6 +101,23 @@ BACKEND_BASE_URL=https://dreamjourney-api.liftora.cn \
 scripts/run-backend-owner-truth-media-processing-deployed-smoke.sh
 ```
 
+### Phase B 正式 closed-pilot 链路 Gate
+
+该 Gate 在一次性 PostgreSQL 数据库中使用真实 FastAPI 路由、认证会话、服务端
+release-policy 快照和正式 Candidate 路径。它不携带
+`X-DreamJourney-QA-Owner-Truth`，也不会写入生产业务数据：
+
+```bash
+DREAMJOURNEY_OWNER_TRUTH_MEDIA_FORMAL_SMOKE=1 \
+OWNER_TRUTH_FORMAL_SMOKE_ADMIN_DATABASE_URL='<admin database url>' \
+scripts/run-backend-owner-truth-media-closed-pilot-formal-postgres-smoke.sh
+```
+
+它验证完整闭环：`SourceObject 上传 -> 私有处理 -> Candidate -> Owner 确认 ->
+MemoryVersion -> Projection -> /context/build`，并验证非 Owner 不可读取候选。
+该命令只验证正式后端合同，不会替代真实 closed-pilot 的身份、内容安全扫描、私有
+对象存储和 Worker 部署前置条件，也不会打开公开发布态。
+
 ## 2026-08-03 部署证据
 
 - 服务器后端版本：`98898cd`。

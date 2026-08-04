@@ -62,3 +62,4 @@ PY
 
 bash -n scripts/run-backend-owner-truth-media-processing-postgres-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-processing-deployed-smoke.sh
+bash -n scripts/run-backend-owner-truth-media-closed-pilot-formal-postgres-smoke.sh

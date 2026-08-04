@@ -34,6 +34,9 @@ from app.async_effects.owner_truth_candidate_extraction_worker import (
 from app.async_effects.owner_truth_media_processing_worker import (
     OwnerTruthMediaProcessingWorkerRuntime,
 )
+from app.async_effects.owner_truth_memory_projection_worker import (
+    OwnerTruthMemoryProjectionWorkerRuntime,
+)
 from app.core.config import Settings, settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.services.owner_truth_media_source_object import (
@@ -91,19 +94,45 @@ def login(client: TestClient, *, phone: str) -> tuple[str, dict[str, str], str]:
     )
 
 
-def capture_headers(
+def captured_policy_headers(
+    client: TestClient,
     headers: dict[str, str],
     *,
     session_id: str,
-    decision_id: str,
+    feature: str,
 ) -> dict[str, str]:
+    """Fetch a server snapshot, then create the minimal client capture it requires.
+
+    A policy snapshot is server-authored. The decision ID remains a client-side
+    correlation value, which is the same shape used by the iOS client. This
+    keeps the smoke in the normal release-policy lane without a QA bypass.
+    """
+
+    snapshot_response = client.get(
+        "/v2/release-policy",
+        params={"feature": feature, "clientBuild": 1},
+        headers=headers,
+    )
+    require(
+        snapshot_response.status_code == 200,
+        f"release-policy snapshot failed for {feature}: {snapshot_response.text}",
+    )
+    snapshot = snapshot_response.json()
+    decisions = snapshot.get("features") or []
+    require(len(decisions) == 1, f"release-policy returned an ambiguous {feature} decision")
+    decision = decisions[0]
+    require(
+        decision.get("feature") == feature and decision.get("enabled") is True,
+        f"closed-pilot policy must enable {feature}: {decision}",
+    )
     return {
         **headers,
-        "X-DreamJourney-Feature": "ownerMediaCaptureV1",
-        "X-DreamJourney-Feature-Decision-Id": decision_id,
+        "X-DreamJourney-Feature": feature,
+        "X-DreamJourney-Feature-Decision-Id": f"media-formal-smoke-{feature}-{uuid.uuid4()}",
         "X-DreamJourney-Feature-Allowed": "true",
-        "X-DreamJourney-Policy-Version": "release-policy-v1",
-        "X-DreamJourney-Policy-Revision": "1",
+        "X-DreamJourney-Policy-Version": str(snapshot["policyVersion"]),
+        "X-DreamJourney-Policy-Revision": str(snapshot["policyRevision"]),
+        "X-DreamJourney-Client-Build": str(snapshot["minClient"]),
         "X-DreamJourney-Account-Generation": sha256(
             session_id.encode("utf-8")
         ).hexdigest()[:24],
@@ -222,6 +251,10 @@ def main() -> None:
     previous_legacy_phone_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
     previous_route_mode = main_module.AUTH_ROUTE_MODE
     previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
+    previous_release_policy_command_mode = main_module.RELEASE_POLICY_COMMAND_MODE
+    previous_context_authority_closed_pilot_enabled = (
+        main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED
+    )
     previous_closed_pilot_owner_ids = main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
     previous_closed_pilot_features = set(
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
@@ -262,9 +295,14 @@ def main() -> None:
             main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
             main_module.AUTH_ROUTE_MODE = "enforce"
             main_module.AUTH_OWNERSHIP_MODE = "enforce"
+            main_module.RELEASE_POLICY_COMMAND_MODE = "enforce"
+            main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = True
             main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset()
             main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.discard(
                 "ownerMediaCaptureV1"
+            )
+            main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.discard(
+                "ownerTruthCandidateReview"
             )
 
             client = TestClient(main_module.app)
@@ -276,7 +314,11 @@ def main() -> None:
                 client,
                 phone="13900000374",
             )
-            vault_id = "vault-media-processing-postgres-smoke"
+            # The formal Context authority derives a personal Vault directly
+            # from the authenticated Owner. Keep the SourceObject on that same
+            # Vault so Candidate acceptance can reach Context without a second
+            # fixture-only authority model.
+            vault_id = owner_id
             source_text = "A private Stage 2 document remains pending until Owner review."
             body = source_text.encode("utf-8")
             intent_path = f"/v2/vaults/{vault_id}/source-objects/upload-intents"
@@ -302,15 +344,23 @@ def main() -> None:
             main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
                 "ownerMediaCaptureV1"
             )
-            owner_policy_headers = capture_headers(
+            main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
+                "ownerTruthCandidateReview"
+            )
+            main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
+                "echoTextInput"
+            )
+            owner_policy_headers = captured_policy_headers(
+                client,
                 owner_headers,
                 session_id=owner_session_id,
-                decision_id="media-processing-postgres-owner",
+                feature="ownerMediaCaptureV1",
             )
-            other_policy_headers = capture_headers(
+            other_policy_headers = captured_policy_headers(
+                client,
                 other_headers,
                 session_id=other_session_id,
-                decision_id="media-processing-postgres-other",
+                feature="ownerMediaCaptureV1",
             )
 
             created = client.post(intent_path, headers=owner_policy_headers, json=payload)
@@ -355,6 +405,7 @@ def main() -> None:
                 async_effect_v1_enabled=True,
                 async_effect_worker_enabled=True,
                 owner_truth_candidate_extraction_worker_enabled=True,
+                owner_truth_memory_projection_worker_enabled=True,
                 owner_truth_media_capture_enabled=True,
                 owner_truth_media_processing_worker_enabled=True,
                 owner_truth_media_storage_provider="filesystem",
@@ -400,6 +451,134 @@ def main() -> None:
                 source_text=source_text,
             )
             require(upload_token not in json.dumps(summary), "summary leaked upload token")
+
+            candidate_headers = captured_policy_headers(
+                client,
+                owner_headers,
+                session_id=owner_session_id,
+                feature="ownerTruthCandidateReview",
+            )
+            candidate_inbox = client.get(
+                f"/v2/vaults/{vault_id}/candidates",
+                headers=candidate_headers,
+            )
+            require(
+                candidate_inbox.status_code == 200,
+                f"formal Candidate inbox failed: {candidate_inbox.text}",
+            )
+            candidate_rows = candidate_inbox.json().get("candidates") or []
+            require(len(candidate_rows) == 1, "media Candidate must reach the formal Owner inbox")
+            candidate = candidate_rows[0]
+            candidate_id = str(candidate.get("candidateId") or "")
+            candidate_version = int(candidate.get("candidateVersion") or 0)
+            candidate_source_id = str(candidate.get("sourceId") or "")
+            require(
+                candidate_id and candidate_version == 1 and candidate_source_id,
+                "formal media Candidate must retain review identifiers",
+            )
+            require(
+                "X-DreamJourney-QA-Owner-Truth" not in candidate_headers,
+                "formal media Candidate review must not use a QA header",
+            )
+            other_candidate_inbox = client.get(
+                f"/v2/vaults/{vault_id}/candidates",
+                headers=captured_policy_headers(
+                    client,
+                    other_headers,
+                    session_id=other_session_id,
+                    feature="ownerTruthCandidateReview",
+                ),
+            )
+            require(
+                other_candidate_inbox.status_code == 403,
+                "non-owner must not read the formal media Candidate inbox",
+            )
+
+            candidate_decision = client.post(
+                f"/v2/vaults/{vault_id}/candidates/{candidate_id}/decisions",
+                headers=captured_policy_headers(
+                    client,
+                    owner_headers,
+                    session_id=owner_session_id,
+                    feature="ownerTruthCandidateReview",
+                ),
+                json={
+                    "commandId": str(uuid.uuid4()),
+                    "expectedCandidateVersion": candidate_version,
+                    "action": "accept",
+                    "reasonCode": "ownerReviewed",
+                },
+            )
+            require(
+                candidate_decision.status_code == 201,
+                f"formal Candidate acceptance failed: {candidate_decision.text}",
+            )
+            decision_body = candidate_decision.json()
+            require(
+                (decision_body.get("receipt") or {}).get("decision") == "accepted"
+                and (decision_body.get("memoryActivation") or {}).get("status") == "created",
+                "accepted media Candidate must create one MemoryVersion",
+            )
+            memory_version_id = str(
+                (decision_body.get("memoryActivation") or {}).get("memoryVersionId") or ""
+            )
+            require(memory_version_id, "Candidate acceptance must return the created MemoryVersion")
+
+            projection_worker = OwnerTruthMemoryProjectionWorkerRuntime(
+                settings=worker_settings,
+                store=store,
+                worker_id="media-candidate-projection-postgres-smoke",
+                retry_seconds=1,
+            )
+            projection_results: list[dict[str, Any]] = []
+            for _ in range(4):
+                projection_result = projection_worker.run_once()
+                projection_results.append(projection_result)
+                if projection_result.get("status") == "idle":
+                    break
+                require(
+                    projection_result.get("status") == "completed"
+                    and projection_result.get("projectionOutcome") in {"rebuilt", "unchanged"},
+                    f"Memory projection failed: {projection_result}",
+                )
+            require(
+                any(result.get("status") == "completed" for result in projection_results),
+                "accepted media Candidate must schedule a confirmed memory projection",
+            )
+
+            context_response = client.post(
+                "/context/build",
+                headers=captured_policy_headers(
+                    client,
+                    owner_headers,
+                    session_id=owner_session_id,
+                    feature="echoTextInput",
+                ),
+                json={
+                    "userId": owner_id,
+                    "intent": "echo_chat",
+                    "query": "请只依据已经确认的个人回忆回答。",
+                    "personaScope": "personal",
+                    "digitalHumanId": owner_id,
+                },
+            )
+            require(
+                context_response.status_code == 200,
+                f"formal media Context failed: {context_response.text}",
+            )
+            context_packet = context_response.json().get("contextPacket") or {}
+            require(
+                context_packet.get("contextVersion") == "echo-context-v4-owner",
+                "formal media Context must use confirmed Projection authority",
+            )
+            selected_context = context_packet.get("selectedContext") or []
+            require(
+                any(
+                    ((item.get("citation") or {}).get("sourceId") == candidate_source_id)
+                    for item in selected_context
+                ),
+                "formal media Context must cite the confirmed media-derived Source",
+            )
             require(
                 OwnerTruthMediaProcessingWorkerRuntime(
                     settings=worker_settings,
@@ -431,6 +610,12 @@ def main() -> None:
                         "privateObjectCount": 1,
                         "derivedSource": True,
                         "pendingCandidate": True,
+                        "formalPolicySnapshotCaptured": True,
+                        "candidateConfirmed": True,
+                        "memoryVersionCreated": True,
+                        "projectionReady": True,
+                        "contextBuilt": True,
+                        "qaHeaderUsed": False,
                         "responseRedaction": True,
                         **summary,
                     },
@@ -447,6 +632,10 @@ def main() -> None:
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = previous_legacy_phone_login
         main_module.AUTH_ROUTE_MODE = previous_route_mode
         main_module.AUTH_OWNERSHIP_MODE = previous_ownership_mode
+        main_module.RELEASE_POLICY_COMMAND_MODE = previous_release_policy_command_mode
+        main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = (
+            previous_context_authority_closed_pilot_enabled
+        )
         main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = previous_closed_pilot_owner_ids
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features = (
             previous_closed_pilot_features
