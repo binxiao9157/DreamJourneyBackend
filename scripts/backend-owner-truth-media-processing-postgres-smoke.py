@@ -503,7 +503,7 @@ def main() -> None:
                     feature="ownerTruthCandidateReview",
                 ),
                 json={
-                    "commandId": str(uuid.uuid4()),
+                    "commandId": f"media-candidate-accept-{uuid.uuid4()}",
                     "expectedCandidateVersion": candidate_version,
                     "action": "accept",
                     "reasonCode": "ownerReviewed",
