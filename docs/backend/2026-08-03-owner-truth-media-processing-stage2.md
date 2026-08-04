@@ -118,10 +118,15 @@ MemoryVersion -> Projection -> /context/build`，并验证非 Owner 不可读取
 该命令只验证正式后端合同，不会替代真实 closed-pilot 的身份、内容安全扫描、私有
 对象存储和 Worker 部署前置条件，也不会打开公开发布态。
 
-## 2026-08-03 部署证据
+## 部署证据
 
-- 服务器后端版本：`98898cd`。
-- PostgreSQL 已从 `0072` 迁移到 `0074`，`0073`、`0074` 均成功执行；迁移校验结果为 `status=ready`、`pendingVersions=[]`。
+- 2026-08-03：服务器后端版本 `98898cd`。PostgreSQL 已从 `0072` 迁移到
+  `0074`，`0073`、`0074` 均成功执行；迁移校验结果为 `status=ready`、
+  `pendingVersions=[]`。
+- 2026-08-05：服务器源码已同步至 `abb317e`，并在新构建的临时 API 容器中运行
+  Phase B 正式 closed-pilot Gate。结果确认：默认关闭、Owner 绑定上传、跨 Owner
+  拒绝、私有对象落盘、处理完成、Candidate 确认、MemoryVersion 创建、Projection
+  就绪和 `/context/build` 全部通过；执行过程未携带 QA header，临时数据库已自动删除。
 - 公网 `/ready` 验证通过：database、schema、auth、incident 均为 `ready`。
 - 部署态 smoke 在服务器容器内创建一次性 PostgreSQL 数据库，完成后自动删除，没有写入生产业务表。
 - E2E 已证明：公开默认关闭、Owner 绑定上传、命令幂等、跨 Owner 隐藏、私有文件落盘、媒体处理成功、派生 `import` Source、生成一条 `pending` Candidate、处理回执持久化及响应脱敏。
