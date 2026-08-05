@@ -221,20 +221,49 @@ def seed_reviewable_batch(
             )
             cursor.execute(
                 """
-                INSERT INTO owner_truth.conversation_threads (
-                    id, vault_id, owner_subject_id, entry_mode, policy_version
-                ) VALUES (%s, %s, %s, %s, %s)
+                SELECT id, current_thread_id
+                FROM owner_truth.interview_sessions
+                WHERE vault_id = %s AND state = 'active'
                 """,
-                (thread_id, vault_id, owner_subject_id, "naturalInput", OWNER_TRUTH_SCHEMA_VERSION),
+                (vault_id,),
             )
+            active_session = cursor.fetchone()
+            if active_session is None:
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.conversation_threads (
+                        id, vault_id, owner_subject_id, entry_mode, policy_version
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        thread_id,
+                        vault_id,
+                        owner_subject_id,
+                        "naturalInput",
+                        OWNER_TRUTH_SCHEMA_VERSION,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.interview_sessions (
+                        id, vault_id, owner_subject_id, current_thread_id, policy_version
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (session_id, vault_id, owner_subject_id, thread_id, OWNER_TRUTH_SCHEMA_VERSION),
+                )
+            else:
+                session_id = str(active_session[0])
+                thread_id = str(active_session[1])
+
             cursor.execute(
                 """
-                INSERT INTO owner_truth.interview_sessions (
-                    id, vault_id, owner_subject_id, current_thread_id, policy_version
-                ) VALUES (%s, %s, %s, %s, %s)
+                SELECT COALESCE(MAX(through_message_sequence), 0) + 1
+                FROM owner_truth.interview_review_batches
+                WHERE vault_id = %s AND session_id = %s AND thread_id = %s
                 """,
-                (session_id, vault_id, owner_subject_id, thread_id, OWNER_TRUTH_SCHEMA_VERSION),
+                (vault_id, session_id, thread_id),
             )
+            through_message_sequence = int(cursor.fetchone()[0])
             cursor.execute(
                 """
                 INSERT INTO owner_truth.interview_review_batches (
@@ -253,9 +282,9 @@ def seed_reviewable_batch(
                     "turnThreshold",
                     "acknowledged",
                     1,
-                    1,
-                    1,
-                    1,
+                    through_message_sequence,
+                    through_message_sequence,
+                    through_message_sequence,
                     OWNER_TRUTH_SCHEMA_VERSION,
                 ),
             )
