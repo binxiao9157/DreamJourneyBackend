@@ -3157,6 +3157,10 @@ def _publication_owner_management_response(
                 "publicationVersionId": item.publication_version_id,
                 "draftId": item.draft_id,
                 "draftRevision": item.draft_revision,
+                # This is an optimistic-concurrency value for the QA-only
+                # lifecycle command, not an account credential. It is scoped
+                # to the already redacted owner publication summary.
+                "lifecycleAuthorityEpoch": item.lifecycle_authority_epoch,
                 "publicationState": item.publication_state,
                 "projectionState": item.projection_state,
                 "preview": {

@@ -174,6 +174,7 @@ class PublicationManagementReadAPITests(unittest.TestCase):
         grant_summary = grant_payload["grants"][0]
         self.assertEqual(publication["publicationId"], confirmed["publicationId"])
         self.assertEqual(publication["publicationVersionId"], confirmed["publicationVersionId"])
+        self.assertEqual(publication["lifecycleAuthorityEpoch"], 0)
         self.assertEqual(publication["publicationState"], "confirmed")
         self.assertEqual(publication["projectionState"], "active")
         self.assertEqual(publication["preview"]["title"], "院子里的雨声")

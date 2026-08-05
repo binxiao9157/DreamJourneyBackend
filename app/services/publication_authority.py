@@ -283,6 +283,7 @@ class PublicationOwnerPublicationSummary:
     publication_version_id: str | None
     draft_id: str
     draft_revision: int
+    lifecycle_authority_epoch: int
     publication_state: str
     projection_state: str | None
     preview_title: str
@@ -711,6 +712,9 @@ class InMemoryPublicationAuthorityRepository:
                         ),
                         draft_id=draft_result.draft_id,
                         draft_revision=draft_result.expected_draft_revision,
+                        lifecycle_authority_epoch=int(
+                            projection.get("authorityEpoch") if projection is not None else 0
+                        ),
                         publication_state=(
                             str(projection.get("publicationState"))
                             if projection is not None
@@ -1169,6 +1173,7 @@ class PostgresPublicationAuthorityRepository:
                     ),
                     draft_id=str(row["draft_id"]),
                     draft_revision=int(row["draft_revision"]),
+                    lifecycle_authority_epoch=int(vault["authority_epoch"]),
                     publication_state=str(row["publication_state"]),
                     projection_state=(
                         str(row["projection_state"])
