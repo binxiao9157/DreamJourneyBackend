@@ -9,6 +9,7 @@ import unittest
 from uuid import uuid4
 
 from app.async_effects.consumer_repository import InMemoryAsyncEffectConsumerRepository
+from app.async_effects.dead_letter_repository import InMemoryAsyncEffectDeadLetterRepository
 from app.async_effects.lease_repository import InMemoryAsyncEffectLeaseRepository
 from app.async_effects.owner_truth_media_deletion_worker import (
     OwnerTruthMediaDeletionWorkerRuntime,
@@ -37,6 +38,7 @@ class _MediaDeletionWorkerStore(InMemoryStore):
         super().__init__()
         self._lease_repository = InMemoryAsyncEffectLeaseRepository()
         self._consumer_repository = InMemoryAsyncEffectConsumerRepository()
+        self._dead_letter_repository = InMemoryAsyncEffectDeadLetterRepository()
 
     def readiness_probe(self):
         return {"status": "ready"}
@@ -46,6 +48,9 @@ class _MediaDeletionWorkerStore(InMemoryStore):
 
     def async_effect_consumer_repository(self):
         return self._consumer_repository
+
+    def async_effect_dead_letter_repository(self):
+        return self._dead_letter_repository
 
 
 class _UnavailableDeleteStore(FilesystemPrivateMediaObjectStore):
@@ -147,6 +152,10 @@ class OwnerTruthMediaDeletionWorkerTests(unittest.TestCase):
         self.assertEqual(result["deletionStatus"], "partial")
         self.assertTrue(result["deletionRetryable"])
         self.assertEqual(result["jobState"], "failed")
+        self.assertEqual(result["deadLetterOutcome"], "admitted")
+        self.assertEqual(result["deadLetterCause"], "manualInterventionRequired")
+        self.assertEqual(result["deadLetterState"], "open")
+        self.assertEqual(result["deadLetterNextAction"], "manualInterventionRequired")
         self.assertEqual(self._private_file_count(), 1)
         partial = self._source_object(source_object)
         self.assertEqual(partial["accessState"], "accessRevoked")
@@ -154,6 +163,10 @@ class OwnerTruthMediaDeletionWorkerTests(unittest.TestCase):
         self.assertTrue(partial["deletionRetryable"])
         self.assertEqual(partial["deletionFailureCode"], "privateMediaDeletionUnavailable")
         self.assertEqual(self.store._lease_repository.attempt_state(intent.job_id, 1), "terminalFailed")
+        self.assertEqual(self.store._dead_letter_repository.record_count(), 1)
+        admission = self.store._dead_letter_repository.load(result["deadLetterId"])
+        self.assertEqual(admission.intent, intent)
+        self.assertEqual(admission.cause.value, "manualInterventionRequired")
 
     def test_storage_provider_mismatch_is_terminal_without_touching_bytes(self) -> None:
         source_object, _intent = self._upload_and_enqueue_deletion()
@@ -171,6 +184,8 @@ class OwnerTruthMediaDeletionWorkerTests(unittest.TestCase):
         self.assertEqual(unsupported["accessState"], "accessRevoked")
         self.assertEqual(unsupported["deletionStatus"], "unsupported")
         self.assertFalse(unsupported["deletionRetryable"])
+        self.assertEqual(result["deadLetterCause"], "manualInterventionRequired")
+        self.assertEqual(self.store._dead_letter_repository.record_count(), 1)
 
     def test_slow_physical_deletion_heartbeats_lease_and_blocks_second_worker(self) -> None:
         source_object, _intent = self._upload_and_enqueue_deletion()

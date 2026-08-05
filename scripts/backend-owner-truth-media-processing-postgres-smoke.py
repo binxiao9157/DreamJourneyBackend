@@ -46,6 +46,7 @@ from app.core.config import Settings, settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.services.owner_truth_media_source_object import (
     FilesystemPrivateMediaObjectStore,
+    OwnerTruthMediaCaptureUnavailable,
     OwnerTruthMediaIngestionService,
     OwnerTruthMediaUploadConflict,
     TestOnlyCleanMediaContentSafetyScanner,
@@ -83,6 +84,14 @@ class BlockingFilesystemPrivateMediaObjectStore(FilesystemPrivateMediaObjectStor
         if not self._allow_delete.wait(timeout=10):
             raise TimeoutError("lease heartbeat smoke did not release the private delete")
         super().delete(storage_key=storage_key)
+
+
+class UnavailableFilesystemPrivateMediaObjectStore(FilesystemPrivateMediaObjectStore):
+    """Test-only provider failure for one revocation-first delete attempt."""
+
+    def delete(self, *, storage_key: str) -> None:
+        del storage_key
+        raise OwnerTruthMediaCaptureUnavailable("disposable deletion provider is unavailable")
 
 
 def dsn_for_database(base_dsn: str, database_name: str) -> str:
@@ -447,7 +456,10 @@ def main() -> None:
                 owner_truth_memory_projection_worker_enabled=True,
                 owner_truth_media_capture_enabled=True,
                 owner_truth_media_processing_worker_enabled=True,
-                owner_truth_media_deletion_worker_enabled=run_physical_deletion_smoke,
+                # This disposable smoke explicitly invokes the default-off
+                # deletion worker to prove its terminal evidence contract. It
+                # does not enable the production worker profile.
+                owner_truth_media_deletion_worker_enabled=True,
                 owner_truth_media_storage_provider="filesystem",
                 owner_truth_media_storage_root=media_root,
             )
@@ -859,12 +871,12 @@ def main() -> None:
                 "accepted deletion must record one value-free provider effect receipt",
             )
 
-            # Provider outcomes are committed independently of request handling.
-            # Keep this simulation inside a real Store unit of work so the deployed
-            # Postgres path exercises the same transaction boundary as a worker.
+            # A provider outage keeps access revoked and makes this immutable
+            # deletion generation terminal. The retry route below creates a
+            # new generation rather than replaying this failed job.
             with store.request_unit_of_work(
-                correlation_id="stage2-media-deletion-partial",
-                command_id="stage2MediaDeletionPartial",
+                correlation_id="stage2-media-deletion-load",
+                command_id="stage2MediaDeletionLoad",
             ):
                 repository = store.owner_truth_media_source_object_repository()
                 deletion_source = repository.get_source_object(
@@ -872,15 +884,78 @@ def main() -> None:
                     source_object_id=source_object_id,
                     owner_subject_id=owner_id,
                 )
-                repository.record_deletion_outcome(
-                    vault_id=vault_id,
-                    source_object_id=source_object_id,
-                    owner_subject_id=owner_id,
-                    deletion_generation=int(deletion_source["deletionGeneration"]),
-                    outcome="partial",
-                    retryable=True,
-                    failure_code="objectStorageUnavailable",
-                )
+            deletion_generation = int(deletion_source["deletionGeneration"])
+            deletion_failure = OwnerTruthMediaDeletionWorkerRuntime(
+                settings=worker_settings,
+                store=store,
+                worker_id="media-deletion-dead-letter-postgres-smoke",
+                object_store=UnavailableFilesystemPrivateMediaObjectStore(root=media_root),
+            ).run_once()
+            require(
+                deletion_failure.get("status") == "failed"
+                and deletion_failure.get("reason") == "privateMediaDeletionUnavailable"
+                and deletion_failure.get("deletionStatus") == "partial"
+                and deletion_failure.get("deletionRetryable") is True
+                and deletion_failure.get("deadLetterCause") == "manualInterventionRequired"
+                and deletion_failure.get("deadLetterState") == "open"
+                and deletion_failure.get("deadLetterNextAction") == "manualInterventionRequired",
+                f"terminal media deletion must expose value-free dead-letter state: {deletion_failure}",
+            )
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT state, attempt
+                        FROM async_effects.jobs
+                        WHERE job_id = %s
+                        """,
+                        (deletion_failure["jobId"],),
+                    )
+                    deletion_failure_job = cursor.fetchone()
+                    cursor.execute(
+                        """
+                        SELECT reason_code, state, attempt
+                        FROM async_effects.dead_letters
+                        WHERE job_id = %s
+                        """,
+                        (deletion_failure["jobId"],),
+                    )
+                    deletion_dead_letter_rows = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT state, outcome
+                        FROM async_effects.business_receipts
+                        WHERE operation_id = %s
+                          AND receipt_type = 'consumer.ownerTruth.mediaSourceObject.deletion.completion'
+                        """,
+                        (deletion_failure["operationId"],),
+                    )
+                    deletion_failure_receipts = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT access_state, deletion_status, deletion_retryable
+                        FROM owner_truth.media_source_objects
+                        WHERE vault_id = %s AND id = %s
+                        """,
+                        (vault_id, source_object_id),
+                    )
+                    deletion_failure_source = cursor.fetchone()
+            require(
+                deletion_failure_job == ("failed", 1),
+                "failed deletion job must become terminal before dead-letter admission",
+            )
+            require(
+                deletion_dead_letter_rows == [("manualInterventionRequired", "open", 1)],
+                "failed deletion must admit exactly one open manual-intervention dead letter",
+            )
+            require(
+                deletion_failure_receipts == [("failed", "failed")],
+                "failed deletion must keep one failed typed consumer receipt",
+            )
+            require(
+                deletion_failure_source == ("accessRevoked", "partial", True),
+                "failed deletion must retain revoked access and a retryable partial state",
+            )
             deletion_retry_payload = {
                 "commandId": str(uuid.uuid4()),
                 "expectedAuthorityEpoch": 0,
@@ -922,7 +997,7 @@ def main() -> None:
                         vault_id=vault_id,
                         source_object_id=source_object_id,
                         owner_subject_id=owner_id,
-                        deletion_generation=int(deletion_source["deletionGeneration"]),
+                        deletion_generation=deletion_generation,
                         outcome="completed",
                         retryable=False,
                     )
@@ -976,12 +1051,6 @@ def main() -> None:
                     store=store,
                     worker_id="media-deletion-postgres-smoke",
                     object_store=object_store,
-                )
-                stale_deletion = deletion_worker.run_once()
-                require(
-                    stale_deletion.get("status") == "blocked"
-                    and stale_deletion.get("reason") == "mediaDeletionStale",
-                    f"old deletion generation must be fenced: {stale_deletion}",
                 )
                 if run_lease_heartbeat_smoke:
                     delete_started = Event()
@@ -1097,6 +1166,7 @@ def main() -> None:
                         "physicalDeletionCompleted": physical_deletion_completed,
                         "leaseHeartbeatProtected": lease_heartbeat_protected,
                         "mediaProcessingDeadLetterAdmitted": True,
+                        "mediaDeletionDeadLetterAdmitted": True,
                         "deletedMediaExcludedFromContext": True,
                         "qaHeaderUsed": False,
                         "responseRedaction": True,

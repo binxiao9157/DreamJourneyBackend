@@ -18,9 +18,11 @@ from typing import Any, Mapping, Optional
 
 from app.async_effects.contracts import (
     AsyncEffectIntent,
+    AsyncEffectJobState,
     is_async_effect_store_ready,
     resolve_async_effect_runtime_status,
 )
+from app.async_effects.dead_letter_effects import DeadLetterCause, admit_dead_letter
 from app.async_effects.lease_repository import (
     AsyncEffectJobLease,
     AsyncEffectLeaseCancelled,
@@ -338,6 +340,30 @@ class OwnerTruthMediaDeletionWorkerRuntime:
             outcome=lease_outcome,
             error_code=None if lease_outcome == "succeeded" else reason,
         )
+        dead_letter = None
+        if lease_outcome == "failed":
+            # A deletion failure never restores access. Its retry path creates
+            # a new deletion generation, so this terminal job needs an
+            # operator-visible record rather than an implicit auto-replay.
+            admission = admit_dead_letter(
+                intent=intent,
+                job_state=AsyncEffectJobState.FAILED,
+                attempt=lease.attempt,
+                max_attempts=int(intent.max_attempts),
+                cause=DeadLetterCause.MANUAL_INTERVENTION_REQUIRED,
+                failure_hash=_result_hash(
+                    intent.stable_key,
+                    reason,
+                    str(intent.target.resource_version),
+                    str(lease.attempt),
+                ),
+                last_receipt_hash=_result_hash(
+                    receipt.business_receipt_id,
+                    receipt.business_target_key,
+                    receipt.business_outcome,
+                ),
+            )
+            dead_letter = self._store.async_effect_dead_letter_repository().record(admission)
         return self._payload(
             status="completed" if deletion_state == "completed" else "failed",
             reason=reason,
@@ -346,6 +372,7 @@ class OwnerTruthMediaDeletionWorkerRuntime:
             completion=completion,
             receipt=receipt,
             source_object=updated,
+            dead_letter=dead_letter,
         )
 
     def _block_stale_lease(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
@@ -511,6 +538,7 @@ class OwnerTruthMediaDeletionWorkerRuntime:
             "request_unit_of_work",
             "async_effect_lease_repository",
             "async_effect_consumer_repository",
+            "async_effect_dead_letter_repository",
             "owner_truth_media_source_object_repository",
         ]
         if not all(callable(getattr(self._store, name, None)) for name in required):
@@ -533,6 +561,7 @@ class OwnerTruthMediaDeletionWorkerRuntime:
         completion: Any | None = None,
         receipt: Any | None = None,
         source_object: Mapping[str, Any] | None = None,
+        dead_letter: Any | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "mode": "run",
@@ -572,6 +601,17 @@ class OwnerTruthMediaDeletionWorkerRuntime:
                     "mediaKind": source_object.get("mediaKind"),
                     "deletionStatus": source_object.get("deletionStatus"),
                     "deletionRetryable": bool(source_object.get("deletionRetryable", False)),
+                }
+            )
+        if dead_letter is not None:
+            admission = dead_letter.admission
+            payload.update(
+                {
+                    "deadLetterCause": admission.cause.value,
+                    "deadLetterId": admission.dead_letter_id,
+                    "deadLetterNextAction": admission.next_action,
+                    "deadLetterOutcome": dead_letter.outcome,
+                    "deadLetterState": admission.state.value,
                 }
             )
         return payload

@@ -76,6 +76,8 @@ assert "assert_deletion_execution_allowed" in deletion_worker
 assert "OperationMetricRecorder" in deletion_worker
 assert "WorkerLeaseHeartbeat" in deletion_worker
 assert "def _renew_lease(" in deletion_worker
+assert "admit_dead_letter" in deletion_worker
+assert "async_effect_dead_letter_repository" in deletion_worker
 print("Owner Truth Stage 2 private media processing gate passed")
 PY
 
