@@ -71,6 +71,18 @@ M0_DFX_BUILD_ID="<deployed-commit>" \
 完整报告仅输出到调用方标准输出，便于 CI 或 QA 存档；运行器不会把子脚本的原始输出
 写入报告，避免意外扩散测试数据。
 
+## 部署态证据
+
+2026-08-05，服务器部署提交为 `069bc6f`，API 容器内完成：
+
+1. `migrate_db.py --verify`：`status=ready`、`appliedHead=0078`。
+2. `run-backend-m0-dfx-baseline-deployed-smoke.sh`：`status=passed`、三条 Probe 全部通过、
+   `sampleCount=7`、`failureCount=0`。
+3. Context 固定负载的 `latencyP95Ms=14`、`contextPacketP95Bytes=18995`。这些是本次合成
+   fixture 的观察值，不是生产 SLO 或容量承诺。
+
+该 smoke 只创建并清理临时 PostgreSQL 数据库，未写入生产业务表。
+
 ## 未覆盖边界
 
 该基线不替代以下独立验收：真实对象 ACL/删除回执、OCR/ASR/视觉解析质量、队列和容器
