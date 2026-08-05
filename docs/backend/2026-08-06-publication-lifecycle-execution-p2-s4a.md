@@ -82,9 +82,15 @@ bash scripts/run-backend-publication-lifecycle-execution-postgres-smoke.sh
 
 该脚本从 `DATABASE_URL` 创建临时数据库，应用所有迁移，验证撤回、争议冻结、命令幂等、既有 Visitor session 拒绝，以及 Source authority 变化引起的 grant/session 自动撤销；不会写入配置的应用数据库。
 
+## P2-S4B iOS QA consumer follow-on
+
+- 后端 `main@ac7ab7a` 在 owner-only、已脱敏的 publication management summary 中增加 `lifecycleAuthorityEpoch`。它是撤回命令的乐观并发值，不是账户凭据、Visitor credential 或 Provider 标识。
+- `main@909fe73` 将该值加入上述 disposable Postgres smoke；部署后 smoke 已再次通过。
+- iOS 仅在 owner-management、Visitor 和 lifecycle 三个 QA gate 同时开启时读取该字段并显示撤回控件。撤回成功后会刷新为 publication/projection/grant 均已撤回，并在 Visitor 读取返回 lifecycle denial 时清空内存 scope、projection 和 session。
+- 该 consumer 仍是 default-off 的内部 QA 能力，不新增公开 M2 路由、深链或普通发布入口。
+
 ## 明确未完成
 
 - Public Index、缓存、CDN、对象存储和外部搜索的实际清理 worker/receipt。
 - 绑定了 `publicationId/grantId` 的腾讯数智人 runtime session 释放。当前移动端数智人 session 没有 M2 scope，不能伪造“已关闭”回执。
-- iOS Visitor 本地缓存接收到 lifecycle denial 后的显式清空 UIQA。
 - 公开 M2 入口、成年人资格 Provider、法务/隐私、Provider 成本与真机 Gate。
