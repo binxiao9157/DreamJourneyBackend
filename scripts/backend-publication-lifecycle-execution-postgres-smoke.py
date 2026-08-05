@@ -47,6 +47,7 @@ create_draft = _authority_smoke["create_draft"]
 confirm_draft = _authority_smoke["confirm_draft"]
 issue = _visitor_smoke["issue"]
 admit = _visitor_smoke["admit"]
+owner_publications = _visitor_smoke["owner_publications"]
 read_projection = _visitor_smoke["read_projection"]
 
 
@@ -121,6 +122,13 @@ def execute(dsn: str) -> None:
     try:
         seed = seed_publishable_memory(dsn, label="lifecycle-withdraw")
         withdrawal = confirm_draft(store, seed, create_draft(store, seed), command_id=str(uuid.uuid4()))
+        owner_summaries = owner_publications(store, seed=seed)
+        require(
+            len(owner_summaries) == 1
+            and owner_summaries[0].publication_id == withdrawal.publication_id
+            and owner_summaries[0].lifecycle_authority_epoch == 0,
+            "owner management read must expose the publication lifecycle authority epoch",
+        )
         visitor = "publication-lifecycle-visitor"
         issued, admitted, session_credential = issue_and_admit(
             store,
