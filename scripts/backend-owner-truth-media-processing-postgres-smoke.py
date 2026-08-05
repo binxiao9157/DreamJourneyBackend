@@ -711,21 +711,28 @@ def main() -> None:
                 "accepted deletion must record one value-free provider effect receipt",
             )
 
-            repository = store.owner_truth_media_source_object_repository()
-            deletion_source = repository.get_source_object(
-                vault_id=vault_id,
-                source_object_id=source_object_id,
-                owner_subject_id=owner_id,
-            )
-            repository.record_deletion_outcome(
-                vault_id=vault_id,
-                source_object_id=source_object_id,
-                owner_subject_id=owner_id,
-                deletion_generation=int(deletion_source["deletionGeneration"]),
-                outcome="partial",
-                retryable=True,
-                failure_code="objectStorageUnavailable",
-            )
+            # Provider outcomes are committed independently of request handling.
+            # Keep this simulation inside a real Store unit of work so the deployed
+            # Postgres path exercises the same transaction boundary as a worker.
+            with store.request_unit_of_work(
+                correlation_id="stage2-media-deletion-partial",
+                command_id="stage2MediaDeletionPartial",
+            ):
+                repository = store.owner_truth_media_source_object_repository()
+                deletion_source = repository.get_source_object(
+                    vault_id=vault_id,
+                    source_object_id=source_object_id,
+                    owner_subject_id=owner_id,
+                )
+                repository.record_deletion_outcome(
+                    vault_id=vault_id,
+                    source_object_id=source_object_id,
+                    owner_subject_id=owner_id,
+                    deletion_generation=int(deletion_source["deletionGeneration"]),
+                    outcome="partial",
+                    retryable=True,
+                    failure_code="objectStorageUnavailable",
+                )
             deletion_retry_payload = {
                 "commandId": str(uuid.uuid4()),
                 "expectedAuthorityEpoch": 0,
@@ -757,19 +764,24 @@ def main() -> None:
                 and deletion_retry_replay.json().get("status") == "deletionDeduplicated",
                 "deletion retry command must deduplicate",
             )
-            try:
-                repository.record_deletion_outcome(
-                    vault_id=vault_id,
-                    source_object_id=source_object_id,
-                    owner_subject_id=owner_id,
-                    deletion_generation=int(deletion_source["deletionGeneration"]),
-                    outcome="completed",
-                    retryable=False,
-                )
-            except OwnerTruthMediaUploadConflict:
-                pass
-            else:
-                raise AssertionError("old deletion generation must not overwrite a retry")
+            with store.request_unit_of_work(
+                correlation_id="stage2-media-deletion-stale-outcome",
+                command_id="stage2MediaDeletionStaleOutcome",
+            ):
+                repository = store.owner_truth_media_source_object_repository()
+                try:
+                    repository.record_deletion_outcome(
+                        vault_id=vault_id,
+                        source_object_id=source_object_id,
+                        owner_subject_id=owner_id,
+                        deletion_generation=int(deletion_source["deletionGeneration"]),
+                        outcome="completed",
+                        retryable=False,
+                    )
+                except OwnerTruthMediaUploadConflict:
+                    pass
+                else:
+                    raise AssertionError("old deletion generation must not overwrite a retry")
             with psycopg.connect(test_dsn) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
