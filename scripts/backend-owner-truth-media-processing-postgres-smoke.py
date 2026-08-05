@@ -966,6 +966,10 @@ def main() -> None:
             )
             physical_deletion_completed = False
             lease_heartbeat_protected = False
+            # The normal completed document plus the intentionally retained
+            # dead-letter image are both private objects. Physical deletion
+            # below targets only the completed document's SourceObject.
+            retained_dead_letter_object_count = 1
             if run_physical_deletion_smoke:
                 deletion_worker = OwnerTruthMediaDeletionWorkerRuntime(
                     settings=worker_settings,
@@ -1052,13 +1056,15 @@ def main() -> None:
                     f"physical media deletion failed: {physical_deletion}",
                 )
                 require(
-                    len(list(Path(media_root).rglob("*.bin"))) == 0,
-                    "completed deletion must remove the private filesystem object",
+                    len(list(Path(media_root).rglob("*.bin")))
+                    == retained_dead_letter_object_count,
+                    "completed deletion must remove only its private filesystem object",
                 )
                 physical_deletion_completed = True
             else:
                 require(
-                    len(list(Path(media_root).rglob("*.bin"))) == 1,
+                    len(list(Path(media_root).rglob("*.bin")))
+                    == 1 + retained_dead_letter_object_count,
                     "P0-S1 must not claim physical deletion before its dedicated worker exists",
                 )
 
@@ -1070,7 +1076,11 @@ def main() -> None:
                         "ownerBoundUpload": True,
                         "commandReplayDeduplicated": True,
                         "crossOwnerDenied": True,
-                        "privateObjectCount": 0 if physical_deletion_completed else 1,
+                        "privateObjectCount": (
+                            retained_dead_letter_object_count
+                            if physical_deletion_completed
+                            else 1 + retained_dead_letter_object_count
+                        ),
                         "derivedSource": True,
                         "pendingCandidate": True,
                         "formalPolicySnapshotCaptured": True,
