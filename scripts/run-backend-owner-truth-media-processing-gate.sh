@@ -17,6 +17,10 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
   tests.test_owner_truth_media_capture_api \
   tests.test_owner_truth_media_processing_worker \
   tests.test_owner_truth_media_deletion_worker \
+  tests.test_owner_truth_candidate_extraction_worker \
+  tests.test_owner_truth_memory_projection_worker \
+  tests.test_async_effect_typed_consumer_completion \
+  tests.test_owner_truth_memory_projection_async_effect \
   tests.test_owner_truth_media_external_processor_contract \
   tests.test_owner_truth_media_processing_migration_contract \
   tests.test_owner_truth_media_deletion_migration_contract \
@@ -33,6 +37,9 @@ PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/services/owner_truth_media_deletion.py \
   app/async_effects/owner_truth_media_processing_worker.py \
   app/async_effects/owner_truth_media_deletion_worker.py \
+  app/async_effects/owner_truth_candidate_extraction_worker.py \
+  app/async_effects/owner_truth_memory_projection_worker.py \
+  app/async_effects/consumer_repository.py \
   app/async_effects/worker_lifecycle.py \
   scripts/backend-owner-truth-media-processing-postgres-smoke.py \
   app/services/route_ownership.py \
@@ -78,6 +85,14 @@ assert "WorkerLeaseHeartbeat" in deletion_worker
 assert "def _renew_lease(" in deletion_worker
 assert "admit_dead_letter" in deletion_worker
 assert "async_effect_dead_letter_repository" in deletion_worker
+candidate_worker = Path("app/async_effects/owner_truth_candidate_extraction_worker.py").read_text(encoding="utf-8")
+assert "candidateExtractionRetriesExhausted" in candidate_worker
+assert "admit_dead_letter" in candidate_worker
+assert "async_effect_dead_letter_repository" in candidate_worker
+projection_worker = Path("app/async_effects/owner_truth_memory_projection_worker.py").read_text(encoding="utf-8")
+assert "memoryProjectionRetriesExhausted" in projection_worker
+assert "admit_dead_letter" in projection_worker
+assert "async_effect_dead_letter_repository" in projection_worker
 print("Owner Truth Stage 2 private media processing gate passed")
 PY
 

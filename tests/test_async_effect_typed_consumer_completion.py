@@ -269,6 +269,54 @@ class MemoryProjectionTypedConsumerCompletionTests(unittest.TestCase):
         self.assertEqual(created.inbox_state, "completed")
         self.assertEqual(replayed.outcome, "deduplicated")
 
+    def test_admitted_projection_failure_writes_one_fixed_terminal_receipt(self):
+        admission = self.admission_repository.admit_owner_truth_memory_projection(self.intent)
+        command = OwnerTruthMemoryProjectionRebuildConsumerCommand(
+            intent=self.intent,
+            consumer_name="ownerTruth.memoryProjection.rebuild",
+            business_target_key=self.intent.business_target_key,
+            outcome="failed",
+            reason_code="memoryProjectionRetriesExhausted",
+            result_ref_hash=digest("projection-terminal-failure"),
+            admission=admission,
+            projection_outcome="failed",
+        )
+
+        created = self.consumer_repository.consume(command)
+        replayed = self.consumer_repository.consume(command)
+
+        self.assertTrue(admission.allowed)
+        self.assertEqual(created.business_outcome, "failed")
+        self.assertEqual(created.inbox_state, "failed")
+        self.assertEqual(replayed.outcome, "deduplicated")
+
+    def test_projection_failure_refuses_invalid_terminal_combinations(self):
+        admission = self.admission_repository.admit_owner_truth_memory_projection(self.intent)
+        cases = (
+            ("completed", "memoryProjectionRetriesExhausted", "failed"),
+            ("failed", "memoryProjectionRebuilt", "failed"),
+            ("failed", "memoryProjectionRetriesExhausted", "rebuilt"),
+        )
+        for outcome, reason_code, projection_outcome in cases:
+            with self.subTest(
+                outcome=outcome,
+                reason_code=reason_code,
+                projection_outcome=projection_outcome,
+            ):
+                with self.assertRaises(AsyncEffectConsumerError):
+                    OwnerTruthMemoryProjectionRebuildConsumerCommand(
+                        intent=self.intent,
+                        consumer_name="ownerTruth.memoryProjection.rebuild",
+                        business_target_key=self.intent.business_target_key,
+                        outcome=outcome,
+                        reason_code=reason_code,
+                        result_ref_hash=digest(
+                            f"projection-invalid-terminal:{outcome}:{reason_code}:{projection_outcome}"
+                        ),
+                        admission=admission,
+                        projection_outcome=projection_outcome,
+                    )
+
     def test_stale_projection_target_can_only_write_a_blocked_completion(self):
         self.admission_repository.seed_vault(
             vault_id=self.vault_id,

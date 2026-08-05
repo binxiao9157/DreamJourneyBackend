@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from hashlib import sha256
 import json
 from threading import Event, Thread
@@ -9,6 +10,7 @@ import unittest
 from uuid import uuid4
 
 from app.async_effects.consumer_repository import InMemoryAsyncEffectConsumerRepository
+from app.async_effects.dead_letter_repository import InMemoryAsyncEffectDeadLetterRepository
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
 from app.async_effects.lease_repository import InMemoryAsyncEffectLeaseRepository
 from app.async_effects.owner_truth_memory_projection_worker import (
@@ -134,6 +136,7 @@ class _Store:
     def __init__(self, *, projection: _ProjectionRepository | None = None) -> None:
         self.lease_repository = InMemoryAsyncEffectLeaseRepository()
         self.consumer_repository = InMemoryAsyncEffectConsumerRepository()
+        self.dead_letter_repository = InMemoryAsyncEffectDeadLetterRepository()
         self.admission_repository = InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository()
         self.projection_repository = projection or _ProjectionRepository()
         self.search_projection_repository = _SearchDocumentProjectionRepository(
@@ -155,6 +158,9 @@ class _Store:
     def async_effect_consumer_repository(self):
         return self.consumer_repository
 
+    def async_effect_dead_letter_repository(self):
+        return self.dead_letter_repository
+
     def owner_truth_memory_projection_target_admission_repository(self):
         return self.admission_repository
 
@@ -167,7 +173,6 @@ class _Store:
 
 class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.store = _Store()
         self.owner_subject_id = "owner-projection-worker"
         self.vault_id = "vault-projection-worker"
         self.memory_version_id = str(uuid4())
@@ -187,36 +192,57 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
             event_type=MEMORY_PROJECTION_REBUILD_EVENT_TYPE,
             job_type=MEMORY_PROJECTION_REBUILD_JOB_TYPE,
         )
-        self.store.lease_repository.seed(self.intent)
-        self.store.admission_repository.seed_vault(
-            vault_id=self.vault_id,
-            owner_subject_id=self.owner_subject_id,
-            authority_epoch=6,
+        self.store = self._store_for_intent(self.intent)
+
+    def _store_for_intent(
+        self,
+        intent: AsyncEffectIntent,
+        *,
+        projection: _ProjectionRepository | None = None,
+    ) -> _Store:
+        store = _Store(projection=projection)
+        store.lease_repository.seed(intent)
+        store.admission_repository.seed_vault(
+            vault_id=intent.target.vault_id,
+            owner_subject_id=intent.target.owner_subject_id,
+            authority_epoch=int(intent.target.authority_epoch),
             status="active",
         )
-        self.store.admission_repository.seed_memory_version(
-            vault_id=self.vault_id,
-            memory_version_id=self.memory_version_id,
-            owner_subject_id=self.owner_subject_id,
-            authority_epoch=6,
+        store.admission_repository.seed_memory_version(
+            vault_id=intent.target.vault_id,
+            memory_version_id=intent.target.resource_id,
+            owner_subject_id=intent.target.owner_subject_id,
+            authority_epoch=int(intent.target.authority_epoch),
             state="active",
             source_version=4,
-            version_number=2,
+            version_number=int(intent.target.resource_version),
             is_current=True,
             content_hash=self.content_hash,
-            source_owner_subject_id=self.owner_subject_id,
-            source_authority_epoch=6,
+            source_owner_subject_id=intent.target.owner_subject_id,
+            source_authority_epoch=int(intent.target.authority_epoch),
             source_state="active",
             source_version_current=4,
         )
+        return store
+
+    def _reset_for_intent(
+        self,
+        intent: AsyncEffectIntent,
+        *,
+        projection: _ProjectionRepository | None = None,
+    ) -> None:
+        self.intent = intent
+        self.store = self._store_for_intent(intent, projection=projection)
 
     def worker(
         self,
         *,
         enabled: bool = True,
         search_projection_enabled: bool = False,
+        store: _Store | None = None,
         worker_id: str = "projection-worker-test",
         lease_seconds: int = 60,
+        retry_seconds: int = 5,
         heartbeat_interval_seconds: float | None = None,
         operation_metric_recorder=None,
     ) -> OwnerTruthMemoryProjectionWorkerRuntime:
@@ -227,10 +253,10 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
                 owner_truth_memory_projection_worker_enabled=enabled,
                 owner_truth_memory_search_projection_worker_enabled=search_projection_enabled,
             ),
-            store=self.store,
+            store=store or self.store,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
-            retry_seconds=5,
+            retry_seconds=retry_seconds,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             operation_metric_recorder=operation_metric_recorder,
         )
@@ -494,6 +520,7 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
         )
 
     def test_search_projection_failure_releases_the_current_job_for_retry(self):
+        self._reset_for_intent(replace(self.intent, max_attempts=3))
         self.store.search_projection_repository.fail = True
 
         result = self.worker(search_projection_enabled=True).run_once()
@@ -509,6 +536,7 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
         self.assertEqual(self.store.consumer_repository._inbox, {})
 
     def test_non_ready_search_projection_result_never_terminalizes_the_job(self):
+        self._reset_for_intent(replace(self.intent, max_attempts=3))
         self.store.search_projection_repository.outcome = "sourceRebuilding"
 
         result = self.worker(search_projection_enabled=True).run_once()
@@ -518,6 +546,7 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
         self.assertEqual(self.store.consumer_repository._inbox, {})
 
     def test_stale_search_projection_checkpoint_never_terminalizes_the_job(self):
+        self._reset_for_intent(replace(self.intent, max_attempts=3))
         self.store.search_projection_repository.checkpoint_override = _digest("stale-search-checkpoint")
 
         result = self.worker(search_projection_enabled=True).run_once()
@@ -556,18 +585,51 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
             "terminalFailed",
         )
 
-    def test_projection_error_releases_only_the_current_job_for_retry(self):
+    def test_projection_error_at_default_attempt_limit_writes_terminal_receipt_and_dead_letter(self):
         self.store.projection_repository.fail = True
 
         result = self.worker().run_once()
 
-        self.assertEqual(result["status"], "retryWait")
-        self.assertEqual(result["reason"], "memoryProjectionRebuildRetryableFailure")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "memoryProjectionRetriesExhausted")
+        self.assertEqual(result["projectionOutcome"], "failed")
+        self.assertEqual(result["jobState"], "failed")
+        self.assertEqual(result["businessOutcome"], "failed")
+        self.assertEqual(result["deadLetterOutcome"], "admitted")
+        self.assertEqual(result["deadLetterCause"], "maxAttemptsExceeded")
+        self.assertEqual(result["deadLetterState"], "open")
+        self.assertEqual(result["deadLetterNextAction"], "authorizedReplayRequired")
         self.assertEqual(
             self.store.lease_repository.attempt_state(self.intent.job_id, 1),
-            "retryableFailed",
+            "terminalFailed",
         )
-        self.assertEqual(self.store.consumer_repository._inbox, {})
+        self.assertEqual(len(self.store.consumer_repository._inbox), 1)
+        admission = self.store.dead_letter_repository.load(result["deadLetterId"])
+        self.assertEqual(admission.intent, self.intent)
+        self.assertEqual(admission.attempt, 1)
+        self.assertEqual(admission.cause.value, "maxAttemptsExceeded")
+
+    def test_projection_error_retries_until_explicit_attempt_limit(self):
+        self._reset_for_intent(
+            replace(self.intent, max_attempts=3),
+            projection=_ProjectionRepository(fail=True),
+        )
+        worker = self.worker(retry_seconds=1)
+
+        first = worker.run_once()
+        sleep(1.05)
+        second = worker.run_once()
+        sleep(1.05)
+        third = worker.run_once()
+
+        self.assertEqual([first["status"], second["status"], third["status"]], ["retryWait", "retryWait", "failed"])
+        self.assertEqual(third["reason"], "memoryProjectionRetriesExhausted")
+        self.assertEqual(third["attempt"], 3)
+        self.assertEqual(third["deadLetterCause"], "maxAttemptsExceeded")
+        self.assertEqual(self.store.lease_repository.attempt_state(self.intent.job_id, 1), "retryableFailed")
+        self.assertEqual(self.store.lease_repository.attempt_state(self.intent.job_id, 2), "retryableFailed")
+        self.assertEqual(self.store.lease_repository.attempt_state(self.intent.job_id, 3), "terminalFailed")
+        self.assertEqual(self.store.dead_letter_repository.record_count(), 1)
 
     def test_claimed_job_records_value_free_worker_attempt_metric(self):
         recorder = _RecordingMetricRecorder()

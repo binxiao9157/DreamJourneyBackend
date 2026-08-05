@@ -34,6 +34,7 @@ _TERMINAL_OUTCOMES = {"completed", "skipped", "blocked", "failed", "unknown"}
 _OWNER_TRUTH_SOURCE_BLOCKED_CONSUMER = "ownerTruth.source.blocked"
 _OWNER_TRUTH_SOURCE_EXTRACTION_CONSUMER = "ownerTruth.source.extraction"
 _OWNER_TRUTH_MEMORY_PROJECTION_CONSUMER = "ownerTruth.memoryProjection.rebuild"
+_MEMORY_PROJECTION_RETRIES_EXHAUSTED_REASON = "memoryProjectionRetriesExhausted"
 
 
 def _is_typed_memory_projection_rebuild(intent: AsyncEffectIntent) -> bool:
@@ -269,6 +270,15 @@ class OwnerTruthMemoryProjectionRebuildConsumerCommand(AsyncEffectConsumerComple
         )
         object.__setattr__(self, "projection_outcome", normalized_projection_outcome)
         if self.admission.allowed:
+            if normalized_projection_outcome == "failed":
+                if (
+                    self.outcome != "failed"
+                    or self.reason_code != _MEMORY_PROJECTION_RETRIES_EXHAUSTED_REASON
+                ):
+                    raise AsyncEffectConsumerError(
+                        "failed projection rebuild must preserve its fixed terminal reason"
+                    )
+                return
             if self.outcome != "completed":
                 raise AsyncEffectConsumerError("admitted projection rebuild must complete")
             if normalized_projection_outcome not in {"rebuilt", "unchanged"}:

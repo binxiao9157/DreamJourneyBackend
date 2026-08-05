@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from hashlib import sha256
 import json
 from threading import Event, Thread
@@ -9,6 +10,7 @@ import unittest
 from uuid import uuid4
 
 from app.async_effects.consumer_repository import InMemoryAsyncEffectConsumerRepository
+from app.async_effects.dead_letter_repository import InMemoryAsyncEffectDeadLetterRepository
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
 from app.async_effects.lease_repository import InMemoryAsyncEffectLeaseRepository
 from app.async_effects.owner_truth_candidate_extraction_worker import (
@@ -62,6 +64,7 @@ class _Store:
     ) -> None:
         self.lease_repository = InMemoryAsyncEffectLeaseRepository()
         self.consumer_repository = InMemoryAsyncEffectConsumerRepository()
+        self.dead_letter_repository = InMemoryAsyncEffectDeadLetterRepository()
         self.admission_repository = InMemoryOwnerTruthSourceTargetAdmissionRepository()
         self.input_repository = _SourceInputRepository(
             source_content_hash=source_content_hash,
@@ -100,6 +103,9 @@ class _Store:
 
     def async_effect_consumer_repository(self):
         return self.consumer_repository
+
+    def async_effect_dead_letter_repository(self):
+        return self.dead_letter_repository
 
     def owner_truth_source_target_admission_repository(self):
         return self.admission_repository
@@ -217,6 +223,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         operation_metric_recorder=None,
         worker_id: str = "candidate-extraction-worker-test",
         lease_seconds: int = 60,
+        retry_seconds: int = 5,
         heartbeat_interval_seconds: float | None = None,
     ) -> OwnerTruthCandidateExtractionWorkerRuntime:
         return OwnerTruthCandidateExtractionWorkerRuntime(
@@ -228,7 +235,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
             store=store or self.store,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
-            retry_seconds=5,
+            retry_seconds=retry_seconds,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             extractor=extractor,
             operation_metric_recorder=operation_metric_recorder,
@@ -346,17 +353,57 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(len(snapshot["extractions"]), 1)
         self.assertEqual(snapshot["candidates"], {})
 
-    def test_adapter_failure_releases_only_the_current_job_for_retry(self) -> None:
+    def test_adapter_failure_at_default_attempt_limit_persists_failed_extraction_and_dead_letter(self) -> None:
         result = self._worker(extractor=_FailingExtractor()).run_once()
 
-        self.assertEqual(result["status"], "retryWait")
-        self.assertEqual(result["reason"], "candidateExtractionRetryableFailure")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "candidateExtractionRetriesExhausted")
+        self.assertEqual(result["extractionStatus"], "failed")
+        self.assertEqual(result["candidateCount"], 0)
+        self.assertEqual(result["jobState"], "failed")
+        self.assertEqual(result["consumerOutcome"], "accepted")
+        self.assertEqual(result["businessOutcome"], "failed")
+        self.assertEqual(result["deadLetterOutcome"], "admitted")
+        self.assertEqual(result["deadLetterCause"], "maxAttemptsExceeded")
+        self.assertEqual(result["deadLetterState"], "open")
+        self.assertEqual(result["deadLetterNextAction"], "authorizedReplayRequired")
         self.assertEqual(
             self.store.lease_repository.attempt_state(self.intent.job_id, 1),
-            "retryableFailed",
+            "terminalFailed",
         )
-        self.assertEqual(self.store.candidate_repository.snapshot()["extractions"], {})
-        self.assertEqual(self.store.consumer_repository._inbox, {})
+        snapshot = self.store.candidate_repository.snapshot()
+        self.assertEqual(len(snapshot["extractions"]), 1)
+        self.assertEqual(snapshot["candidates"], {})
+        self.assertEqual(len(self.store.consumer_repository._inbox), 1)
+        admission = self.store.dead_letter_repository.load(result["deadLetterId"])
+        self.assertEqual(admission.intent, self.intent)
+        self.assertEqual(admission.attempt, 1)
+        self.assertEqual(admission.cause.value, "maxAttemptsExceeded")
+
+    def test_adapter_failure_retries_until_the_explicit_attempt_limit(self) -> None:
+        intent = replace(self.intent, max_attempts=3)
+        store = self._new_store()
+        store.lease_repository.seed(intent)
+        worker = self._worker(
+            store=store,
+            extractor=_FailingExtractor(),
+            retry_seconds=1,
+        )
+
+        first = worker.run_once()
+        sleep(1.05)
+        second = worker.run_once()
+        sleep(1.05)
+        third = worker.run_once()
+
+        self.assertEqual([first["status"], second["status"], third["status"]], ["retryWait", "retryWait", "failed"])
+        self.assertEqual(third["reason"], "candidateExtractionRetriesExhausted")
+        self.assertEqual(third["attempt"], 3)
+        self.assertEqual(third["deadLetterCause"], "maxAttemptsExceeded")
+        self.assertEqual(store.lease_repository.attempt_state(intent.job_id, 1), "retryableFailed")
+        self.assertEqual(store.lease_repository.attempt_state(intent.job_id, 2), "retryableFailed")
+        self.assertEqual(store.lease_repository.attempt_state(intent.job_id, 3), "terminalFailed")
+        self.assertEqual(store.dead_letter_repository.record_count(), 1)
 
     def test_slow_extractor_heartbeats_lease_and_blocks_second_worker(self) -> None:
         started = Event()

@@ -19,9 +19,11 @@ from typing import Any, Optional, Protocol
 from app.async_effects.consumer_repository import OwnerTruthSourceBlockedConsumerCommand
 from app.async_effects.contracts import (
     AsyncEffectIntent,
+    AsyncEffectJobState,
     is_async_effect_store_ready,
     resolve_async_effect_runtime_status,
 )
+from app.async_effects.dead_letter_effects import DeadLetterCause, admit_dead_letter
 from app.async_effects.lease_repository import (
     AsyncEffectJobLease,
     AsyncEffectLeaseCancelled,
@@ -57,6 +59,10 @@ _SOURCE_CANDIDATE_EXTRACTION_JOB_TYPE = "ownerTruth.source.created"
 _DEFAULT_LEASE_SECONDS = 60
 _DEFAULT_RETRY_SECONDS = 30
 _WORKER_METRIC_COMPONENT_ID = "ownerTruthCandidateExtractionWorker"
+_TERMINAL_FAILURE_EXTRACTOR_ID = "candidateWorkerTerminalizer"
+_TERMINAL_FAILURE_MODEL_ID = "notApplicable"
+_TERMINAL_FAILURE_PROMPT_VERSION = "owner-truth-candidate-worker-terminal-v1"
+_TERMINAL_FAILURE_REASON = "candidateExtractionRetriesExhausted"
 
 
 class OwnerTruthCandidateExtractionWorkerError(RuntimeError):
@@ -196,7 +202,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 lease=lease,
             )
         except Exception:
-            result = self._release_retryable(lease)
+            result = self._release_retryable_or_terminalize(lease)
         self._record_attempt(lease=lease, result=result, started_at=started_at)
         return result
 
@@ -403,22 +409,125 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 lease_seconds=self._lease_seconds,
             )
 
-    def _release_retryable(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
+    def _release_retryable_or_terminalize(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
         try:
             with self._unit_of_work(
                 correlation_id=f"owner-truth-candidate-extraction-worker-retry-{lease.job_id}",
                 command_id=f"ownerTruthCandidateExtractionWorkerRetry:{lease.operation_id}",
             ):
-                preview = self._store.async_effect_lease_repository().release_retryable(
-                    lease,
-                    retry_seconds=self._retry_seconds,
+                lease_repository = self._store.async_effect_lease_repository()
+                intent = lease_repository.load_intent(lease)
+                self._assert_typed_intent(intent)
+                if lease.attempt < int(intent.max_attempts):
+                    preview = lease_repository.release_retryable(
+                        lease,
+                        retry_seconds=self._retry_seconds,
+                    )
+                    return self._payload(
+                        status="retryWait",
+                        reason="candidateExtractionRetryableFailure",
+                        lease=lease,
+                        intent=intent,
+                        retry_available_at=preview.available_at,
+                    )
+
+                admission = (
+                    self._store.owner_truth_source_target_admission_repository()
+                    .admit_owner_truth_source(intent)
                 )
-            return self._payload(
-                status="retryWait",
-                reason="candidateExtractionRetryableFailure",
-                lease=lease,
-                retry_available_at=preview.available_at,
-            )
+                consumer_repository = self._store.async_effect_consumer_repository()
+                if not admission.allowed:
+                    receipt = consumer_repository.consume(
+                        OwnerTruthSourceBlockedConsumerCommand(
+                            intent=intent,
+                            consumer_name="ownerTruth.source.blocked",
+                            business_target_key=intent.business_target_key,
+                            outcome="blocked",
+                            reason_code=admission.reason_code,
+                            result_ref_hash=_result_hash(
+                                intent.stable_key,
+                                admission.reason_code,
+                                str(lease.attempt),
+                            ),
+                            admission=admission,
+                        )
+                    )
+                    completion = lease_repository.complete(
+                        lease,
+                        outcome="blocked",
+                        error_code=admission.reason_code,
+                    )
+                    return self._payload(
+                        status="blocked",
+                        reason=admission.reason_code,
+                        lease=lease,
+                        intent=intent,
+                        completion=completion,
+                        receipt=receipt,
+                    )
+
+                source = (
+                    self._store.owner_truth_candidate_extraction_input_repository()
+                    .read_for_candidate_extraction(intent)
+                )
+                command = self._terminal_failure_command(
+                    intent=intent,
+                    source=source,
+                )
+                extraction_result = OwnerTruthCandidateExtractionService(
+                    self._store
+                ).record_in_unit_of_work(command)
+                if extraction_result.outcome == "blocked":
+                    completion = lease_repository.complete(
+                        lease,
+                        outcome="blocked",
+                        error_code=extraction_result.reason_code,
+                    )
+                    return self._payload(
+                        status="blocked",
+                        reason=extraction_result.reason_code,
+                        lease=lease,
+                        intent=intent,
+                        completion=completion,
+                        receipt=extraction_result.consumer,
+                        extraction_result=extraction_result,
+                    )
+
+                completion = lease_repository.complete(
+                    lease,
+                    outcome="failed",
+                    error_code=_TERMINAL_FAILURE_REASON,
+                )
+                admission_record = admit_dead_letter(
+                    intent=intent,
+                    job_state=AsyncEffectJobState.FAILED,
+                    attempt=lease.attempt,
+                    max_attempts=int(intent.max_attempts),
+                    cause=DeadLetterCause.MAX_ATTEMPTS_EXCEEDED,
+                    failure_hash=_result_hash(
+                        intent.stable_key,
+                        _TERMINAL_FAILURE_REASON,
+                        str(lease.attempt),
+                    ),
+                    last_receipt_hash=_result_hash(
+                        extraction_result.consumer.business_receipt_id,
+                        extraction_result.consumer.business_target_key,
+                        extraction_result.consumer.business_outcome,
+                    ),
+                )
+                dead_letter = self._store.async_effect_dead_letter_repository().record(
+                    admission_record
+                )
+                return self._payload(
+                    status="failed",
+                    reason=_TERMINAL_FAILURE_REASON,
+                    lease=lease,
+                    intent=intent,
+                    completion=completion,
+                    receipt=extraction_result.consumer,
+                    extraction_result=extraction_result,
+                    dead_letter=dead_letter,
+                )
         except AsyncEffectLeaseCancelled:
             return self._payload(
                 status="cancelled",
@@ -437,6 +546,27 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 reason="candidateExtractionRetryReleaseFailed",
                 lease=lease,
             )
+
+    @staticmethod
+    def _terminal_failure_command(
+        *,
+        intent: AsyncEffectIntent,
+        source: OwnerTruthCandidateExtractionInput,
+    ) -> SyntheticCandidateExtractionCommand:
+        """Persist a worker failure without representing it as model output."""
+
+        return SyntheticCandidateExtractionCommand(
+            intent=intent,
+            extractor_id=_TERMINAL_FAILURE_EXTRACTOR_ID,
+            model_id=_TERMINAL_FAILURE_MODEL_ID,
+            prompt_version=_TERMINAL_FAILURE_PROMPT_VERSION,
+            policy_version=OWNER_TRUTH_SCHEMA_VERSION,
+            source_content_hash=source.source_content_hash,
+            status=ExtractionResultStatus.FAILED,
+            proposals=(),
+            failure_code=_TERMINAL_FAILURE_REASON,
+            retryable=False,
+        )
 
     def _runtime_block_reason(self) -> str | None:
         readiness = self._readiness()
@@ -462,6 +592,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
             "request_unit_of_work",
             "async_effect_lease_repository",
             "async_effect_consumer_repository",
+            "async_effect_dead_letter_repository",
             "owner_truth_source_target_admission_repository",
             "owner_truth_candidate_extraction_input_repository",
             "owner_truth_candidate_extraction_repository",
@@ -487,6 +618,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
         receipt: Any | None = None,
         extraction_result: OwnerTruthCandidateExtractionResult | None = None,
         retry_available_at: str | None = None,
+        dead_letter: Any | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "mode": "run",
@@ -533,6 +665,17 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
             )
         if retry_available_at is not None:
             payload["retryAvailableAt"] = retry_available_at
+        if dead_letter is not None:
+            admission = dead_letter.admission
+            payload.update(
+                {
+                    "deadLetterCause": admission.cause.value,
+                    "deadLetterId": admission.dead_letter_id,
+                    "deadLetterNextAction": admission.next_action,
+                    "deadLetterOutcome": dead_letter.outcome,
+                    "deadLetterState": admission.state.value,
+                }
+            )
         return payload
 
 

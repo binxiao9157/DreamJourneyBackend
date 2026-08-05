@@ -242,6 +242,7 @@ class OwnerTruthMemoryProjectionAsyncEffectTests(unittest.TestCase):
         self.assertEqual(intent.target.purpose, "compatibilityProjection")
         self.assertEqual(intent.target.authority_epoch, 0)
         self.assertEqual(intent.payload_hash, created.memory_activation.content_hash)
+        self.assertEqual(intent.max_attempts, 1)
         self.assertNotIn(candidate.content["summary"], str(intent))
         self.assertNotIn(created.review.receipt_id, str(intent))
 

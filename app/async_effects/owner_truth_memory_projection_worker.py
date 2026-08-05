@@ -21,9 +21,11 @@ from app.async_effects.consumer_repository import (
 )
 from app.async_effects.contracts import (
     AsyncEffectIntent,
+    AsyncEffectJobState,
     is_async_effect_store_ready,
     resolve_async_effect_runtime_status,
 )
+from app.async_effects.dead_letter_effects import DeadLetterCause, admit_dead_letter
 from app.async_effects.lease_repository import (
     AsyncEffectJobLease,
     AsyncEffectLeaseCancelled,
@@ -48,6 +50,7 @@ _CONSUMER_NAME = "ownerTruth.memoryProjection.rebuild"
 _DEFAULT_LEASE_SECONDS = 60
 _DEFAULT_RETRY_SECONDS = 30
 _WORKER_METRIC_COMPONENT_ID = "ownerTruthMemoryProjectionWorker"
+_TERMINAL_FAILURE_REASON = "memoryProjectionRetriesExhausted"
 
 
 class OwnerTruthMemoryProjectionWorkerError(RuntimeError):
@@ -117,7 +120,7 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
                 lease=lease,
             )
         except Exception:
-            result = self._release_retryable(lease)
+            result = self._release_retryable_or_terminalize(lease)
         self._record_attempt(lease=lease, result=result, started_at=started_at)
         return result
 
@@ -391,22 +394,113 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
                 supported_job_types=[MEMORY_PROJECTION_REBUILD_JOB_TYPE],
             )
 
-    def _release_retryable(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
+    def _release_retryable_or_terminalize(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
         try:
             with self._unit_of_work(
                 correlation_id=f"owner-truth-memory-projection-worker-retry-{lease.job_id}",
                 command_id=f"ownerTruthMemoryProjectionWorkerRetry:{lease.operation_id}",
             ):
-                preview = self._store.async_effect_lease_repository().release_retryable(
-                    lease,
-                    retry_seconds=self._retry_seconds,
+                lease_repository = self._store.async_effect_lease_repository()
+                intent = lease_repository.load_intent(lease)
+                if lease.attempt < int(intent.max_attempts):
+                    preview = lease_repository.release_retryable(
+                        lease,
+                        retry_seconds=self._retry_seconds,
+                    )
+                    return self._payload(
+                        status="retryWait",
+                        reason="memoryProjectionRebuildRetryableFailure",
+                        lease=lease,
+                        intent=intent,
+                        retry_available_at=preview.available_at,
+                    )
+
+                admission_repository = (
+                    self._store.owner_truth_memory_projection_target_admission_repository()
                 )
-            return self._payload(
-                status="retryWait",
-                reason="memoryProjectionRebuildRetryableFailure",
-                lease=lease,
-                retry_available_at=preview.available_at,
-            )
+                if intent.operation_type == MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE:
+                    admission = admission_repository.admit_owner_truth_projection_rights_rebuild(intent)
+                else:
+                    admission = admission_repository.admit_owner_truth_memory_projection(intent)
+                if not admission.allowed:
+                    receipt = self._store.async_effect_consumer_repository().consume(
+                        OwnerTruthMemoryProjectionRebuildConsumerCommand(
+                            intent=intent,
+                            consumer_name=_CONSUMER_NAME,
+                            business_target_key=intent.business_target_key,
+                            outcome="blocked",
+                            reason_code=admission.reason_code,
+                            result_ref_hash=_result_hash(
+                                intent.stable_key,
+                                admission.reason_code,
+                                str(lease.attempt),
+                            ),
+                            admission=admission,
+                            projection_outcome=None,
+                        )
+                    )
+                    completion = lease_repository.complete(
+                        lease,
+                        outcome="blocked",
+                        error_code=admission.reason_code,
+                    )
+                    return self._payload(
+                        status="blocked",
+                        reason=admission.reason_code,
+                        lease=lease,
+                        intent=intent,
+                        completion=completion,
+                        receipt=receipt,
+                    )
+
+                result_hash = _result_hash(
+                    intent.stable_key,
+                    _TERMINAL_FAILURE_REASON,
+                    str(lease.attempt),
+                )
+                receipt = self._store.async_effect_consumer_repository().consume(
+                    OwnerTruthMemoryProjectionRebuildConsumerCommand(
+                        intent=intent,
+                        consumer_name=_CONSUMER_NAME,
+                        business_target_key=intent.business_target_key,
+                        outcome="failed",
+                        reason_code=_TERMINAL_FAILURE_REASON,
+                        result_ref_hash=result_hash,
+                        admission=admission,
+                        projection_outcome="failed",
+                    )
+                )
+                completion = lease_repository.complete(
+                    lease,
+                    outcome="failed",
+                    error_code=_TERMINAL_FAILURE_REASON,
+                )
+                admission_record = admit_dead_letter(
+                    intent=intent,
+                    job_state=AsyncEffectJobState.FAILED,
+                    attempt=lease.attempt,
+                    max_attempts=int(intent.max_attempts),
+                    cause=DeadLetterCause.MAX_ATTEMPTS_EXCEEDED,
+                    failure_hash=result_hash,
+                    last_receipt_hash=_result_hash(
+                        receipt.business_receipt_id,
+                        receipt.business_target_key,
+                        receipt.business_outcome,
+                    ),
+                )
+                dead_letter = self._store.async_effect_dead_letter_repository().record(
+                    admission_record
+                )
+                return self._payload(
+                    status="failed",
+                    reason=_TERMINAL_FAILURE_REASON,
+                    lease=lease,
+                    intent=intent,
+                    completion=completion,
+                    receipt=receipt,
+                    projection_outcome="failed",
+                    dead_letter=dead_letter,
+                )
         except AsyncEffectLeaseCancelled:
             return self._payload(
                 status="cancelled",
@@ -450,6 +544,7 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
             "request_unit_of_work",
             "async_effect_lease_repository",
             "async_effect_consumer_repository",
+            "async_effect_dead_letter_repository",
             "owner_truth_memory_projection_target_admission_repository",
             "owner_truth_memory_projection_repository",
         ]
@@ -482,6 +577,7 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
         search_projection_outcome: str | None = None,
         search_projection_document_count: int | None = None,
         retry_available_at: str | None = None,
+        dead_letter: Any | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "mode": "run",
@@ -531,6 +627,17 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
             payload["searchProjectionDocumentCount"] = search_projection_document_count
         if retry_available_at is not None:
             payload["retryAvailableAt"] = retry_available_at
+        if dead_letter is not None:
+            admission = dead_letter.admission
+            payload.update(
+                {
+                    "deadLetterCause": admission.cause.value,
+                    "deadLetterId": admission.dead_letter_id,
+                    "deadLetterNextAction": admission.next_action,
+                    "deadLetterOutcome": dead_letter.outcome,
+                    "deadLetterState": admission.state.value,
+                }
+            )
         return payload
 
 
