@@ -1,6 +1,6 @@
 # P2-S4A 发布撤回与争议冻结的本地访问阻断
 
-状态：`LOCAL_G0_VERIFIED / DEFAULT_OFF / DEPLOYMENT_PENDING`
+状态：`LOCAL_G0_VERIFIED / DEPLOYED_POSTGRES_VERIFIED / DEFAULT_OFF`
 
 本切片实现的是 M2 发布生命周期的第一道安全边界：在 Owner 主动撤回或已确认第三方异议时，先在同一个后端事务内停止新的 Visitor 读取，再记录不可变、脱敏的回执。它没有把 M2 变成公开功能。
 
@@ -66,7 +66,14 @@ X-DreamJourney-QA-Publication-Lifecycle: 1
   tests.test_runtime_capabilities
 ```
 
-部署前/后还应运行可丢弃数据库 smoke：
+已在部署环境完成：
+
+- 后端代码已推进至 `main@b473ed5`；功能提交为 `5e7942e`，随后用前向修复更正了 `0082` 的 receipt UUID 语法。
+- 生产 PostgreSQL 已执行 `0082_publication_lifecycle_execution`，migration head 已验证为 `0082`。
+- `GET /ready` 返回 database、schema、auth 与 incident 均为 `ready`。
+- 在 API 容器内执行下述可丢弃数据库 smoke 已通过；它不写入生产业务数据。
+
+部署前/后应运行可丢弃数据库 smoke：
 
 ```bash
 PYTHON_BIN=.venv/bin/python \
