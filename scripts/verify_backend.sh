@@ -164,6 +164,7 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-provider-query-operations-contract-
 echo "== Business completion/message/notification G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-notification-contract-gate.sh
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-projection-contract-gate.sh
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-projection-worker-gate.sh
 
 echo "== Legacy identity inbox bridge G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-legacy-identity-inbox-bridge-contract-gate.sh
@@ -400,6 +401,21 @@ test -f scripts/run-backend-business-message-projection-contract-gate.sh
 test -f scripts/backend-business-message-projection-postgres-smoke.py
 test -f scripts/run-backend-business-message-projection-postgres-smoke.sh
 test -f tests/test_business_message_projection_postgres_smoke_contract.py
+test -f db/migrations/0076_async_effect_business_message_projection_worker_inputs.sql
+test -f db/migrations/0076_async_effect_business_message_projection_worker_inputs.json
+test -f app/async_effects/business_message_projection_effects.py
+test -f app/async_effects/business_message_projection_enqueue.py
+test -f app/async_effects/business_message_projection_request_repository.py
+test -f app/async_effects/business_message_projection_worker.py
+test -f tests/test_business_message_projection_effects.py
+test -f tests/test_business_message_projection_enqueue.py
+test -f tests/test_business_message_projection_request_repository.py
+test -f tests/test_business_message_projection_worker.py
+test -f tests/test_business_message_projection_worker_migration_contract.py
+test -f tests/test_business_message_projection_worker_postgres_smoke_contract.py
+test -f scripts/run-backend-business-message-projection-worker-gate.sh
+test -f scripts/backend-business-message-projection-worker-postgres-smoke.py
+test -f scripts/run-backend-business-message-projection-worker-postgres-smoke.sh
 test -f scripts/backend-legacy-identity-inbox-bridge-postgres-smoke.py
 test -f scripts/run-backend-legacy-identity-inbox-bridge-postgres-smoke.sh
 test -f tests/test_legacy_identity_inbox_bridge_postgres_smoke_contract.py

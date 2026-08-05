@@ -165,6 +165,22 @@ MemoryVersion -> Projection -> /context/build`，并验证非 Owner 不可读取
   receipt 均为失败终态，并写入一条 open `manualInterventionRequired` dead-letter。随后
   物理删除 lease-heartbeat smoke 通过，证明慢删除期间竞争 worker 不会接管 lease；默认
   Worker profile 仍未启动。
+- 2026-08-05：服务器已部署 `ad16092`。Candidate extraction 与 Memory Projection worker
+  均按各自不可变 `maxAttempts` 收敛：在上限前只进入 `retryWait`，到达上限后写入明确的
+  failed typed consumer receipt、终态 lease 和一条 open `maxAttemptsExceeded` dead-letter。
+  目标在最终提交前失效时仍写 `blocked`，不会把失效对象伪装成失败或重放。公网 `/ready`、
+  Stage 2 媒体处理 smoke 与删除 lease-heartbeat smoke 均通过；默认 Worker profile
+  仍未启动。
+- 待本轮部署：新增 `business-message-projection-worker`，它只把已完成的业务回执投影为
+  私有、无正文的 `async_effects.business_message_projections` shadow。调用方必须在同一
+  Unit of Work 通过 `BusinessMessageProjectionEnqueueCoordinator` 原子接受 typed job 并保存
+  不可变输入；不能从 legacy mailbox 反推任务。数据库会同时核验 source operation、completed
+  receipt 和 consumer inbox 的全部坐标、hash 与 consumer type。Compose profile 为
+  `business-message-worker`，环境开关 `BUSINESS_MESSAGE_PROJECTION_WORKER_ENABLED=false`，
+  默认不会启动。执行前只允许已验证且当前有效的 Owner inbox snapshot；auth epoch 变化、账号
+  不可用或跨账号 snapshot 都终止为明确 blocked receipt，跨账号消息仍由既有家庭授权投递链路
+  负责。它不改变旧时间信件公开投递。一次性 PostgreSQL smoke 使用临时数据库验证 default-off、
+  成功投影、重试耗尽、dead-letter 和账号快照失效；不会写 `mailbox_letters`、发通知或调用 Provider。
 - 公网 `/ready` 验证通过：database、schema、auth、incident 均为 `ready`。
 - 部署态 smoke 在服务器容器内创建一次性 PostgreSQL 数据库，完成后自动删除，没有写入生产业务表。
 - E2E 已证明：公开默认关闭、Owner 绑定上传、命令幂等、跨 Owner 隐藏、私有文件落盘、媒体处理成功、派生 `import` Source、生成一条 `pending` Candidate、处理回执持久化及响应脱敏。

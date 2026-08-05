@@ -27,6 +27,11 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
   tests.test_async_effect_lease_repository \
   tests.test_worker_lifecycle \
   tests.test_owner_truth_worker_process \
+  tests.test_business_message_projection_effects \
+  tests.test_business_message_projection_request_repository \
+  tests.test_business_message_projection_worker \
+  tests.test_business_message_projection_worker_migration_contract \
+  tests.test_business_message_projection_worker_postgres_smoke_contract \
   tests.test_route_ownership_registry \
   tests.test_release_policy
 
@@ -103,3 +108,7 @@ bash -n scripts/run-backend-owner-truth-media-deletion-postgres-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-deletion-deployed-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-deletion-lease-heartbeat-postgres-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-deletion-lease-heartbeat-deployed-smoke.sh
+bash -n scripts/run-backend-business-message-projection-worker-gate.sh
+bash -n scripts/run-backend-business-message-projection-worker-postgres-smoke.sh
+
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-business-message-projection-worker-gate.sh

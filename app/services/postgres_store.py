@@ -102,6 +102,9 @@ from app.async_effects.worker_loss_observation_repository import (
 from app.async_effects.business_message_projection_repository import (
     PostgresBusinessMessageProjectionRepository,
 )
+from app.async_effects.business_message_projection_request_repository import (
+    PostgresBusinessMessageProjectionRequestRepository,
+)
 from app.async_effects.legacy_identity_inbox_bridge import (
     PostgresLegacyInboxAccountResolver,
 )
@@ -364,6 +367,21 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("business message projection persistence requires an active unit of work")
         return PostgresBusinessMessageProjectionRepository(active.connection)
+
+    def async_effect_business_message_projection_request_repository(
+        self,
+    ) -> PostgresBusinessMessageProjectionRequestRepository:
+        """Return immutable private input for the default-disabled message worker.
+
+        This input is metadata-only and binds a completed business receipt to
+        one explicit inbox snapshot. It never exposes a message body, writes
+        the legacy mailbox, or invokes local/APNs notification delivery.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("business message projection request persistence requires an active unit of work")
+        return PostgresBusinessMessageProjectionRequestRepository(active.connection)
 
     def async_effect_legacy_inbox_account_resolver(
         self,

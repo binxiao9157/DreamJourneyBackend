@@ -7,12 +7,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from app.async_effects import business_message_projection_worker
 from app.async_effects import owner_truth_candidate_extraction_worker
 from app.async_effects import owner_truth_media_deletion_worker
 from app.async_effects import owner_truth_media_processing_worker
 from app.async_effects import owner_truth_memory_projection_worker
 from app.async_effects.owner_truth_candidate_extraction_worker import (
     _parser as candidate_worker_parser,
+)
+from app.async_effects.business_message_projection_worker import (
+    _parser as business_message_projection_worker_parser,
 )
 from app.async_effects.owner_truth_memory_projection_worker import (
     _parser as projection_worker_parser,
@@ -36,6 +40,7 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
             projection_worker_parser(),
             media_processing_worker_parser(),
             media_deletion_worker_parser(),
+            business_message_projection_worker_parser(),
         ):
             once = parser.parse_args(["--once"])
             loop = parser.parse_args(["--loop", "--poll-seconds", "1.25"])
@@ -69,6 +74,10 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
             (
                 owner_truth_media_deletion_worker,
                 owner_truth_media_deletion_worker.OwnerTruthMediaDeletionWorkerRuntime,
+            ),
+            (
+                business_message_projection_worker,
+                business_message_projection_worker.BusinessMessageProjectionWorkerRuntime,
             ),
         ):
             fake_store = object()
@@ -112,6 +121,10 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
                 owner_truth_media_deletion_worker,
                 owner_truth_media_deletion_worker.OwnerTruthMediaDeletionWorkerRuntime,
             ),
+            (
+                business_message_projection_worker,
+                business_message_projection_worker.BusinessMessageProjectionWorkerRuntime,
+            ),
         ):
             fake_store = object()
             fake_worker = Mock()
@@ -148,8 +161,10 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
         self.assertIn("owner-truth-memory-projection-worker:", compose)
         self.assertIn("owner-truth-media-processing-worker:", compose)
         self.assertIn("owner-truth-media-deletion-worker:", compose)
+        self.assertIn("business-message-projection-worker:", compose)
         self.assertIn("- owner-truth-worker", compose)
         self.assertIn("- owner-truth-media-worker", compose)
+        self.assertIn("- business-message-worker", compose)
         self.assertIn(
             '"app.async_effects.owner_truth_candidate_extraction_worker", "--loop"',
             compose,
@@ -166,8 +181,12 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
             '"app.async_effects.owner_truth_media_deletion_worker", "--loop"',
             compose,
         )
+        self.assertIn(
+            '"app.async_effects.business_message_projection_worker", "--loop"',
+            compose,
+        )
         self.assertIn("restart: unless-stopped", compose)
-        self.assertEqual(compose.count("stop_grace_period: 150s"), 4)
+        self.assertEqual(compose.count("stop_grace_period: 150s"), 5)
 
 
 if __name__ == "__main__":

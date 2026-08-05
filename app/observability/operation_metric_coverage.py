@@ -92,6 +92,15 @@ CRITICAL_WORKER_COVERAGE = (
         status=OperationMetricCoverageStatus.INSTRUMENTED,
         reason_code="workerAttemptRecorderAttached",
     ),
+    OperationMetricCoverageEntry(
+        component_id=(
+            "app.async_effects.business_message_projection_worker."
+            "BusinessMessageProjectionWorkerRuntime"
+        ),
+        component_kind="worker",
+        status=OperationMetricCoverageStatus.INSTRUMENTED,
+        reason_code="workerAttemptRecorderAttached",
+    ),
 )
 
 

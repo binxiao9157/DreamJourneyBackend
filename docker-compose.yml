@@ -112,6 +112,21 @@ services:
       redis:
         condition: service_started
 
+  business-message-projection-worker:
+    build: .
+    profiles:
+      - business-message-worker
+    restart: unless-stopped
+    stop_grace_period: 150s
+    command: ["python", "-m", "app.async_effects.business_message_projection_worker", "--loop"]
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
   postgres:
     image: mirror.ccs.tencentyun.com/library/postgres:16-alpine
     restart: unless-stopped
