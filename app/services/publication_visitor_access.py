@@ -377,6 +377,26 @@ class PublicationGrantRevokeResult:
 
 
 @dataclass(frozen=True)
+class PublicationOwnerGrantSummary:
+    """Owner-visible ShareGrant state without a credential or visitor identity."""
+
+    grant_id: str
+    publication_id: str
+    publication_version_id: str
+    state: str
+    expires_at: datetime
+    use_remaining: int
+
+    def __post_init__(self) -> None:
+        for field_name in ("grant_id", "publication_id", "publication_version_id"):
+            object.__setattr__(self, field_name, _uuid(getattr(self, field_name), field_name=field_name))
+        object.__setattr__(self, "expires_at", _utc(self.expires_at, field_name="expires_at"))
+        object.__setattr__(self, "state", _identifier(self.state, field_name="state"))
+        if isinstance(self.use_remaining, bool) or not isinstance(self.use_remaining, int) or self.use_remaining < 0:
+            raise PublicationVisitorAccessError("use_remaining must be non-negative")
+
+
+@dataclass(frozen=True)
 class PublicationVisitorAdmissionResult:
     outcome: str
     grant_id: str
@@ -416,6 +436,14 @@ class PublicationVisitorAccessRepository(Protocol):
         command: PublicationGrantRevokeCommand,
         now: datetime,
     ) -> PublicationGrantRevokeResult:
+        ...
+
+    def list_owner_grants(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        now: datetime,
+    ) -> tuple[PublicationOwnerGrantSummary, ...]:
         ...
 
     def admit_visitor(
@@ -507,6 +535,20 @@ class PublicationVisitorAccessService:
             now=_utc(now or datetime.now(timezone.utc), field_name="now"),
         )
 
+    def list_owner_grants(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        now: datetime | None = None,
+    ) -> tuple[PublicationOwnerGrantSummary, ...]:
+        _owner_context(context)
+        if not self._enabled:
+            raise PublicationVisitorAccessDisabled("publication visitor access is default-off")
+        return self._repository.list_owner_grants(
+            context=context,
+            now=_utc(now or datetime.now(timezone.utc), field_name="now"),
+        )
+
     def admit_visitor(
         self,
         *,
@@ -543,10 +585,12 @@ class InMemoryPublicationVisitorAccessRepository:
         *,
         projection_scope_reader: Callable[[str, str], Mapping[str, Any] | None] | None = None,
         projection_content_reader: Callable[[str, str], Mapping[str, Any] | None] | None = None,
+        owner_vault_scope_reader: Callable[[str], Mapping[str, Any] | None] | None = None,
     ) -> None:
         self._lock = RLock()
         self._projection_scope_reader = projection_scope_reader
         self._projection_content_reader = projection_content_reader
+        self._owner_vault_scope_reader = owner_vault_scope_reader
         self._scopes: dict[tuple[str, str], PublicationGrantScope] = {}
         self._grants: dict[str, dict[str, Any]] = {}
         self._sessions: dict[str, dict[str, Any]] = {}
@@ -699,6 +743,51 @@ class InMemoryPublicationVisitorAccessRepository:
                 outcome="revoked",
                 grant_id=command.grant_id,
                 revoked_session_count=revoked,
+            )
+
+    def list_owner_grants(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        now: datetime,
+    ) -> tuple[PublicationOwnerGrantSummary, ...]:
+        _owner_context(context)
+        with self._lock:
+            self._assert_owner_vault(context)
+            summaries: list[PublicationOwnerGrantSummary] = []
+            for grant in self._grants.values():
+                if (
+                    str(grant.get("vaultId") or "") != context.vault_id
+                    or str(grant.get("ownerSubjectId") or "") != context.owner_subject_id
+                ):
+                    continue
+                expires_at = _utc(grant["expiresAt"], field_name="expires_at")
+                state = str(grant.get("state") or "active")
+                if state == "active" and expires_at <= now:
+                    state = "expired"
+                summaries.append(
+                    PublicationOwnerGrantSummary(
+                        grant_id=str(grant["grantId"]),
+                        publication_id=str(grant["publicationId"]),
+                        publication_version_id=str(grant["publicationVersionId"]),
+                        state=state,
+                        expires_at=expires_at,
+                        use_remaining=max(0, int(grant["useLimit"]) - int(grant["useCount"])),
+                    )
+                )
+            return tuple(sorted(summaries, key=lambda item: item.grant_id))
+
+    def _assert_owner_vault(self, context: OwnerTruthCommandContext) -> None:
+        if self._owner_vault_scope_reader is None:
+            return
+        scope = self._owner_vault_scope_reader(context.vault_id)
+        if (
+            scope is None
+            or str(scope.get("ownerSubjectId") or "") != context.owner_subject_id
+            or str(scope.get("status") or "active") != "active"
+        ):
+            raise PublicationVisitorAccessDenied(
+                "publication Vault is not available to this Owner"
             )
 
     def admit_visitor(
@@ -1008,6 +1097,62 @@ class PostgresPublicationVisitorAccessRepository:
                 grant_id=command.grant_id,
                 revoked_session_count=revoked_session_count,
             )
+
+    def list_owner_grants(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        now: datetime,
+    ) -> tuple[PublicationOwnerGrantSummary, ...]:
+        _owner_context(context)
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT owner_subject_id, authority_epoch, status
+                FROM owner_truth.vaults
+                WHERE vault_id = %s
+                FOR SHARE
+                """,
+                (context.vault_id,),
+            )
+            vault = cursor.fetchone()
+            if vault is None or str(vault["owner_subject_id"]) != context.owner_subject_id:
+                raise PublicationVisitorAccessDenied("publication Vault is not available to this Owner")
+            if str(vault["status"]) != "active":
+                raise PublicationVisitorAccessUnavailable("publication Vault is no longer active")
+            cursor.execute(
+                """
+                SELECT id, publication_id, publication_version_id, state, expires_at,
+                    use_limit, use_count
+                FROM publication.share_grants
+                WHERE vault_id = %s
+                  AND owner_subject_id = %s
+                  AND authority_epoch = %s
+                ORDER BY created_at DESC, id ASC
+                """,
+                (
+                    context.vault_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            summaries: list[PublicationOwnerGrantSummary] = []
+            for row in cursor.fetchall():
+                expires_at = _utc(row["expires_at"], field_name="expires_at")
+                state = str(row["state"])
+                if state == "active" and expires_at <= now:
+                    state = "expired"
+                summaries.append(
+                    PublicationOwnerGrantSummary(
+                        grant_id=str(row["id"]),
+                        publication_id=str(row["publication_id"]),
+                        publication_version_id=str(row["publication_version_id"]),
+                        state=state,
+                        expires_at=expires_at,
+                        use_remaining=max(0, int(row["use_limit"]) - int(row["use_count"])),
+                    )
+                )
+            return tuple(summaries)
 
     def admit_visitor(
         self,
@@ -1436,6 +1581,7 @@ __all__ = [
     "PublicationGrantRevokeCommand",
     "PublicationGrantRevokeResult",
     "PublicationGrantScope",
+    "PublicationOwnerGrantSummary",
     "PublicationVisitorAccessConflict",
     "PublicationVisitorAccessDenied",
     "PublicationVisitorAccessDisabled",

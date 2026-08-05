@@ -66,6 +66,7 @@ from app.services.publication_authority import (
     PublicationAuthorityDisabled,
     PublicationAuthorityError,
     PublicationAuthorityNotPublishable,
+    PublicationOwnerPublicationSummary,
     PublicationAuthorityService,
     PublicationConfirmCommand,
     PublicationConfirmResult,
@@ -78,6 +79,7 @@ from app.services.publication_visitor_access import (
     PublicationGrantIssueResult,
     PublicationGrantRevokeCommand,
     PublicationGrantRevokeResult,
+    PublicationOwnerGrantSummary,
     PublicationVisitorAccessConflict,
     PublicationVisitorAccessDenied,
     PublicationVisitorAccessDisabled,
@@ -3079,6 +3081,61 @@ def _publication_authority_confirm_response(
         "projectionState": result.projection_state,
         "publicProjectionHash": result.public_projection_hash,
         "aiDisclosureRequired": result.ai_disclosure_required,
+    }
+
+
+def _publication_owner_management_response(
+    *,
+    vault_id: str,
+    summaries: tuple[PublicationOwnerPublicationSummary, ...],
+) -> Dict[str, Any]:
+    """Expose only the independent public preview and owner lifecycle state."""
+
+    return {
+        "schemaVersion": "publication-owner-management-v1",
+        "vaultId": vault_id,
+        "publications": [
+            {
+                "publicationId": item.publication_id,
+                "publicationVersionId": item.publication_version_id,
+                "draftId": item.draft_id,
+                "draftRevision": item.draft_revision,
+                "publicationState": item.publication_state,
+                "projectionState": item.projection_state,
+                "preview": {
+                    "title": item.preview_title,
+                    "body": item.preview_body,
+                },
+                "requiresSecondConfirmation": item.requires_second_confirmation,
+                "thirdPartyReviewRequired": item.third_party_review_required,
+                "aiDisclosureRequired": item.ai_disclosure_required,
+            }
+            for item in summaries
+        ],
+    }
+
+
+def _publication_owner_grant_list_response(
+    *,
+    vault_id: str,
+    summaries: tuple[PublicationOwnerGrantSummary, ...],
+) -> Dict[str, Any]:
+    """Return grant lifecycle state without raw credentials or visitor identity."""
+
+    return {
+        "schemaVersion": "publication-owner-grant-list-v1",
+        "vaultId": vault_id,
+        "grants": [
+            {
+                "grantId": item.grant_id,
+                "publicationId": item.publication_id,
+                "publicationVersionId": item.publication_version_id,
+                "state": item.state,
+                "expiresAt": item.expires_at.isoformat(),
+                "useRemaining": item.use_remaining,
+            }
+            for item in summaries
+        ],
     }
 
 
@@ -6582,6 +6639,36 @@ def owner_truth_candidate_inbox(
     }
 
 
+@app.get(
+    "/v2/internal/owner-authority/vaults/{vault_id}/publications",
+    include_in_schema=False,
+)
+def list_publication_owner_management(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """Read QA-only owner summaries without consulting private Memory content."""
+
+    try:
+        context = _publication_authority_context(request, vault_id=vault_id)
+        with store.request_unit_of_work(
+            correlation_id=f"publication-owner-management-read:{context.vault_id}",
+            command_id=None,
+        ):
+            summaries = PublicationAuthorityService(
+                store.publication_authority_repository(),
+                enabled=True,
+            ).list_owner_publications(context=context)
+    except HTTPException:
+        raise
+    except PublicationAuthorityError as error:
+        raise _publication_authority_http_error(error) from error
+    return JSONResponse(
+        content=_publication_owner_management_response(vault_id=vault_id, summaries=summaries),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post(
     "/v2/internal/owner-authority/vaults/{vault_id}/drafts",
     include_in_schema=False,
@@ -6695,6 +6782,42 @@ def issue_publication_share_grant(
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
         content=_publication_grant_issue_response(vault_id=vault_id, result=result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/internal/publication-access/vaults/{vault_id}/grants",
+    include_in_schema=False,
+)
+def list_publication_owner_grants(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """Read QA-only ShareGrant lifecycle summaries for one authenticated Owner."""
+
+    try:
+        owner_subject_id = _require_publication_visitor_access_qa(request)
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_subject_id,
+            actor_subject_id=owner_subject_id,
+        )
+        with store.request_unit_of_work(
+            correlation_id=f"publication-owner-grant-list:{vault_id}",
+            command_id=None,
+        ):
+            summaries = PublicationVisitorAccessService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).list_owner_grants(context=context)
+    except HTTPException:
+        raise
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(
+        content=_publication_owner_grant_list_response(vault_id=vault_id, summaries=summaries),
         headers={"Cache-Control": "no-store"},
     )
 

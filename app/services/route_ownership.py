@@ -285,6 +285,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthCandidateInbox",
             ),
             _rule(
+                "GET",
+                "/v2/internal/owner-authority/vaults/{vault_id}/publications",
+                session,
+                "publicationOwnerManagementRead",
+            ),
+            _rule(
                 "POST",
                 "/v2/internal/owner-authority/vaults/{vault_id}/drafts",
                 session,
@@ -295,6 +301,12 @@ class RouteOwnershipRegistry:
                 "/v2/internal/owner-authority/vaults/{vault_id}/drafts/{draft_id}/confirm/{record_id}",
                 session,
                 "publicationAuthorityConfirm",
+            ),
+            _rule(
+                "GET",
+                "/v2/internal/publication-access/vaults/{vault_id}/grants",
+                session,
+                "publicationShareGrantList",
             ),
             _rule(
                 "POST",

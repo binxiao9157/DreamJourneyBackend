@@ -36,12 +36,14 @@ from app.services.publication_visitor_access import (
     PublicationGrantIssueCommand,
     PublicationGrantRevokeCommand,
     PublicationVisitorAccessConflict,
+    PublicationVisitorAccessDenied,
     PublicationVisitorAccessService,
     PublicationVisitorAccessUnavailable,
     PublicationVisitorEligibility,
     PublicationVisitorSessionCommand,
     StaticPublicationVisitorEligibilityResolver,
 )
+from app.services.publication_authority import PublicationAuthorityAccessDenied
 from app.services.publication_visitor_reader import PublicationVisitorReaderService
 
 
@@ -54,6 +56,7 @@ dsn_for_database = _authority_smoke["dsn_for_database"]
 seed_publishable_memory = _authority_smoke["seed_publishable_memory"]
 create_draft = _authority_smoke["create_draft"]
 confirm_draft = _authority_smoke["confirm_draft"]
+authority_service = _authority_smoke["authority_service"]
 
 
 def require(condition: bool, message: str) -> None:
@@ -65,6 +68,14 @@ def expect_rejected(operation, message: str) -> None:
     try:
         operation()
     except (PublicationVisitorAccessUnavailable, PublicationVisitorAccessConflict):
+        return
+    raise AssertionError(message)
+
+
+def expect_owner_access_denied(operation, message: str) -> None:
+    try:
+        operation()
+    except (PublicationAuthorityAccessDenied, PublicationVisitorAccessDenied):
         return
     raise AssertionError(message)
 
@@ -166,6 +177,24 @@ def revoke(store: PostgresStore, *, seed, grant_id: str, visitor_subject_id: str
         )
 
 
+def owner_publications(store: PostgresStore, *, seed):
+    with store.request_unit_of_work(
+        correlation_id=f"publication-owner-management-smoke:publications:{seed.context.vault_id}",
+        command_id=None,
+    ):
+        return authority_service(store).list_owner_publications(context=seed.context)
+
+
+def owner_grants(store: PostgresStore, *, seed, visitor_subject_id: str):
+    with store.request_unit_of_work(
+        correlation_id=f"publication-owner-management-smoke:grants:{seed.context.vault_id}",
+        command_id=None,
+    ):
+        return visitor_service(store, visitor_subject_id=visitor_subject_id).list_owner_grants(
+            context=seed.context
+        )
+
+
 def read_projection(
     store: PostgresStore,
     *,
@@ -196,6 +225,41 @@ def exercise(dsn: str) -> None:
         publication = confirm_draft(store, seed, draft, command_id=str(uuid.uuid4()))
         visitor_subject_id = "publication-visitor-smoke"
 
+        publications = owner_publications(store, seed=seed)
+        require(len(publications) == 1, "Owner management read must return the confirmed publication")
+        publication_summary = publications[0]
+        require(
+            publication_summary.publication_id == publication.publication_id
+            and publication_summary.publication_version_id == publication.publication_version_id
+            and publication_summary.publication_state == "confirmed"
+            and publication_summary.projection_state == "active",
+            "Owner management read must remain bound to the independent public projection",
+        )
+        require(
+            publication_summary.preview_title == "确认的公开回忆"
+            and publication_summary.preview_body == "这是由发布者重新整理并确认的公开说明。",
+            "Owner management read must expose only the owner-authored public preview",
+        )
+        require(
+            "memory" not in str(publication_summary).lower()
+            and "source" not in str(publication_summary).lower()
+            and "kblite" not in str(publication_summary).lower(),
+            "Owner management read must not expose private source or memory identifiers",
+        )
+        other_owner_context = type(seed.context)(
+            vault_id=seed.context.vault_id,
+            owner_subject_id="publication-management-other-owner",
+            actor_subject_id="publication-management-other-owner",
+        )
+        with store.request_unit_of_work(
+            correlation_id=f"publication-owner-management-smoke:cross-owner:{seed.context.vault_id}",
+            command_id=None,
+        ):
+            expect_owner_access_denied(
+                lambda: authority_service(store).list_owner_publications(context=other_owner_context),
+                "cross-owner publication management read must fail closed",
+            )
+
         issued = issue(
             store,
             seed=seed,
@@ -207,6 +271,29 @@ def exercise(dsn: str) -> None:
         require(issued.outcome == "created", "ShareGrant must be issued")
         require(bool(issued.grant_credential), "raw grant credential must be returned once")
         assert issued.grant_credential is not None
+
+        grants = owner_grants(store, seed=seed, visitor_subject_id=visitor_subject_id)
+        require(len(grants) == 1, "Owner management read must return the issued ShareGrant")
+        grant_summary = grants[0]
+        require(
+            grant_summary.grant_id == issued.grant_id
+            and grant_summary.publication_id == publication.publication_id
+            and grant_summary.publication_version_id == publication.publication_version_id
+            and grant_summary.state == "active"
+            and grant_summary.use_remaining == 1,
+            "Owner ShareGrant summary must include only lifecycle state and remaining use count",
+        )
+        with store.request_unit_of_work(
+            correlation_id=f"publication-owner-management-smoke:grant-cross-owner:{seed.context.vault_id}",
+            command_id=None,
+        ):
+            expect_owner_access_denied(
+                lambda: visitor_service(
+                    store,
+                    visitor_subject_id=visitor_subject_id,
+                ).list_owner_grants(context=other_owner_context),
+                "cross-owner ShareGrant management read must fail closed",
+            )
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [
@@ -238,6 +325,10 @@ def exercise(dsn: str) -> None:
                     rejected += 1
         require(admitted == 1 and rejected == 1, "usage CAS must admit exactly one Visitor")
         require(bool(admitted_session_id), "one Visitor session must be available for projection read")
+        require(
+            owner_grants(store, seed=seed, visitor_subject_id=visitor_subject_id)[0].use_remaining == 0,
+            "Owner ShareGrant summary must reflect the atomically consumed use",
+        )
 
         read_result = read_projection(
             store,
@@ -296,6 +387,10 @@ def exercise(dsn: str) -> None:
             visitor_subject_id=visitor_subject_id,
         )
         require(revoke_result.revoked_session_count == 1, "revoke must close the active session")
+        require(
+            owner_grants(store, seed=seed, visitor_subject_id=visitor_subject_id)[0].state == "revoked",
+            "Owner ShareGrant summary must reflect revocation without exposing a credential",
+        )
         expect_rejected(
             lambda: read_projection(
                 store,
@@ -372,7 +467,7 @@ def exercise(dsn: str) -> None:
                 require(session == ("revoked", 1), "revoked session must retain bound use count")
         print(
             "Publication visitor access Postgres smoke passed "
-            "(projection-only read, adult/direct admission, CAS, revoke and projection block verified)."
+            "(owner management summaries, projection-only read, adult/direct admission, CAS, revoke and projection block verified)."
         )
     finally:
         store.close_pool()

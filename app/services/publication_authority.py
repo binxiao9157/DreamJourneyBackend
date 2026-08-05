@@ -270,6 +270,28 @@ class PublicationConfirmResult:
     ai_disclosure_required: bool
 
 
+@dataclass(frozen=True)
+class PublicationOwnerPublicationSummary:
+    """Owner-only, redacted management facts for one M2 publication.
+
+    This is intentionally a read-model summary rather than a MemoryVersion or
+    Source projection. It contains only the independently supplied public
+    preview and lifecycle state needed by the closed-beta management surface.
+    """
+
+    publication_id: str
+    publication_version_id: str | None
+    draft_id: str
+    draft_revision: int
+    publication_state: str
+    projection_state: str | None
+    preview_title: str
+    preview_body: str
+    requires_second_confirmation: bool
+    third_party_review_required: bool
+    ai_disclosure_required: bool
+
+
 class PublicationAuthorityRepository(Protocol):
     def create_draft(
         self,
@@ -284,6 +306,12 @@ class PublicationAuthorityRepository(Protocol):
         context: OwnerTruthCommandContext,
         command: PublicationConfirmCommand,
     ) -> PublicationConfirmResult: ...
+
+    def list_owner_publications(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[PublicationOwnerPublicationSummary, ...]: ...
 
 
 class PublicationAuthorityService:
@@ -319,6 +347,16 @@ class PublicationAuthorityService:
             raise PublicationAuthorityError("publication confirmation command is required")
         return self._repository.confirm_draft(context=context, command=command)
 
+    def list_owner_publications(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[PublicationOwnerPublicationSummary, ...]:
+        _assert_owner_context(context)
+        if not self._enabled:
+            raise PublicationAuthorityDisabled("publication authority is default-off")
+        return self._repository.list_owner_publications(context=context)
+
 
 class InMemoryPublicationAuthorityRepository:
     """Semantic double for route and contract tests.
@@ -331,6 +369,7 @@ class InMemoryPublicationAuthorityRepository:
 
     def __init__(self) -> None:
         self._lock = RLock()
+        self._vault_owners: dict[str, str] = {}
         self._memory_versions: dict[str, PublicationAuthorityMemoryVersion] = {}
         self._drafts: dict[str, dict[str, Any]] = {}
         self._command_results: dict[tuple[str, str, str], tuple[str, Any]] = {}
@@ -340,7 +379,26 @@ class InMemoryPublicationAuthorityRepository:
         if not isinstance(value, PublicationAuthorityMemoryVersion):
             raise TypeError("PublicationAuthorityMemoryVersion is required")
         with self._lock:
+            known_owner = self._vault_owners.get(value.vault_id)
+            if known_owner is not None and known_owner != value.owner_subject_id:
+                raise PublicationAuthorityAccessDenied(
+                    "publication Vault owner cannot change in the in-memory contract double"
+                )
+            self._vault_owners[value.vault_id] = value.owner_subject_id
             self._memory_versions[value.memory_version_id] = value
+
+    def owner_vault_scope_snapshot(self, vault_id: str) -> Mapping[str, Any] | None:
+        """Return only the canonical owner fact needed by adjacent QA doubles."""
+
+        with self._lock:
+            owner_subject_id = self._vault_owners.get(vault_id)
+            if owner_subject_id is None:
+                return None
+            return {
+                "vaultId": vault_id,
+                "ownerSubjectId": owner_subject_id,
+                "status": "active",
+            }
 
     def memory_versions(self) -> tuple[PublicationAuthorityMemoryVersion, ...]:
         with self._lock:
@@ -401,6 +459,7 @@ class InMemoryPublicationAuthorityRepository:
     ) -> PublicationDraftResult:
         _assert_owner_context(context)
         with self._lock:
+            self._assert_active_vault(context)
             replay_key = ("draftCreate", context.vault_id, command.command_id_hash)
             replay = self._command_results.get(replay_key)
             if replay is not None:
@@ -465,6 +524,7 @@ class InMemoryPublicationAuthorityRepository:
     ) -> PublicationConfirmResult:
         _assert_owner_context(context)
         with self._lock:
+            self._assert_active_vault(context)
             replay_key = ("draftConfirm", context.vault_id, command.command_id_hash)
             replay = self._command_results.get(replay_key)
             if replay is not None:
@@ -546,6 +606,72 @@ class InMemoryPublicationAuthorityRepository:
             }
             self._command_results[replay_key] = (command.payload_hash, result)
             return result
+
+    def list_owner_publications(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[PublicationOwnerPublicationSummary, ...]:
+        _assert_owner_context(context)
+        with self._lock:
+            self._assert_active_vault(context)
+            summaries: list[PublicationOwnerPublicationSummary] = []
+            for draft in self._drafts.values():
+                if (
+                    str(draft.get("vaultId") or "") != context.vault_id
+                    or str(draft.get("ownerSubjectId") or "") != context.owner_subject_id
+                ):
+                    continue
+                draft_result = draft["draftResult"]
+                if not isinstance(draft_result, PublicationDraftResult):
+                    raise PublicationAuthorityConflict("publication draft summary is malformed")
+                publication_id = str(draft["publicationId"])
+                publication_version_id = draft.get("publicationVersionId")
+                projection = next(
+                    (
+                        item
+                        for item in self._public_projections.values()
+                        if item.get("publicationId") == publication_id
+                        and item.get("publicationVersionId") == publication_version_id
+                    ),
+                    None,
+                )
+                draft_state = str(draft.get("state") or "draft")
+                summaries.append(
+                    PublicationOwnerPublicationSummary(
+                        publication_id=publication_id,
+                        publication_version_id=(
+                            str(publication_version_id)
+                            if publication_version_id is not None
+                            else None
+                        ),
+                        draft_id=draft_result.draft_id,
+                        draft_revision=draft_result.expected_draft_revision,
+                        publication_state=(
+                            str(projection.get("publicationState"))
+                            if projection is not None
+                            else draft_state
+                        ),
+                        projection_state=(
+                            str(projection.get("projectionState"))
+                            if projection is not None
+                            else None
+                        ),
+                        preview_title=draft_result.preview_title,
+                        preview_body=draft_result.preview_body,
+                        requires_second_confirmation=draft_state == "draft",
+                        third_party_review_required=draft_result.third_party_review_required,
+                        ai_disclosure_required=True,
+                    )
+                )
+            return tuple(sorted(summaries, key=lambda item: item.publication_id))
+
+    def _assert_active_vault(self, context: OwnerTruthCommandContext) -> None:
+        owner_subject_id = self._vault_owners.get(context.vault_id)
+        if owner_subject_id != context.owner_subject_id:
+            raise PublicationAuthorityAccessDenied(
+                "publication Vault is not available to this Owner"
+            )
 
     def _publishable_memory(
         self,
@@ -918,6 +1044,82 @@ class PostgresPublicationAuthorityRepository:
             ai_disclosure_required=True,
         )
 
+    def list_owner_publications(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[PublicationOwnerPublicationSummary, ...]:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            vault = self._active_vault(cursor, context=context)
+            cursor.execute(
+                """
+                SELECT
+                    publication_row.id AS publication_id,
+                    publication_row.state AS publication_state,
+                    draft.id AS draft_id,
+                    draft.draft_revision,
+                    draft.state AS draft_state,
+                    content.preview_title,
+                    content.preview_body,
+                    content.third_party_review_required,
+                    version.id AS publication_version_id,
+                    projection.state AS projection_state
+                FROM publication.publications AS publication_row
+                JOIN publication.publication_drafts AS draft
+                  ON draft.publication_id = publication_row.id
+                 AND draft.vault_id = publication_row.vault_id
+                JOIN publication.publication_draft_public_contents AS content
+                  ON content.draft_id = draft.id
+                 AND content.vault_id = draft.vault_id
+                LEFT JOIN LATERAL (
+                    SELECT id, version_number
+                    FROM publication.publication_versions
+                    WHERE publication_id = publication_row.id
+                      AND vault_id = publication_row.vault_id
+                    ORDER BY version_number DESC
+                    LIMIT 1
+                ) AS version ON TRUE
+                LEFT JOIN publication.public_projections AS projection
+                  ON projection.publication_version_id = version.id
+                 AND projection.publication_id = publication_row.id
+                 AND projection.vault_id = publication_row.vault_id
+                WHERE publication_row.vault_id = %s
+                  AND publication_row.owner_subject_id = %s
+                  AND publication_row.authority_epoch = %s
+                ORDER BY draft.created_at DESC, publication_row.id ASC
+                """,
+                (
+                    context.vault_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            return tuple(
+                PublicationOwnerPublicationSummary(
+                    publication_id=str(row["publication_id"]),
+                    publication_version_id=(
+                        str(row["publication_version_id"])
+                        if row.get("publication_version_id") is not None
+                        else None
+                    ),
+                    draft_id=str(row["draft_id"]),
+                    draft_revision=int(row["draft_revision"]),
+                    publication_state=str(row["publication_state"]),
+                    projection_state=(
+                        str(row["projection_state"])
+                        if row.get("projection_state") is not None
+                        else None
+                    ),
+                    preview_title=str(row["preview_title"]),
+                    preview_body=str(row["preview_body"]),
+                    requires_second_confirmation=str(row["draft_state"]) == "draft",
+                    third_party_review_required=bool(row["third_party_review_required"]),
+                    ai_disclosure_required=True,
+                )
+                for row in cursor.fetchall()
+            )
+
     @staticmethod
     def _third_party_review_required(payload: Any, *, sensitivity: str) -> bool:
         if str(sensitivity) != "standard":
@@ -1250,6 +1452,7 @@ __all__ = [
     "PublicationAuthorityError",
     "PublicationAuthorityMemoryVersion",
     "PublicationAuthorityNotPublishable",
+    "PublicationOwnerPublicationSummary",
     "PublicationAuthorityRepository",
     "PublicationAuthorityService",
     "PublicationConfirmCommand",

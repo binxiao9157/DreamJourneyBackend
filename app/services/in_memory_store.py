@@ -200,6 +200,9 @@ class InMemoryStore:
             projection_content_reader=(
                 self._publication_authority_repository.public_projection_content_snapshot
             ),
+            owner_vault_scope_reader=(
+                self._publication_authority_repository.owner_vault_scope_snapshot
+            ),
         )
         self._owner_truth_conversation_repository = (
             InMemoryOwnerTruthConversationRepository()
