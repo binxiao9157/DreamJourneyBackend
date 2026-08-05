@@ -96,14 +96,15 @@ def mark_source_redacted(dsn: str, *, vault_id: str, review_batch_id: str) -> No
         connection.commit()
 
 
-def make_source_epoch_stale(dsn: str, *, vault_id: str, review_batch_id: str) -> None:
-    source_id = source_id_for_batch(dsn, vault_id=vault_id, review_batch_id=review_batch_id)
+def make_vault_epoch_stale(dsn: str, *, vault_id: str) -> None:
+    """Advance the Vault authority so pre-existing fixture records become stale."""
+
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                "UPDATE owner_truth.sources SET authority_epoch = authority_epoch + 1 "
-                "WHERE vault_id = %s AND id = %s",
-                (vault_id, source_id),
+                "UPDATE owner_truth.vaults SET authority_epoch = authority_epoch + 1 "
+                "WHERE vault_id = %s",
+                (vault_id,),
             )
         connection.commit()
 
@@ -237,6 +238,7 @@ def main() -> None:
 
             owner_a_vault_id = "vault-review-ready-handoff-owner-a"
             owner_b_vault_id = "vault-review-ready-handoff-owner-b"
+            owner_a_stale_vault_id = "vault-review-ready-handoff-owner-a-stale"
             selected_batch_id, _ = FORMAL.seed_reviewable_batch(
                 test_dsn, vault_id=owner_a_vault_id, owner_subject_id=owner_a_id
             )
@@ -247,13 +249,13 @@ def main() -> None:
                 test_dsn, vault_id=owner_a_vault_id, owner_subject_id=owner_a_id
             )
             stale_epoch_batch_id, _ = FORMAL.seed_reviewable_batch(
-                test_dsn, vault_id=owner_a_vault_id, owner_subject_id=owner_a_id
+                test_dsn, vault_id=owner_a_stale_vault_id, owner_subject_id=owner_a_id
             )
             owner_b_batch_id, _ = FORMAL.seed_reviewable_batch(
                 test_dsn, vault_id=owner_b_vault_id, owner_subject_id=owner_b_id
             )
             mark_source_redacted(test_dsn, vault_id=owner_a_vault_id, review_batch_id=redacted_batch_id)
-            make_source_epoch_stale(test_dsn, vault_id=owner_a_vault_id, review_batch_id=stale_epoch_batch_id)
+            make_vault_epoch_stale(test_dsn, vault_id=owner_a_stale_vault_id)
             baseline_effects = side_effect_counts(test_dsn)
             require(
                 baseline_effects == {
@@ -295,6 +297,24 @@ def main() -> None:
                 response=inbox,
                 vault_id=owner_a_vault_id,
                 expected_batch_ids={selected_batch_id, second_batch_id},
+            )
+
+            stale_inbox = client.get(
+                f"/v2/vaults/{owner_a_stale_vault_id}/interview-candidate-confirmations",
+                headers=FORMAL.formal_headers(
+                    owner_a_headers,
+                    session_id=owner_a_session_id,
+                    decision_id="review-ready-handoff-stale-epoch-filter",
+                ),
+            )
+            assert_value_minimized_inbox(
+                response=stale_inbox,
+                vault_id=owner_a_stale_vault_id,
+                expected_batch_ids=set(),
+            )
+            require(
+                stale_epoch_batch_id not in json.dumps(stale_inbox.json(), ensure_ascii=False),
+                "stale Vault authority must not expose a review batch",
             )
 
             owner_b_denied = client.get(
