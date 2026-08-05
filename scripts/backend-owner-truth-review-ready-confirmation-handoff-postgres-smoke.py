@@ -209,7 +209,8 @@ def main() -> None:
     previous_route_mode = main_module.AUTH_ROUTE_MODE
     previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
     policy_service = main_module.RELEASE_POLICY_SERVICE
-    previous_visible = set(policy_service._CLOSED_PILOT_OWNER_VISIBLE)
+    previous_closed_pilot_owner_ids = main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+    previous_closed_pilot_features = set(policy_service.closed_pilot_enabled_features)
 
     try:
         FORMAL.create_database(admin_dsn, database_name)
@@ -230,11 +231,14 @@ def main() -> None:
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         main_module.AUTH_ROUTE_MODE = "enforce"
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
-        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible | {"ownerTruthCandidateReview"}
 
         with TestClient(main_module.app) as client:
             owner_a_id, owner_a_headers, owner_a_session_id = FORMAL.login(client, phone="13900000381")
             owner_b_id, owner_b_headers, owner_b_session_id = FORMAL.login(client, phone="13900000382")
+            main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
+                {owner_a_id, owner_b_id}
+            )
+            policy_service.closed_pilot_enabled_features.add("ownerTruthCandidateReview")
 
             owner_a_vault_id = "vault-review-ready-handoff-owner-a"
             owner_b_vault_id = "vault-review-ready-handoff-owner-b"
@@ -360,7 +364,9 @@ def main() -> None:
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = previous_legacy_phone_login
         main_module.AUTH_ROUTE_MODE = previous_route_mode
         main_module.AUTH_OWNERSHIP_MODE = previous_ownership_mode
-        policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = previous_closed_pilot_owner_ids
+        policy_service.closed_pilot_enabled_features.clear()
+        policy_service.closed_pilot_enabled_features.update(previous_closed_pilot_features)
         if store is not None:
             store.close_pool()
         try:
