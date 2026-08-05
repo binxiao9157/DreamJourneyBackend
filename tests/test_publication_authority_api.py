@@ -93,6 +93,18 @@ class PublicationAuthorityAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 404, response.text)
         self.assertEqual(response.json()["detail"]["code"], "publicationAuthorityUnavailable")
 
+    def test_default_off_hides_writer_before_backend_token_authentication(self) -> None:
+        main_module.BACKEND_API_TOKEN = "configured-server-token"
+        main_module.PUBLICATION_AUTHORITY_QA_ENABLED = False
+
+        response = client.post(
+            "/v2/internal/owner-authority/vaults/default-off/drafts",
+            json={},
+        )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "publicationAuthorityUnavailable")
+
     def test_owner_can_create_draft_and_second_confirm_independent_projection(self) -> None:
         owner_id, headers = self._login("13800139172")
         vault_id = "publication-owner"

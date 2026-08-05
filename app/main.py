@@ -759,14 +759,27 @@ def _require_owner_truth_candidate_review_qa(request: Request) -> str:
     return user_id
 
 
+_PUBLICATION_AUTHORITY_QA_ROUTE_PREFIX = "/v2/internal/owner-authority/"
+
+
+def _publication_authority_qa_requested(request: Request) -> bool:
+    return (
+        PUBLICATION_AUTHORITY_QA_ENABLED
+        and str(request.headers.get("x-dreamjourney-qa-publication") or "").strip() == "1"
+    )
+
+
+def _publication_authority_qa_route_is_hidden(request: Request) -> bool:
+    return (
+        str(request.url.path).startswith(_PUBLICATION_AUTHORITY_QA_ROUTE_PREFIX)
+        and not _publication_authority_qa_requested(request)
+    )
+
+
 def _require_publication_authority_qa(request: Request) -> str:
     """Keep the unfinished M2 publication writer absent from normal product UI."""
 
-    if (
-        not PUBLICATION_AUTHORITY_QA_ENABLED
-        or str(request.headers.get("x-dreamjourney-qa-publication") or "").strip()
-        != "1"
-    ):
+    if not _publication_authority_qa_requested(request):
         raise HTTPException(
             status_code=404,
             detail={"code": "publicationAuthorityUnavailable"},
@@ -5502,6 +5515,14 @@ def _recovery_access_denied_response(request: Request) -> Optional[JSONResponse]
 
 @app.middleware("http")
 async def require_backend_api_token(request: Request, call_next):
+    if _publication_authority_qa_route_is_hidden(request):
+        return _set_no_store_headers(
+            JSONResponse(
+                status_code=404,
+                content={"detail": {"code": "publicationAuthorityUnavailable"}},
+            )
+        )
+
     recovery_response = _recovery_access_denied_response(request)
     if recovery_response is not None:
         return recovery_response
