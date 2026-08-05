@@ -403,6 +403,8 @@ test -f scripts/run-backend-business-message-projection-postgres-smoke.sh
 test -f tests/test_business_message_projection_postgres_smoke_contract.py
 test -f db/migrations/0076_async_effect_business_message_projection_worker_inputs.sql
 test -f db/migrations/0076_async_effect_business_message_projection_worker_inputs.json
+test -f db/migrations/0077_async_effect_business_message_projection_worker_trigger_fix.sql
+test -f db/migrations/0077_async_effect_business_message_projection_worker_trigger_fix.json
 test -f app/async_effects/business_message_projection_effects.py
 test -f app/async_effects/business_message_projection_enqueue.py
 test -f app/async_effects/business_message_projection_request_repository.py

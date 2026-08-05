@@ -181,6 +181,8 @@ MemoryVersion -> Projection -> /context/build`，并验证非 Owner 不可读取
   不可用或跨账号 snapshot 都终止为明确 blocked receipt，跨账号消息仍由既有家庭授权投递链路
   负责。它不改变旧时间信件公开投递。一次性 PostgreSQL smoke 使用临时数据库验证 default-off、
   成功投影、重试耗尽、dead-letter 和账号快照失效；不会写 `mailbox_letters`、发通知或调用 Provider。
+  首次部署 smoke 还发现 `0076` trigger 存在 PL/pgSQL 变量同名歧义；已用新的 `0077` 前向 migration
+  重新定义函数，禁止修改已在服务器执行的 `0076` checksum。
 - 公网 `/ready` 验证通过：database、schema、auth、incident 均为 `ready`。
 - 部署态 smoke 在服务器容器内创建一次性 PostgreSQL 数据库，完成后自动删除，没有写入生产业务表。
 - E2E 已证明：公开默认关闭、Owner 绑定上传、命令幂等、跨 Owner 隐藏、私有文件落盘、媒体处理成功、派生 `import` Source、生成一条 `pending` Candidate、处理回执持久化及响应脱敏。

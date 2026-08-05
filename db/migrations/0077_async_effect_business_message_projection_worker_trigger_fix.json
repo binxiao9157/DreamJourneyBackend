@@ -1,0 +1,13 @@
+{
+  "version": "0077",
+  "name": "async_effect_business_message_projection_worker_trigger_fix",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "asyncEffectBusinessMessageProjectionWorkerDefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "asyncEffectBusinessMessageProjectionWorkerV1": false,
+    "asyncEffectBusinessMessagePublicReadV1": false,
+    "asyncEffectBusinessMessageDispatchV1": false
+  }
+}
