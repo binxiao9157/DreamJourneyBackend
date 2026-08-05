@@ -150,6 +150,11 @@ MemoryVersion -> Projection -> /context/build`，并验证非 Owner 不可读取
 - 2026-08-05：服务器已部署 `74ddcab`。API 容器内的 lease-heartbeat PostgreSQL
   smoke 通过，`leaseHeartbeatProtected=true`：删除调用超过初始 lease 后，竞争
   worker 没有接管 job，原 worker 完成物理删除；默认 worker profile 仍未启动。
+- 2026-08-05：服务器已部署 `e71fda3` 与 smoke 修正 `59ebb7b`。API 容器内的
+  Stage 2 PostgreSQL smoke 确认 `mediaProcessingDeadLetterAdmitted=true`：禁用图片
+  OCR 在第三次失败后写入一条 open `maxAttemptsExceeded` dead-letter，SourceObject、
+  typed consumer receipt 和 async job 均为终态。随后 lease-heartbeat smoke 再次通过；
+  两个一次性数据库均已删除，默认 Worker profile 仍未启动。
 - 公网 `/ready` 验证通过：database、schema、auth、incident 均为 `ready`。
 - 部署态 smoke 在服务器容器内创建一次性 PostgreSQL 数据库，完成后自动删除，没有写入生产业务表。
 - E2E 已证明：公开默认关闭、Owner 绑定上传、命令幂等、跨 Owner 隐藏、私有文件落盘、媒体处理成功、派生 `import` Source、生成一条 `pending` Candidate、处理回执持久化及响应脱敏。
