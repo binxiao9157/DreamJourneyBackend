@@ -72,6 +72,22 @@ from app.services.publication_authority import (
     PublicationDraftCommand,
     PublicationDraftResult,
 )
+from app.services.publication_visitor_access import (
+    DenyPublicationVisitorEligibilityResolver,
+    PublicationGrantIssueCommand,
+    PublicationGrantIssueResult,
+    PublicationGrantRevokeCommand,
+    PublicationGrantRevokeResult,
+    PublicationVisitorAccessConflict,
+    PublicationVisitorAccessDenied,
+    PublicationVisitorAccessDisabled,
+    PublicationVisitorAccessError,
+    PublicationVisitorAccessService,
+    PublicationVisitorAccessUnavailable,
+    PublicationVisitorAdultVerificationRequired,
+    PublicationVisitorAdmissionResult,
+    PublicationVisitorSessionCommand,
+)
 from app.services.identity_bindings import (
     IdentityChallengeConfigurationError,
     IdentityChallengeDeliveryError,
@@ -664,6 +680,10 @@ OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = bool(
     settings.owner_truth_candidate_review_qa_enabled
 )
 PUBLICATION_AUTHORITY_QA_ENABLED = bool(settings.publication_authority_qa_enabled)
+PUBLICATION_VISITOR_ACCESS_QA_ENABLED = bool(
+    settings.publication_visitor_access_qa_enabled
+)
+PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER = DenyPublicationVisitorEligibilityResolver()
 OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = bool(
     settings.owner_truth_context_authority_closed_pilot_enabled
 )
@@ -760,6 +780,7 @@ def _require_owner_truth_candidate_review_qa(request: Request) -> str:
 
 
 _PUBLICATION_AUTHORITY_QA_ROUTE_PREFIX = "/v2/internal/owner-authority/"
+_PUBLICATION_VISITOR_ACCESS_QA_ROUTE_PREFIX = "/v2/internal/publication-access/"
 
 
 def _publication_authority_qa_requested(request: Request) -> bool:
@@ -776,6 +797,22 @@ def _publication_authority_qa_route_is_hidden(request: Request) -> bool:
     )
 
 
+def _publication_visitor_access_qa_requested(request: Request) -> bool:
+    return (
+        PUBLICATION_VISITOR_ACCESS_QA_ENABLED
+        and str(request.headers.get("x-dreamjourney-qa-visitor-access") or "").strip() == "1"
+    )
+
+
+def _publication_internal_qa_route_is_hidden(request: Request) -> bool:
+    path = str(request.url.path)
+    if path.startswith(_PUBLICATION_AUTHORITY_QA_ROUTE_PREFIX):
+        return not _publication_authority_qa_requested(request)
+    if path.startswith(_PUBLICATION_VISITOR_ACCESS_QA_ROUTE_PREFIX):
+        return not _publication_visitor_access_qa_requested(request)
+    return False
+
+
 def _require_publication_authority_qa(request: Request) -> str:
     """Keep the unfinished M2 publication writer absent from normal product UI."""
 
@@ -789,6 +826,23 @@ def _require_publication_authority_qa(request: Request) -> str:
         raise HTTPException(
             status_code=401,
             detail={"code": "publicationAuthorityUserSessionRequired"},
+        )
+    return user_id
+
+
+def _require_publication_visitor_access_qa(request: Request) -> str:
+    """Keep ShareGrant issuance and Visitor admission out of released surfaces."""
+
+    if not _publication_visitor_access_qa_requested(request):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "publicationVisitorAccessUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "publicationVisitorAccessUserSessionRequired"},
         )
     return user_id
 
@@ -3024,6 +3078,177 @@ def _publication_authority_confirm_response(
         "projectionState": result.projection_state,
         "publicProjectionHash": result.public_projection_hash,
         "aiDisclosureRequired": result.ai_disclosure_required,
+    }
+
+
+def _publication_visitor_access_http_error(
+    error: PublicationVisitorAccessError,
+) -> HTTPException:
+    if isinstance(error, PublicationVisitorAccessDisabled):
+        return HTTPException(
+            status_code=404,
+            detail={"code": "publicationVisitorAccessUnavailable"},
+        )
+    if isinstance(error, PublicationVisitorAdultVerificationRequired):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "publicationVisitorAdultVerificationRequired"},
+        )
+    if isinstance(error, PublicationVisitorAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "publicationVisitorAccessDenied"},
+        )
+    if isinstance(error, PublicationVisitorAccessUnavailable):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "publicationVisitorAccessUnavailable"},
+        )
+    if isinstance(error, PublicationVisitorAccessConflict):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "publicationVisitorAccessConflict"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "publicationVisitorAccessInvalid"},
+    )
+
+
+def _publication_visitor_access_payload(
+    payload: Mapping[str, Any],
+    *,
+    allowed_fields: set[str],
+    required_fields: set[str],
+) -> Mapping[str, Any]:
+    unexpected = set(payload) - allowed_fields
+    missing = {field for field in required_fields if field not in payload}
+    if unexpected or missing:
+        raise PublicationVisitorAccessError("publication visitor payload shape is invalid")
+    return payload
+
+
+def _publication_visitor_access_expiry(value: object) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise PublicationVisitorAccessError("expiresAt must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise PublicationVisitorAccessError("expiresAt must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _publication_grant_issue_command(
+    payload: Mapping[str, Any],
+) -> PublicationGrantIssueCommand:
+    value = _publication_visitor_access_payload(
+        payload,
+        allowed_fields={
+            "commandId",
+            "publicationId",
+            "publicationVersionId",
+            "granteeUserId",
+            "expiresAt",
+            "useLimit",
+        },
+        required_fields={
+            "commandId",
+            "publicationId",
+            "publicationVersionId",
+            "granteeUserId",
+            "expiresAt",
+            "useLimit",
+        },
+    )
+    return PublicationGrantIssueCommand(
+        command_id=str(value.get("commandId") or ""),
+        publication_id=str(value.get("publicationId") or ""),
+        publication_version_id=str(value.get("publicationVersionId") or ""),
+        grantee_subject_id=str(value.get("granteeUserId") or ""),
+        expires_at=_publication_visitor_access_expiry(value.get("expiresAt")),
+        use_limit=value.get("useLimit"),
+    )
+
+
+def _publication_grant_revoke_command(
+    payload: Mapping[str, Any],
+    *,
+    grant_id: str,
+) -> PublicationGrantRevokeCommand:
+    value = _publication_visitor_access_payload(
+        payload,
+        allowed_fields={"commandId"},
+        required_fields={"commandId"},
+    )
+    return PublicationGrantRevokeCommand(
+        command_id=str(value.get("commandId") or ""),
+        grant_id=grant_id,
+    )
+
+
+def _publication_visitor_session_command(
+    payload: Mapping[str, Any],
+) -> PublicationVisitorSessionCommand:
+    value = _publication_visitor_access_payload(
+        payload,
+        allowed_fields={"commandId", "grantCredential", "sessionCredential"},
+        required_fields={"commandId", "grantCredential", "sessionCredential"},
+    )
+    return PublicationVisitorSessionCommand(
+        command_id=str(value.get("commandId") or ""),
+        grant_credential=str(value.get("grantCredential") or ""),
+        session_credential=str(value.get("sessionCredential") or ""),
+    )
+
+
+def _publication_grant_issue_response(
+    *,
+    vault_id: str,
+    result: PublicationGrantIssueResult,
+) -> Dict[str, Any]:
+    response: Dict[str, Any] = {
+        "schemaVersion": "publication-visitor-access-v1",
+        "vaultId": vault_id,
+        "grantId": result.grant_id,
+        "publicationId": result.publication_id,
+        "publicationVersionId": result.publication_version_id,
+        "outcome": result.outcome,
+        "expiresAt": result.expires_at.isoformat(),
+        "useRemaining": result.use_remaining,
+        "credentialIssued": result.grant_credential is not None,
+    }
+    # This raw credential is intentionally returned once at issuance only.
+    if result.grant_credential is not None:
+        response["grantCredential"] = result.grant_credential
+    return response
+
+
+def _publication_grant_revoke_response(
+    *,
+    vault_id: str,
+    result: PublicationGrantRevokeResult,
+) -> Dict[str, Any]:
+    return {
+        "schemaVersion": "publication-visitor-access-v1",
+        "vaultId": vault_id,
+        "grantId": result.grant_id,
+        "outcome": result.outcome,
+        "revokedSessionCount": result.revoked_session_count,
+    }
+
+
+def _publication_visitor_admission_response(
+    result: PublicationVisitorAdmissionResult,
+) -> Dict[str, Any]:
+    return {
+        "schemaVersion": "publication-visitor-access-v1",
+        "grantId": result.grant_id,
+        "visitorSessionId": result.session_id,
+        "publicationId": result.publication_id,
+        "publicationVersionId": result.publication_version_id,
+        "outcome": result.outcome,
+        "expiresAt": result.expires_at.isoformat(),
+        "useRemaining": result.use_remaining,
     }
 
 
@@ -5515,11 +5740,16 @@ def _recovery_access_denied_response(request: Request) -> Optional[JSONResponse]
 
 @app.middleware("http")
 async def require_backend_api_token(request: Request, call_next):
-    if _publication_authority_qa_route_is_hidden(request):
+    if _publication_internal_qa_route_is_hidden(request):
+        unavailable_code = (
+            "publicationVisitorAccessUnavailable"
+            if str(request.url.path).startswith(_PUBLICATION_VISITOR_ACCESS_QA_ROUTE_PREFIX)
+            else "publicationAuthorityUnavailable"
+        )
         return _set_no_store_headers(
             JSONResponse(
                 status_code=404,
-                content={"detail": {"code": "publicationAuthorityUnavailable"}},
+                content={"detail": {"code": unavailable_code}},
             )
         )
 
@@ -6410,6 +6640,123 @@ def confirm_publication_authority_draft(
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
         content=_publication_authority_confirm_response(vault_id=vault_id, result=result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/internal/publication-access/vaults/{vault_id}/grants",
+    include_in_schema=False,
+)
+def issue_publication_share_grant(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Issue one QA-only, version-scoped ShareGrant for an authenticated Visitor."""
+
+    try:
+        owner_subject_id = _require_publication_visitor_access_qa(request)
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_subject_id,
+            actor_subject_id=owner_subject_id,
+        )
+        command = _publication_grant_issue_command(payload)
+        with store.request_unit_of_work(
+            correlation_id=f"publication-share-grant-issue:{vault_id}:{command.publication_id}",
+            command_id=command.command_id,
+        ):
+            result = PublicationVisitorAccessService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).issue_grant(context=context, command=command)
+    except HTTPException:
+        raise
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_publication_grant_issue_response(vault_id=vault_id, result=result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/internal/publication-access/vaults/{vault_id}/grants/{grant_id}/revoke",
+    include_in_schema=False,
+)
+def revoke_publication_share_grant(
+    request: Request,
+    vault_id: str,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Revoke one ShareGrant and atomically close its active Visitor sessions."""
+
+    try:
+        owner_subject_id = _require_publication_visitor_access_qa(request)
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_subject_id,
+            actor_subject_id=owner_subject_id,
+        )
+        command = _publication_grant_revoke_command(payload, grant_id=grant_id)
+        with store.request_unit_of_work(
+            correlation_id=f"publication-share-grant-revoke:{vault_id}:{command.grant_id}",
+            command_id=command.command_id,
+        ):
+            result = PublicationVisitorAccessService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).revoke_grant(context=context, command=command)
+    except HTTPException:
+        raise
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=_publication_grant_revoke_response(vault_id=vault_id, result=result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/internal/publication-access/grants/{grant_id}/sessions",
+    include_in_schema=False,
+)
+def admit_publication_visitor_session(
+    request: Request,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Admit a verified adult Visitor to a version-scoped QA session only."""
+
+    try:
+        visitor_subject_id = _require_publication_visitor_access_qa(request)
+        command = _publication_visitor_session_command(payload)
+        with store.request_unit_of_work(
+            correlation_id=f"publication-visitor-session:{grant_id}",
+            command_id=command.command_id,
+        ):
+            result = PublicationVisitorAccessService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).admit_visitor(
+                visitor_subject_id=visitor_subject_id,
+                grant_id=grant_id,
+                command=command,
+            )
+    except HTTPException:
+        raise
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_publication_visitor_admission_response(result),
         headers={"Cache-Control": "no-store"},
     )
 

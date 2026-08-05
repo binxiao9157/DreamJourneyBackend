@@ -1,0 +1,15 @@
+{
+  "version": "0081",
+  "name": "publication_share_grant_authority_epoch",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationVisitorAccessInternalQADefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publicationAuthorityV1": false,
+    "shareGrantIssueV1": false,
+    "visitorSessionV1": false,
+    "publicationPublicProjectionReadV1": false,
+    "visitorGatewayV1": false
+  }
+}

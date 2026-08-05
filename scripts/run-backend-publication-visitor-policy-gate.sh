@@ -36,7 +36,10 @@ assert service.command_mode_for("publication") == "enforce"
 assert service.command_mode_for("visitorAccess") == "enforce"
 
 for route in main_module.app.routes:
-    path = getattr(route, "path", "")
+    path = str(getattr(route, "path", ""))
+    if path.startswith(("/v2/internal/owner-authority/", "/v2/internal/publication-access/")):
+        assert getattr(route, "include_in_schema", True) is False
+        continue
     normalized_path = path.lower()
     for forbidden_route_term in ("publication", "visitor", "share", "guest", "public", "index"):
         assert forbidden_route_term not in normalized_path, (

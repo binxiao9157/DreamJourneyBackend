@@ -44,7 +44,11 @@ assert disabled.public_query_allowed is False
 assert disabled.use_consumed is False
 
 for route in main_module.app.routes:
-    path = str(getattr(route, "path", "")).lower()
+    raw_path = str(getattr(route, "path", ""))
+    if raw_path.startswith(("/v2/internal/owner-authority/", "/v2/internal/publication-access/")):
+        assert getattr(route, "include_in_schema", True) is False
+        continue
+    path = raw_path.lower()
     for forbidden in ("publication", "visitor", "guest", "public"):
         assert forbidden not in path, f"G0 must not register a Visitor/public route: {path}"
 

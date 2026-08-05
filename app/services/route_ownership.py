@@ -298,6 +298,24 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/internal/publication-access/vaults/{vault_id}/grants",
+                session,
+                "publicationShareGrantIssue",
+            ),
+            _rule(
+                "POST",
+                "/v2/internal/publication-access/vaults/{vault_id}/grants/{grant_id}/revoke",
+                session,
+                "publicationShareGrantRevoke",
+            ),
+            _rule(
+                "POST",
+                "/v2/internal/publication-access/grants/{grant_id}/sessions",
+                session,
+                "publicationVisitorSessionAdmission",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/candidates/{candidate_id}/decisions",
                 session,
                 "ownerTruthCandidateDecision",

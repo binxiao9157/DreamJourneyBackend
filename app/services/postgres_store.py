@@ -129,6 +129,9 @@ from app.services.owner_truth_candidate_review import (
 from app.services.publication_authority import (
     PostgresPublicationAuthorityRepository,
 )
+from app.services.publication_visitor_access import (
+    PostgresPublicationVisitorAccessRepository,
+)
 from app.services.owner_truth_memory_projection import (
     PostgresOwnerTruthMemoryProjectionRepository,
 )
@@ -474,6 +477,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("publication authority requires an active unit of work")
         return PostgresPublicationAuthorityRepository(active.connection)
+
+    def publication_visitor_access_repository(
+        self,
+    ) -> PostgresPublicationVisitorAccessRepository:
+        """Return the default-off ShareGrant port bound to the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("publication visitor access requires an active unit of work")
+        return PostgresPublicationVisitorAccessRepository(active.connection)
 
     def owner_truth_memory_projection_repository(
         self,

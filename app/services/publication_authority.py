@@ -350,6 +350,22 @@ class InMemoryPublicationAuthorityRepository:
         with self._lock:
             return len(self._public_projections)
 
+    def public_projection_scope_snapshot(
+        self,
+        publication_id: str,
+        publication_version_id: str,
+    ) -> Mapping[str, Any] | None:
+        """Expose only QA access scope, never private memory content."""
+
+        with self._lock:
+            for projection in self._public_projections.values():
+                if (
+                    projection.get("publicationId") == publication_id
+                    and projection.get("publicationVersionId") == publication_version_id
+                ):
+                    return deepcopy(projection)
+        return None
+
     def create_draft(
         self,
         *,
@@ -478,10 +494,15 @@ class InMemoryPublicationAuthorityRepository:
             draft["state"] = "confirmed"
             draft["publicationVersionId"] = version_id
             self._public_projections[projection_id] = {
+                "vaultId": context.vault_id,
+                "ownerSubjectId": context.owner_subject_id,
+                "authorityEpoch": memory.authority_epoch,
                 "publicationId": command.publication_id,
                 "publicationVersionId": version_id,
                 "projectionHash": public_projection_hash,
-                "state": "active",
+                "projectionState": "active",
+                "vaultState": "active",
+                "publicationState": "confirmed",
             }
             self._command_results[replay_key] = (command.payload_hash, result)
             return result

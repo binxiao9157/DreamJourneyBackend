@@ -127,6 +127,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-public-projector-g0-gat
 echo "== Publication share grant/session G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-share-grant-session-g0-gate.sh
 
+echo "== Publication Visitor access default-off gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-visitor-access-gate.sh
+
 echo "== Publication Visitor answer safety G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-visitor-answer-safety-g0-gate.sh
 
