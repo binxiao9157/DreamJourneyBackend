@@ -153,6 +153,10 @@ class Settings:
     # default-off until the public reader, safety execution and release gates
     # are complete. This is an internal QA contract, never a public feature.
     publication_visitor_access_qa_enabled: bool = False
+    # Withdrawal and third-party objection execution is an even narrower QA
+    # capability. It is separately default-off so enabling owner drafts or
+    # visitor reads never exposes a destructive lifecycle command.
+    publication_lifecycle_qa_enabled: bool = False
     # Candidate review is an Owner Truth QA contract only until the M0 review
     # UI, release policy, and external gates are complete.
     owner_truth_candidate_review_qa_enabled: bool = False
@@ -508,6 +512,10 @@ class Settings:
             publication_visitor_access_qa_enabled=_env_bool(
                 "PUBLICATION_VISITOR_ACCESS_QA_ENABLED",
                 cls.publication_visitor_access_qa_enabled,
+            ),
+            publication_lifecycle_qa_enabled=_env_bool(
+                "PUBLICATION_LIFECYCLE_QA_ENABLED",
+                cls.publication_lifecycle_qa_enabled,
             ),
             owner_truth_candidate_review_qa_enabled=_env_bool(
                 "OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED",

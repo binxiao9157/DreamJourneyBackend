@@ -132,6 +132,9 @@ from app.services.publication_authority import (
 from app.services.publication_visitor_access import (
     PostgresPublicationVisitorAccessRepository,
 )
+from app.services.publication_lifecycle_execution import (
+    PostgresPublicationLifecycleExecutionRepository,
+)
 from app.services.owner_truth_memory_projection import (
     PostgresOwnerTruthMemoryProjectionRepository,
 )
@@ -487,6 +490,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("publication visitor access requires an active unit of work")
         return PostgresPublicationVisitorAccessRepository(active.connection)
+
+    def publication_lifecycle_execution_repository(
+        self,
+    ) -> PostgresPublicationLifecycleExecutionRepository:
+        """Return publication access-deny execution bound to the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("publication lifecycle execution requires an active unit of work")
+        return PostgresPublicationLifecycleExecutionRepository(active.connection)
 
     def owner_truth_memory_projection_repository(
         self,

@@ -611,6 +611,44 @@ class InMemoryPublicationVisitorAccessRepository:
             value = self._sessions.get(session_id)
             return deepcopy(value) if value is not None else None
 
+    def revoke_publication_access(
+        self,
+        *,
+        vault_id: str,
+        publication_id: str,
+        command_id_hash: str,
+        now: datetime,
+    ) -> tuple[int, int]:
+        """Close all active access for one publication lifecycle transition.
+
+        The method is reserved for the default-off lifecycle execution double.
+        It never returns a credential, visitor identity, or public payload.
+        """
+
+        with self._lock:
+            revoked_grants = 0
+            revoked_sessions = 0
+            for grant in self._grants.values():
+                if (
+                    str(grant.get("vaultId") or "") != vault_id
+                    or str(grant.get("publicationId") or "") != publication_id
+                ):
+                    continue
+                if str(grant.get("state") or "") == "active":
+                    grant["state"] = "revoked"
+                    grant["revokedAt"] = now
+                    grant["revocationCommandHash"] = command_id_hash
+                    revoked_grants += 1
+            for session in self._sessions.values():
+                if (
+                    str(session.get("vaultId") or "") == vault_id
+                    and str(session.get("publicationId") or "") == publication_id
+                    and str(session.get("state") or "") == "active"
+                ):
+                    session["state"] = "revoked"
+                    revoked_sessions += 1
+            return revoked_grants, revoked_sessions
+
     def _scope(self, *, publication_id: str, publication_version_id: str) -> PublicationGrantScope:
         value: Mapping[str, Any] | PublicationGrantScope | None = None
         if self._projection_scope_reader is not None:

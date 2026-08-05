@@ -1,0 +1,16 @@
+{
+  "version": "0082",
+  "name": "publication_lifecycle_execution",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationLifecycleInternalQADefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publicationAuthorityV1": false,
+    "shareGrantIssueV1": false,
+    "visitorSessionV1": false,
+    "publicationLifecycleExecutionV1": false,
+    "publicationExternalCleanupWorkerV1": false,
+    "publicationPublicProjectionReadV1": false
+  }
+}

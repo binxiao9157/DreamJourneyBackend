@@ -90,6 +90,17 @@ from app.services.publication_visitor_access import (
     PublicationVisitorAdmissionResult,
     PublicationVisitorSessionCommand,
 )
+from app.services.publication_lifecycle_execution import (
+    PublicationLifecycleExecutionAccessDenied,
+    PublicationLifecycleExecutionCommand,
+    PublicationLifecycleExecutionConflict,
+    PublicationLifecycleExecutionDisabled,
+    PublicationLifecycleExecutionError,
+    PublicationLifecycleExecutionResult,
+    PublicationLifecycleExecutionService,
+    PublicationLifecycleExecutionUnavailable,
+    PUBLICATION_LIFECYCLE_EXECUTION_SCHEMA_VERSION,
+)
 from app.services.publication_visitor_reader import PublicationVisitorReaderService
 from app.services.identity_bindings import (
     IdentityChallengeConfigurationError,
@@ -686,6 +697,7 @@ PUBLICATION_AUTHORITY_QA_ENABLED = bool(settings.publication_authority_qa_enable
 PUBLICATION_VISITOR_ACCESS_QA_ENABLED = bool(
     settings.publication_visitor_access_qa_enabled
 )
+PUBLICATION_LIFECYCLE_QA_ENABLED = bool(settings.publication_lifecycle_qa_enabled)
 PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER = DenyPublicationVisitorEligibilityResolver()
 OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = bool(
     settings.owner_truth_context_authority_closed_pilot_enabled
@@ -784,6 +796,7 @@ def _require_owner_truth_candidate_review_qa(request: Request) -> str:
 
 _PUBLICATION_AUTHORITY_QA_ROUTE_PREFIX = "/v2/internal/owner-authority/"
 _PUBLICATION_VISITOR_ACCESS_QA_ROUTE_PREFIX = "/v2/internal/publication-access/"
+_PUBLICATION_LIFECYCLE_QA_ROUTE_PREFIX = "/v2/internal/publication-lifecycle/"
 
 
 def _publication_authority_qa_requested(request: Request) -> bool:
@@ -807,12 +820,26 @@ def _publication_visitor_access_qa_requested(request: Request) -> bool:
     )
 
 
+def _publication_lifecycle_qa_requested(request: Request) -> bool:
+    """Require every narrower publication QA gate for a destructive command."""
+
+    return (
+        PUBLICATION_LIFECYCLE_QA_ENABLED
+        and _publication_authority_qa_requested(request)
+        and _publication_visitor_access_qa_requested(request)
+        and str(request.headers.get("x-dreamjourney-qa-publication-lifecycle") or "").strip()
+        == "1"
+    )
+
+
 def _publication_internal_qa_route_is_hidden(request: Request) -> bool:
     path = str(request.url.path)
     if path.startswith(_PUBLICATION_AUTHORITY_QA_ROUTE_PREFIX):
         return not _publication_authority_qa_requested(request)
     if path.startswith(_PUBLICATION_VISITOR_ACCESS_QA_ROUTE_PREFIX):
         return not _publication_visitor_access_qa_requested(request)
+    if path.startswith(_PUBLICATION_LIFECYCLE_QA_ROUTE_PREFIX):
+        return not _publication_lifecycle_qa_requested(request)
     return False
 
 
@@ -846,6 +873,23 @@ def _require_publication_visitor_access_qa(request: Request) -> str:
         raise HTTPException(
             status_code=401,
             detail={"code": "publicationVisitorAccessUserSessionRequired"},
+        )
+    return user_id
+
+
+def _require_publication_lifecycle_qa(request: Request) -> str:
+    """Keep destructive publication lifecycle commands absent by default."""
+
+    if not _publication_lifecycle_qa_requested(request):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "publicationLifecycleUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "publicationLifecycleUserSessionRequired"},
         )
     return user_id
 
@@ -1297,6 +1341,19 @@ def _publication_authority_context(
     vault_id: str,
 ) -> OwnerTruthCommandContext:
     owner_subject_id = _require_publication_authority_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
+def _publication_lifecycle_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_publication_lifecycle_qa(request)
     return OwnerTruthCommandContext(
         vault_id=vault_id,
         owner_subject_id=owner_subject_id,
@@ -3322,6 +3379,79 @@ def _publication_visitor_admission_response(
         "outcome": result.outcome,
         "expiresAt": result.expires_at.isoformat(),
         "useRemaining": result.use_remaining,
+    }
+
+
+def _publication_lifecycle_http_error(
+    error: PublicationLifecycleExecutionError,
+) -> HTTPException:
+    if isinstance(error, PublicationLifecycleExecutionDisabled):
+        return HTTPException(
+            status_code=404,
+            detail={"code": "publicationLifecycleUnavailable"},
+        )
+    if isinstance(error, PublicationLifecycleExecutionAccessDenied):
+        return HTTPException(
+            status_code=403,
+            detail={"code": "publicationLifecycleAccessDenied"},
+        )
+    if isinstance(error, PublicationLifecycleExecutionUnavailable):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "publicationLifecycleUnavailable"},
+        )
+    if isinstance(error, PublicationLifecycleExecutionConflict):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "publicationLifecycleConflict"},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"code": "publicationLifecycleInvalid"},
+    )
+
+
+def _publication_lifecycle_command(
+    payload: Mapping[str, Any],
+    *,
+    publication_id: str,
+    action: str,
+) -> PublicationLifecycleExecutionCommand:
+    allowed_fields = {"commandId", "expectedAuthorityEpoch"}
+    if set(payload) - allowed_fields or allowed_fields - set(payload):
+        raise PublicationLifecycleExecutionError("publication lifecycle payload shape is invalid")
+    value = payload
+    return PublicationLifecycleExecutionCommand(
+        command_id=str(value.get("commandId") or ""),
+        publication_id=publication_id,
+        expected_authority_epoch=value.get("expectedAuthorityEpoch"),
+        action=action,
+    )
+
+
+def _publication_lifecycle_response(
+    result: PublicationLifecycleExecutionResult,
+) -> Dict[str, Any]:
+    """Return no content, credential, visitor, or provider-sensitive fields."""
+
+    return {
+        "schemaVersion": PUBLICATION_LIFECYCLE_EXECUTION_SCHEMA_VERSION,
+        "vaultId": result.vault_id,
+        "publicationId": result.publication_id,
+        "publicationVersionId": result.publication_version_id,
+        "outcome": result.outcome,
+        "publicationState": result.publication_state,
+        "projectionState": result.projection_state,
+        "conflictHold": result.conflict_hold,
+        "revokedGrantCount": result.revoked_grant_count,
+        "revokedVisitorSessionCount": result.revoked_visitor_session_count,
+        "receipt": {
+            "receiptId": result.receipt_id,
+            "reasonCode": result.reason_code,
+            "accessDenyState": result.access_deny_state,
+            "publicIndexCleanupState": result.public_index_cleanup_state,
+            "runtimeCleanupState": result.runtime_cleanup_state,
+        },
     }
 
 
@@ -5814,11 +5944,12 @@ def _recovery_access_denied_response(request: Request) -> Optional[JSONResponse]
 @app.middleware("http")
 async def require_backend_api_token(request: Request, call_next):
     if _publication_internal_qa_route_is_hidden(request):
-        unavailable_code = (
-            "publicationVisitorAccessUnavailable"
-            if str(request.url.path).startswith(_PUBLICATION_VISITOR_ACCESS_QA_ROUTE_PREFIX)
-            else "publicationAuthorityUnavailable"
-        )
+        path = str(request.url.path)
+        unavailable_code = "publicationAuthorityUnavailable"
+        if path.startswith(_PUBLICATION_VISITOR_ACCESS_QA_ROUTE_PREFIX):
+            unavailable_code = "publicationVisitorAccessUnavailable"
+        elif path.startswith(_PUBLICATION_LIFECYCLE_QA_ROUTE_PREFIX):
+            unavailable_code = "publicationLifecycleUnavailable"
         return _set_no_store_headers(
             JSONResponse(
                 status_code=404,
@@ -6743,6 +6874,80 @@ def confirm_publication_authority_draft(
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
         content=_publication_authority_confirm_response(vault_id=vault_id, result=result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/internal/publication-lifecycle/vaults/{vault_id}/publications/{publication_id}/withdraw",
+    include_in_schema=False,
+)
+def withdraw_publication_lifecycle(
+    request: Request,
+    vault_id: str,
+    publication_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only Owner withdrawal: deny local access before any external cleanup."""
+
+    try:
+        context = _publication_lifecycle_context(request, vault_id=vault_id)
+        command = _publication_lifecycle_command(
+            payload,
+            publication_id=publication_id,
+            action="withdraw",
+        )
+        with store.request_unit_of_work(
+            correlation_id=f"publication-lifecycle-withdraw:{vault_id}:{publication_id}",
+            command_id=command.command_id,
+        ):
+            result = PublicationLifecycleExecutionService(
+                store.publication_lifecycle_execution_repository(),
+                enabled=True,
+            ).execute(context=context, command=command)
+    except HTTPException:
+        raise
+    except PublicationLifecycleExecutionError as error:
+        raise _publication_lifecycle_http_error(error) from error
+    return JSONResponse(
+        content=_publication_lifecycle_response(result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/internal/publication-lifecycle/vaults/{vault_id}/publications/{publication_id}/suspend",
+    include_in_schema=False,
+)
+def suspend_publication_lifecycle(
+    request: Request,
+    vault_id: str,
+    publication_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """QA-only third-party objection hold; it cannot restore a publication."""
+
+    try:
+        context = _publication_lifecycle_context(request, vault_id=vault_id)
+        command = _publication_lifecycle_command(
+            payload,
+            publication_id=publication_id,
+            action="suspend",
+        )
+        with store.request_unit_of_work(
+            correlation_id=f"publication-lifecycle-suspend:{vault_id}:{publication_id}",
+            command_id=command.command_id,
+        ):
+            result = PublicationLifecycleExecutionService(
+                store.publication_lifecycle_execution_repository(),
+                enabled=True,
+            ).execute(context=context, command=command)
+    except HTTPException:
+        raise
+    except PublicationLifecycleExecutionError as error:
+        raise _publication_lifecycle_http_error(error) from error
+    return JSONResponse(
+        content=_publication_lifecycle_response(result),
         headers={"Cache-Control": "no-store"},
     )
 

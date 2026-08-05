@@ -64,6 +64,9 @@ from app.services.publication_authority import (
 from app.services.publication_visitor_access import (
     InMemoryPublicationVisitorAccessRepository,
 )
+from app.services.publication_lifecycle_execution import (
+    InMemoryPublicationLifecycleExecutionRepository,
+)
 from app.services.owner_truth_media_source_object import (
     InMemoryOwnerTruthMediaSourceObjectRepository,
 )
@@ -203,6 +206,12 @@ class InMemoryStore:
             owner_vault_scope_reader=(
                 self._publication_authority_repository.owner_vault_scope_snapshot
             ),
+        )
+        self._publication_lifecycle_execution_repository = (
+            InMemoryPublicationLifecycleExecutionRepository(
+                self._publication_authority_repository,
+                self._publication_visitor_access_repository,
+            )
         )
         self._owner_truth_conversation_repository = (
             InMemoryOwnerTruthConversationRepository()
@@ -374,6 +383,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryPublicationVisitorAccessRepository:
         return self._publication_visitor_access_repository
+
+    def publication_lifecycle_execution_repository(
+        self,
+    ) -> InMemoryPublicationLifecycleExecutionRepository:
+        return self._publication_lifecycle_execution_repository
 
     def owner_truth_conversation_repository(
         self,

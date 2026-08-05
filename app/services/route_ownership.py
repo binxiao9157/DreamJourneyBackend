@@ -303,6 +303,18 @@ class RouteOwnershipRegistry:
                 "publicationAuthorityConfirm",
             ),
             _rule(
+                "POST",
+                "/v2/internal/publication-lifecycle/vaults/{vault_id}/publications/{publication_id}/withdraw",
+                session,
+                "publicationLifecycleWithdraw",
+            ),
+            _rule(
+                "POST",
+                "/v2/internal/publication-lifecycle/vaults/{vault_id}/publications/{publication_id}/suspend",
+                session,
+                "publicationLifecycleSuspend",
+            ),
+            _rule(
                 "GET",
                 "/v2/internal/publication-access/vaults/{vault_id}/grants",
                 session,

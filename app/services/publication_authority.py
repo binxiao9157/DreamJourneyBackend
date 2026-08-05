@@ -451,6 +451,70 @@ class InMemoryPublicationAuthorityRepository:
                     )
         return None
 
+    def apply_lifecycle_transition(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        publication_id: str,
+        expected_authority_epoch: int,
+        action: str,
+    ) -> Mapping[str, Any]:
+        """Apply the local access-deny state for the lifecycle QA double.
+
+        This is intentionally an internal collaborator for the lifecycle
+        execution repository. It exposes only opaque scope and state values;
+        public copy and private Memory data remain unavailable to lifecycle
+        commands.
+        """
+
+        _assert_owner_context(context)
+        if action not in {"withdraw", "suspend"}:
+            raise PublicationAuthorityConflict("publication lifecycle action is invalid")
+        if isinstance(expected_authority_epoch, bool) or not isinstance(
+            expected_authority_epoch, int
+        ) or expected_authority_epoch < 0:
+            raise PublicationAuthorityConflict("publication authority epoch is invalid")
+        with self._lock:
+            self._assert_active_vault(context)
+            projection = next(
+                (
+                    item
+                    for item in self._public_projections.values()
+                    if item.get("publicationId") == publication_id
+                    and item.get("vaultId") == context.vault_id
+                ),
+                None,
+            )
+            if projection is None:
+                raise PublicationAuthorityAccessDenied(
+                    "publication is not available in this Owner Vault"
+                )
+            if str(projection.get("ownerSubjectId") or "") != context.owner_subject_id:
+                raise PublicationAuthorityAccessDenied(
+                    "publication is not available in this Owner Vault"
+                )
+            authority_epoch = int(projection.get("authorityEpoch") or 0)
+            if authority_epoch != expected_authority_epoch:
+                raise PublicationAuthorityConflict("publication authority epoch has changed")
+            if (
+                str(projection.get("publicationState") or "") != "confirmed"
+                or str(projection.get("projectionState") or "") != "active"
+            ):
+                raise PublicationAuthorityNotPublishable("publication is no longer active")
+            target_state = "withdrawn" if action == "withdraw" else "suspended"
+            projection["publicationState"] = target_state
+            projection["projectionState"] = target_state
+            projection["conflictHold"] = action == "suspend"
+            projection["blockReasonCode"] = (
+                "ownerWithdrawal" if action == "withdraw" else "thirdPartyObjection"
+            )
+            return {
+                "publicationVersionId": str(projection["publicationVersionId"]),
+                "publicationState": target_state,
+                "projectionState": target_state,
+                "conflictHold": bool(projection["conflictHold"]),
+            }
+
     def create_draft(
         self,
         *,
