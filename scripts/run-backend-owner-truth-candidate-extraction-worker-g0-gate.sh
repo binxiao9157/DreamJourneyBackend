@@ -16,6 +16,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
 
 PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/async_effects/owner_truth_candidate_extraction_worker.py \
+  app/async_effects/worker_lifecycle.py \
   app/services/owner_truth_candidate_extraction.py \
   app/services/postgres_store.py
 
@@ -32,6 +33,8 @@ for required in (
     "record_in_unit_of_work",
     "candidateExtractionRetryableFailure",
     "DeterministicOwnerTruthCandidateExtractor",
+    "WorkerLeaseHeartbeat",
+    "def _renew_lease(",
 ):
     assert required in worker_source, f"missing candidate worker invariant: {required}"
 assert 'payload["sourceText"]' not in worker_source

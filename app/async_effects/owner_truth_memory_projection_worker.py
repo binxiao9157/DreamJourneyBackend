@@ -30,7 +30,10 @@ from app.async_effects.lease_repository import (
     AsyncEffectLeaseError,
     AsyncEffectLeaseLost,
 )
-from app.async_effects.worker_lifecycle import WorkerDrainController
+from app.async_effects.worker_lifecycle import (
+    WorkerDrainController,
+    WorkerLeaseHeartbeat,
+)
 from app.core.config import Settings
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.observability.operation_metrics import OperationMetricRecorder
@@ -66,6 +69,7 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
         worker_id: Optional[str] = None,
         lease_seconds: int = _DEFAULT_LEASE_SECONDS,
         retry_seconds: int = _DEFAULT_RETRY_SECONDS,
+        heartbeat_interval_seconds: float | None = None,
         operation_metric_recorder: OperationMetricRecorder | None = None,
     ) -> None:
         self._settings = settings
@@ -75,6 +79,10 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
         )
         self._lease_seconds = max(1, int(lease_seconds))
         self._retry_seconds = max(1, int(retry_seconds))
+        self._heartbeat_interval_seconds = _heartbeat_interval_seconds(
+            lease_seconds=self._lease_seconds,
+            configured=heartbeat_interval_seconds,
+        )
         self._operation_metric_recorder = operation_metric_recorder or self._make_metric_recorder()
 
     def run_once(self) -> dict[str, Any]:
@@ -199,25 +207,17 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
             owner_subject_id=intent.target.owner_subject_id,
             actor_subject_id=intent.target.owner_subject_id,
         )
-        projection = self._store.owner_truth_memory_projection_repository().rebuild(context=context)
-        projection_outcome = str(getattr(projection, "outcome", "")).strip()
-        snapshot = getattr(projection, "snapshot", None)
-        if projection_outcome not in {"rebuilt", "unchanged"} or not isinstance(snapshot, Mapping):
-            raise OwnerTruthMemoryProjectionWorkerError("projection rebuild returned an invalid outcome")
-        checkpoint = str(snapshot.get("checkpoint") or "").strip()
-        if len(checkpoint) != 64:
-            raise OwnerTruthMemoryProjectionWorkerError("projection rebuild returned no checkpoint")
-        search_projection_outcome: str | None = None
-        search_projection_document_count: int | None = None
-        if self._settings.owner_truth_memory_search_projection_worker_enabled:
-            (
-                search_projection_outcome,
-                search_projection_document_count,
-            ) = self._rebuild_search_projection(
-                context=context,
-                source_checkpoint=checkpoint,
-                authority_epoch=int(intent.target.authority_epoch),
-            )
+        (
+            projection_outcome,
+            snapshot,
+            checkpoint,
+            search_projection_outcome,
+            search_projection_document_count,
+        ) = self._rebuild_projections_with_lease_heartbeat(
+            lease=lease,
+            context=context,
+            authority_epoch=int(intent.target.authority_epoch),
+        )
         reason = (
             "memoryProjectionRebuilt"
             if projection_outcome == "rebuilt"
@@ -249,6 +249,95 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
             search_projection_outcome=search_projection_outcome,
             search_projection_document_count=search_projection_document_count,
         )
+
+    def _rebuild_projections_with_lease_heartbeat(
+        self,
+        *,
+        lease: AsyncEffectJobLease,
+        context: OwnerTruthCommandContext,
+        authority_epoch: int,
+    ) -> tuple[str, Mapping[str, Any], str, str | None, int | None]:
+        """Keep the lease current across every potentially slow projection rebuild.
+
+        Projection storage and the optional private search projection can both
+        perform I/O outside the async-effect lease repository. The heartbeat
+        runs in an independent Unit of Work, so the main Unit of Work retains
+        the authority/consumer fences while a competing worker cannot claim
+        the same job. If renewal becomes uncertain, no completion receipt is
+        written for the projection result.
+        """
+
+        heartbeat = self._start_lease_heartbeat(lease)
+        try:
+            projection = self._store.owner_truth_memory_projection_repository().rebuild(
+                context=context
+            )
+            projection_outcome = str(getattr(projection, "outcome", "")).strip()
+            snapshot = getattr(projection, "snapshot", None)
+            if projection_outcome not in {"rebuilt", "unchanged"} or not isinstance(
+                snapshot, Mapping
+            ):
+                raise OwnerTruthMemoryProjectionWorkerError(
+                    "projection rebuild returned an invalid outcome"
+                )
+            checkpoint = str(snapshot.get("checkpoint") or "").strip()
+            if len(checkpoint) != 64:
+                raise OwnerTruthMemoryProjectionWorkerError(
+                    "projection rebuild returned no checkpoint"
+                )
+            search_projection_outcome: str | None = None
+            search_projection_document_count: int | None = None
+            if self._settings.owner_truth_memory_search_projection_worker_enabled:
+                (
+                    search_projection_outcome,
+                    search_projection_document_count,
+                ) = self._rebuild_search_projection(
+                    context=context,
+                    source_checkpoint=checkpoint,
+                    authority_epoch=authority_epoch,
+                )
+        except Exception:
+            self._stop_and_verify_lease_heartbeat(heartbeat)
+            raise
+        self._stop_and_verify_lease_heartbeat(heartbeat)
+        return (
+            projection_outcome,
+            snapshot,
+            checkpoint,
+            search_projection_outcome,
+            search_projection_document_count,
+        )
+
+    def _start_lease_heartbeat(self, lease: AsyncEffectJobLease) -> WorkerLeaseHeartbeat:
+        heartbeat = WorkerLeaseHeartbeat(
+            heartbeat=lambda: self._renew_lease(lease),
+            interval_seconds=self._heartbeat_interval_seconds,
+        )
+        heartbeat.start()
+        return heartbeat
+
+    @staticmethod
+    def _stop_and_verify_lease_heartbeat(heartbeat: WorkerLeaseHeartbeat) -> None:
+        heartbeat.stop()
+        try:
+            heartbeat.raise_if_failed()
+        except (AsyncEffectLeaseCancelled, AsyncEffectLeaseLost):
+            raise
+        except Exception as exc:
+            # An independent heartbeat failure makes ownership of a completed
+            # projection rebuild unknown. Do not persist a consumer receipt or
+            # terminal lease result from this worker attempt.
+            raise AsyncEffectLeaseLost("memory projection lease heartbeat failed") from exc
+
+    def _renew_lease(self, lease: AsyncEffectJobLease) -> None:
+        with self._unit_of_work(
+            correlation_id=f"owner-truth-memory-projection-worker-heartbeat-{lease.job_id}",
+            command_id=f"ownerTruthMemoryProjectionWorkerHeartbeat:{lease.operation_id}",
+        ):
+            self._store.async_effect_lease_repository().heartbeat(
+                lease,
+                lease_seconds=self._lease_seconds,
+            )
 
     def _rebuild_search_projection(
         self,
@@ -462,6 +551,17 @@ def _parser() -> argparse.ArgumentParser:
         help="idle delay between loop iterations; defaults to OWNER_TRUTH_WORKER_POLL_SECONDS",
     )
     return parser
+
+
+def _heartbeat_interval_seconds(*, lease_seconds: int, configured: float | None) -> float:
+    """Renew well before expiry while avoiding a hot loop for short QA leases."""
+
+    if configured is not None:
+        normalized = float(configured)
+        if normalized <= 0:
+            raise ValueError("heartbeat interval must be positive")
+        return normalized
+    return max(0.1, min(30.0, float(lease_seconds) / 3.0))
 
 
 def main(argv: Optional[list[str]] = None) -> int:

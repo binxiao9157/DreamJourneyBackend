@@ -3,6 +3,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from hashlib import sha256
 import json
+from threading import Event, Thread
+from time import sleep
 import unittest
 from uuid import uuid4
 
@@ -10,6 +12,7 @@ from app.async_effects.consumer_repository import InMemoryAsyncEffectConsumerRep
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
 from app.async_effects.lease_repository import InMemoryAsyncEffectLeaseRepository
 from app.async_effects.owner_truth_candidate_extraction_worker import (
+    DeterministicOwnerTruthCandidateExtractor,
     OwnerTruthCandidateExtractionWorkerRuntime,
 )
 from app.async_effects.target_admission import InMemoryOwnerTruthSourceTargetAdmissionRepository
@@ -113,6 +116,19 @@ class _FailingExtractor:
         raise RuntimeError("deterministic extractor fixture failure")
 
 
+class _BlockingExtractor:
+    def __init__(self, *, started: Event, release: Event) -> None:
+        self._started = started
+        self._release = release
+        self._delegate = DeterministicOwnerTruthCandidateExtractor()
+
+    def extract(self, **kwargs):
+        self._started.set()
+        if not self._release.wait(timeout=3.0):
+            raise RuntimeError("candidate extraction test fixture timed out")
+        return self._delegate.extract(**kwargs)
+
+
 class _RecordingMetricRecorder:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -199,6 +215,9 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         enabled: bool = True,
         extractor=None,
         operation_metric_recorder=None,
+        worker_id: str = "candidate-extraction-worker-test",
+        lease_seconds: int = 60,
+        heartbeat_interval_seconds: float | None = None,
     ) -> OwnerTruthCandidateExtractionWorkerRuntime:
         return OwnerTruthCandidateExtractionWorkerRuntime(
             settings=Settings(
@@ -207,8 +226,10 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
                 owner_truth_candidate_extraction_worker_enabled=enabled,
             ),
             store=store or self.store,
-            worker_id="candidate-extraction-worker-test",
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
             retry_seconds=5,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
             extractor=extractor,
             operation_metric_recorder=operation_metric_recorder,
         )
@@ -336,6 +357,87 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         )
         self.assertEqual(self.store.candidate_repository.snapshot()["extractions"], {})
         self.assertEqual(self.store.consumer_repository._inbox, {})
+
+    def test_slow_extractor_heartbeats_lease_and_blocks_second_worker(self) -> None:
+        started = Event()
+        release = Event()
+        first_worker = self._worker(
+            extractor=_BlockingExtractor(started=started, release=release),
+            worker_id="candidate-extraction-first-worker",
+            lease_seconds=1,
+            heartbeat_interval_seconds=0.02,
+        )
+        first_result: dict[str, object] = {}
+        first_thread = Thread(
+            target=lambda: first_result.update(first_worker.run_once()),
+            name="candidate-extraction-first-worker-test",
+        )
+        first_thread.start()
+        self.assertTrue(started.wait(timeout=1.0))
+
+        # The initial one-second lease has elapsed, but the independent
+        # heartbeat prevents a competing worker from claiming the same job.
+        sleep(1.1)
+        contender = self._worker(
+            worker_id="candidate-extraction-contender",
+            lease_seconds=1,
+        ).run_once()
+        self.assertEqual(contender["status"], "idle")
+
+        release.set()
+        first_thread.join(timeout=3.0)
+        self.assertFalse(first_thread.is_alive())
+        self.assertEqual(first_result["status"], "completed")
+        self.assertEqual(self.store.lease_repository.attempt_state(self.intent.job_id, 1), "succeeded")
+        self.assertEqual(len(self.store.candidate_repository.snapshot()["candidates"]), 1)
+
+    def test_lease_heartbeat_failure_discards_extraction_and_consumer_receipt(self) -> None:
+        started = Event()
+        release = Event()
+        heartbeat_attempted = Event()
+        original_heartbeat = self.store.lease_repository.heartbeat
+
+        def fail_heartbeat(*_args, **_kwargs):
+            heartbeat_attempted.set()
+            raise RuntimeError("candidate extraction heartbeat test failure")
+
+        self.store.lease_repository.heartbeat = fail_heartbeat
+        worker = self._worker(
+            extractor=_BlockingExtractor(started=started, release=release),
+            lease_seconds=1,
+            heartbeat_interval_seconds=0.01,
+        )
+        result: dict[str, object] = {}
+        thread = Thread(
+            target=lambda: result.update(worker.run_once()),
+            name="candidate-extraction-heartbeat-failure-test",
+        )
+        try:
+            thread.start()
+            self.assertTrue(started.wait(timeout=1.0))
+            self.assertTrue(heartbeat_attempted.wait(timeout=1.0))
+            release.set()
+            thread.join(timeout=3.0)
+        finally:
+            self.store.lease_repository.heartbeat = original_heartbeat
+            release.set()
+            thread.join(timeout=3.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["status"], "lost")
+        self.assertEqual(result["reason"], "candidateExtractionLeaseLost")
+        self.assertNotEqual(self.store.lease_repository.attempt_state(self.intent.job_id, 1), "succeeded")
+        self.assertEqual(self.store.candidate_repository.snapshot()["extractions"], {})
+        self.assertEqual(self.store.candidate_repository.snapshot()["candidates"], {})
+        self.assertEqual(self.store.consumer_repository._inbox, {})
+
+    def test_lease_heartbeat_uses_bounded_third_by_default_and_allows_test_injection(self) -> None:
+        self.assertAlmostEqual(self._worker(lease_seconds=3)._heartbeat_interval_seconds, 1.0)
+        self.assertAlmostEqual(self._worker(lease_seconds=180)._heartbeat_interval_seconds, 30.0)
+        self.assertAlmostEqual(
+            self._worker(lease_seconds=1, heartbeat_interval_seconds=0.02)._heartbeat_interval_seconds,
+            0.02,
+        )
 
     def test_claimed_job_records_value_free_worker_attempt_metric(self) -> None:
         recorder = _RecordingMetricRecorder()

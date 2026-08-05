@@ -3,6 +3,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from hashlib import sha256
 import json
+from threading import Event, Thread
+from time import sleep
 import unittest
 from uuid import uuid4
 
@@ -60,6 +62,21 @@ class _ProjectionRepository:
                 "entryCount": 1,
             },
         )
+
+
+class _BlockingProjectionRepository(_ProjectionRepository):
+    """Test-only rebuild fixture that holds an external effect past its lease."""
+
+    def __init__(self, *, started: Event, release: Event) -> None:
+        super().__init__()
+        self._started = started
+        self._release = release
+
+    def rebuild(self, *, context):
+        self._started.set()
+        if not self._release.wait(timeout=5.0):
+            raise TimeoutError("test projection rebuild release was not signalled")
+        return super().rebuild(context=context)
 
 
 class _SearchDocumentProjectionRepository:
@@ -198,6 +215,9 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
         *,
         enabled: bool = True,
         search_projection_enabled: bool = False,
+        worker_id: str = "projection-worker-test",
+        lease_seconds: int = 60,
+        heartbeat_interval_seconds: float | None = None,
         operation_metric_recorder=None,
     ) -> OwnerTruthMemoryProjectionWorkerRuntime:
         return OwnerTruthMemoryProjectionWorkerRuntime(
@@ -208,8 +228,10 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
                 owner_truth_memory_search_projection_worker_enabled=search_projection_enabled,
             ),
             store=self.store,
-            worker_id="projection-worker-test",
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
             retry_seconds=5,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
             operation_metric_recorder=operation_metric_recorder,
         )
 
@@ -243,6 +265,99 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
             "succeeded",
         )
         self.assertNotIn("content", json.dumps(result, sort_keys=True).lower())
+
+    def test_slow_projection_rebuild_heartbeats_lease_and_blocks_second_worker(self):
+        started = Event()
+        release = Event()
+        self.store.projection_repository = _BlockingProjectionRepository(
+            started=started,
+            release=release,
+        )
+        first_worker = self.worker(
+            worker_id="projection-worker-first",
+            lease_seconds=1,
+            heartbeat_interval_seconds=0.02,
+        )
+        first_result: dict[str, object] = {}
+        first_thread = Thread(
+            target=lambda: first_result.update(first_worker.run_once()),
+            name="projection-first-worker-test",
+        )
+        first_thread.start()
+        self.assertTrue(started.wait(timeout=1.0))
+
+        # The rebuild outlives the initial lease. Its independent heartbeat
+        # keeps the same effect owned, so a second worker cannot claim it.
+        sleep(1.1)
+        contender = self.worker(
+            worker_id="projection-worker-contender",
+            lease_seconds=1,
+        ).run_once()
+        self.assertEqual(contender["status"], "idle")
+
+        release.set()
+        first_thread.join(timeout=3.0)
+        self.assertFalse(first_thread.is_alive())
+        self.assertEqual(first_result["status"], "completed")
+        self.assertEqual(
+            self.store.lease_repository.attempt_state(self.intent.job_id, 1),
+            "succeeded",
+        )
+
+    def test_lease_heartbeat_failure_fails_closed_without_success_receipt(self):
+        started = Event()
+        release = Event()
+        heartbeat_attempted = Event()
+        self.store.projection_repository = _BlockingProjectionRepository(
+            started=started,
+            release=release,
+        )
+        original_heartbeat = self.store.lease_repository.heartbeat
+
+        def fail_heartbeat(*_args, **_kwargs) -> None:
+            heartbeat_attempted.set()
+            raise RuntimeError("test projection heartbeat transaction failed")
+
+        self.store.lease_repository.heartbeat = fail_heartbeat
+        worker = self.worker(
+            lease_seconds=1,
+            heartbeat_interval_seconds=0.01,
+        )
+        result: dict[str, object] = {}
+        thread = Thread(
+            target=lambda: result.update(worker.run_once()),
+            name="projection-heartbeat-failure-test",
+        )
+        try:
+            thread.start()
+            self.assertTrue(started.wait(timeout=1.0))
+            self.assertTrue(heartbeat_attempted.wait(timeout=1.0))
+            release.set()
+            thread.join(timeout=3.0)
+        finally:
+            self.store.lease_repository.heartbeat = original_heartbeat
+            release.set()
+            thread.join(timeout=3.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["status"], "lost")
+        self.assertEqual(result["reason"], "memoryProjectionLeaseLost")
+        self.assertNotEqual(
+            self.store.lease_repository.attempt_state(self.intent.job_id, 1),
+            "succeeded",
+        )
+        # In-memory fixtures do not model transaction rollback for the rebuilt
+        # projection itself. The terminal lease and success receipt are still
+        # forbidden once lease ownership is uncertain.
+        self.assertEqual(self.store.consumer_repository._inbox, {})
+
+    def test_lease_heartbeat_uses_bounded_third_by_default_and_allows_test_injection(self):
+        self.assertAlmostEqual(self.worker(lease_seconds=3)._heartbeat_interval_seconds, 1.0)
+        self.assertAlmostEqual(self.worker(lease_seconds=180)._heartbeat_interval_seconds, 30.0)
+        self.assertAlmostEqual(
+            self.worker(lease_seconds=1, heartbeat_interval_seconds=0.02)._heartbeat_interval_seconds,
+            0.02,
+        )
 
     def test_active_rights_revision_rebuilds_projection_without_a_memory_payload_target(self):
         store = _Store()

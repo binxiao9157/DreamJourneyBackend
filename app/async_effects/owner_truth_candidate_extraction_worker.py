@@ -27,7 +27,7 @@ from app.async_effects.lease_repository import (
     AsyncEffectLeaseCancelled,
     AsyncEffectLeaseLost,
 )
-from app.async_effects.worker_lifecycle import WorkerDrainController
+from app.async_effects.worker_lifecycle import WorkerDrainController, WorkerLeaseHeartbeat
 from app.core.config import Settings
 from app.domain.owner_truth.candidate_extraction import (
     CandidateEvidenceSpan,
@@ -146,6 +146,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
         worker_id: Optional[str] = None,
         lease_seconds: int = _DEFAULT_LEASE_SECONDS,
         retry_seconds: int = _DEFAULT_RETRY_SECONDS,
+        heartbeat_interval_seconds: float | None = None,
         extractor: OwnerTruthCandidateExtractor | None = None,
         operation_metric_recorder: OperationMetricRecorder | None = None,
     ) -> None:
@@ -156,6 +157,10 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
         )
         self._lease_seconds = max(1, int(lease_seconds))
         self._retry_seconds = max(1, int(retry_seconds))
+        self._heartbeat_interval_seconds = _heartbeat_interval_seconds(
+            lease_seconds=self._lease_seconds,
+            configured=heartbeat_interval_seconds,
+        )
         self._extractor = extractor or DeterministicOwnerTruthCandidateExtractor()
         self._operation_metric_recorder = operation_metric_recorder or self._make_metric_recorder()
 
@@ -277,7 +282,11 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
             self._store.owner_truth_candidate_extraction_input_repository()
             .read_for_candidate_extraction(intent)
         )
-        command = self._extractor.extract(intent=intent, source=source)
+        command = self._extract_with_lease_heartbeat(
+            lease=lease,
+            intent=intent,
+            source=source,
+        )
         result = OwnerTruthCandidateExtractionService(self._store).record_in_unit_of_work(command)
         if result.outcome == "blocked":
             completion = lease_repository.complete(
@@ -336,6 +345,62 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 worker_id=self._worker_id,
                 lease_seconds=self._lease_seconds,
                 supported_job_types=[_SOURCE_CANDIDATE_EXTRACTION_JOB_TYPE],
+            )
+
+    def _extract_with_lease_heartbeat(
+        self,
+        *,
+        lease: AsyncEffectJobLease,
+        intent: AsyncEffectIntent,
+        source: OwnerTruthCandidateExtractionInput,
+    ) -> SyntheticCandidateExtractionCommand:
+        """Renew a claimed lease while an extractor performs external work.
+
+        Admission, source reads, persistence, consumer receipts and lease
+        completion remain in the primary Unit of Work. Only the potentially
+        slow extractor adapter is wrapped. Renewal uses an independent Unit
+        of Work; if it fails, the extraction result is discarded rather than
+        committing a success after ownership becomes uncertain.
+        """
+
+        heartbeat = self._start_lease_heartbeat(lease)
+        try:
+            command = self._extractor.extract(intent=intent, source=source)
+        except Exception:
+            self._stop_and_verify_lease_heartbeat(heartbeat)
+            raise
+        self._stop_and_verify_lease_heartbeat(heartbeat)
+        return command
+
+    def _start_lease_heartbeat(self, lease: AsyncEffectJobLease) -> WorkerLeaseHeartbeat:
+        heartbeat = WorkerLeaseHeartbeat(
+            heartbeat=lambda: self._renew_lease(lease),
+            interval_seconds=self._heartbeat_interval_seconds,
+        )
+        heartbeat.start()
+        return heartbeat
+
+    def _stop_and_verify_lease_heartbeat(self, heartbeat: WorkerLeaseHeartbeat) -> None:
+        heartbeat.stop()
+        try:
+            heartbeat.raise_if_failed()
+        except AsyncEffectLeaseCancelled:
+            raise
+        except AsyncEffectLeaseLost:
+            raise
+        except Exception as exc:
+            # A renewal error means the worker cannot prove ownership of the
+            # current lease. Do not persist an extractor result or receipt.
+            raise AsyncEffectLeaseLost("candidate extraction lease heartbeat failed") from exc
+
+    def _renew_lease(self, lease: AsyncEffectJobLease) -> None:
+        with self._unit_of_work(
+            correlation_id=f"owner-truth-candidate-extraction-worker-heartbeat-{lease.job_id}",
+            command_id=f"ownerTruthCandidateExtractionWorkerHeartbeat:{lease.operation_id}",
+        ):
+            self._store.async_effect_lease_repository().heartbeat(
+                lease,
+                lease_seconds=self._lease_seconds,
             )
 
     def _release_retryable(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
@@ -488,6 +553,17 @@ def _parser() -> argparse.ArgumentParser:
         help="idle delay between loop iterations; defaults to OWNER_TRUTH_WORKER_POLL_SECONDS",
     )
     return parser
+
+
+def _heartbeat_interval_seconds(*, lease_seconds: int, configured: float | None) -> float:
+    """Renew well before expiry while avoiding a hot loop for short QA leases."""
+
+    if configured is not None:
+        normalized = float(configured)
+        if normalized <= 0:
+            raise ValueError("heartbeat interval must be positive")
+        return normalized
+    return max(0.1, min(30.0, float(lease_seconds) / 3.0))
 
 
 def main(argv: Optional[list[str]] = None) -> int:

@@ -13,5 +13,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest tests.test_owner_truth_worker_process
 PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/async_effects/owner_truth_candidate_extraction_worker.py \
   app/async_effects/owner_truth_memory_projection_worker.py \
-  app/async_effects/owner_truth_media_processing_worker.py
+  app/async_effects/owner_truth_media_processing_worker.py \
+  app/async_effects/owner_truth_media_deletion_worker.py \
+  app/async_effects/worker_lifecycle.py
 echo "Owner Truth worker process gate passed"

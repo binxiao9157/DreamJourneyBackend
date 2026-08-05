@@ -16,6 +16,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
 
 PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/async_effects/owner_truth_memory_projection_worker.py \
+  app/async_effects/worker_lifecycle.py \
   app/services/owner_truth_memory_search_projection.py
 
 "$PYTHON_BIN" - <<'PY'
@@ -30,6 +31,8 @@ for required in (
     "search projection rebuild returned an invalid outcome",
     "search projection rebuild returned a cross-scope or stale checkpoint",
     "searchProjectionOutcome",
+    "WorkerLeaseHeartbeat",
+    "def _renew_lease(",
 ):
     assert required in worker_source, f"missing SearchDocument worker invariant: {required}"
 
