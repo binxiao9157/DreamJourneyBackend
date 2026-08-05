@@ -65,7 +65,7 @@ class OperationMetricCoverageTests(unittest.TestCase):
                 entry.status is OperationMetricCoverageStatus.NOT_INSTRUMENTED
                 for entry in CRITICAL_WORKER_COVERAGE
             ),
-            1,
+            2,
         )
 
     def test_worker_gap_is_fail_closed_and_observation_summary_is_value_free(self) -> None:
@@ -75,7 +75,7 @@ class OperationMetricCoverageTests(unittest.TestCase):
         self.assertEqual(summary["schemaVersion"], OPERATION_METRIC_COVERAGE_SCHEMA_VERSION)
         self.assertEqual(summary["httpRouteCoverage"]["instrumentedCount"], 1)
         self.assertEqual(summary["criticalWorkerCoverage"]["instrumentedCount"], 5)
-        self.assertEqual(summary["criticalWorkerCoverage"]["notInstrumentedCount"], 1)
+        self.assertEqual(summary["criticalWorkerCoverage"]["notInstrumentedCount"], 2)
         self.assertFalse(summary["coverageComplete"])
         self.assertFalse(summary["sloClaimAllowed"])
         self.assertTrue(summary["valueFree"])

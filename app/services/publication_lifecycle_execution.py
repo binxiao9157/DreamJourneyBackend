@@ -31,6 +31,13 @@ from app.services.publication_authority import (
     PublicationAuthorityNotPublishable,
 )
 from app.services.publication_visitor_access import InMemoryPublicationVisitorAccessRepository
+from app.async_effects.provider_effect_repository import InMemoryProviderEffectRepository
+from app.async_effects.repository import InMemoryEffectKernelRepository
+from app.services.publication_external_cleanup import (
+    InMemoryPublicationExternalCleanupRepository,
+    PublicationExternalCleanupCoordinator,
+    PublicationExternalCleanupStatus,
+)
 
 
 PUBLICATION_LIFECYCLE_EXECUTION_SCHEMA_VERSION = "publication-lifecycle-v1"
@@ -139,6 +146,10 @@ class PublicationLifecycleExecutionResult:
     access_deny_state: str = "completed"
     public_index_cleanup_state: str = "pending"
     runtime_cleanup_state: str = "notApplicable"
+    # P2-S4C may attach post-commit, redacted external effect status here.
+    # Empty means that local denial succeeded but no async effect coordinates
+    # were accepted in the same response path; it never means cleanup is done.
+    external_cleanup: tuple[PublicationExternalCleanupStatus, ...] = ()
 
     def __post_init__(self) -> None:
         if self.outcome not in {"withdrawn", "suspended", "deduplicated"}:
@@ -186,6 +197,10 @@ class PublicationLifecycleExecutionResult:
             raise PublicationLifecycleExecutionError("public index cleanup cannot be claimed complete")
         if self.runtime_cleanup_state != "notApplicable":
             raise PublicationLifecycleExecutionError("runtime cleanup is not applicable without runtime binding")
+        if not isinstance(self.external_cleanup, tuple) or not all(
+            isinstance(item, PublicationExternalCleanupStatus) for item in self.external_cleanup
+        ):
+            raise PublicationLifecycleExecutionError("external cleanup summary is invalid")
 
 
 class PublicationLifecycleExecutionRepository(Protocol):
@@ -242,9 +257,17 @@ class InMemoryPublicationLifecycleExecutionRepository:
         self,
         authority_repository: InMemoryPublicationAuthorityRepository,
         visitor_access_repository: InMemoryPublicationVisitorAccessRepository,
+        external_cleanup_coordinator: PublicationExternalCleanupCoordinator | None = None,
     ) -> None:
         self._authority_repository = authority_repository
         self._visitor_access_repository = visitor_access_repository
+        self._external_cleanup_coordinator = external_cleanup_coordinator or (
+            PublicationExternalCleanupCoordinator(
+                effect_repository=InMemoryEffectKernelRepository(),
+                provider_effect_repository=InMemoryProviderEffectRepository(),
+                cleanup_repository=InMemoryPublicationExternalCleanupRepository(),
+            )
+        )
         self._lock = RLock()
         self._commands: dict[tuple[str, str], tuple[str, str, PublicationLifecycleExecutionResult]] = {}
 
@@ -308,6 +331,20 @@ class InMemoryPublicationLifecycleExecutionRepository:
                 ),
                 reason_code=(
                     "ownerWithdrawal" if command.action == "withdraw" else "thirdPartyObjection"
+                ),
+            )
+            result = replace(
+                result,
+                external_cleanup=self._external_cleanup_coordinator.enqueue_after_access_deny(
+                    lifecycle_receipt_id=result.receipt_id,
+                    vault_id=context.vault_id,
+                    owner_subject_id=context.owner_subject_id,
+                    publication_id=result.publication_id,
+                    publication_version_id=result.publication_version_id,
+                    authority_epoch=command.expected_authority_epoch,
+                    action=command.action,
+                    reason_code=result.reason_code,
+                    observed_at=now,
                 ),
             )
             self._commands[replay_key] = (

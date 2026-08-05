@@ -217,8 +217,20 @@ class PublicationLifecycleAPITests(unittest.TestCase):
         self.assertEqual(receipt["receipt"]["accessDenyState"], "completed")
         self.assertEqual(receipt["receipt"]["publicIndexCleanupState"], "pending")
         self.assertEqual(receipt["receipt"]["runtimeCleanupState"], "notApplicable")
+        self.assertEqual(
+            {item["domain"] for item in receipt["externalCleanup"]},
+            {"publicIndex", "cache", "digitalHumanSession", "providerVoice", "objectStorage"},
+        )
+        self.assertTrue(
+            all(item["state"] == "pending" for item in receipt["externalCleanup"])
+        )
+        self.assertTrue(
+            all(not item["providerReceiptPresent"] for item in receipt["externalCleanup"])
+        )
         self.assertNotIn("grantCredential", str(receipt))
         self.assertNotIn("sessionCredential", str(receipt))
+        self.assertNotIn(str(publication["publicationId"]), str(receipt["externalCleanup"]))
+        self.assertNotIn(state["vaultId"], str(receipt["externalCleanup"]))
 
         rejected = client.post(
             f"/v2/internal/publication-access/sessions/{state['visitorSessionId']}/projection",
@@ -240,6 +252,7 @@ class PublicationLifecycleAPITests(unittest.TestCase):
         self.assertEqual(replay.status_code, 200, replay.text)
         self.assertEqual(replay.json()["outcome"], "deduplicated")
         self.assertEqual(replay.json()["receipt"]["receiptId"], receipt["receipt"]["receiptId"])
+        self.assertEqual(replay.json()["externalCleanup"], receipt["externalCleanup"])
 
     def test_stale_authority_epoch_keeps_existing_visitor_access_intact(self) -> None:
         state = self._active_projection_with_visitor_session()

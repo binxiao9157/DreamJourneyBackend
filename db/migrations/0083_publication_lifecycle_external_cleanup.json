@@ -1,0 +1,14 @@
+{
+  "version": "0083",
+  "name": "publication_lifecycle_external_cleanup",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationExternalCleanupInternalQADefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publicationLifecycleExecutionV1": false,
+    "publicationExternalCleanupWorkerV1": false,
+    "publicationExternalCleanupMaterializerV1": false,
+    "publicationPublicProjectionReadV1": false
+  }
+}

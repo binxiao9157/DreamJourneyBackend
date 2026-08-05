@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import hashlib
 import json
 import logging
@@ -100,6 +101,10 @@ from app.services.publication_lifecycle_execution import (
     PublicationLifecycleExecutionService,
     PublicationLifecycleExecutionUnavailable,
     PUBLICATION_LIFECYCLE_EXECUTION_SCHEMA_VERSION,
+)
+from app.services.publication_external_cleanup import (
+    PublicationExternalCleanupCoordinator,
+    PublicationExternalCleanupError,
 )
 from app.services.publication_visitor_reader import PublicationVisitorReaderService
 from app.services.identity_bindings import (
@@ -3456,7 +3461,48 @@ def _publication_lifecycle_response(
             "publicIndexCleanupState": result.public_index_cleanup_state,
             "runtimeCleanupState": result.runtime_cleanup_state,
         },
+        "externalCleanup": [item.public_contract() for item in result.external_cleanup],
     }
+
+
+def _materialize_publication_lifecycle_external_cleanup(
+    result: PublicationLifecycleExecutionResult,
+) -> PublicationLifecycleExecutionResult:
+    """Queue redacted external cleanup only after the local deny UoW committed.
+
+    The lifecycle transaction remains the source of truth for access denial.
+    A post-commit failure to persist coordination records must never restore a
+    public projection, grant, or Visitor session.  The empty summary is
+    therefore intentional evidence of a deferred materialization, not a
+    completed cleanup claim.
+    """
+
+    if result.external_cleanup:
+        return result
+    try:
+        with store.request_unit_of_work(
+            correlation_id=(
+                "publication-lifecycle-external-cleanup:"
+                f"{result.receipt_id}"
+            ),
+            command_id=f"publicationLifecycleExternalCleanup:{result.receipt_id}",
+        ):
+            cleanup_repository = store.publication_external_cleanup_repository()
+            coordinator = PublicationExternalCleanupCoordinator(
+                effect_repository=store.effect_kernel_repository(),
+                provider_effect_repository=store.provider_effect_repository(),
+                cleanup_repository=cleanup_repository,
+            )
+            statuses = coordinator.materialize(
+                cleanup_repository.materialization_target(result.receipt_id)
+            )
+        return replace(result, external_cleanup=statuses)
+    except (PublicationExternalCleanupError, RuntimeError) as exc:
+        logger.warning(
+            "publication lifecycle external cleanup materialization deferred",
+            extra={"reasonCode": type(exc).__name__},
+        )
+        return result
 
 
 def _owner_truth_text_capture_http_error(
@@ -6913,6 +6959,7 @@ def withdraw_publication_lifecycle(
         raise
     except PublicationLifecycleExecutionError as error:
         raise _publication_lifecycle_http_error(error) from error
+    result = _materialize_publication_lifecycle_external_cleanup(result)
     return JSONResponse(
         content=_publication_lifecycle_response(result),
         headers={"Cache-Control": "no-store"},
@@ -6950,6 +6997,7 @@ def suspend_publication_lifecycle(
         raise
     except PublicationLifecycleExecutionError as error:
         raise _publication_lifecycle_http_error(error) from error
+    result = _materialize_publication_lifecycle_external_cleanup(result)
     return JSONResponse(
         content=_publication_lifecycle_response(result),
         headers={"Cache-Control": "no-store"},

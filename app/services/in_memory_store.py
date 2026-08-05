@@ -67,6 +67,10 @@ from app.services.publication_visitor_access import (
 from app.services.publication_lifecycle_execution import (
     InMemoryPublicationLifecycleExecutionRepository,
 )
+from app.services.publication_external_cleanup import (
+    InMemoryPublicationExternalCleanupRepository,
+    PublicationExternalCleanupCoordinator,
+)
 from app.services.owner_truth_media_source_object import (
     InMemoryOwnerTruthMediaSourceObjectRepository,
 )
@@ -186,6 +190,9 @@ class InMemoryStore:
         self._owner_truth_family_contribution_grant_commands: Dict[Tuple[str, str], str] = {}
         self._effect_kernel_repository = InMemoryEffectKernelRepository()
         self._provider_effect_repository = InMemoryProviderEffectRepository()
+        self._publication_external_cleanup_repository = (
+            InMemoryPublicationExternalCleanupRepository()
+        )
         self._owner_truth_candidate_review_repository = (
             InMemoryOwnerTruthCandidateReviewRepository(
                 memory_projection_rebuild_runnable_reader=(
@@ -211,6 +218,11 @@ class InMemoryStore:
             InMemoryPublicationLifecycleExecutionRepository(
                 self._publication_authority_repository,
                 self._publication_visitor_access_repository,
+                PublicationExternalCleanupCoordinator(
+                    effect_repository=self._effect_kernel_repository,
+                    provider_effect_repository=self._provider_effect_repository,
+                    cleanup_repository=self._publication_external_cleanup_repository,
+                ),
             )
         )
         self._owner_truth_conversation_repository = (
@@ -388,6 +400,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryPublicationLifecycleExecutionRepository:
         return self._publication_lifecycle_execution_repository
+
+    def publication_external_cleanup_repository(
+        self,
+    ) -> InMemoryPublicationExternalCleanupRepository:
+        return self._publication_external_cleanup_repository
 
     def owner_truth_conversation_repository(
         self,

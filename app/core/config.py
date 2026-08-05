@@ -157,6 +157,11 @@ class Settings:
     # capability. It is separately default-off so enabling owner drafts or
     # visitor reads never exposes a destructive lifecycle command.
     publication_lifecycle_qa_enabled: bool = False
+    # The lifecycle cleanup materializer only binds already-denied receipts to
+    # value-minimized async effects. It never calls a Provider, but still
+    # remains independently default-off until the closed-beta worker profile
+    # has been validated in its target environment.
+    publication_external_cleanup_materializer_enabled: bool = False
     # Candidate review is an Owner Truth QA contract only until the M0 review
     # UI, release policy, and external gates are complete.
     owner_truth_candidate_review_qa_enabled: bool = False
@@ -516,6 +521,10 @@ class Settings:
             publication_lifecycle_qa_enabled=_env_bool(
                 "PUBLICATION_LIFECYCLE_QA_ENABLED",
                 cls.publication_lifecycle_qa_enabled,
+            ),
+            publication_external_cleanup_materializer_enabled=_env_bool(
+                "PUBLICATION_EXTERNAL_CLEANUP_MATERIALIZER_ENABLED",
+                cls.publication_external_cleanup_materializer_enabled,
             ),
             owner_truth_candidate_review_qa_enabled=_env_bool(
                 "OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED",

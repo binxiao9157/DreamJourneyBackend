@@ -127,6 +127,21 @@ services:
       redis:
         condition: service_started
 
+  publication-external-cleanup-materializer-worker:
+    build: .
+    profiles:
+      - publication-lifecycle-worker
+    restart: unless-stopped
+    stop_grace_period: 150s
+    command: ["python", "-m", "app.async_effects.publication_external_cleanup_materializer_worker", "--loop"]
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
   postgres:
     image: mirror.ccs.tencentyun.com/library/postgres:16-alpine
     restart: unless-stopped

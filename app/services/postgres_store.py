@@ -135,6 +135,9 @@ from app.services.publication_visitor_access import (
 from app.services.publication_lifecycle_execution import (
     PostgresPublicationLifecycleExecutionRepository,
 )
+from app.services.publication_external_cleanup import (
+    PostgresPublicationExternalCleanupRepository,
+)
 from app.services.owner_truth_memory_projection import (
     PostgresOwnerTruthMemoryProjectionRepository,
 )
@@ -500,6 +503,32 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("publication lifecycle execution requires an active unit of work")
         return PostgresPublicationLifecycleExecutionRepository(active.connection)
+
+    def publication_external_cleanup_repository(
+        self,
+    ) -> PostgresPublicationExternalCleanupRepository:
+        """Return the default-off lifecycle cleanup receipt port inside a UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("publication external cleanup requires an active unit of work")
+        return PostgresPublicationExternalCleanupRepository(active.connection)
+
+    def effect_kernel_repository(self) -> PostgresEffectKernelRepository:
+        """Return the generic effect writer while the caller owns a UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("async effect kernel requires an active unit of work")
+        return PostgresEffectKernelRepository(active.connection)
+
+    def provider_effect_repository(self) -> PostgresProviderEffectRepository:
+        """Return the generic provider receipt writer while a UoW is active."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("provider effect repository requires an active unit of work")
+        return PostgresProviderEffectRepository(active.connection)
 
     def owner_truth_memory_projection_repository(
         self,

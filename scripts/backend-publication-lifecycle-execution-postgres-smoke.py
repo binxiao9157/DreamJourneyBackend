@@ -25,11 +25,16 @@ import psycopg
 from psycopg.conninfo import conninfo_to_dict
 
 from app.db.migrator import PostgresMigrator, default_migrations_dir
+from app.async_effects.publication_external_cleanup_materializer_worker import (
+    PublicationExternalCleanupMaterializerWorkerRuntime,
+)
+from app.core.config import Settings
 from app.services.postgres_store import PostgresStore
 from app.services.publication_lifecycle_execution import (
     PublicationLifecycleExecutionCommand,
     PublicationLifecycleExecutionService,
 )
+from app.services.publication_external_cleanup import PublicationExternalCleanupCoordinator
 from app.services.publication_visitor_access import PublicationVisitorAccessUnavailable
 
 
@@ -86,6 +91,36 @@ def lifecycle_execute(
             store.publication_lifecycle_execution_repository(),
             enabled=True,
         ).execute(context=seed.context, command=command)
+
+
+def materialize_external_cleanup(store: PostgresStore, *, result):
+    """Mirror the post-commit API materializer without touching a provider."""
+
+    with store.request_unit_of_work(
+        correlation_id=f"publication-lifecycle-cleanup-smoke:{result.receipt_id}",
+        command_id=f"publicationLifecycleCleanupSmoke:{result.receipt_id}",
+    ):
+        cleanup_repository = store.publication_external_cleanup_repository()
+        statuses = PublicationExternalCleanupCoordinator(
+            effect_repository=store.effect_kernel_repository(),
+            provider_effect_repository=store.provider_effect_repository(),
+            cleanup_repository=cleanup_repository,
+        ).materialize(cleanup_repository.materialization_target(result.receipt_id))
+    return statuses
+
+
+def materialize_pending_external_cleanup(store: PostgresStore, *, limit: int = 20):
+    """Prove authority-triggered receipts are recoverable by the real worker shell."""
+
+    return PublicationExternalCleanupMaterializerWorkerRuntime(
+        settings=Settings(
+            async_effect_v1_enabled=True,
+            async_effect_worker_enabled=True,
+            publication_external_cleanup_materializer_enabled=True,
+        ),
+        store=store,
+        worker_id="publication-lifecycle-cleanup-smoke-worker",
+    ).run_once(limit=limit)
 
 
 def issue_and_admit(
@@ -156,6 +191,15 @@ def execute(dsn: str) -> None:
             result.revoked_grant_count == 1 and result.revoked_visitor_session_count == 1,
             "withdrawal must revoke its active ShareGrant and Visitor session",
         )
+        cleanup_statuses = materialize_external_cleanup(store, result=result)
+        require(
+            len(cleanup_statuses) == 5
+            and {item.domain.value for item in cleanup_statuses}
+            == {"publicIndex", "cache", "digitalHumanSession", "providerVoice", "objectStorage"}
+            and all(item.state.value == "pending" for item in cleanup_statuses)
+            and all(not item.provider_receipt_present for item in cleanup_statuses),
+            "external cleanup must enqueue five redacted pending effects without claiming provider completion",
+        )
         replay = lifecycle_execute(
             store,
             seed=seed,
@@ -166,6 +210,11 @@ def execute(dsn: str) -> None:
         require(
             replay.outcome == "deduplicated" and replay.receipt_id == result.receipt_id,
             "lifecycle command replay must return its original redacted receipt",
+        )
+        replay_cleanup = materialize_external_cleanup(store, result=replay)
+        require(
+            replay_cleanup == cleanup_statuses,
+            "external cleanup materialization must be idempotent across lifecycle replay",
         )
         expect_unavailable(
             lambda: read_projection(
@@ -190,6 +239,12 @@ def execute(dsn: str) -> None:
             and suspended_result.conflict_hold
             and suspended_result.reason_code == "thirdPartyObjection",
             "third-party objection must create an irreversible local conflict hold",
+        )
+        suspended_cleanup = materialize_external_cleanup(store, result=suspended_result)
+        require(
+            len(suspended_cleanup) == 5
+            and all(item.state.value == "pending" for item in suspended_cleanup),
+            "third-party objection must queue cleanup without claiming completion",
         )
 
         trigger_seed = seed_publishable_memory(dsn, label="lifecycle-trigger")
@@ -228,7 +283,7 @@ def execute(dsn: str) -> None:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT publication_state, projection_state, conflict_hold,
+                    SELECT id, action, publication_state, projection_state, conflict_hold,
                         revoked_grant_count, revoked_visitor_session_count,
                         access_deny_state, public_index_cleanup_state, runtime_cleanup_state
                     FROM publication.publication_lifecycle_receipts
@@ -242,7 +297,18 @@ def execute(dsn: str) -> None:
                 require(receipt is not None, "authority trigger must append a lifecycle receipt")
                 require(
                     receipt
-                    == ("suspended", "blocked", False, 1, 1, "completed", "pending", "notApplicable"),
+                    == (
+                        receipt[0],
+                        "systemSuspend",
+                        "suspended",
+                        "blocked",
+                        False,
+                        1,
+                        1,
+                        "completed",
+                        "pending",
+                        "notApplicable",
+                    ),
                     "authority trigger receipt must report local denial without external cleanup claims",
                 )
                 cursor.execute(
@@ -253,9 +319,85 @@ def execute(dsn: str) -> None:
                     (trigger_publication.publication_id,),
                 )
                 require(cursor.fetchone() == ("revoked",), "authority trigger must revoke the ShareGrant")
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM publication.lifecycle_external_cleanup_effects
+                    WHERE lifecycle_receipt_id = %s
+                    """,
+                    (result.receipt_id,),
+                )
+                require(
+                    cursor.fetchone() == (5,),
+                    "withdrawal must persist five cleanup effect links",
+                )
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM async_effects.operations
+                    WHERE operation_type = 'publication.lifecycle.externalCleanup'
+                    """
+                )
+                require(
+                    cursor.fetchone() == (10,),
+                    "withdrawal and objection must create one generic operation per cleanup domain",
+                )
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM async_effects.provider_effects
+                    WHERE state = 'unknown'
+                    """
+                )
+                require(
+                    cursor.fetchone() == (10,),
+                    "initial external cleanup provider evidence must remain unknown",
+                )
+
+        triggered_materialization = materialize_pending_external_cleanup(store)
+        require(
+            triggered_materialization["status"] == "materialized"
+            and triggered_materialization["materializedReceiptCount"] == 1
+            and triggered_materialization["materializedEffectCount"] == 5
+            and triggered_materialization["domainStates"]
+            == {
+                "cache:pending": 1,
+                "digitalHumanSession:pending": 1,
+                "objectStorage:pending": 1,
+                "providerVoice:pending": 1,
+                "publicIndex:pending": 1,
+            },
+            "authority-triggered lifecycle receipt must remain materializable without reopening access",
+        )
+        with psycopg.connect(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM publication.lifecycle_external_cleanup_effects
+                    WHERE lifecycle_receipt_id = %s
+                    """,
+                    (receipt[0],),
+                )
+                require(
+                    cursor.fetchone() == (5,),
+                    "worker materialization must persist five effect links for authority-triggered denial",
+                )
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM async_effects.operations
+                    WHERE operation_type = 'publication.lifecycle.externalCleanup'
+                    """
+                )
+                require(
+                    cursor.fetchone() == (15,),
+                    "worker materialization must add five generic operations for authority-triggered denial",
+                )
         print(
             "Publication lifecycle execution Postgres smoke passed "
-            "(withdrawal, objection hold, idempotency, local access denial and trigger propagation verified)."
+            "(withdrawal, objection hold, idempotency, local access denial, "
+            "trigger propagation and external cleanup receipts verified)."
         )
     finally:
         store.close_pool()
@@ -281,7 +423,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require("0082" in applied["appliedVersions"], "lifecycle execution migration must apply")
+        require("0083" in applied["appliedVersions"], "external cleanup migration must apply")
         execute(test_dsn)
     finally:
         drop_database(admin_dsn, database_name)

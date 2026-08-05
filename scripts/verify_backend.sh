@@ -136,6 +136,9 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-visitor-answer-safety-g
 echo "== Publication lifecycle/propagation G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-lifecycle-propagation-g0-gate.sh
 
+echo "== Publication external cleanup P2-S4C gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-external-cleanup-gate.sh
+
 echo "== Publication release-guard/ViewState G0 contract gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-publication-release-guard-viewstate-g0-gate.sh
 
