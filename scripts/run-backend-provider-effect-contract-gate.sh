@@ -17,7 +17,7 @@ PYTHONPATH=. "$PYTHON_BIN" - <<'PY'
 from app.async_effects.provider_effects import provider_effect_catalog_summary
 
 summary = provider_effect_catalog_summary()
-assert summary["entryCount"] == 10, summary
+assert summary["entryCount"] == 11, summary
 assert summary["providerCallsEnabledByCatalog"] is False, summary
 assert summary["stableRequestRequiredCount"] >= 7, summary
 print(

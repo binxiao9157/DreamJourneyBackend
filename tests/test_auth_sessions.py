@@ -152,7 +152,7 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertIn("careSnapshotRead", policy["coveredPolicies"])
         self.assertIn("timeLetterDetail", policy["coveredPolicies"])
         self.assertTrue(policy["principalBoundRouteEnforcement"])
-        self.assertEqual(policy["routeOwnershipAudit"]["routeCount"], 157)
+        self.assertEqual(policy["routeOwnershipAudit"]["routeCount"], 159)
         self.assertEqual(policy["routeOwnershipAudit"]["unclassifiedCount"], 0)
         self.assertEqual(
             policy["diagnosticHeaders"],
