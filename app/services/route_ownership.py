@@ -787,6 +787,11 @@ class RouteOwnershipRegistry:
             _owner_path("GET", "/voice/profiles/{user_id}", "voiceOwner"),
             _owner_path(
                 "POST",
+                "/voice/profiles/{user_id}/sample-authorization",
+                "voiceOwner",
+            ),
+            _owner_path(
+                "POST",
                 "/voice/profiles/{user_id}/{voice_profile_id}/disable",
                 "voiceOwner",
                 resource_type="voiceProfile",
@@ -797,6 +802,15 @@ class RouteOwnershipRegistry:
             _owner_path(
                 "POST",
                 "/voice/profiles/{user_id}/{voice_profile_id}/refresh",
+                "voiceOwner",
+                resource_type="voiceProfile",
+                resource_id_path_parameter="voice_profile_id",
+                resource_operation="update",
+                requires_existing_resource=True,
+            ),
+            _owner_path(
+                "POST",
+                "/voice/profiles/{user_id}/{voice_profile_id}/retry",
                 "voiceOwner",
                 resource_type="voiceProfile",
                 resource_id_path_parameter="voice_profile_id",

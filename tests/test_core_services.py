@@ -56,6 +56,10 @@ from app.services.voice_profile_lifecycle import (
     make_voice_profile_consent,
 )
 from app.services.voice_profile_eligibility import synthetic_test_resolution
+from app.services.voice_sample_authorization import issue_voice_sample_authorization_challenge
+
+
+VOICE_SAMPLE_TEST_AUTHORIZATION_SECRET = "voice-sample-test-authorization-secret"
 
 
 def verified_self_eligibility(capability: str = "clonedVoice") -> dict:
@@ -70,6 +74,29 @@ def verified_self_eligibility(capability: str = "clonedVoice") -> dict:
         "consentVerified": True,
         "consentPurpose": capability,
     }
+
+
+def verified_voice_sample_base64(duration_seconds: int = 12) -> str:
+    """A valid quiet-leading PCM WAV fixture for server-side sample checks."""
+    sample_rate_hz = 16_000
+    buffer = BytesIO()
+    with wave.open(buffer, "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(sample_rate_hz)
+        writer.writeframes(
+            b"\x00\x00" * (sample_rate_hz * 2)
+            + b"\x00\x10" * (sample_rate_hz * (duration_seconds - 2))
+        )
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def voice_sample_authorization_receipt(user_id: str, voice_profile_id: str) -> str:
+    return issue_voice_sample_authorization_challenge(
+        secret=VOICE_SAMPLE_TEST_AUTHORIZATION_SECRET,
+        user_id=user_id,
+        voice_profile_id=voice_profile_id,
+    ).receipt_id
 
 
 def p1_voice_profile(
@@ -3609,6 +3636,7 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
             volcengine_voice_clone_api_key="test-voice-clone-key",
             volcengine_voice_clone_speaker_id_mode="trialSpeakerIdPool",
             volcengine_voice_clone_speaker_ids="S_slot_001,S_slot_002,S_slot_003",
+            identity_binding_hmac_key=VOICE_SAMPLE_TEST_AUTHORIZATION_SECRET,
         )
         client = TestClient(app)
 
@@ -3627,8 +3655,12 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                         "consentVersion": "voice-clone-consent-v1",
                         "personaScope": "personal",
                         "digitalHumanId": f"u{index}",
-                        "audioBase64": "RAW_SAMPLE_BASE64",
+                        "audioBase64": verified_voice_sample_base64(),
                         "audioFormat": "wav",
+                        "sampleVersion": "voice-sample-v1",
+                        "sampleAuthorizationReceiptId": voice_sample_authorization_receipt(
+                            f"u{index}", f"vp_{index}"
+                        ),
                         "privacyMetadata": {"scope": "generationAllowed"},
                         "subjectEligibility": verified_self_eligibility(),
                     },
@@ -3826,7 +3858,10 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
         self.assertIn("VOLCENGINE_VOICE_CLONE_SPEAKER_ID", str(context.exception))
 
     def test_volcengine_voice_clone_v3_provider_normalizes_nested_speaker_status(self):
-        configured = Settings(volcengine_voice_clone_api_key="test-voice-clone-key")
+        configured = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            identity_binding_hmac_key=VOICE_SAMPLE_TEST_AUTHORIZATION_SECRET,
+        )
         provider = VolcEngineVoiceCloneV3Provider(configured)
 
         result = provider._normalize_response(
@@ -3922,7 +3957,10 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                     "sampleStatus": "pending",
                 }
 
-        configured = Settings(volcengine_voice_clone_api_key="test-voice-clone-key")
+        configured = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            identity_binding_hmac_key=VOICE_SAMPLE_TEST_AUTHORIZATION_SECRET,
+        )
         user_id = "voice_clone_provider_user"
         voice_profile_id = "voice_profile_provider_1"
 
@@ -3940,8 +3978,12 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                     "consentVersion": "voice-clone-consent-v1",
                     "personaScope": "personal",
                     "digitalHumanId": user_id,
-                    "audioBase64": "RAW_SAMPLE_BASE64",
+                    "audioBase64": verified_voice_sample_base64(),
                     "audioFormat": "wav",
+                    "sampleVersion": "voice-sample-v1",
+                    "sampleAuthorizationReceiptId": voice_sample_authorization_receipt(
+                        user_id, voice_profile_id
+                    ),
                     "privacyMetadata": {"scope": "generationAllowed"},
                     "subjectEligibility": verified_self_eligibility(),
                 },
@@ -3968,7 +4010,10 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
             def submit_training(self, *, voice_profile_id, audio_base64, audio_format, language):
                 raise ValueError("voice clone provider HTTP 401: Invalid X-Api-Key")
 
-        configured = Settings(volcengine_voice_clone_api_key="test-voice-clone-key")
+        configured = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            identity_binding_hmac_key=VOICE_SAMPLE_TEST_AUTHORIZATION_SECRET,
+        )
         user_id = "voice_clone_failure_user"
         voice_profile_id = "voice_profile_failure_1"
 
@@ -3986,8 +4031,12 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                     "consentVersion": "voice-clone-consent-v1",
                     "personaScope": "personal",
                     "digitalHumanId": user_id,
-                    "audioBase64": "RAW_SAMPLE_BASE64",
+                    "audioBase64": verified_voice_sample_base64(),
                     "audioFormat": "wav",
+                    "sampleVersion": "voice-sample-v1",
+                    "sampleAuthorizationReceiptId": voice_sample_authorization_receipt(
+                        user_id, voice_profile_id
+                    ),
                     "privacyMetadata": {"scope": "generationAllowed"},
                     "subjectEligibility": verified_self_eligibility(),
                 },
@@ -4020,7 +4069,10 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
             def submit_training(self, *, voice_profile_id, audio_base64, audio_format, language):
                 raise ProviderFailure("voice clone provider HTTP 500: resource mismatch")
 
-        configured = Settings(volcengine_voice_clone_api_key="test-voice-clone-key")
+        configured = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            identity_binding_hmac_key=VOICE_SAMPLE_TEST_AUTHORIZATION_SECRET,
+        )
         user_id = "voice_clone_failure_log_user"
         voice_profile_id = "voice_profile_failure_log_1"
 
@@ -4038,8 +4090,12 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                     "consentVersion": "voice-clone-consent-v1",
                     "personaScope": "personal",
                     "digitalHumanId": user_id,
-                    "audioBase64": "RAW_SAMPLE_BASE64",
+                    "audioBase64": verified_voice_sample_base64(),
                     "audioFormat": "wav",
+                    "sampleVersion": "voice-sample-v1",
+                    "sampleAuthorizationReceiptId": voice_sample_authorization_receipt(
+                        user_id, voice_profile_id
+                    ),
                     "privacyMetadata": {"scope": "generationAllowed"},
                     "subjectEligibility": verified_self_eligibility(),
                 },
@@ -4058,41 +4114,50 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
         client = TestClient(app)
         user_id = "voice_clone_contract_user"
         voice_profile_id = "voice_profile_contract_1"
+        configured = Settings(
+            identity_binding_hmac_key=VOICE_SAMPLE_TEST_AUTHORIZATION_SECRET,
+        )
 
-        unauthorized = client.post(
-            "/voice/profiles",
-            json={
-                "userId": user_id,
-                "voiceProfileId": voice_profile_id,
-                "sampleStatus": "pending",
-                "authorizationConfirmed": False,
-                "privacyMetadata": {"scope": "generationAllowed"},
-            },
-        )
-        created = client.post(
-            "/voice/profiles",
-            json={
-                "userId": user_id,
-                "voiceProfileId": voice_profile_id,
-                "sampleStatus": "pending",
-                "sampleCount": 2,
-                "authorizationConfirmed": True,
-                "authorizationVersion": "voice-clone-consent-v1",
-                "purpose": "training",
-                "authorizationText": "用户确认提交本人声音样本，仅用于本人私有声音能力。",
-                "personaScope": "personal",
-                "digitalHumanId": user_id,
-                "rawSampleURL": "file:///private/var/mobile/voice/raw.m4a",
-                "sampleLocalPath": "/private/var/mobile/voice/raw.m4a",
-                "audioBase64": "RAW_SAMPLE_BASE64",
-                "privacyMetadata": {"scope": "generationAllowed"},
-                "subjectEligibility": verified_self_eligibility(),
-            },
-        )
-        listed = client.get(f"/voice/profiles/{user_id}")
-        disabled = client.post(f"/voice/profiles/{user_id}/{voice_profile_id}/disable")
-        deleted = client.delete(f"/voice/profiles/{user_id}/{voice_profile_id}")
-        listed_after_delete = client.get(f"/voice/profiles/{user_id}")
+        with patch("app.main.settings", configured):
+            unauthorized = client.post(
+                "/voice/profiles",
+                json={
+                    "userId": user_id,
+                    "voiceProfileId": voice_profile_id,
+                    "sampleStatus": "pending",
+                    "authorizationConfirmed": False,
+                    "privacyMetadata": {"scope": "generationAllowed"},
+                },
+            )
+            created = client.post(
+                "/voice/profiles",
+                json={
+                    "userId": user_id,
+                    "voiceProfileId": voice_profile_id,
+                    "sampleStatus": "pending",
+                    "sampleCount": 2,
+                    "authorizationConfirmed": True,
+                    "authorizationVersion": "voice-clone-consent-v1",
+                    "purpose": "training",
+                    "authorizationText": "用户确认提交本人声音样本，仅用于本人私有声音能力。",
+                    "personaScope": "personal",
+                    "digitalHumanId": user_id,
+                    "rawSampleURL": "file:///private/var/mobile/voice/raw.m4a",
+                    "sampleLocalPath": "/private/var/mobile/voice/raw.m4a",
+                    "audioBase64": verified_voice_sample_base64(),
+                    "audioFormat": "wav",
+                    "sampleVersion": "voice-sample-v1",
+                    "sampleAuthorizationReceiptId": voice_sample_authorization_receipt(
+                        user_id, voice_profile_id
+                    ),
+                    "privacyMetadata": {"scope": "generationAllowed"},
+                    "subjectEligibility": verified_self_eligibility(),
+                },
+            )
+            listed = client.get(f"/voice/profiles/{user_id}")
+            disabled = client.post(f"/voice/profiles/{user_id}/{voice_profile_id}/disable")
+            deleted = client.delete(f"/voice/profiles/{user_id}/{voice_profile_id}")
+            listed_after_delete = client.get(f"/voice/profiles/{user_id}")
 
         self.assertEqual(unauthorized.status_code, 403)
         self.assertEqual(created.status_code, 200)

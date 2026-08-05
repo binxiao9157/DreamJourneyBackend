@@ -29,7 +29,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 159)
+        self.assertEqual(len(app_routes), 161)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
 
@@ -59,6 +59,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
             ("GET", "/echo/delayed-replies/{user_id}/{delayed_reply_id}/answer"): RouteOwnershipCategory.OWNER_PATH,
             ("GET", "/kb/source-ref-audit/{user_id}"): RouteOwnershipCategory.OWNER_PATH,
             ("POST", "/voice/synthesis"): RouteOwnershipCategory.OWNER_BODY,
+            ("POST", "/voice/profiles/{user_id}/sample-authorization"): RouteOwnershipCategory.OWNER_PATH,
+            ("POST", "/voice/profiles/{user_id}/{voice_profile_id}/retry"): RouteOwnershipCategory.OWNER_PATH,
             ("POST", "/kb/governance/actions"): RouteOwnershipCategory.OWNER_BODY,
             ("GET", "/archive/time-letters/{owner_user_id}/{item_id}/detail"): RouteOwnershipCategory.DELEGATED,
             ("GET", "/care/snapshots/latest/{user_id}"): RouteOwnershipCategory.DELEGATED,
@@ -149,8 +151,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 159)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 159)
+        self.assertEqual(summary["routeCount"], 161)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 161)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)
@@ -159,6 +161,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         expected = {
             ("POST", "/digital-human/sessions/{session_id}/heartbeat"): "digitalHumanSession",
             ("POST", "/voice/synthesis"): "voiceProfile",
+            ("POST", "/voice/profiles/{user_id}/{voice_profile_id}/retry"): "voiceProfile",
             ("POST", "/archive/media/upload-intent"): "archiveItem",
             ("POST", "/archive/image-analysis"): "archiveItem",
             ("POST", "/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletions"): "mediaSourceObject",

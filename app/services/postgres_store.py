@@ -6149,6 +6149,37 @@ class PostgresStore:
             raise ValueError("voiceProfileId is already owned by another user")
         return deepcopy(row["payload"])
 
+    def save_voice_profile_if_version(
+        self,
+        user_id: str,
+        payload: Dict[str, Any],
+        *,
+        expected_profile_version: int,
+    ) -> Optional[Dict[str, Any]]:
+        item = deepcopy(payload)
+        item["userId"] = user_id
+        item.setdefault("id", item.get("voiceProfileId"))
+        item.setdefault("voiceProfileId", item["id"])
+        item["updatedAt"] = self._now()
+        row = self._fetchone(
+            """
+            UPDATE voice_profiles
+            SET payload = %s,
+                updated_at = NOW()
+            WHERE user_id = %s
+              AND id = %s
+              AND CASE
+                    WHEN COALESCE(payload->>'profileVersion', '') ~ '^[0-9]+$'
+                    THEN (payload->>'profileVersion')::integer
+                    ELSE 0
+                  END = %s
+            RETURNING payload
+            """,
+            (item, user_id, item["voiceProfileId"], expected_profile_version),
+            commit=True,
+        )
+        return None if row is None else deepcopy(row["payload"])
+
     def list_voice_profiles(self, user_id: str) -> List[Dict[str, Any]]:
         rows = self._fetchall(
             """

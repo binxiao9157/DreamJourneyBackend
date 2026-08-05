@@ -309,6 +309,7 @@ class InMemoryStore:
         self._echo_delayed_reply_answers: Dict[str, List[Dict[str, Any]]] = {}
         self._push_device_tokens: Dict[str, List[Dict[str, Any]]] = {}
         self._voice_profiles: Dict[str, List[Dict[str, Any]]] = {}
+        self._voice_profile_lock = RLock()
         self._voice_clone_slots: Dict[str, Dict[str, Any]] = {}
         self._digital_human_sessions: Dict[str, Dict[str, Any]] = {}
         self._auth_sessions: Dict[str, Dict[str, Any]] = {}
@@ -3323,6 +3324,37 @@ class InMemoryStore:
         return deepcopy(self._push_device_tokens.get(user_id, []))
 
     def save_voice_profile(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._voice_profile_lock:
+            return self._save_voice_profile_locked(user_id, payload)
+
+    def save_voice_profile_if_version(
+        self,
+        user_id: str,
+        payload: Dict[str, Any],
+        *,
+        expected_profile_version: int,
+    ) -> Optional[Dict[str, Any]]:
+        voice_profile_id = str(payload.get("voiceProfileId") or payload.get("id") or "").strip()
+        if not voice_profile_id:
+            raise ValueError("voiceProfileId is required")
+        with self._voice_profile_lock:
+            existing = next(
+                (
+                    profile
+                    for profile in self._voice_profiles.get(user_id, [])
+                    if profile.get("voiceProfileId") == voice_profile_id
+                ),
+                None,
+            )
+            try:
+                current_version = max(0, int((existing or {}).get("profileVersion") or 0))
+            except (TypeError, ValueError):
+                current_version = 0
+            if existing is None or current_version != expected_profile_version:
+                return None
+            return self._save_voice_profile_locked(user_id, payload)
+
+    def _save_voice_profile_locked(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(payload)
         item["userId"] = user_id
         item.setdefault("id", item.get("voiceProfileId") or self._new_resource_id("voice_profile"))

@@ -7,9 +7,14 @@ acceptance can make it synthesizable.
 
 from __future__ import annotations
 
+from array import array
+import base64
 from datetime import datetime, timedelta, timezone
+import io
+import math
 import unittest
 from unittest.mock import patch
+import wave
 
 from fastapi.testclient import TestClient
 
@@ -58,6 +63,39 @@ def eligible_self_payload() -> dict[str, object]:
         "consentVerified": True,
         "consentPurpose": "clonedVoice",
     }
+
+
+def valid_voice_sample_base64(duration_seconds: int = 12) -> str:
+    sample_rate_hz = 16_000
+    samples = array("h")
+    silence_frames = sample_rate_hz * 2
+    for index in range(sample_rate_hz * duration_seconds):
+        if index < silence_frames:
+            samples.append(0)
+        else:
+            samples.append(int(7_000 * math.sin(2 * math.pi * 220 * index / sample_rate_hz)))
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(sample_rate_hz)
+        writer.writeframes(samples.tobytes())
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def issue_sample_authorization_receipt(
+    client: TestClient,
+    *,
+    user_id: str,
+    voice_profile_id: str,
+) -> str:
+    response = client.post(
+        f"/voice/profiles/{user_id}/sample-authorization",
+        json={"voiceProfileId": voice_profile_id},
+    )
+    if response.status_code != 200:
+        raise AssertionError(response.text)
+    return response.json()["sampleAuthorization"]["receiptId"]
 
 
 class VoiceProfileLifecycleTests(unittest.TestCase):
@@ -269,7 +307,10 @@ class VoiceProfileLifecycleAPITests(unittest.TestCase):
                 }
 
         store = InMemoryStore()
-        settings = Settings(volcengine_voice_clone_api_key="test-voice-clone-key")
+        settings = Settings(
+            volcengine_voice_clone_api_key="test-voice-clone-key",
+            identity_binding_hmac_key="test-sample-authorization-key",
+        )
         client = TestClient(app)
         payload = {
             "userId": "voice-lifecycle-owner",
@@ -281,8 +322,9 @@ class VoiceProfileLifecycleAPITests(unittest.TestCase):
             "consentVersion": "voice-clone-consent-v1",
             "personaScope": "personal",
             "digitalHumanId": "voice-lifecycle-owner",
-            "audioBase64": "RAW_SAMPLE_BASE64",
+            "audioBase64": valid_voice_sample_base64(),
             "audioFormat": "wav",
+            "sampleVersion": "voice-sample-v1",
             "privacyMetadata": {"scope": "generationAllowed"},
             "subjectEligibility": eligible_self_payload(),
         }
@@ -295,6 +337,11 @@ class VoiceProfileLifecycleAPITests(unittest.TestCase):
         ):
             training_factory.return_value.make.return_value = ReadyTrainingProvider()
             tts_factory.return_value.make.return_value = PreviewTTSProvider()
+            payload["sampleAuthorizationReceiptId"] = issue_sample_authorization_receipt(
+                client,
+                user_id=payload["userId"],
+                voice_profile_id=payload["voiceProfileId"],
+            )
             created = client.post("/voice/profiles", json=payload)
 
             self.assertEqual(created.status_code, 200)
@@ -365,13 +412,17 @@ class VoiceProfileLifecycleAPITests(unittest.TestCase):
             "consentVersion": "voice-clone-consent-v1",
             "personaScope": "personal",
             "digitalHumanId": "voice-lifecycle-owner",
-            "audioBase64": "RAW_SAMPLE_BASE64",
+            "audioBase64": valid_voice_sample_base64(),
             "audioFormat": "wav",
+            "sampleVersion": "voice-sample-v1",
             "privacyMetadata": {"scope": "generationAllowed"},
             "subjectEligibility": eligible_self_payload(),
         }
 
-        with patch("app.main.store", store), patch("app.main.VoiceCloneProviderFactory") as factory:
+        with patch("app.main.store", store), patch(
+            "app.main.settings",
+            Settings(identity_binding_hmac_key="test-sample-authorization-key"),
+        ), patch("app.main.VoiceCloneProviderFactory") as factory:
             factory.return_value.make.return_value = provider
             response = client.post("/voice/profiles", json=payload)
 

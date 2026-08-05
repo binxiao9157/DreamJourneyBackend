@@ -245,7 +245,7 @@ def _allowed_operations(
     if state is VoiceProfileLifecycleState.PAUSED:
         return ["preview", "delete"]
     if state is VoiceProfileLifecycleState.FAILED:
-        return ["delete"]
+        return ["retry", "delete"]
     return []
 
 

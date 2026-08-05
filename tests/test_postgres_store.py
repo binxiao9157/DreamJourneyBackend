@@ -1309,6 +1309,24 @@ class FakeCursor:
             profiles[:] = [item for item in profiles if item.get("voiceProfileId") != item_id]
             profiles.insert(0, dict(payload))
             self.result = {"payload": payload}
+        elif normalized.startswith("UPDATE voice_profiles"):
+            payload, user_id, item_id, expected_profile_version = params
+            payload = unwrap_jsonb(payload)
+            profiles = self.connection.voice_profiles.get(user_id, [])
+            for index, item in enumerate(profiles):
+                try:
+                    current_profile_version = int(item.get("profileVersion") or 0)
+                except (TypeError, ValueError):
+                    current_profile_version = 0
+                if (
+                    item.get("voiceProfileId") == item_id
+                    and current_profile_version == expected_profile_version
+                ):
+                    profiles[index] = dict(payload)
+                    self.result = {"payload": payload}
+                    break
+            else:
+                self.result = None
         elif normalized.startswith("INSERT INTO voice_clone_slots"):
             provider_speaker_id = params[0]
             slot = self.connection.voice_clone_slots.setdefault(
@@ -3245,6 +3263,46 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0]["sampleStatus"], "deleted")
         self.assertEqual(fetched["voiceProfileId"], "voice_profile_1")
+
+    def test_voice_profile_compare_and_swap_rejects_stale_retry_write(self):
+        connection = FakeConnection()
+        store = PostgresStore(connection_factory=lambda: connection)
+        profile = store.save_voice_profile(
+            "u1",
+            {
+                "voiceProfileId": "voice_profile_retry_1",
+                "profileVersion": 2,
+                "retryGeneration": 1,
+                "sampleStatus": "failed",
+            },
+        )
+
+        reserved = store.save_voice_profile_if_version(
+            "u1",
+            {
+                **profile,
+                "profileVersion": 3,
+                "retryGeneration": 2,
+                "sampleStatus": "pending",
+            },
+            expected_profile_version=2,
+        )
+        stale = store.save_voice_profile_if_version(
+            "u1",
+            {
+                **profile,
+                "profileVersion": 3,
+                "retryGeneration": 2,
+                "sampleStatus": "pending",
+            },
+            expected_profile_version=2,
+        )
+        persisted = store.get_voice_profile("u1", "voice_profile_retry_1")
+
+        self.assertIsNotNone(reserved)
+        self.assertIsNone(stale)
+        self.assertEqual(persisted["profileVersion"], 3)
+        self.assertEqual(persisted["retryGeneration"], 2)
 
     def test_in_memory_store_allocates_voice_clone_slots_exclusively(self):
         store = InMemoryStore()

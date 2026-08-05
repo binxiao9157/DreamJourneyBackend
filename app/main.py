@@ -513,6 +513,17 @@ from app.services.voice_profile_eligibility import (
     VoiceProfileEligibilityResolution,
     VoiceProfileEligibilityResolver,
 )
+from app.services.voice_sample_assessment import (
+    VoiceSampleAssessment,
+    VoiceSampleAssessmentError,
+    assess_voice_sample,
+)
+from app.services.voice_sample_authorization import (
+    VoiceSampleAuthorizationError,
+    VerifiedVoiceSampleAuthorization,
+    issue_voice_sample_authorization_challenge,
+    verify_voice_sample_authorization_receipt,
+)
 from app.services.user_identity import stable_user_id
 
 
@@ -4435,7 +4446,7 @@ ARCHIVE_MEDIA_UPLOAD_LIMITS = {
     "video": ARCHIVE_VIDEO_UPLOAD_LIMIT_BYTES,
 }
 VOICE_CLONE_SAMPLE_STATUSES = {"notProvided", "pending", "ready", "disabled", "deleted", "failed"}
-VOICE_CLONE_CONTRACT_VERSION = 6
+VOICE_CLONE_CONTRACT_VERSION = 7
 VOICE_CLONE_PROVIDER_MODE = "mockContract"
 VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE = "echo"
 VOICE_CLONE_QUALITY_PREVIEW_PURPOSE = "qualityPreview"
@@ -10451,11 +10462,38 @@ def _voice_clone_public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
         "qualityPreviewIssuedAt",
         "qualityPreviewExpiresAt",
         "qualityPreviewReceiptVersion",
+        "qualityPreviewRetryGeneration",
         "qualityPreviewReceiptConsumedAt",
         "qualityAcceptanceReceiptHash",
         "qualityAcceptanceReceiptIssuedAt",
+        "sampleAuthorizationReceiptHash",
+        "sampleAuthorizationChallengeId",
+        "sampleAuthorizationReceiptExpiresAt",
+        "retryReservationGeneration",
+        "retryReservedAt",
+        "sampleHash",
     ):
         public_profile.pop(private_receipt_field, None)
+    raw_sample_assessment = public_profile.get("sampleAssessment")
+    if isinstance(raw_sample_assessment, dict):
+        public_profile["sampleAssessment"] = {
+            key: raw_sample_assessment[key]
+            for key in (
+                "schemaVersion",
+                "sampleVersion",
+                "format",
+                "durationMilliseconds",
+                "sampleRateHz",
+                "channelCount",
+                "sampleWidthBits",
+                "estimatedSnrDb",
+                "rmsDbfs",
+                "peakDbfs",
+                "assessmentState",
+                "assessedAt",
+            )
+            if key in raw_sample_assessment
+        }
     provider_request_id = str(public_profile.pop("providerRequestId", "") or "").strip()
     provider_log_id = str(public_profile.pop("providerLogId", "") or "").strip()
     public_profile.pop("providerMessage", None)
@@ -10528,6 +10566,9 @@ def _issue_voice_profile_quality_preview_receipt(
     updated["qualityPreviewIssuedAt"] = now.isoformat()
     updated["qualityPreviewExpiresAt"] = expires_at.isoformat()
     updated["qualityPreviewReceiptVersion"] = 1
+    updated["qualityPreviewRetryGeneration"] = int(
+        profile.get("retryGeneration") or 0
+    )
     updated["updatedAt"] = now.isoformat()
     return updated, {
         "id": receipt_id,
@@ -10662,10 +10703,73 @@ def _validate_voice_profile_for_synthesis(
     return profile
 
 
+def _voice_sample_authorization_secret() -> str:
+    # Keep challenge signing server-side.  Identity HMAC is preferred because
+    # it is already an independent secret; the API token is only a legacy
+    # fallback for deployed environments that have not configured it yet.
+    secret = str(
+        settings.identity_binding_hmac_key or settings.backend_api_token or ""
+    ).strip()
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="voice sample authorization is not configured",
+        )
+    return secret
+
+
+def _voice_sample_http_error(error: Exception) -> HTTPException:
+    code = str(getattr(error, "code", "voiceSampleRejected") or "voiceSampleRejected")
+    status_code = 403 if code in {
+        "invalidSampleAuthorizationReceipt",
+        "sampleAuthorizationOwnerMismatch",
+        "sampleAuthorizationReceiptExpired",
+    } else 400
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "code": code,
+            "message": "voice sample is not eligible for training",
+            "retryable": code in {"sampleTooQuiet", "sampleNoiseTooHigh", "sampleClipped"},
+        },
+    )
+
+
+def _assess_voice_profile_sample_submission(
+    payload: Dict[str, Any],
+    *,
+    user_id: str,
+    voice_profile_id: str,
+    now: datetime,
+) -> Tuple[VoiceSampleAssessment, VerifiedVoiceSampleAuthorization]:
+    audio_base64 = str(payload.get("audioBase64") or "").strip()
+    if not audio_base64:
+        raise HTTPException(status_code=400, detail="audioBase64 is required")
+    try:
+        assessment = assess_voice_sample(
+            audio_base64=audio_base64,
+            audio_format=str(payload.get("audioFormat") or "").strip(),
+            sample_version=str(payload.get("sampleVersion") or "").strip(),
+            now=now,
+        )
+        authorization = verify_voice_sample_authorization_receipt(
+            secret=_voice_sample_authorization_secret(),
+            receipt_id=str(payload.get("sampleAuthorizationReceiptId") or "").strip(),
+            user_id=user_id,
+            voice_profile_id=voice_profile_id,
+            now=now,
+        )
+    except (VoiceSampleAssessmentError, VoiceSampleAuthorizationError) as exc:
+        raise _voice_sample_http_error(exc) from exc
+    return assessment, authorization
+
+
 def _sanitize_voice_profile_payload(
     payload: Dict[str, Any],
     *,
     actor_user_id: str,
+    existing_profile_override: Optional[Dict[str, Any]] = None,
+    retry_generation: Optional[int] = None,
 ) -> Dict[str, Any]:
     user_id = _required_text(payload, "userId", 96)
     privacy_metadata = payload.get("privacyMetadata") or {}
@@ -10702,6 +10806,8 @@ def _sanitize_voice_profile_payload(
     provider_mode = provider.provider_mode
     provider_result: Dict[str, Any] = {}
     audio_base64 = str(payload.get("audioBase64") or "").strip()
+    sample_assessment: Optional[VoiceSampleAssessment] = None
+    sample_authorization: Optional[VerifiedVoiceSampleAuthorization] = None
     eligibility_resolution = None
     # A profile may remain a local draft before a sample exists. Once it
     # contains a sample, only a server-trusted eligibility result can trigger
@@ -10719,7 +10825,30 @@ def _sanitize_voice_profile_payload(
     ).strip()
     if not consent_version:
         raise HTTPException(status_code=400, detail="consentVersion is required")
-    existing_profile = store.get_voice_profile(user_id, voice_profile_id) or {}
+    existing_profile = existing_profile_override or store.get_voice_profile(user_id, voice_profile_id) or {}
+    if audio_base64 and existing_profile:
+        existing_state = canonical_lifecycle_state(existing_profile)
+        if retry_generation is None and existing_state is not VoiceProfileLifecycleState.DRAFT:
+            raise HTTPException(
+                status_code=409,
+                detail="existing voice profile samples require the retry endpoint",
+            )
+        if retry_generation is not None and int(
+            existing_profile.get("retryReservationGeneration") or -1
+        ) != retry_generation:
+            raise HTTPException(
+                status_code=409,
+                detail="voice profile retry reservation is not current",
+            )
+    if audio_base64:
+        sample_assessment, sample_authorization = _assess_voice_profile_sample_submission(
+            payload,
+            user_id=user_id,
+            voice_profile_id=voice_profile_id,
+            now=now_at,
+        )
+        # The provider, not a mobile client, determines a terminal status.
+        sample_status = "pending"
     provider_speaker_id = _voice_clone_provider_speaker_id(existing_profile)
     provider_binding_mode = str(existing_profile.get("providerBindingMode") or "unassigned")
     provider_slot_state = str(existing_profile.get("providerSlotState") or "")
@@ -10752,7 +10881,7 @@ def _sanitize_voice_profile_payload(
             provider_result = provider.submit_training(
                 voice_profile_id=provider_speaker_id,
                 audio_base64=audio_base64,
-                audio_format=str(payload.get("audioFormat") or "wav").strip() or "wav",
+                audio_format=sample_assessment.audio_format if sample_assessment else "wav",
                 language=int(payload.get("language") or 0),
             )
             sample_status = str(provider_result.get("sampleStatus") or sample_status)
@@ -10775,7 +10904,8 @@ def _sanitize_voice_profile_payload(
         if slot_update is not None:
             provider_slot_state = str(slot_update.get("status") or provider_slot_state)
 
-    profile = {
+    profile = dict(existing_profile)
+    profile.update({
         "id": voice_profile_id,
         "voiceProfileId": voice_profile_id,
         "userId": user_id,
@@ -10802,7 +10932,33 @@ def _sanitize_voice_profile_payload(
         "privacyMetadata": {
             "scope": privacy_metadata.get("scope"),
         },
-    }
+    })
+    if audio_base64:
+        for stale_receipt_field in (
+            "qualityPreviewReceiptHash",
+            "qualityPreviewIssuedAt",
+            "qualityPreviewExpiresAt",
+            "qualityPreviewReceiptVersion",
+            "qualityPreviewReceiptConsumedAt",
+            "qualityAcceptanceReceiptHash",
+            "qualityAcceptanceReceiptIssuedAt",
+            "qualityAcceptedAt",
+            "qualityAcceptedBy",
+        ):
+            profile.pop(stale_receipt_field, None)
+        profile["sampleAssessment"] = sample_assessment.persistence_payload()
+        profile["sampleAuthorizationStatementId"] = sample_authorization.statement_id
+        profile["sampleAuthorizationReceiptHash"] = sample_authorization.receipt_hash
+        profile["sampleAuthorizationChallengeId"] = sample_authorization.challenge_id
+        profile["sampleAuthorizationReceiptExpiresAt"] = sample_authorization.expires_at
+        profile["sampleAuthorizationConfirmedAt"] = now
+        profile["retryGeneration"] = int(
+            retry_generation
+            if retry_generation is not None
+            else existing_profile.get("retryGeneration") or 0
+        )
+        profile.pop("retryReservationGeneration", None)
+        profile.pop("retryReservedAt", None)
     if provider_speaker_id:
         profile["providerSpeakerId"] = provider_speaker_id
     provider_request_id = str(provider_result.get("providerRequestId") or "").strip()
@@ -10814,7 +10970,9 @@ def _sanitize_voice_profile_payload(
         profile["providerLogId"] = provider_log_id[:160]
     if provider_error_code:
         profile["providerErrorCode"] = provider_error_code[:128]
-    if "createdAt" in payload:
+    if existing_profile.get("createdAt"):
+        profile["createdAt"] = str(existing_profile["createdAt"])
+    elif "createdAt" in payload:
         profile["createdAt"] = str(payload.get("createdAt") or now)
     else:
         profile["createdAt"] = now
@@ -10972,6 +11130,13 @@ def _voice_profile_quality_acceptance_update(
     actual_receipt_hash = _voice_clone_quality_preview_receipt_hash(preview_receipt_id)
     if not secrets.compare_digest(expected_receipt_hash, actual_receipt_hash):
         raise HTTPException(status_code=409, detail="voice profile quality preview receipt is invalid")
+    try:
+        receipt_retry_generation = int(profile.get("qualityPreviewRetryGeneration") or 0)
+        current_retry_generation = int(profile.get("retryGeneration") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="voice profile quality preview receipt is invalid") from exc
+    if receipt_retry_generation != current_retry_generation:
+        raise HTTPException(status_code=409, detail="voice profile quality preview receipt is stale")
 
     expires_at_value = str(profile.get("qualityPreviewExpiresAt") or "").strip()
     try:
@@ -10995,6 +11160,7 @@ def _voice_profile_quality_acceptance_update(
     updated.pop("qualityPreviewIssuedAt", None)
     updated.pop("qualityPreviewExpiresAt", None)
     updated.pop("qualityPreviewReceiptVersion", None)
+    updated.pop("qualityPreviewRetryGeneration", None)
     updated = apply_voice_profile_lifecycle(
         updated,
         state=VoiceProfileLifecycleState.ACCEPTED,
@@ -11013,6 +11179,115 @@ def _voice_profile_quality_acceptance_update(
     updated["qualityPreviewReceiptConsumedAt"] = now
     updated["updatedAt"] = now
     return updated
+
+
+def _voice_profile_integer(profile: Mapping[str, Any], field: str) -> int:
+    try:
+        return max(0, int(profile.get(field) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _required_nonnegative_payload_integer(payload: Mapping[str, Any], field: str) -> int:
+    value = payload.get(field)
+    if isinstance(value, bool):
+        raise HTTPException(status_code=400, detail=f"{field} must be a non-negative integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"{field} must be a non-negative integer") from exc
+    if result < 0:
+        raise HTTPException(status_code=400, detail=f"{field} must be a non-negative integer")
+    return result
+
+
+def _reserve_voice_profile_retry(
+    profile: Mapping[str, Any],
+    *,
+    retry_generation: int,
+    now: datetime,
+) -> Dict[str, Any]:
+    if canonical_lifecycle_state(profile) is not VoiceProfileLifecycleState.FAILED:
+        raise HTTPException(status_code=409, detail="voice profile is not in a retryable failed state")
+    current_generation = _voice_profile_integer(profile, "retryGeneration")
+    if retry_generation != current_generation + 1:
+        raise HTTPException(status_code=409, detail="voice profile retry generation is not current")
+    reserved = dict(profile)
+    for stale_receipt_field in (
+        "qualityPreviewReceiptHash",
+        "qualityPreviewIssuedAt",
+        "qualityPreviewExpiresAt",
+        "qualityPreviewReceiptVersion",
+        "qualityPreviewRetryGeneration",
+        "qualityPreviewReceiptConsumedAt",
+        "qualityAcceptanceReceiptHash",
+        "qualityAcceptanceReceiptIssuedAt",
+        "qualityAcceptedAt",
+        "qualityAcceptedBy",
+    ):
+        reserved.pop(stale_receipt_field, None)
+    reserved["retryGeneration"] = retry_generation
+    reserved["retryReservationGeneration"] = retry_generation
+    reserved["retryReservedAt"] = now.isoformat()
+    reserved["providerStatus"] = "retryReserved"
+    reserved.pop("providerErrorCode", None)
+    reserved = apply_voice_profile_lifecycle(
+        reserved,
+        state=VoiceProfileLifecycleState.UPLOAD_PENDING,
+        now=now,
+    )
+    reserved["updatedAt"] = now.isoformat()
+    return reserved
+
+
+def _retry_payload_from_profile(
+    payload: Mapping[str, Any],
+    *,
+    user_id: str,
+    voice_profile_id: str,
+    profile: Mapping[str, Any],
+) -> Dict[str, Any]:
+    consent = profile.get("consent") if isinstance(profile.get("consent"), Mapping) else {}
+    consent_version = str(consent.get("version") or profile.get("authorizationVersion") or "").strip()
+    if not consent_version:
+        raise HTTPException(status_code=409, detail="voice profile consent is unavailable for retry")
+    privacy_metadata = profile.get("privacyMetadata") if isinstance(profile.get("privacyMetadata"), Mapping) else {}
+    scope = str(privacy_metadata.get("scope") or "").strip()
+    if scope not in {"generationAllowed", "familyCircle"}:
+        raise HTTPException(status_code=409, detail="voice profile authorization scope is unavailable for retry")
+    retry_payload = dict(payload)
+    retry_payload.update(
+        {
+            "userId": user_id,
+            "voiceProfileId": voice_profile_id,
+            "personaScope": str(profile.get("personaScope") or "personal"),
+            "digitalHumanId": str(profile.get("digitalHumanId") or user_id),
+            "privacyMetadata": {"scope": scope},
+            "authorizationConfirmed": True,
+            "purpose": "training",
+            "consentVersion": consent_version,
+            "sampleCount": _voice_profile_integer(profile, "sampleCount"),
+            "sampleStatus": "pending",
+        }
+    )
+    retry_payload.pop("subjectEligibility", None)
+    return retry_payload
+
+
+def _mark_voice_profile_retry_submission_failed(
+    profile: Mapping[str, Any],
+    *,
+    expected_profile_version: int,
+) -> None:
+    failed = _voice_profile_lifecycle_update(dict(profile), "failed")
+    failed["providerStatus"] = "retrySubmissionFailed"
+    saver = getattr(store, "save_voice_profile_if_version", None)
+    if callable(saver):
+        saver(
+            str(failed.get("userId") or ""),
+            failed,
+            expected_profile_version=expected_profile_version,
+        )
 
 
 @app.post("/profile")
@@ -11091,6 +11366,110 @@ def list_voice_profiles(request: Request, user_id: str) -> Dict[str, Any]:
         "userId": user_id,
         "profiles": [_voice_clone_public_profile(profile) for profile in store.list_voice_profiles(user_id)],
     }
+
+
+@app.post("/voice/profiles/{user_id}/sample-authorization")
+def issue_voice_profile_sample_authorization(
+    request: Request,
+    user_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
+    voice_profile_id = _safe_voice_profile_id(
+        str((payload or {}).get("voiceProfileId") or ""),
+        user_id,
+    )
+    if not voice_profile_id:
+        raise HTTPException(status_code=400, detail="voiceProfileId is required")
+    try:
+        challenge = issue_voice_sample_authorization_challenge(
+            secret=_voice_sample_authorization_secret(),
+            user_id=user_id,
+            voice_profile_id=voice_profile_id,
+        )
+    except VoiceSampleAuthorizationError as exc:
+        raise _voice_sample_http_error(exc) from exc
+    return {"status": "issued", "sampleAuthorization": challenge.public_payload()}
+
+
+@app.post("/voice/profiles/{user_id}/{voice_profile_id}/retry")
+def retry_voice_profile(
+    request: Request,
+    user_id: str,
+    voice_profile_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
+    profile = store.get_voice_profile(user_id, voice_profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="voice profile not found")
+    retry_payload = payload or {}
+    expected_profile_version = _required_nonnegative_payload_integer(
+        retry_payload,
+        "expectedProfileVersion",
+    )
+    current_profile_version = _voice_profile_integer(profile, "profileVersion")
+    if expected_profile_version != current_profile_version:
+        raise HTTPException(status_code=409, detail="voice profile version is not current")
+    retry_generation = _required_nonnegative_payload_integer(
+        retry_payload,
+        "retryGeneration",
+    )
+    prepared_payload = _retry_payload_from_profile(
+        retry_payload,
+        user_id=user_id,
+        voice_profile_id=voice_profile_id,
+        profile=profile,
+    )
+    # Validate all user-controlled media and authorization inputs before the
+    # reservation changes persistent state or a provider slot is touched.
+    _resolve_trusted_voice_profile_eligibility(
+        actor_user_id=user_id,
+        profile_user_id=user_id,
+    )
+    _assess_voice_profile_sample_submission(
+        prepared_payload,
+        user_id=user_id,
+        voice_profile_id=voice_profile_id,
+        now=datetime.now(timezone.utc),
+    )
+    reserved = _reserve_voice_profile_retry(
+        profile,
+        retry_generation=retry_generation,
+        now=datetime.now(timezone.utc),
+    )
+    saver = getattr(store, "save_voice_profile_if_version", None)
+    if not callable(saver):
+        raise HTTPException(status_code=503, detail="voice profile retry storage is unavailable")
+    saved_reservation = saver(
+        user_id,
+        reserved,
+        expected_profile_version=expected_profile_version,
+    )
+    if saved_reservation is None:
+        raise HTTPException(status_code=409, detail="voice profile retry reservation is stale")
+    reservation_version = _voice_profile_integer(saved_reservation, "profileVersion")
+    try:
+        retried = _sanitize_voice_profile_payload(
+            prepared_payload,
+            actor_user_id=user_id,
+            existing_profile_override=saved_reservation,
+            retry_generation=retry_generation,
+        )
+    except HTTPException:
+        _mark_voice_profile_retry_submission_failed(
+            saved_reservation,
+            expected_profile_version=reservation_version,
+        )
+        raise
+    saved = saver(
+        user_id,
+        retried,
+        expected_profile_version=reservation_version,
+    )
+    if saved is None:
+        raise HTTPException(status_code=409, detail="voice profile retry result is stale")
+    return {"status": "retrySubmitted", "profile": _voice_clone_public_profile(saved)}
 
 
 @app.post("/voice/profiles/{user_id}/{voice_profile_id}/disable")
