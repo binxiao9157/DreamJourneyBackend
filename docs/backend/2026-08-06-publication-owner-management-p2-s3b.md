@@ -1,7 +1,7 @@
 # P2-S3b：发布管理读取合同
 
 日期：2026-08-06
-状态：`IMPLEMENTED_PENDING_DEPLOYED_SMOKE`
+状态：`DEPLOYED_VERIFIED`
 范围：M2 closed-beta QA-only；默认发布态关闭。
 
 ## 目的
@@ -54,6 +54,12 @@ PYTHON_BIN=.venv/bin/python bash scripts/run-backend-publication-visitor-access-
 ```
 
 该 smoke 创建并清理独立数据库，验证 Owner 读取、跨账号拒绝、授权使用次数 CAS、撤回和 Projection 阻断；不会写入生产业务数据。
+
+## 部署证据
+
+- 后端提交：`08ad7cf feat(publication): add owner management read contracts`。
+- 已部署到服务器 API 容器，`/ready` 返回 `status=ready`。
+- 容器内执行 `python scripts/backend-publication-visitor-access-postgres-smoke.py` 通过；该 smoke 使用临时数据库，不修改生产业务数据。
 
 ## 后续
 
