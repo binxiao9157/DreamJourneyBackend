@@ -4203,22 +4203,34 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
 
         self.assertEqual(deleted.status_code, 200)
         deleted_profile = deleted.json()["profile"]
-        self.assertEqual(deleted.json()["status"], "deleted")
-        self.assertEqual(deleted_profile["sampleStatus"], "deleted")
-        self.assertEqual(deleted_profile["deletionState"], "deleted")
+        self.assertEqual(deleted.json()["status"], "deletionPending")
+        self.assertEqual(deleted_profile["lifecycleState"], "deleting")
+        self.assertEqual(deleted_profile["sampleStatus"], "pending")
+        self.assertEqual(deleted_profile["deletionState"], "pending")
         self.assertFalse(deleted_profile["isEnabled"])
         self.assertEqual(deleted_profile["exitState"], "partial")
         self.assertTrue(deleted_profile["accessRevoked"])
         self.assertEqual(deleted_profile["localCleanupState"], "tombstoned")
-        self.assertEqual(deleted_profile["providerCleanupState"], "unsupported")
+        self.assertEqual(deleted_profile["providerCleanupState"], "pending")
         self.assertFalse(deleted_profile["providerCleanupReceiptAvailable"])
-        self.assertIn("deletedAt", deleted_profile)
+        self.assertEqual(deleted_profile["providerEffectReceipt"]["state"], "accepted")
+        self.assertFalse(deleted_profile["providerEffectReceipt"]["providerReceiptPresent"])
+        for field in (
+            "effectId",
+            "operationId",
+            "outboxEventId",
+            "jobId",
+            "providerEffectKey",
+            "receiptHash",
+        ):
+            self.assertTrue(deleted_profile["providerEffectReceipt"].get(field))
+        self.assertIn("deletionRequestedAt", deleted_profile)
         matching = [
             item for item in listed_after_delete.json()["profiles"]
             if item.get("voiceProfileId") == voice_profile_id
         ]
         self.assertEqual(len(matching), 1)
-        self.assertEqual(matching[0]["sampleStatus"], "deleted")
+        self.assertEqual(matching[0]["lifecycleState"], "deleting")
 
     def test_voice_clone_profile_contract_rejects_unsupported_status_and_local_only(self):
         client = TestClient(app)

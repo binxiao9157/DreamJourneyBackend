@@ -509,6 +509,10 @@ from app.services.voice_profile_lifecycle import (
     profile_public_projection,
     provider_observed_lifecycle_state,
 )
+from app.services.voice_profile_deletion_effects import (
+    VOICE_PROFILE_PROVIDER_DELETE_RECEIPT_SCHEMA_VERSION,
+    enqueue_voice_profile_deletion_effect,
+)
 from app.services.voice_profile_eligibility import (
     VoiceProfileEligibilityResolution,
     VoiceProfileEligibilityResolver,
@@ -4462,8 +4466,8 @@ VOICE_CLONE_DISABLE_CONTRACT = (
     "当前后端仅保存本地禁用状态，尚未产生 Provider 停用或删除回执。"
 )
 VOICE_CLONE_DELETE_CONTRACT = (
-    "deleteVoiceProfile(profileId:) 会立即撤销本地合成权限并保存 deleted tombstone；"
-    "当前后端尚未产生样本、训练产物或 Provider 资产的删除回执，不能宣称第三方清理已完成。"
+    "deleteVoiceProfile(profileId:) 会立即撤销本地合成权限，并写入可重放的删除 effect；"
+    "在收到样本、训练产物或 Provider 资产的上游回执前，状态只能是待确认，不能宣称第三方清理已完成。"
 )
 FAMILY_PERSONA_CONTRACT_VERSION = 1
 FAMILY_PERSONA_CONTRACT_MODE = "mockFamilyPersona"
@@ -10039,6 +10043,37 @@ def _record_account_access_revocation(
     }
 
 
+def _revoke_voice_profiles_for_account_deletion(user_id: str) -> Dict[str, Any]:
+    """Persist the local voice authority fence before account deletion returns."""
+
+    revoked_profile_count = 0
+    for profile in store.list_voice_profiles(user_id):
+        state = canonical_lifecycle_state(profile)
+        if state in {
+            VoiceProfileLifecycleState.DELETING,
+            VoiceProfileLifecycleState.DELETED,
+        }:
+            continue
+        if (
+            state is VoiceProfileLifecycleState.PAUSED
+            and str(profile.get("sampleStatus") or "") == "disabled"
+            and profile.get("isEnabled") is False
+        ):
+            continue
+        paused = _voice_profile_lifecycle_update(profile, "disabled")
+        voice_profile_id = str(paused.get("voiceProfileId") or "").strip()
+        if voice_profile_id:
+            slot_update = _update_voice_clone_slot(voice_profile_id, "disabled")
+            if slot_update is not None:
+                paused["providerSlotState"] = str(slot_update.get("status") or "disabled")
+        store.save_voice_profile(user_id, paused)
+        revoked_profile_count += 1
+    return {
+        "status": "revoked",
+        "revokedProfileCount": revoked_profile_count,
+    }
+
+
 _ACCOUNT_DELETE_EXTERNAL_EFFECTS = (
     ("objectStorage", "unsupported", "objectStorageNoExternalTarget"),
     ("providerVoice", "unsupported", "providerVoiceExitAdapterNotConfigured"),
@@ -10134,6 +10169,7 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
             )
             if deletion is None:
                 raise HTTPException(status_code=404, detail="account not found")
+            voice_profile_revocation = _revoke_voice_profiles_for_account_deletion(user_id)
             delegated_grant_revocation = _delegated_access_service().revoke_subject_access(
                 user_id,
                 reason="accountSoftDeleted",
@@ -10172,6 +10208,7 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
                 "sessionRevocation": session_revocation,
                 "delegatedGrantRevocation": delegated_grant_revocation,
                 "accessRevocation": access_revocation,
+                "voiceProfileRevocation": voice_profile_revocation,
                 "rights": rights_summary,
             }
         deletion = store.soft_delete_user(
@@ -10181,6 +10218,7 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
         )
         if deletion is None:
             raise HTTPException(status_code=404, detail="account not found")
+        voice_profile_revocation = _revoke_voice_profiles_for_account_deletion(user_id)
         delegated_grant_revocation = _delegated_access_service().revoke_subject_access(
             user_id,
             reason="accountSoftDeleted",
@@ -10220,6 +10258,7 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
         "sessionRevocation": session_revocation,
         "delegatedGrantRevocation": delegated_grant_revocation,
         "accessRevocation": access_revocation,
+        "voiceProfileRevocation": voice_profile_revocation,
         "rights": rights_summary,
     }
 
@@ -10459,6 +10498,7 @@ def _voice_clone_public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     public_profile = profile_public_projection(profile)
     public_profile.pop("providerSpeakerId", None)
     public_profile.pop("authorizationText", None)
+    public_profile.pop("providerEffectReceipt", None)
     for private_receipt_field in (
         "qualityPreviewReceiptHash",
         "qualityPreviewIssuedAt",
@@ -10512,14 +10552,78 @@ def _voice_clone_public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
         else "unassigned",
     )
     public_profile.setdefault("providerSlotManaged", public_profile.get("providerBindingMode") == "exclusiveSlot")
+    if canonical_lifecycle_state(profile) in {
+        VoiceProfileLifecycleState.DELETING,
+        VoiceProfileLifecycleState.DELETED,
+    }:
+        public_profile["providerEffectReceipt"] = _voice_profile_provider_delete_effect_receipt(profile)
     public_profile.update(_voice_clone_exit_disclosure(public_profile))
     return public_profile
 
 
+def _voice_profile_deletion_effect_is_persisted(profile: Mapping[str, Any]) -> bool:
+    raw = profile.get("providerEffectReceipt")
+    receipt = raw if isinstance(raw, Mapping) else {}
+    required_fields = (
+        "effectId",
+        "operationId",
+        "outboxEventId",
+        "jobId",
+        "providerEffectKey",
+        "receiptHash",
+    )
+    return all(str(receipt.get(field) or "").strip() for field in required_fields)
+
+
+def _voice_profile_provider_delete_effect_receipt(profile: Mapping[str, Any]) -> Dict[str, Any]:
+    """Project a deletion receipt without treating local state as Provider proof."""
+
+    raw = profile.get("providerEffectReceipt")
+    raw_receipt = raw if isinstance(raw, Mapping) else {}
+    state = str(raw_receipt.get("state") or "pending").strip().lower()
+    if state not in {"pending", "accepted", "completed", "failed", "unknown"}:
+        state = "pending"
+    provider_receipt_present = raw_receipt.get("providerReceiptPresent") is True
+    # A local deletion marker is never enough to represent Provider completion.
+    if state == "completed" and (
+        not provider_receipt_present
+        or not _voice_profile_deletion_effect_is_persisted(profile)
+    ):
+        state = "pending"
+    reason_code = str(raw_receipt.get("reasonCode") or "").strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}", reason_code):
+        reason_code = (
+            "providerVoiceDeletionCompleted"
+            if state == "completed" and provider_receipt_present
+            else "providerVoiceDeletionReceiptPending"
+        )
+    receipt = {
+        "schemaVersion": VOICE_PROFILE_PROVIDER_DELETE_RECEIPT_SCHEMA_VERSION,
+        "state": state,
+        "providerReceiptPresent": provider_receipt_present,
+        "reasonCode": reason_code,
+    }
+    recorded_at = str(raw_receipt.get("recordedAt") or "").strip()
+    if recorded_at:
+        receipt["recordedAt"] = recorded_at
+    for key in (
+        "effectId",
+        "operationId",
+        "outboxEventId",
+        "jobId",
+        "providerEffectKey",
+        "receiptHash",
+    ):
+        value = str(raw_receipt.get(key) or "").strip()
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
+            receipt[key] = value
+    return receipt
+
+
 def _voice_clone_exit_disclosure(profile: Dict[str, Any]) -> Dict[str, Any]:
     """Describe the proven cleanup boundary without fabricating Provider receipts."""
-    sample_status = str(profile.get("sampleStatus") or "notProvided").strip()
-    if sample_status == "disabled":
+    lifecycle_state = canonical_lifecycle_state(profile)
+    if lifecycle_state is VoiceProfileLifecycleState.PAUSED:
         return {
             "exitState": "accessRevoked",
             "accessRevoked": True,
@@ -10527,13 +10631,30 @@ def _voice_clone_exit_disclosure(profile: Dict[str, Any]) -> Dict[str, Any]:
             "providerCleanupState": "notRequested",
             "providerCleanupReceiptAvailable": False,
         }
-    if sample_status == "deleted":
+    if lifecycle_state in {
+        VoiceProfileLifecycleState.DELETING,
+        VoiceProfileLifecycleState.DELETED,
+    }:
+        receipt = _voice_profile_provider_delete_effect_receipt(profile)
+        provider_completed = (
+            receipt["state"] == "completed"
+            and receipt["providerReceiptPresent"] is True
+        )
+        if provider_completed:
+            provider_cleanup_state = "completed"
+            exit_state = "completed"
+        elif receipt["state"] in {"failed", "unknown"}:
+            provider_cleanup_state = "partial"
+            exit_state = "partial"
+        else:
+            provider_cleanup_state = "pending"
+            exit_state = "partial"
         return {
-            "exitState": "partial",
+            "exitState": exit_state,
             "accessRevoked": True,
             "localCleanupState": "tombstoned",
-            "providerCleanupState": "unsupported",
-            "providerCleanupReceiptAvailable": False,
+            "providerCleanupState": provider_cleanup_state,
+            "providerCleanupReceiptAvailable": receipt["providerReceiptPresent"],
         }
     return {
         "exitState": "active",
@@ -10660,10 +10781,21 @@ def _validate_voice_profile_for_synthesis(
     *,
     allow_quality_preview: bool = False,
 ) -> Dict[str, Any]:
+    account = _store_get_user(user_id)
+    if account is not None and (
+        str(account.get("deletionState") or "active") != "active"
+        or str(account.get("accessState") or "active") != "active"
+        or str(account.get("providerCapabilityState") or "enabled") != "enabled"
+    ):
+        raise HTTPException(status_code=409, detail="voice profile account authority is revoked")
     profile = store.get_voice_profile(user_id, voice_profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="voice profile not found for user")
     lifecycle_state = canonical_lifecycle_state(profile)
+    if lifecycle_state is VoiceProfileLifecycleState.PAUSED:
+        raise HTTPException(status_code=409, detail="voice profile is paused")
+    if lifecycle_state is VoiceProfileLifecycleState.DELETING:
+        raise HTTPException(status_code=409, detail="voice profile deletion is pending")
     if lifecycle_state is VoiceProfileLifecycleState.DELETED:
         raise HTTPException(status_code=409, detail="voice profile is deleted")
     if not bool(profile.get("realCloneProviderReady")):
@@ -11180,7 +11312,58 @@ def _voice_profile_lifecycle_update(profile: Dict[str, Any], sample_status: str)
     return updated
 
 
+def _request_voice_profile_deletion(profile: Mapping[str, Any]) -> Dict[str, Any]:
+    """Revoke local use and persist a pending Provider deletion observation."""
+
+    current_state = canonical_lifecycle_state(profile)
+    current_receipt = _voice_profile_provider_delete_effect_receipt(profile)
+    if (
+        current_state is VoiceProfileLifecycleState.DELETED
+        and current_receipt["state"] == "completed"
+        and current_receipt["providerReceiptPresent"] is True
+    ):
+        return dict(profile)
+    if current_state is VoiceProfileLifecycleState.DELETING and isinstance(
+        profile.get("providerEffectReceipt"), Mapping
+    ):
+        return dict(profile)
+
+    now_at = datetime.now(timezone.utc)
+    updated = apply_voice_profile_lifecycle(
+        _sanitize_voice_profile_provider_metadata(dict(profile)),
+        state=VoiceProfileLifecycleState.DELETING,
+        now=now_at,
+    )
+    updated["deletionState"] = "pending"
+    updated["deletionRequestedAt"] = str(profile.get("deletionRequestedAt") or now_at.isoformat())
+    updated["providerEffectReceipt"] = {
+        "schemaVersion": VOICE_PROFILE_PROVIDER_DELETE_RECEIPT_SCHEMA_VERSION,
+        "state": "pending",
+        "providerReceiptPresent": False,
+        "reasonCode": "providerVoiceDeletionReceiptPending",
+        "recordedAt": now_at.isoformat(),
+    }
+    updated["updatedAt"] = now_at.isoformat()
+    updated.pop("deletedAt", None)
+    return updated
+
+
+def _voice_profile_deletion_authority_epoch(user_id: str) -> int:
+    account = _store_get_user(user_id)
+    try:
+        epoch = int((account or {}).get("authEpoch") or 0)
+    except (TypeError, ValueError):
+        epoch = 0
+    return max(0, epoch)
+
+
 def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
+    if canonical_lifecycle_state(profile) in {
+        VoiceProfileLifecycleState.PAUSED,
+        VoiceProfileLifecycleState.DELETING,
+        VoiceProfileLifecycleState.DELETED,
+    }:
+        return _sanitize_voice_profile_provider_metadata(profile)
     provider = VoiceCloneProviderFactory(settings).make()
     if not provider.is_configured:
         raise HTTPException(status_code=503, detail="voice clone provider is not configured")
@@ -11600,14 +11783,15 @@ def retry_voice_profile(
 @app.post("/voice/profiles/{user_id}/{voice_profile_id}/disable")
 def disable_voice_profile(request: Request, user_id: str, voice_profile_id: str) -> Dict[str, Any]:
     user_id = _principal_path_owner(request, user_id)
-    profile = store.get_voice_profile(user_id, voice_profile_id)
-    if profile is None:
-        raise HTTPException(status_code=404, detail="voice profile not found")
-    disabled = _voice_profile_lifecycle_update(profile, "disabled")
-    slot_update = _update_voice_clone_slot(voice_profile_id, "disabled")
-    if slot_update is not None:
-        disabled["providerSlotState"] = str(slot_update.get("status") or "disabled")
-    saved = store.save_voice_profile(user_id, disabled)
+    with store.auth_user_operation(user_id):
+        profile = store.get_voice_profile(user_id, voice_profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="voice profile not found")
+        disabled = _voice_profile_lifecycle_update(profile, "disabled")
+        slot_update = _update_voice_clone_slot(voice_profile_id, "disabled")
+        if slot_update is not None:
+            disabled["providerSlotState"] = str(slot_update.get("status") or "disabled")
+        saved = store.save_voice_profile(user_id, disabled)
     return {"status": "disabled", "profile": _voice_clone_public_profile(saved)}
 
 
@@ -11673,21 +11857,6 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
         if request_purpose == VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE:
             raise _voice_synthesis_profile_unavailable_error(exc) from exc
         raise
-    synthesis_binding: Optional[Dict[str, Any]] = None
-    if output_mode == "tencentAudioDrive":
-        synthesis_binding = _resolve_tencent_audio_drive_binding(
-            payload=payload,
-            user_id=user_id,
-            voice_profile_id=voice_profile_id,
-            profile=profile,
-        )
-    provider_speaker_id = _voice_clone_provider_speaker_id(profile)
-    provider_audio_format = audio_format
-    provider_sample_rate = sample_rate
-    if output_mode == "tencentAudioDrive":
-        provider_audio_format = "wav"
-        provider_sample_rate = TencentAudioDrivePCMAdapter.sample_rate
-
     provider = VoiceCloneTTSProviderFactory(settings).make()
     if not provider.is_configured:
         if request_purpose == VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE:
@@ -11700,18 +11869,56 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
                 ),
             )
         raise HTTPException(status_code=503, detail="voice clone TTS provider is not configured")
-    provider_call_started = time.monotonic()
-    try:
-        result = provider.synthesize(
-            text=text,
-            user_id=user_id,
-            voice_profile_id=provider_speaker_id,
-            audio_format=provider_audio_format,
-            sample_rate=provider_sample_rate,
-            speech_rate=speech_rate,
-            loudness_rate=loudness_rate,
-        )
-    except ValueError as exc:
+
+    # The second authorization check and Provider boundary share the same
+    # owner operation lock as pause/delete/account-deletion.  That closes the
+    # final race where a request could otherwise synthesize after local access
+    # had already been revoked by another request.
+    provider_error: Optional[ValueError] = None
+    result: Any = None
+    synthesis_binding: Optional[Dict[str, Any]] = None
+    provider_call_started = 0.0
+    provider_speaker_id = ""
+    with store.auth_user_operation(user_id):
+        try:
+            profile = _validate_voice_profile_for_synthesis(
+                user_id,
+                voice_profile_id,
+                allow_quality_preview=request_purpose == VOICE_CLONE_QUALITY_PREVIEW_PURPOSE,
+            )
+        except HTTPException as exc:
+            if request_purpose == VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE:
+                raise _voice_synthesis_profile_unavailable_error(exc) from exc
+            raise
+
+        if output_mode == "tencentAudioDrive":
+            synthesis_binding = _resolve_tencent_audio_drive_binding(
+                payload=payload,
+                user_id=user_id,
+                voice_profile_id=voice_profile_id,
+                profile=profile,
+            )
+        provider_speaker_id = _voice_clone_provider_speaker_id(profile)
+        provider_audio_format = audio_format
+        provider_sample_rate = sample_rate
+        if output_mode == "tencentAudioDrive":
+            provider_audio_format = "wav"
+            provider_sample_rate = TencentAudioDrivePCMAdapter.sample_rate
+        provider_call_started = time.monotonic()
+        try:
+            result = provider.synthesize(
+                text=text,
+                user_id=user_id,
+                voice_profile_id=provider_speaker_id,
+                audio_format=provider_audio_format,
+                sample_rate=provider_sample_rate,
+                speech_rate=speech_rate,
+                loudness_rate=loudness_rate,
+            )
+        except ValueError as exc:
+            provider_error = exc
+
+    if provider_error is not None:
         _record_provider_cost_attempt(
             request,
             provider="volcengineVoiceClone",
@@ -11721,13 +11928,13 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
             state="failed",
             reason="providerCallFailed",
             started_at=provider_call_started,
-            provider_request_key=getattr(exc, "provider_request_id", None),
+            provider_request_key=getattr(provider_error, "provider_request_id", None),
         )
         raise _voice_synthesis_provider_failure_error(
             code="voice_synthesis_provider_failed",
-            request_id=str(getattr(exc, "provider_request_id", "") or ""),
-            log_id=str(getattr(exc, "provider_log_id", "") or ""),
-        ) from exc
+            request_id=str(getattr(provider_error, "provider_request_id", "") or ""),
+            log_id=str(getattr(provider_error, "provider_log_id", "") or ""),
+        ) from provider_error
 
     if not isinstance(result, dict):
         _record_provider_cost_attempt(
@@ -11841,15 +12048,28 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
 @app.delete("/voice/profiles/{user_id}/{voice_profile_id}")
 def delete_voice_profile(request: Request, user_id: str, voice_profile_id: str) -> Dict[str, Any]:
     user_id = _principal_path_owner(request, user_id)
-    profile = store.get_voice_profile(user_id, voice_profile_id)
-    if profile is None:
-        raise HTTPException(status_code=404, detail="voice profile not found")
-    deleted = _voice_profile_lifecycle_update(profile, "deleted")
-    slot_update = _update_voice_clone_slot(voice_profile_id, "deleted")
-    if slot_update is not None:
-        deleted["providerSlotState"] = str(slot_update.get("status") or "retired")
-    saved = store.save_voice_profile(user_id, deleted)
-    return {"status": "deleted", "profile": _voice_clone_public_profile(saved)}
+    with store.auth_user_operation(user_id):
+        profile = store.get_voice_profile(user_id, voice_profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="voice profile not found")
+        deleted = _request_voice_profile_deletion(profile)
+        slot_update = _update_voice_clone_slot(voice_profile_id, "deleted")
+        if slot_update is not None:
+            deleted["providerSlotState"] = str(slot_update.get("status") or "retired")
+        saved = store.save_voice_profile(user_id, deleted)
+        if not _voice_profile_deletion_effect_is_persisted(saved):
+            accepted_effect = enqueue_voice_profile_deletion_effect(
+                store=store,
+                user_id=user_id,
+                profile=saved,
+                authority_epoch=_voice_profile_deletion_authority_epoch(user_id),
+            )
+            with_effect_receipt = dict(saved)
+            with_effect_receipt["providerEffectReceipt"] = accepted_effect.public_receipt(
+                recorded_at=datetime.now(timezone.utc).isoformat()
+            )
+            saved = store.save_voice_profile(user_id, with_effect_receipt)
+    return {"status": "deletionPending", "profile": _voice_clone_public_profile(saved)}
 
 
 @app.post("/tts")

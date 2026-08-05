@@ -87,6 +87,15 @@ def provider_observed_lifecycle_state(
 
     observed = str(provider_sample_status or "").strip()
     current = canonical_lifecycle_state(profile)
+    # Local owner authority wins over a stale provider status. A profile that
+    # was paused or put into deletion cannot be made usable by a later ready
+    # observation alone.
+    if current in {
+        VoiceProfileLifecycleState.PAUSED,
+        VoiceProfileLifecycleState.DELETING,
+        VoiceProfileLifecycleState.DELETED,
+    }:
+        return current
     if observed == "ready":
         return (
             VoiceProfileLifecycleState.ACCEPTED
@@ -172,7 +181,9 @@ def apply_voice_profile_lifecycle(
             "eligibility": eligibility,
         }
     )
-    if state is VoiceProfileLifecycleState.DELETED:
+    if state is VoiceProfileLifecycleState.DELETING:
+        updated["deletionState"] = "pending"
+    elif state is VoiceProfileLifecycleState.DELETED:
         updated["deletionState"] = "deleted"
     return updated
 

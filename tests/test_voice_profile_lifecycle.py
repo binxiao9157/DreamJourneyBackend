@@ -12,6 +12,8 @@ import base64
 from datetime import datetime, timedelta, timezone
 import io
 import math
+from threading import Event, Thread
+import time
 import unittest
 from unittest.mock import patch
 import wave
@@ -165,6 +167,40 @@ class VoiceProfileLifecycleTests(unittest.TestCase):
         self.assertTrue(projection["eligibility"]["allowed"])
         self.assertEqual(projection["consent"]["purpose"], "private_synthesis")
         self.assertIn("synthesize", projection["allowedOperations"])
+
+    def test_provider_ready_cannot_reactivate_paused_or_deleting_profile(self) -> None:
+        accepted = apply_voice_profile_lifecycle(
+            {"voiceProfileId": "vp-owner-a", "sampleStatus": "ready"},
+            state=VoiceProfileLifecycleState.ACCEPTED,
+            consent=make_voice_profile_consent(
+                purpose="private_synthesis",
+                version="voice-clone-consent-v1",
+                now=NOW,
+            ),
+            eligibility_decision=eligible_self(),
+            eligibility_provenance="syntheticTest",
+            now=NOW,
+        )
+
+        paused = apply_voice_profile_lifecycle(
+            accepted,
+            state=VoiceProfileLifecycleState.PAUSED,
+            now=NOW + timedelta(minutes=1),
+        )
+        deleting = apply_voice_profile_lifecycle(
+            accepted,
+            state=VoiceProfileLifecycleState.DELETING,
+            now=NOW + timedelta(minutes=2),
+        )
+
+        self.assertEqual(
+            provider_observed_lifecycle_state(paused, "ready"),
+            VoiceProfileLifecycleState.PAUSED,
+        )
+        self.assertEqual(
+            provider_observed_lifecycle_state(deleting, "ready"),
+            VoiceProfileLifecycleState.DELETING,
+        )
 
     def test_expired_consent_fails_closed_and_hides_raw_decision(self) -> None:
         profile = apply_voice_profile_lifecycle(
@@ -434,6 +470,268 @@ class VoiceProfileLifecycleAPITests(unittest.TestCase):
         )
         self.assertEqual(provider.submit_count, 0)
         self.assertIsNone(store.get_voice_profile(payload["userId"], payload["voiceProfileId"]))
+
+    def test_paused_profile_rejects_synthesis_before_tts_provider(self) -> None:
+        class RecordingTTSProvider:
+            is_configured = True
+            provider_mode = "testTTS"
+
+            def __init__(self) -> None:
+                self.synthesize_count = 0
+
+            def synthesize(self, **_kwargs):
+                self.synthesize_count += 1
+                return {
+                    "audioBase64": "U09VTkQ=",
+                    "audioFormat": "mp3",
+                    "byteCount": 5,
+                    "providerMode": self.provider_mode,
+                    "voiceProfileId": "speaker-paused",
+                    "visemeTimeline": None,
+                }
+
+        user_id = "voice-paused-owner"
+        voice_profile_id = "voice-paused-profile"
+        now = datetime.now(timezone.utc)
+        profile = apply_voice_profile_lifecycle(
+            {
+                "userId": user_id,
+                "voiceProfileId": voice_profile_id,
+                "providerSpeakerId": "speaker-paused",
+                "realCloneProviderReady": True,
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+            },
+            state=VoiceProfileLifecycleState.ACCEPTED,
+            consent=make_voice_profile_consent(
+                purpose="private_synthesis",
+                version="voice-clone-consent-v1",
+                now=now,
+            ),
+            eligibility_decision=eligible_self(),
+            eligibility_provenance="syntheticTest",
+            now=now,
+        )
+        store = InMemoryStore()
+        store.save_voice_profile(user_id, profile)
+        provider = RecordingTTSProvider()
+        client = TestClient(app)
+
+        with patch("app.main.store", store), patch(
+            "app.main.VoiceCloneTTSProviderFactory"
+        ) as factory:
+            factory.return_value.make.return_value = provider
+            paused = client.post(f"/voice/profiles/{user_id}/{voice_profile_id}/disable")
+            synthesis = client.post(
+                "/voice/synthesis",
+                json={
+                    "userId": user_id,
+                    "voiceProfileId": voice_profile_id,
+                    "text": "paused profiles are not synthesizable",
+                },
+            )
+
+        self.assertEqual(paused.status_code, 200)
+        self.assertEqual(paused.json()["profile"]["lifecycleState"], "paused")
+        self.assertEqual(synthesis.status_code, 409)
+        self.assertEqual(provider.synthesize_count, 0)
+
+    def test_delete_persists_pending_provider_receipt_and_fences_synthesis(self) -> None:
+        class RecordingTTSProvider:
+            is_configured = True
+            provider_mode = "testTTS"
+
+            def __init__(self) -> None:
+                self.synthesize_count = 0
+
+            def synthesize(self, **_kwargs):
+                self.synthesize_count += 1
+                raise AssertionError("deleted voice profile must not reach the provider")
+
+        user_id = "voice-delete-owner"
+        voice_profile_id = "voice-delete-profile"
+        now = datetime.now(timezone.utc)
+        profile = apply_voice_profile_lifecycle(
+            {
+                "userId": user_id,
+                "voiceProfileId": voice_profile_id,
+                "providerSpeakerId": "speaker-delete",
+                "realCloneProviderReady": True,
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+            },
+            state=VoiceProfileLifecycleState.ACCEPTED,
+            consent=make_voice_profile_consent(
+                purpose="private_synthesis",
+                version="voice-clone-consent-v1",
+                now=now,
+            ),
+            eligibility_decision=eligible_self(),
+            eligibility_provenance="syntheticTest",
+            now=now,
+        )
+        store = InMemoryStore()
+        store.save_voice_profile(user_id, profile)
+        provider = RecordingTTSProvider()
+        client = TestClient(app)
+
+        with patch("app.main.store", store), patch(
+            "app.main.VoiceCloneTTSProviderFactory"
+        ) as factory:
+            factory.return_value.make.return_value = provider
+            deleted = client.delete(f"/voice/profiles/{user_id}/{voice_profile_id}")
+            replayed = client.delete(f"/voice/profiles/{user_id}/{voice_profile_id}")
+            synthesis = client.post(
+                "/voice/synthesis",
+                json={
+                    "userId": user_id,
+                    "voiceProfileId": voice_profile_id,
+                    "text": "pending provider deletion must fence synthesis",
+                },
+            )
+
+        self.assertEqual(deleted.status_code, 200)
+        payload = deleted.json()
+        self.assertEqual(payload["status"], "deletionPending")
+        self.assertEqual(payload["profile"]["lifecycleState"], "deleting")
+        self.assertEqual(payload["profile"]["deletionState"], "pending")
+        self.assertEqual(payload["profile"]["exitState"], "partial")
+        self.assertEqual(payload["profile"]["providerCleanupState"], "pending")
+        self.assertFalse(payload["profile"]["providerCleanupReceiptAvailable"])
+        receipt = payload["profile"]["providerEffectReceipt"]
+        self.assertEqual(receipt["state"], "accepted")
+        self.assertFalse(payload["profile"]["providerEffectReceipt"]["providerReceiptPresent"])
+        for key in (
+            "effectId",
+            "operationId",
+            "outboxEventId",
+            "jobId",
+            "providerEffectKey",
+            "receiptHash",
+        ):
+            self.assertTrue(receipt.get(key))
+        self.assertNotIn("providerSpeakerId", receipt)
+        self.assertNotIn("speaker-delete", str(receipt))
+        self.assertEqual(replayed.status_code, 200)
+        replayed_profile = replayed.json()["profile"]
+        self.assertEqual(replayed.json()["status"], "deletionPending")
+        self.assertEqual(replayed_profile["lifecycleState"], "deleting")
+        self.assertEqual(
+            replayed_profile["deletionRequestedAt"],
+            payload["profile"]["deletionRequestedAt"],
+        )
+        self.assertEqual(
+            replayed_profile["providerEffectReceipt"],
+            payload["profile"]["providerEffectReceipt"],
+        )
+        stored = store.get_voice_profile(user_id, voice_profile_id)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["providerEffectReceipt"]["state"], "accepted")
+        self.assertFalse(stored["providerEffectReceipt"]["providerReceiptPresent"])
+        self.assertEqual(store.effect_kernel_repository().record_count(), 1)
+        self.assertEqual(synthesis.status_code, 409)
+        self.assertEqual(provider.synthesize_count, 0)
+
+    def test_delete_serializes_with_inflight_synthesis_and_fences_later_requests(self) -> None:
+        class BlockingTTSProvider:
+            is_configured = True
+            provider_mode = "testTTS"
+
+            def __init__(self) -> None:
+                self.synthesize_count = 0
+                self.started = Event()
+                self.release = Event()
+
+            def synthesize(self, **_kwargs):
+                self.synthesize_count += 1
+                self.started.set()
+                if not self.release.wait(timeout=3):
+                    raise ValueError("test provider was not released")
+                return {
+                    "audioBase64": "U09VTkQ=",
+                    "audioFormat": "mp3",
+                    "byteCount": 5,
+                    "providerMode": self.provider_mode,
+                    "voiceProfileId": "speaker-race",
+                    "visemeTimeline": None,
+                }
+
+        user_id = "voice-race-owner"
+        voice_profile_id = "voice-race-profile"
+        now = datetime.now(timezone.utc)
+        profile = apply_voice_profile_lifecycle(
+            {
+                "userId": user_id,
+                "voiceProfileId": voice_profile_id,
+                "providerSpeakerId": "speaker-race",
+                "realCloneProviderReady": True,
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+            },
+            state=VoiceProfileLifecycleState.ACCEPTED,
+            consent=make_voice_profile_consent(
+                purpose="private_synthesis",
+                version="voice-clone-consent-v1",
+                now=now,
+            ),
+            eligibility_decision=eligible_self(),
+            eligibility_provenance="syntheticTest",
+            now=now,
+        )
+        store = InMemoryStore()
+        store.save_voice_profile(user_id, profile)
+        provider = BlockingTTSProvider()
+        responses = {}
+
+        def synthesize() -> None:
+            with TestClient(app) as client:
+                responses["synthesis"] = client.post(
+                    "/voice/synthesis",
+                    json={
+                        "userId": user_id,
+                        "voiceProfileId": voice_profile_id,
+                        "text": "inflight synthesis must finish before revoke",
+                    },
+                )
+
+        def delete() -> None:
+            with TestClient(app) as client:
+                responses["deletion"] = client.delete(
+                    f"/voice/profiles/{user_id}/{voice_profile_id}"
+                )
+
+        with patch("app.main.store", store), patch(
+            "app.main.VoiceCloneTTSProviderFactory"
+        ) as factory:
+            factory.return_value.make.return_value = provider
+            synthesis_thread = Thread(target=synthesize)
+            synthesis_thread.start()
+            self.assertTrue(provider.started.wait(timeout=1))
+
+            deletion_thread = Thread(target=delete)
+            deletion_thread.start()
+            time.sleep(0.05)
+            self.assertTrue(deletion_thread.is_alive())
+
+            provider.release.set()
+            synthesis_thread.join(timeout=3)
+            deletion_thread.join(timeout=3)
+
+            after_delete = TestClient(app).post(
+                "/voice/synthesis",
+                json={
+                    "userId": user_id,
+                    "voiceProfileId": voice_profile_id,
+                    "text": "post-revoke synthesis must be denied",
+                },
+            )
+
+        self.assertFalse(synthesis_thread.is_alive())
+        self.assertFalse(deletion_thread.is_alive())
+        self.assertEqual(responses["synthesis"].status_code, 200)
+        self.assertEqual(responses["deletion"].status_code, 200)
+        self.assertEqual(after_delete.status_code, 409)
+        self.assertEqual(provider.synthesize_count, 1)
 
 
 if __name__ == "__main__":
