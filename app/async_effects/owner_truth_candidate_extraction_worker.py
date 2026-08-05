@@ -27,6 +27,7 @@ from app.async_effects.lease_repository import (
     AsyncEffectLeaseCancelled,
     AsyncEffectLeaseLost,
 )
+from app.async_effects.worker_lifecycle import WorkerDrainController
 from app.core.config import Settings
 from app.domain.owner_truth.candidate_extraction import (
     CandidateEvidenceSpan,
@@ -494,6 +495,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     settings = Settings.from_env()
     store = make_store(settings)
     open_store(store, wait=True)
+    drain_controller = WorkerDrainController()
+    drain_controller.install()
     try:
         worker = OwnerTruthCandidateExtractionWorkerRuntime(
             settings=settings,
@@ -520,10 +523,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                     last_result_key = result_key
                 if not args.loop:
                     return 0
+                if drain_controller.stop_requested:
+                    print(
+                        json.dumps(
+                            {
+                                "mode": "run",
+                                "status": "drained",
+                                "reason": "workerShutdownRequested",
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                    return 0
                 sleep(poll_seconds)
         except KeyboardInterrupt:
             return 0
     finally:
+        drain_controller.restore()
         close_store(store)
 
 

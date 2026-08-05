@@ -53,6 +53,7 @@ services:
     profiles:
       - owner-truth-worker
     restart: unless-stopped
+    stop_grace_period: 150s
     command: ["python", "-m", "app.async_effects.owner_truth_candidate_extraction_worker", "--loop"]
     env_file:
       - .env
@@ -67,6 +68,7 @@ services:
     profiles:
       - owner-truth-worker
     restart: unless-stopped
+    stop_grace_period: 150s
     command: ["python", "-m", "app.async_effects.owner_truth_memory_projection_worker", "--loop"]
     env_file:
       - .env
@@ -81,6 +83,7 @@ services:
     profiles:
       - owner-truth-media-worker
     restart: unless-stopped
+    stop_grace_period: 150s
     command: ["python", "-m", "app.async_effects.owner_truth_media_processing_worker", "--loop"]
     env_file:
       - .env
@@ -97,6 +100,7 @@ services:
     profiles:
       - owner-truth-media-worker
     restart: unless-stopped
+    stop_grace_period: 150s
     command: ["python", "-m", "app.async_effects.owner_truth_media_deletion_worker", "--loop"]
     env_file:
       - .env

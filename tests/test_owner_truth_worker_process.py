@@ -94,6 +94,53 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
             open_store.assert_called_once_with(fake_store, wait=True)
             close_store.assert_called_once_with(fake_store)
 
+    def test_typed_worker_drains_after_current_lease_when_shutdown_is_requested(self) -> None:
+        for module, worker_type in (
+            (
+                owner_truth_candidate_extraction_worker,
+                owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerRuntime,
+            ),
+            (
+                owner_truth_memory_projection_worker,
+                owner_truth_memory_projection_worker.OwnerTruthMemoryProjectionWorkerRuntime,
+            ),
+            (
+                owner_truth_media_processing_worker,
+                owner_truth_media_processing_worker.OwnerTruthMediaProcessingWorkerRuntime,
+            ),
+            (
+                owner_truth_media_deletion_worker,
+                owner_truth_media_deletion_worker.OwnerTruthMediaDeletionWorkerRuntime,
+            ),
+        ):
+            fake_store = object()
+            fake_worker = Mock()
+            fake_worker.run_once.return_value = {
+                "status": "completed",
+                "reason": "completedCurrentLease",
+            }
+            drain_controller = Mock()
+            drain_controller.stop_requested = True
+            output = StringIO()
+            with self.subTest(module=module.__name__), patch.object(
+                module.Settings, "from_env", return_value=Settings()
+            ), patch.object(module, "make_store", return_value=fake_store), patch.object(
+                module, "open_store"
+            ) as open_store, patch.object(module, "close_store") as close_store, patch.object(
+                module, worker_type.__name__, return_value=fake_worker
+            ), patch.object(
+                module, "WorkerDrainController", return_value=drain_controller
+            ), redirect_stdout(output):
+                self.assertEqual(module.main(["--loop", "--poll-seconds", "0.1"]), 0)
+
+            self.assertEqual(fake_worker.run_once.call_count, 1)
+            self.assertIn('"status": "drained"', output.getvalue())
+            self.assertIn('"reason": "workerShutdownRequested"', output.getvalue())
+            drain_controller.install.assert_called_once_with()
+            drain_controller.restore.assert_called_once_with()
+            open_store.assert_called_once_with(fake_store, wait=True)
+            close_store.assert_called_once_with(fake_store)
+
     def test_compose_profile_keeps_typed_workers_out_of_default_api_startup(self) -> None:
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
@@ -120,6 +167,7 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
             compose,
         )
         self.assertIn("restart: unless-stopped", compose)
+        self.assertEqual(compose.count("stop_grace_period: 150s"), 4)
 
 
 if __name__ == "__main__":
