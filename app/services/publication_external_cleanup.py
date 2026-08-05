@@ -882,7 +882,7 @@ class PostgresPublicationExternalCleanupRepository:
                     id, effect_id, state, reason_code, provider_receipt_present,
                     provider_receipt_hash, observation_hash, observed_at, created_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (observation_hash) DO NOTHING
+                ON CONFLICT (effect_id, observation_hash) DO NOTHING
                 """,
                 (
                     receipt_id,

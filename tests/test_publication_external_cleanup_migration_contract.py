@@ -12,6 +12,7 @@ from app.db.migrator import load_migrations
 ROOT = Path(__file__).parents[1]
 MIGRATION = ROOT / "db/migrations/0083_publication_lifecycle_external_cleanup.sql"
 MANIFEST = ROOT / "db/migrations/0083_publication_lifecycle_external_cleanup.json"
+SERVICE = ROOT / "app/services/publication_external_cleanup.py"
 
 
 class PublicationExternalCleanupMigrationContractTests(unittest.TestCase):
@@ -30,6 +31,7 @@ class PublicationExternalCleanupMigrationContractTests(unittest.TestCase):
         self.assertIn("references async_effects.operations", sql)
         self.assertIn("references async_effects.provider_effects", sql)
         self.assertIn("provider_receipt_hash text check", sql)
+        self.assertIn("unique (effect_id, observation_hash)", sql)
         self.assertIn(
             "state <> 'completed' or (provider_receipt_present and provider_receipt_hash is not null)",
             sql,
@@ -54,6 +56,10 @@ class PublicationExternalCleanupMigrationContractTests(unittest.TestCase):
         item = next(value for value in load_migrations(ROOT / "db/migrations") if value.version == "0083")
         self.assertEqual(item.name, "publication_lifecycle_external_cleanup")
         self.assertEqual(item.phase, "expand")
+
+    def test_receipt_insert_uses_the_migration_idempotency_constraint(self) -> None:
+        service = SERVICE.read_text(encoding="utf-8")
+        self.assertIn("ON CONFLICT (effect_id, observation_hash) DO NOTHING", service)
 
 
 if __name__ == "__main__":  # pragma: no cover
