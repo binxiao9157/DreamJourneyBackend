@@ -152,9 +152,11 @@ class DataRightsExternalEffectReceipt:
             request_id=self.request_id,
             owner_subject_hash=self.owner_subject_hash,
             domain=self.domain,
+            effect_identity_hash=self.effect_identity_hash,
             state=self.state,
             provider_receipt_present=self.provider_receipt_present,
             reason_codes=[self.reason_code],
+            observed_at=self.observed_at,
         )
 
 

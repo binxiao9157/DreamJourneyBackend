@@ -117,6 +117,39 @@ class DataRightsExternalEffectProjectionTests(unittest.TestCase):
             "completed",
         )
 
+    def test_latest_receipt_state_controls_one_effect_without_hiding_history(self) -> None:
+        report = build_data_rights_external_effect_projection(
+            self._summary(),
+            resource_evidence=[],
+            access_revocation={"status": "revoked"},
+            linked_effect_observations=[
+                {
+                    "requestId": "rights-request-1",
+                    "ownerSubjectHash": "owner-hash-1",
+                    "domain": "providerVoice",
+                    "effectIdentityHash": "voice-effect-1",
+                    "state": "accepted",
+                    "providerReceiptPresent": False,
+                    "observedAt": "2026-08-05T09:00:00+00:00",
+                    "reasonCodes": ["providerAccepted"],
+                },
+                {
+                    "requestId": "rights-request-1",
+                    "ownerSubjectHash": "owner-hash-1",
+                    "domain": "providerVoice",
+                    "effectIdentityHash": "voice-effect-1",
+                    "state": "completed",
+                    "providerReceiptPresent": True,
+                    "observedAt": "2026-08-05T09:01:00+00:00",
+                    "reasonCodes": ["providerCompleted"],
+                },
+            ],
+        )
+
+        voice = next(item for item in report["domains"] if item["domain"] == "providerVoice")
+        self.assertEqual(voice["status"], "completed")
+        self.assertEqual(voice["receiptState"], "partial")
+
     def test_legacy_redacted_summary_rejects_linked_receipts_without_failing(self) -> None:
         report = build_data_rights_external_effect_projection(
             {"request": {"id": "legacy-rights-request"}},
