@@ -196,7 +196,10 @@ class InMemoryStore:
         self._publication_visitor_access_repository = InMemoryPublicationVisitorAccessRepository(
             projection_scope_reader=(
                 self._publication_authority_repository.public_projection_scope_snapshot
-            )
+            ),
+            projection_content_reader=(
+                self._publication_authority_repository.public_projection_content_snapshot
+            ),
         )
         self._owner_truth_conversation_repository = (
             InMemoryOwnerTruthConversationRepository()

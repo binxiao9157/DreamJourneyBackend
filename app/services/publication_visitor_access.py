@@ -1,10 +1,11 @@
 """Default-off ShareGrant and Visitor admission for the M2 closed beta.
 
-This service operates only on the independently stored publication projection
-created by the Owner-authority lane.  It does not provide a public URL, a
-Visitor reader, an answer endpoint, or an automatic Family authorization.
-Raw grant and session credentials are accepted only at the HTTP boundary,
-hashed immediately, and never persisted or returned after their first issue.
+This access service operates only on the independently stored publication
+projection created by the Owner-authority lane. A separate default-off reader
+may re-check the same grant/session boundary; neither service provides a
+public URL or automatic Family authorization. Raw grant and session
+credentials are accepted only at the HTTP boundary, hashed immediately, and
+never persisted or returned after their first issue.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from hashlib import sha256
 import json
 import secrets
 from threading import RLock
-from typing import Any, Callable, Mapping, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol
 from uuid import UUID, uuid5
 
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
@@ -24,6 +25,9 @@ from app.domain.publication.share_grant_session import (
     PublicationAdultVerificationState,
     PublicationVisitorRelationshipOrigin,
 )
+
+if TYPE_CHECKING:
+    from app.services.publication_visitor_reader import PublicationVisitorProjectionReadResult
 
 
 PUBLICATION_VISITOR_ACCESS_SCHEMA_VERSION = "publication-visitor-access-v1"
@@ -427,6 +431,17 @@ class PublicationVisitorAccessRepository(Protocol):
     ) -> PublicationVisitorAdmissionResult:
         ...
 
+    def read_public_projection(
+        self,
+        *,
+        visitor_subject_hash: str,
+        eligibility: PublicationVisitorEligibility,
+        session_id: str,
+        session_credential_hash: str,
+        now: datetime,
+    ) -> "PublicationVisitorProjectionReadResult":
+        ...
+
 
 class PublicationVisitorAccessService:
     """Coordinates the server-only M2 ShareGrant and Visitor session boundary."""
@@ -527,9 +542,11 @@ class InMemoryPublicationVisitorAccessRepository:
         self,
         *,
         projection_scope_reader: Callable[[str, str], Mapping[str, Any] | None] | None = None,
+        projection_content_reader: Callable[[str, str], Mapping[str, Any] | None] | None = None,
     ) -> None:
         self._lock = RLock()
         self._projection_scope_reader = projection_scope_reader
+        self._projection_content_reader = projection_content_reader
         self._scopes: dict[tuple[str, str], PublicationGrantScope] = {}
         self._grants: dict[str, dict[str, Any]] = {}
         self._sessions: dict[str, dict[str, Any]] = {}
@@ -695,7 +712,6 @@ class InMemoryPublicationVisitorAccessRepository:
         session_credential_hash: str,
         now: datetime,
     ) -> PublicationVisitorAdmissionResult:
-        del eligibility
         with self._lock:
             grant = self._grants.get(grant_id)
             if grant is None:
@@ -750,6 +766,8 @@ class InMemoryPublicationVisitorAccessRepository:
                 "visitorSubjectHash": visitor_subject_hash,
                 "sessionCredentialHash": session_credential_hash,
                 "expectedGrantUseCount": expected_use_count,
+                "adultVerificationState": eligibility.adult_verification.value,
+                "relationshipOrigin": eligibility.relationship_origin.value,
                 "expiresAt": grant["expiresAt"],
                 "state": "active",
             }
@@ -761,6 +779,76 @@ class InMemoryPublicationVisitorAccessRepository:
                 publication_version_id=str(grant["publicationVersionId"]),
                 expires_at=grant["expiresAt"],
                 use_remaining=int(grant["useLimit"]) - int(grant["useCount"]),
+            )
+
+    def read_public_projection(
+        self,
+        *,
+        visitor_subject_hash: str,
+        eligibility: PublicationVisitorEligibility,
+        session_id: str,
+        session_credential_hash: str,
+        now: datetime,
+    ) -> "PublicationVisitorProjectionReadResult":
+        from app.services.publication_visitor_reader import PublicationVisitorProjectionReadResult
+
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise PublicationVisitorAccessDenied("Visitor session credential is not accepted")
+            if (
+                session["visitorSubjectHash"] != visitor_subject_hash
+                or session["sessionCredentialHash"] != session_credential_hash
+            ):
+                raise PublicationVisitorAccessDenied("Visitor session credential is not accepted")
+            if not eligibility.admitted or (
+                session.get("adultVerificationState") != PublicationAdultVerificationState.VERIFIED.value
+                or session.get("relationshipOrigin")
+                != PublicationVisitorRelationshipOrigin.DIRECT.value
+            ):
+                raise PublicationVisitorAdultVerificationRequired(
+                    "Visitor requires a server-verified adult, direct-relationship admission"
+                )
+            if session["state"] != "active" or session["expiresAt"] <= now:
+                raise PublicationVisitorAccessUnavailable("Visitor session is not active")
+            grant = self._grants.get(str(session["grantId"]))
+            if grant is None or grant["state"] != "active" or grant["expiresAt"] <= now:
+                raise PublicationVisitorAccessUnavailable("ShareGrant is not active")
+            if (
+                grant["granteeSubjectHash"] != visitor_subject_hash
+                or int(session["expectedGrantUseCount"]) != int(grant["useCount"])
+            ):
+                raise PublicationVisitorAccessUnavailable("Visitor session is no longer bound to ShareGrant")
+            scope = self._scope(
+                publication_id=str(session["publicationId"]),
+                publication_version_id=str(session["publicationVersionId"]),
+            )
+            if (
+                scope.vault_id != grant["vaultId"]
+                or scope.owner_subject_id != grant["ownerSubjectId"]
+                or scope.authority_epoch != grant["authorityEpoch"]
+                or scope.publication_id != session["publicationId"]
+                or scope.publication_version_id != session["publicationVersionId"]
+            ):
+                raise PublicationVisitorAccessUnavailable("publication authority changed")
+            if self._projection_content_reader is None:
+                raise PublicationVisitorAccessUnavailable("public projection content is unavailable")
+            projection = self._projection_content_reader(
+                scope.publication_id,
+                scope.publication_version_id,
+            )
+            if projection is None or str(projection.get("projectionState") or "") != "active":
+                raise PublicationVisitorAccessUnavailable("public projection is not active")
+            return PublicationVisitorProjectionReadResult(
+                session_id=session_id,
+                publication_id=scope.publication_id,
+                publication_version_id=scope.publication_version_id,
+                expires_at=session["expiresAt"],
+                display_title=str(projection.get("displayTitle") or ""),
+                display_body=str(projection.get("displayBody") or ""),
+                ai_disclosure=str(projection.get("aiDisclosure") or ""),
+                projection_hash=str(projection.get("projectionHash") or ""),
+                public_citation_hash=str(projection.get("publicCitationHash") or ""),
             )
 
 
@@ -1051,6 +1139,120 @@ class PostgresPublicationVisitorAccessRepository:
                 publication_version_id=scope.publication_version_id,
                 expires_at=expires_at,
                 use_remaining=use_limit - (use_count + 1),
+            )
+
+    def read_public_projection(
+        self,
+        *,
+        visitor_subject_hash: str,
+        eligibility: PublicationVisitorEligibility,
+        session_id: str,
+        session_credential_hash: str,
+        now: datetime,
+    ) -> "PublicationVisitorProjectionReadResult":
+        from app.services.publication_visitor_reader import PublicationVisitorProjectionReadResult
+
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT visitor_session.id AS session_id,
+                    visitor_session.vault_id,
+                    visitor_session.publication_id,
+                    visitor_session.publication_version_id,
+                    visitor_session.visitor_subject_hash,
+                    visitor_session.session_token_hash,
+                    visitor_session.state AS session_state,
+                    visitor_session.expires_at AS session_expires_at,
+                    visitor_session.adult_verification_state,
+                    visitor_session.relationship_origin,
+                    visitor_session.expected_grant_use_count,
+                    share_grant.publication_version_id AS grant_publication_version_id,
+                    share_grant.grantee_subject_hash,
+                    share_grant.state AS grant_state,
+                    share_grant.expires_at AS grant_expires_at,
+                    share_grant.use_count AS grant_use_count,
+                    share_grant.authority_epoch AS grant_authority_epoch,
+                    vault.authority_epoch AS vault_authority_epoch,
+                    vault.status AS vault_state,
+                    publication.state AS publication_state,
+                    publication.authority_epoch AS publication_authority_epoch,
+                    projection.state AS projection_state,
+                    projection.display_title,
+                    projection.display_body,
+                    projection.ai_disclosure,
+                    projection.projection_hash,
+                    projection.public_citation_hash
+                FROM publication.visitor_sessions AS visitor_session
+                JOIN publication.share_grants AS share_grant
+                  ON share_grant.id = visitor_session.share_grant_id
+                 AND share_grant.publication_id = visitor_session.publication_id
+                 AND share_grant.publication_version_id = visitor_session.publication_version_id
+                 AND share_grant.vault_id = visitor_session.vault_id
+                JOIN owner_truth.vaults AS vault ON vault.vault_id = visitor_session.vault_id
+                JOIN publication.publications AS publication
+                  ON publication.id = visitor_session.publication_id
+                 AND publication.vault_id = visitor_session.vault_id
+                JOIN publication.publication_versions AS version
+                  ON version.id = visitor_session.publication_version_id
+                 AND version.publication_id = visitor_session.publication_id
+                 AND version.vault_id = visitor_session.vault_id
+                JOIN publication.public_projections AS projection
+                  ON projection.publication_version_id = version.id
+                 AND projection.publication_id = version.publication_id
+                 AND projection.vault_id = version.vault_id
+                WHERE visitor_session.id = %s
+                FOR SHARE OF visitor_session, share_grant, vault, publication, version, projection
+                """,
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if row is None or (
+                str(row["visitor_subject_hash"]) != visitor_subject_hash
+                or str(row["session_token_hash"]) != session_credential_hash
+            ):
+                raise PublicationVisitorAccessDenied("Visitor session credential is not accepted")
+            if not eligibility.admitted or (
+                str(row["adult_verification_state"])
+                != PublicationAdultVerificationState.VERIFIED.value
+                or str(row["relationship_origin"])
+                != PublicationVisitorRelationshipOrigin.DIRECT.value
+            ):
+                raise PublicationVisitorAdultVerificationRequired(
+                    "Visitor requires a server-verified adult, direct-relationship admission"
+                )
+            if str(row["session_state"]) != "active" or _utc(
+                row["session_expires_at"], field_name="session_expires_at"
+            ) <= now:
+                raise PublicationVisitorAccessUnavailable("Visitor session is not active")
+            if str(row["grant_state"]) != "active" or _utc(
+                row["grant_expires_at"], field_name="grant_expires_at"
+            ) <= now:
+                raise PublicationVisitorAccessUnavailable("ShareGrant is not active")
+            if (
+                str(row["grantee_subject_hash"]) != visitor_subject_hash
+                or str(row["grant_publication_version_id"])
+                != str(row["publication_version_id"])
+                or int(row["expected_grant_use_count"]) != int(row["grant_use_count"])
+            ):
+                raise PublicationVisitorAccessUnavailable("Visitor session is no longer bound to ShareGrant")
+            if (
+                str(row["vault_state"]) != "active"
+                or str(row["publication_state"]) != "confirmed"
+                or str(row["projection_state"]) != "active"
+                or int(row["grant_authority_epoch"]) != int(row["vault_authority_epoch"])
+                or int(row["grant_authority_epoch"]) != int(row["publication_authority_epoch"])
+            ):
+                raise PublicationVisitorAccessUnavailable("publication projection is not active")
+            return PublicationVisitorProjectionReadResult(
+                session_id=str(row["session_id"]),
+                publication_id=str(row["publication_id"]),
+                publication_version_id=str(row["publication_version_id"]),
+                expires_at=_utc(row["session_expires_at"], field_name="session_expires_at"),
+                display_title=str(row["display_title"]),
+                display_body=str(row["display_body"]),
+                ai_disclosure=str(row["ai_disclosure"]),
+                projection_hash=str(row["projection_hash"]),
+                public_citation_hash=str(row["public_citation_hash"]),
             )
 
     def _active_owner_scope(

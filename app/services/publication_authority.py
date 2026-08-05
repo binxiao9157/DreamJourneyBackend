@@ -366,6 +366,33 @@ class InMemoryPublicationAuthorityRepository:
                     return deepcopy(projection)
         return None
 
+    def public_projection_content_snapshot(
+        self,
+        publication_id: str,
+        publication_version_id: str,
+    ) -> Mapping[str, Any] | None:
+        """Return the independently stored public copy, never Owner Truth content."""
+
+        with self._lock:
+            for projection in self._public_projections.values():
+                if (
+                    projection.get("publicationId") == publication_id
+                    and projection.get("publicationVersionId") == publication_version_id
+                ):
+                    return deepcopy(
+                        {
+                            "publicationId": projection["publicationId"],
+                            "publicationVersionId": projection["publicationVersionId"],
+                            "projectionState": projection["projectionState"],
+                            "displayTitle": projection["displayTitle"],
+                            "displayBody": projection["displayBody"],
+                            "aiDisclosure": projection["aiDisclosure"],
+                            "projectionHash": projection["projectionHash"],
+                            "publicCitationHash": projection["publicCitationHash"],
+                        }
+                    )
+        return None
+
     def create_draft(
         self,
         *,
@@ -472,12 +499,21 @@ class InMemoryPublicationAuthorityRepository:
                 )
             version_id = str(uuid5(_NAMESPACE, f"publication-version:{command.draft_id}:1"))
             projection_id = str(uuid5(_NAMESPACE, f"publication-projection:{version_id}"))
+            public_citation_hash = _digest(
+                {
+                    "publicationVersionId": version_id,
+                    "memoryVersionId": memory.memory_version_id,
+                    "memoryContentHash": memory.content_hash,
+                    "draftSnapshotHash": draft_result.draft_snapshot_hash,
+                }
+            )
             public_projection_hash = _digest(
                 {
                     "title": draft["publicTitle"],
                     "body": draft["publicBody"],
                     "aiDisclosure": PUBLICATION_AI_DISCLOSURE,
                     "draftSnapshotHash": draft_result.draft_snapshot_hash,
+                    "publicCitationHash": public_citation_hash,
                 }
             )
             result = PublicationConfirmResult(
@@ -499,7 +535,11 @@ class InMemoryPublicationAuthorityRepository:
                 "authorityEpoch": memory.authority_epoch,
                 "publicationId": command.publication_id,
                 "publicationVersionId": version_id,
+                "displayTitle": draft["publicTitle"],
+                "displayBody": draft["publicBody"],
+                "aiDisclosure": PUBLICATION_AI_DISCLOSURE,
                 "projectionHash": public_projection_hash,
+                "publicCitationHash": public_citation_hash,
                 "projectionState": "active",
                 "vaultState": "active",
                 "publicationState": "confirmed",

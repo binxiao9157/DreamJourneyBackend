@@ -316,6 +316,18 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/internal/publication-access/sessions/{session_id}/projection",
+                session,
+                "publicationVisitorProjectionRead",
+            ),
+            _rule(
+                "POST",
+                "/v2/internal/publication-access/sessions/{session_id}/answers",
+                session,
+                "publicationVisitorDeterministicAnswer",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/candidates/{candidate_id}/decisions",
                 session,
                 "ownerTruthCandidateDecision",

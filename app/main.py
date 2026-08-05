@@ -88,6 +88,7 @@ from app.services.publication_visitor_access import (
     PublicationVisitorAdmissionResult,
     PublicationVisitorSessionCommand,
 )
+from app.services.publication_visitor_reader import PublicationVisitorReaderService
 from app.services.identity_bindings import (
     IdentityChallengeConfigurationError,
     IdentityChallengeDeliveryError,
@@ -3198,6 +3199,21 @@ def _publication_visitor_session_command(
         command_id=str(value.get("commandId") or ""),
         grant_credential=str(value.get("grantCredential") or ""),
         session_credential=str(value.get("sessionCredential") or ""),
+    )
+
+
+def _publication_visitor_reader_payload(
+    payload: Mapping[str, Any],
+    *,
+    allow_question: bool,
+) -> Mapping[str, Any]:
+    allowed_fields = {"sessionCredential"}
+    if allow_question:
+        allowed_fields.add("question")
+    return _publication_visitor_access_payload(
+        payload,
+        allowed_fields=allowed_fields,
+        required_fields=allowed_fields,
     )
 
 
@@ -6759,6 +6775,75 @@ def admit_publication_visitor_session(
         content=_publication_visitor_admission_response(result),
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.post(
+    "/v2/internal/publication-access/sessions/{session_id}/projection",
+    include_in_schema=False,
+)
+def read_publication_visitor_projection(
+    request: Request,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Read only the immutable public projection bound to one QA Visitor session."""
+
+    try:
+        visitor_subject_id = _require_publication_visitor_access_qa(request)
+        value = _publication_visitor_reader_payload(payload, allow_question=False)
+        with store.request_unit_of_work(
+            correlation_id=f"publication-visitor-projection-read:{session_id}",
+            command_id=None,
+        ):
+            result = PublicationVisitorReaderService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).read_projection(
+                visitor_subject_id=visitor_subject_id,
+                session_id=session_id,
+                session_credential=str(value.get("sessionCredential") or ""),
+            )
+    except HTTPException:
+        raise
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(content=result.payload(), headers={"Cache-Control": "no-store"})
+
+
+@app.post(
+    "/v2/internal/publication-access/sessions/{session_id}/answers",
+    include_in_schema=False,
+)
+def answer_publication_visitor_question(
+    request: Request,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Return a deterministic public-only excerpt or an explicit unknown answer."""
+
+    try:
+        visitor_subject_id = _require_publication_visitor_access_qa(request)
+        value = _publication_visitor_reader_payload(payload, allow_question=True)
+        with store.request_unit_of_work(
+            correlation_id=f"publication-visitor-answer:{session_id}",
+            command_id=None,
+        ):
+            result = PublicationVisitorReaderService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).answer(
+                visitor_subject_id=visitor_subject_id,
+                session_id=session_id,
+                session_credential=str(value.get("sessionCredential") or ""),
+                question=str(value.get("question") or ""),
+            )
+    except HTTPException:
+        raise
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(content=result.payload(), headers={"Cache-Control": "no-store"})
 
 
 @app.post(
