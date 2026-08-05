@@ -685,6 +685,43 @@ def main() -> None:
             )
             require(memory_version_id, "Candidate acceptance must return the created MemoryVersion")
 
+            # A confirmed MemoryVersion is not queryable until the Projection
+            # worker has rebuilt the owner-scoped read model. This prevents a
+            # freshly accepted Candidate from leaking through a stale Context.
+            pre_projection_context_response = client.post(
+                "/context/build",
+                headers=captured_policy_headers(
+                    client,
+                    owner_headers,
+                    session_id=owner_session_id,
+                    feature="echoTextInput",
+                ),
+                json={
+                    "userId": owner_id,
+                    "intent": "echo_chat",
+                    "query": "请只依据已经确认的个人回忆回答。",
+                    "personaScope": "personal",
+                    "digitalHumanId": owner_id,
+                },
+            )
+            require(
+                pre_projection_context_response.status_code == 200,
+                "Context must remain available while a confirmed Projection is rebuilding",
+            )
+            pre_projection_selected_context = (
+                (pre_projection_context_response.json().get("contextPacket") or {}).get(
+                    "selectedContext"
+                )
+                or []
+            )
+            require(
+                not any(
+                    ((item.get("citation") or {}).get("sourceId") == candidate_source_id)
+                    for item in pre_projection_selected_context
+                ),
+                "Context must not expose confirmed media before Projection rebuild",
+            )
+
             projection_worker = OwnerTruthMemoryProjectionWorkerRuntime(
                 settings=worker_settings,
                 store=store,
@@ -1155,6 +1192,7 @@ def main() -> None:
                         "formalPolicySnapshotCaptured": True,
                         "candidateConfirmed": True,
                         "memoryVersionCreated": True,
+                        "projectionLagBlocked": True,
                         "projectionReady": True,
                         "contextBuilt": True,
                         "deletionAccessRevoked": True,
