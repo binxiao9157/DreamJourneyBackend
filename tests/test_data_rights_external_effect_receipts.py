@@ -1,4 +1,5 @@
 import hashlib
+import json
 import unittest
 from typing import Optional
 
@@ -60,6 +61,8 @@ class DataRightsExternalEffectReceiptTests(unittest.TestCase):
         self.assertEqual([item["state"] for item in observations], ["accepted", "completed"])
         self.assertTrue(observations[-1]["providerReceiptPresent"])
         self.assertNotIn("effectIdentityHash", observations[-1])
+        self.assertNotIn(self.owner_hash, json.dumps(observations, sort_keys=True))
+        self.assertNotIn(self.owner_hash, json.dumps(first["receipt"], sort_keys=True))
 
     def test_cross_account_observation_is_rejected_before_projection(self) -> None:
         with self.assertRaisesRegex(ValueError, "owner does not match"):

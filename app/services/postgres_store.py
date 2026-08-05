@@ -2522,9 +2522,10 @@ class PostgresStore:
         if row is None:
             raise RuntimeError("external effect receipt insert did not produce a row")
         persisted = self._rights_external_effect_receipt_payload(row)
-        if receipt_from_persistence(persisted).persistence_payload() != payload:
+        persisted_receipt = receipt_from_persistence(persisted)
+        if persisted_receipt.persistence_payload() != payload:
             raise ValueError("external effect receipt is append-only")
-        return {"outcome": outcome, "receipt": persisted}
+        return {"outcome": outcome, "receipt": persisted_receipt.projection_observation()}
 
     def list_rights_external_effect_receipts(self, request_id: str) -> List[Dict[str, Any]]:
         rows = self._fetchall(

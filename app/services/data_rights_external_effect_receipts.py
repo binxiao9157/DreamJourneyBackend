@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 
 from app.services.data_rights_external_effect_projection import (
     DATA_RIGHTS_EXTERNAL_EFFECT_DOMAINS,
+    DataRightsExternalEffectObservation,
 )
 
 
@@ -144,17 +145,17 @@ class DataRightsExternalEffectReceipt:
             "retentionUntil": self.retention_until,
         }
 
-    def projection_observation(self) -> Dict[str, Any]:
-        """Return data safe for the external-effect read projection."""
+    def projection_observation(self) -> DataRightsExternalEffectObservation:
+        """Return a redacted observation with an in-process owner binding."""
 
-        return {
-            "requestId": self.request_id,
-            "ownerSubjectHash": self.owner_subject_hash,
-            "domain": self.domain,
-            "state": self.state,
-            "providerReceiptPresent": self.provider_receipt_present,
-            "reasonCodes": [self.reason_code],
-        }
+        return DataRightsExternalEffectObservation(
+            request_id=self.request_id,
+            owner_subject_hash=self.owner_subject_hash,
+            domain=self.domain,
+            state=self.state,
+            provider_receipt_present=self.provider_receipt_present,
+            reason_codes=[self.reason_code],
+        )
 
 
 def receipt_from_persistence(record: Dict[str, Any]) -> DataRightsExternalEffectReceipt:

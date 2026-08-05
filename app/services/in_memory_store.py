@@ -1654,9 +1654,12 @@ class InMemoryStore:
             if existing is not None:
                 if existing != record:
                     raise ValueError("external effect receipt is append-only")
-                return {"outcome": "deduplicated", "receipt": deepcopy(existing)}
+                return {
+                    "outcome": "deduplicated",
+                    "receipt": receipt_from_persistence(existing).projection_observation(),
+                }
             self._rights_external_effect_receipts[receipt.receipt_id] = record
-            return {"outcome": "appended", "receipt": deepcopy(record)}
+            return {"outcome": "appended", "receipt": receipt.projection_observation()}
 
     def list_rights_external_effect_receipts(self, request_id: str) -> List[Dict[str, Any]]:
         """Return internal, value-minimized observations for one rights request."""

@@ -61,6 +61,45 @@ class DataRightsExternalEffectProjectionError(ValueError):
     """Raised when a redacted external-effect projection cannot be built."""
 
 
+class DataRightsExternalEffectObservation(dict):
+    """A value-minimized receipt observation with a non-serializable owner bind.
+
+    Repositories create this object only after enforcing the request-owner
+    fence.  The owner hash remains available to this in-process projection so
+    it can reject foreign evidence, while the public mapping deliberately
+    contains no owner hash, effect identity, evidence hash, or Provider value.
+    ``json.dumps`` treats this as its dictionary payload and therefore cannot
+    accidentally serialize the private owner binding.
+    """
+
+    def __init__(
+        self,
+        *,
+        request_id: str,
+        owner_subject_hash: str,
+        domain: str,
+        state: str,
+        provider_receipt_present: bool,
+        reason_codes: Sequence[str],
+    ) -> None:
+        super().__init__(
+            {
+                "requestId": request_id,
+                "domain": domain,
+                "state": state,
+                "providerReceiptPresent": provider_receipt_present,
+                "reasonCodes": list(reason_codes),
+            }
+        )
+        self._owner_subject_hash = owner_subject_hash
+
+    @property
+    def owner_subject_hash(self) -> str:
+        """Return the owner binding for in-process projection validation only."""
+
+        return self._owner_subject_hash
+
+
 def build_data_rights_external_effect_projection(
     summary: Mapping[str, Any],
     *,
@@ -112,7 +151,7 @@ def build_data_rights_external_effect_projection(
         if (
             not subject_hash
             or str(observation.get("requestId") or "") != request_id
-            or str(observation.get("ownerSubjectHash") or "") != subject_hash
+            or _linked_observation_owner_hash(observation) != subject_hash
         ):
             rejected_evidence_count += 1
             continue
@@ -198,6 +237,20 @@ def _linked_effect_observation(observation: Mapping[str, Any]) -> Dict[str, Any]
         "ageSeconds": _nonnegative_int_or_none(observation.get("ageSeconds")),
         "reasonCodes": _deduplicate(reason_codes),
     }
+
+
+def _linked_observation_owner_hash(observation: Mapping[str, Any]) -> str:
+    """Read a trusted private owner bind or a test-only raw mapping value.
+
+    The raw mapping fallback preserves validation of malformed/foreign inputs
+    from callers that do not originate in a repository.  Repository results
+    use :class:`DataRightsExternalEffectObservation`, whose owner binding is
+    intentionally excluded from the dictionary payload.
+    """
+
+    if isinstance(observation, DataRightsExternalEffectObservation):
+        return observation.owner_subject_hash
+    return str(observation.get("ownerSubjectHash") or "")
 
 
 def _domain_projection(
@@ -314,6 +367,7 @@ def _text(value: Any, field: str) -> str:
 __all__ = [
     "DATA_RIGHTS_EXTERNAL_EFFECT_PROJECTION_SCHEMA_VERSION",
     "DATA_RIGHTS_EXTERNAL_EFFECT_DOMAINS",
+    "DataRightsExternalEffectObservation",
     "DataRightsExternalEffectProjectionError",
     "build_data_rights_external_effect_projection",
 ]
