@@ -596,7 +596,7 @@ class VoiceProfileLifecycleAPITests(unittest.TestCase):
         self.assertEqual(payload["profile"]["lifecycleState"], "deleting")
         self.assertEqual(payload["profile"]["deletionState"], "pending")
         self.assertEqual(payload["profile"]["exitState"], "partial")
-        self.assertEqual(payload["profile"]["providerCleanupState"], "pending")
+        self.assertEqual(payload["profile"]["providerCleanupState"], "unsupported")
         self.assertFalse(payload["profile"]["providerCleanupReceiptAvailable"])
         receipt = payload["profile"]["providerEffectReceipt"]
         self.assertEqual(receipt["state"], "accepted")

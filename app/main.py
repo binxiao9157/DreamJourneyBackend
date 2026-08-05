@@ -5121,8 +5121,26 @@ VOICE_CLONE_DISABLE_CONTRACT = (
 )
 VOICE_CLONE_DELETE_CONTRACT = (
     "deleteVoiceProfile(profileId:) 会立即撤销本地合成权限，并写入可重放的删除 effect；"
-    "在收到样本、训练产物或 Provider 资产的上游回执前，状态只能是待确认，不能宣称第三方清理已完成。"
+    "尚未产生样本、训练产物或 Provider 资产的删除回执；在收到上游回执前，"
+    "状态只能是待确认，不能宣称第三方清理已完成。"
 )
+VOICE_CLONE_EXIT_DISCLOSURE_CONTRACT = {
+    "accessRevoked": {
+        "exitState": "accessRevoked",
+        "accessRevoked": True,
+        "localCleanupState": "retained",
+        "providerCleanupState": "notRequested",
+        "providerCleanupReceiptAvailable": False,
+    },
+    # A local outbox acceptance is not an upstream Provider cleanup receipt.
+    "deletionReceiptUnsupported": {
+        "exitState": "partial",
+        "accessRevoked": True,
+        "localCleanupState": "tombstoned",
+        "providerCleanupState": "unsupported",
+        "providerCleanupReceiptAvailable": False,
+    },
+}
 FAMILY_PERSONA_CONTRACT_VERSION = 1
 FAMILY_PERSONA_CONTRACT_MODE = "mockFamilyPersona"
 DIGITAL_HUMAN_MODE_LABELS = {
@@ -11698,13 +11716,7 @@ def _voice_clone_exit_disclosure(profile: Dict[str, Any]) -> Dict[str, Any]:
     """Describe the proven cleanup boundary without fabricating Provider receipts."""
     lifecycle_state = canonical_lifecycle_state(profile)
     if lifecycle_state is VoiceProfileLifecycleState.PAUSED:
-        return {
-            "exitState": "accessRevoked",
-            "accessRevoked": True,
-            "localCleanupState": "retained",
-            "providerCleanupState": "notRequested",
-            "providerCleanupReceiptAvailable": False,
-        }
+        return dict(VOICE_CLONE_EXIT_DISCLOSURE_CONTRACT["accessRevoked"])
     if lifecycle_state in {
         VoiceProfileLifecycleState.DELETING,
         VoiceProfileLifecycleState.DELETED,
@@ -11721,8 +11733,12 @@ def _voice_clone_exit_disclosure(profile: Dict[str, Any]) -> Dict[str, Any]:
             provider_cleanup_state = "partial"
             exit_state = "partial"
         else:
-            provider_cleanup_state = "pending"
-            exit_state = "partial"
+            # The stored effect is a local intent only. Until a Provider adapter
+            # actually dispatches it and persists an upstream receipt, do not
+            # represent local acceptance as third-party cleanup in progress.
+            return dict(
+                VOICE_CLONE_EXIT_DISCLOSURE_CONTRACT["deletionReceiptUnsupported"]
+            )
         return {
             "exitState": exit_state,
             "accessRevoked": True,
