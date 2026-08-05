@@ -212,7 +212,11 @@ def seed_reviewable_batch(
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO owner_truth.vaults (vault_id, owner_subject_id) VALUES (%s, %s)",
+                """
+                INSERT INTO owner_truth.vaults (vault_id, owner_subject_id)
+                VALUES (%s, %s)
+                ON CONFLICT (vault_id) DO NOTHING
+                """,
                 (vault_id, owner_subject_id),
             )
             cursor.execute(

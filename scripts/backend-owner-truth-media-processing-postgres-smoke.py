@@ -321,8 +321,8 @@ def main() -> None:
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         require(
-            str(applied.get("appliedHead") or "") == "0075",
-            "Stage 2 media lifecycle migration must be the schema head",
+            str(applied.get("appliedHead") or "") == str(verified.get("expectedHead") or ""),
+            "Stage 2 media lifecycle migration must reach the current schema head",
         )
 
         with TemporaryDirectory(prefix="dreamjourney-media-postgres-smoke-") as media_root:
