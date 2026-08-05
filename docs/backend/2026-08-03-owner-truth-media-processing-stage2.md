@@ -11,6 +11,7 @@
 5. 视频当前只做私有存储，处理状态固定为 `notApplicable`，不伪造缩略图、转写或理解结果。
 6. 临时 Provider 失败最多自动重试三次；终止失败后保留已验证的私有文件，用户可发起一次新的 `processingGeneration`，不需要重新上传，也不会改写文件版本。
 7. 每次处理任务的终止失败都会在同一数据库事务内写入 value-free dead-letter：先写 SourceObject 失败状态与 typed consumer receipt，再使 job 终止，最后记录 dead-letter。重试耗尽的记录标记为 `maxAttemptsExceeded`，需经已有 restore-fenced 人工授权后才能申请 replay；不可恢复的处理错误标记为 `manualInterventionRequired`，不会被静默重放。
+8. 私有媒体删除同样采用撤权优先：对象存储不可用或存储 Provider 不匹配时，访问仍保持撤销，当前删除 job 终止并写入 `manualInterventionRequired` dead-letter。用户后续的删除重试会创建新的 `deletionGeneration`，不会重放旧 job 或恢复访问。
 
 这仍是 closed-pilot 能力：`ownerMediaCaptureV1`、摄入服务、处理 Worker 和内容安全扫描均须独立打开；默认公开发布态不可见。
 
@@ -96,7 +97,10 @@ scripts/run-backend-owner-truth-media-processing-gate.sh
 
 其中的 disposable PostgreSQL smoke 还会验证禁用的图片 OCR 在第三次失败后只产生一条
 `maxAttemptsExceeded` dead-letter，且 job、typed consumer receipt、SourceObject 状态和
-dead-letter 一并成为终态；该 smoke 不会调用真实 OCR/ASR Provider。
+dead-letter 一并成为终态。它还会让私有对象删除 Provider 显式失败，验证访问撤销、
+`partial` 删除状态、失败 job、typed consumer receipt 和一条
+`manualInterventionRequired` dead-letter 在同一事务中落库；删除重试只生成新代次。该 smoke
+不会调用真实 OCR/ASR Provider 或真实对象存储。
 
 部署容器内执行：
 
@@ -155,6 +159,12 @@ MemoryVersion -> Projection -> /context/build`，并验证非 Owner 不可读取
   OCR 在第三次失败后写入一条 open `maxAttemptsExceeded` dead-letter，SourceObject、
   typed consumer receipt 和 async job 均为终态。随后 lease-heartbeat smoke 再次通过；
   两个一次性数据库均已删除，默认 Worker profile 仍未启动。
+- 2026-08-05：服务器已部署 `572d438`。API 容器内的 Stage 2 PostgreSQL smoke 确认
+  `mediaDeletionDeadLetterAdmitted=true`：对象删除 Provider 不可用时，访问保持
+  `accessRevoked`，SourceObject 变为可重试 `partial`，当前 async job 与 typed consumer
+  receipt 均为失败终态，并写入一条 open `manualInterventionRequired` dead-letter。随后
+  物理删除 lease-heartbeat smoke 通过，证明慢删除期间竞争 worker 不会接管 lease；默认
+  Worker profile 仍未启动。
 - 公网 `/ready` 验证通过：database、schema、auth、incident 均为 `ready`。
 - 部署态 smoke 在服务器容器内创建一次性 PostgreSQL 数据库，完成后自动删除，没有写入生产业务表。
 - E2E 已证明：公开默认关闭、Owner 绑定上传、命令幂等、跨 Owner 隐藏、私有文件落盘、媒体处理成功、派生 `import` Source、生成一条 `pending` Candidate、处理回执持久化及响应脱敏。
