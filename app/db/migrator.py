@@ -246,8 +246,8 @@ class PostgresMigrator:
             for migration in migrations:
                 existing = ledger.get(migration.version)
                 if existing is not None:
-                    self._validate_checksum(migration, existing)
                     if existing.get("state") == "applied":
+                        self._validate_checksum(migration, existing)
                         skipped.append(migration.version)
                         continue
 
@@ -555,7 +555,7 @@ class PostgresMigrator:
             )
         for version, migration in known.items():
             existing = ledger.get(version)
-            if existing is not None:
+            if existing is not None and existing.get("state") == "applied":
                 self._validate_checksum(migration, existing)
 
     @staticmethod

@@ -310,6 +310,27 @@ class PostgresMigratorTests(unittest.TestCase):
         self.assertEqual(result["appliedVersions"], ["0001"])
         self.assertEqual(database.ledger["0001"]["state"], "applied")
 
+    def test_failed_unapplied_migration_allows_a_corrected_checksum_on_retry(self):
+        database = FakeMigrationDatabase()
+        database.fail_next_migration = True
+        migrator = self.migrator(database)
+
+        with self.assertRaisesRegex(RuntimeError, "migration statement failed"):
+            migrator.apply()
+        failed_checksum = database.ledger["0001"]["checksum"]
+
+        write_migration(
+            self.migrations_dir,
+            sql="-- migration:baseline\nCREATE TABLE users (id TEXT PRIMARY KEY, value TEXT);\n",
+            baseline=self.baseline,
+        )
+
+        result = migrator.apply()
+
+        self.assertEqual(result["appliedVersions"], ["0001"])
+        self.assertEqual(database.ledger["0001"]["state"], "applied")
+        self.assertNotEqual(database.ledger["0001"]["checksum"], failed_checksum)
+
     def test_concurrent_migrators_are_serialized_by_advisory_lock(self):
         database = FakeMigrationDatabase()
 
