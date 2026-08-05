@@ -224,6 +224,8 @@ test -f .env.example
 test -f requirements.txt
 test -f scripts/migrate_db.py
 test -f scripts/backend-readiness-postgres-smoke.py
+test -f scripts/backend-publication-authority-postgres-smoke.py
+test -f scripts/run-backend-publication-authority-postgres-smoke.sh
 test -f scripts/backend-readiness-deployed-smoke.py
 test -f scripts/backend-operation-metrics-deployed-smoke.py
 test -f scripts/run-backend-operation-metrics-deployed-smoke.sh

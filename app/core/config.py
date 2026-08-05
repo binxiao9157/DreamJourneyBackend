@@ -145,6 +145,10 @@ class Settings:
     owner_truth_media_external_processor_timeout_seconds: float = 30.0
     owner_truth_media_external_processor_max_payload_bytes: int = 10 * 1024 * 1024
     delegated_access_contract_api_enabled: bool = False
+    # Publication is an M2 capability.  The first owner-authority writer is
+    # intentionally QA-only until visitor grants and revocation propagation
+    # have their own completed release gates.
+    publication_authority_qa_enabled: bool = False
     # Candidate review is an Owner Truth QA contract only until the M0 review
     # UI, release policy, and external gates are complete.
     owner_truth_candidate_review_qa_enabled: bool = False
@@ -492,6 +496,10 @@ class Settings:
             delegated_access_contract_api_enabled=_env_bool(
                 "DELEGATED_ACCESS_CONTRACT_API_ENABLED",
                 cls.delegated_access_contract_api_enabled,
+            ),
+            publication_authority_qa_enabled=_env_bool(
+                "PUBLICATION_AUTHORITY_QA_ENABLED",
+                cls.publication_authority_qa_enabled,
             ),
             owner_truth_candidate_review_qa_enabled=_env_bool(
                 "OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED",

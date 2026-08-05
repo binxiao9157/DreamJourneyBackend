@@ -126,6 +126,9 @@ from app.services.owner_truth_media_source_object import (
 from app.services.owner_truth_candidate_review import (
     PostgresOwnerTruthCandidateReviewRepository,
 )
+from app.services.publication_authority import (
+    PostgresPublicationAuthorityRepository,
+)
 from app.services.owner_truth_memory_projection import (
     PostgresOwnerTruthMemoryProjectionRepository,
 )
@@ -461,6 +464,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth candidate review requires an active unit of work")
         return PostgresOwnerTruthCandidateReviewRepository(active.connection)
+
+    def publication_authority_repository(
+        self,
+    ) -> PostgresPublicationAuthorityRepository:
+        """Return the M2 Owner writer only while its request UoW is active."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("publication authority requires an active unit of work")
+        return PostgresPublicationAuthorityRepository(active.connection)
 
     def owner_truth_memory_projection_repository(
         self,

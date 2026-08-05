@@ -1,0 +1,13 @@
+{
+  "version": "0079",
+  "name": "publication_authority_public_projection",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationAuthorityInternalQADefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publicationAuthorityV1": false,
+    "publicationPublicProjectionReadV1": false,
+    "publicationProjectionInvalidationWorkerV1": false
+  }
+}

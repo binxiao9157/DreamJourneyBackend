@@ -58,6 +58,9 @@ from app.domain.owner_truth.source_commands import (
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
 )
+from app.services.publication_authority import (
+    InMemoryPublicationAuthorityRepository,
+)
 from app.services.owner_truth_media_source_object import (
     InMemoryOwnerTruthMediaSourceObjectRepository,
 )
@@ -184,6 +187,9 @@ class InMemoryStore:
                 )
             )
         )
+        # This is an explicit semantic double for the hidden M2 owner writer.
+        # It is not connected to legacy archive or KBLite records.
+        self._publication_authority_repository = InMemoryPublicationAuthorityRepository()
         self._owner_truth_conversation_repository = (
             InMemoryOwnerTruthConversationRepository()
         )
@@ -344,6 +350,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthCandidateReviewRepository:
         return self._owner_truth_candidate_review_repository
+
+    def publication_authority_repository(
+        self,
+    ) -> InMemoryPublicationAuthorityRepository:
+        return self._publication_authority_repository
 
     def owner_truth_conversation_repository(
         self,

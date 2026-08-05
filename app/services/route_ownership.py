@@ -286,6 +286,18 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/internal/owner-authority/vaults/{vault_id}/drafts",
+                session,
+                "publicationAuthorityDraft",
+            ),
+            _rule(
+                "POST",
+                "/v2/internal/owner-authority/vaults/{vault_id}/drafts/{draft_id}/confirm/{record_id}",
+                session,
+                "publicationAuthorityConfirm",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/candidates/{candidate_id}/decisions",
                 session,
                 "ownerTruthCandidateDecision",

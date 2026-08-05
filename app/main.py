@@ -60,6 +60,18 @@ from app.services.delegated_access import (
     ResourceScopeType,
     RevokeAccessGrantCommand,
 )
+from app.services.publication_authority import (
+    PublicationAuthorityAccessDenied,
+    PublicationAuthorityConflict,
+    PublicationAuthorityDisabled,
+    PublicationAuthorityError,
+    PublicationAuthorityNotPublishable,
+    PublicationAuthorityService,
+    PublicationConfirmCommand,
+    PublicationConfirmResult,
+    PublicationDraftCommand,
+    PublicationDraftResult,
+)
 from app.services.identity_bindings import (
     IdentityChallengeConfigurationError,
     IdentityChallengeDeliveryError,
@@ -651,6 +663,7 @@ DELEGATED_ACCESS_CONTRACT_API_ENABLED = bool(
 OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = bool(
     settings.owner_truth_candidate_review_qa_enabled
 )
+PUBLICATION_AUTHORITY_QA_ENABLED = bool(settings.publication_authority_qa_enabled)
 OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = bool(
     settings.owner_truth_context_authority_closed_pilot_enabled
 )
@@ -742,6 +755,27 @@ def _require_owner_truth_candidate_review_qa(request: Request) -> str:
         raise HTTPException(
             status_code=401,
             detail={"code": "ownerTruthCandidateReviewUserSessionRequired"},
+        )
+    return user_id
+
+
+def _require_publication_authority_qa(request: Request) -> str:
+    """Keep the unfinished M2 publication writer absent from normal product UI."""
+
+    if (
+        not PUBLICATION_AUTHORITY_QA_ENABLED
+        or str(request.headers.get("x-dreamjourney-qa-publication") or "").strip()
+        != "1"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "publicationAuthorityUnavailable"},
+        )
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "publicationAuthorityUserSessionRequired"},
         )
     return user_id
 
@@ -1180,6 +1214,19 @@ def _owner_truth_candidate_review_context(
     vault_id: str,
 ) -> OwnerTruthCommandContext:
     owner_subject_id = _require_owner_truth_candidate_review_qa(request)
+    return OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
+def _publication_authority_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    owner_subject_id = _require_publication_authority_qa(request)
     return OwnerTruthCommandContext(
         vault_id=vault_id,
         owner_subject_id=owner_subject_id,
@@ -2849,6 +2896,122 @@ def _owner_truth_candidate_review_http_error(
         status_code=400,
         detail={"code": "ownerTruthCandidateReviewInvalid"},
     )
+
+
+def _publication_authority_http_error(error: PublicationAuthorityError) -> HTTPException:
+    if isinstance(error, PublicationAuthorityAccessDenied):
+        return HTTPException(status_code=403, detail={"code": "publicationAuthorityDenied"})
+    if isinstance(error, PublicationAuthorityNotPublishable):
+        return HTTPException(status_code=409, detail={"code": "publicationNotPublishable"})
+    if isinstance(error, PublicationAuthorityConflict):
+        return HTTPException(status_code=409, detail={"code": "publicationAuthorityConflict"})
+    if isinstance(error, PublicationAuthorityDisabled):
+        return HTTPException(status_code=404, detail={"code": "publicationAuthorityUnavailable"})
+    return HTTPException(status_code=400, detail={"code": "publicationAuthorityInvalid"})
+
+
+def _publication_authority_payload(
+    payload: Mapping[str, Any],
+    *,
+    allowed_fields: set[str],
+    required_fields: set[str],
+) -> Mapping[str, Any]:
+    unexpected = set(payload) - allowed_fields
+    missing = {field for field in required_fields if field not in payload}
+    if unexpected or missing:
+        raise PublicationAuthorityError("publication payload shape is invalid")
+    return payload
+
+
+def _publication_authority_draft_command(
+    payload: Mapping[str, Any],
+) -> PublicationDraftCommand:
+    value = _publication_authority_payload(
+        payload,
+        allowed_fields={"commandId", "memoryVersionId", "publicTitle", "publicBody"},
+        required_fields={"commandId", "memoryVersionId", "publicTitle", "publicBody"},
+    )
+    return PublicationDraftCommand(
+        command_id=str(value.get("commandId") or ""),
+        memory_version_id=str(value.get("memoryVersionId") or ""),
+        public_title=str(value.get("publicTitle") or ""),
+        public_body=str(value.get("publicBody") or ""),
+    )
+
+
+def _publication_authority_confirm_command(
+    payload: Mapping[str, Any],
+    *,
+    publication_id: str,
+    draft_id: str,
+) -> PublicationConfirmCommand:
+    value = _publication_authority_payload(
+        payload,
+        allowed_fields={
+            "commandId",
+            "expectedDraftRevision",
+            "expectedDraftSnapshotHash",
+            "secondConfirmation",
+        },
+        required_fields={
+            "commandId",
+            "expectedDraftRevision",
+            "expectedDraftSnapshotHash",
+            "secondConfirmation",
+        },
+    )
+    return PublicationConfirmCommand(
+        command_id=str(value.get("commandId") or ""),
+        publication_id=publication_id,
+        draft_id=draft_id,
+        expected_draft_revision=value.get("expectedDraftRevision"),
+        expected_draft_snapshot_hash=str(value.get("expectedDraftSnapshotHash") or ""),
+        second_confirmation=value.get("secondConfirmation"),
+    )
+
+
+def _publication_authority_draft_response(
+    *,
+    vault_id: str,
+    result: PublicationDraftResult,
+) -> Dict[str, Any]:
+    return {
+        "schemaVersion": "publication-authority-v1",
+        "vaultId": vault_id,
+        "publicationId": result.publication_id,
+        "draftId": result.draft_id,
+        "outcome": result.outcome,
+        "state": result.state,
+        "expectedDraftRevision": result.expected_draft_revision,
+        "expectedDraftSnapshotHash": result.draft_snapshot_hash,
+        "preview": {
+            "title": result.preview_title,
+            "body": result.preview_body,
+        },
+        "requiresSecondConfirmation": result.second_confirmation_required,
+        "thirdPartyReviewRequired": result.third_party_review_required,
+        "aiDisclosureRequired": True,
+    }
+
+
+def _publication_authority_confirm_response(
+    *,
+    vault_id: str,
+    result: PublicationConfirmResult,
+) -> Dict[str, Any]:
+    return {
+        "schemaVersion": "publication-authority-v1",
+        "vaultId": vault_id,
+        "publicationId": result.publication_id,
+        "draftId": result.draft_id,
+        "publicationVersionId": result.publication_version_id,
+        "publicationVersion": result.publication_version,
+        "outcome": result.outcome,
+        "publicationState": result.publication_state,
+        "projectionState": result.projection_state,
+        "publicProjectionHash": result.public_projection_hash,
+        "aiDisclosureRequired": result.ai_disclosure_required,
+    }
 
 
 def _owner_truth_text_capture_http_error(
@@ -6150,6 +6313,84 @@ def owner_truth_candidate_inbox(
             _owner_truth_candidate_inbox_item_response(item) for item in items
         ],
     }
+
+
+@app.post(
+    "/v2/internal/owner-authority/vaults/{vault_id}/drafts",
+    include_in_schema=False,
+)
+def create_publication_authority_draft(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Create an M2 QA-only draft from one active, confirmed MemoryVersion."""
+
+    try:
+        context = _publication_authority_context(request, vault_id=vault_id)
+        command = _publication_authority_draft_command(payload)
+        with store.request_unit_of_work(
+            correlation_id=(
+                "publication-authority-draft:"
+                f"{context.vault_id}:{command.memory_version_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = PublicationAuthorityService(
+                store.publication_authority_repository(),
+                enabled=True,
+            ).create_draft(context=context, command=command)
+    except HTTPException:
+        raise
+    except PublicationAuthorityError as error:
+        raise _publication_authority_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_publication_authority_draft_response(vault_id=vault_id, result=result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/internal/owner-authority/vaults/{vault_id}/drafts/{draft_id}/confirm/{record_id}",
+    include_in_schema=False,
+)
+def confirm_publication_authority_draft(
+    request: Request,
+    vault_id: str,
+    draft_id: str,
+    record_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Second Owner confirmation creates one immutable public projection."""
+
+    try:
+        context = _publication_authority_context(request, vault_id=vault_id)
+        command = _publication_authority_confirm_command(
+            payload,
+            publication_id=record_id,
+            draft_id=draft_id,
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "publication-authority-confirm:"
+                f"{context.vault_id}:{command.publication_id}:{command.draft_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = PublicationAuthorityService(
+                store.publication_authority_repository(),
+                enabled=True,
+            ).confirm_draft(context=context, command=command)
+    except HTTPException:
+        raise
+    except PublicationAuthorityError as error:
+        raise _publication_authority_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_publication_authority_confirm_response(vault_id=vault_id, result=result),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post(
