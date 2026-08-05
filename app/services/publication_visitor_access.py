@@ -1119,14 +1119,14 @@ class PostgresPublicationVisitorAccessRepository:
     ) -> Mapping[str, Any]:
         cursor.execute(
             """
-            SELECT grant.id, grant.vault_id, grant.publication_id, grant.publication_version_id,
-                grant.owner_subject_id, grant.grantee_subject_hash, grant.state,
-                grant.authority_epoch, grant.grant_policy_hash, grant.revocation_command_hash,
+            SELECT share_grant.id, share_grant.vault_id, share_grant.publication_id, share_grant.publication_version_id,
+                share_grant.owner_subject_id, share_grant.grantee_subject_hash, share_grant.state,
+                share_grant.authority_epoch, share_grant.grant_policy_hash, share_grant.revocation_command_hash,
                 vault.owner_subject_id AS vault_owner_subject_id
-            FROM publication.share_grants AS grant
-            JOIN owner_truth.vaults AS vault ON vault.vault_id = grant.vault_id
-            WHERE grant.id = %s AND grant.vault_id = %s
-            FOR UPDATE OF grant, vault
+            FROM publication.share_grants AS share_grant
+            JOIN owner_truth.vaults AS vault ON vault.vault_id = share_grant.vault_id
+            WHERE share_grant.id = %s AND share_grant.vault_id = %s
+            FOR UPDATE OF share_grant, vault
             """,
             (grant_id, context.vault_id),
         )
@@ -1143,30 +1143,30 @@ class PostgresPublicationVisitorAccessRepository:
     def _grant_with_active_projection(self, cursor: Any, *, grant_id: str) -> Mapping[str, Any]:
         cursor.execute(
             """
-            SELECT grant.id, grant.vault_id, grant.publication_id, grant.publication_version_id,
-                grant.owner_subject_id, grant.grantee_subject_hash, grant.token_hash, grant.state,
-                grant.expires_at, grant.use_limit, grant.use_count, grant.grant_policy_hash,
-                grant.authority_epoch,
+            SELECT share_grant.id, share_grant.vault_id, share_grant.publication_id, share_grant.publication_version_id,
+                share_grant.owner_subject_id, share_grant.grantee_subject_hash, share_grant.token_hash, share_grant.state,
+                share_grant.expires_at, share_grant.use_limit, share_grant.use_count, share_grant.grant_policy_hash,
+                share_grant.authority_epoch,
                 vault.owner_subject_id AS vault_owner_subject_id,
                 vault.authority_epoch AS vault_authority_epoch,
                 vault.status AS vault_state,
                 publication.state AS publication_state,
                 publication.authority_epoch AS publication_authority_epoch,
                 projection.state AS projection_state
-            FROM publication.share_grants AS grant
-            JOIN owner_truth.vaults AS vault ON vault.vault_id = grant.vault_id
+            FROM publication.share_grants AS share_grant
+            JOIN owner_truth.vaults AS vault ON vault.vault_id = share_grant.vault_id
             JOIN publication.publications AS publication
-              ON publication.id = grant.publication_id AND publication.vault_id = grant.vault_id
+              ON publication.id = share_grant.publication_id AND publication.vault_id = share_grant.vault_id
             JOIN publication.publication_versions AS version
-              ON version.id = grant.publication_version_id
-             AND version.publication_id = grant.publication_id
-             AND version.vault_id = grant.vault_id
+              ON version.id = share_grant.publication_version_id
+             AND version.publication_id = share_grant.publication_id
+             AND version.vault_id = share_grant.vault_id
             JOIN publication.public_projections AS projection
               ON projection.publication_version_id = version.id
              AND projection.publication_id = version.publication_id
              AND projection.vault_id = version.vault_id
-            WHERE grant.id = %s
-            FOR UPDATE OF grant, vault, publication, version, projection
+            WHERE share_grant.id = %s
+            FOR UPDATE OF share_grant, vault, publication, version, projection
             """,
             (grant_id,),
         )

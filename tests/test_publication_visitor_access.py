@@ -310,9 +310,14 @@ class PublicationVisitorAccessTests(unittest.TestCase):
             ROOT
             / "db/migrations/0081_publication_share_grant_authority_epoch.sql"
         ).read_text(encoding="utf-8")
+        service = (ROOT / "app/services/publication_visitor_access.py").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("UPDATE publication.share_grants AS share_grant", migration)
         self.assertNotIn("AS grant\n", migration)
+        self.assertNotIn("publication.share_grants AS grant", service)
+        self.assertNotIn("FOR UPDATE OF grant", service)
 
 
 if __name__ == "__main__":  # pragma: no cover
