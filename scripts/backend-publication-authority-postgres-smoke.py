@@ -391,12 +391,28 @@ def exercise(dsn: str) -> None:
         version_case = seed_publishable_memory(dsn, label="version")
         version_draft = create_draft(store, version_case)
         version_result = confirm_draft(store, version_case, version_draft, command_id=str(uuid.uuid4()))
+        replacement_version_id = str(uuid.uuid4())
         with psycopg.connect(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "UPDATE owner_truth.memory_versions SET is_current = FALSE WHERE id = %s",
                     (version_case.memory_version_id,),
                 )
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.memory_versions (
+                        id, vault_id, memory_id, version_number, is_current, schema_version,
+                        content_hash, payload, source_id, source_version, decision_receipt_id,
+                        supersedes_version_id
+                    )
+                    SELECT %s, vault_id, memory_id, version_number + 1, TRUE, schema_version,
+                        content_hash, payload, source_id, source_version, decision_receipt_id, id
+                    FROM owner_truth.memory_versions
+                    WHERE id = %s
+                    """,
+                    (replacement_version_id, version_case.memory_version_id),
+                )
+                require(cursor.rowcount == 1, "replacement MemoryVersion must be inserted")
             connection.commit()
         require(
             projection_state(dsn, version_result.publication_version_id)

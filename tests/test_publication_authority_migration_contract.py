@@ -97,6 +97,8 @@ class PublicationAuthorityMigrationContractTests(unittest.TestCase):
         self.assertIn("DROP DATABASE IF EXISTS", smoke)
         self.assertIn("0079", smoke)
         self.assertIn("0080", smoke)
+        self.assertIn("replacement_version_id", smoke)
+        self.assertIn("supersedes_version_id", smoke)
         self.assertIn("backend-publication-authority-postgres-smoke.py", runner)
         self.assertIn("DATABASE_URL is required", runner)
 
