@@ -40,6 +40,7 @@ from app.services.owner_truth_media_processing import (
     build_media_processing_candidate_effect,
 )
 from app.services.owner_truth_media_source_object import (
+    OwnerTruthMediaAccessRevoked,
     OwnerTruthMediaUploadInvalid,
     PrivateMediaObjectStore,
     build_private_media_object_store,
@@ -129,6 +130,11 @@ class OwnerTruthMediaProcessingWorkerRuntime:
                 reason="mediaProcessingLeaseLost",
                 lease=lease,
             )
+        except OwnerTruthMediaAccessRevoked:
+            # A delete request revokes the SourceObject before the physical
+            # deletion worker runs.  Never turn that into a retryable parser
+            # failure: cancel this lease and leave the tombstone authoritative.
+            result = self._cancel_access_revoked_lease(lease)
         except OwnerTruthMediaProcessingRetryableError as error:
             result = self._retry_or_terminal(lease, reason=error.reason_code)
         except OwnerTruthMediaProcessingTerminalError as error:
@@ -208,6 +214,16 @@ class OwnerTruthMediaProcessingWorkerRuntime:
             raise OwnerTruthMediaProcessingTerminalError("privateMediaObjectIntegrityMismatch")
 
         extraction = self._processor_router.extract(source_object=source_object, payload=payload)
+        # Extraction can take long enough for an Owner delete request to land.
+        # Re-read behind the repository's commit fence before creating a
+        # derived Source or Candidate effect, so deleted media cannot leak
+        # downstream through an in-flight worker.
+        source_object = repository.assert_processing_commit_allowed(
+            vault_id=intent.target.vault_id,
+            source_object_id=intent.target.resource_id,
+            owner_subject_id=intent.target.owner_subject_id,
+            expected_processing_generation=int(source_object["processingGeneration"]),
+        )
         derived_source_id, candidate_effect = build_media_processing_candidate_effect(
             context=OwnerTruthCommandContext(
                 vault_id=intent.target.vault_id,
@@ -252,6 +268,25 @@ class OwnerTruthMediaProcessingWorkerRuntime:
             receipt=receipt,
             source_object=updated,
             candidate_effect=candidate_effect,
+        )
+
+    def _cancel_access_revoked_lease(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
+        try:
+            with self._unit_of_work(
+                correlation_id=f"owner-truth-media-processing-worker-revoked-{lease.job_id}",
+                command_id=f"ownerTruthMediaProcessingWorkerRevoked:{lease.operation_id}",
+            ):
+                self._store.async_effect_lease_repository().request_cancel(lease.job_id)
+        except (AsyncEffectLeaseCancelled, AsyncEffectLeaseLost):
+            pass
+        except Exception:
+            # The revocation fence in the SourceObject repository remains the
+            # final guard even if a best-effort lease cancellation races out.
+            pass
+        return self._payload(
+            status="cancelled",
+            reason="mediaAccessRevoked",
+            lease=lease,
         )
 
     def _retry_or_terminal(self, lease: AsyncEffectJobLease, *, reason: str) -> dict[str, Any]:

@@ -16,8 +16,11 @@ from app.services.in_memory_store import InMemoryStore
 from app.services.owner_truth_media_source_object import (
     DisabledMediaContentSafetyScanner,
     FilesystemPrivateMediaObjectStore,
+    MediaDeletionCommand,
     MediaUploadIntentCommand,
+    OwnerTruthMediaAccessRevoked,
     OwnerTruthMediaIngestionService,
+    OwnerTruthMediaUploadConflict,
     OwnerTruthMediaUploadInvalid,
     S3PrivateMediaObjectStore,
     TestOnlyCleanMediaContentSafetyScanner,
@@ -117,6 +120,14 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
     @staticmethod
     def _intent_path(vault_id: str) -> str:
         return f"/v2/vaults/{vault_id}/source-objects/upload-intents"
+
+    @staticmethod
+    def _deletion_payload(*, command_id: str | None = None) -> dict[str, object]:
+        return {
+            "commandId": command_id or str(uuid4()),
+            "expectedAuthorityEpoch": 0,
+            "clientRequestedAt": "2026-08-05T00:00:00Z",
+        }
 
     def _allow_owner(self, owner_id: str) -> None:
         main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(
@@ -239,6 +250,274 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
             content=body,
         )
         self.assertEqual(upload_cross_owner.status_code, 404, upload_cross_owner.text)
+
+        delete_cross_owner = self.client.post(
+            f"/v2/vaults/{vault_id}/source-objects/{object_id}/deletions",
+            headers=owner_b_headers,
+            json=self._deletion_payload(),
+        )
+        self.assertEqual(delete_cross_owner.status_code, 404, delete_cross_owner.text)
+        self.assertEqual(
+            delete_cross_owner.json()["detail"]["code"],
+            "ownerTruthMediaVaultNotFound",
+        )
+
+        delete_retry_cross_owner = self.client.post(
+            f"/v2/vaults/{vault_id}/source-objects/{object_id}/deletion-retries",
+            headers=owner_b_headers,
+            json=self._deletion_payload(),
+        )
+        self.assertEqual(delete_retry_cross_owner.status_code, 404, delete_retry_cross_owner.text)
+        self.assertEqual(
+            delete_retry_cross_owner.json()["detail"]["code"],
+            "ownerTruthMediaVaultNotFound",
+        )
+
+    def test_deletion_revokes_access_cancels_processing_and_returns_only_sanitized_status(self) -> None:
+        owner_id, auth_headers, session_id = self._login("13800139731")
+        self._allow_owner(owner_id)
+        headers = self._capture_headers(auth_headers, session_id=session_id)
+        vault_id = "vault-media-delete"
+        body = b"private media must be revoked before physical deletion"
+        created = self.client.post(
+            self._intent_path(vault_id),
+            headers=headers,
+            json=self._intent_payload(body=body),
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        intent = created.json()["uploadIntent"]
+        uploaded = self.client.put(
+            f"{self._intent_path(vault_id)}/{intent['uploadIntentId']}/content",
+            headers={
+                **headers,
+                "X-DreamJourney-Upload-Token": intent["uploadToken"],
+                "Content-Type": "text/plain",
+            },
+            content=body,
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        object_id = uploaded.json()["sourceObject"]["sourceObjectId"]
+        deletion_payload = self._deletion_payload()
+
+        deleted = self.client.post(
+            f"/v2/vaults/{vault_id}/source-objects/{object_id}/deletions",
+            headers=headers,
+            json=deletion_payload,
+        )
+
+        self.assertEqual(deleted.status_code, 202, deleted.text)
+        body_json = deleted.json()
+        self.assertEqual(body_json["schemaVersion"], "owner-truth-media-deletion-response-v1")
+        self.assertEqual(body_json["status"], "deletionRequested")
+        self.assertEqual(body_json["sourceObject"]["state"], "deleted")
+        self.assertEqual(body_json["sourceObject"]["processingStatus"], "blocked")
+        self.assertEqual(
+            set(body_json["deletion"]),
+            {"accessState", "deletionStatus", "retryable", "failureCode", "updatedAt"},
+        )
+        self.assertEqual(body_json["deletion"]["accessState"], "accessRevoked")
+        self.assertEqual(body_json["deletion"]["deletionStatus"], "pending")
+        self.assertTrue(body_json["deletion"]["retryable"])
+        rendered = json.dumps(body_json, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn("storageKey", rendered)
+        self.assertNotIn("storageProvider", rendered)
+        self.assertNotIn(body.decode("utf-8"), rendered)
+        # P0-S1 is revocation-first: the later worker owns physical deletion.
+        self.assertEqual(len(list(Path(self.media_root.name).rglob("*.bin"))), 1)
+        self.assertEqual(self.store.effect_kernel_repository().record_count(), 1)
+
+        replay = self.client.post(
+            f"/v2/vaults/{vault_id}/source-objects/{object_id}/deletions",
+            headers=headers,
+            json=deletion_payload,
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["status"], "deletionDeduplicated")
+
+        retry = self.client.post(
+            f"/v2/vaults/{vault_id}/source-objects/{object_id}/processing-retries",
+            headers=headers,
+        )
+        self.assertEqual(retry.status_code, 409, retry.text)
+        self.assertEqual(retry.json()["detail"]["code"], "ownerTruthMediaAccessRevoked")
+
+        fetched = self.client.get(
+            f"/v2/vaults/{vault_id}/source-objects/{object_id}",
+            headers=headers,
+        )
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        self.assertEqual(fetched.json()["sourceObject"]["state"], "deleted")
+        self.assertEqual(fetched.json()["sourceObject"]["processingStatus"], "blocked")
+
+    def test_retryable_deletion_requeues_only_the_deletion_effect(self) -> None:
+        owner_id, auth_headers, session_id = self._login("13800139733")
+        self._allow_owner(owner_id)
+        headers = self._capture_headers(auth_headers, session_id=session_id)
+        vault_id = "vault-media-deletion-retry"
+        body = b"the deletion retry must never restore private media access"
+        created = self.client.post(
+            self._intent_path(vault_id),
+            headers=headers,
+            json=self._intent_payload(body=body),
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        intent = created.json()["uploadIntent"]
+        uploaded = self.client.put(
+            f"{self._intent_path(vault_id)}/{intent['uploadIntentId']}/content",
+            headers={
+                **headers,
+                "X-DreamJourney-Upload-Token": intent["uploadToken"],
+                "Content-Type": "text/plain",
+            },
+            content=body,
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        object_id = uploaded.json()["sourceObject"]["sourceObjectId"]
+        deleted = self.client.post(
+            f"/v2/vaults/{vault_id}/source-objects/{object_id}/deletions",
+            headers=headers,
+            json=self._deletion_payload(),
+        )
+        self.assertEqual(deleted.status_code, 202, deleted.text)
+        repository = self.store.owner_truth_media_source_object_repository()
+        pending = repository.get_source_object(
+            vault_id=vault_id,
+            source_object_id=object_id,
+            owner_subject_id=owner_id,
+        )
+        partial = repository.record_deletion_outcome(
+            vault_id=vault_id,
+            source_object_id=object_id,
+            owner_subject_id=owner_id,
+            deletion_generation=int(pending["deletionGeneration"]),
+            outcome="partial",
+            retryable=True,
+            failure_code="objectStorageUnavailable",
+        )
+        self.assertEqual(partial["state"], "deleted")
+        self.assertEqual(partial["deletionStatus"], "partial")
+        self.assertTrue(partial["deletionRetryable"])
+
+        retry_payload = self._deletion_payload()
+        retried = self.client.post(
+            f"/v2/vaults/{vault_id}/source-objects/{object_id}/deletion-retries",
+            headers=headers,
+            json=retry_payload,
+        )
+        self.assertEqual(retried.status_code, 202, retried.text)
+        retried_body = retried.json()
+        self.assertEqual(retried_body["status"], "deletionRetryRequested")
+        self.assertEqual(retried_body["sourceObject"]["state"], "deleted")
+        self.assertEqual(retried_body["sourceObject"]["processingStatus"], "blocked")
+        self.assertEqual(retried_body["deletion"]["deletionStatus"], "pending")
+        self.assertTrue(retried_body["deletion"]["retryable"])
+        self.assertEqual(self.store.effect_kernel_repository().record_count(), 2)
+
+        replay = self.client.post(
+            f"/v2/vaults/{vault_id}/source-objects/{object_id}/deletion-retries",
+            headers=headers,
+            json=retry_payload,
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["status"], "deletionDeduplicated")
+        self.assertEqual(self.store.effect_kernel_repository().record_count(), 2)
+
+        with self.assertRaises(OwnerTruthMediaUploadConflict):
+            repository.record_deletion_outcome(
+                vault_id=vault_id,
+                source_object_id=object_id,
+                owner_subject_id=owner_id,
+                deletion_generation=int(pending["deletionGeneration"]),
+                outcome="completed",
+                retryable=False,
+            )
+        final = repository.get_source_object(
+            vault_id=vault_id,
+            source_object_id=object_id,
+            owner_subject_id=owner_id,
+        )
+        self.assertEqual(final["state"], "deleted")
+        self.assertEqual(final["accessState"], "accessRevoked")
+        self.assertEqual(final["processingStatus"], "blocked")
+
+    def test_deletion_commit_fence_blocks_inflight_processing_result(self) -> None:
+        owner_id, auth_headers, session_id = self._login("13800139732")
+        self._allow_owner(owner_id)
+        headers = self._capture_headers(auth_headers, session_id=session_id)
+        vault_id = "vault-media-delete-race"
+        body = b"do not allow a deleted file to create a candidate"
+        created = self.client.post(
+            self._intent_path(vault_id),
+            headers=headers,
+            json=self._intent_payload(body=body),
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        intent = created.json()["uploadIntent"]
+        uploaded = self.client.put(
+            f"{self._intent_path(vault_id)}/{intent['uploadIntentId']}/content",
+            headers={
+                **headers,
+                "X-DreamJourney-Upload-Token": intent["uploadToken"],
+                "Content-Type": "text/plain",
+            },
+            content=body,
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        source_object = uploaded.json()["sourceObject"]
+        repository = self.store.owner_truth_media_source_object_repository()
+        queued = repository.queue_processing(
+            vault_id=vault_id,
+            source_object_id=source_object["sourceObjectId"],
+            owner_subject_id=owner_id,
+        )
+        begun = repository.begin_processing(
+            vault_id=vault_id,
+            source_object_id=source_object["sourceObjectId"],
+            owner_subject_id=owner_id,
+            expected_authority_epoch=0,
+            expected_processing_generation=int(queued["processingGeneration"]),
+            attempt=1,
+        )
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        deletion = repository.request_deletion(
+            context=context,
+            source_object_id=source_object["sourceObjectId"],
+            command=MediaDeletionCommand.from_payload(self._deletion_payload()),
+        )
+        self.assertEqual(deletion.source_object["state"], "deleted")
+        with self.assertRaises(OwnerTruthMediaAccessRevoked):
+            repository.assert_processing_commit_allowed(
+                vault_id=vault_id,
+                source_object_id=source_object["sourceObjectId"],
+                owner_subject_id=owner_id,
+                expected_processing_generation=int(begun["processingGeneration"]),
+            )
+        with self.assertRaises(OwnerTruthMediaAccessRevoked):
+            repository.record_processing_outcome(
+                vault_id=vault_id,
+                source_object_id=source_object["sourceObjectId"],
+                owner_subject_id=owner_id,
+                processing_generation=int(begun["processingGeneration"]),
+                attempt=1,
+                processor_id="localDocumentText",
+                processor_version="v1",
+                outcome="succeeded",
+                result_hash=sha256(b"deleted-media-must-not-commit").hexdigest(),
+                extracted_text_sha256=sha256(body).hexdigest(),
+                derived_source_id=str(uuid4()),
+            )
+        final = repository.get_source_object(
+            vault_id=vault_id,
+            source_object_id=source_object["sourceObjectId"],
+            owner_subject_id=owner_id,
+        )
+        self.assertEqual(final["state"], "deleted")
+        self.assertEqual(final["processingStatus"], "blocked")
+        self.assertIsNone(final["derivedSourceId"])
 
     def test_scanner_unavailable_quarantines_without_persisting_unscanned_bytes(self) -> None:
         unavailable_root = TemporaryDirectory()

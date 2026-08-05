@@ -533,9 +533,26 @@ def build_media_source_object_processing_effect_intent(
         raise OwnerTruthMediaProcessingError("only safety-cleared media can request processing")
     if str(source_object.get("processingStatus") or "") not in {"queued", "retryableFailed"}:
         raise OwnerTruthMediaProcessingError("media object is not queued for processing")
+    return build_media_source_object_processing_effect_intent_for_generation(
+        source_object=source_object,
+        processing_generation=int(source_object.get("processingGeneration") or 0),
+    )
+
+
+def build_media_source_object_processing_effect_intent_for_generation(
+    *,
+    source_object: Mapping[str, Any],
+    processing_generation: int,
+) -> AsyncEffectIntent:
+    """Rebuild a prior processing intent only to cancel its stale job.
+
+    Deletion uses this after access is revoked.  It never queues work for a
+    deleted object; it derives the existing stable job identity so the lease
+    repository can stop a pending or leased processor.
+    """
+
     source_object_id = _uuid(source_object.get("sourceObjectId"), field="source_object_id")
     storage_version = source_object.get("storageVersion")
-    processing_generation = source_object.get("processingGeneration")
     authority_epoch = source_object.get("authorityEpoch")
     if type(storage_version) is not int or storage_version < 1:
         raise OwnerTruthMediaProcessingError("media object storage version is invalid")
@@ -688,6 +705,7 @@ __all__ = [
     "OwnerTruthMediaProcessingTerminalError",
     "OwnerTruthMediaProcessorRouter",
     "UnavailableExternalMediaProcessor",
+    "build_media_source_object_processing_effect_intent_for_generation",
     "build_import_source_command",
     "build_media_processing_candidate_effect",
     "build_media_source_object_processing_effect_intent",

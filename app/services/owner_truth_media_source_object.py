@@ -31,6 +31,7 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 
 OWNER_TRUTH_MEDIA_SOURCE_OBJECT_SCHEMA_VERSION = "owner-truth-media-source-object-v1"
 OWNER_TRUTH_MEDIA_UPLOAD_INTENT_SCHEMA_VERSION = "owner-truth-media-upload-intent-v1"
+OWNER_TRUTH_MEDIA_DELETION_RESPONSE_SCHEMA_VERSION = "owner-truth-media-deletion-response-v1"
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _PURPOSE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,79}$")
@@ -102,6 +103,12 @@ class OwnerTruthMediaUploadTokenInvalid(OwnerTruthMediaIngestionError):
 
 class OwnerTruthMediaContentSafetyUnavailable(OwnerTruthMediaIngestionError):
     code = "ownerTruthMediaContentSafetyUnavailable"
+
+
+class OwnerTruthMediaAccessRevoked(OwnerTruthMediaIngestionError):
+    """A private object was revoked before the requested mutation could commit."""
+
+    code = "ownerTruthMediaAccessRevoked"
 
 
 def _utc_now() -> datetime:
@@ -285,6 +292,64 @@ class MediaUploadIntentCommand:
             )
         )
 
+
+@dataclass(frozen=True)
+class MediaDeletionCommand:
+    """An Owner-authored, idempotent request to revoke one private object.
+
+    The command deliberately contains no storage location, provider choice, or
+    bytes.  Those remain server-side implementation details and are handled by
+    the later deletion worker.
+    """
+
+    command_id: str
+    expected_authority_epoch: int
+    client_requested_at: datetime
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "MediaDeletionCommand":
+        required_fields = {"commandId", "expectedAuthorityEpoch", "clientRequestedAt"}
+        if set(payload) != required_fields:
+            raise OwnerTruthMediaUploadInvalid("media deletion payload is invalid")
+        try:
+            command_id = str(UUID(str(payload.get("commandId"))))
+        except (TypeError, ValueError) as exc:
+            raise OwnerTruthMediaUploadInvalid("deletion command id is invalid") from exc
+        expected_epoch = payload.get("expectedAuthorityEpoch")
+        if type(expected_epoch) is not int or expected_epoch < 0:
+            raise OwnerTruthMediaUploadInvalid("deletion authority epoch is invalid")
+        return cls(
+            command_id=command_id,
+            expected_authority_epoch=expected_epoch,
+            client_requested_at=_parse_iso(payload.get("clientRequestedAt")),
+        )
+
+    @property
+    def command_id_hash(self) -> str:
+        return _sha256(self.command_id)
+
+    def payload_hash(self, *, vault_id: str, source_object_id: str) -> str:
+        return _sha256(
+            _canonical_json(
+                {
+                    "clientRequestedAt": _utc_iso(self.client_requested_at),
+                    "commandId": self.command_id,
+                    "expectedAuthorityEpoch": self.expected_authority_epoch,
+                    "schemaVersion": OWNER_TRUTH_MEDIA_DELETION_RESPONSE_SCHEMA_VERSION,
+                    "sourceObjectId": source_object_id,
+                    "vaultId": vault_id,
+                }
+            )
+        )
+
+    def deletion_command_id(self, *, vault_id: str, source_object_id: str) -> str:
+        return str(
+            uuid5(
+                NAMESPACE_URL,
+                "dreamjourney-owner-truth-media-deletion-command-v1:"
+                f"{vault_id}:{source_object_id}:{self.command_id}",
+            )
+        )
 
 @dataclass(frozen=True)
 class MediaSafetyVerdict:
@@ -671,6 +736,14 @@ class MediaUploadIntentCreateResult:
     upload_token: Optional[str]
 
 
+@dataclass(frozen=True)
+class MediaSourceObjectDeletionResult:
+    outcome: str
+    source_object: Mapping[str, Any]
+    deletion_effect_required: bool
+    cancelled_processing_generation: Optional[int] = None
+
+
 class OwnerTruthMediaSourceObjectRepository(Protocol):
     def create_upload_intent(
         self,
@@ -722,6 +795,47 @@ class OwnerTruthMediaSourceObjectRepository(Protocol):
         vault_id: str,
         source_object_id: str,
         owner_subject_id: str,
+    ) -> Mapping[str, Any]:
+        ...
+
+    def request_deletion(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        source_object_id: str,
+        command: MediaDeletionCommand,
+    ) -> MediaSourceObjectDeletionResult:
+        ...
+
+    def retry_deletion(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        source_object_id: str,
+        command: MediaDeletionCommand,
+    ) -> MediaSourceObjectDeletionResult:
+        ...
+
+    def assert_processing_commit_allowed(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        expected_processing_generation: int,
+    ) -> Mapping[str, Any]:
+        ...
+
+    def record_deletion_outcome(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        deletion_generation: int,
+        outcome: str,
+        retryable: bool,
+        failure_code: Optional[str] = None,
     ) -> Mapping[str, Any]:
         ...
 
@@ -787,6 +901,41 @@ def _object_public_receipt(record: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _object_public_deletion_receipt(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return only the user-explainable deletion state, never provider detail."""
+
+    return {
+        "accessState": str(record.get("accessState") or "available"),
+        "deletionStatus": str(record.get("deletionStatus") or "notRequested"),
+        "retryable": bool(record.get("deletionRetryable", False)),
+        "failureCode": record.get("deletionFailureCode"),
+        "updatedAt": str(record.get("deletionUpdatedAt") or record["updatedAt"]),
+    }
+
+
+def _deletion_effect_is_required(record: Mapping[str, Any]) -> bool:
+    """Keep an accepted effect repairable without reopening private access."""
+
+    return (
+        str(record.get("accessState") or "") == "accessRevoked"
+        and str(record.get("deletionStatus") or "") == "pending"
+        and bool(record.get("storageKey"))
+        and int(record.get("storageVersion") or 0) >= 1
+    )
+
+
+def _assert_deletion_retryable(record: Mapping[str, Any]) -> None:
+    if (
+        str(record.get("accessState") or "") != "accessRevoked"
+        or str(record.get("state") or "") != "deleted"
+        or str(record.get("deletionStatus") or "") not in {"partial", "unsupported"}
+        or record.get("deletionRetryable") is not True
+        or not bool(record.get("storageKey"))
+        or int(record.get("storageVersion") or 0) < 1
+    ):
+        raise OwnerTruthMediaUploadConflict("media deletion is not retryable")
+
+
 def _intent_public_receipt(record: Mapping[str, Any], *, upload_token: Optional[str]) -> dict[str, Any]:
     result = {
         "uploadIntentId": str(record["uploadIntentId"]),
@@ -805,12 +954,20 @@ def _intent_public_receipt(record: Mapping[str, Any], *, upload_token: Optional[
 class InMemoryOwnerTruthMediaSourceObjectRepository:
     """Semantic double for the private V2 media object persistence contract."""
 
-    def __init__(self, *, vaults: dict[str, dict[str, Any]], lock: RLock) -> None:
+    def __init__(
+        self,
+        *,
+        vaults: dict[str, dict[str, Any]],
+        lock: RLock,
+        on_derived_source_access_revoked: Optional[Callable[[str, str, str], None]] = None,
+    ) -> None:
         self._vaults = vaults
         self._lock = lock
+        self._on_derived_source_access_revoked = on_derived_source_access_revoked
         self._objects: dict[tuple[str, str], dict[str, Any]] = {}
         self._intents: dict[tuple[str, str], dict[str, Any]] = {}
         self._intent_by_command: dict[tuple[str, str], str] = {}
+        self._deletion_commands: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._processing_results: dict[str, dict[str, Any]] = {}
 
     def create_upload_intent(
@@ -862,6 +1019,13 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
                 "storageProvider": None,
                 "storageKey": None,
                 "storageVersion": 0,
+                "accessState": "available",
+                "deletionStatus": "notRequested",
+                "deletionGeneration": 0,
+                "deletionRetryable": False,
+                "deletionFailureCode": None,
+                "deletionRequestedAt": None,
+                "deletionUpdatedAt": None,
                 "safetyStatus": "pending",
                 "safetyProvider": None,
                 "processingStatus": "notQueued",
@@ -954,6 +1118,7 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
                 owner_subject_id=owner_subject_id,
                 upload_token_hash=upload_token_hash,
             )
+            self._assert_access_active(source_object)
             if intent["state"] == "uploaded":
                 return "deduplicated", deepcopy(source_object)
             self._assert_pending_intent(intent)
@@ -992,6 +1157,7 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
                 owner_subject_id=owner_subject_id,
                 upload_token_hash=upload_token_hash,
             )
+            self._assert_access_active(source_object)
             self._assert_pending_intent(intent)
             now = _utc_now()
             intent.update(state="rejected", updatedAt=_utc_iso(now))
@@ -1020,6 +1186,206 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
                 raise OwnerTruthMediaVaultNotFound("source object was not found")
             return deepcopy(source_object)
 
+    def request_deletion(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        source_object_id: str,
+        command: MediaDeletionCommand,
+    ) -> MediaSourceObjectDeletionResult:
+        with self._lock:
+            vault = self._ensure_owned_vault(context)
+            source_object = self._owned_source_object(
+                vault_id=context.vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=context.owner_subject_id,
+            )
+            payload_hash = command.payload_hash(
+                vault_id=context.vault_id,
+                source_object_id=source_object_id,
+            )
+            command_key = (context.vault_id, source_object_id, command.command_id_hash)
+            existing_command = self._deletion_commands.get(command_key)
+            if existing_command is not None:
+                if existing_command["payloadHash"] != payload_hash:
+                    raise OwnerTruthMediaUploadConflict("deletion command cannot change meaning")
+                return MediaSourceObjectDeletionResult(
+                    outcome="deduplicated",
+                    source_object=deepcopy(source_object),
+                    deletion_effect_required=_deletion_effect_is_required(source_object),
+                )
+            current_epoch = int(vault.get("authorityEpoch") or 0)
+            if command.expected_authority_epoch != current_epoch:
+                raise OwnerTruthMediaAuthorityEpochConflict(
+                    expected_epoch=command.expected_authority_epoch,
+                    current_epoch=current_epoch,
+                )
+
+            now = _utc_now()
+            already_revoked = str(source_object.get("accessState") or "available") == "accessRevoked"
+            cancelled_processing_generation: Optional[int] = None
+            if not already_revoked:
+                if str(source_object.get("processingStatus") or "") in {
+                    "queued",
+                    "processing",
+                    "retryableFailed",
+                }:
+                    cancelled_processing_generation = int(
+                        source_object.get("processingGeneration") or 0
+                    )
+                deletion_effect_required = bool(source_object.get("storageKey"))
+                deletion_status = "pending" if deletion_effect_required else "completed"
+                source_object.update(
+                    state="deleted",
+                    accessState="accessRevoked",
+                    processingStatus="blocked",
+                    processingGeneration=int(source_object.get("processingGeneration") or 0) + 1,
+                    processingAttempt=0,
+                    retryable=False,
+                    failureCode=None,
+                    deletionStatus=deletion_status,
+                    deletionGeneration=int(source_object.get("deletionGeneration") or 0) + 1,
+                    deletionRetryable=deletion_effect_required,
+                    deletionFailureCode=None,
+                    deletionRequestedAt=_utc_iso(now),
+                    deletionUpdatedAt=_utc_iso(now),
+                    updatedAt=_utc_iso(now),
+                    rowVersion=int(source_object["rowVersion"]) + 1,
+                )
+                derived_source_id = source_object.get("derivedSourceId")
+                if derived_source_id and self._on_derived_source_access_revoked is not None:
+                    self._on_derived_source_access_revoked(
+                        context.vault_id,
+                        context.owner_subject_id,
+                        str(derived_source_id),
+                    )
+            self._deletion_commands[command_key] = {
+                "deletionCommandId": command.deletion_command_id(
+                    vault_id=context.vault_id,
+                    source_object_id=source_object_id,
+                ),
+                "payloadHash": payload_hash,
+                "deletionGeneration": int(source_object.get("deletionGeneration") or 0),
+                "createdAt": _utc_iso(now),
+            }
+            return MediaSourceObjectDeletionResult(
+                outcome="accepted" if not already_revoked else "alreadyRevoked",
+                source_object=deepcopy(source_object),
+                deletion_effect_required=_deletion_effect_is_required(source_object),
+                cancelled_processing_generation=cancelled_processing_generation,
+            )
+
+    def retry_deletion(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        source_object_id: str,
+        command: MediaDeletionCommand,
+    ) -> MediaSourceObjectDeletionResult:
+        with self._lock:
+            vault = self._ensure_owned_vault(context)
+            source_object = self._owned_source_object(
+                vault_id=context.vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=context.owner_subject_id,
+            )
+            payload_hash = command.payload_hash(
+                vault_id=context.vault_id,
+                source_object_id=source_object_id,
+            )
+            command_key = (context.vault_id, source_object_id, command.command_id_hash)
+            existing_command = self._deletion_commands.get(command_key)
+            if existing_command is not None:
+                if existing_command["payloadHash"] != payload_hash:
+                    raise OwnerTruthMediaUploadConflict("deletion command cannot change meaning")
+                return MediaSourceObjectDeletionResult(
+                    outcome="deduplicated",
+                    source_object=deepcopy(source_object),
+                    deletion_effect_required=_deletion_effect_is_required(source_object),
+                )
+            current_epoch = int(vault.get("authorityEpoch") or 0)
+            if command.expected_authority_epoch != current_epoch:
+                raise OwnerTruthMediaAuthorityEpochConflict(
+                    expected_epoch=command.expected_authority_epoch,
+                    current_epoch=current_epoch,
+                )
+            _assert_deletion_retryable(source_object)
+            now = _utc_now()
+            source_object.update(
+                state="deleted",
+                accessState="accessRevoked",
+                processingStatus="blocked",
+                retryable=False,
+                failureCode=None,
+                deletionStatus="pending",
+                deletionGeneration=int(source_object.get("deletionGeneration") or 0) + 1,
+                deletionRetryable=True,
+                deletionFailureCode=None,
+                deletionUpdatedAt=_utc_iso(now),
+                updatedAt=_utc_iso(now),
+                rowVersion=int(source_object["rowVersion"]) + 1,
+            )
+            self._deletion_commands[command_key] = {
+                "deletionCommandId": command.deletion_command_id(
+                    vault_id=context.vault_id,
+                    source_object_id=source_object_id,
+                ),
+                "payloadHash": payload_hash,
+                "deletionGeneration": int(source_object["deletionGeneration"]),
+                "createdAt": _utc_iso(now),
+            }
+            return MediaSourceObjectDeletionResult(
+                outcome="retryAccepted",
+                source_object=deepcopy(source_object),
+                deletion_effect_required=True,
+            )
+
+    def assert_processing_commit_allowed(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        expected_processing_generation: int,
+    ) -> Mapping[str, Any]:
+        with self._lock:
+            source_object = self._owned_source_object(
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+            )
+            self._assert_access_active(source_object)
+            if int(source_object.get("processingGeneration") or 0) != expected_processing_generation:
+                raise OwnerTruthMediaUploadConflict("media processing generation is no longer current")
+            if source_object.get("state") != "processing":
+                raise OwnerTruthMediaUploadConflict("media source object is no longer processing")
+            return deepcopy(source_object)
+
+    def record_deletion_outcome(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        deletion_generation: int,
+        outcome: str,
+        retryable: bool,
+        failure_code: Optional[str] = None,
+    ) -> Mapping[str, Any]:
+        with self._lock:
+            source_object = self._owned_source_object(
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+            )
+            return self._record_deletion_outcome_locked(
+                source_object=source_object,
+                deletion_generation=deletion_generation,
+                outcome=outcome,
+                retryable=retryable,
+                failure_code=failure_code,
+            )
+
     def queue_processing(
         self,
         *,
@@ -1033,6 +1399,7 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
                 source_object_id=source_object_id,
                 owner_subject_id=owner_subject_id,
             )
+            self._assert_access_active(source_object)
             if source_object["state"] != "verified" or source_object["safetyStatus"] != "clean":
                 raise OwnerTruthMediaUploadConflict("media source object is not verified for processing")
             if source_object["mediaKind"] == "video":
@@ -1078,6 +1445,7 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
                 source_object_id=source_object_id,
                 owner_subject_id=owner_subject_id,
             )
+            self._assert_access_active(source_object)
             if int(source_object["authorityEpoch"]) != expected_authority_epoch:
                 raise OwnerTruthMediaAuthorityEpochConflict(
                     expected_epoch=expected_authority_epoch,
@@ -1125,6 +1493,7 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
                 source_object_id=source_object_id,
                 owner_subject_id=owner_subject_id,
             )
+            self._assert_access_active(source_object)
             return self._record_processing_outcome_locked(
                 source_object=source_object,
                 processing_generation=processing_generation,
@@ -1143,6 +1512,7 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
             return {
                 "sourceObjects": deepcopy(self._objects),
                 "uploadIntents": deepcopy(self._intents),
+                "deletionCommands": deepcopy(self._deletion_commands),
                 "processingResults": deepcopy(self._processing_results),
             }
 
@@ -1158,6 +1528,58 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
             raise OwnerTruthMediaVaultNotFound("source object was not found")
         return source_object
 
+    @staticmethod
+    def _assert_access_active(source_object: Mapping[str, Any]) -> None:
+        if (
+            str(source_object.get("accessState") or "available") != "available"
+            or str(source_object.get("state") or "") == "deleted"
+        ):
+            raise OwnerTruthMediaAccessRevoked("media source object access was revoked")
+
+    def _record_deletion_outcome_locked(
+        self,
+        *,
+        source_object: dict[str, Any],
+        deletion_generation: int,
+        outcome: str,
+        retryable: bool,
+        failure_code: Optional[str],
+    ) -> Mapping[str, Any]:
+        if type(deletion_generation) is not int or deletion_generation < 1:
+            raise OwnerTruthMediaUploadInvalid("media deletion generation is invalid")
+        if int(source_object.get("deletionGeneration") or 0) != deletion_generation:
+            raise OwnerTruthMediaUploadConflict("media deletion generation is no longer current")
+        if str(source_object.get("accessState") or "") != "accessRevoked":
+            raise OwnerTruthMediaUploadConflict("media deletion requires revoked access")
+        normalized_outcome = str(outcome or "").strip()
+        if normalized_outcome not in {"completed", "partial", "unsupported"}:
+            raise OwnerTruthMediaUploadInvalid("media deletion outcome is invalid")
+        if type(retryable) is not bool:
+            raise OwnerTruthMediaUploadInvalid("media deletion retryable flag is invalid")
+        normalized_failure_code = str(failure_code or "").strip() or None
+        if normalized_failure_code is not None and not _PURPOSE_PATTERN.fullmatch(normalized_failure_code):
+            raise OwnerTruthMediaUploadInvalid("media deletion failure code is invalid")
+        if normalized_outcome == "completed":
+            if retryable or normalized_failure_code is not None:
+                raise OwnerTruthMediaUploadInvalid("completed media deletion cannot be retryable")
+        elif normalized_failure_code is None:
+            raise OwnerTruthMediaUploadInvalid("incomplete media deletion outcome requires failure code")
+        now = _utc_now()
+        source_object.update(
+            state="deleted",
+            accessState="accessRevoked",
+            processingStatus="blocked",
+            retryable=False,
+            failureCode=None,
+            deletionStatus=normalized_outcome,
+            deletionRetryable=retryable,
+            deletionFailureCode=normalized_failure_code,
+            deletionUpdatedAt=_utc_iso(now),
+            updatedAt=_utc_iso(now),
+            rowVersion=int(source_object["rowVersion"]) + 1,
+        )
+        return deepcopy(source_object)
+
     def _record_processing_outcome_locked(
         self,
         *,
@@ -1172,6 +1594,7 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
         derived_source_id: Optional[str] = None,
         failure_code: Optional[str] = None,
     ) -> Mapping[str, Any]:
+        self._assert_access_active(source_object)
         if type(processing_generation) is not int or processing_generation < 0:
             raise OwnerTruthMediaUploadInvalid("media processing generation is invalid")
         if int(source_object.get("processingGeneration") or 0) != processing_generation:
@@ -1474,6 +1897,7 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
                 source_object_id=source_object_id,
                 for_update=True,
             )
+            self._assert_access_active(source_object)
             if str(intent["state"]) == "uploaded":
                 return "deduplicated", source_object
             self._assert_pending_intent_row(intent)
@@ -1529,6 +1953,13 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
             )
             self._assert_upload_token(intent=intent, upload_token_hash=upload_token_hash)
             self._assert_pending_intent_row(intent)
+            source_object = self._fetch_source_object(
+                cursor=cursor,
+                vault_id=vault_id,
+                source_object_id=str(intent["source_object_id"]),
+                for_update=True,
+            )
+            self._assert_access_active(source_object)
             cursor.execute(
                 """
                 UPDATE owner_truth.media_source_objects
@@ -1581,6 +2012,265 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
                 raise OwnerTruthMediaVaultNotFound("source object was not found")
             return self._source_object_record(row)
 
+    def request_deletion(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        source_object_id: str,
+        command: MediaDeletionCommand,
+    ) -> MediaSourceObjectDeletionResult:
+        with self._cursor() as cursor:
+            vault = self._ensure_owned_vault(cursor=cursor, context=context)
+            source_object = self._fetch_owned_source_object(
+                cursor=cursor,
+                vault_id=context.vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=context.owner_subject_id,
+                for_update=True,
+            )
+            payload_hash = command.payload_hash(
+                vault_id=context.vault_id,
+                source_object_id=source_object_id,
+            )
+            cursor.execute(
+                """
+                SELECT payload_hash
+                FROM owner_truth.media_source_object_deletion_commands
+                WHERE vault_id = %s AND source_object_id = %s AND command_id_hash = %s
+                FOR UPDATE
+                """,
+                (context.vault_id, source_object_id, command.command_id_hash),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                if str(existing["payload_hash"]) != payload_hash:
+                    raise OwnerTruthMediaUploadConflict("deletion command cannot change meaning")
+                return MediaSourceObjectDeletionResult(
+                    outcome="deduplicated",
+                    source_object=source_object,
+                    deletion_effect_required=_deletion_effect_is_required(source_object),
+                )
+            current_epoch = int(vault["authority_epoch"])
+            if command.expected_authority_epoch != current_epoch:
+                raise OwnerTruthMediaAuthorityEpochConflict(
+                    expected_epoch=command.expected_authority_epoch,
+                    current_epoch=current_epoch,
+                )
+
+            already_revoked = str(source_object.get("accessState") or "available") == "accessRevoked"
+            cancelled_processing_generation: Optional[int] = None
+            if not already_revoked:
+                if str(source_object.get("processingStatus") or "") in {
+                    "queued",
+                    "processing",
+                    "retryableFailed",
+                }:
+                    cancelled_processing_generation = int(
+                        source_object.get("processingGeneration") or 0
+                    )
+                deletion_effect_required = bool(source_object.get("storageKey"))
+                deletion_status = "pending" if deletion_effect_required else "completed"
+                cursor.execute(
+                    """
+                    UPDATE owner_truth.media_source_objects
+                    SET state = 'deleted', access_state = 'accessRevoked',
+                        processing_status = 'blocked',
+                        processing_generation = processing_generation + 1,
+                        processing_attempt = 0, retryable = FALSE, failure_code = NULL,
+                        deletion_status = %s,
+                        deletion_generation = deletion_generation + 1,
+                        deletion_retryable = %s, deletion_failure_code = NULL,
+                        deletion_requested_at = NOW(), deletion_updated_at = NOW(),
+                        updated_at = NOW(), row_version = row_version + 1
+                    WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+                    RETURNING *
+                    """,
+                    (
+                        deletion_status,
+                        deletion_effect_required,
+                        context.vault_id,
+                        source_object_id,
+                        context.owner_subject_id,
+                    ),
+                )
+                source_object = self._source_object_record(cursor.fetchone())
+                if source_object.get("derivedSourceId"):
+                    cursor.execute(
+                        """
+                        UPDATE owner_truth.sources
+                        SET state = 'deleted', row_version = row_version + 1, updated_at = NOW()
+                        WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+                          AND state <> 'deleted'
+                        """,
+                        (
+                            context.vault_id,
+                            source_object["derivedSourceId"],
+                            context.owner_subject_id,
+                        ),
+                    )
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.media_source_object_deletion_commands (
+                    id, vault_id, source_object_id, owner_subject_id, command_id_hash,
+                    payload_hash, deletion_generation
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    command.deletion_command_id(
+                        vault_id=context.vault_id,
+                        source_object_id=source_object_id,
+                    ),
+                    context.vault_id,
+                    source_object_id,
+                    context.owner_subject_id,
+                    command.command_id_hash,
+                    payload_hash,
+                    int(source_object.get("deletionGeneration") or 0),
+                ),
+            )
+            return MediaSourceObjectDeletionResult(
+                outcome="accepted" if not already_revoked else "alreadyRevoked",
+                source_object=source_object,
+                deletion_effect_required=_deletion_effect_is_required(source_object),
+                cancelled_processing_generation=cancelled_processing_generation,
+            )
+
+    def retry_deletion(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        source_object_id: str,
+        command: MediaDeletionCommand,
+    ) -> MediaSourceObjectDeletionResult:
+        with self._cursor() as cursor:
+            vault = self._ensure_owned_vault(cursor=cursor, context=context)
+            source_object = self._fetch_owned_source_object(
+                cursor=cursor,
+                vault_id=context.vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=context.owner_subject_id,
+                for_update=True,
+            )
+            payload_hash = command.payload_hash(
+                vault_id=context.vault_id,
+                source_object_id=source_object_id,
+            )
+            cursor.execute(
+                """
+                SELECT payload_hash
+                FROM owner_truth.media_source_object_deletion_commands
+                WHERE vault_id = %s AND source_object_id = %s AND command_id_hash = %s
+                FOR UPDATE
+                """,
+                (context.vault_id, source_object_id, command.command_id_hash),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                if str(existing["payload_hash"]) != payload_hash:
+                    raise OwnerTruthMediaUploadConflict("deletion command cannot change meaning")
+                return MediaSourceObjectDeletionResult(
+                    outcome="deduplicated",
+                    source_object=source_object,
+                    deletion_effect_required=_deletion_effect_is_required(source_object),
+                )
+            current_epoch = int(vault["authority_epoch"])
+            if command.expected_authority_epoch != current_epoch:
+                raise OwnerTruthMediaAuthorityEpochConflict(
+                    expected_epoch=command.expected_authority_epoch,
+                    current_epoch=current_epoch,
+                )
+            _assert_deletion_retryable(source_object)
+            cursor.execute(
+                """
+                UPDATE owner_truth.media_source_objects
+                SET state = 'deleted', access_state = 'accessRevoked',
+                    processing_status = 'blocked', retryable = FALSE, failure_code = NULL,
+                    deletion_status = 'pending', deletion_generation = deletion_generation + 1,
+                    deletion_retryable = TRUE, deletion_failure_code = NULL,
+                    deletion_updated_at = NOW(), updated_at = NOW(), row_version = row_version + 1
+                WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+                RETURNING *
+                """,
+                (context.vault_id, source_object_id, context.owner_subject_id),
+            )
+            source_object = self._source_object_record(cursor.fetchone())
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.media_source_object_deletion_commands (
+                    id, vault_id, source_object_id, owner_subject_id, command_id_hash,
+                    payload_hash, deletion_generation
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    command.deletion_command_id(
+                        vault_id=context.vault_id,
+                        source_object_id=source_object_id,
+                    ),
+                    context.vault_id,
+                    source_object_id,
+                    context.owner_subject_id,
+                    command.command_id_hash,
+                    payload_hash,
+                    int(source_object["deletionGeneration"]),
+                ),
+            )
+            return MediaSourceObjectDeletionResult(
+                outcome="retryAccepted",
+                source_object=source_object,
+                deletion_effect_required=True,
+            )
+
+    def assert_processing_commit_allowed(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        expected_processing_generation: int,
+    ) -> Mapping[str, Any]:
+        with self._cursor() as cursor:
+            source_object = self._fetch_owned_source_object(
+                cursor=cursor,
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+                for_update=True,
+            )
+            self._assert_access_active(source_object)
+            if int(source_object.get("processingGeneration") or 0) != expected_processing_generation:
+                raise OwnerTruthMediaUploadConflict("media processing generation is no longer current")
+            if source_object.get("state") != "processing":
+                raise OwnerTruthMediaUploadConflict("media source object is no longer processing")
+            return source_object
+
+    def record_deletion_outcome(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        deletion_generation: int,
+        outcome: str,
+        retryable: bool,
+        failure_code: Optional[str] = None,
+    ) -> Mapping[str, Any]:
+        with self._cursor() as cursor:
+            source_object = self._fetch_owned_source_object(
+                cursor=cursor,
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+                for_update=True,
+            )
+            return self._record_deletion_outcome_cursor(
+                cursor=cursor,
+                source_object=source_object,
+                deletion_generation=deletion_generation,
+                outcome=outcome,
+                retryable=retryable,
+                failure_code=failure_code,
+            )
+
     def queue_processing(
         self,
         *,
@@ -1596,6 +2286,7 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
                 owner_subject_id=owner_subject_id,
                 for_update=True,
             )
+            self._assert_access_active(source_object)
             if source_object["state"] != "verified" or source_object["safetyStatus"] != "clean":
                 raise OwnerTruthMediaUploadConflict("media source object is not verified for processing")
             if source_object["mediaKind"] == "video":
@@ -1646,6 +2337,7 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
                 owner_subject_id=owner_subject_id,
                 for_update=True,
             )
+            self._assert_access_active(source_object)
             if int(source_object["authorityEpoch"]) != expected_authority_epoch:
                 raise OwnerTruthMediaAuthorityEpochConflict(
                     expected_epoch=expected_authority_epoch,
@@ -1696,6 +2388,7 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
                 owner_subject_id=owner_subject_id,
                 for_update=True,
             )
+            self._assert_access_active(source_object)
             return self._record_processing_outcome_cursor(
                 cursor=cursor,
                 source_object=source_object,
@@ -1811,6 +2504,7 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
         derived_source_id: Optional[str] = None,
         failure_code: Optional[str] = None,
     ) -> Mapping[str, Any]:
+        self._assert_access_active(source_object)
         if type(processing_generation) is not int or processing_generation < 0:
             raise OwnerTruthMediaUploadInvalid("media processing generation is invalid")
         if int(source_object.get("processingGeneration") or 0) != processing_generation:
@@ -1955,6 +2649,64 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
         return self._source_object_record(cursor.fetchone())
 
     @staticmethod
+    def _assert_access_active(source_object: Mapping[str, Any]) -> None:
+        if (
+            str(source_object.get("accessState") or "available") != "available"
+            or str(source_object.get("state") or "") == "deleted"
+        ):
+            raise OwnerTruthMediaAccessRevoked("media source object access was revoked")
+
+    def _record_deletion_outcome_cursor(
+        self,
+        *,
+        cursor: Any,
+        source_object: Mapping[str, Any],
+        deletion_generation: int,
+        outcome: str,
+        retryable: bool,
+        failure_code: Optional[str],
+    ) -> Mapping[str, Any]:
+        if type(deletion_generation) is not int or deletion_generation < 1:
+            raise OwnerTruthMediaUploadInvalid("media deletion generation is invalid")
+        if int(source_object.get("deletionGeneration") or 0) != deletion_generation:
+            raise OwnerTruthMediaUploadConflict("media deletion generation is no longer current")
+        if str(source_object.get("accessState") or "") != "accessRevoked":
+            raise OwnerTruthMediaUploadConflict("media deletion requires revoked access")
+        normalized_outcome = str(outcome or "").strip()
+        if normalized_outcome not in {"completed", "partial", "unsupported"}:
+            raise OwnerTruthMediaUploadInvalid("media deletion outcome is invalid")
+        if type(retryable) is not bool:
+            raise OwnerTruthMediaUploadInvalid("media deletion retryable flag is invalid")
+        normalized_failure_code = str(failure_code or "").strip() or None
+        if normalized_failure_code is not None and not _PURPOSE_PATTERN.fullmatch(normalized_failure_code):
+            raise OwnerTruthMediaUploadInvalid("media deletion failure code is invalid")
+        if normalized_outcome == "completed":
+            if retryable or normalized_failure_code is not None:
+                raise OwnerTruthMediaUploadInvalid("completed media deletion cannot be retryable")
+        elif normalized_failure_code is None:
+            raise OwnerTruthMediaUploadInvalid("incomplete media deletion outcome requires failure code")
+        cursor.execute(
+            """
+            UPDATE owner_truth.media_source_objects
+            SET state = 'deleted', access_state = 'accessRevoked', processing_status = 'blocked',
+                retryable = FALSE, failure_code = NULL, deletion_status = %s,
+                deletion_retryable = %s, deletion_failure_code = %s,
+                deletion_updated_at = NOW(), updated_at = NOW(), row_version = row_version + 1
+            WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+            RETURNING *
+            """,
+            (
+                normalized_outcome,
+                retryable,
+                normalized_failure_code,
+                source_object["vaultId"],
+                source_object["sourceObjectId"],
+                source_object["ownerSubjectId"],
+            ),
+        )
+        return self._source_object_record(cursor.fetchone())
+
+    @staticmethod
     def _assert_upload_token(*, intent: Mapping[str, Any], upload_token_hash: str) -> None:
         if not secrets.compare_digest(str(intent["upload_token_hash"]), upload_token_hash):
             raise OwnerTruthMediaUploadTokenInvalid("upload token is invalid")
@@ -1992,6 +2744,17 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
             "storageProvider": row.get("storage_provider"),
             "storageKey": row.get("storage_key"),
             "storageVersion": int(row.get("storage_version") or 0),
+            "accessState": str(row.get("access_state") or "available"),
+            "deletionStatus": str(row.get("deletion_status") or "notRequested"),
+            "deletionGeneration": int(row.get("deletion_generation") or 0),
+            "deletionRetryable": bool(row.get("deletion_retryable", False)),
+            "deletionFailureCode": row.get("deletion_failure_code"),
+            "deletionRequestedAt": _utc_iso(row["deletion_requested_at"])
+            if row.get("deletion_requested_at")
+            else None,
+            "deletionUpdatedAt": _utc_iso(row["deletion_updated_at"])
+            if row.get("deletion_updated_at")
+            else None,
             "safetyStatus": str(row["safety_status"]),
             "safetyProvider": row.get("safety_provider"),
             "processingStatus": str(row["processing_status"]),
@@ -2176,6 +2939,34 @@ class OwnerTruthMediaIngestionService:
             owner_subject_id=context.owner_subject_id,
         )
 
+    def request_deletion(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        source_object_id: str,
+        command: MediaDeletionCommand,
+    ) -> MediaSourceObjectDeletionResult:
+        self._require_available()
+        return self._repository().request_deletion(
+            context=context,
+            source_object_id=self._normalize_uuid(source_object_id, field="source object id"),
+            command=command,
+        )
+
+    def retry_deletion(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        source_object_id: str,
+        command: MediaDeletionCommand,
+    ) -> MediaSourceObjectDeletionResult:
+        self._require_available()
+        return self._repository().retry_deletion(
+            context=context,
+            source_object_id=self._normalize_uuid(source_object_id, field="source object id"),
+            command=command,
+        )
+
     @staticmethod
     def public_upload_intent_response(result: MediaUploadIntentCreateResult) -> dict[str, Any]:
         return {
@@ -2193,6 +2984,23 @@ class OwnerTruthMediaIngestionService:
         return {
             "schemaVersion": OWNER_TRUTH_MEDIA_SOURCE_OBJECT_SCHEMA_VERSION,
             "sourceObject": _object_public_receipt(source_object),
+        }
+
+    @staticmethod
+    def public_deletion_response(result: MediaSourceObjectDeletionResult) -> dict[str, Any]:
+        status = {
+            "accepted": "deletionRequested",
+            "retryAccepted": "deletionRetryRequested",
+            "deduplicated": "deletionDeduplicated",
+            "alreadyRevoked": "deletionDeduplicated",
+        }.get(result.outcome)
+        if status is None:
+            raise OwnerTruthMediaUploadInvalid("media deletion outcome is invalid")
+        return {
+            "schemaVersion": OWNER_TRUTH_MEDIA_DELETION_RESPONSE_SCHEMA_VERSION,
+            "status": status,
+            "sourceObject": _object_public_receipt(result.source_object),
+            "deletion": _object_public_deletion_receipt(result.source_object),
         }
 
     def _repository(self) -> OwnerTruthMediaSourceObjectRepository:
@@ -2223,10 +3031,13 @@ __all__ = [
     "DisabledMediaContentSafetyScanner",
     "FilesystemPrivateMediaObjectStore",
     "InMemoryOwnerTruthMediaSourceObjectRepository",
+    "MediaDeletionCommand",
     "MediaSafetyVerdict",
+    "MediaSourceObjectDeletionResult",
     "MediaUploadIntentCommand",
     "MediaUploadIntentCreateResult",
     "OwnerTruthMediaAuthorityEpochConflict",
+    "OwnerTruthMediaAccessRevoked",
     "OwnerTruthMediaCaptureUnavailable",
     "OwnerTruthMediaIngestionError",
     "OwnerTruthMediaIngestionService",
@@ -2238,6 +3049,7 @@ __all__ = [
     "OwnerTruthMediaUploadTokenInvalid",
     "OwnerTruthMediaVaultNotFound",
     "OWNER_TRUTH_MEDIA_SOURCE_OBJECT_SCHEMA_VERSION",
+    "OWNER_TRUTH_MEDIA_DELETION_RESPONSE_SCHEMA_VERSION",
     "OWNER_TRUTH_MEDIA_UPLOAD_INTENT_SCHEMA_VERSION",
     "PostgresOwnerTruthMediaSourceObjectRepository",
     "PrivateMediaObjectStore",

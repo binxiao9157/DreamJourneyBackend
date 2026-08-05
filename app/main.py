@@ -79,6 +79,8 @@ from app.services.owner_truth_source import (
     OwnerTruthSourceAsyncEffectCommandService,
 )
 from app.services.owner_truth_media_source_object import (
+    MediaDeletionCommand,
+    OwnerTruthMediaAccessRevoked,
     MediaUploadIntentCommand,
     OwnerTruthMediaAuthorityEpochConflict,
     OwnerTruthMediaCaptureUnavailable,
@@ -92,6 +94,10 @@ from app.services.owner_truth_media_source_object import (
     OwnerTruthMediaVaultNotFound,
     build_media_content_safety_scanner,
     build_private_media_object_store,
+)
+from app.services.owner_truth_media_deletion import (
+    OwnerTruthMediaDeletionCoordinator,
+    OwnerTruthMediaDeletionError,
 )
 from app.services.owner_truth_media_processing import (
     OwnerTruthMediaProcessingCoordinator,
@@ -536,6 +542,11 @@ def _request_owner_truth_media_processing_retry(
         context=context,
         source_object_id=source_object_id,
     )
+    if (
+        str(source_object.get("accessState") or "available") != "available"
+        or str(source_object.get("state") or "") == "deleted"
+    ):
+        raise OwnerTruthMediaAccessRevoked("media source object access was revoked")
     if str(source_object.get("processingStatus") or "") not in {"failed", "notQueued"}:
         raise OwnerTruthMediaUploadConflict("media processing retry is not eligible")
     return _queue_verified_owner_truth_media_processing(context, source_object)
@@ -1229,6 +1240,8 @@ def _owner_truth_media_capture_context(
         route = "PUT /v2/vaults/*/source-objects/upload-intents/*/content"
     elif request.method.upper() == "POST" and normalized_path.endswith("/processing-retries"):
         route = "POST /v2/vaults/*/source-objects/*/processing-retries"
+    elif request.method.upper() == "POST" and normalized_path.endswith("/deletions"):
+        route = "POST /v2/vaults/*/source-objects/*/deletions"
     else:
         route = "GET /v2/vaults/*/source-objects/*"
     return _owner_truth_captured_release_policy_context(
@@ -2850,6 +2863,8 @@ def _owner_truth_media_capture_http_error(
             status_code=503,
             detail={"code": error.code, "retryable": True},
         )
+    if isinstance(error, OwnerTruthMediaAccessRevoked):
+        return HTTPException(status_code=409, detail={"code": error.code, "retryable": False})
     if isinstance(error, OwnerTruthMediaVaultNotFound):
         return HTTPException(status_code=404, detail={"code": error.code})
     if isinstance(error, OwnerTruthMediaUploadNotFound):
@@ -5915,6 +5930,97 @@ def get_owner_truth_media_source_object(
     return JSONResponse(
         content={
             **OWNER_TRUTH_MEDIA_INGESTION_SERVICE.public_source_object_response(source_object),
+            "vaultId": context.vault_id,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletions",
+    include_in_schema=False,
+)
+def request_owner_truth_media_source_object_deletion(
+    request: Request,
+    vault_id: str,
+    source_object_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Revoke private media access before asynchronous physical deletion.
+
+    The response intentionally says ``pending`` until a dedicated worker has a
+    real object-store receipt.  It never returns a storage key, provider body,
+    or a claim that the bytes are already deleted.
+    """
+
+    try:
+        context = _owner_truth_media_capture_context(request, vault_id=vault_id)
+        command = MediaDeletionCommand.from_payload(payload)
+        result = OWNER_TRUTH_MEDIA_INGESTION_SERVICE.request_deletion(
+            context=context,
+            source_object_id=source_object_id,
+            command=command,
+        )
+        OwnerTruthMediaDeletionCoordinator(store).enqueue_accepted_deletion(
+            context=context,
+            result=result,
+        )
+    except HTTPException:
+        raise
+    except OwnerTruthMediaIngestionError as error:
+        raise _owner_truth_media_capture_http_error(error) from error
+    except OwnerTruthMediaDeletionError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthMediaDeletionConflict", "retryable": False},
+        ) from error
+    return JSONResponse(
+        status_code=202 if result.outcome == "accepted" else 200,
+        content={
+            **OWNER_TRUTH_MEDIA_INGESTION_SERVICE.public_deletion_response(result),
+            "vaultId": context.vault_id,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletion-retries",
+    include_in_schema=False,
+)
+def retry_owner_truth_media_source_object_deletion(
+    request: Request,
+    vault_id: str,
+    source_object_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Replay only a failed physical-deletion effect for a revoked object."""
+
+    try:
+        context = _owner_truth_media_capture_context(request, vault_id=vault_id)
+        command = MediaDeletionCommand.from_payload(payload)
+        result = OWNER_TRUTH_MEDIA_INGESTION_SERVICE.retry_deletion(
+            context=context,
+            source_object_id=source_object_id,
+            command=command,
+        )
+        OwnerTruthMediaDeletionCoordinator(store).enqueue_accepted_deletion(
+            context=context,
+            result=result,
+        )
+    except HTTPException:
+        raise
+    except OwnerTruthMediaIngestionError as error:
+        raise _owner_truth_media_capture_http_error(error) from error
+    except OwnerTruthMediaDeletionError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ownerTruthMediaDeletionConflict", "retryable": False},
+        ) from error
+    return JSONResponse(
+        status_code=202 if result.outcome == "retryAccepted" else 200,
+        content={
+            **OWNER_TRUTH_MEDIA_INGESTION_SERVICE.public_deletion_response(result),
             "vaultId": context.vault_id,
         },
         headers={"Cache-Control": "no-store"},

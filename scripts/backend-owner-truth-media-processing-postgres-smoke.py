@@ -42,6 +42,7 @@ from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.services.owner_truth_media_source_object import (
     FilesystemPrivateMediaObjectStore,
     OwnerTruthMediaIngestionService,
+    OwnerTruthMediaUploadConflict,
     TestOnlyCleanMediaContentSafetyScanner,
 )
 from app.services.postgres_store import PostgresStore
@@ -273,8 +274,8 @@ def main() -> None:
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         require(
-            str(applied.get("appliedHead") or "") == "0074",
-            "Stage 2 media processing migration must be the schema head",
+            str(applied.get("appliedHead") or "") == "0075",
+            "Stage 2 media lifecycle migration must be the schema head",
         )
 
         with TemporaryDirectory(prefix="dreamjourney-media-postgres-smoke-") as media_root:
@@ -579,6 +580,212 @@ def main() -> None:
                 ),
                 "formal media Context must cite the confirmed media-derived Source",
             )
+
+            deletion_path = (
+                f"/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletions"
+            )
+            deletion_payload = {
+                "commandId": str(uuid.uuid4()),
+                "expectedAuthorityEpoch": 0,
+                "clientRequestedAt": "2026-08-05T00:00:00Z",
+            }
+            cross_owner_deletion = client.post(
+                deletion_path,
+                headers=other_policy_headers,
+                json=deletion_payload,
+            )
+            require(
+                cross_owner_deletion.status_code == 404,
+                "cross Owner media deletion must be hidden",
+            )
+
+            deletion = client.post(
+                deletion_path,
+                headers=owner_policy_headers,
+                json=deletion_payload,
+            )
+            require(deletion.status_code == 202, f"media deletion failed: {deletion.text}")
+            deletion_body = deletion.json()
+            deletion_state = deletion_body.get("deletion") or {}
+            require(
+                deletion_body.get("schemaVersion") == "owner-truth-media-deletion-response-v1",
+                "media deletion response schema changed",
+            )
+            require(
+                deletion_body.get("status") == "deletionRequested"
+                and (deletion_body.get("sourceObject") or {}).get("state") == "deleted"
+                and (deletion_body.get("sourceObject") or {}).get("processingStatus") == "blocked",
+                "accepted deletion must revoke read and processing access first",
+            )
+            require(
+                deletion_state == {
+                    "accessState": "accessRevoked",
+                    "deletionStatus": "pending",
+                    "retryable": True,
+                    "failureCode": None,
+                    "updatedAt": deletion_state.get("updatedAt"),
+                }
+                and isinstance(deletion_state.get("updatedAt"), str),
+                "deletion receipt must remain value-minimized and pending",
+            )
+            rendered_deletion = json.dumps(deletion_body, ensure_ascii=False, sort_keys=True)
+            require("storageKey" not in rendered_deletion, "deletion response leaked storage key")
+            require("storageProvider" not in rendered_deletion, "deletion response leaked provider")
+            require(source_text not in rendered_deletion, "deletion response leaked private text")
+
+            deletion_replay = client.post(
+                deletion_path,
+                headers=owner_policy_headers,
+                json=deletion_payload,
+            )
+            require(
+                deletion_replay.status_code == 200
+                and deletion_replay.json().get("status") == "deletionDeduplicated",
+                "same deletion command must deduplicate",
+            )
+            processing_retry_after_deletion = client.post(
+                f"/v2/vaults/{vault_id}/source-objects/{source_object_id}/processing-retries",
+                headers=owner_policy_headers,
+            )
+            require(
+                processing_retry_after_deletion.status_code == 409
+                and route_code(processing_retry_after_deletion) == "ownerTruthMediaAccessRevoked",
+                "revoked media must not be reprocessed",
+            )
+            deleted_read = client.get(
+                f"/v2/vaults/{vault_id}/source-objects/{source_object_id}",
+                headers=owner_policy_headers,
+            )
+            require(
+                deleted_read.status_code == 200
+                and (deleted_read.json().get("sourceObject") or {}).get("state") == "deleted",
+                "Owner status read must remain a tombstone rather than restoring access",
+            )
+
+            context_after_deletion = client.post(
+                "/context/build",
+                headers=captured_policy_headers(
+                    client,
+                    owner_headers,
+                    session_id=owner_session_id,
+                    feature="echoTextInput",
+                ),
+                json={
+                    "userId": owner_id,
+                    "intent": "echo_chat",
+                    "query": "只依据仍可使用的确认记忆回答。",
+                    "personaScope": "personal",
+                    "digitalHumanId": owner_id,
+                },
+            )
+            require(
+                context_after_deletion.status_code == 200,
+                f"Context after media deletion failed: {context_after_deletion.text}",
+            )
+            selected_after_deletion = (
+                (context_after_deletion.json().get("contextPacket") or {}).get("selectedContext")
+                or []
+            )
+            require(
+                not any(
+                    ((item.get("citation") or {}).get("sourceId") == candidate_source_id)
+                    for item in selected_after_deletion
+                ),
+                "revoked media-derived Source must not remain in Context",
+            )
+
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT provider_name, capability, state
+                        FROM async_effects.provider_effects
+                        WHERE vault_id = %s AND resource_id = %s
+                          AND purpose = 'privateMediaDeletion'
+                        """,
+                        (vault_id, source_object_id),
+                    )
+                    provider_effect_rows = cursor.fetchall()
+            require(
+                provider_effect_rows == [("objectStorage", "privateMediaDeletion", "accepted")],
+                "accepted deletion must record one value-free provider effect receipt",
+            )
+
+            repository = store.owner_truth_media_source_object_repository()
+            deletion_source = repository.get_source_object(
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_id,
+            )
+            repository.record_deletion_outcome(
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_id,
+                deletion_generation=int(deletion_source["deletionGeneration"]),
+                outcome="partial",
+                retryable=True,
+                failure_code="objectStorageUnavailable",
+            )
+            deletion_retry_payload = {
+                "commandId": str(uuid.uuid4()),
+                "expectedAuthorityEpoch": 0,
+                "clientRequestedAt": "2026-08-05T00:01:00Z",
+            }
+            deletion_retry = client.post(
+                f"/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletion-retries",
+                headers=owner_policy_headers,
+                json=deletion_retry_payload,
+            )
+            require(
+                deletion_retry.status_code == 202,
+                f"retryable deletion must requeue safely: {deletion_retry.text}",
+            )
+            require(
+                deletion_retry.json().get("status") == "deletionRetryRequested"
+                and (deletion_retry.json().get("sourceObject") or {}).get("state") == "deleted"
+                and (deletion_retry.json().get("deletion") or {}).get("deletionStatus")
+                == "pending",
+                "deletion retry must preserve revoked access and reset only its effect state",
+            )
+            deletion_retry_replay = client.post(
+                f"/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletion-retries",
+                headers=owner_policy_headers,
+                json=deletion_retry_payload,
+            )
+            require(
+                deletion_retry_replay.status_code == 200
+                and deletion_retry_replay.json().get("status") == "deletionDeduplicated",
+                "deletion retry command must deduplicate",
+            )
+            try:
+                repository.record_deletion_outcome(
+                    vault_id=vault_id,
+                    source_object_id=source_object_id,
+                    owner_subject_id=owner_id,
+                    deletion_generation=int(deletion_source["deletionGeneration"]),
+                    outcome="completed",
+                    retryable=False,
+                )
+            except OwnerTruthMediaUploadConflict:
+                pass
+            else:
+                raise AssertionError("old deletion generation must not overwrite a retry")
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM async_effects.provider_effects
+                        WHERE vault_id = %s AND resource_id = %s
+                          AND purpose = 'privateMediaDeletion'
+                        """,
+                        (vault_id, source_object_id),
+                    )
+                    deletion_effect_count = int(cursor.fetchone()[0])
+            require(
+                deletion_effect_count == 2,
+                "each accepted deletion generation must create one provider-effect receipt",
+            )
             require(
                 OwnerTruthMediaProcessingWorkerRuntime(
                     settings=worker_settings,
@@ -597,7 +804,10 @@ def main() -> None:
                 ).run_once()["status"] == "idle",
                 "completed Candidate work replayed",
             )
-            require(len(list(Path(media_root).rglob("*.bin"))) == 1, "private object count changed")
+            require(
+                len(list(Path(media_root).rglob("*.bin"))) == 1,
+                "P0-S1 must not claim physical deletion before its dedicated worker exists",
+            )
 
             print(
                 json.dumps(
@@ -615,6 +825,13 @@ def main() -> None:
                         "memoryVersionCreated": True,
                         "projectionReady": True,
                         "contextBuilt": True,
+                        "deletionAccessRevoked": True,
+                        "deletionReplayDeduplicated": True,
+                        "deletionRetryRequeued": True,
+                        "deletionRetryReplayDeduplicated": True,
+                        "staleDeletionOutcomeBlocked": True,
+                        "deletionProviderReceiptAccepted": True,
+                        "deletedMediaExcludedFromContext": True,
                         "qaHeaderUsed": False,
                         "responseRedaction": True,
                         **summary,

@@ -1,0 +1,11 @@
+{
+  "version": "0075",
+  "name": "owner_truth_media_deletion_receipts",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthMediaDeletionClosedPilotDefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerMediaCaptureV1": false
+  }
+}

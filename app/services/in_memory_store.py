@@ -123,6 +123,7 @@ from app.services.owner_truth_migration_parity_shadow import (
 )
 from app.services.user_identity import stable_user_id
 from app.async_effects.repository import InMemoryEffectKernelRepository
+from app.async_effects.provider_effect_repository import InMemoryProviderEffectRepository
 from app.services.echo_delayed_reply_effects import ECHO_DELAYED_REPLY_SCHEMA_VERSION
 from app.observability.events import (
     EvidenceEventConflict,
@@ -165,11 +166,13 @@ class InMemoryStore:
             InMemoryOwnerTruthMediaSourceObjectRepository(
                 vaults=self._owner_truth_vaults,
                 lock=self._owner_truth_lock,
+                on_derived_source_access_revoked=self._revoke_owner_truth_media_derived_source,
             )
         )
         self._owner_truth_family_contribution_grants: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._owner_truth_family_contribution_grant_commands: Dict[Tuple[str, str], str] = {}
         self._effect_kernel_repository = InMemoryEffectKernelRepository()
+        self._provider_effect_repository = InMemoryProviderEffectRepository()
         self._owner_truth_candidate_review_repository = (
             InMemoryOwnerTruthCandidateReviewRepository(
                 memory_projection_rebuild_runnable_reader=(
@@ -348,6 +351,9 @@ class InMemoryStore:
 
     def effect_kernel_repository(self) -> InMemoryEffectKernelRepository:
         return self._effect_kernel_repository
+
+    def provider_effect_repository(self) -> InMemoryProviderEffectRepository:
+        return self._provider_effect_repository
 
     def owner_truth_media_source_object_repository(
         self,
@@ -2546,6 +2552,19 @@ class InMemoryStore:
             authority_epoch=int(vault["authorityEpoch"]),
             content_hash=record.content_hash,
         )
+
+    def _revoke_owner_truth_media_derived_source(
+        self,
+        vault_id: str,
+        owner_subject_id: str,
+        source_id: str,
+    ) -> None:
+        """Do not leave a deleted media object eligible for Candidate work."""
+
+        source = self._owner_truth_sources.get((vault_id, source_id))
+        if source is None or source.get("ownerSubjectId") != owner_subject_id:
+            return
+        source["state"] = "deleted"
 
     def get_owner_truth_vault(self, vault_id: str) -> Optional[Dict[str, Any]]:
         with self._owner_truth_lock:

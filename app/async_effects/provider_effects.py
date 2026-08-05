@@ -464,6 +464,20 @@ PROVIDER_EFFECT_CATALOG: tuple[ProviderEffectCatalogEntry, ...] = (
         default_exposure="defaultOff",
     ),
     ProviderEffectCatalogEntry(
+        key="objectStorage.privateMediaDeletion",
+        provider="objectStorage",
+        capability="privateMediaDeletion",
+        source_paths=(
+            "app/main.py:/v2/vaults/*/source-objects/*/deletions",
+            "app/services/owner_truth_media_deletion.py:OwnerTruthMediaDeletionCoordinator",
+        ),
+        current_execution="asyncContractOnly",
+        request_id_strategy="stableEffectIntent",
+        query_reconcile_support="providerReceiptRequired",
+        migration_disposition="stableRequestBeforeEnable",
+        default_exposure="defaultOff",
+    ),
+    ProviderEffectCatalogEntry(
         key="tencent.digitalHumanSession",
         provider="tencent",
         capability="digitalHumanSession",

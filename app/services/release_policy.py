@@ -943,6 +943,10 @@ class ReleasePolicyCommandGate:
                 return f"{normalized_method} /v2/vaults/*/source-objects/upload-intents/*/content"
             if suffix.endswith("/processing-retries"):
                 return f"{normalized_method} /v2/vaults/*/source-objects/*/processing-retries"
+            if suffix.endswith("/deletion-retries"):
+                return f"{normalized_method} /v2/vaults/*/source-objects/*/deletion-retries"
+            if suffix.endswith("/deletions"):
+                return f"{normalized_method} /v2/vaults/*/source-objects/*/deletions"
             return f"{normalized_method} /v2/vaults/*/source-objects/*"
         if (
             normalized_method == "POST"

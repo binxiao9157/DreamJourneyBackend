@@ -18,6 +18,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
   tests.test_owner_truth_media_processing_worker \
   tests.test_owner_truth_media_external_processor_contract \
   tests.test_owner_truth_media_processing_migration_contract \
+  tests.test_owner_truth_media_deletion_migration_contract \
   tests.test_async_effect_lease_repository \
   tests.test_route_ownership_registry \
   tests.test_release_policy
@@ -26,6 +27,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/core/config.py \
   app/services/owner_truth_media_source_object.py \
   app/services/owner_truth_media_processing.py \
+  app/services/owner_truth_media_deletion.py \
   app/async_effects/owner_truth_media_processing_worker.py \
   scripts/backend-owner-truth-media-processing-postgres-smoke.py \
   app/services/route_ownership.py \

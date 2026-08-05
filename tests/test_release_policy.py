@@ -975,6 +975,22 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
             "POST /v2/vaults/*/source-objects/*/processing-retries",
         )
         self.assertEqual(
+            gate.route_label_for_request(
+                "POST",
+                "/v2/vaults/vault-a/source-objects/object-a/deletion-retries",
+                {},
+            ),
+            "POST /v2/vaults/*/source-objects/*/deletion-retries",
+        )
+        self.assertEqual(
+            gate.route_label_for_request(
+                "POST",
+                "/v2/vaults/vault-a/source-objects/object-a/deletions",
+                {},
+            ),
+            "POST /v2/vaults/*/source-objects/*/deletions",
+        )
+        self.assertEqual(
             gate.feature_for_request("POST", "/echo/delayed-replies/dispatch-due", {}),
             "echoTextInput",
         )

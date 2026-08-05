@@ -29,7 +29,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 157)
+        self.assertEqual(len(app_routes), 159)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
 
@@ -71,6 +71,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
             ("POST", "/v2/vaults/{vault_id}/source-objects/upload-intents"): RouteOwnershipCategory.USER_SESSION,
             ("PUT", "/v2/vaults/{vault_id}/source-objects/upload-intents/{intent_id}/content"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/source-objects/{source_object_id}"): RouteOwnershipCategory.USER_SESSION,
+            ("POST", "/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletions"): RouteOwnershipCategory.USER_SESSION,
+            ("POST", "/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletion-retries"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/source-objects/{source_object_id}/processing-retries"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/source-capture-state"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/candidates/{candidate_id}/decisions"): RouteOwnershipCategory.USER_SESSION,
@@ -147,8 +149,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 157)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 157)
+        self.assertEqual(summary["routeCount"], 159)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 159)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)
@@ -159,6 +161,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
             ("POST", "/voice/synthesis"): "voiceProfile",
             ("POST", "/archive/media/upload-intent"): "archiveItem",
             ("POST", "/archive/image-analysis"): "archiveItem",
+            ("POST", "/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletions"): "mediaSourceObject",
+            ("POST", "/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletion-retries"): "mediaSourceObject",
             ("DELETE", "/archive/items/{user_id}/{item_id}"): "archiveItem",
             ("POST", "/mailbox/letters/{user_id}/{letter_id}/read"): "mailboxLetter",
             ("POST", "/family/members/{user_id}/{member_id}/revoke"): "familyMember",
