@@ -103,3 +103,12 @@ bash scripts/run-backend-publication-lifecycle-execution-postgres-smoke.sh
 3. 在部署容器内运行 lifecycle Postgres disposable smoke。
 4. 默认保持 materializer profile 关闭。
 5. 只有有明确 Provider adapter、Provider 删除/关闭回执和 closed-beta 批准后，才启用对应 worker，再将单域状态从 `pending` 写为 `partial`、`completed` 或 `unsupported`。
+
+## 部署证据
+
+- 2026-08-06，后端 `main@58e346f` 已部署到 `miao-server`。
+- migration `0083` 的 apply/verify 均返回 `status=ready`、`expectedHead=0083`、`appliedHead=0083`、`pendingVersions=[]`。
+- `/ready` 返回 `ready`，数据库、schema、认证和 incident 组件均为 `ready`。
+- 部署容器内的 `scripts/run-backend-publication-lifecycle-execution-postgres-smoke.sh` 已通过；它使用从 `DATABASE_URL` 派生的一次性数据库，验证撤回、异议、authority trigger、补料、五域 pending 回执和幂等重放，不写入应用业务数据。
+- `ASYNC_EFFECT_V1_ENABLED`、`ASYNC_EFFECT_WORKER_ENABLED` 和 `PUBLICATION_EXTERNAL_CLEANUP_MATERIALIZER_ENABLED` 在部署环境均保持 `false`；materializer profile 未启动。
+- 初次 disposable smoke 发现 receipt 写入的 SQL 冲突键与迁移约束不一致；修复提交 `58e346f` 已改为 `(effect_id, observation_hash)` 并通过全量后端验证及第二次 deployed smoke。该问题未写入应用业务数据。
