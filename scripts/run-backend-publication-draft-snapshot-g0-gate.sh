@@ -39,7 +39,7 @@ assert disabled.outbox_enqueued is False
 
 for route in main_module.app.routes:
     raw_path = str(getattr(route, "path", ""))
-    if raw_path.startswith(("/v2/internal/owner-authority/", "/v2/internal/publication-access/")):
+    if raw_path.startswith(("/v2/internal/owner-authority/", "/v2/internal/publication-access/", "/v2/internal/publication-lifecycle/")):
         assert getattr(route, "include_in_schema", True) is False
         continue
     path = raw_path.lower()

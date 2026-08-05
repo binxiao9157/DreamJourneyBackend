@@ -35,9 +35,15 @@ assert policy.publication.allowedContent == ()
 assert service.command_mode_for("publication") == "enforce"
 assert service.command_mode_for("visitorAccess") == "enforce"
 
+internal_qa_prefixes = (
+    "/v2/internal/owner-authority/",
+    "/v2/internal/publication-access/",
+    "/v2/internal/publication-lifecycle/",
+)
+
 for route in main_module.app.routes:
     path = str(getattr(route, "path", ""))
-    if path.startswith(("/v2/internal/owner-authority/", "/v2/internal/publication-access/")):
+    if path.startswith(internal_qa_prefixes):
         assert getattr(route, "include_in_schema", True) is False
         continue
     normalized_path = path.lower()
