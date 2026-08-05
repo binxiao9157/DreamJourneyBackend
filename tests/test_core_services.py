@@ -5,6 +5,7 @@ import urllib.error
 import unittest
 import wave
 from copy import deepcopy
+from typing import Optional
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -37,6 +38,11 @@ from app.services.voice_clone import VolcEngineVoiceCloneV3Provider, VoiceCloneP
 from app.services.amap import AMapDistrictProxy
 from app.services.deepseek import DeepSeekImageAnalysisProxy, DeepSeekKnowledgeExtractionProxy
 from app.services.echo_delayed_reply_effects import ECHO_DELAYED_REPLY_SCHEMA_VERSION
+from app.services.safety_policy import (
+    HighRiskCapability,
+    SubjectEligibilityDecision,
+    SubjectEligibilityReason,
+)
 from app.services.delegated_access import (
     AccessGrantCommand,
     AccessGrantPurpose,
@@ -44,6 +50,12 @@ from app.services.delegated_access import (
     GrantOperation,
     ResourceScopeType,
 )
+from app.services.voice_profile_lifecycle import (
+    VoiceProfileLifecycleState,
+    apply_voice_profile_lifecycle,
+    make_voice_profile_consent,
+)
+from app.services.voice_profile_eligibility import synthetic_test_resolution
 
 
 def verified_self_eligibility(capability: str = "clonedVoice") -> dict:
@@ -58,6 +70,35 @@ def verified_self_eligibility(capability: str = "clonedVoice") -> dict:
         "consentVerified": True,
         "consentPurpose": capability,
     }
+
+
+def p1_voice_profile(
+    payload: dict,
+    *,
+    state: VoiceProfileLifecycleState,
+    purpose: Optional[str] = None,
+) -> dict:
+    now = datetime.now(timezone.utc)
+    resolved_purpose = purpose or (
+        "private_synthesis" if state is VoiceProfileLifecycleState.ACCEPTED else "training"
+    )
+    return apply_voice_profile_lifecycle(
+        payload,
+        state=state,
+        consent=make_voice_profile_consent(
+            purpose=resolved_purpose,
+            version="voice-clone-consent-v1",
+            now=now,
+        ),
+        eligibility_decision=SubjectEligibilityDecision(
+            capability=HighRiskCapability.CLONED_VOICE,
+            allowed=True,
+            decision="allow",
+            reason=SubjectEligibilityReason.ELIGIBLE_LIVING_ADULT_SELF,
+        ),
+        eligibility_provenance="syntheticTest",
+        now=now,
+    )
 
 
 def machine_request(client: TestClient, method: str, path: str, **kwargs):
@@ -642,15 +683,16 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
         profile_store = InMemoryStore()
         profile_store.save_voice_profile(
             "u1",
-            {
-                "voiceProfileId": "vp_voice_001",
-                "providerSpeakerId": "S_voice_001",
-                "sampleStatus": "ready",
-                "isEnabled": True,
-                "realCloneProviderReady": True,
-                "qualityAcceptanceRequired": False,
-                "qualityAcceptanceState": "accepted",
-            },
+            p1_voice_profile(
+                {
+                    "voiceProfileId": "vp_voice_001",
+                    "providerSpeakerId": "S_voice_001",
+                    "realCloneProviderReady": True,
+                    "personaScope": "personal",
+                    "digitalHumanId": "u1",
+                },
+                state=VoiceProfileLifecycleState.ACCEPTED,
+            ),
         )
         fake_provider = FakeVoiceCloneTTSProvider()
         with patch("app.main.store", profile_store), patch("app.main.VoiceCloneTTSProviderFactory") as factory:
@@ -713,14 +755,15 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
         profile_store = InMemoryStore()
         profile_store.save_voice_profile(
             "u1",
-            {
-                "voiceProfileId": "S_voice_001",
-                "sampleStatus": "ready",
-                "isEnabled": True,
-                "realCloneProviderReady": True,
-                "qualityAcceptanceRequired": False,
-                "qualityAcceptanceState": "accepted",
-            },
+            p1_voice_profile(
+                {
+                    "voiceProfileId": "S_voice_001",
+                    "realCloneProviderReady": True,
+                    "personaScope": "personal",
+                    "digitalHumanId": "u1",
+                },
+                state=VoiceProfileLifecycleState.ACCEPTED,
+            ),
         )
         fake_provider = FakeVoiceCloneTTSProvider()
         with patch("app.main.store", profile_store), patch("app.main.VoiceCloneTTSProviderFactory") as factory:
@@ -3392,6 +3435,25 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
 
 
 class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
+    def setUp(self):
+        super().setUp()
+        self._voice_profile_eligibility_patch = patch(
+            "app.main._resolve_trusted_voice_profile_eligibility",
+            return_value=synthetic_test_resolution(
+                SubjectEligibilityDecision(
+                    capability=HighRiskCapability.CLONED_VOICE,
+                    allowed=True,
+                    decision="allow",
+                    reason=SubjectEligibilityReason.ELIGIBLE_LIVING_ADULT_SELF,
+                )
+            ),
+        )
+        self._voice_profile_eligibility_patch.start()
+
+    def tearDown(self):
+        self._voice_profile_eligibility_patch.stop()
+        super().tearDown()
+
     def test_runtime_config_exposes_volcengine_voice_clone_v3_capability(self):
         configured = Settings(
             volcengine_voice_clone_api_key="test-voice-clone-key",
@@ -3561,6 +3623,8 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                         "sampleStatus": "pending",
                         "sampleCount": 1,
                         "authorizationConfirmed": True,
+                        "purpose": "training",
+                        "consentVersion": "voice-clone-consent-v1",
                         "personaScope": "personal",
                         "digitalHumanId": f"u{index}",
                         "audioBase64": "RAW_SAMPLE_BASE64",
@@ -3599,26 +3663,25 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
         profile_store = InMemoryStore()
         profile_store.save_voice_profile(
             "owner",
-            {
-                "voiceProfileId": "vp_ready",
-                "providerSpeakerId": "S_slot_001",
-                "sampleStatus": "ready",
-                "isEnabled": True,
-                "realCloneProviderReady": True,
-                "qualityAcceptanceRequired": False,
-                "qualityAcceptanceState": "accepted",
-            },
+            p1_voice_profile(
+                {
+                    "voiceProfileId": "vp_ready",
+                    "providerSpeakerId": "S_slot_001",
+                    "realCloneProviderReady": True,
+                },
+                state=VoiceProfileLifecycleState.ACCEPTED,
+            ),
         )
         profile_store.save_voice_profile(
             "owner",
-            {
-                "voiceProfileId": "vp_pending",
-                "providerSpeakerId": "S_slot_002",
-                "sampleStatus": "pending",
-                "isEnabled": False,
-                "realCloneProviderReady": True,
-                "qualityAcceptanceRequired": True,
-            },
+            p1_voice_profile(
+                {
+                    "voiceProfileId": "vp_pending",
+                    "providerSpeakerId": "S_slot_002",
+                    "realCloneProviderReady": True,
+                },
+                state=VoiceProfileLifecycleState.TRAINING,
+            ),
         )
         client = TestClient(app)
 
@@ -3684,19 +3747,19 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
         )
         profile_store.save_voice_profile(
             "owner",
-            {
-                "voiceProfileId": "vp_bound",
-                "providerSpeakerId": slot["providerSpeakerId"],
-                "providerBindingMode": "exclusiveSlot",
-                "providerSlotManaged": True,
-                "providerSlotState": "training",
-                "sampleStatus": "pending",
-                "isEnabled": False,
-                "realCloneProviderReady": True,
-                "qualityAcceptanceRequired": True,
-                "qualityPreviewReceiptHash": main_module._voice_clone_quality_preview_receipt_hash(preview_receipt_id),
-                "qualityPreviewExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
-            },
+            p1_voice_profile(
+                {
+                    "voiceProfileId": "vp_bound",
+                    "providerSpeakerId": slot["providerSpeakerId"],
+                    "providerBindingMode": "exclusiveSlot",
+                    "providerSlotManaged": True,
+                    "providerSlotState": "training",
+                    "realCloneProviderReady": True,
+                    "qualityPreviewReceiptHash": main_module._voice_clone_quality_preview_receipt_hash(preview_receipt_id),
+                    "qualityPreviewExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+                },
+                state=VoiceProfileLifecycleState.TRAINING,
+            ),
         )
         provider = FakeProvider()
         client = TestClient(app)
@@ -3727,6 +3790,8 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
             "sampleStatus": "pending",
             "sampleCount": 0,
             "authorizationConfirmed": True,
+            "purpose": "training",
+            "consentVersion": "voice-clone-consent-v1",
             "personaScope": "personal",
             "digitalHumanId": "owner",
             "privacyMetadata": {"scope": "generationAllowed"},
@@ -3871,6 +3936,8 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                     "sampleStatus": "pending",
                     "sampleCount": 1,
                     "authorizationConfirmed": True,
+                    "purpose": "training",
+                    "consentVersion": "voice-clone-consent-v1",
                     "personaScope": "personal",
                     "digitalHumanId": user_id,
                     "audioBase64": "RAW_SAMPLE_BASE64",
@@ -3915,6 +3982,8 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                     "sampleStatus": "pending",
                     "sampleCount": 1,
                     "authorizationConfirmed": True,
+                    "purpose": "training",
+                    "consentVersion": "voice-clone-consent-v1",
                     "personaScope": "personal",
                     "digitalHumanId": user_id,
                     "audioBase64": "RAW_SAMPLE_BASE64",
@@ -3965,6 +4034,8 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                     "sampleStatus": "pending",
                     "sampleCount": 1,
                     "authorizationConfirmed": True,
+                    "purpose": "training",
+                    "consentVersion": "voice-clone-consent-v1",
                     "personaScope": "personal",
                     "digitalHumanId": user_id,
                     "audioBase64": "RAW_SAMPLE_BASE64",
@@ -4007,6 +4078,7 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                 "sampleCount": 2,
                 "authorizationConfirmed": True,
                 "authorizationVersion": "voice-clone-consent-v1",
+                "purpose": "training",
                 "authorizationText": "用户确认提交本人声音样本，仅用于本人私有声音能力。",
                 "personaScope": "personal",
                 "digitalHumanId": user_id,
@@ -4014,6 +4086,7 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
                 "sampleLocalPath": "/private/var/mobile/voice/raw.m4a",
                 "audioBase64": "RAW_SAMPLE_BASE64",
                 "privacyMetadata": {"scope": "generationAllowed"},
+                "subjectEligibility": verified_self_eligibility(),
             },
         )
         listed = client.get(f"/voice/profiles/{user_id}")
@@ -4119,24 +4192,24 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
             preview_receipt_id = "quality-preview-receipt-001"
             main_module.store.save_voice_profile(
                 user_id,
-                {
-                    "id": voice_profile_id,
-                    "voiceProfileId": voice_profile_id,
-                    "userId": user_id,
-                    "sampleStatus": "ready",
-                    "isEnabled": True,
-                    "realCloneProviderReady": True,
-                    "qualityAcceptanceRequired": True,
-                    "qualityPreviewReceiptHash": main_module._voice_clone_quality_preview_receipt_hash(preview_receipt_id),
-                    "qualityPreviewExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
-                    "providerMode": "volcengineVoiceCloneV3",
-                    "providerStatus": "2",
-                    "authorizationConfirmed": True,
-                    "authorizationCopy": "用户已授权本人声音样本。",
-                    "disableContract": main_module.VOICE_CLONE_DISABLE_CONTRACT,
-                    "deleteContract": main_module.VOICE_CLONE_DELETE_CONTRACT,
-                    "contractVersion": main_module.VOICE_CLONE_CONTRACT_VERSION,
-                },
+                p1_voice_profile(
+                    {
+                        "id": voice_profile_id,
+                        "voiceProfileId": voice_profile_id,
+                        "userId": user_id,
+                        "realCloneProviderReady": True,
+                        "qualityPreviewReceiptHash": main_module._voice_clone_quality_preview_receipt_hash(preview_receipt_id),
+                        "qualityPreviewExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+                        "providerMode": "volcengineVoiceCloneV3",
+                        "providerStatus": "2",
+                        "authorizationConfirmed": True,
+                        "authorizationCopy": "用户已授权本人声音样本。",
+                        "disableContract": main_module.VOICE_CLONE_DISABLE_CONTRACT,
+                        "deleteContract": main_module.VOICE_CLONE_DELETE_CONTRACT,
+                        "contractVersion": main_module.VOICE_CLONE_CONTRACT_VERSION,
+                    },
+                    state=VoiceProfileLifecycleState.PREVIEW_READY,
+                ),
             )
 
             accepted = client.post(
@@ -4166,22 +4239,22 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
             voice_profile_id = "S_quality_pending_1"
             main_module.store.save_voice_profile(
                 user_id,
-                {
-                    "id": voice_profile_id,
-                    "voiceProfileId": voice_profile_id,
-                    "userId": user_id,
-                    "sampleStatus": "pending",
-                    "isEnabled": False,
-                    "realCloneProviderReady": True,
-                    "qualityAcceptanceRequired": True,
-                    "providerMode": "volcengineVoiceCloneV3",
-                    "providerStatus": "1",
-                    "authorizationConfirmed": True,
-                    "authorizationCopy": "用户已授权本人声音样本。",
-                    "disableContract": main_module.VOICE_CLONE_DISABLE_CONTRACT,
-                    "deleteContract": main_module.VOICE_CLONE_DELETE_CONTRACT,
-                    "contractVersion": main_module.VOICE_CLONE_CONTRACT_VERSION,
-                },
+                p1_voice_profile(
+                    {
+                        "id": voice_profile_id,
+                        "voiceProfileId": voice_profile_id,
+                        "userId": user_id,
+                        "realCloneProviderReady": True,
+                        "providerMode": "volcengineVoiceCloneV3",
+                        "providerStatus": "1",
+                        "authorizationConfirmed": True,
+                        "authorizationCopy": "用户已授权本人声音样本。",
+                        "disableContract": main_module.VOICE_CLONE_DISABLE_CONTRACT,
+                        "deleteContract": main_module.VOICE_CLONE_DELETE_CONTRACT,
+                        "contractVersion": main_module.VOICE_CLONE_CONTRACT_VERSION,
+                    },
+                    state=VoiceProfileLifecycleState.TRAINING,
+                ),
             )
 
             accepted = client.post(f"/voice/profiles/{user_id}/{voice_profile_id}/quality-acceptance")
@@ -4215,23 +4288,23 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
             voice_profile_id = "vp_quality_preview"
             main_module.store.save_voice_profile(
                 user_id,
-                {
-                    "id": voice_profile_id,
-                    "voiceProfileId": voice_profile_id,
-                    "userId": user_id,
-                    "providerSpeakerId": "S_quality_preview_001",
-                    "sampleStatus": "ready",
-                    "isEnabled": True,
-                    "realCloneProviderReady": True,
-                    "qualityAcceptanceRequired": True,
-                    "providerMode": "volcengineVoiceCloneV3",
-                    "providerStatus": "2",
-                    "authorizationConfirmed": True,
-                    "authorizationCopy": "用户已授权本人声音样本。",
-                    "disableContract": main_module.VOICE_CLONE_DISABLE_CONTRACT,
-                    "deleteContract": main_module.VOICE_CLONE_DELETE_CONTRACT,
-                    "contractVersion": main_module.VOICE_CLONE_CONTRACT_VERSION,
-                },
+                p1_voice_profile(
+                    {
+                        "id": voice_profile_id,
+                        "voiceProfileId": voice_profile_id,
+                        "userId": user_id,
+                        "providerSpeakerId": "S_quality_preview_001",
+                        "realCloneProviderReady": True,
+                        "providerMode": "volcengineVoiceCloneV3",
+                        "providerStatus": "2",
+                        "authorizationConfirmed": True,
+                        "authorizationCopy": "用户已授权本人声音样本。",
+                        "disableContract": main_module.VOICE_CLONE_DISABLE_CONTRACT,
+                        "deleteContract": main_module.VOICE_CLONE_DELETE_CONTRACT,
+                        "contractVersion": main_module.VOICE_CLONE_CONTRACT_VERSION,
+                    },
+                    state=VoiceProfileLifecycleState.PREVIEW_READY,
+                ),
             )
 
             with patch("app.main.VoiceCloneTTSProviderFactory") as factory:

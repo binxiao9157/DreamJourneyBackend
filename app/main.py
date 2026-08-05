@@ -500,6 +500,19 @@ from app.services.voice_clone import (
     configured_voice_clone_speaker_ids,
     uses_voice_clone_speaker_pool,
 )
+from app.services.voice_profile_lifecycle import (
+    VoiceProfileLifecycleState,
+    apply_voice_profile_lifecycle,
+    canonical_lifecycle_state,
+    is_voice_profile_synthesizable,
+    make_voice_profile_consent,
+    profile_public_projection,
+    provider_observed_lifecycle_state,
+)
+from app.services.voice_profile_eligibility import (
+    VoiceProfileEligibilityResolution,
+    VoiceProfileEligibilityResolver,
+)
 from app.services.user_identity import stable_user_id
 
 
@@ -4422,7 +4435,7 @@ ARCHIVE_MEDIA_UPLOAD_LIMITS = {
     "video": ARCHIVE_VIDEO_UPLOAD_LIMIT_BYTES,
 }
 VOICE_CLONE_SAMPLE_STATUSES = {"notProvided", "pending", "ready", "disabled", "deleted", "failed"}
-VOICE_CLONE_CONTRACT_VERSION = 4
+VOICE_CLONE_CONTRACT_VERSION = 6
 VOICE_CLONE_PROVIDER_MODE = "mockContract"
 VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE = "echo"
 VOICE_CLONE_QUALITY_PREVIEW_PURPOSE = "qualityPreview"
@@ -4541,6 +4554,25 @@ def _evaluate_subject_eligibility_payload(
             },
         )
     return decision
+
+
+def _resolve_trusted_voice_profile_eligibility(
+    *,
+    actor_user_id: str,
+    profile_user_id: str,
+) -> VoiceProfileEligibilityResolution:
+    """Resolve VoiceProfile eligibility without trusting mobile JSON claims."""
+
+    resolution = VoiceProfileEligibilityResolver().resolve(
+        actor_user_id=actor_user_id,
+        profile_user_id=profile_user_id,
+    )
+    if not resolution.decision.allowed:
+        _subject_eligibility_hard_deny(
+            HighRiskCapability.CLONED_VOICE,
+            resolution.decision.reason,
+        )
+    return resolution
 
 
 def _request_bearer_token(request: Request) -> str:
@@ -10411,8 +10443,9 @@ def _voice_clone_provider_speaker_id(profile: Dict[str, Any]) -> str:
 
 
 def _voice_clone_public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
-    public_profile = dict(profile)
+    public_profile = profile_public_projection(profile)
     public_profile.pop("providerSpeakerId", None)
+    public_profile.pop("authorizationText", None)
     for private_receipt_field in (
         "qualityPreviewReceiptHash",
         "qualityPreviewIssuedAt",
@@ -10587,12 +10620,9 @@ def _validate_voice_profile_for_synthesis(
     profile = store.get_voice_profile(user_id, voice_profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="voice profile not found for user")
-    if str(profile.get("deletionState") or "") == "deleted" or str(profile.get("sampleStatus") or "") == "deleted":
+    lifecycle_state = canonical_lifecycle_state(profile)
+    if lifecycle_state is VoiceProfileLifecycleState.DELETED:
         raise HTTPException(status_code=409, detail="voice profile is deleted")
-    if str(profile.get("sampleStatus") or "") != "ready":
-        raise HTTPException(status_code=409, detail="voice profile is not ready")
-    if not bool(profile.get("isEnabled")):
-        raise HTTPException(status_code=409, detail="voice profile is disabled")
     if not bool(profile.get("realCloneProviderReady")):
         raise HTTPException(status_code=409, detail="voice profile provider is not ready")
     persona_scope = str(profile.get("personaScope") or "personal").strip()
@@ -10602,23 +10632,41 @@ def _validate_voice_profile_for_synthesis(
             HighRiskCapability.CLONED_VOICE,
             SubjectEligibilityReason.FAMILY_SUBJECT,
         )
-    stored_eligibility = profile.get("subjectEligibilityDecision")
-    if isinstance(stored_eligibility, dict) and stored_eligibility.get("allowed") is not True:
-        reason_value = str(stored_eligibility.get("reason") or "")
+    public_profile = profile_public_projection(profile)
+    eligibility = public_profile["eligibility"]
+    if eligibility.get("allowed") is not True:
+        reason_value = str(eligibility.get("reasonCode") or "")
         try:
             reason = SubjectEligibilityReason(reason_value)
         except ValueError:
             reason = SubjectEligibilityReason.SUBJECT_MISMATCH
         _subject_eligibility_hard_deny(HighRiskCapability.CLONED_VOICE, reason)
-    if bool(profile.get("qualityAcceptanceRequired", True)) and not allow_quality_preview:
-        raise HTTPException(status_code=409, detail="voice profile quality acceptance is required")
+    consent = public_profile["consent"]
+    if consent.get("state") != "active":
+        raise HTTPException(status_code=409, detail="voice profile consent is not active")
+    if allow_quality_preview:
+        if lifecycle_state not in {
+            VoiceProfileLifecycleState.PREVIEW_READY,
+            VoiceProfileLifecycleState.ACCEPTED,
+        }:
+            raise HTTPException(status_code=409, detail="voice profile is not ready for quality preview")
+        if "preview" not in public_profile["allowedOperations"]:
+            raise HTTPException(status_code=409, detail="voice profile preview is not allowed")
+    elif lifecycle_state is not VoiceProfileLifecycleState.ACCEPTED:
+        raise HTTPException(status_code=409, detail="voice profile is not accepted")
+    elif not is_voice_profile_synthesizable(profile):
+        raise HTTPException(status_code=409, detail="voice profile synthesis is not allowed")
     provider_speaker_id = _voice_clone_provider_speaker_id(profile)
     if not provider_speaker_id:
         raise HTTPException(status_code=409, detail="voice profile provider binding is missing")
     return profile
 
 
-def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _sanitize_voice_profile_payload(
+    payload: Dict[str, Any],
+    *,
+    actor_user_id: str,
+) -> Dict[str, Any]:
     user_id = _required_text(payload, "userId", 96)
     privacy_metadata = payload.get("privacyMetadata") or {}
     if not isinstance(privacy_metadata, dict) or privacy_metadata.get("scope") not in {"generationAllowed", "familyCircle"}:
@@ -10648,16 +10696,29 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="sampleCount must be an integer")
     sample_count = max(0, min(sample_count, 20))
 
-    now = datetime.now(timezone.utc).isoformat()
+    now_at = datetime.now(timezone.utc)
+    now = now_at.isoformat()
     provider = VoiceCloneProviderFactory(settings).make()
     provider_mode = provider.provider_mode
     provider_result: Dict[str, Any] = {}
     audio_base64 = str(payload.get("audioBase64") or "").strip()
-    eligibility_decision = _evaluate_subject_eligibility_payload(
-        payload,
-        HighRiskCapability.CLONED_VOICE,
-        required=provider.is_configured and bool(audio_base64),
-    )
+    eligibility_resolution = None
+    # A profile may remain a local draft before a sample exists. Once it
+    # contains a sample, only a server-trusted eligibility result can trigger
+    # provider work; caller-supplied JSON is intentionally ignored here.
+    if audio_base64 or payload.get("subjectEligibility") is not None:
+        eligibility_resolution = _resolve_trusted_voice_profile_eligibility(
+            actor_user_id=actor_user_id,
+            profile_user_id=user_id,
+        )
+    consent_purpose = _required_text(payload, "purpose", 64)
+    if consent_purpose != "training":
+        raise HTTPException(status_code=400, detail="voice profile creation purpose must be training")
+    consent_version = str(
+        payload.get("consentVersion") or payload.get("authorizationVersion") or ""
+    ).strip()
+    if not consent_version:
+        raise HTTPException(status_code=400, detail="consentVersion is required")
     existing_profile = store.get_voice_profile(user_id, voice_profile_id) or {}
     provider_speaker_id = _voice_clone_provider_speaker_id(existing_profile)
     provider_binding_mode = str(existing_profile.get("providerBindingMode") or "unassigned")
@@ -10723,7 +10784,7 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "sampleStatus": sample_status,
         "sampleCount": sample_count,
         "authorizationConfirmed": True,
-        "authorizationVersion": str(payload.get("authorizationVersion") or "voice-clone-consent-v1"),
+        "authorizationVersion": consent_version,
         "authorizationText": str(payload.get("authorizationText") or VOICE_CLONE_AUTHORIZATION_COPY)[:300],
         "authorizationConfirmedAt": str(payload.get("authorizationConfirmedAt") or now),
         "authorizationCopy": VOICE_CLONE_AUTHORIZATION_COPY,
@@ -10733,8 +10794,6 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "providerBindingMode": provider_binding_mode,
         "providerSlotManaged": provider_binding_mode == "exclusiveSlot",
         "providerSlotState": provider_slot_state,
-        "qualityAcceptanceRequired": True,
-        "isEnabled": sample_status == "ready",
         "defaultReleaseVisible": False,
         "contractVersion": VOICE_CLONE_CONTRACT_VERSION,
         "disableContract": VOICE_CLONE_DISABLE_CONTRACT,
@@ -10744,8 +10803,6 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             "scope": privacy_metadata.get("scope"),
         },
     }
-    if eligibility_decision is not None:
-        profile["subjectEligibilityDecision"] = eligibility_decision.model_dump(mode="json")
     if provider_speaker_id:
         profile["providerSpeakerId"] = provider_speaker_id
     provider_request_id = str(provider_result.get("providerRequestId") or "").strip()
@@ -10761,6 +10818,32 @@ def _sanitize_voice_profile_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         profile["createdAt"] = str(payload.get("createdAt") or now)
     else:
         profile["createdAt"] = now
+    if audio_base64:
+        if provider.is_configured:
+            lifecycle_state = provider_observed_lifecycle_state({}, sample_status)
+        elif sample_status == "failed":
+            lifecycle_state = VoiceProfileLifecycleState.FAILED
+        else:
+            lifecycle_state = VoiceProfileLifecycleState.UPLOAD_PENDING
+    else:
+        lifecycle_state = canonical_lifecycle_state(profile)
+    consent = make_voice_profile_consent(
+        purpose=consent_purpose,
+        version=consent_version,
+        now=now_at,
+    )
+    profile = apply_voice_profile_lifecycle(
+        profile,
+        state=lifecycle_state,
+        consent=consent,
+        eligibility_decision=(
+            eligibility_resolution.decision if eligibility_resolution is not None else None
+        ),
+        eligibility_provenance=(
+            eligibility_resolution.provenance if eligibility_resolution is not None else None
+        ),
+        now=now_at,
+    )
     return _sanitize_voice_profile_provider_metadata(profile)
 
 
@@ -10791,9 +10874,19 @@ def _sanitize_family_member_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _voice_profile_lifecycle_update(profile: Dict[str, Any], sample_status: str) -> Dict[str, Any]:
     updated = _sanitize_voice_profile_provider_metadata(profile)
-    now = datetime.now(timezone.utc).isoformat()
-    updated["sampleStatus"] = sample_status
-    updated["isEnabled"] = False
+    now_at = datetime.now(timezone.utc)
+    now = now_at.isoformat()
+    if sample_status == "disabled":
+        lifecycle_state = VoiceProfileLifecycleState.PAUSED
+    elif sample_status == "deleted":
+        lifecycle_state = VoiceProfileLifecycleState.DELETED
+    else:
+        lifecycle_state = provider_observed_lifecycle_state(updated, sample_status)
+    updated = apply_voice_profile_lifecycle(
+        updated,
+        state=lifecycle_state,
+        now=now_at,
+    )
     updated["updatedAt"] = now
     if sample_status == "disabled":
         updated["disabledAt"] = now
@@ -10830,8 +10923,6 @@ def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
     if sample_status not in VOICE_CLONE_SAMPLE_STATUSES:
         sample_status = "pending"
     updated = _sanitize_voice_profile_provider_metadata(profile)
-    updated["sampleStatus"] = sample_status
-    updated["isEnabled"] = sample_status == "ready"
     updated["providerMode"] = provider.provider_mode
     updated["realCloneProviderReady"] = provider.is_configured
     updated["providerStatus"] = str(provider_result.get("providerStatus") or updated.get("providerStatus") or "unknown")
@@ -10844,7 +10935,13 @@ def _voice_profile_refresh_update(profile: Dict[str, Any]) -> Dict[str, Any]:
         updated["providerLogId"] = provider_log_id[:160]
     if provider_error_code:
         updated["providerErrorCode"] = provider_error_code[:128]
-    updated["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    now_at = datetime.now(timezone.utc)
+    updated = apply_voice_profile_lifecycle(
+        updated,
+        state=provider_observed_lifecycle_state(updated, sample_status),
+        now=now_at,
+    )
+    updated["updatedAt"] = now_at.isoformat()
     slot_update = _update_voice_clone_slot(voice_profile_id, sample_status)
     if slot_update is not None:
         updated["providerSlotState"] = str(slot_update.get("status") or "")
@@ -10856,9 +10953,17 @@ def _voice_profile_quality_acceptance_update(
     user_id: str,
     preview_receipt_id: str,
 ) -> Dict[str, Any]:
-    if profile.get("sampleStatus") != "ready" or not bool(profile.get("isEnabled")) or not bool(profile.get("realCloneProviderReady")):
+    now_at = datetime.now(timezone.utc)
+    public_profile = profile_public_projection(profile, now=now_at)
+    if (
+        canonical_lifecycle_state(profile) is not VoiceProfileLifecycleState.PREVIEW_READY
+        or not bool(profile.get("realCloneProviderReady"))
+        or public_profile["eligibility"].get("allowed") is not True
+    ):
         raise HTTPException(status_code=409, detail="voice profile is not ready for quality acceptance")
-    if not bool(profile.get("qualityAcceptanceRequired", True)):
+    if public_profile["consent"].get("state") != "active":
+        raise HTTPException(status_code=409, detail="voice profile consent is not active")
+    if public_profile["consent"].get("purpose") != "training":
         raise HTTPException(status_code=409, detail="voice profile quality has already been accepted")
 
     expected_receipt_hash = str(profile.get("qualityPreviewReceiptHash") or "").strip()
@@ -10873,17 +10978,34 @@ def _voice_profile_quality_acceptance_update(
         expires_at = datetime.fromisoformat(expires_at_value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail="voice profile quality preview receipt is invalid") from exc
-    if expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc):
+    if expires_at.tzinfo is None or expires_at <= now_at:
         raise HTTPException(status_code=409, detail="voice profile quality preview receipt has expired")
 
-    now = datetime.now(timezone.utc).isoformat()
+    consent_expires_at = str(public_profile["consent"].get("expiresAt") or "").strip()
+    try:
+        consent_expiry = datetime.fromisoformat(consent_expires_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="voice profile consent is not active") from exc
+    if consent_expiry.tzinfo is None or consent_expiry <= now_at:
+        raise HTTPException(status_code=409, detail="voice profile consent is not active")
+
+    now = now_at.isoformat()
     updated = dict(profile)
     updated.pop("qualityPreviewReceiptHash", None)
     updated.pop("qualityPreviewIssuedAt", None)
     updated.pop("qualityPreviewExpiresAt", None)
     updated.pop("qualityPreviewReceiptVersion", None)
-    updated["qualityAcceptanceRequired"] = False
-    updated["qualityAcceptanceState"] = "accepted"
+    updated = apply_voice_profile_lifecycle(
+        updated,
+        state=VoiceProfileLifecycleState.ACCEPTED,
+        consent=make_voice_profile_consent(
+            purpose="private_synthesis",
+            version=str(public_profile["consent"].get("version") or ""),
+            now=now_at,
+            expires_at=consent_expiry,
+        ),
+        now=now_at,
+    )
     updated["qualityAcceptedAt"] = now
     updated["qualityAcceptedBy"] = user_id
     updated["qualityAcceptanceReceiptHash"] = actual_receipt_hash
@@ -10953,8 +11075,8 @@ def realtime_token(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.post("/voice/profiles")
 def save_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
-    _, payload = _principal_owned_payload(request, payload)
-    profile = _sanitize_voice_profile_payload(payload)
+    actor_user_id, payload = _principal_owned_payload(request, payload)
+    profile = _sanitize_voice_profile_payload(payload, actor_user_id=actor_user_id)
     try:
         saved = store.save_voice_profile(profile["userId"], profile)
     except ValueError as exc:
@@ -11018,11 +11140,6 @@ def accept_voice_profile_quality(
 def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id, payload = _principal_owned_payload(request, payload)
     voice_profile_id = _required_text(payload, "voiceProfileId", 96)
-    _evaluate_subject_eligibility_payload(
-        payload,
-        HighRiskCapability.CLONED_VOICE,
-        required=True,
-    )
     text = _required_text(payload, "text", 4000)
     audio_format = str(payload.get("format") or "mp3").strip() or "mp3"
     sample_rate = int(payload.get("sampleRate") or 24000)
