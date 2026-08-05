@@ -573,10 +573,13 @@ class S3PrivateMediaObjectStore:
     def delete(self, *, storage_key: str) -> None:
         try:
             self._client.delete_object(Bucket=self._bucket, Key=self._object_key(storage_key))
-        except Exception:
-            # Cleanup is best effort; callers are already handling the original
-            # metadata transition failure and must not receive provider details.
-            return
+        except Exception as exc:
+            # A deletion worker must distinguish an acknowledged removal from
+            # an unavailable object store. Upload rollback handles this
+            # exception separately because it is only best-effort cleanup.
+            raise OwnerTruthMediaCaptureUnavailable(
+                "private media object delete is unavailable"
+            ) from exc
 
     def read(self, *, storage_key: str) -> bytes:
         try:
@@ -814,6 +817,17 @@ class OwnerTruthMediaSourceObjectRepository(Protocol):
         source_object_id: str,
         command: MediaDeletionCommand,
     ) -> MediaSourceObjectDeletionResult:
+        ...
+
+    def assert_deletion_execution_allowed(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        expected_authority_epoch: int,
+        expected_deletion_generation: int,
+    ) -> Mapping[str, Any]:
         ...
 
     def assert_processing_commit_allowed(
@@ -1339,6 +1353,41 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
                 source_object=deepcopy(source_object),
                 deletion_effect_required=True,
             )
+
+    def assert_deletion_execution_allowed(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        expected_authority_epoch: int,
+        expected_deletion_generation: int,
+    ) -> Mapping[str, Any]:
+        if type(expected_authority_epoch) is not int or expected_authority_epoch < 0:
+            raise OwnerTruthMediaUploadInvalid("media deletion authority epoch is invalid")
+        if type(expected_deletion_generation) is not int or expected_deletion_generation < 1:
+            raise OwnerTruthMediaUploadInvalid("media deletion generation is invalid")
+        with self._lock:
+            source_object = self._owned_source_object(
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+            )
+            current_epoch = int(source_object.get("authorityEpoch") or 0)
+            if current_epoch != expected_authority_epoch:
+                raise OwnerTruthMediaAuthorityEpochConflict(
+                    expected_epoch=expected_authority_epoch,
+                    current_epoch=current_epoch,
+                )
+            if int(source_object.get("deletionGeneration") or 0) != expected_deletion_generation:
+                raise OwnerTruthMediaUploadConflict("media deletion generation is no longer current")
+            if (
+                str(source_object.get("accessState") or "") != "accessRevoked"
+                or str(source_object.get("state") or "") != "deleted"
+                or str(source_object.get("deletionStatus") or "") != "pending"
+            ):
+                raise OwnerTruthMediaUploadConflict("media deletion is not eligible for execution")
+            return deepcopy(source_object)
 
     def assert_processing_commit_allowed(
         self,
@@ -2220,6 +2269,43 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
                 deletion_effect_required=True,
             )
 
+    def assert_deletion_execution_allowed(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+        owner_subject_id: str,
+        expected_authority_epoch: int,
+        expected_deletion_generation: int,
+    ) -> Mapping[str, Any]:
+        if type(expected_authority_epoch) is not int or expected_authority_epoch < 0:
+            raise OwnerTruthMediaUploadInvalid("media deletion authority epoch is invalid")
+        if type(expected_deletion_generation) is not int or expected_deletion_generation < 1:
+            raise OwnerTruthMediaUploadInvalid("media deletion generation is invalid")
+        with self._cursor() as cursor:
+            source_object = self._fetch_owned_source_object(
+                cursor=cursor,
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+                owner_subject_id=owner_subject_id,
+                for_update=True,
+            )
+            current_epoch = int(source_object.get("authorityEpoch") or 0)
+            if current_epoch != expected_authority_epoch:
+                raise OwnerTruthMediaAuthorityEpochConflict(
+                    expected_epoch=expected_authority_epoch,
+                    current_epoch=current_epoch,
+                )
+            if int(source_object.get("deletionGeneration") or 0) != expected_deletion_generation:
+                raise OwnerTruthMediaUploadConflict("media deletion generation is no longer current")
+            if (
+                str(source_object.get("accessState") or "") != "accessRevoked"
+                or str(source_object.get("state") or "") != "deleted"
+                or str(source_object.get("deletionStatus") or "") != "pending"
+            ):
+                raise OwnerTruthMediaUploadConflict("media deletion is not eligible for execution")
+            return source_object
+
     def assert_processing_commit_allowed(
         self,
         *,
@@ -2924,7 +3010,13 @@ class OwnerTruthMediaIngestionService:
                 completed = self._on_verified(context, completed)
             return outcome, completed
         except Exception:
-            self._object_store.delete(storage_key=storage_key)
+            try:
+                self._object_store.delete(storage_key=storage_key)
+            except OwnerTruthMediaCaptureUnavailable:
+                # Preserve the original metadata/write failure. Any residual
+                # private bytes remain inaccessible and can later be removed
+                # through the revocation-first deletion lane.
+                pass
             raise
 
     def get_source_object(

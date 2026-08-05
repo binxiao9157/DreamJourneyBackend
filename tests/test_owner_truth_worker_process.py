@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app.async_effects import owner_truth_candidate_extraction_worker
+from app.async_effects import owner_truth_media_deletion_worker
 from app.async_effects import owner_truth_media_processing_worker
 from app.async_effects import owner_truth_memory_projection_worker
 from app.async_effects.owner_truth_candidate_extraction_worker import (
@@ -18,6 +19,9 @@ from app.async_effects.owner_truth_memory_projection_worker import (
 )
 from app.async_effects.owner_truth_media_processing_worker import (
     _parser as media_processing_worker_parser,
+)
+from app.async_effects.owner_truth_media_deletion_worker import (
+    _parser as media_deletion_worker_parser,
 )
 from app.core.config import Settings
 
@@ -31,6 +35,7 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
             candidate_worker_parser(),
             projection_worker_parser(),
             media_processing_worker_parser(),
+            media_deletion_worker_parser(),
         ):
             once = parser.parse_args(["--once"])
             loop = parser.parse_args(["--loop", "--poll-seconds", "1.25"])
@@ -60,6 +65,10 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
             (
                 owner_truth_media_processing_worker,
                 owner_truth_media_processing_worker.OwnerTruthMediaProcessingWorkerRuntime,
+            ),
+            (
+                owner_truth_media_deletion_worker,
+                owner_truth_media_deletion_worker.OwnerTruthMediaDeletionWorkerRuntime,
             ),
         ):
             fake_store = object()
@@ -91,6 +100,7 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
         self.assertIn("owner-truth-candidate-extraction-worker:", compose)
         self.assertIn("owner-truth-memory-projection-worker:", compose)
         self.assertIn("owner-truth-media-processing-worker:", compose)
+        self.assertIn("owner-truth-media-deletion-worker:", compose)
         self.assertIn("- owner-truth-worker", compose)
         self.assertIn("- owner-truth-media-worker", compose)
         self.assertIn(
@@ -103,6 +113,10 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
         )
         self.assertIn(
             '"app.async_effects.owner_truth_media_processing_worker", "--loop"',
+            compose,
+        )
+        self.assertIn(
+            '"app.async_effects.owner_truth_media_deletion_worker", "--loop"',
             compose,
         )
         self.assertIn("restart: unless-stopped", compose)

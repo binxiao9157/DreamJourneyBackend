@@ -13,6 +13,7 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping, Optional
 
+from app.async_effects.consumer_repository import AsyncEffectConsumerCompletionCommand
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget, EffectReceiptSummary
 from app.async_effects.lease_repository import AsyncEffectLeaseError
 from app.async_effects.provider_effect_repository import ProviderEffectPersistenceSummary
@@ -34,6 +35,7 @@ OWNER_TRUTH_MEDIA_DELETION_OPERATION_TYPE = "ownerTruth.mediaSourceObject.delete
 OWNER_TRUTH_MEDIA_DELETION_EVENT_TYPE = "ownerTruth.mediaSourceObject.deletionRequested"
 OWNER_TRUTH_MEDIA_DELETION_JOB_TYPE = "ownerTruth.mediaSourceObject.delete"
 OWNER_TRUTH_MEDIA_DELETION_MAX_ATTEMPTS = 3
+OWNER_TRUTH_MEDIA_DELETION_CONSUMER = "ownerTruth.mediaSourceObject.deletion"
 
 
 class OwnerTruthMediaDeletionError(RuntimeError):
@@ -46,6 +48,37 @@ class MediaDeletionEnqueueResult:
     deletion_effect: Optional[EffectReceiptSummary]
     provider_effect: Optional[ProviderEffectPersistenceSummary]
     processing_cancelled: bool
+
+
+@dataclass(frozen=True)
+class OwnerTruthMediaDeletionConsumerCommand(AsyncEffectConsumerCompletionCommand):
+    """Value-free terminal evidence for one revocation-first deletion effect."""
+
+    deletion_state: str
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        target = self.intent.target
+        if (
+            self.intent.operation_type != OWNER_TRUTH_MEDIA_DELETION_OPERATION_TYPE
+            or self.intent.event_type != OWNER_TRUTH_MEDIA_DELETION_EVENT_TYPE
+            or self.intent.job_type != OWNER_TRUTH_MEDIA_DELETION_JOB_TYPE
+            or target.resource_type != "mediaSourceObject"
+            or target.purpose != "privateMediaDeletion"
+        ):
+            raise OwnerTruthMediaDeletionError("media deletion consumer requires its typed effect")
+        if self.consumer_name != OWNER_TRUTH_MEDIA_DELETION_CONSUMER:
+            raise OwnerTruthMediaDeletionError("media deletion consumer name is invalid")
+        if self.business_target_key != self.intent.business_target_key:
+            raise OwnerTruthMediaDeletionError("media deletion consumer target is invalid")
+        normalized_state = str(self.deletion_state or "").strip()
+        if normalized_state not in {"completed", "partial", "unsupported"}:
+            raise OwnerTruthMediaDeletionError("media deletion state is invalid")
+        if normalized_state == "completed" and self.outcome != "completed":
+            raise OwnerTruthMediaDeletionError("completed media deletion must complete its consumer")
+        if normalized_state != "completed" and self.outcome != "failed":
+            raise OwnerTruthMediaDeletionError("incomplete media deletion must fail its consumer")
+        object.__setattr__(self, "deletion_state", normalized_state)
 
 
 def _canonical_hash(value: Mapping[str, object]) -> str:
@@ -192,12 +225,14 @@ class OwnerTruthMediaDeletionCoordinator:
 
 __all__ = [
     "MediaDeletionEnqueueResult",
+    "OWNER_TRUTH_MEDIA_DELETION_CONSUMER",
     "OWNER_TRUTH_MEDIA_DELETION_EVENT_TYPE",
     "OWNER_TRUTH_MEDIA_DELETION_JOB_TYPE",
     "OWNER_TRUTH_MEDIA_DELETION_MAX_ATTEMPTS",
     "OWNER_TRUTH_MEDIA_DELETION_OPERATION_TYPE",
     "OWNER_TRUTH_MEDIA_DELETION_SCHEMA_VERSION",
     "OwnerTruthMediaDeletionCoordinator",
+    "OwnerTruthMediaDeletionConsumerCommand",
     "OwnerTruthMediaDeletionError",
     "build_media_source_object_deletion_effect_intent",
 ]

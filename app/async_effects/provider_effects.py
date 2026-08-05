@@ -470,8 +470,9 @@ PROVIDER_EFFECT_CATALOG: tuple[ProviderEffectCatalogEntry, ...] = (
         source_paths=(
             "app/main.py:/v2/vaults/*/source-objects/*/deletions",
             "app/services/owner_truth_media_deletion.py:OwnerTruthMediaDeletionCoordinator",
+            "app/async_effects/owner_truth_media_deletion_worker.py:OwnerTruthMediaDeletionWorkerRuntime",
         ),
-        current_execution="asyncContractOnly",
+        current_execution="asyncWorker",
         request_id_strategy="stableEffectIntent",
         query_reconcile_support="providerReceiptRequired",
         migration_disposition="stableRequestBeforeEnable",

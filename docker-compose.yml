@@ -92,6 +92,22 @@ services:
       redis:
         condition: service_started
 
+  owner-truth-media-deletion-worker:
+    build: .
+    profiles:
+      - owner-truth-media-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.async_effects.owner_truth_media_deletion_worker", "--loop"]
+    env_file:
+      - .env
+    volumes:
+      - archive_media_data:/var/lib/dreamjourney/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
   postgres:
     image: mirror.ccs.tencentyun.com/library/postgres:16-alpine
     restart: unless-stopped

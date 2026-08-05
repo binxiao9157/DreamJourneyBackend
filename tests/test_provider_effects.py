@@ -192,7 +192,7 @@ class ProviderEffectCatalogTests(unittest.TestCase):
     def test_catalog_is_sorted_complete_and_default_off_for_future_effects(self):
         summary = provider_effect_catalog_summary()
 
-        self.assertEqual(summary["entryCount"], 10)
+        self.assertEqual(summary["entryCount"], 11)
         self.assertFalse(summary["providerCallsEnabledByCatalog"])
         self.assertEqual(
             [entry.key for entry in PROVIDER_EFFECT_CATALOG],
@@ -201,6 +201,7 @@ class ProviderEffectCatalogTests(unittest.TestCase):
         catalog = {entry.key: entry for entry in PROVIDER_EFFECT_CATALOG}
         self.assertEqual(catalog["amap.districtLookup"].migration_disposition, "keepReadOnlySync")
         self.assertEqual(catalog["deepseek.archiveImageAnalysis"].current_execution, "providerUnsupported")
+        self.assertEqual(catalog["objectStorage.privateMediaDeletion"].current_execution, "asyncWorker")
         self.assertEqual(catalog["tencent.digitalHumanSession"].current_execution, "credentialBrokerBlocked")
         self.assertEqual(catalog["apns.delivery"].current_execution, "notImplemented")
         self.assertTrue(catalog["volcengineVoiceClone.training"].requires_stable_provider_effect)

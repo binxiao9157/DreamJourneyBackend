@@ -34,6 +34,9 @@ from app.async_effects.owner_truth_candidate_extraction_worker import (
 from app.async_effects.owner_truth_media_processing_worker import (
     OwnerTruthMediaProcessingWorkerRuntime,
 )
+from app.async_effects.owner_truth_media_deletion_worker import (
+    OwnerTruthMediaDeletionWorkerRuntime,
+)
 from app.async_effects.owner_truth_memory_projection_worker import (
     OwnerTruthMemoryProjectionWorkerRuntime,
 )
@@ -245,6 +248,9 @@ def main() -> None:
     test_dsn = dsn_for_database(base_dsn, database_name)
     store: PostgresStore | None = None
     client: TestClient | None = None
+    run_physical_deletion_smoke = (
+        os.environ.get("RUN_OWNER_TRUTH_MEDIA_PHYSICAL_DELETION_SMOKE") == "1"
+    )
 
     previous_store = main_module.store
     previous_ingestion_service = main_module.OWNER_TRUTH_MEDIA_INGESTION_SERVICE
@@ -409,6 +415,7 @@ def main() -> None:
                 owner_truth_memory_projection_worker_enabled=True,
                 owner_truth_media_capture_enabled=True,
                 owner_truth_media_processing_worker_enabled=True,
+                owner_truth_media_deletion_worker_enabled=run_physical_deletion_smoke,
                 owner_truth_media_storage_provider="filesystem",
                 owner_truth_media_storage_root=media_root,
             )
@@ -816,10 +823,37 @@ def main() -> None:
                 ).run_once()["status"] == "idle",
                 "completed Candidate work replayed",
             )
-            require(
-                len(list(Path(media_root).rglob("*.bin"))) == 1,
-                "P0-S1 must not claim physical deletion before its dedicated worker exists",
-            )
+            physical_deletion_completed = False
+            if run_physical_deletion_smoke:
+                deletion_worker = OwnerTruthMediaDeletionWorkerRuntime(
+                    settings=worker_settings,
+                    store=store,
+                    worker_id="media-deletion-postgres-smoke",
+                    object_store=object_store,
+                )
+                stale_deletion = deletion_worker.run_once()
+                require(
+                    stale_deletion.get("status") == "blocked"
+                    and stale_deletion.get("reason") == "mediaDeletionStale",
+                    f"old deletion generation must be fenced: {stale_deletion}",
+                )
+                physical_deletion = deletion_worker.run_once()
+                require(
+                    physical_deletion.get("status") == "completed"
+                    and physical_deletion.get("deletionStatus") == "completed"
+                    and physical_deletion.get("businessOutcome") == "completed",
+                    f"physical media deletion failed: {physical_deletion}",
+                )
+                require(
+                    len(list(Path(media_root).rglob("*.bin"))) == 0,
+                    "completed deletion must remove the private filesystem object",
+                )
+                physical_deletion_completed = True
+            else:
+                require(
+                    len(list(Path(media_root).rglob("*.bin"))) == 1,
+                    "P0-S1 must not claim physical deletion before its dedicated worker exists",
+                )
 
             print(
                 json.dumps(
@@ -829,7 +863,7 @@ def main() -> None:
                         "ownerBoundUpload": True,
                         "commandReplayDeduplicated": True,
                         "crossOwnerDenied": True,
-                        "privateObjectCount": 1,
+                        "privateObjectCount": 0 if physical_deletion_completed else 1,
                         "derivedSource": True,
                         "pendingCandidate": True,
                         "formalPolicySnapshotCaptured": True,
@@ -843,6 +877,7 @@ def main() -> None:
                         "deletionRetryReplayDeduplicated": True,
                         "staleDeletionOutcomeBlocked": True,
                         "deletionProviderReceiptAccepted": True,
+                        "physicalDeletionCompleted": physical_deletion_completed,
                         "deletedMediaExcludedFromContext": True,
                         "qaHeaderUsed": False,
                         "responseRedaction": True,
