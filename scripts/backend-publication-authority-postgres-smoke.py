@@ -448,6 +448,7 @@ def main() -> None:
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         require("0079" in applied["appliedVersions"], "publication authority migration must apply")
+        require("0080" in applied["appliedVersions"], "publication authority trigger fix must apply")
         exercise(test_dsn)
     finally:
         drop_database(admin_dsn, database_name)

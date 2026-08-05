@@ -1,0 +1,13 @@
+{
+  "version": "0080",
+  "name": "publication_authority_receipt_trigger_fix",
+  "phase": "expand",
+  "compatibility": "backwardCompatible",
+  "runtimeCompatibility": "publicationAuthorityInternalQADefaultOff",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publicationAuthorityV1": false,
+    "publicationPublicProjectionReadV1": false,
+    "publicationProjectionInvalidationWorkerV1": false
+  }
+}
