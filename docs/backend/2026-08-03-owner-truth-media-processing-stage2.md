@@ -10,6 +10,7 @@
 4. 图片 OCR 与音频 ASR 走同一套可配置 HTTPS Provider 合同。上传时必须显式指定 `allowExternalProcessing=true`，否则 Worker 不会向外部服务发送字节。
 5. 视频当前只做私有存储，处理状态固定为 `notApplicable`，不伪造缩略图、转写或理解结果。
 6. 临时 Provider 失败最多自动重试三次；终止失败后保留已验证的私有文件，用户可发起一次新的 `processingGeneration`，不需要重新上传，也不会改写文件版本。
+7. 每次处理任务的终止失败都会在同一数据库事务内写入 value-free dead-letter：先写 SourceObject 失败状态与 typed consumer receipt，再使 job 终止，最后记录 dead-letter。重试耗尽的记录标记为 `maxAttemptsExceeded`，需经已有 restore-fenced 人工授权后才能申请 replay；不可恢复的处理错误标记为 `manualInterventionRequired`，不会被静默重放。
 
 这仍是 closed-pilot 能力：`ownerMediaCaptureV1`、摄入服务、处理 Worker 和内容安全扫描均须独立打开；默认公开发布态不可见。
 
@@ -68,7 +69,7 @@ response: { "text": "..." } 或 { "transcript": "..." }
 
 ## 部署前配置顺序
 
-1. 先迁移到 `0074_owner_truth_media_processing`，并确认旧的 `0073_owner_truth_media_source_objects` 已成功执行。
+1. 先迁移到当前 Stage 2 schema head `0075`，并确认 `0073_owner_truth_media_source_objects`、`0074_owner_truth_media_processing` 与 `0075` 均成功执行。
 2. 配置私有存储和生产可用的内容安全扫描；不要使用 `testClean`。
 3. 仅在 Provider 的区域、保留期、删除能力、费用和 DPA 已确认后，再配置 `httpJson` OCR/ASR endpoint 与密钥。
 4. 先保持以下开关关闭，执行本地 Gate：
@@ -92,6 +93,10 @@ scripts/run-backend-owner-truth-media-processing-gate.sh
 ```
 
 该 Gate 覆盖：私有上传、跨 Owner 隔离、S3/COS 无公共 ACL、文本/PDF/DOCX 解析、OCR/ASR 授权合同、三次重试、人工新代次重试、迁移合同、路由归属和发布策略。
+
+其中的 disposable PostgreSQL smoke 还会验证禁用的图片 OCR 在第三次失败后只产生一条
+`maxAttemptsExceeded` dead-letter，且 job、typed consumer receipt、SourceObject 状态和
+dead-letter 一并成为终态；该 smoke 不会调用真实 OCR/ASR Provider。
 
 部署容器内执行：
 

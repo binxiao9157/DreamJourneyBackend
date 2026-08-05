@@ -18,9 +18,11 @@ from typing import Any, Mapping, Optional
 
 from app.async_effects.contracts import (
     AsyncEffectIntent,
+    AsyncEffectJobState,
     is_async_effect_store_ready,
     resolve_async_effect_runtime_status,
 )
+from app.async_effects.dead_letter_effects import DeadLetterCause, admit_dead_letter
 from app.async_effects.lease_repository import (
     AsyncEffectJobLease,
     AsyncEffectLeaseCancelled,
@@ -444,6 +446,32 @@ class OwnerTruthMediaProcessingWorkerRuntime:
             outcome="succeeded" if is_not_applicable else "failed",
             error_code=None if is_not_applicable else reason,
         )
+        dead_letter = None
+        if not is_not_applicable:
+            # The lease transition must precede durable admission: the
+            # dead-letter repository verifies that this immutable job is
+            # already terminal. Keeping all four writes in this Unit of Work
+            # makes a failed admission roll back the business outcome instead
+            # of leaving an untraceable terminal job behind.
+            cause = (
+                DeadLetterCause.MAX_ATTEMPTS_EXCEEDED
+                if reason == "mediaProcessingRetriesExhausted"
+                else DeadLetterCause.MANUAL_INTERVENTION_REQUIRED
+            )
+            admission = admit_dead_letter(
+                intent=intent,
+                job_state=AsyncEffectJobState.FAILED,
+                attempt=lease.attempt,
+                max_attempts=int(intent.max_attempts),
+                cause=cause,
+                failure_hash=_result_hash(intent.stable_key, reason, str(lease.attempt)),
+                last_receipt_hash=_result_hash(
+                    receipt.business_receipt_id,
+                    receipt.business_target_key,
+                    receipt.business_outcome,
+                ),
+            )
+            dead_letter = self._store.async_effect_dead_letter_repository().record(admission)
         return self._payload(
             status="completed" if is_not_applicable else "failed",
             reason=reason,
@@ -452,6 +480,7 @@ class OwnerTruthMediaProcessingWorkerRuntime:
             completion=completion,
             receipt=receipt,
             source_object=updated,
+            dead_letter=dead_letter,
         )
 
     @staticmethod
@@ -565,6 +594,7 @@ class OwnerTruthMediaProcessingWorkerRuntime:
             "request_unit_of_work",
             "async_effect_lease_repository",
             "async_effect_consumer_repository",
+            "async_effect_dead_letter_repository",
             "owner_truth_media_source_object_repository",
             "create_owner_truth_source",
             "effect_kernel_repository",
@@ -591,6 +621,7 @@ class OwnerTruthMediaProcessingWorkerRuntime:
         source_object: Mapping[str, Any] | None = None,
         candidate_effect: Any | None = None,
         retry_available_at: str | None = None,
+        dead_letter: Any | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "mode": "run",
@@ -636,6 +667,17 @@ class OwnerTruthMediaProcessingWorkerRuntime:
             payload["candidateExtractionRequested"] = candidate_effect.outcome
         if retry_available_at is not None:
             payload["retryAvailableAt"] = retry_available_at
+        if dead_letter is not None:
+            admission = dead_letter.admission
+            payload.update(
+                {
+                    "deadLetterCause": admission.cause.value,
+                    "deadLetterId": admission.dead_letter_id,
+                    "deadLetterNextAction": admission.next_action,
+                    "deadLetterOutcome": dead_letter.outcome,
+                    "deadLetterState": admission.state.value,
+                }
+            )
         return payload
 
 

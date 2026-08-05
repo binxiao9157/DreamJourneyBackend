@@ -12,6 +12,7 @@ from uuid import uuid4
 import httpx
 
 from app.async_effects.consumer_repository import InMemoryAsyncEffectConsumerRepository
+from app.async_effects.dead_letter_repository import InMemoryAsyncEffectDeadLetterRepository
 from app.async_effects.lease_repository import InMemoryAsyncEffectLeaseRepository
 from app.async_effects.owner_truth_media_processing_worker import (
     OwnerTruthMediaProcessingWorkerRuntime,
@@ -22,6 +23,7 @@ from app.services.in_memory_store import InMemoryStore
 from app.services.owner_truth_media_processing import (
     MediaTextExtraction,
     OwnerTruthMediaProcessingCoordinator,
+    OwnerTruthMediaProcessingTerminalError,
     OwnerTruthMediaProcessorRouter,
 )
 from app.services.owner_truth_media_source_object import (
@@ -39,6 +41,7 @@ class _MediaWorkerStore(InMemoryStore):
         super().__init__()
         self._lease_repository = InMemoryAsyncEffectLeaseRepository()
         self._consumer_repository = InMemoryAsyncEffectConsumerRepository()
+        self._dead_letter_repository = InMemoryAsyncEffectDeadLetterRepository()
 
     def readiness_probe(self):
         return {"status": "ready"}
@@ -48,6 +51,9 @@ class _MediaWorkerStore(InMemoryStore):
 
     def async_effect_consumer_repository(self):
         return self._consumer_repository
+
+    def async_effect_dead_letter_repository(self):
+        return self._dead_letter_repository
 
 
 class _RecordingMetricRecorder:
@@ -84,6 +90,17 @@ class _BlockingProcessorRouter:
 
     def identity_for(self, _source_object):
         return "blockingProcessor", "v1"
+
+
+class _TerminalProcessorRouter:
+    """Test-only processor that rejects an otherwise valid private image."""
+
+    def extract(self, *, source_object, payload) -> MediaTextExtraction:
+        del source_object, payload
+        raise OwnerTruthMediaProcessingTerminalError("mediaProcessorRejected")
+
+    def identity_for(self, _source_object):
+        return "terminalProcessor", "v1"
 
 
 class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
@@ -198,6 +215,10 @@ class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
         self.assertEqual(second["status"], "retryWait")
         self.assertEqual(third["status"], "failed")
         self.assertEqual(third["reason"], "mediaProcessingRetriesExhausted")
+        self.assertEqual(third["deadLetterOutcome"], "admitted")
+        self.assertEqual(third["deadLetterCause"], "maxAttemptsExceeded")
+        self.assertEqual(third["deadLetterState"], "open")
+        self.assertEqual(third["deadLetterNextAction"], "authorizedReplayRequired")
         completed = self.store.owner_truth_media_source_object_repository().get_source_object(
             vault_id=self.context.vault_id,
             source_object_id=str(source_object["sourceObjectId"]),
@@ -212,6 +233,13 @@ class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
         self.assertEqual(self.store._lease_repository.attempt_state(intent.job_id, 2), "retryableFailed")
         self.assertEqual(self.store._lease_repository.attempt_state(intent.job_id, 3), "terminalFailed")
         self.assertEqual(self.store.effect_kernel_repository().record_count(), 1)
+        self.assertEqual(self.store._dead_letter_repository.record_count(), 1)
+        admission = self.store._dead_letter_repository.load(third["deadLetterId"])
+        self.assertEqual(admission.intent, intent)
+        self.assertEqual(admission.cause.value, "maxAttemptsExceeded")
+        self.assertEqual(admission.next_action, "authorizedReplayRequired")
+        self.assertEqual(self._worker().run_once()["status"], "idle")
+        self.assertEqual(self.store._dead_letter_repository.record_count(), 1)
 
         with self.store.request_unit_of_work(
             correlation_id="test-media-processing-manual-retry",
@@ -229,6 +257,35 @@ class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
         self.assertEqual(retry.source_object["processingGeneration"], 2)
         self.assertNotEqual(retry.intent.job_id, intent.job_id)
         self.assertEqual(self.store.effect_kernel_repository().record_count(), 2)
+        self.assertEqual(self.store._dead_letter_repository.record_count(), 1)
+
+    def test_terminal_processor_failure_records_manual_intervention_dead_letter(self) -> None:
+        source_object, intent = self._upload_and_queue(
+            payload=b"\x89PNG\r\n\x1a\nprivate-terminal-image",
+            media_kind="image",
+            content_type="image/png",
+            file_name="terminal-image.png",
+        )
+
+        result = self._worker(processor_router=_TerminalProcessorRouter()).run_once()
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "mediaProcessorRejected")
+        self.assertEqual(result["deadLetterOutcome"], "admitted")
+        self.assertEqual(result["deadLetterCause"], "manualInterventionRequired")
+        self.assertEqual(result["deadLetterNextAction"], "manualInterventionRequired")
+        admission = self.store._dead_letter_repository.load(result["deadLetterId"])
+        self.assertEqual(admission.intent, intent)
+        self.assertEqual(admission.attempt, 1)
+        self.assertEqual(admission.cause.value, "manualInterventionRequired")
+        failed = self.store.owner_truth_media_source_object_repository().get_source_object(
+            vault_id=self.context.vault_id,
+            source_object_id=str(source_object["sourceObjectId"]),
+            owner_subject_id=self.context.owner_subject_id,
+        )
+        self.assertEqual(failed["processingStatus"], "failed")
+        self.assertFalse(failed["retryable"])
+        self.assertEqual(self.store._lease_repository.attempt_state(intent.job_id, 1), "terminalFailed")
 
     def test_consented_image_ocr_provider_creates_private_import_source_through_worker(self) -> None:
         observed_requests: list[httpx.Request] = []

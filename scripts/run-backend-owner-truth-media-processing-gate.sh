@@ -67,6 +67,8 @@ assert "ownerTruthMediaProcessingWorker" in worker
 assert "def _record_attempt(" in worker
 assert "WorkerLeaseHeartbeat" in worker
 assert "def _renew_lease(" in worker
+assert "admit_dead_letter" in worker
+assert "async_effect_dead_letter_repository" in worker
 deletion_worker = Path("app/async_effects/owner_truth_media_deletion_worker.py").read_text(encoding="utf-8")
 assert 'payload["storageKey"]' not in deletion_worker
 assert "owner_truth_media_deletion_worker_enabled" in deletion_worker

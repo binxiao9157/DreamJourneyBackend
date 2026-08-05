@@ -475,6 +475,115 @@ def main() -> None:
                 f"Candidate worker failed: {candidate_result}",
             )
 
+            # A disabled image OCR provider is an intentional retryable
+            # failure fixture. It proves the worker only admits a dead letter
+            # after the bounded third attempt, while the SourceObject and
+            # typed consumer receipt become terminal in the same transaction.
+            image_body = b"\x89PNG\r\n\x1a\nprivate-dead-letter-smoke"
+            image_payload = {
+                "commandId": str(uuid.uuid4()),
+                "expectedAuthorityEpoch": 0,
+                "mediaKind": "image",
+                "fileName": "private-dead-letter.png",
+                "contentType": "image/png",
+                "fileSizeBytes": len(image_body),
+                "contentSha256": sha256(image_body).hexdigest(),
+                "purpose": "memoryCapture",
+                "clientCreatedAt": "2026-08-05T00:00:00Z",
+            }
+            image_created = client.post(intent_path, headers=owner_policy_headers, json=image_payload)
+            require(image_created.status_code == 201, f"image intent failed: {image_created.text}")
+            image_created_body = image_created.json()
+            image_source_object_id = str(image_created_body["sourceObject"]["sourceObjectId"])
+            image_upload_intent = image_created_body["uploadIntent"]
+            image_uploaded = client.put(
+                f"{intent_path}/{image_upload_intent['uploadIntentId']}/content",
+                headers={
+                    **owner_policy_headers,
+                    "X-DreamJourney-Upload-Token": str(image_upload_intent["uploadToken"]),
+                    "Content-Type": "image/png",
+                },
+                content=image_body,
+            )
+            require(image_uploaded.status_code == 200, f"image upload failed: {image_uploaded.text}")
+            require(
+                (image_uploaded.json().get("sourceObject") or {}).get("processingStatus") == "queued",
+                "disabled image OCR fixture must queue processing",
+            )
+            image_worker = OwnerTruthMediaProcessingWorkerRuntime(
+                settings=worker_settings,
+                store=store,
+                worker_id="media-processing-dead-letter-postgres-smoke",
+                retry_seconds=0,
+                object_store=object_store,
+            )
+            image_attempts = [image_worker.run_once() for _ in range(3)]
+            require(
+                [attempt.get("status") for attempt in image_attempts]
+                == ["retryWait", "retryWait", "failed"],
+                f"disabled image OCR must exhaust exactly three attempts: {image_attempts}",
+            )
+            dead_letter_result = image_attempts[-1]
+            require(
+                dead_letter_result.get("reason") == "mediaProcessingRetriesExhausted"
+                and dead_letter_result.get("deadLetterCause") == "maxAttemptsExceeded"
+                and dead_letter_result.get("deadLetterState") == "open"
+                and dead_letter_result.get("deadLetterNextAction") == "authorizedReplayRequired",
+                f"terminal media failure must expose value-free dead-letter state: {dead_letter_result}",
+            )
+            with psycopg.connect(test_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT state, attempt
+                        FROM async_effects.jobs
+                        WHERE job_id = %s
+                        """,
+                        (dead_letter_result["jobId"],),
+                    )
+                    dead_letter_job = cursor.fetchone()
+                    cursor.execute(
+                        """
+                        SELECT reason_code, state, attempt
+                        FROM async_effects.dead_letters
+                        WHERE job_id = %s
+                        """,
+                        (dead_letter_result["jobId"],),
+                    )
+                    dead_letter_rows = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT state, outcome
+                        FROM async_effects.business_receipts
+                        WHERE operation_id = %s
+                          AND receipt_type = 'consumer.ownerTruth.mediaProcessing.completion'
+                        """,
+                        (dead_letter_result["operationId"],),
+                    )
+                    dead_letter_receipts = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT processing_status, retryable
+                        FROM owner_truth.media_source_objects
+                        WHERE vault_id = %s AND id = %s
+                        """,
+                        (vault_id, image_source_object_id),
+                    )
+                    dead_letter_source = cursor.fetchone()
+            require(dead_letter_job == ("failed", 3), "dead-letter job must be terminal at attempt three")
+            require(
+                dead_letter_rows == [("maxAttemptsExceeded", "open", 3)],
+                "exactly one open max-attempt dead letter must be durable",
+            )
+            require(
+                dead_letter_receipts == [("failed", "failed")],
+                "terminal media failure must keep one failed typed consumer receipt",
+            )
+            require(
+                dead_letter_source == ("failed", False),
+                "terminal media failure must not leave the SourceObject retryable",
+            )
+
             fetched = client.get(
                 f"/v2/vaults/{vault_id}/source-objects/{source_object_id}",
                 headers=owner_policy_headers,
@@ -977,6 +1086,7 @@ def main() -> None:
                         "deletionProviderReceiptAccepted": True,
                         "physicalDeletionCompleted": physical_deletion_completed,
                         "leaseHeartbeatProtected": lease_heartbeat_protected,
+                        "mediaProcessingDeadLetterAdmitted": True,
                         "deletedMediaExcludedFromContext": True,
                         "qaHeaderUsed": False,
                         "responseRedaction": True,
