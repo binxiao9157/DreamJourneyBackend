@@ -171,7 +171,7 @@ MemoryVersion -> Projection -> /context/build`，并验证非 Owner 不可读取
   目标在最终提交前失效时仍写 `blocked`，不会把失效对象伪装成失败或重放。公网 `/ready`、
   Stage 2 媒体处理 smoke 与删除 lease-heartbeat smoke 均通过；默认 Worker profile
   仍未启动。
-- 待本轮部署：新增 `business-message-projection-worker`，它只把已完成的业务回执投影为
+- 2026-08-05：服务器已部署 `d347c89`，新增 `business-message-projection-worker`，它只把已完成的业务回执投影为
   私有、无正文的 `async_effects.business_message_projections` shadow。调用方必须在同一
   Unit of Work 通过 `BusinessMessageProjectionEnqueueCoordinator` 原子接受 typed job 并保存
   不可变输入；不能从 legacy mailbox 反推任务。数据库会同时核验 source operation、completed
@@ -182,7 +182,9 @@ MemoryVersion -> Projection -> /context/build`，并验证非 Owner 不可读取
   负责。它不改变旧时间信件公开投递。一次性 PostgreSQL smoke 使用临时数据库验证 default-off、
   成功投影、重试耗尽、dead-letter 和账号快照失效；不会写 `mailbox_letters`、发通知或调用 Provider。
   首次部署 smoke 还发现 `0076` trigger 存在 PL/pgSQL 变量同名歧义；已用新的 `0077` 前向 migration
-  重新定义函数，禁止修改已在服务器执行的 `0076` checksum。
+  重新定义函数，禁止修改已在服务器执行的 `0076` checksum。服务器已验证 `0076/0077` migration head、
+  公网 `/ready` 和一次性 disposable Postgres smoke；success、重试耗尽 dead-letter 与 auth epoch 失效
+  blocked 均通过，临时数据库已自动删除，默认 `business-message-worker` Compose profile 未启动。
 - 公网 `/ready` 验证通过：database、schema、auth、incident 均为 `ready`。
 - 部署态 smoke 在服务器容器内创建一次性 PostgreSQL 数据库，完成后自动删除，没有写入生产业务表。
 - E2E 已证明：公开默认关闭、Owner 绑定上传、命令幂等、跨 Owner 隐藏、私有文件落盘、媒体处理成功、派生 `import` Source、生成一条 `pending` Candidate、处理回执持久化及响应脱敏。
