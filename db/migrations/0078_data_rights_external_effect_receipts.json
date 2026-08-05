@@ -1,0 +1,12 @@
+{
+  "version": "0078",
+  "name": "data_rights_external_effect_receipts",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "dataRightsExternalEffectReceiptsReadOnly",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "dataRightsExternalEffectReceipts": false,
+    "dataRightsExternalEffectReceiptsPublicRead": false
+  }
+}

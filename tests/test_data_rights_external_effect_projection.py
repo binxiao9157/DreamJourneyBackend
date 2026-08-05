@@ -117,6 +117,27 @@ class DataRightsExternalEffectProjectionTests(unittest.TestCase):
             "completed",
         )
 
+    def test_legacy_redacted_summary_rejects_linked_receipts_without_failing(self) -> None:
+        report = build_data_rights_external_effect_projection(
+            {"request": {"id": "legacy-rights-request"}},
+            resource_evidence=[],
+            access_revocation={"status": "revoked"},
+            linked_effect_observations=[
+                {
+                    "requestId": "legacy-rights-request",
+                    "ownerSubjectHash": "owner-hash-that-cannot-be-verified",
+                    "domain": "providerVoice",
+                    "state": "completed",
+                    "providerReceiptPresent": True,
+                    "reasonCodes": ["foreignLegacyEvidence"],
+                }
+            ],
+        )
+
+        voice = next(item for item in report["domains"] if item["domain"] == "providerVoice")
+        self.assertEqual(report["rejectedEvidenceCount"], 1)
+        self.assertEqual(voice["status"], "pending")
+
 
 if __name__ == "__main__":
     unittest.main()

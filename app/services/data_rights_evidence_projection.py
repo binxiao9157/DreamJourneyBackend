@@ -32,6 +32,7 @@ def build_data_rights_evidence_projection(
     summary: Mapping[str, Any],
     *,
     access_revocation_events: Iterable[Mapping[str, Any]] = (),
+    linked_effect_observations: Iterable[Mapping[str, Any]] = (),
     now: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Project immutable rights evidence without creating a second state machine.
@@ -107,6 +108,7 @@ def build_data_rights_evidence_projection(
         summary,
         resource_evidence=resources,
         access_revocation=access_revocation,
+        linked_effect_observations=linked_effect_observations,
     )
     return projection
 

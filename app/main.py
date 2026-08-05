@@ -37,6 +37,9 @@ from app.services.data_rights_evidence_projection import (
     DataRightsEvidenceProjectionError,
     build_data_rights_evidence_projection,
 )
+from app.services.data_rights_external_effect_receipts import (
+    DataRightsExternalEffectReceipt,
+)
 from app.services.data_rights_module_inventory import build_module_owned_data_export
 from app.services.client_compatibility import (
     ClientCompatibilityDecision,
@@ -9758,10 +9761,21 @@ def observe_data_rights_evidence(request_id: str) -> JSONResponse:
         if callable(list_access_revocations)
         else []
     )
+    list_external_effect_receipts = getattr(
+        store,
+        "list_rights_external_effect_receipts",
+        None,
+    )
+    external_effect_receipts = (
+        list_external_effect_receipts(request_id)
+        if callable(list_external_effect_receipts)
+        else []
+    )
     try:
         report = build_data_rights_evidence_projection(
             summary,
             access_revocation_events=access_revocations,
+            linked_effect_observations=external_effect_receipts,
         )
     except DataRightsEvidenceProjectionError as exc:
         logger.error("data rights evidence projection failed: %s", exc)
@@ -9980,6 +9994,69 @@ def _record_account_access_revocation(
     }
 
 
+_ACCOUNT_DELETE_EXTERNAL_EFFECTS = (
+    ("objectStorage", "unsupported", "objectStorageNoExternalTarget"),
+    ("providerVoice", "unsupported", "providerVoiceExitAdapterNotConfigured"),
+    (
+        "providerDigitalHuman",
+        "unsupported",
+        "providerDigitalHumanExitAdapterNotConfigured",
+    ),
+    (
+        "notificationDelivery",
+        "unsupported",
+        "notificationDeliveryExitAdapterNotConfigured",
+    ),
+    ("backupRetention", "pending", "backupRetentionExternalReceiptPending"),
+)
+
+
+def _record_account_delete_external_effect_boundaries(
+    *,
+    request_id: str,
+    request_record: Dict[str, Any],
+    deletion: Dict[str, Any],
+) -> None:
+    """Persist current external cleanup boundaries after access is revoked.
+
+    These records intentionally describe only the currently configured exit
+    capability. They never claim Provider or object deletion completed merely
+    because the account's local access was suspended.
+    """
+
+    owner_subject_hash = str(request_record.get("subjectHash") or "").strip()
+    observed_at = str(
+        deletion.get("updatedAt")
+        or deletion.get("deletedAt")
+        or datetime.now(timezone.utc).isoformat()
+    )
+    retention_until = deletion.get("purgeAfter")
+    if not owner_subject_hash:
+        raise ValueError("account deletion rights request is missing subject hash")
+    recorder = getattr(store, "record_rights_external_effect_receipt", None)
+    if not callable(recorder):
+        raise RuntimeError("data-rights external-effect receipt store is unavailable")
+
+    for domain, state, reason_code in _ACCOUNT_DELETE_EXTERNAL_EFFECTS:
+        recorder(
+            DataRightsExternalEffectReceipt(
+                request_id=request_id,
+                owner_subject_hash=owner_subject_hash,
+                domain=domain,
+                effect_identity_hash=hashlib.sha256(
+                    f"{request_id}:accountDelete:{domain}".encode("utf-8")
+                ).hexdigest(),
+                state=state,
+                provider_receipt_present=False,
+                reason_code=reason_code,
+                observed_at=observed_at,
+                retention_until=(
+                    str(retention_until) if domain == "backupRetention" and retention_until else None
+                ),
+            )
+        )
+
+
 @app.post("/auth/delete")
 def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id, payload = _principal_owned_payload(request, payload)
@@ -10027,6 +10104,11 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
                 session_revocation=session_revocation,
                 delegated_grant_revocation=delegated_grant_revocation,
             )
+            _record_account_delete_external_effect_boundaries(
+                request_id=str(rights_record.get("id") or ""),
+                request_record=rights_record,
+                deletion=deletion,
+            )
             rights_summary = _account_delete_rights_summary(
                 str(rights_record.get("id") or ""),
                 outcome="deduplicated",
@@ -10068,6 +10150,11 @@ def soft_delete_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
             deletion=deletion,
             session_revocation=session_revocation,
             delegated_grant_revocation=delegated_grant_revocation,
+        )
+        _record_account_delete_external_effect_boundaries(
+            request_id=str(rights_record.get("id") or ""),
+            request_record=rights_record,
+            deletion=deletion,
         )
         rights_summary = _record_account_delete_rights_completion(
             str(rights_record.get("id") or ""),

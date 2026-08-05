@@ -1,11 +1,15 @@
 import json
 import unittest
+from hashlib import sha256
 
 from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.main import app
 from app.services.data_rights_contract import DataRightsRequestAuthority
+from app.services.data_rights_external_effect_receipts import (
+    DataRightsExternalEffectReceipt,
+)
 from app.services.in_memory_store import InMemoryStore
 from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 
@@ -210,6 +214,51 @@ class DataRightsEvidenceProjectionTests(unittest.TestCase):
         self.assertEqual(response.json()["physicalCleanup"]["status"], "pending")
         self.assertEqual(missing.status_code, 404)
         self.assertNotIn("private-subject-must-not-leak", response.text)
+
+    def test_ops_endpoint_projects_persisted_external_effect_receipts(self) -> None:
+        request = self._request()
+        self.store.create_rights_request(request)
+        self.store.record_rights_access_revocation_outbox(
+            event_id="revocation-event-external-effect",
+            request_id=request.request_id,
+            user_id="private-subject-must-not-leak",
+            auth_epoch=3,
+            provider_capability_state="revoked",
+            session_revocation={"scope": "allDevices"},
+            delegated_grant_revocation={"revokedGrantCount": 0},
+            created_at="2026-08-05T09:00:00+00:00",
+        )
+        self.store.record_rights_external_effect_receipt(
+            DataRightsExternalEffectReceipt(
+                request_id=request.request_id,
+                owner_subject_hash=request.subject_hash,
+                domain="providerVoice",
+                effect_identity_hash=sha256(b"private-provider-effect").hexdigest(),
+                state="completed",
+                provider_receipt_present=True,
+                reason_code="providerAcceptedDeletion",
+                observed_at="2026-08-05T09:01:00+00:00",
+                evidence_hash=sha256(b"private-provider-receipt").hexdigest(),
+            )
+        )
+
+        response = self.client.get(
+            f"/ops/data-rights/requests/{request.request_id}/evidence",
+            headers={"Authorization": "Bearer rights-evidence-machine-token"},
+        )
+        body = response.json()
+        serialized = json.dumps(body, ensure_ascii=False, sort_keys=True)
+        voice = next(
+            item
+            for item in body["externalEffects"]["domains"]
+            if item["domain"] == "providerVoice"
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(voice["status"], "completed")
+        self.assertEqual(voice["receiptState"], "recorded")
+        self.assertNotIn("private-provider-effect", serialized)
+        self.assertNotIn("private-provider-receipt", serialized)
 
 
 if __name__ == "__main__":

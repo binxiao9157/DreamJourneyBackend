@@ -52,6 +52,17 @@ class AccountDeletionRightsAdapterAPITests(unittest.TestCase):
         serialized = json.dumps(summary, ensure_ascii=False, sort_keys=True)
         self.assertEqual(len(summary["executions"]), 1)
         self.assertEqual(len(summary["receipts"]), 1)
+        external_effects = main_module.store.list_rights_external_effect_receipts(
+            first.json()["rights"]["requestId"]
+        )
+        external_by_domain = {item["domain"]: item for item in external_effects}
+        self.assertEqual(len(external_effects), 5)
+        self.assertEqual(external_by_domain["objectStorage"]["state"], "unsupported")
+        self.assertEqual(external_by_domain["providerVoice"]["state"], "unsupported")
+        self.assertEqual(external_by_domain["providerDigitalHuman"]["state"], "unsupported")
+        self.assertEqual(external_by_domain["notificationDelivery"]["state"], "unsupported")
+        self.assertEqual(external_by_domain["backupRetention"]["state"], "pending")
+        self.assertNotIn("effectIdentityHash", external_by_domain["providerVoice"])
         self.assertNotIn(phone, serialized)
         self.assertNotIn("delete-command-1", serialized)
 

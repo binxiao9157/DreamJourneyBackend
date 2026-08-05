@@ -27,6 +27,10 @@ from app.services.data_rights_contract import (
     EXECUTION_OUTCOMES,
     aggregate_data_rights_status,
 )
+from app.services.data_rights_external_effect_receipts import (
+    DataRightsExternalEffectReceipt,
+    receipt_from_persistence,
+)
 from app.services.account_deletion_state import (
     account_purge_block_reason,
     account_restore_block_reason,
@@ -323,6 +327,7 @@ class InMemoryStore:
         self._rights_request_ids_by_command: Dict[Tuple[str, str], str] = {}
         self._rights_executions: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         self._rights_receipts: Dict[str, Dict[str, Any]] = {}
+        self._rights_external_effect_receipts: Dict[str, Dict[str, Any]] = {}
         self._rights_access_revocation_outbox: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._account_purge_receipts: Dict[str, Dict[str, Any]] = {}
         self._rights_lock = RLock()
@@ -1629,6 +1634,43 @@ class InMemoryStore:
                 return {"outcome": "deduplicated", "receipt": deepcopy(existing)}
             self._rights_receipts[str(receipt_id)] = record
             return {"outcome": "appended", "receipt": deepcopy(record)}
+
+    def record_rights_external_effect_receipt(
+        self,
+        receipt: DataRightsExternalEffectReceipt,
+    ) -> Dict[str, Any]:
+        """Append one hash-only external-effect observation for a rights request."""
+
+        if not isinstance(receipt, DataRightsExternalEffectReceipt):
+            raise TypeError("external effect receipt contract is required")
+        record = receipt.persistence_payload()
+        with self._rights_lock:
+            request = self._rights_requests.get(receipt.request_id)
+            if request is None:
+                raise KeyError("rights request not found")
+            if str(request.get("subjectHash") or "") != receipt.owner_subject_hash:
+                raise ValueError("external effect receipt owner does not match rights request")
+            existing = self._rights_external_effect_receipts.get(receipt.receipt_id)
+            if existing is not None:
+                if existing != record:
+                    raise ValueError("external effect receipt is append-only")
+                return {"outcome": "deduplicated", "receipt": deepcopy(existing)}
+            self._rights_external_effect_receipts[receipt.receipt_id] = record
+            return {"outcome": "appended", "receipt": deepcopy(record)}
+
+    def list_rights_external_effect_receipts(self, request_id: str) -> List[Dict[str, Any]]:
+        """Return internal, value-minimized observations for one rights request."""
+
+        normalized_request_id = str(request_id or "").strip()
+        with self._rights_lock:
+            records = [
+                deepcopy(record)
+                for record in self._rights_external_effect_receipts.values()
+                if record["requestId"] == normalized_request_id
+            ]
+        records.sort(key=lambda record: (record["observedAt"], record["id"]))
+        # Rehydrate to defend the projection boundary against an invalid store row.
+        return [receipt_from_persistence(record).projection_observation() for record in records]
 
     def record_rights_access_revocation_outbox(
         self,

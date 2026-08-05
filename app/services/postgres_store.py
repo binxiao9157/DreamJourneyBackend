@@ -58,6 +58,10 @@ from app.services.data_rights_contract import (
     EXECUTION_OUTCOMES,
     aggregate_data_rights_status,
 )
+from app.services.data_rights_external_effect_receipts import (
+    DataRightsExternalEffectReceipt,
+    receipt_from_persistence,
+)
 from app.services.account_deletion_state import (
     account_purge_block_reason,
     account_restore_block_reason,
@@ -2147,6 +2151,27 @@ class PostgresStore:
         }
 
     @staticmethod
+    def _rights_external_effect_receipt_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": str(row.get("id") or ""),
+            "requestId": str(row.get("request_id") or ""),
+            "ownerSubjectHash": str(row.get("owner_subject_hash") or ""),
+            "domain": str(row.get("domain") or ""),
+            "effectIdentityHash": str(row.get("effect_identity_hash") or ""),
+            "state": str(row.get("state") or ""),
+            "providerReceiptPresent": bool(row.get("provider_receipt_present")),
+            "reasonCode": str(row.get("reason_code") or ""),
+            "observationHash": str(row.get("observation_hash") or ""),
+            "observedAt": PostgresStore._iso_value(row.get("observed_at")),
+            "evidenceHash": row.get("evidence_hash"),
+            "retentionUntil": (
+                None
+                if row.get("retention_until") is None
+                else PostgresStore._iso_value(row.get("retention_until"))
+            ),
+        }
+
+    @staticmethod
     def _rights_access_revocation_outbox_payload(row: Dict[str, Any]) -> Dict[str, Any]:
         payload = deepcopy(row.get("payload") or {})
         return {
@@ -2431,6 +2456,94 @@ class PostgresStore:
         if existing["receiptHash"] != str(receipt_hash) or existing["requestId"] != str(request_id):
             raise ValueError("resource deletion receipt is append-only")
         return {"outcome": result, "receipt": existing}
+
+    def record_rights_external_effect_receipt(
+        self,
+        receipt: DataRightsExternalEffectReceipt,
+    ) -> Dict[str, Any]:
+        """Append a value-free external-effect receipt with request-owner fencing."""
+
+        if not isinstance(receipt, DataRightsExternalEffectReceipt):
+            raise TypeError("external effect receipt contract is required")
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"rights-external-effect-{receipt.request_id}",
+                command_id=receipt.observation_hash,
+            ):
+                return self.record_rights_external_effect_receipt(receipt)
+        request = self.get_rights_request(receipt.request_id)
+        if request is None:
+            raise KeyError("rights request not found")
+        if str(request.get("subjectHash") or "") != receipt.owner_subject_hash:
+            raise ValueError("external effect receipt owner does not match rights request")
+        payload = receipt.persistence_payload()
+        row = self._fetchone(
+            """
+            INSERT INTO rights_external_effect_receipts (
+                id, request_id, owner_subject_hash, domain, effect_identity_hash,
+                state, provider_receipt_present, reason_code, observation_hash,
+                observed_at, evidence_hash, retention_until
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (observation_hash) DO NOTHING
+            RETURNING id, request_id, owner_subject_hash, domain, effect_identity_hash,
+                state, provider_receipt_present, reason_code, observation_hash,
+                observed_at, evidence_hash, retention_until
+            """,
+            (
+                payload["id"],
+                payload["requestId"],
+                payload["ownerSubjectHash"],
+                payload["domain"],
+                payload["effectIdentityHash"],
+                payload["state"],
+                payload["providerReceiptPresent"],
+                payload["reasonCode"],
+                payload["observationHash"],
+                payload["observedAt"],
+                payload["evidenceHash"],
+                payload["retentionUntil"],
+            ),
+        )
+        outcome = "appended"
+        if row is None:
+            row = self._fetchone(
+                """
+                SELECT id, request_id, owner_subject_hash, domain, effect_identity_hash,
+                    state, provider_receipt_present, reason_code, observation_hash,
+                    observed_at, evidence_hash, retention_until
+                FROM rights_external_effect_receipts
+                WHERE observation_hash = %s
+                FOR UPDATE
+                """,
+                (receipt.observation_hash,),
+            )
+            outcome = "deduplicated"
+        if row is None:
+            raise RuntimeError("external effect receipt insert did not produce a row")
+        persisted = self._rights_external_effect_receipt_payload(row)
+        if receipt_from_persistence(persisted).persistence_payload() != payload:
+            raise ValueError("external effect receipt is append-only")
+        return {"outcome": outcome, "receipt": persisted}
+
+    def list_rights_external_effect_receipts(self, request_id: str) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT id, request_id, owner_subject_hash, domain, effect_identity_hash,
+                state, provider_receipt_present, reason_code, observation_hash,
+                observed_at, evidence_hash, retention_until
+            FROM rights_external_effect_receipts
+            WHERE request_id = %s
+            ORDER BY observed_at ASC, id ASC
+            """,
+            (str(request_id or "").strip(),),
+        )
+        return [
+            receipt_from_persistence(
+                self._rights_external_effect_receipt_payload(row)
+            ).projection_observation()
+            for row in rows
+        ]
 
     def record_rights_access_revocation_outbox(
         self,

@@ -49,7 +49,9 @@ _DOMAIN_DEFINITIONS = (
         "defaultReasonCode": "backupRetentionExternalBoundary",
     },
 )
-_DOMAIN_NAMES = frozenset(item["domain"] for item in _DOMAIN_DEFINITIONS)
+DATA_RIGHTS_EXTERNAL_EFFECT_DOMAINS = frozenset(
+    item["domain"] for item in _DOMAIN_DEFINITIONS
+)
 _SAFE_REASON_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-"
 )
@@ -77,7 +79,11 @@ def build_data_rights_external_effect_projection(
 
     request = _mapping(summary.get("request"), "rights summary request")
     request_id = _text(request.get("id"), "request id")
-    subject_hash = _text(request.get("subjectHash"), "request subject hash")
+    # Older redacted rights summaries predate the owner-hash projection.  They
+    # remain readable, but cannot safely bind a newly linked external receipt.
+    # Treating that as an empty match would allow foreign evidence to enter the
+    # projection, so the linked receipt is rejected below instead.
+    subject_hash = str(request.get("subjectHash") or "").strip()
     access_state = (
         "revoked"
         if str(access_revocation.get("status") or "") == "revoked"
@@ -85,7 +91,7 @@ def build_data_rights_external_effect_projection(
     )
 
     observations_by_domain: Dict[str, List[Dict[str, Any]]] = {
-        domain: [] for domain in _DOMAIN_NAMES
+        domain: [] for domain in DATA_RIGHTS_EXTERNAL_EFFECT_DOMAINS
     }
     for resource in resource_evidence:
         if not isinstance(resource, Mapping):
@@ -100,11 +106,12 @@ def build_data_rights_external_effect_projection(
             rejected_evidence_count += 1
             continue
         domain = str(observation.get("domain") or "").strip()
-        if domain not in _DOMAIN_NAMES:
+        if domain not in DATA_RIGHTS_EXTERNAL_EFFECT_DOMAINS:
             rejected_evidence_count += 1
             continue
         if (
-            str(observation.get("requestId") or "") != request_id
+            not subject_hash
+            or str(observation.get("requestId") or "") != request_id
             or str(observation.get("ownerSubjectHash") or "") != subject_hash
         ):
             rejected_evidence_count += 1
@@ -306,6 +313,7 @@ def _text(value: Any, field: str) -> str:
 
 __all__ = [
     "DATA_RIGHTS_EXTERNAL_EFFECT_PROJECTION_SCHEMA_VERSION",
+    "DATA_RIGHTS_EXTERNAL_EFFECT_DOMAINS",
     "DataRightsExternalEffectProjectionError",
     "build_data_rights_external_effect_projection",
 ]
