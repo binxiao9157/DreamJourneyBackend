@@ -7,12 +7,12 @@
 ALTER TABLE publication.share_grants
     ADD COLUMN IF NOT EXISTS authority_epoch BIGINT;
 
-UPDATE publication.share_grants AS grant
+UPDATE publication.share_grants AS share_grant
 SET authority_epoch = publication.authority_epoch
 FROM publication.publications AS publication
-WHERE publication.id = grant.publication_id
-  AND publication.vault_id = grant.vault_id
-  AND grant.authority_epoch IS NULL;
+WHERE publication.id = share_grant.publication_id
+  AND publication.vault_id = share_grant.vault_id
+  AND share_grant.authority_epoch IS NULL;
 
 ALTER TABLE publication.share_grants
     ALTER COLUMN authority_epoch SET NOT NULL;

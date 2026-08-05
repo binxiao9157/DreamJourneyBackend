@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 import unittest
 from uuid import uuid4
 
@@ -34,6 +35,7 @@ from app.services.publication_visitor_access import (
 
 
 NOW = datetime(2026, 8, 6, 9, 0, tzinfo=timezone.utc)
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class PublicationVisitorAccessTests(unittest.TestCase):
@@ -302,6 +304,15 @@ class PublicationVisitorAccessTests(unittest.TestCase):
                 grant_credential=issued.grant_credential,
                 suffix="authority-changed",
             )
+
+    def test_authority_epoch_migration_uses_a_non_reserved_share_grant_alias(self) -> None:
+        migration = (
+            ROOT
+            / "db/migrations/0081_publication_share_grant_authority_epoch.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("UPDATE publication.share_grants AS share_grant", migration)
+        self.assertNotIn("AS grant\n", migration)
 
 
 if __name__ == "__main__":  # pragma: no cover
