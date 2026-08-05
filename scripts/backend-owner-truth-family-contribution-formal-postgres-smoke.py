@@ -194,9 +194,13 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
+        # This smoke owns the family-authorization contract introduced by
+        # migration 0072. Newer additive migrations must not turn that
+        # contract check into a false failure merely because the global schema
+        # head has advanced.
         require(
-            str(applied.get("appliedHead") or "") == "0072",
-            "formal family authorization migration must be the schema head",
+            "0072" in tuple(applied.get("appliedVersions") or ()),
+            "formal family authorization migration must be applied",
         )
 
         store = PostgresStore(dsn=test_dsn, pool_min_size=1, pool_max_size=3)
