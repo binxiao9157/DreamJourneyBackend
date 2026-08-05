@@ -26,7 +26,10 @@ from app.async_effects.lease_repository import (
     AsyncEffectLeaseCancelled,
     AsyncEffectLeaseLost,
 )
-from app.async_effects.worker_lifecycle import WorkerDrainController
+from app.async_effects.worker_lifecycle import (
+    WorkerDrainController,
+    WorkerLeaseHeartbeat,
+)
 from app.core.config import Settings
 from app.observability.operation_metrics import OperationMetricRecorder
 from app.services.owner_truth_media_deletion import (
@@ -70,6 +73,7 @@ class OwnerTruthMediaDeletionWorkerRuntime:
         store: Any,
         worker_id: Optional[str] = None,
         lease_seconds: int = _DEFAULT_LEASE_SECONDS,
+        heartbeat_interval_seconds: float | None = None,
         object_store: PrivateMediaObjectStore | None = None,
         operation_metric_recorder: OperationMetricRecorder | None = None,
     ) -> None:
@@ -79,6 +83,10 @@ class OwnerTruthMediaDeletionWorkerRuntime:
             worker_id or f"owner-truth-media-deletion-worker-{socket.gethostname()}"
         )
         self._lease_seconds = max(1, int(lease_seconds))
+        self._heartbeat_interval_seconds = _heartbeat_interval_seconds(
+            lease_seconds=self._lease_seconds,
+            configured=heartbeat_interval_seconds,
+        )
         self._object_store = object_store or build_private_media_object_store(
             provider=settings.owner_truth_media_storage_provider,
             root=settings.owner_truth_media_storage_root,
@@ -198,10 +206,12 @@ class OwnerTruthMediaDeletionWorkerRuntime:
                 lease_outcome="failed",
             )
 
-        # The repository row remains locked in this request UoW while the
-        # provider call occurs. A process crash can repeat an idempotent object
-        # delete later, but a newer generation cannot be physically removed.
-        self._object_store.delete(storage_key=storage_key)
+        # The SourceObject row remains locked in this request UoW while the
+        # provider call occurs. The lease itself lives in a separate row, so a
+        # dedicated transaction can renew it without releasing the authority
+        # fence. A crash can still repeat an idempotent object delete, but a
+        # second active worker cannot claim the job during a slow provider call.
+        self._delete_with_lease_heartbeat(lease=lease, storage_key=storage_key)
         return self._finish_in_unit_of_work(
             lease=lease,
             intent=intent,
@@ -431,6 +441,51 @@ class OwnerTruthMediaDeletionWorkerRuntime:
                 supported_job_types=[OWNER_TRUTH_MEDIA_DELETION_JOB_TYPE],
             )
 
+    def _start_lease_heartbeat(self, lease: AsyncEffectJobLease) -> WorkerLeaseHeartbeat:
+        heartbeat = WorkerLeaseHeartbeat(
+            heartbeat=lambda: self._renew_lease(lease),
+            interval_seconds=self._heartbeat_interval_seconds,
+        )
+        heartbeat.start()
+        return heartbeat
+
+    def _delete_with_lease_heartbeat(
+        self,
+        *,
+        lease: AsyncEffectJobLease,
+        storage_key: str,
+    ) -> None:
+        heartbeat = self._start_lease_heartbeat(lease)
+        try:
+            self._object_store.delete(storage_key=storage_key)
+        except Exception:
+            self._stop_and_verify_lease_heartbeat(heartbeat)
+            raise
+        self._stop_and_verify_lease_heartbeat(heartbeat)
+
+    @staticmethod
+    def _stop_and_verify_lease_heartbeat(heartbeat: WorkerLeaseHeartbeat) -> None:
+        heartbeat.stop()
+        try:
+            heartbeat.raise_if_failed()
+        except (AsyncEffectLeaseCancelled, AsyncEffectLeaseLost):
+            raise
+        except Exception as exc:
+            # A heartbeat transport/database failure makes the ownership of a
+            # completed external delete unknown. Do not persist a completion
+            # or a retry outcome from this worker attempt.
+            raise AsyncEffectLeaseLost("media deletion lease heartbeat failed") from exc
+
+    def _renew_lease(self, lease: AsyncEffectJobLease) -> None:
+        with self._unit_of_work(
+            correlation_id=f"owner-truth-media-deletion-worker-heartbeat-{lease.job_id}",
+            command_id=f"ownerTruthMediaDeletionWorkerHeartbeat:{lease.operation_id}",
+        ):
+            self._store.async_effect_lease_repository().heartbeat(
+                lease,
+                lease_seconds=self._lease_seconds,
+            )
+
     def _runtime_block_reason(self) -> str | None:
         runtime = resolve_async_effect_runtime_status(
             async_effect_v1_enabled=self._settings.async_effect_v1_enabled,
@@ -538,6 +593,17 @@ def _parser() -> argparse.ArgumentParser:
         help="idle delay between loop iterations; defaults to OWNER_TRUTH_WORKER_POLL_SECONDS",
     )
     return parser
+
+
+def _heartbeat_interval_seconds(*, lease_seconds: int, configured: float | None) -> float:
+    """Renew well before expiry while avoiding a hot loop for short QA leases."""
+
+    if configured is not None:
+        normalized = float(configured)
+        if normalized <= 0:
+            raise ValueError("heartbeat interval must be positive")
+        return normalized
+    return max(0.1, min(30.0, float(lease_seconds) / 3.0))
 
 
 def main(argv: Optional[list[str]] = None) -> int:

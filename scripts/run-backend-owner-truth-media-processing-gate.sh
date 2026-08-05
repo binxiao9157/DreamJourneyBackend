@@ -21,6 +21,8 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
   tests.test_owner_truth_media_processing_migration_contract \
   tests.test_owner_truth_media_deletion_migration_contract \
   tests.test_async_effect_lease_repository \
+  tests.test_worker_lifecycle \
+  tests.test_owner_truth_worker_process \
   tests.test_route_ownership_registry \
   tests.test_release_policy
 
@@ -31,6 +33,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/services/owner_truth_media_deletion.py \
   app/async_effects/owner_truth_media_processing_worker.py \
   app/async_effects/owner_truth_media_deletion_worker.py \
+  app/async_effects/worker_lifecycle.py \
   scripts/backend-owner-truth-media-processing-postgres-smoke.py \
   app/services/route_ownership.py \
   app/services/release_policy.py \
@@ -62,11 +65,15 @@ assert "owner_truth_media_processing_worker_enabled" in worker
 assert "OperationMetricRecorder" in worker
 assert "ownerTruthMediaProcessingWorker" in worker
 assert "def _record_attempt(" in worker
+assert "WorkerLeaseHeartbeat" in worker
+assert "def _renew_lease(" in worker
 deletion_worker = Path("app/async_effects/owner_truth_media_deletion_worker.py").read_text(encoding="utf-8")
 assert 'payload["storageKey"]' not in deletion_worker
 assert "owner_truth_media_deletion_worker_enabled" in deletion_worker
 assert "assert_deletion_execution_allowed" in deletion_worker
 assert "OperationMetricRecorder" in deletion_worker
+assert "WorkerLeaseHeartbeat" in deletion_worker
+assert "def _renew_lease(" in deletion_worker
 print("Owner Truth Stage 2 private media processing gate passed")
 PY
 
@@ -75,3 +82,5 @@ bash -n scripts/run-backend-owner-truth-media-processing-deployed-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-closed-pilot-formal-postgres-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-deletion-postgres-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-deletion-deployed-smoke.sh
+bash -n scripts/run-backend-owner-truth-media-deletion-lease-heartbeat-postgres-smoke.sh
+bash -n scripts/run-backend-owner-truth-media-deletion-lease-heartbeat-deployed-smoke.sh

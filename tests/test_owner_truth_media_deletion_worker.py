@@ -3,6 +3,8 @@ from __future__ import annotations
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
+from time import sleep
 import unittest
 from uuid import uuid4
 
@@ -54,6 +56,19 @@ class _UnavailableDeleteStore(FilesystemPrivateMediaObjectStore):
 
 class _MismatchedProviderStore(FilesystemPrivateMediaObjectStore):
     provider_name = "mismatched"
+
+
+class _BlockingDeleteStore(FilesystemPrivateMediaObjectStore):
+    def __init__(self, *, root: str, started: Event, release: Event) -> None:
+        super().__init__(root=root)
+        self._started = started
+        self._release = release
+
+    def delete(self, *, storage_key: str) -> None:
+        self._started.set()
+        if not self._release.wait(timeout=5.0):
+            raise TimeoutError("test deletion release was not signalled")
+        super().delete(storage_key=storage_key)
 
 
 class _RecordingMetricRecorder:
@@ -157,6 +172,88 @@ class OwnerTruthMediaDeletionWorkerTests(unittest.TestCase):
         self.assertEqual(unsupported["deletionStatus"], "unsupported")
         self.assertFalse(unsupported["deletionRetryable"])
 
+    def test_slow_physical_deletion_heartbeats_lease_and_blocks_second_worker(self) -> None:
+        source_object, _intent = self._upload_and_enqueue_deletion()
+        started = Event()
+        release = Event()
+        slow_store = _BlockingDeleteStore(
+            root=self.media_root.name,
+            started=started,
+            release=release,
+        )
+        first_worker = self._worker(
+            worker_id="owner-truth-media-deletion-first",
+            lease_seconds=1,
+            heartbeat_interval_seconds=0.02,
+            object_store=slow_store,
+        )
+        first_result: dict[str, object] = {}
+        first_thread = Thread(
+            target=lambda: first_result.update(first_worker.run_once()),
+            name="media-deletion-first-worker-test",
+        )
+        first_thread.start()
+        self.assertTrue(started.wait(timeout=1.0))
+
+        # Wait beyond the original one-second lease. The heartbeat keeps the
+        # current attempt active, so a competing worker must observe no job.
+        sleep(1.1)
+        contender = self._worker(
+            worker_id="owner-truth-media-deletion-contender",
+            lease_seconds=1,
+        ).run_once()
+        self.assertEqual(contender["status"], "idle")
+
+        release.set()
+        first_thread.join(timeout=3.0)
+        self.assertFalse(first_thread.is_alive())
+        self.assertEqual(first_result["status"], "completed")
+        self.assertEqual(self._private_file_count(), 0)
+        self.assertEqual(self._source_object(source_object)["deletionStatus"], "completed")
+
+    def test_heartbeat_failure_does_not_persist_a_physical_deletion_completion(self) -> None:
+        source_object, intent = self._upload_and_enqueue_deletion()
+        started = Event()
+        release = Event()
+        heartbeat_attempted = Event()
+        original_heartbeat = self.store._lease_repository.heartbeat
+
+        def fail_heartbeat(*_args, **_kwargs) -> None:
+            heartbeat_attempted.set()
+            raise RuntimeError("test deletion heartbeat transaction failed")
+
+        self.store._lease_repository.heartbeat = fail_heartbeat
+        worker = self._worker(
+            lease_seconds=1,
+            heartbeat_interval_seconds=0.01,
+            object_store=_BlockingDeleteStore(
+                root=self.media_root.name,
+                started=started,
+                release=release,
+            ),
+        )
+        result: dict[str, object] = {}
+        thread = Thread(
+            target=lambda: result.update(worker.run_once()),
+            name="media-deletion-heartbeat-failure-test",
+        )
+        try:
+            thread.start()
+            self.assertTrue(started.wait(timeout=1.0))
+            self.assertTrue(heartbeat_attempted.wait(timeout=1.0))
+            release.set()
+            thread.join(timeout=3.0)
+        finally:
+            self.store._lease_repository.heartbeat = original_heartbeat
+            release.set()
+            thread.join(timeout=3.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["status"], "lost")
+        self.assertEqual(result["reason"], "mediaDeletionLeaseLost")
+        self.assertNotEqual(self.store._lease_repository.attempt_state(intent.job_id, 1), "succeeded")
+        self.assertNotEqual(self._source_object(source_object)["deletionStatus"], "completed")
+
     def test_stale_generation_is_blocked_before_provider_delete_and_current_retry_can_finish(self) -> None:
         source_object, old_intent = self._upload_and_enqueue_deletion(seed=False)
         repository = self.store.owner_truth_media_source_object_repository()
@@ -223,11 +320,16 @@ class OwnerTruthMediaDeletionWorkerTests(unittest.TestCase):
         *,
         object_store: FilesystemPrivateMediaObjectStore | None = None,
         operation_metric_recorder: object | None = None,
+        worker_id: str = "owner-truth-media-deletion-test-worker",
+        lease_seconds: int = 120,
+        heartbeat_interval_seconds: float | None = None,
     ) -> OwnerTruthMediaDeletionWorkerRuntime:
         return OwnerTruthMediaDeletionWorkerRuntime(
             settings=self.settings,
             store=self.store,
-            worker_id="owner-truth-media-deletion-test-worker",
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
             object_store=object_store or self.object_store,
             operation_metric_recorder=operation_metric_recorder,
         )

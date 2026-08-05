@@ -101,6 +101,21 @@ BACKEND_BASE_URL=https://dreamjourney-api.liftora.cn \
 scripts/run-backend-owner-truth-media-processing-deployed-smoke.sh
 ```
 
+### Worker lease 续租验证
+
+媒体处理和物理删除 Worker 都会在对象存储读写、OCR/ASR 或其他外部调用期间，
+以独立数据库事务更新已认领 job 的 lease。续租失败时不会写入处理成功或删除完成
+结果，后续由既有 lease-expiry/recovery 流程处理。此行为不打开 closed-pilot 功能。
+
+部署容器中可运行以下一次性 PostgreSQL smoke：它会故意让删除调用超过一秒租约，
+验证第二个 worker 仍不能认领同一 job，随后第一个 worker 才能完成：
+
+```bash
+DREAMJOURNEY_DEPLOYED_CONTAINER_SMOKE=1 \
+BACKEND_BASE_URL=https://dreamjourney-api.liftora.cn \
+scripts/run-backend-owner-truth-media-deletion-lease-heartbeat-deployed-smoke.sh
+```
+
 ### Phase B 正式 closed-pilot 链路 Gate
 
 该 Gate 在一次性 PostgreSQL 数据库中使用真实 FastAPI 路由、认证会话、服务端

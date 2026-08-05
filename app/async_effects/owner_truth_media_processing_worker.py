@@ -26,7 +26,10 @@ from app.async_effects.lease_repository import (
     AsyncEffectLeaseCancelled,
     AsyncEffectLeaseLost,
 )
-from app.async_effects.worker_lifecycle import WorkerDrainController
+from app.async_effects.worker_lifecycle import (
+    WorkerDrainController,
+    WorkerLeaseHeartbeat,
+)
 from app.core.config import Settings
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.observability.operation_metrics import OperationMetricRecorder
@@ -74,6 +77,7 @@ class OwnerTruthMediaProcessingWorkerRuntime:
         worker_id: Optional[str] = None,
         lease_seconds: int = _DEFAULT_LEASE_SECONDS,
         retry_seconds: int = _DEFAULT_RETRY_SECONDS,
+        heartbeat_interval_seconds: float | None = None,
         object_store: PrivateMediaObjectStore | None = None,
         processor_router: OwnerTruthMediaProcessorRouter | None = None,
         operation_metric_recorder: OperationMetricRecorder | None = None,
@@ -85,6 +89,10 @@ class OwnerTruthMediaProcessingWorkerRuntime:
         )
         self._lease_seconds = max(1, int(lease_seconds))
         self._retry_seconds = max(0, int(retry_seconds))
+        self._heartbeat_interval_seconds = _heartbeat_interval_seconds(
+            lease_seconds=self._lease_seconds,
+            configured=heartbeat_interval_seconds,
+        )
         self._object_store = object_store or build_private_media_object_store(
             provider=settings.owner_truth_media_storage_provider,
             root=settings.owner_truth_media_storage_root,
@@ -210,11 +218,11 @@ class OwnerTruthMediaProcessingWorkerRuntime:
         storage_key = str(source_object.get("storageKey") or "").strip()
         if not storage_key:
             raise OwnerTruthMediaProcessingTerminalError("privateMediaObjectMissing")
-        payload = self._object_store.read(storage_key=storage_key)
-        if sha256(payload).hexdigest() != str(source_object.get("contentSha256") or ""):
-            raise OwnerTruthMediaProcessingTerminalError("privateMediaObjectIntegrityMismatch")
-
-        extraction = self._processor_router.extract(source_object=source_object, payload=payload)
+        extraction = self._read_and_extract_with_lease_heartbeat(
+            lease=lease,
+            source_object=source_object,
+            storage_key=storage_key,
+        )
         # Extraction can take long enough for an Owner delete request to land.
         # Re-read behind the repository's commit fence before creating a
         # derived Source or Candidate effect, so deleted media cannot leak
@@ -470,6 +478,67 @@ class OwnerTruthMediaProcessingWorkerRuntime:
                 supported_job_types=[OWNER_TRUTH_MEDIA_PROCESSING_JOB_TYPE],
             )
 
+    def _read_and_extract_with_lease_heartbeat(
+        self,
+        *,
+        lease: AsyncEffectJobLease,
+        source_object: Mapping[str, Any],
+        storage_key: str,
+    ) -> Any:
+        """Renew the lease while private I/O or a processor may block.
+
+        The main request unit of work owns the SourceObject processing fence.
+        Heartbeats use their own unit of work so that a slow object-store read
+        or an explicitly consented OCR/ASR call cannot let another worker
+        claim the same effect. A heartbeat failure takes precedence over a
+        provider result: the caller must leave the current processing result
+        uncommitted and report the lease as lost.
+        """
+
+        heartbeat = self._start_lease_heartbeat(lease)
+        try:
+            payload = self._object_store.read(storage_key=storage_key)
+            if sha256(payload).hexdigest() != str(source_object.get("contentSha256") or ""):
+                raise OwnerTruthMediaProcessingTerminalError("privateMediaObjectIntegrityMismatch")
+            extraction = self._processor_router.extract(source_object=source_object, payload=payload)
+        except Exception:
+            self._stop_and_verify_lease_heartbeat(heartbeat)
+            raise
+        self._stop_and_verify_lease_heartbeat(heartbeat)
+        return extraction
+
+    def _start_lease_heartbeat(self, lease: AsyncEffectJobLease) -> WorkerLeaseHeartbeat:
+        heartbeat = WorkerLeaseHeartbeat(
+            heartbeat=lambda: self._renew_lease(lease),
+            interval_seconds=self._heartbeat_interval_seconds,
+        )
+        heartbeat.start()
+        return heartbeat
+
+    def _stop_and_verify_lease_heartbeat(self, heartbeat: WorkerLeaseHeartbeat) -> None:
+        heartbeat.stop()
+        try:
+            heartbeat.raise_if_failed()
+        except AsyncEffectLeaseCancelled:
+            raise
+        except AsyncEffectLeaseLost:
+            raise
+        except Exception as exc:
+            # A heartbeat transport/database failure means this worker can no
+            # longer prove that it owns the lease. Do not persist the external
+            # processor result or transform it into a retry outcome.
+            raise AsyncEffectLeaseLost("media processing lease heartbeat failed") from exc
+
+    def _renew_lease(self, lease: AsyncEffectJobLease) -> None:
+        with self._unit_of_work(
+            correlation_id=f"owner-truth-media-processing-worker-heartbeat-{lease.job_id}",
+            command_id=f"ownerTruthMediaProcessingWorkerHeartbeat:{lease.operation_id}",
+        ):
+            self._store.async_effect_lease_repository().heartbeat(
+                lease,
+                lease_seconds=self._lease_seconds,
+            )
+
     def _runtime_block_reason(self) -> str | None:
         readiness = self._readiness()
         runtime = resolve_async_effect_runtime_status(
@@ -587,6 +656,17 @@ def _parser() -> argparse.ArgumentParser:
         help="idle delay between loop iterations; defaults to OWNER_TRUTH_WORKER_POLL_SECONDS",
     )
     return parser
+
+
+def _heartbeat_interval_seconds(*, lease_seconds: int, configured: float | None) -> float:
+    """Renew well before expiry while avoiding a hot loop for short QA leases."""
+
+    if configured is not None:
+        normalized = float(configured)
+        if normalized <= 0:
+            raise ValueError("heartbeat interval must be positive")
+        return normalized
+    return max(0.1, min(30.0, float(lease_seconds) / 3.0))
 
 
 def main(argv: Optional[list[str]] = None) -> int:

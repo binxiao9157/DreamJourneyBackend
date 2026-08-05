@@ -4,6 +4,8 @@ from hashlib import sha256
 from io import BytesIO
 import json
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
+from time import sleep
 import unittest
 from uuid import uuid4
 
@@ -18,6 +20,7 @@ from app.core.config import Settings
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.in_memory_store import InMemoryStore
 from app.services.owner_truth_media_processing import (
+    MediaTextExtraction,
     OwnerTruthMediaProcessingCoordinator,
     OwnerTruthMediaProcessorRouter,
 )
@@ -59,6 +62,28 @@ class _RecordingMetricRecorder:
 class _FailingMetricRecorder:
     def record_attempt(self, **_kwargs: object) -> dict[str, object]:
         raise RuntimeError("metric sink unavailable")
+
+
+class _BlockingProcessorRouter:
+    """Test-only processor that keeps an external call open past a short lease."""
+
+    def __init__(self, *, started: Event, release: Event) -> None:
+        self._started = started
+        self._release = release
+
+    def extract(self, *, source_object, payload) -> MediaTextExtraction:
+        del source_object, payload
+        self._started.set()
+        if not self._release.wait(timeout=5.0):
+            raise TimeoutError("test processor release was not signalled")
+        return MediaTextExtraction(
+            processor_id="blockingProcessor",
+            processor_version="v1",
+            extracted_text="The private provider returned after its lease heartbeat.",
+        )
+
+    def identity_for(self, _source_object):
+        return "blockingProcessor", "v1"
 
 
 class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
@@ -246,6 +271,107 @@ class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
         self.assertIsNotNone(completed["derivedSourceId"])
         self.assertIsNotNone(completed["lastProcessingResultId"])
 
+    def test_slow_processor_heartbeats_lease_and_blocks_second_worker(self) -> None:
+        source_object, intent = self._upload_and_queue(
+            payload=b"A private memory written in a document.",
+            media_kind="document",
+            content_type="text/plain",
+            file_name="memory.txt",
+        )
+        started = Event()
+        release = Event()
+        processor_router = _BlockingProcessorRouter(started=started, release=release)
+        first_worker = self._worker(
+            processor_router=processor_router,
+            worker_id="owner-truth-media-processing-first",
+            lease_seconds=1,
+            heartbeat_interval_seconds=0.02,
+        )
+        first_result: dict[str, object] = {}
+        first_thread = Thread(
+            target=lambda: first_result.update(first_worker.run_once()),
+            name="media-processing-first-worker-test",
+        )
+        first_thread.start()
+        self.assertTrue(started.wait(timeout=1.0))
+
+        # Wait beyond the initial one-second lease. The first worker renews
+        # independently while the processor blocks, so a second worker cannot
+        # take ownership of the same effect.
+        sleep(1.1)
+        contender = self._worker(
+            worker_id="owner-truth-media-processing-contender",
+            lease_seconds=1,
+        ).run_once()
+        self.assertEqual(contender["status"], "idle")
+
+        release.set()
+        first_thread.join(timeout=3.0)
+        self.assertFalse(first_thread.is_alive())
+        self.assertEqual(first_result["status"], "completed")
+        completed = self.store.owner_truth_media_source_object_repository().get_source_object(
+            vault_id=self.context.vault_id,
+            source_object_id=str(source_object["sourceObjectId"]),
+            owner_subject_id=self.context.owner_subject_id,
+        )
+        self.assertEqual(completed["processingStatus"], "succeeded")
+        self.assertEqual(self.store._lease_repository.attempt_state(intent.job_id, 1), "succeeded")
+
+    def test_lease_heartbeat_failure_fails_closed_without_committing_provider_result(self) -> None:
+        _source_object, intent = self._upload_and_queue(
+            payload=b"A private memory written in a document.",
+            media_kind="document",
+            content_type="text/plain",
+            file_name="memory.txt",
+        )
+        started = Event()
+        release = Event()
+        heartbeat_attempted = Event()
+        original_heartbeat = self.store._lease_repository.heartbeat
+
+        def fail_heartbeat(*_args, **_kwargs):
+            heartbeat_attempted.set()
+            raise RuntimeError("test lease heartbeat transaction failed")
+
+        self.store._lease_repository.heartbeat = fail_heartbeat
+        worker = self._worker(
+            processor_router=_BlockingProcessorRouter(started=started, release=release),
+            lease_seconds=1,
+            heartbeat_interval_seconds=0.01,
+        )
+        result: dict[str, object] = {}
+        thread = Thread(
+            target=lambda: result.update(worker.run_once()),
+            name="media-processing-heartbeat-failure-test",
+        )
+        try:
+            thread.start()
+            self.assertTrue(started.wait(timeout=1.0))
+            self.assertTrue(heartbeat_attempted.wait(timeout=1.0))
+            release.set()
+            thread.join(timeout=3.0)
+        finally:
+            self.store._lease_repository.heartbeat = original_heartbeat
+            release.set()
+            thread.join(timeout=3.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["status"], "lost")
+        self.assertEqual(result["reason"], "mediaProcessingLeaseLost")
+        self.assertNotEqual(self.store._lease_repository.attempt_state(intent.job_id, 1), "succeeded")
+        # The only effect is the original media-processing request. No derived
+        # Source/Candidate effect can be committed after lease ownership is
+        # uncertain.
+        self.assertEqual(self.store.effect_kernel_repository().record_count(), 1)
+
+    def test_lease_heartbeat_uses_bounded_third_by_default_and_allows_test_injection(self) -> None:
+        self.assertAlmostEqual(self._worker(lease_seconds=3)._heartbeat_interval_seconds, 1.0)
+        self.assertAlmostEqual(self._worker(lease_seconds=180)._heartbeat_interval_seconds, 30.0)
+        self.assertAlmostEqual(
+            self._worker(lease_seconds=1, heartbeat_interval_seconds=0.02)._heartbeat_interval_seconds,
+            0.02,
+        )
+
     def test_docx_is_parsed_inside_the_private_worker_before_candidate_review(self) -> None:
         from docx import Document
 
@@ -325,12 +451,17 @@ class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
         *,
         processor_router: OwnerTruthMediaProcessorRouter | None = None,
         operation_metric_recorder: object | None = None,
+        worker_id: str = "owner-truth-media-test-worker",
+        lease_seconds: int = 120,
+        heartbeat_interval_seconds: float | None = None,
     ) -> OwnerTruthMediaProcessingWorkerRuntime:
         return OwnerTruthMediaProcessingWorkerRuntime(
             settings=self.settings,
             store=self.store,
-            worker_id="owner-truth-media-test-worker",
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
             retry_seconds=0,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
             object_store=self.object_store,
             processor_router=processor_router,
             operation_metric_recorder=operation_metric_recorder,

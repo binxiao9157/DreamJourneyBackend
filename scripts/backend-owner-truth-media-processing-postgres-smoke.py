@@ -15,6 +15,8 @@ import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
+from time import sleep
 from typing import Any
 import uuid
 
@@ -54,6 +56,33 @@ from app.services.postgres_store import PostgresStore
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+class BlockingFilesystemPrivateMediaObjectStore(FilesystemPrivateMediaObjectStore):
+    """Hold one delete call so the smoke can exercise lease renewal.
+
+    This adapter exists only in the disposable Postgres smoke. It blocks after
+    the worker has fenced the SourceObject but before it removes the local
+    private file, which lets a second worker attempt a claim after the original
+    one-second lease would otherwise have expired.
+    """
+
+    def __init__(
+        self,
+        *,
+        root: str | Path,
+        delete_started: Event,
+        allow_delete: Event,
+    ) -> None:
+        super().__init__(root=root)
+        self._delete_started = delete_started
+        self._allow_delete = allow_delete
+
+    def delete(self, *, storage_key: str) -> None:
+        self._delete_started.set()
+        if not self._allow_delete.wait(timeout=10):
+            raise TimeoutError("lease heartbeat smoke did not release the private delete")
+        super().delete(storage_key=storage_key)
 
 
 def dsn_for_database(base_dsn: str, database_name: str) -> str:
@@ -248,7 +277,10 @@ def main() -> None:
     test_dsn = dsn_for_database(base_dsn, database_name)
     store: PostgresStore | None = None
     client: TestClient | None = None
-    run_physical_deletion_smoke = (
+    run_lease_heartbeat_smoke = (
+        os.environ.get("RUN_OWNER_TRUTH_MEDIA_LEASE_HEARTBEAT_SMOKE") == "1"
+    )
+    run_physical_deletion_smoke = run_lease_heartbeat_smoke or (
         os.environ.get("RUN_OWNER_TRUTH_MEDIA_PHYSICAL_DELETION_SMOKE") == "1"
     )
 
@@ -824,6 +856,7 @@ def main() -> None:
                 "completed Candidate work replayed",
             )
             physical_deletion_completed = False
+            lease_heartbeat_protected = False
             if run_physical_deletion_smoke:
                 deletion_worker = OwnerTruthMediaDeletionWorkerRuntime(
                     settings=worker_settings,
@@ -837,7 +870,72 @@ def main() -> None:
                     and stale_deletion.get("reason") == "mediaDeletionStale",
                     f"old deletion generation must be fenced: {stale_deletion}",
                 )
-                physical_deletion = deletion_worker.run_once()
+                if run_lease_heartbeat_smoke:
+                    delete_started = Event()
+                    allow_delete = Event()
+                    blocking_object_store = BlockingFilesystemPrivateMediaObjectStore(
+                        root=media_root,
+                        delete_started=delete_started,
+                        allow_delete=allow_delete,
+                    )
+                    protected_worker = OwnerTruthMediaDeletionWorkerRuntime(
+                        settings=worker_settings,
+                        store=store,
+                        worker_id="media-deletion-postgres-lease-heartbeat-primary",
+                        lease_seconds=1,
+                        heartbeat_interval_seconds=0.1,
+                        object_store=blocking_object_store,
+                    )
+                    protected_result: dict[str, Any] = {}
+                    protected_failure: list[BaseException] = []
+
+                    def run_protected_delete() -> None:
+                        try:
+                            protected_result.update(protected_worker.run_once())
+                        except BaseException as exc:  # thread boundary for smoke diagnostics
+                            protected_failure.append(exc)
+
+                    protected_thread = Thread(
+                        target=run_protected_delete,
+                        name="owner-truth-media-deletion-lease-heartbeat-smoke",
+                    )
+                    protected_thread.start()
+                    try:
+                        require(
+                            delete_started.wait(timeout=5),
+                            "protected deletion worker did not reach the provider call",
+                        )
+                        # This deliberately exceeds the first one-second lease. A
+                        # successful contender claim here would prove that the
+                        # heartbeat did not keep the active worker protected.
+                        sleep(1.25)
+                        contender = OwnerTruthMediaDeletionWorkerRuntime(
+                            settings=worker_settings,
+                            store=store,
+                            worker_id="media-deletion-postgres-lease-heartbeat-contender",
+                            lease_seconds=1,
+                            heartbeat_interval_seconds=0.1,
+                            object_store=object_store,
+                        ).run_once()
+                        require(
+                            contender.get("status") == "idle",
+                            f"second deletion worker claimed an active lease: {contender}",
+                        )
+                    finally:
+                        allow_delete.set()
+                        protected_thread.join(timeout=10)
+                    require(
+                        not protected_thread.is_alive(),
+                        "protected deletion worker did not finish after provider release",
+                    )
+                    require(
+                        not protected_failure,
+                        "protected deletion worker raised while completing its lease",
+                    )
+                    physical_deletion = protected_result
+                    lease_heartbeat_protected = True
+                else:
+                    physical_deletion = deletion_worker.run_once()
                 require(
                     physical_deletion.get("status") == "completed"
                     and physical_deletion.get("deletionStatus") == "completed"
@@ -878,6 +976,7 @@ def main() -> None:
                         "staleDeletionOutcomeBlocked": True,
                         "deletionProviderReceiptAccepted": True,
                         "physicalDeletionCompleted": physical_deletion_completed,
+                        "leaseHeartbeatProtected": lease_heartbeat_protected,
                         "deletedMediaExcludedFromContext": True,
                         "qaHeaderUsed": False,
                         "responseRedaction": True,
