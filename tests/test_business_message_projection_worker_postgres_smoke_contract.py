@@ -20,6 +20,7 @@ class BusinessMessageProjectionWorkerPostgresSmokeContractTests(unittest.TestCas
         self.assertIn("seed_verified_owner_inbox_bridge", source)
         self.assertIn("businessMessageProjectionInboxSnapshotMismatch", source)
         self.assertIn("BusinessMessageProjectionEnqueueCoordinator", source)
+        self.assertIn("is_async_effect_store_ready(store.readiness_probe())", source)
         self.assertIn("async_effects.dead_letters", source)
         self.assertIn("mailbox_letters", source)
         self.assertIn('table_count(dsn, "mailbox_letters") == 0', source)

@@ -32,7 +32,11 @@ from app.async_effects.business_message_projection_worker import (
     BusinessMessageProjectionWorkerRuntime,
 )
 from app.async_effects.consumer_repository import AsyncEffectSyntheticConsumerCommand
-from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
+from app.async_effects.contracts import (
+    AsyncEffectIntent,
+    AsyncEffectTarget,
+    is_async_effect_store_ready,
+)
 from app.async_effects.message_notification_effects import (
     BusinessCompletionMessageSource,
     InAppMessageKind,
@@ -288,7 +292,10 @@ def exercise(dsn: str) -> None:
     store = PostgresStore(dsn=dsn, pool_min_size=1, pool_max_size=4)
     store.open_pool(wait=True)
     try:
-        require(store.readiness_probe().get("status") == "ready", "temporary schema must be ready")
+        require(
+            is_async_effect_store_ready(store.readiness_probe()),
+            "temporary schema must be ready",
+        )
 
         success_request = enqueue(store, source=completed_source(store, label="success"))
         disabled = worker(store=store, enabled=False).run_once()
