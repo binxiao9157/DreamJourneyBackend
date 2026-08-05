@@ -323,7 +323,7 @@ def seed_reviewable_batch(
                     1,
                     canonical_hash(source_payload),
                     str(uuid.uuid4()),
-                    canonical_hash({"command": "admit"}),
+                    canonical_hash({"command": "admit", "batch": review_batch_id}),
                     canonical_hash({"batch": review_batch_id, "source": source_id}),
                     owner_subject_id,
                     OWNER_TRUTH_SCHEMA_VERSION,
