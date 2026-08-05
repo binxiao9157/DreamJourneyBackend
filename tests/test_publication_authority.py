@@ -14,6 +14,7 @@ from uuid import uuid4
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.publication_authority import (
     InMemoryPublicationAuthorityRepository,
+    PostgresPublicationAuthorityRepository,
     PublicationAuthorityConflict,
     PublicationAuthorityDisabled,
     PublicationAuthorityMemoryVersion,
@@ -22,6 +23,17 @@ from app.services.publication_authority import (
     PublicationConfirmCommand,
     PublicationDraftCommand,
 )
+
+
+class _PublicationCursor:
+    def __init__(self, row: dict[str, object]) -> None:
+        self._row = row
+
+    def execute(self, _query: str, _parameters: object) -> None:
+        pass
+
+    def fetchone(self) -> dict[str, object]:
+        return self._row
 
 
 class PublicationAuthorityTests(unittest.TestCase):
@@ -131,6 +143,45 @@ class PublicationAuthorityTests(unittest.TestCase):
         )
         with self.assertRaises(PublicationAuthorityNotPublishable):
             self.service.create_draft(context=self.context, command=self._draft_command())
+
+    def test_postgres_publication_accepts_initial_authority_epoch_zero(self) -> None:
+        """The first Owner Truth epoch is 0, not an absent authority value."""
+
+        repository = PostgresPublicationAuthorityRepository(connection=object())
+        row = {
+            "memory_version_id": self.memory.memory_version_id,
+            "memory_id": self.memory.memory_id,
+            "vault_id": self.context.vault_id,
+            "is_current": True,
+            "content_hash": self.memory.content_hash,
+            "payload": {},
+            "source_id": str(uuid4()),
+            "source_version": 1,
+            "decision_receipt_id": self.memory.decision_receipt_id,
+            "owner_subject_id": self.context.owner_subject_id,
+            "memory_authority_epoch": 0,
+            "memory_state": "active",
+            "sensitivity": "standard",
+            "source_owner_subject_id": self.context.owner_subject_id,
+            "source_authority_epoch": 0,
+            "live_source_version": 1,
+            "source_state": "active",
+            "receipt_decision": "accepted",
+            "receipt_authority_epoch": 0,
+            "candidate_owner_subject_id": self.context.owner_subject_id,
+            "candidate_authority_epoch": 0,
+            "candidate_decision_status": "accepted",
+        }
+
+        result = repository._publishable_memory(
+            _PublicationCursor(row),
+            context=self.context,
+            vault_authority_epoch=0,
+            memory_version_id=self.memory.memory_version_id,
+        )
+
+        self.assertEqual(result.authority_epoch, 0)
+        self.assertEqual(result.memory_version_id, self.memory.memory_version_id)
 
     def test_third_party_flag_requires_redaction_workflow_before_confirmation(self) -> None:
         self.repository.seed_memory_version(

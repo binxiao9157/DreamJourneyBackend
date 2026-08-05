@@ -112,6 +112,12 @@ def _assert_public_copy_has_no_direct_identifiers(*, title: str, body: str) -> N
         )
 
 
+def _int_or_missing(value: Any) -> int:
+    """Preserve zero-valued authority epochs while rejecting an absent value."""
+
+    return -1 if value is None else int(value)
+
+
 @dataclass(frozen=True)
 class PublicationAuthorityMemoryVersion:
     """Canonical, command-time facts needed to admit one selected version."""
@@ -963,13 +969,13 @@ class PostgresPublicationAuthorityRepository:
             or int(row["memory_authority_epoch"]) != vault_authority_epoch
             or str(row.get("source_owner_subject_id") or "") != context.owner_subject_id
             or str(row.get("source_state") or "") != "active"
-            or int(row.get("source_authority_epoch") or -1) != vault_authority_epoch
-            or int(row.get("live_source_version") or -1) != int(row["source_version"])
+            or _int_or_missing(row.get("source_authority_epoch")) != vault_authority_epoch
+            or _int_or_missing(row.get("live_source_version")) != int(row["source_version"])
             or str(row.get("receipt_decision") or "") not in {"accepted", "corrected"}
             or str(row.get("candidate_decision_status") or "") != str(row.get("receipt_decision") or "")
             or str(row.get("candidate_owner_subject_id") or "") != context.owner_subject_id
-            or int(row.get("candidate_authority_epoch") or -1) != vault_authority_epoch
-            or int(row.get("receipt_authority_epoch") or -1) != vault_authority_epoch
+            or _int_or_missing(row.get("candidate_authority_epoch")) != vault_authority_epoch
+            or _int_or_missing(row.get("receipt_authority_epoch")) != vault_authority_epoch
         ):
             raise PublicationAuthorityNotPublishable(
                 "MemoryVersion must be active, current and Owner-confirmed before publication"
