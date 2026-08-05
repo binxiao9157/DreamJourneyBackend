@@ -12,6 +12,10 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from app.services.data_rights_external_effect_projection import (
+    build_data_rights_external_effect_projection,
+)
+
 
 DATA_RIGHTS_EVIDENCE_PROJECTION_SCHEMA_VERSION = 1
 
@@ -76,7 +80,7 @@ def build_data_rights_evidence_projection(
         "scopeCoverage": "unverifiableFromRedactedScopeHash",
     }
 
-    return {
+    projection = {
         "schemaVersion": DATA_RIGHTS_EVIDENCE_PROJECTION_SCHEMA_VERSION,
         "generatedAt": timestamp.isoformat(),
         "denominatorMode": "observedEvidenceOnly",
@@ -99,6 +103,12 @@ def build_data_rights_evidence_projection(
         "layerSummary": layer_summary,
         "gapSummary": gap_summary,
     }
+    projection["externalEffects"] = build_data_rights_external_effect_projection(
+        summary,
+        resource_evidence=resources,
+        access_revocation=access_revocation,
+    )
+    return projection
 
 
 def _resource_evidence(

@@ -111,6 +111,13 @@ class DataRightsEvidenceProjectionTests(unittest.TestCase):
         self.assertEqual(report["accessRevocation"]["status"], "revoked")
         self.assertEqual(report["physicalCleanup"]["status"], "completed")
         self.assertEqual(report["denominatorMode"], "observedEvidenceOnly")
+        self.assertEqual(report["externalEffects"]["accessState"], "revoked")
+        self.assertTrue(
+            any(
+                item["domain"] == "providerVoice" and item["status"] == "pending"
+                for item in report["externalEffects"]["domains"]
+            )
+        )
         archive = next(
             item for item in report["resources"] if item["moduleId"] == "archive"
         )

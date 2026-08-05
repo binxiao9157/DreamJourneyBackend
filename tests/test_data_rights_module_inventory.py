@@ -223,6 +223,42 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
         self.assertEqual(boundary_by_module["objectStorage"], "unsupported")
         self.assertEqual(boundary_by_module["backupRetention"], "pending")
 
+    def test_owner_export_redacts_external_media_and_provider_locators(self):
+        login = self._login("13900007773")
+        user_id = login["user"]["id"]
+        self.store.add_archive_item(
+            user_id,
+            {
+                "id": "archive_locator_export_1",
+                "kind": "image",
+                "description": "可导出的照片说明",
+                "objectKey": "private/media/object-key",
+                "storageKey": "private/storage-key",
+                "uploadURL": "https://upload.example.invalid/private",
+                "signedUrl": "https://download.example.invalid/signed",
+                "providerSpeakerId": "S_provider_voice_id",
+                "providerAssetId": "provider-asset-id",
+                "providerLogId": "provider-log-id",
+            },
+        )
+
+        export = build_module_owned_data_export(self.store, user_id=user_id)
+        serialized = json.dumps(export, ensure_ascii=False, sort_keys=True)
+        boundaries = {item["moduleId"]: item for item in export["externalBoundaries"]}
+
+        for private_value in (
+            "private/media/object-key",
+            "private/storage-key",
+            "https://upload.example.invalid/private",
+            "https://download.example.invalid/signed",
+            "S_provider_voice_id",
+            "provider-asset-id",
+            "provider-log-id",
+        ):
+            self.assertNotIn(private_value, serialized)
+        self.assertEqual(boundaries["objectStorage"]["retentionState"], "providerControlled")
+        self.assertTrue(boundaries["objectStorage"]["uncompleted"])
+
     def test_owner_truth_export_is_owner_scoped_and_discloses_append_only_cleanup_boundary(self):
         owner_login = self._login("13900007774")
         other_login = self._login("13900007775")
