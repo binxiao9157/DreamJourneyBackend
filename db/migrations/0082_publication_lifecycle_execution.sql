@@ -162,7 +162,7 @@ BEGIN
                     'publication-lifecycle-trigger:' || target.publication_version_id::text
                     || ':' || target_reason_code
                 ), 21, 12
-        )::UUID;
+        ))::UUID;
 
         INSERT INTO publication.publication_lifecycle_receipts (
             id, vault_id, publication_id, publication_version_id, owner_subject_id,
