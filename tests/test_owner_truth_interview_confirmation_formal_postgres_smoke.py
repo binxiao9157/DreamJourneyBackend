@@ -5,18 +5,22 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "scripts/run-backend-owner-truth-interview-confirmation-formal-postgres-smoke.sh"
 SMOKE = ROOT / "scripts/backend-owner-truth-interview-confirmation-formal-postgres-smoke.py"
+HANDOFF_SMOKE = ROOT / "scripts/backend-owner-truth-review-ready-confirmation-handoff-postgres-smoke.py"
 
 
 class OwnerTruthInterviewConfirmationFormalPostgresSmokeTests(unittest.TestCase):
     def test_runner_requires_an_explicit_database_and_keeps_formal_route_separate_from_qa(self) -> None:
         runner = RUNNER.read_text(encoding="utf-8")
         smoke = SMOKE.read_text(encoding="utf-8")
+        handoff_smoke = HANDOFF_SMOKE.read_text(encoding="utf-8")
 
         self.assertIn('DREAMJOURNEY_OWNER_TRUTH_FORMAL_SMOKE=1 is required', runner)
         self.assertIn('OWNER_TRUTH_FORMAL_SMOKE_ADMIN_DATABASE_URL is required', runner)
         self.assertIn('formal-postgres-smoke.py', runner)
         self.assertIn('/confirmation/batch-accept', smoke)
         self.assertIn('/interview-candidate-confirmations', smoke)
+        self.assertIn('make_vault_epoch_stale', handoff_smoke)
+        self.assertIn('stale Vault authority must not expose a review batch', handoff_smoke)
         self.assertIn('/interview-memory-activation-inbox', smoke)
         self.assertIn('/interview-memory-projection-recovery-inbox', smoke)
         self.assertIn('/confirmation/candidates/{single_candidate_id}/decision', smoke)

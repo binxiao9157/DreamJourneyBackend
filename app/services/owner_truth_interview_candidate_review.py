@@ -512,6 +512,7 @@ class PostgresOwnerTruthInterviewCandidateReviewRepository:
 
         _assert_owner_context(context)
         with self._cursor() as cursor:
+            self._assert_live_owner_vault(cursor, context=context)
             cursor.execute(
                 """
                 SELECT a.review_batch_id
@@ -548,6 +549,32 @@ class PostgresOwnerTruthInterviewCandidateReviewRepository:
                 ),
             )
             return tuple(str(row["review_batch_id"]) for row in cursor.fetchall())
+
+    @staticmethod
+    def _assert_live_owner_vault(
+        cursor: Any,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> None:
+        """Match the per-batch path: another Owner cannot probe an inbox."""
+
+        cursor.execute(
+            """
+            SELECT owner_subject_id, status
+            FROM owner_truth.vaults
+            WHERE vault_id = %s
+            """,
+            (context.vault_id,),
+        )
+        vault = cursor.fetchone()
+        if (
+            vault is None
+            or str(vault["owner_subject_id"]) != context.owner_subject_id
+            or str(vault["status"]) != "active"
+        ):
+            raise OwnerTruthInterviewCandidateReviewAccessDenied(
+                "confirmation inbox does not belong to this active Owner Vault"
+            )
 
     def _load_admission(
         self,
