@@ -4451,6 +4451,8 @@ VOICE_CLONE_PROVIDER_MODE = "mockContract"
 VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE = "echo"
 VOICE_CLONE_QUALITY_PREVIEW_PURPOSE = "qualityPreview"
 VOICE_CLONE_QUALITY_PREVIEW_RECEIPT_TTL_SECONDS = 15 * 60
+VOICE_SYNTHESIS_BINDING_SCHEMA_VERSION = "voice-synthesis-binding-v1"
+VOICE_SYNTHESIS_TENCENT_AUDIO_OWNER = "tencentDigitalHuman"
 VOICE_CLONE_AUTHORIZATION_COPY = (
     "声音克隆必须由用户主动授权，仅使用用户确认提交的声音样本；"
     "未完成授权、样本质量和合规验收前不会公开训练或合成功能。"
@@ -10703,6 +10705,129 @@ def _validate_voice_profile_for_synthesis(
     return profile
 
 
+def _voice_synthesis_fallback_detail(
+    *,
+    code: str,
+    fallback_mode: str,
+    retryable: bool,
+) -> Dict[str, Any]:
+    """Return a client-safe Echo fallback instruction without a voice binding.
+
+    A client must clear any previous clone selection when the server cannot
+    authorize the requested one.  In particular, this prevents an old role's
+    audio from continuing after a profile/role switch fails.
+    """
+
+    return {
+        "code": code,
+        "message": "requested Echo voice is unavailable",
+        "retryable": retryable,
+        "fallback": {
+            "mode": fallback_mode,
+            "clearPreviousProfile": True,
+            "forbidDifferentProfile": True,
+            "audioOwner": "none",
+        },
+    }
+
+
+def _voice_synthesis_profile_unavailable_error(error: HTTPException) -> HTTPException:
+    """Normalize Echo profile failures to an explicit, non-audio fallback."""
+
+    if error.status_code == 403:
+        # Existing high-risk eligibility denials deliberately retain their
+        # policy code and decision reason.  Replacing them would make a hard
+        # deny look like a recoverable rendering fallback.
+        return error
+    code = "accepted_voice_profile_required"
+    fallback_mode = "neutralOrText"
+    return HTTPException(
+        status_code=error.status_code,
+        detail=_voice_synthesis_fallback_detail(
+            code=code,
+            fallback_mode=fallback_mode,
+            retryable=False,
+        ),
+    )
+
+
+def _resolve_tencent_audio_drive_binding(
+    *,
+    payload: Dict[str, Any],
+    user_id: str,
+    voice_profile_id: str,
+    profile: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Bind PCM audio-drive output to the authorized self role only.
+
+    Family/member voice publication is intentionally not enabled by P1-S3.
+    Echo PCM callers must explicitly name ``personalOwner``; preview keeps its
+    separate, backward-compatible contract.  Any supplied mismatch must fail
+    closed instead of retaining a prior role or substituting another provider
+    voice.
+    """
+
+    profile_scope = str(profile.get("personaScope") or "personal").strip()
+    profile_digital_human_id = str(profile.get("digitalHumanId") or user_id).strip() or user_id
+    role_key = str(payload.get("roleKey") or "").strip()
+    role_subject_id = str(payload.get("roleSubjectId") or user_id).strip()
+    requested_scope = str(payload.get("personaScope") or profile_scope).strip()
+    requested_digital_human_id = str(
+        payload.get("digitalHumanId") or profile_digital_human_id
+    ).strip()
+
+    if (
+        role_key != "personalOwner"
+        or role_subject_id != user_id
+        or requested_scope != "personal"
+        or requested_digital_human_id != user_id
+        or profile_scope != "personal"
+        or profile_digital_human_id != user_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=_voice_synthesis_fallback_detail(
+                code="role_voice_binding_unavailable",
+                fallback_mode="neutralOrText",
+                retryable=False,
+            ),
+        )
+
+    return {
+        "schemaVersion": VOICE_SYNTHESIS_BINDING_SCHEMA_VERSION,
+        "voiceProfileId": voice_profile_id,
+        "profileVersion": int(profile.get("profileVersion") or 0),
+        "ownerUserId": user_id,
+        "roleSubjectId": user_id,
+        "roleKey": "personalOwner",
+        "personaScope": "personal",
+        "digitalHumanId": user_id,
+        "requestPurpose": VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE,
+        "outputMode": "tencentAudioDrive",
+        "audioOwner": VOICE_SYNTHESIS_TENCENT_AUDIO_OWNER,
+    }
+
+
+def _voice_synthesis_provider_failure_error(
+    *,
+    code: str,
+    request_id: str = "",
+    log_id: str = "",
+) -> HTTPException:
+    detail = _voice_synthesis_fallback_detail(
+        code=code,
+        fallback_mode="textOnly",
+        retryable=True,
+    )
+    provider_request_hash = _provider_reference_hash(request_id)
+    provider_log_hash = _provider_reference_hash(log_id)
+    if provider_request_hash:
+        detail["providerRequestIdHash"] = provider_request_hash
+    if provider_log_hash:
+        detail["providerLogIdHash"] = provider_log_hash
+    return HTTPException(status_code=502, detail=detail)
+
+
 def _voice_sample_authorization_secret() -> str:
     # Keep challenge signing server-side.  Identity HMAC is preferred because
     # it is already an independent secret; the API token is only a legacy
@@ -11530,11 +11655,32 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
         raise HTTPException(status_code=400, detail="unsupported voice synthesis requestPurpose")
     if request_purpose == VOICE_CLONE_QUALITY_PREVIEW_PURPOSE and output_mode != "default":
         raise HTTPException(status_code=400, detail="quality preview must use default audio output")
-    profile = _validate_voice_profile_for_synthesis(
-        user_id,
-        voice_profile_id,
-        allow_quality_preview=request_purpose == VOICE_CLONE_QUALITY_PREVIEW_PURPOSE,
-    )
+    if payload.get("roleKey") is not None and not (
+        request_purpose == VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE
+        and output_mode == "tencentAudioDrive"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="roleKey is only supported for Echo Tencent audio-drive synthesis",
+        )
+    try:
+        profile = _validate_voice_profile_for_synthesis(
+            user_id,
+            voice_profile_id,
+            allow_quality_preview=request_purpose == VOICE_CLONE_QUALITY_PREVIEW_PURPOSE,
+        )
+    except HTTPException as exc:
+        if request_purpose == VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE:
+            raise _voice_synthesis_profile_unavailable_error(exc) from exc
+        raise
+    synthesis_binding: Optional[Dict[str, Any]] = None
+    if output_mode == "tencentAudioDrive":
+        synthesis_binding = _resolve_tencent_audio_drive_binding(
+            payload=payload,
+            user_id=user_id,
+            voice_profile_id=voice_profile_id,
+            profile=profile,
+        )
     provider_speaker_id = _voice_clone_provider_speaker_id(profile)
     provider_audio_format = audio_format
     provider_sample_rate = sample_rate
@@ -11544,6 +11690,15 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
 
     provider = VoiceCloneTTSProviderFactory(settings).make()
     if not provider.is_configured:
+        if request_purpose == VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE:
+            raise HTTPException(
+                status_code=503,
+                detail=_voice_synthesis_fallback_detail(
+                    code="voice_synthesis_provider_unavailable",
+                    fallback_mode="textOnly",
+                    retryable=True,
+                ),
+            )
         raise HTTPException(status_code=503, detail="voice clone TTS provider is not configured")
     provider_call_started = time.monotonic()
     try:
@@ -11568,20 +11723,63 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
             started_at=provider_call_started,
             provider_request_key=getattr(exc, "provider_request_id", None),
         )
-        detail = {
-            "code": "voice_synthesis_provider_failed",
-            "message": "voice synthesis provider failed",
-            "retryable": True,
-        }
-        provider_request_hash = _provider_reference_hash(getattr(exc, "provider_request_id", ""))
-        provider_log_hash = _provider_reference_hash(getattr(exc, "provider_log_id", ""))
-        if provider_request_hash:
-            detail["providerRequestIdHash"] = provider_request_hash
-        if provider_log_hash:
-            detail["providerLogIdHash"] = provider_log_hash
-        raise HTTPException(status_code=502, detail=detail) from exc
+        raise _voice_synthesis_provider_failure_error(
+            code="voice_synthesis_provider_failed",
+            request_id=str(getattr(exc, "provider_request_id", "") or ""),
+            log_id=str(getattr(exc, "provider_log_id", "") or ""),
+        ) from exc
 
+    if not isinstance(result, dict):
+        _record_provider_cost_attempt(
+            request,
+            provider="volcengineVoiceClone",
+            capability="voiceCloneSynthesis",
+            unit_type="character",
+            units=len(text),
+            state="failed",
+            reason="providerResponseInvalid",
+            started_at=provider_call_started,
+        )
+        raise _voice_synthesis_provider_failure_error(
+            code="voice_synthesis_provider_invalid_response",
+        )
+    provider_audio_base64 = str(result.get("audioBase64") or "").strip()
+    provider_audio_format = str(result.get("audioFormat") or "").strip()
+    if not provider_audio_base64 or not provider_audio_format:
+        _record_provider_cost_attempt(
+            request,
+            provider="volcengineVoiceClone",
+            capability="voiceCloneSynthesis",
+            unit_type="character",
+            units=len(text),
+            state="failed",
+            reason="providerResponseInvalid",
+            started_at=provider_call_started,
+        )
+        raise _voice_synthesis_provider_failure_error(
+            code="voice_synthesis_provider_invalid_response",
+            request_id=str(result.get("providerRequestId") or ""),
+            log_id=str(result.get("providerLogId") or ""),
+        )
     provider_request_id = str(result.get("providerRequestId") or "").strip()
+    provider_result_profile_id = str(result.get("voiceProfileId") or "").strip()
+    if provider_result_profile_id and provider_result_profile_id != provider_speaker_id:
+        _record_provider_cost_attempt(
+            request,
+            provider="volcengineVoiceClone",
+            capability="voiceCloneSynthesis",
+            unit_type="character",
+            units=len(text),
+            state="failed",
+            reason="providerProfileBindingMismatch",
+            started_at=provider_call_started,
+            provider_request_key=provider_request_id or None,
+        )
+        raise _voice_synthesis_provider_failure_error(
+            code="voice_synthesis_provider_profile_mismatch",
+            request_id=provider_request_id,
+            log_id=str(result.get("providerLogId") or ""),
+        )
     _record_provider_cost_attempt(
         request,
         provider="volcengineVoiceClone",
@@ -11595,15 +11793,22 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
     )
     audio_payload = {
         "encoding": "base64",
-        "format": result["audioFormat"],
-        "data": result["audioBase64"],
-        "byteCount": result["byteCount"],
+        "format": provider_audio_format,
+        "data": provider_audio_base64,
+        "byteCount": int(result.get("byteCount") or 0),
     }
     if output_mode == "tencentAudioDrive":
-        audio_payload = TencentAudioDrivePCMAdapter().adapt(
-            audio_base64=result["audioBase64"],
-            audio_format=result["audioFormat"],
-        )
+        try:
+            audio_payload = TencentAudioDrivePCMAdapter().adapt(
+                audio_base64=provider_audio_base64,
+                audio_format=provider_audio_format,
+            )
+        except ValueError as exc:
+            raise _voice_synthesis_provider_failure_error(
+                code="voice_synthesis_audio_drive_conversion_failed",
+                request_id=provider_request_id,
+                log_id=str(result.get("providerLogId") or ""),
+            ) from exc
 
     response = {
         "status": "synthesized",
@@ -11628,6 +11833,8 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
         response["providerLogIdHash"] = _provider_reference_hash(provider_log_id)
     if output_mode != "default":
         response["outputMode"] = output_mode
+    if synthesis_binding is not None:
+        response["synthesisBinding"] = synthesis_binding
     return response
 
 
