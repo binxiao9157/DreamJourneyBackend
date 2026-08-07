@@ -48,6 +48,9 @@ def main():
         "archiveImageAnalysis",
         "archiveAudioUpload",
         "archiveVideoUpload",
+        "ownerTruthMediaStorage",
+        "ownerTruthMediaProcessing",
+        "identityChallenge",
         "timeLetters",
         "familyManagement",
         "familySpace",
@@ -67,7 +70,19 @@ def main():
         require(snapshot.get("capability") == capability, f"{capability} identity mismatch")
         for axis in axes:
             require(type(snapshot.get(axis)) is bool, f"{capability}.{axis} must be bool")
-        for field in ("provider", "fallbackMode", "reason", "evidenceTimestamp"):
+        for field in (
+            "provider",
+            "fallbackMode",
+            "reason",
+            "evidenceTimestamp",
+            "providerKind",
+            "operation",
+            "dataClass",
+            "region",
+            "retentionPolicyVersion",
+            "configurationStatus",
+            "evidenceStatus",
+        ):
             require(field in snapshot, f"{capability}.{field} is missing")
 
     image = snapshots["archiveImageAnalysis"]
@@ -81,6 +96,67 @@ def main():
         require(media["providerReady"] is False, f"{capability} mock provider must not be ready")
         require(media["releaseVisible"] is False, f"{capability} must remain release hidden")
 
+    inventory = runtime.get("providerInventory") or {}
+    require(inventory.get("contractVersion") == 1, "provider inventory contract must be v1")
+    require(inventory.get("validatedAtStartup") is True, "provider inventory must be startup-validated")
+    inventory_capabilities = inventory.get("capabilities") or {}
+    for capability in (
+        "ownerTruthMediaStorage",
+        "ownerTruthMediaProcessing",
+        "identityChallenge",
+        "voiceCloneShell",
+        "digitalHumanLivePanel",
+    ):
+        descriptor = inventory_capabilities.get(capability) or {}
+        snapshot = snapshots[capability]
+        for field in (
+            "enabled",
+            "providerReady",
+            "provider",
+            "providerKind",
+            "operation",
+            "dataClass",
+            "region",
+            "retentionPolicyVersion",
+            "fallbackMode",
+            "reason",
+            "configurationStatus",
+            "evidenceStatus",
+        ):
+            require(
+                descriptor.get(field) == snapshot.get(field),
+                f"{capability}.{field} inventory/snapshot mismatch",
+            )
+
+    owner_truth_media = runtime.get("ownerTruthMedia") or {}
+    require(
+        owner_truth_media.get("captureCapability") == "ownerTruthMediaStorage",
+        "owner truth media capture must bind to the storage capability",
+    )
+    require(
+        owner_truth_media.get("processingCapability") == "ownerTruthMediaProcessing",
+        "owner truth media processing must bind to the processing capability",
+    )
+    require(
+        owner_truth_media.get("contractVersion") == 1,
+        "owner truth media contract must be v1",
+    )
+    capabilities = runtime.get("capabilities") or {}
+    storage = snapshots["ownerTruthMediaStorage"]
+    processing = snapshots["ownerTruthMediaProcessing"]
+    require(
+        capabilities.get("ownerTruthMediaCapture") is storage["providerReady"],
+        "capture alias must follow the startup provider decision",
+    )
+    require(
+        capabilities.get("ownerTruthMediaProcessing") is processing["providerReady"],
+        "processing alias must follow the startup provider decision",
+    )
+    require(
+        capabilities.get("identityChallenge") is snapshots["identityChallenge"]["enabled"],
+        "identity alias must follow the startup provider decision",
+    )
+
     for capability in ("voiceCloneShell", "digitalHumanLivePanel"):
         snapshot = snapshots[capability]
         require(snapshot["releaseVisible"] is False, f"{capability} must remain release hidden")
@@ -90,7 +166,22 @@ def main():
     for forbidden in ("secretkey", "accesskey", "accesstoken", "x-api-key"):
         require(forbidden not in serialized, f"runtime response exposed forbidden field: {forbidden}")
 
-    print("Backend runtime capability deployed smoke passed: five axes remain independent")
+    inventory_serialized = json.dumps(inventory, ensure_ascii=False).lower()
+    for forbidden in (
+        "secret_access_key",
+        "access_key_id",
+        "api_key",
+        "bucket",
+        "endpoint_url",
+        "appkey",
+        "accesstoken",
+    ):
+        require(
+            forbidden not in inventory_serialized,
+            f"provider inventory exposed sensitive configuration name: {forbidden}",
+        )
+
+    print("Backend runtime capability deployed smoke passed: provider inventory remains fail-closed and value-free")
 
 
 if __name__ == "__main__":

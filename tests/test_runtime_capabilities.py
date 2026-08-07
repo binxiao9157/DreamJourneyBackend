@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -7,6 +8,7 @@ from app.services.runtime_capabilities import (
     RuntimeCapabilityInput,
 )
 from app.services.runtime_config import RuntimeConfigService
+from app.services.provider_runtime import ProviderRuntimeInventory
 
 
 class RuntimeCapabilityComposerTests(unittest.TestCase):
@@ -117,6 +119,9 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             "archiveImageAnalysis",
             "archiveAudioUpload",
             "archiveVideoUpload",
+            "ownerTruthMediaStorage",
+            "ownerTruthMediaProcessing",
+            "identityChallenge",
             "timeLetters",
             "familyManagement",
             "familySpace",
@@ -138,6 +143,16 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             self.assertIn("fallbackMode", snapshot)
             self.assertIn("reason", snapshot)
             self.assertIn("evidenceTimestamp", snapshot)
+            for field in (
+                "providerKind",
+                "operation",
+                "dataClass",
+                "region",
+                "retentionPolicyVersion",
+                "configurationStatus",
+                "evidenceStatus",
+            ):
+                self.assertIsInstance(snapshot[field], str, f"{capability}.{field}")
 
     def test_text_only_image_provider_and_mock_storage_are_not_provider_ready(self):
         config = RuntimeConfigService(
@@ -176,6 +191,135 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
         self.assertFalse(voice["externalVerified"])
         self.assertEqual(voice["reason"], "externalEvidenceMissing")
         self.assertTrue(config["voiceClone"]["realProviderReady"])
+
+    def test_incomplete_provider_configuration_fails_closed_without_disabling_unrelated_runtime(self):
+        settings = Settings(
+            owner_truth_media_capture_enabled=True,
+            owner_truth_media_storage_provider="s3",
+            owner_truth_media_s3_bucket="fixture-private-media",
+            owner_truth_media_s3_region="ap-shanghai",
+            owner_truth_media_s3_access_key_id="fixture-storage-access",
+            owner_truth_media_s3_secret_access_key=None,
+            owner_truth_media_content_safety_provider="clamav",
+            owner_truth_media_processing_worker_enabled=True,
+            async_effect_v1_enabled=True,
+            async_effect_worker_enabled=True,
+            identity_binding_hmac_key="h" * 32,
+            identity_challenge_adapter="httpJson",
+            identity_challenge_http_json_url="https://otp.example.test/challenge",
+            identity_challenge_http_json_api_key=None,
+        )
+
+        config = RuntimeConfigService(settings).public_config()
+        snapshots = config["capabilitySnapshots"]
+        inventory = config["providerInventory"]["capabilities"]
+
+        storage = snapshots["ownerTruthMediaStorage"]
+        self.assertFalse(storage["enabled"])
+        self.assertFalse(storage["providerReady"])
+        self.assertEqual(storage["reason"], "providerConfigurationIncomplete")
+        self.assertEqual(storage["configurationStatus"], "incomplete")
+        self.assertFalse(config["capabilities"]["ownerTruthMediaCapture"])
+        self.assertFalse(config["capabilities"]["ownerTruthMediaProcessing"])
+        self.assertEqual(inventory["ownerTruthMediaStorage"]["reason"], storage["reason"])
+
+        identity = snapshots["identityChallenge"]
+        self.assertFalse(identity["enabled"])
+        self.assertFalse(identity["providerReady"])
+        self.assertEqual(identity["reason"], "providerConfigurationIncomplete")
+        self.assertEqual(identity["configurationStatus"], "incomplete")
+        self.assertFalse(config["capabilities"]["identityChallenge"])
+
+        # Existing metadata-only archive behavior remains explicitly separate
+        # from the new M0 source-object capture route.
+        self.assertTrue(config["capabilities"]["archiveMediaUploadIntent"])
+        self.assertEqual(config["archive"]["providerMode"], "mock")
+        self.assertEqual(
+            config["ownerTruthMedia"]["captureCapability"],
+            "ownerTruthMediaStorage",
+        )
+
+    def test_complete_provider_configuration_is_value_free_and_stays_release_controlled(self):
+        settings = Settings(
+            owner_truth_media_capture_enabled=True,
+            owner_truth_media_storage_provider="s3",
+            owner_truth_media_s3_bucket="fixture-private-media",
+            owner_truth_media_s3_region="ap-shanghai",
+            owner_truth_media_s3_access_key_id="fixture-storage-access",
+            owner_truth_media_s3_secret_access_key="fixture-storage-secret",
+            owner_truth_media_content_safety_provider="clamav",
+            owner_truth_media_processing_worker_enabled=True,
+            async_effect_v1_enabled=True,
+            async_effect_worker_enabled=True,
+            identity_binding_hmac_key="h" * 32,
+            identity_challenge_adapter="httpJson",
+            identity_challenge_http_json_url="https://otp.example.test/challenge",
+            identity_challenge_http_json_api_key="fixture-otp-secret",
+            volcengine_voice_clone_api_key="fixture-voice-training-secret",
+            volcengine_voice_clone_tts_api_key="fixture-voice-synthesis-secret",
+            tencent_digital_human_app_key="fixture-dh-app-key",
+            tencent_digital_human_access_token="fixture-dh-access-token",
+            tencent_digital_human_asset_virtualman_key="fixture-dh-asset",
+        )
+
+        config = RuntimeConfigService(settings).public_config()
+        snapshots = config["capabilitySnapshots"]
+        inventory = config["providerInventory"]
+
+        self.assertFalse(inventory["validatedAtStartup"])
+        self.assertEqual(inventory["contractVersion"], 1)
+        self.assertTrue(snapshots["ownerTruthMediaStorage"]["enabled"])
+        self.assertTrue(snapshots["ownerTruthMediaStorage"]["providerReady"])
+        self.assertEqual(snapshots["ownerTruthMediaStorage"]["providerKind"], "privateObjectStorage")
+        self.assertEqual(snapshots["ownerTruthMediaStorage"]["dataClass"], "ownerPrivateMedia")
+        self.assertTrue(snapshots["ownerTruthMediaProcessing"]["providerReady"])
+        self.assertTrue(snapshots["identityChallenge"]["providerReady"])
+        self.assertTrue(snapshots["voiceCloneShell"]["providerReady"])
+
+        # Tencent's static project credentials still do not open a mobile
+        # session until the scoped-session broker has a verified contract.
+        digital_human = snapshots["digitalHumanLivePanel"]
+        self.assertFalse(digital_human["enabled"])
+        self.assertFalse(digital_human["providerReady"])
+        self.assertEqual(
+            digital_human["configurationStatus"],
+            "configuredButBrokerBlocked",
+        )
+
+        serialized = json.dumps(config, ensure_ascii=False)
+        for secret in (
+            "fixture-storage-access",
+            "fixture-storage-secret",
+            "fixture-otp-secret",
+            "fixture-voice-training-secret",
+            "fixture-voice-synthesis-secret",
+            "fixture-dh-app-key",
+            "fixture-dh-access-token",
+            "fixture-private-media",
+            "https://otp.example.test/challenge",
+        ):
+            self.assertNotIn(secret, serialized)
+
+    def test_startup_validated_inventory_is_the_runtime_authority(self):
+        settings = Settings(
+            owner_truth_media_capture_enabled=True,
+            owner_truth_media_storage_provider="filesystem",
+            owner_truth_media_storage_root="/var/lib/dreamjourney/private-media",
+            owner_truth_media_content_safety_provider="clamav",
+        )
+        inventory = ProviderRuntimeInventory(settings, validated_at_startup=True)
+
+        config = RuntimeConfigService(
+            settings,
+            provider_inventory=inventory,
+        ).public_config()
+
+        self.assertTrue(config["providerInventory"]["validatedAtStartup"])
+        self.assertTrue(config["capabilitySnapshots"]["ownerTruthMediaStorage"]["providerReady"])
+        self.assertEqual(
+            config["providerInventory"]["capabilities"]["ownerTruthMediaStorage"],
+            inventory.public_descriptor()["capabilities"]["ownerTruthMediaStorage"],
+        )
 
 
 if __name__ == "__main__":

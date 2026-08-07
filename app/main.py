@@ -480,6 +480,7 @@ from app.services.archive_store import (
     ResourceOwnershipConflict,
     ResourceVersionConflict,
 )
+from app.services.provider_runtime import ProviderRuntimeInventory
 from app.services.runtime_config import RuntimeConfigService
 from app.services.safety_policy import (
     HighRiskCapability,
@@ -6432,6 +6433,13 @@ async def shadow_operation_metric_attempt(request: Request, call_next):
 
 @app.on_event("startup")
 def startup() -> None:
+    # This checks configuration shape only.  A partially configured external
+    # Provider never prevents the API from starting, but it is recorded as
+    # unavailable and stays fail-closed in the public runtime contract.
+    app.state.provider_runtime_inventory = ProviderRuntimeInventory(
+        settings,
+        validated_at_startup=True,
+    )
     validate_route_authentication_startup(
         app,
         registry=ROUTE_AUTHENTICATION_POLICY.registry,
@@ -10382,7 +10390,10 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
     summary["incidentLifecycle"] = _incident_lifecycle_service().summary()
     summary["voiceDigitalHumanReadiness"] = (
         VoiceDigitalHumanLaneReadinessService().evaluate(
-            capability_snapshots=RuntimeConfigService(settings).public_config().get(
+            capability_snapshots=RuntimeConfigService(
+                settings,
+                provider_inventory=getattr(app.state, "provider_runtime_inventory", None),
+            ).public_config().get(
                 "capabilitySnapshots",
                 {},
             ),
@@ -12707,7 +12718,10 @@ def get_profile(request: Request, user_id: str) -> Dict[str, Any]:
 
 @app.get("/config/runtime")
 def runtime_config() -> Dict[str, Any]:
-    return RuntimeConfigService(settings).public_config()
+    return RuntimeConfigService(
+        settings,
+        provider_inventory=getattr(app.state, "provider_runtime_inventory", None),
+    ).public_config()
 
 
 @app.post("/context/build")

@@ -19,6 +19,13 @@ class RuntimeCapabilitySnapshot(BaseModel):
     fallbackMode: str
     reason: str
     evidenceTimestamp: Optional[datetime]
+    providerKind: str
+    operation: str
+    dataClass: str
+    region: str
+    retentionPolicyVersion: str
+    configurationStatus: str
+    evidenceStatus: str
 
 
 @dataclass(frozen=True)
@@ -33,6 +40,13 @@ class RuntimeCapabilityInput:
     fallback_mode: str
     reason: str
     evidence_timestamp: Optional[datetime] = None
+    provider_kind: str = "unknown"
+    operation: str = "unknown"
+    data_class: str = "unknown"
+    region: str = "unknown"
+    retention_policy_version: str = "unknown"
+    configuration_status: str = "unknown"
+    evidence_status: str = "notVerified"
 
 
 class RuntimeCapabilityComposer:
@@ -76,6 +90,13 @@ class RuntimeCapabilityComposer:
             fallbackMode=value.fallback_mode,
             reason=reason,
             evidenceTimestamp=evidence_timestamp,
+            providerKind=value.provider_kind,
+            operation=value.operation,
+            dataClass=value.data_class,
+            region=value.region,
+            retentionPolicyVersion=value.retention_policy_version,
+            configurationStatus=value.configuration_status,
+            evidenceStatus=value.evidence_status,
         )
 
     @staticmethod

@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.core.config import Settings
 from app.async_effects.contracts import resolve_async_effect_runtime_status
@@ -10,6 +10,7 @@ from app.services.route_ownership import RouteOwnershipRegistry
 from app.services.release_policy import ReleasePolicyService, parse_release_policy_feature_set
 from app.services.recovery_access import RecoveryAccessPolicy
 from app.services.safety_policy import SafetyPolicy
+from app.services.provider_runtime import ProviderRuntimeInventory, ProviderRuntimeStatus
 from app.services.tokens import TokenService
 from app.services.tts import VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice_clone_speaker_ids
@@ -20,8 +21,17 @@ from app.services.runtime_capabilities import (
 
 
 class RuntimeConfigService:
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        provider_inventory: Optional[ProviderRuntimeInventory] = None,
+    ):
         self.settings = settings
+        # Tests and maintenance commands may instantiate this service outside
+        # FastAPI startup.  They still receive the same fail-closed inventory,
+        # marked as a runtime validation rather than a startup receipt.
+        self.provider_inventory = provider_inventory or ProviderRuntimeInventory(settings)
 
     def public_config(self) -> Dict[str, Any]:
         archive_image_analysis = ArchiveImageAnalysisProviderFactory(self.settings).make()
@@ -37,6 +47,9 @@ class RuntimeConfigService:
         )
         realtime_voice = TokenService(self.settings).realtime_config(user_id="runtime-capability")
         identity_challenge = identity_challenge_runtime_descriptor(self.settings)
+        media_storage = self.provider_inventory.status_for("ownerTruthMediaStorage")
+        media_processing = self.provider_inventory.status_for("ownerTruthMediaProcessing")
+        identity_provider = self.provider_inventory.status_for("identityChallenge")
         release_policy = ReleasePolicyService(
             policy_revision=self.settings.release_policy_revision,
             min_client_build=self.settings.release_policy_min_client_build,
@@ -65,9 +78,8 @@ class RuntimeConfigService:
         )
         capability_snapshots = self._capability_snapshots(
             archive_image_analysis=archive_image_analysis,
-            voice_clone_provider=voice_clone_provider,
-            voice_clone_tts_provider=voice_clone_tts_provider,
-            digital_human_access=digital_human_access,
+            identity_challenge=identity_challenge,
+            provider_inventory=self.provider_inventory,
             release_policy=release_policy,
         )
         return {
@@ -75,6 +87,7 @@ class RuntimeConfigService:
             "baseURL": self.settings.public_base_url,
             "capabilitySnapshotSchemaVersion": RuntimeCapabilityComposer.SCHEMA_VERSION,
             "capabilitySnapshots": capability_snapshots,
+            "providerInventory": self.provider_inventory.public_descriptor(),
             "capabilities": {
                 "deepseekProxy": bool(self.settings.deepseek_api_key),
                 "archiveImageAnalysis": archive_image_analysis.enabled,
@@ -83,12 +96,17 @@ class RuntimeConfigService:
                 "amapDistrictProxy": bool(self.settings.amap_web_service_key),
                 "kbSync": True,
                 "familyCircle": True,
+                # The legacy archive contract below remains metadata-only.
+                # Actual M0 private-media capture has its own authenticated
+                # Owner Truth route and is gated by this startup inventory.
                 "archiveMediaUploadIntent": True,
+                "ownerTruthMediaCapture": media_storage.provider_ready,
+                "ownerTruthMediaProcessing": media_processing.provider_ready,
                 "voiceClone": voice_clone_provider.is_configured,
                 "digitalHumanSession": False,
                 "digitalHumanSessionLease": False,
                 "authSession": True,
-                "identityChallenge": identity_challenge["enabled"],
+                "identityChallenge": identity_provider.enabled,
                 "releasePolicy": True,
                 "asyncEffect": async_effect_runtime.enabled,
             },
@@ -204,6 +222,14 @@ class RuntimeConfigService:
                 "audioFileSizeLimitMB": 50,
                 "videoFileSizeLimitMB": 200,
                 "uploadIntentTTLSeconds": 900,
+            },
+            "ownerTruthMedia": {
+                "captureCapability": "ownerTruthMediaStorage",
+                "processingCapability": "ownerTruthMediaProcessing",
+                "uploadIntentEndpointTemplate": "/v2/vaults/{vaultId}/source-objects/upload-intents",
+                "contentEndpointTemplate": "/v2/vaults/{vaultId}/source-objects/upload-intents/{intentId}/content",
+                "supportedMediaKinds": ["document", "image", "audio", "video"],
+                "contractVersion": 1,
             },
             "archiveImageAnalysis": archive_image_analysis.public_capability(),
             "voice": {
@@ -324,9 +350,8 @@ class RuntimeConfigService:
         self,
         *,
         archive_image_analysis: Any,
-        voice_clone_provider: Any,
-        voice_clone_tts_provider: Any,
-        digital_human_access: Dict[str, Any],
+        identity_challenge: Dict[str, Any],
+        provider_inventory: ProviderRuntimeInventory,
         release_policy: ReleasePolicyService,
     ) -> Dict[str, Dict[str, Any]]:
         composer = RuntimeCapabilityComposer()
@@ -346,15 +371,17 @@ class RuntimeConfigService:
                 "familySpace",
                 "voiceCloneShell",
                 "digitalHumanLivePanel",
+                "ownerMediaCaptureV1",
             )
         }
 
         image_enabled = archive_image_analysis.enabled
         image_provider_ready = image_enabled and archive_image_analysis.supports_vision
-        voice_enabled = voice_clone_provider.is_configured
-        voice_provider_ready = voice_enabled and voice_clone_tts_provider.is_configured
-        digital_human_enabled = bool(digital_human_access.get("enabled", False))
-        digital_human_provider_ready = bool(digital_human_access.get("providerReady", False))
+        media_storage = provider_inventory.status_for("ownerTruthMediaStorage")
+        media_processing = provider_inventory.status_for("ownerTruthMediaProcessing")
+        identity_provider = provider_inventory.status_for("identityChallenge")
+        voice_provider = provider_inventory.status_for("voiceCloneShell")
+        digital_human_provider = provider_inventory.status_for("digitalHumanLivePanel")
 
         inputs = (
             RuntimeCapabilityInput(
@@ -373,6 +400,13 @@ class RuntimeConfigService:
                     if not image_enabled
                     else "externalEvidenceMissing"
                 ),
+                provider_kind="imageAnalysis",
+                operation="analyzeImage",
+                data_class="ownerPrivateImage",
+                region="providerManaged",
+                retention_policy_version="archiveAnalysis-v1",
+                configuration_status="valid" if image_enabled else "disabled",
+                evidence_status="notVerified" if image_enabled else "notRequested",
             ),
             RuntimeCapabilityInput(
                 capability="archiveAudioUpload",
@@ -384,6 +418,13 @@ class RuntimeConfigService:
                 provider="mockObjectStorage",
                 fallback_mode="metadataOnly",
                 reason="mockProviderOnly",
+                provider_kind="legacyMetadataSync",
+                operation="syncMediaMetadata",
+                data_class="localAudioMetadata",
+                region="deviceLocal",
+                retention_policy_version="archiveHiddenMedia-v1",
+                configuration_status="mockOnly",
+                evidence_status="notApplicable",
             ),
             RuntimeCapabilityInput(
                 capability="archiveVideoUpload",
@@ -395,6 +436,25 @@ class RuntimeConfigService:
                 provider="mockObjectStorage",
                 fallback_mode="metadataOnly",
                 reason="mockProviderOnly",
+                provider_kind="legacyMetadataSync",
+                operation="syncMediaMetadata",
+                data_class="localVideoMetadata",
+                region="deviceLocal",
+                retention_policy_version="archiveHiddenMedia-v1",
+                configuration_status="mockOnly",
+                evidence_status="notApplicable",
+            ),
+            self._provider_input(
+                status=media_storage,
+                release_visible=release_decisions["ownerMediaCaptureV1"].releaseVisible,
+            ),
+            self._provider_input(
+                status=media_processing,
+                release_visible=release_decisions["ownerMediaCaptureV1"].releaseVisible,
+            ),
+            self._provider_input(
+                status=identity_provider,
+                release_visible=bool(identity_challenge.get("clientFlowEnabled", False)),
             ),
             RuntimeCapabilityInput(
                 capability="timeLetters",
@@ -406,6 +466,13 @@ class RuntimeConfigService:
                 provider="internalScheduler",
                 fallback_mode="localDraftOnly",
                 reason="externalEvidenceMissing",
+                provider_kind="inAppDeliveryScheduler",
+                operation="deliverTimeLetterReminder",
+                data_class="timeLetterMetadata",
+                region="serviceManaged",
+                retention_policy_version="timeLetterRetention-v1",
+                configuration_status="valid",
+                evidence_status="notVerified",
             ),
             RuntimeCapabilityInput(
                 capability="familyManagement",
@@ -417,6 +484,13 @@ class RuntimeConfigService:
                 provider="internalFamilyService",
                 fallback_mode="hiddenContract",
                 reason="externalEvidenceMissing",
+                provider_kind="familyRelationshipService",
+                operation="manageFamilyRelationship",
+                data_class="familyRelationshipMetadata",
+                region="serviceManaged",
+                retention_policy_version="familyRelationshipRetention-v1",
+                configuration_status="valid",
+                evidence_status="notVerified",
             ),
             RuntimeCapabilityInput(
                 capability="familySpace",
@@ -428,40 +502,49 @@ class RuntimeConfigService:
                 provider="internalPersonaService",
                 fallback_mode="ownerOnly",
                 reason="externalEvidenceMissing",
+                provider_kind="personaService",
+                operation="resolveOwnerPersona",
+                data_class="ownerPersonaMetadata",
+                region="serviceManaged",
+                retention_policy_version="personaRetention-v1",
+                configuration_status="valid",
+                evidence_status="notVerified",
             ),
-            RuntimeCapabilityInput(
-                capability="voiceCloneShell",
-                implemented=True,
-                enabled=voice_enabled,
-                provider_ready=voice_provider_ready,
+            self._provider_input(
+                status=voice_provider,
                 release_visible=release_decisions["voiceCloneShell"].releaseVisible,
-                external_verified=False,
-                provider=voice_clone_provider.provider_mode,
-                fallback_mode=("providerProxy" if voice_provider_ready else "hiddenContract"),
-                reason=(
-                    "runtimeDisabled"
-                    if not voice_enabled
-                    else "synthesisProviderUnavailable"
-                    if not voice_provider_ready
-                    else "externalEvidenceMissing"
-                ),
             ),
-            RuntimeCapabilityInput(
-                capability="digitalHumanLivePanel",
-                implemented=True,
-                enabled=digital_human_enabled,
-                provider_ready=digital_human_provider_ready,
+            self._provider_input(
+                status=digital_human_provider,
                 release_visible=release_decisions["digitalHumanLivePanel"].releaseVisible,
-                external_verified=False,
-                provider=str(digital_human_access.get("provider") or "tencent"),
-                fallback_mode=str(digital_human_access.get("fallbackMode") or "text"),
-                reason=str(
-                    (digital_human_access.get("decisionReceipt") or {}).get("reasonCode")
-                    or "runtimeDisabled"
-                ),
             ),
         )
         return {
             item.capability: item.model_dump(mode="json")
             for item in (composer.compose(value) for value in inputs)
         }
+
+    @staticmethod
+    def _provider_input(
+        *,
+        status: ProviderRuntimeStatus,
+        release_visible: bool,
+    ) -> RuntimeCapabilityInput:
+        return RuntimeCapabilityInput(
+            capability=status.capability,
+            implemented=True,
+            enabled=status.enabled,
+            provider_ready=status.provider_ready,
+            release_visible=release_visible,
+            external_verified=False,
+            provider=status.provider,
+            fallback_mode=status.fallback_mode,
+            reason=status.reason,
+            provider_kind=status.provider_kind,
+            operation=status.operation,
+            data_class=status.data_class,
+            region=status.region,
+            retention_policy_version=status.retention_policy_version,
+            configuration_status=status.configuration_status,
+            evidence_status=status.evidence_status,
+        )
