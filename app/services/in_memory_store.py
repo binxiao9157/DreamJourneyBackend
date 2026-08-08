@@ -1882,11 +1882,12 @@ class InMemoryStore:
                 raise ValueError("external effect receipt owner does not match rights request")
             existing = self._rights_external_effect_receipts.get(receipt.receipt_id)
             if existing is not None:
-                if existing != record:
+                persisted_receipt = receipt_from_persistence(existing)
+                if persisted_receipt.observation_hash != receipt.observation_hash:
                     raise ValueError("external effect receipt is append-only")
                 return {
                     "outcome": "deduplicated",
-                    "receipt": receipt_from_persistence(existing).projection_observation(),
+                    "receipt": persisted_receipt.projection_observation(),
                 }
             self._rights_external_effect_receipts[receipt.receipt_id] = record
             return {"outcome": "appended", "receipt": receipt.projection_observation()}

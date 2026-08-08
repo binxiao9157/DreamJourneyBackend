@@ -2954,7 +2954,7 @@ class PostgresStore:
             raise RuntimeError("external effect receipt insert did not produce a row")
         persisted = self._rights_external_effect_receipt_payload(row)
         persisted_receipt = receipt_from_persistence(persisted)
-        if persisted_receipt.persistence_payload() != payload:
+        if persisted_receipt.observation_hash != receipt.observation_hash:
             raise ValueError("external effect receipt is append-only")
         return {"outcome": outcome, "receipt": persisted_receipt.projection_observation()}
 

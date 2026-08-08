@@ -11152,9 +11152,31 @@ def download_account_data_export_job(job_id: str, request: Request) -> JSONRespo
 def observe_data_rights_evidence(request_id: str) -> JSONResponse:
     """Return a machine-only, read-only evidence projection for one request."""
 
+    try:
+        report = _build_data_rights_evidence_report(request_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail={"code": "rightsRequestNotFound"}) from exc
+    except DataRightsEvidenceProjectionError as exc:
+        logger.error("data rights evidence projection failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "rightsEvidenceUnavailable"},
+        ) from exc
+    return JSONResponse(
+        content=report,
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+def _build_data_rights_evidence_report(request_id: str) -> Dict[str, Any]:
+    """Build the shared redacted projection without exposing Provider values."""
+
     summary = store.summarize_rights_request(request_id)
     if summary is None:
-        raise HTTPException(status_code=404, detail={"code": "rightsRequestNotFound"})
+        raise LookupError("rights request not found")
     list_access_revocations = getattr(store, "list_rights_access_revocation_outbox", None)
     access_revocations = (
         list_access_revocations(request_id)
@@ -11171,24 +11193,10 @@ def observe_data_rights_evidence(request_id: str) -> JSONResponse:
         if callable(list_external_effect_receipts)
         else []
     )
-    try:
-        report = build_data_rights_evidence_projection(
-            summary,
-            access_revocation_events=access_revocations,
-            linked_effect_observations=external_effect_receipts,
-        )
-    except DataRightsEvidenceProjectionError as exc:
-        logger.error("data rights evidence projection failed: %s", exc)
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "rightsEvidenceUnavailable"},
-        ) from exc
-    return JSONResponse(
-        content=report,
-        headers={
-            "Cache-Control": "no-store",
-            "Pragma": "no-cache",
-        },
+    return build_data_rights_evidence_projection(
+        summary,
+        access_revocation_events=access_revocations,
+        linked_effect_observations=external_effect_receipts,
     )
 
 
@@ -11264,6 +11272,44 @@ def _account_delete_rights_summary(request_id: str, *, outcome: Optional[str] = 
     }
     if outcome:
         response["outcome"] = outcome
+    try:
+        evidence = _build_data_rights_evidence_report(request_id)
+        external = evidence.get("externalEffects") or {}
+        domains = external.get("domains") or []
+        external_status = str(external.get("status") or "unknown")
+        access_state = str(external.get("accessState") or "notConfirmed")
+        uncompleted_count = int(external.get("uncompletedDomainCount") or 0)
+        response["externalCleanup"] = {
+            "schemaVersion": int(external.get("schemaVersion") or 1),
+            "status": external_status,
+            "accessState": access_state,
+            "domainCount": len(domains),
+            "uncompletedDomainCount": uncompleted_count,
+            "verifiedComplete": (
+                external_status == "completed"
+                and access_state == "revoked"
+                and uncompleted_count == 0
+            ),
+            "domains": [
+                {
+                    "domain": str(item.get("domain") or "unknown"),
+                    "status": str(item.get("status") or "unknown"),
+                    "requiresFollowUp": bool(item.get("requiresFollowUp")),
+                }
+                for item in domains
+                if isinstance(item, Mapping)
+            ],
+        }
+    except (DataRightsEvidenceProjectionError, LookupError, TypeError, ValueError):
+        response["externalCleanup"] = {
+            "schemaVersion": 1,
+            "status": "unknown",
+            "accessState": "notConfirmed",
+            "domainCount": 0,
+            "uncompletedDomainCount": 0,
+            "verifiedComplete": False,
+            "domains": [],
+        }
     return response
 
 

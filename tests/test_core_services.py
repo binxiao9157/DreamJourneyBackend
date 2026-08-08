@@ -2681,6 +2681,11 @@ class AccountDeletionAPITests(unittest.TestCase):
         self.assertIn("deletedAt", deletion)
         self.assertIn("purgeAfter", deletion)
         self.assertIn("restoreDeadline", deletion)
+        external_cleanup = deleted.json()["rights"]["externalCleanup"]
+        self.assertEqual(external_cleanup["accessState"], "revoked")
+        self.assertFalse(external_cleanup["verifiedComplete"])
+        self.assertEqual(external_cleanup["domainCount"], 5)
+        self.assertNotIn("providerLogId", str(external_cleanup))
         self.assertEqual(restored.status_code, 200)
         self.assertEqual(restored.json()["status"], "restored")
         self.assertEqual(restored.json()["user"]["restoreCount"], 1)

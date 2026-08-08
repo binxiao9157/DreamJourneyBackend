@@ -258,6 +258,16 @@ class AccountDeletionRightsAdapterAPITests(unittest.TestCase):
         self.assertEqual(after_delete.status_code, 409)
         self.assertEqual(provider.synthesize_count, 1)
 
+        restored = self.client.post("/auth/restore", json={"phone": phone})
+        self.assertEqual(restored.status_code, 200)
+        restored_profile = main_module.store.get_voice_profile(
+            user_id,
+            "account-delete-profile",
+        )
+        self.assertIsNotNone(restored_profile)
+        self.assertEqual(restored_profile["lifecycleState"], "paused")
+        self.assertFalse(restored_profile["isEnabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,10 @@ from app.services.data_rights_evidence_projection import (
 from app.services.data_rights_external_effect_receipts import (
     DataRightsExternalEffectReceipt,
 )
+from app.services.data_rights_external_effect_reconciler import (
+    DataRightsExternalEffectAdapterObservation,
+    DataRightsExternalEffectReconciler,
+)
 from app.services.postgres_store import PostgresStore
 
 
@@ -116,6 +120,28 @@ def expect_rejected(operation, message: str) -> None:
     require(rejected, message)
 
 
+class FakeReconciliationAdapter:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def observe(self, *, domain: str, effect_identity_hash: str, attempt: int):
+        self.calls.append((domain, effect_identity_hash, attempt))
+        if domain == "objectStorage":
+            return DataRightsExternalEffectAdapterObservation(
+                state="completed",
+                provider_receipt_present=True,
+                reason_code="externalEffectProviderCompleted",
+                evidence_hash=sha256(b"postgres-object-deletion-receipt").hexdigest(),
+            )
+        if domain == "notificationDelivery":
+            return DataRightsExternalEffectAdapterObservation(
+                state="unsupported",
+                provider_receipt_present=False,
+                reason_code="externalEffectAdapterUnsupported",
+            )
+        raise TimeoutError("raw Provider detail must not persist")
+
+
 def exercise(dsn: str) -> None:
     store = PostgresStore(dsn=dsn, pool_min_size=1, pool_max_size=4)
     store.open_pool(wait=True)
@@ -154,6 +180,16 @@ def exercise(dsn: str) -> None:
         )
         require(record(store, completed, command_id="completed") == "appended", "completion is append-only")
         require(record(store, completed, command_id="completed-replay") == "deduplicated", "completion replay deduplicates")
+        completed_later = receipt(
+            request_id=request.request_id,
+            owner_hash=request.subject_hash,
+            state="completed",
+            observed_at="2026-08-05T09:02:30+00:00",
+        )
+        require(
+            record(store, completed_later, command_id="completed-later-replay") == "deduplicated",
+            "same logical callback with a later timestamp must deduplicate",
+        )
         require(receipt_count(dsn, request.request_id) == 2, "accepted and completed facts must remain")
 
         cross_account = receipt(
@@ -205,9 +241,45 @@ def exercise(dsn: str) -> None:
             lambda: _mutate_receipt(dsn, accepted.receipt_id),
             "receipt rows must be append-only",
         )
+
+        reconcile_request = DataRightsRequestAuthority().create_request(
+            command_id="external-effect-reconciler-postgres-command",
+            subject_id="external-effect-reconciler-postgres-owner",
+            identity_proof={"kind": "reauthenticated"},
+            payload={"action": "account.delete", "scope": ["all"]},
+            now="2026-08-05T10:00:00+00:00",
+        ).request
+        store.create_rights_request(reconcile_request)
+        reconciler = DataRightsExternalEffectReconciler(store, max_attempts=2)
+        adapter = FakeReconciliationAdapter()
+        first_reconcile = reconciler.reconcile(
+            request_id=reconcile_request.request_id,
+            access_revocation_status="revoked",
+            adapter=adapter,
+            now="2026-08-05T10:01:00+00:00",
+        )
+        second_reconcile = reconciler.reconcile(
+            request_id=reconcile_request.request_id,
+            access_revocation_status="revoked",
+            adapter=adapter,
+            now="2026-08-05T10:02:00+00:00",
+        )
+        require(
+            first_reconcile["status"] == "attentionRequired",
+            "first timeout pass must remain retryable",
+        )
+        require(
+            second_reconcile["status"] == "manualReviewRequired",
+            "retry exhaustion must create manual-review evidence",
+        )
+        require(
+            "raw Provider detail must not persist"
+            not in json.dumps(second_reconcile, ensure_ascii=False, sort_keys=True),
+            "raw Provider failures must stay outside reconciliation evidence",
+        )
         print(
             "Data-rights external effect receipt Postgres smoke passed "
-            "(owner fence, replay, append-only and redacted projection verified)."
+            "(owner fence, replay, append-only, reconciliation and redacted projection verified)."
         )
     finally:
         store.close_pool()
