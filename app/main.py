@@ -1391,6 +1391,71 @@ def _publication_lifecycle_context(
     )
 
 
+FORMAL_PUBLICATION_CLOSED_BETA_ROUTE_TEMPLATES = frozenset(
+    {
+        "/v2/vaults/{vault_id}/publications",
+        "/v2/vaults/{vault_id}/publication-drafts",
+        "/v2/vaults/{vault_id}/publication-drafts/{draft_id}/confirm/{publication_id}",
+        "/v2/vaults/{vault_id}/publications/{publication_id}/withdraw",
+        "/v2/vaults/{vault_id}/publications/{publication_id}/suspend",
+        "/v2/vaults/{vault_id}/publication-grants",
+        "/v2/vaults/{vault_id}/publication-grants/{grant_id}/revoke",
+        "/v2/publication-grants/{grant_id}/sessions",
+        "/v2/publication-sessions/{session_id}/projection",
+        "/v2/publication-sessions/{session_id}/answers",
+    }
+)
+
+
+def _publication_formal_owner_context(
+    request: Request,
+    *,
+    vault_id: str,
+    feature: str,
+) -> OwnerTruthCommandContext:
+    """Authorize a formal M2 route without accepting an internal QA header."""
+
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature=feature,
+        route=RELEASE_POLICY_COMMAND_GATE.route_label_for_request(
+            request.method,
+            request.url.path,
+            None,
+        ),
+        user_session_required_code="publicationClosedBetaUserSessionRequired",
+    )
+
+
+def _publication_formal_visitor_subject(request: Request) -> str:
+    """Require an authenticated Visitor and the still-closed M2 release Gate."""
+
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, RequestPrincipal) or _request_user_principal_id(request) is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "publicationVisitorUserSessionRequired"},
+        )
+    if _release_policy_audience(request, principal) != "visitor":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "publicationVisitorAudienceRequired"},
+        )
+    context = _owner_truth_captured_release_policy_context(
+        request,
+        vault_id="publication-visitor-session",
+        feature="visitorAccess",
+        route=RELEASE_POLICY_COMMAND_GATE.route_label_for_request(
+            request.method,
+            request.url.path,
+            None,
+        ),
+        user_session_required_code="publicationVisitorUserSessionRequired",
+    )
+    return context.owner_subject_id
+
+
 def _owner_truth_direct_candidate_review_context(
     request: Request,
     *,
@@ -5974,6 +6039,8 @@ NO_STORE_PATH_PREFIXES = (
     "/auth/",
     "/v2/auth/",
     "/v2/vaults/",
+    "/v2/publication-grants/",
+    "/v2/publication-sessions/",
     "/voice/",
     "/digital-human/",
     "/ops/incidents",
@@ -7087,6 +7154,498 @@ def owner_truth_memory_version_history(
     body = _owner_truth_memory_version_history_response(history)
     body["vaultId"] = context.vault_id
     return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
+
+
+def _publication_owner_management_for_context(
+    context: OwnerTruthCommandContext,
+) -> JSONResponse:
+    try:
+        with store.request_unit_of_work(
+            correlation_id=f"publication-owner-management-read:{context.vault_id}",
+            command_id=None,
+        ):
+            summaries = PublicationAuthorityService(
+                store.publication_authority_repository(),
+                enabled=True,
+            ).list_owner_publications(context=context)
+    except PublicationAuthorityError as error:
+        raise _publication_authority_http_error(error) from error
+    return JSONResponse(
+        content=_publication_owner_management_response(
+            vault_id=context.vault_id,
+            summaries=summaries,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _publication_create_draft_for_context(
+    context: OwnerTruthCommandContext,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    try:
+        command = _publication_authority_draft_command(payload)
+        with store.request_unit_of_work(
+            correlation_id=(
+                "publication-authority-draft:"
+                f"{context.vault_id}:{command.memory_version_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = PublicationAuthorityService(
+                store.publication_authority_repository(),
+                enabled=True,
+            ).create_draft(context=context, command=command)
+    except PublicationAuthorityError as error:
+        raise _publication_authority_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_publication_authority_draft_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _publication_confirm_draft_for_context(
+    context: OwnerTruthCommandContext,
+    *,
+    draft_id: str,
+    publication_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    try:
+        command = _publication_authority_confirm_command(
+            payload,
+            publication_id=publication_id,
+            draft_id=draft_id,
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "publication-authority-confirm:"
+                f"{context.vault_id}:{command.publication_id}:{command.draft_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = PublicationAuthorityService(
+                store.publication_authority_repository(),
+                enabled=True,
+            ).confirm_draft(context=context, command=command)
+    except PublicationAuthorityError as error:
+        raise _publication_authority_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_publication_authority_confirm_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _publication_lifecycle_for_context(
+    context: OwnerTruthCommandContext,
+    *,
+    publication_id: str,
+    action: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    try:
+        command = _publication_lifecycle_command(
+            payload,
+            publication_id=publication_id,
+            action=action,
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                f"publication-lifecycle-{action}:"
+                f"{context.vault_id}:{publication_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = PublicationLifecycleExecutionService(
+                store.publication_lifecycle_execution_repository(),
+                enabled=True,
+            ).execute(context=context, command=command)
+    except PublicationLifecycleExecutionError as error:
+        raise _publication_lifecycle_http_error(error) from error
+    result = _materialize_publication_lifecycle_external_cleanup(result)
+    return JSONResponse(
+        content=_publication_lifecycle_response(result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _publication_issue_grant_for_context(
+    context: OwnerTruthCommandContext,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    try:
+        command = _publication_grant_issue_command(payload)
+        with store.request_unit_of_work(
+            correlation_id=(
+                "publication-share-grant-issue:"
+                f"{context.vault_id}:{command.publication_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = PublicationVisitorAccessService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).issue_grant(context=context, command=command)
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_publication_grant_issue_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _publication_list_grants_for_context(
+    context: OwnerTruthCommandContext,
+) -> JSONResponse:
+    try:
+        with store.request_unit_of_work(
+            correlation_id=f"publication-owner-grant-list:{context.vault_id}",
+            command_id=None,
+        ):
+            summaries = PublicationVisitorAccessService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).list_owner_grants(context=context)
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(
+        content=_publication_owner_grant_list_response(
+            vault_id=context.vault_id,
+            summaries=summaries,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _publication_revoke_grant_for_context(
+    context: OwnerTruthCommandContext,
+    *,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    try:
+        command = _publication_grant_revoke_command(payload, grant_id=grant_id)
+        with store.request_unit_of_work(
+            correlation_id=(
+                "publication-share-grant-revoke:"
+                f"{context.vault_id}:{command.grant_id}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = PublicationVisitorAccessService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).revoke_grant(context=context, command=command)
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(
+        content=_publication_grant_revoke_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _publication_admit_visitor_for_subject(
+    visitor_subject_id: str,
+    *,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    try:
+        command = _publication_visitor_session_command(payload)
+        with store.request_unit_of_work(
+            correlation_id=f"publication-visitor-session:{grant_id}",
+            command_id=command.command_id,
+        ):
+            result = PublicationVisitorAccessService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).admit_visitor(
+                visitor_subject_id=visitor_subject_id,
+                grant_id=grant_id,
+                command=command,
+            )
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_publication_visitor_admission_response(result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _publication_read_projection_for_subject(
+    visitor_subject_id: str,
+    *,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    try:
+        value = _publication_visitor_reader_payload(payload, allow_question=False)
+        with store.request_unit_of_work(
+            correlation_id=f"publication-visitor-projection-read:{session_id}",
+            command_id=None,
+        ):
+            result = PublicationVisitorReaderService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).read_projection(
+                visitor_subject_id=visitor_subject_id,
+                session_id=session_id,
+                session_credential=str(value.get("sessionCredential") or ""),
+            )
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(content=result.payload(), headers={"Cache-Control": "no-store"})
+
+
+def _publication_answer_for_subject(
+    visitor_subject_id: str,
+    *,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    try:
+        value = _publication_visitor_reader_payload(payload, allow_question=True)
+        with store.request_unit_of_work(
+            correlation_id=f"publication-visitor-answer:{session_id}",
+            command_id=None,
+        ):
+            result = PublicationVisitorReaderService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).answer(
+                visitor_subject_id=visitor_subject_id,
+                session_id=session_id,
+                session_credential=str(value.get("sessionCredential") or ""),
+                question=str(value.get("question") or ""),
+            )
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(content=result.payload(), headers={"Cache-Control": "no-store"})
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/publications",
+    include_in_schema=False,
+)
+def list_closed_beta_publications(request: Request, vault_id: str) -> JSONResponse:
+    context = _publication_formal_owner_context(
+        request,
+        vault_id=vault_id,
+        feature="publication",
+    )
+    return _publication_owner_management_for_context(context)
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/publication-drafts",
+    include_in_schema=False,
+)
+def create_closed_beta_publication_draft(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    context = _publication_formal_owner_context(
+        request,
+        vault_id=vault_id,
+        feature="publication",
+    )
+    return _publication_create_draft_for_context(context, payload)
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/publication-drafts/{draft_id}/confirm/{publication_id}",
+    include_in_schema=False,
+)
+def confirm_closed_beta_publication_draft(
+    request: Request,
+    vault_id: str,
+    draft_id: str,
+    publication_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    context = _publication_formal_owner_context(
+        request,
+        vault_id=vault_id,
+        feature="publication",
+    )
+    return _publication_confirm_draft_for_context(
+        context,
+        draft_id=draft_id,
+        publication_id=publication_id,
+        payload=payload,
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/publications/{publication_id}/withdraw",
+    include_in_schema=False,
+)
+def withdraw_closed_beta_publication(
+    request: Request,
+    vault_id: str,
+    publication_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    context = _publication_formal_owner_context(
+        request,
+        vault_id=vault_id,
+        feature="publication",
+    )
+    return _publication_lifecycle_for_context(
+        context,
+        publication_id=publication_id,
+        action="withdraw",
+        payload=payload,
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/publications/{publication_id}/suspend",
+    include_in_schema=False,
+)
+def suspend_closed_beta_publication(
+    request: Request,
+    vault_id: str,
+    publication_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    context = _publication_formal_owner_context(
+        request,
+        vault_id=vault_id,
+        feature="publication",
+    )
+    return _publication_lifecycle_for_context(
+        context,
+        publication_id=publication_id,
+        action="suspend",
+        payload=payload,
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/publication-grants",
+    include_in_schema=False,
+)
+def list_closed_beta_publication_grants(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    context = _publication_formal_owner_context(
+        request,
+        vault_id=vault_id,
+        feature="visitorAccess",
+    )
+    return _publication_list_grants_for_context(context)
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/publication-grants",
+    include_in_schema=False,
+)
+def issue_closed_beta_publication_grant(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    context = _publication_formal_owner_context(
+        request,
+        vault_id=vault_id,
+        feature="visitorAccess",
+    )
+    return _publication_issue_grant_for_context(context, payload)
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/publication-grants/{grant_id}/revoke",
+    include_in_schema=False,
+)
+def revoke_closed_beta_publication_grant(
+    request: Request,
+    vault_id: str,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    context = _publication_formal_owner_context(
+        request,
+        vault_id=vault_id,
+        feature="visitorAccess",
+    )
+    return _publication_revoke_grant_for_context(
+        context,
+        grant_id=grant_id,
+        payload=payload,
+    )
+
+
+@app.post(
+    "/v2/publication-grants/{grant_id}/sessions",
+    include_in_schema=False,
+)
+def admit_closed_beta_publication_visitor(
+    request: Request,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    return _publication_admit_visitor_for_subject(
+        _publication_formal_visitor_subject(request),
+        grant_id=grant_id,
+        payload=payload,
+    )
+
+
+@app.post(
+    "/v2/publication-sessions/{session_id}/projection",
+    include_in_schema=False,
+)
+def read_closed_beta_publication_projection(
+    request: Request,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    return _publication_read_projection_for_subject(
+        _publication_formal_visitor_subject(request),
+        session_id=session_id,
+        payload=payload,
+    )
+
+
+@app.post(
+    "/v2/publication-sessions/{session_id}/answers",
+    include_in_schema=False,
+)
+def answer_closed_beta_publication_question(
+    request: Request,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    return _publication_answer_for_subject(
+        _publication_formal_visitor_subject(request),
+        session_id=session_id,
+        payload=payload,
+    )
 
 
 @app.get(

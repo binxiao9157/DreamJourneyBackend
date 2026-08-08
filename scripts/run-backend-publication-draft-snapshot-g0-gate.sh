@@ -42,6 +42,9 @@ for route in main_module.app.routes:
     if raw_path.startswith(("/v2/internal/owner-authority/", "/v2/internal/publication-access/", "/v2/internal/publication-lifecycle/")):
         assert getattr(route, "include_in_schema", True) is False
         continue
+    if raw_path in main_module.FORMAL_PUBLICATION_CLOSED_BETA_ROUTE_TEMPLATES:
+        assert getattr(route, "include_in_schema", True) is False
+        continue
     path = raw_path.lower()
     for forbidden in ("publication", "visitor", "share", "guest", "public", "index"):
         assert forbidden not in path, f"G0 must not register a public-access route: {path}"

@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# WI-S3-01-01 policy guard. It protects a value-free, default-deny release
-# contract. Later additive schema work may exist, but this gate must still fail
-# if a public content route, grant/session writer, index, provider call, or
-# client-visible entry becomes reachable.
+# Publication/Visitor release guard. Formal closed-beta routes may be
+# registered, but they must remain user-authenticated, hidden from OpenAPI and
+# denied by the server-owned D0 policy until a later release decision.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 
@@ -40,17 +39,29 @@ internal_qa_prefixes = (
     "/v2/internal/publication-access/",
     "/v2/internal/publication-lifecycle/",
 )
+formal_closed_beta_routes = main_module.FORMAL_PUBLICATION_CLOSED_BETA_ROUTE_TEMPLATES
+observed_formal_routes = set()
 
 for route in main_module.app.routes:
     path = str(getattr(route, "path", ""))
     if path.startswith(internal_qa_prefixes):
         assert getattr(route, "include_in_schema", True) is False
         continue
+    if path in formal_closed_beta_routes:
+        observed_formal_routes.add(path)
+        assert getattr(route, "include_in_schema", True) is False
+        for method in getattr(route, "methods", set()):
+            match = main_module.ROUTE_AUTHENTICATION_POLICY.registry.match(method, path)
+            assert match is not None
+            assert match.rule.auth_mode.value == "user"
+        continue
     normalized_path = path.lower()
     for forbidden_route_term in ("publication", "visitor", "share", "guest", "public", "index"):
         assert forbidden_route_term not in normalized_path, (
             f"G0 must not add a public-access route containing {forbidden_route_term}"
         )
+
+assert observed_formal_routes == formal_closed_beta_routes
 
 # The runtime route scan above is deliberately authoritative. A working tree
 # may contain unrelated, authenticated product routes; rejecting every new

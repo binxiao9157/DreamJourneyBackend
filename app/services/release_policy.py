@@ -894,6 +894,9 @@ class ReleasePolicyCommandGate:
         payload: Optional[Mapping[str, Any]],
     ) -> Optional[str]:
         normalized_path = (path or "").split("?", 1)[0]
+        publication_feature = self._publication_formal_feature(normalized_path)
+        if publication_feature is not None:
+            return publication_feature
         for prefix, feature in self._PREFIX_FEATURES:
             if normalized_path == prefix:
                 return feature
@@ -965,6 +968,12 @@ class ReleasePolicyCommandGate:
     ) -> str:
         normalized_method = method.upper()
         normalized_path = (path or "").split("?", 1)[0]
+        publication_label = self._publication_formal_route_label(
+            normalized_method,
+            normalized_path,
+        )
+        if publication_label is not None:
+            return publication_label
         for prefix, _ in self._PREFIX_FEATURES:
             if normalized_path == prefix:
                 return f"{normalized_method} {prefix}"
@@ -1030,6 +1039,61 @@ class ReleasePolicyCommandGate:
             return "GET /archive/items/*"
         feature = self.feature_for_request(method, path, payload)
         return f"{normalized_method} /feature/{feature or 'notApplicable'}"
+
+    @staticmethod
+    def _publication_formal_feature(path: str) -> Optional[str]:
+        segments = tuple(segment for segment in path.split("/") if segment)
+        if len(segments) == 4 and segments[:2] == ("v2", "publication-grants") and segments[3] == "sessions":
+            return "visitorAccess"
+        if (
+            len(segments) == 4
+            and segments[:2] == ("v2", "publication-sessions")
+            and segments[3] in {"projection", "answers"}
+        ):
+            return "visitorAccess"
+        if len(segments) < 4 or segments[:2] != ("v2", "vaults"):
+            return None
+        suffix = segments[3:]
+        if suffix == ("publication-grants",) or (
+            len(suffix) == 3
+            and suffix[0] == "publication-grants"
+            and suffix[2] == "revoke"
+        ):
+            return "visitorAccess"
+        if suffix == ("publications",) or (
+            len(suffix) == 4
+            and suffix[0] == "publication-drafts"
+            and suffix[2] == "confirm"
+        ) or (
+            len(suffix) == 3
+            and suffix[0] == "publications"
+            and suffix[2] in {"withdraw", "suspend"}
+        ) or suffix == ("publication-drafts",):
+            return "publication"
+        return None
+
+    @classmethod
+    def _publication_formal_route_label(cls, method: str, path: str) -> Optional[str]:
+        feature = cls._publication_formal_feature(path)
+        if feature is None:
+            return None
+        segments = tuple(segment for segment in path.split("/") if segment)
+        if segments[:2] == ("v2", "publication-grants"):
+            return f"{method} /v2/publication-grants/*/sessions"
+        if segments[:2] == ("v2", "publication-sessions"):
+            return f"{method} /v2/publication-sessions/*/{segments[-1]}"
+        suffix = segments[3:]
+        if suffix == ("publications",):
+            return f"{method} /v2/vaults/*/publications"
+        if suffix == ("publication-drafts",):
+            return f"{method} /v2/vaults/*/publication-drafts"
+        if suffix[0] == "publication-drafts":
+            return f"{method} /v2/vaults/*/publication-drafts/*/confirm/*"
+        if suffix[0] == "publications":
+            return f"{method} /v2/vaults/*/publications/*/{suffix[-1]}"
+        if suffix == ("publication-grants",):
+            return f"{method} /v2/vaults/*/publication-grants"
+        return f"{method} /v2/vaults/*/publication-grants/*/revoke"
 
     @staticmethod
     def _archive_media_feature(payload: Mapping[str, Any]) -> str:
