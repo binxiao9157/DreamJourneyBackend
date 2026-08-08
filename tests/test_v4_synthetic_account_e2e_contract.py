@@ -32,6 +32,8 @@ class V4SyntheticAccountE2EContractTests(unittest.TestCase):
         self.assertIn('"no-store" in export_download.headers', smoke)
         self.assertIn('"content-disposition"', smoke)
         self.assertIn("cross Owner export job lookup must stay hidden", smoke)
+        self.assertIn('feature="ownerMediaProcessingV1"', smoke)
+        self.assertIn("headers=processing_policy_headers", smoke)
         self.assertIn("RUN_OWNER_TRUTH_MEDIA_PHYSICAL_DELETION_SMOKE=1", gate)
         self.assertIn("backend-owner-truth-media-processing-postgres-smoke.py", gate)
         self.assertIn("v4SyntheticAccountE2E", gate)

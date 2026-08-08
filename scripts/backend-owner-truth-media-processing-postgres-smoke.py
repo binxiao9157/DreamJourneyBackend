@@ -403,6 +403,9 @@ def main() -> None:
                 "ownerMediaCaptureV1"
             )
             main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
+                "ownerMediaProcessingV1"
+            )
+            main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
                 "ownerTruthCandidateReview"
             )
             main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
@@ -422,6 +425,12 @@ def main() -> None:
                 other_headers,
                 session_id=other_session_id,
                 feature="ownerMediaCaptureV1",
+            )
+            processing_policy_headers = captured_policy_headers(
+                client,
+                owner_headers,
+                session_id=owner_session_id,
+                feature="ownerMediaProcessingV1",
             )
 
             created = client.post(intent_path, headers=owner_policy_headers, json=payload)
@@ -950,7 +959,7 @@ def main() -> None:
             )
             processing_retry_after_deletion = client.post(
                 f"/v2/vaults/{vault_id}/source-objects/{source_object_id}/processing-retries",
-                headers=owner_policy_headers,
+                headers=processing_policy_headers,
             )
             require(
                 processing_retry_after_deletion.status_code == 409
