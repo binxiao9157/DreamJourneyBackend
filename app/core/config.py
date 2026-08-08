@@ -132,6 +132,12 @@ class Settings:
     owner_truth_media_upload_intent_ttl_seconds: int = 900
     owner_truth_media_max_upload_bytes: int = 50 * 1024 * 1024
     owner_truth_media_content_safety_provider: str = "disabled"
+    # When set, ``clamav`` routes scans through an internal clamd sidecar
+    # instead of requiring clamscan in every API/worker image. The host must
+    # stay Docker-internal because clamd TCP is neither authenticated nor encrypted.
+    owner_truth_media_clamav_host: Optional[str] = None
+    owner_truth_media_clamav_port: int = 3310
+    owner_truth_media_clamav_timeout_seconds: int = 30
     # The private parser/OCR/ASR queue is a separate worker lane. It remains
     # off until capture, storage and the selected processor rollout are ready.
     owner_truth_media_processing_worker_enabled: bool = False
@@ -490,6 +496,27 @@ class Settings:
                 "OWNER_TRUTH_MEDIA_CONTENT_SAFETY_PROVIDER",
                 cls.owner_truth_media_content_safety_provider,
             ) or cls.owner_truth_media_content_safety_provider,
+            owner_truth_media_clamav_host=_env("OWNER_TRUTH_MEDIA_CLAMAV_HOST"),
+            owner_truth_media_clamav_port=min(
+                65535,
+                max(
+                    1,
+                    _env_int(
+                        "OWNER_TRUTH_MEDIA_CLAMAV_PORT",
+                        cls.owner_truth_media_clamav_port,
+                    ),
+                ),
+            ),
+            owner_truth_media_clamav_timeout_seconds=min(
+                60,
+                max(
+                    1,
+                    _env_int(
+                        "OWNER_TRUTH_MEDIA_CLAMAV_TIMEOUT_SECONDS",
+                        cls.owner_truth_media_clamav_timeout_seconds,
+                    ),
+                ),
+            ),
             owner_truth_media_processing_worker_enabled=_env_bool(
                 "OWNER_TRUTH_MEDIA_PROCESSING_WORKER_ENABLED",
                 cls.owner_truth_media_processing_worker_enabled,

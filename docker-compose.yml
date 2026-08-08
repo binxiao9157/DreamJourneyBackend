@@ -142,6 +142,28 @@ services:
       redis:
         condition: service_started
 
+  # Optional, internal-only media content-safety sidecar. It is not part of
+  # default startup; enable the owner-truth-media-safety profile only after the
+  # server has enough memory for ClamAV signature reloads. Do not publish 3310:
+  # clamd TCP is intentionally unauthenticated and must remain Docker-internal.
+  clamav:
+    image: clamav/clamav:1.5.3-debian13-slim
+    profiles:
+      - owner-truth-media-safety
+    restart: unless-stopped
+    expose:
+      - "3310"
+    volumes:
+      - clamav_data:/var/lib/clamav
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 1 >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 12
+      start_period: 240s
+
   postgres:
     image: mirror.ccs.tencentyun.com/library/postgres:16-alpine
     restart: unless-stopped
@@ -164,3 +186,4 @@ services:
 volumes:
   postgres_data:
   archive_media_data:
+  clamav_data:

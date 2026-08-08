@@ -653,6 +653,9 @@ def _make_owner_truth_media_ingestion_service() -> OwnerTruthMediaIngestionServi
         safety_scanner=build_media_content_safety_scanner(
             provider=settings.owner_truth_media_content_safety_provider,
             environment=settings.environment,
+            clamav_host=settings.owner_truth_media_clamav_host,
+            clamav_port=settings.owner_truth_media_clamav_port,
+            clamav_timeout_seconds=settings.owner_truth_media_clamav_timeout_seconds,
         ),
         enabled=settings.owner_truth_media_capture_enabled,
         max_upload_bytes=settings.owner_truth_media_max_upload_bytes,

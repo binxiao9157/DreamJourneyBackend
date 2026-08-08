@@ -15,7 +15,10 @@ from typing import Callable, Dict, Optional
 
 from app.core.config import Settings
 from app.services.identity_bindings import identity_challenge_runtime_descriptor
-from app.services.owner_truth_media_source_object import clamav_scanner_runtime_ready
+from app.services.owner_truth_media_source_object import (
+    clamav_daemon_runtime_ready,
+    clamav_scanner_runtime_ready,
+)
 
 
 @dataclass(frozen=True)
@@ -74,11 +77,11 @@ class ProviderRuntimeInventory:
         settings: Settings,
         *,
         validated_at_startup: bool = False,
-        clamav_scanner_ready: Callable[[], bool] = clamav_scanner_runtime_ready,
+        clamav_scanner_ready: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._settings = settings
         self._validated_at_startup = validated_at_startup
-        self._clamav_scanner_ready = clamav_scanner_ready
+        self._clamav_scanner_ready = clamav_scanner_ready or self._default_clamav_scanner_ready
         storage = self._media_storage_status()
         self._statuses = {
             storage.capability: storage,
@@ -378,6 +381,18 @@ class ProviderRuntimeInventory:
         if provider == "testclean" and environment not in {"production", "prod"}:
             return None
         return "contentSafetyProviderUnavailable"
+
+    def _default_clamav_scanner_ready(self) -> bool:
+        host = str(self._settings.owner_truth_media_clamav_host or "").strip()
+        if host:
+            return clamav_daemon_runtime_ready(
+                host=host,
+                port=self._settings.owner_truth_media_clamav_port,
+                timeout_seconds=self._settings.owner_truth_media_clamav_timeout_seconds,
+            )
+        return clamav_scanner_runtime_ready(
+            timeout_seconds=self._settings.owner_truth_media_clamav_timeout_seconds,
+        )
 
     def _media_region(self, provider: str) -> str:
         if provider == "filesystem":

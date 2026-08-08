@@ -15,6 +15,7 @@ cd "$ROOT_DIR"
 
 PYTHONPATH=. "$PYTHON_BIN" -m unittest \
   tests.test_owner_truth_media_capture_api \
+  tests.test_owner_truth_media_content_safety_runtime \
   tests.test_owner_truth_media_processing_worker \
   tests.test_owner_truth_media_deletion_worker \
   tests.test_owner_truth_candidate_extraction_worker \
@@ -49,6 +50,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/async_effects/worker_lifecycle.py \
   scripts/backend-owner-truth-media-processing-postgres-smoke.py \
   scripts/backend-owner-truth-media-cos-provider-smoke.py \
+  scripts/backend-owner-truth-media-clamav-sidecar-smoke.py \
   app/services/route_ownership.py \
   app/services/release_policy.py \
   app/main.py
@@ -62,6 +64,7 @@ from app.services.owner_truth_media_source_object import build_private_media_obj
 
 settings = Settings()
 assert settings.owner_truth_media_capture_enabled is False
+assert settings.owner_truth_media_clamav_host is None
 assert settings.owner_truth_media_processing_worker_enabled is False
 assert settings.owner_truth_media_deletion_worker_enabled is False
 assert settings.owner_truth_media_image_ocr_provider == "disabled"
@@ -111,6 +114,7 @@ bash -n scripts/run-backend-owner-truth-media-deletion-deployed-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-deletion-lease-heartbeat-postgres-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-deletion-lease-heartbeat-deployed-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-cos-provider-smoke.sh
+bash -n scripts/run-backend-owner-truth-media-clamav-sidecar-smoke.sh
 bash -n scripts/run-backend-business-message-projection-worker-gate.sh
 bash -n scripts/run-backend-business-message-projection-worker-postgres-smoke.sh
 

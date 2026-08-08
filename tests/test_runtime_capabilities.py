@@ -1,6 +1,7 @@
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from app.core.config import Settings
 from app.services.runtime_capabilities import (
@@ -399,6 +400,26 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
         self.assertFalse(storage["providerReady"])
         self.assertEqual(storage["reason"], "contentSafetyScannerUnavailable")
         self.assertEqual(storage["configurationStatus"], "incomplete")
+
+    def test_media_storage_uses_explicit_clamav_sidecar_runtime_probe(self):
+        settings = Settings(
+            owner_truth_media_capture_enabled=True,
+            owner_truth_media_storage_provider="filesystem",
+            owner_truth_media_storage_root="/var/lib/dreamjourney/private-media",
+            owner_truth_media_content_safety_provider="clamav",
+            owner_truth_media_clamav_host="clamav",
+            owner_truth_media_clamav_port=3310,
+            owner_truth_media_clamav_timeout_seconds=11,
+        )
+        with patch(
+            "app.services.provider_runtime.clamav_daemon_runtime_ready",
+            return_value=True,
+        ) as daemon_ready:
+            inventory = ProviderRuntimeInventory(settings)
+
+        storage = inventory.status_for("ownerTruthMediaStorage").public_descriptor()
+        self.assertTrue(storage["enabled"])
+        daemon_ready.assert_called_once_with(host="clamav", port=3310, timeout_seconds=11)
 
 
 if __name__ == "__main__":

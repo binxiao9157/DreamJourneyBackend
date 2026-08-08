@@ -20,6 +20,8 @@ from pathlib import Path, PurePosixPath
 import re
 import secrets
 import shutil
+import socket
+import struct
 import subprocess
 from threading import RLock
 from typing import Any, Callable, Mapping, Optional, Protocol
@@ -392,6 +394,144 @@ class TestOnlyCleanMediaContentSafetyScanner:
     def inspect(self, *, media_kind: str, content_type: str, payload: bytes) -> MediaSafetyVerdict:
         del media_kind, content_type, payload
         return MediaSafetyVerdict(status="clean", provider="testOnlyClean")
+
+
+_CLAMAV_DAEMON_STREAM_CHUNK_BYTES = 1024 * 1024
+_CLAMAV_DAEMON_MAX_REPLY_BYTES = 64 * 1024
+_CLAMAV_DAEMON_READINESS_PROBE = b"dreamjourney-clamav-runtime-probe-v1"
+
+
+def _clamav_daemon_host(value: object) -> Optional[str]:
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+def _clamav_daemon_port(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 3310
+    return min(65535, max(1, parsed))
+
+
+def _clamav_daemon_timeout_seconds(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 30
+    return min(60, max(1, parsed))
+
+
+def _read_clamav_daemon_reply(connection: socket.socket) -> Optional[bytes]:
+    """Read one bounded NUL-framed clamd reply without retaining media bytes."""
+
+    reply = bytearray()
+    while len(reply) < _CLAMAV_DAEMON_MAX_REPLY_BYTES:
+        chunk = connection.recv(min(4096, _CLAMAV_DAEMON_MAX_REPLY_BYTES - len(reply)))
+        if not chunk:
+            return None
+        reply.extend(chunk)
+        terminator = reply.find(b"\0")
+        if terminator >= 0:
+            return bytes(reply[:terminator])
+    return None
+
+
+class ClamAVDaemonMediaContentSafetyScanner:
+    """Streams a scan to an internal ``clamd`` sidecar over the Docker network.
+
+    ``clamd`` TCP has no transport authentication. The Compose contract therefore
+    deliberately keeps port 3310 internal: this adapter only accepts an explicit
+    server-side host and never exposes the scanner to a client or public network.
+    A connection, framing, timeout, or reply ambiguity is an unavailable verdict
+    so ingestion remains fail-closed before the object store receives any bytes.
+    """
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int = 3310,
+        timeout_seconds: int = 30,
+    ) -> None:
+        normalized_host = _clamav_daemon_host(host)
+        if normalized_host is None:
+            raise ValueError("clamav daemon host is required")
+        self._host = normalized_host
+        self._port = _clamav_daemon_port(port)
+        self._timeout_seconds = _clamav_daemon_timeout_seconds(timeout_seconds)
+
+    def inspect(self, *, media_kind: str, content_type: str, payload: bytes) -> MediaSafetyVerdict:
+        del media_kind, content_type
+        try:
+            with socket.create_connection(
+                (self._host, self._port),
+                timeout=self._timeout_seconds,
+            ) as connection:
+                connection.settimeout(self._timeout_seconds)
+                connection.sendall(b"zINSTREAM\0")
+                for offset in range(0, len(payload), _CLAMAV_DAEMON_STREAM_CHUNK_BYTES):
+                    chunk = payload[offset : offset + _CLAMAV_DAEMON_STREAM_CHUNK_BYTES]
+                    connection.sendall(struct.pack(">I", len(chunk)))
+                    connection.sendall(chunk)
+                connection.sendall(struct.pack(">I", 0))
+                reply = _read_clamav_daemon_reply(connection)
+        except (OSError, ValueError):
+            return MediaSafetyVerdict(
+                status="unavailable",
+                provider="clamav",
+                reason_code="contentSafetyScannerUnavailable",
+            )
+
+        if reply is None:
+            return MediaSafetyVerdict(
+                status="unavailable",
+                provider="clamav",
+                reason_code="contentSafetyScannerUnavailable",
+            )
+        normalized_reply = reply.upper().strip()
+        if normalized_reply.endswith(b" OK"):
+            return MediaSafetyVerdict(status="clean", provider="clamav")
+        if normalized_reply.endswith(b" FOUND"):
+            return MediaSafetyVerdict(
+                status="blocked",
+                provider="clamav",
+                reason_code="contentSafetyScanBlocked",
+            )
+        return MediaSafetyVerdict(
+            status="unavailable",
+            provider="clamav",
+            reason_code="contentSafetyScannerUnavailable",
+        )
+
+
+def clamav_daemon_runtime_ready(
+    *,
+    host: str,
+    port: int = 3310,
+    timeout_seconds: int = 5,
+) -> bool:
+    """Verify the configured sidecar can scan a value-free clean probe.
+
+    This reaches beyond a TCP connect/PING check: a fixed ``INSTREAM`` scan
+    proves clamd can receive data and has loaded a usable signature database.
+    The probe is a constant, not user media, and no provider configuration
+    details leave the process.
+    """
+
+    try:
+        scanner = ClamAVDaemonMediaContentSafetyScanner(
+            host=host,
+            port=port,
+            timeout_seconds=timeout_seconds,
+        )
+    except ValueError:
+        return False
+    return scanner.inspect(
+        media_kind="document",
+        content_type="text/plain",
+        payload=_CLAMAV_DAEMON_READINESS_PROBE,
+    ).status == "clean"
 
 
 def clamav_scanner_runtime_ready(
@@ -878,9 +1018,18 @@ def build_media_content_safety_scanner(
     *,
     provider: str,
     environment: str,
+    clamav_host: Optional[str] = None,
+    clamav_port: int = 3310,
+    clamav_timeout_seconds: int = 30,
 ) -> MediaContentSafetyScanner:
     normalized = str(provider or "").strip().lower()
     if normalized == "clamav":
+        if _clamav_daemon_host(clamav_host) is not None:
+            return ClamAVDaemonMediaContentSafetyScanner(
+                host=str(clamav_host),
+                port=clamav_port,
+                timeout_seconds=clamav_timeout_seconds,
+            )
         return ClamAVMediaContentSafetyScanner()
     if normalized == "testclean" and str(environment or "").strip().lower() not in {
         "production",
@@ -3397,6 +3546,7 @@ class OwnerTruthMediaIngestionService:
 
 
 __all__ = [
+    "ClamAVDaemonMediaContentSafetyScanner",
     "ClamAVMediaContentSafetyScanner",
     "DisabledMediaContentSafetyScanner",
     "FilesystemPrivateMediaObjectStore",
@@ -3426,5 +3576,7 @@ __all__ = [
     "TestOnlyCleanMediaContentSafetyScanner",
     "build_media_content_safety_scanner",
     "build_private_media_object_store",
+    "clamav_daemon_runtime_ready",
+    "clamav_scanner_runtime_ready",
     "inspect_magic_mime",
 ]

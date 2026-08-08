@@ -176,10 +176,15 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
         self.assertIn("owner-truth-media-deletion-worker:", compose)
         self.assertIn("business-message-projection-worker:", compose)
         self.assertIn("publication-external-cleanup-materializer-worker:", compose)
+        self.assertIn("clamav:", compose)
         self.assertIn("- owner-truth-worker", compose)
         self.assertIn("- owner-truth-media-worker", compose)
         self.assertIn("- business-message-worker", compose)
         self.assertIn("- publication-lifecycle-worker", compose)
+        self.assertIn("- owner-truth-media-safety", compose)
+        self.assertIn("clamav/clamav:1.5.3-debian13-slim", compose)
+        self.assertIn("clamav_data:/var/lib/clamav", compose)
+        self.assertNotIn('"3310:3310"', compose)
         self.assertIn(
             '"app.async_effects.owner_truth_candidate_extraction_worker", "--loop"',
             compose,

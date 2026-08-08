@@ -3,8 +3,10 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 from pathlib import Path
+import socket
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -14,6 +16,7 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
 from app.services.owner_truth_media_source_object import (
+    ClamAVDaemonMediaContentSafetyScanner,
     DisabledMediaContentSafetyScanner,
     FilesystemPrivateMediaObjectStore,
     MediaDeletionCommand,
@@ -559,6 +562,56 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
             self.assertEqual(source_object["state"], "quarantined")
             self.assertEqual(source_object["safetyStatus"], "unavailable")
             self.assertTrue(source_object["retryable"])
+            self.assertEqual(source_object["failureCode"], "contentSafetyScannerUnavailable")
+            self.assertEqual(list(Path(unavailable_root.name).rglob("*.bin")), [])
+        finally:
+            unavailable_root.cleanup()
+
+    def test_clamav_sidecar_timeout_quarantines_before_object_store_write(self) -> None:
+        unavailable_root = TemporaryDirectory()
+        try:
+            main_module.OWNER_TRUTH_MEDIA_INGESTION_SERVICE = OwnerTruthMediaIngestionService(
+                store=self.store,
+                object_store=FilesystemPrivateMediaObjectStore(root=unavailable_root.name),
+                safety_scanner=ClamAVDaemonMediaContentSafetyScanner(
+                    host="clamav",
+                    timeout_seconds=1,
+                ),
+                enabled=True,
+                max_upload_bytes=1024 * 1024,
+                upload_intent_ttl_seconds=900,
+            )
+            owner_id, auth_headers, session_id = self._login("13800139714")
+            self._allow_owner(owner_id)
+            headers = self._capture_headers(auth_headers, session_id=session_id)
+            vault_id = "vault-media-sidecar-timeout"
+            body = b"sidecar timeout must not persist bytes"
+            created = self.client.post(
+                self._intent_path(vault_id),
+                headers=headers,
+                json=self._intent_payload(body=body),
+            )
+            self.assertEqual(created.status_code, 201, created.text)
+            intent = created.json()["uploadIntent"]
+
+            with patch(
+                "app.services.owner_truth_media_source_object.socket.create_connection",
+                side_effect=socket.timeout(),
+            ):
+                uploaded = self.client.put(
+                    f"{self._intent_path(vault_id)}/{intent['uploadIntentId']}/content",
+                    headers={
+                        **headers,
+                        "X-DreamJourney-Upload-Token": intent["uploadToken"],
+                        "Content-Type": "text/plain",
+                    },
+                    content=body,
+                )
+
+            self.assertEqual(uploaded.status_code, 202, uploaded.text)
+            source_object = uploaded.json()["sourceObject"]
+            self.assertEqual(source_object["state"], "quarantined")
+            self.assertEqual(source_object["safetyStatus"], "unavailable")
             self.assertEqual(source_object["failureCode"], "contentSafetyScannerUnavailable")
             self.assertEqual(list(Path(unavailable_root.name).rglob("*.bin")), [])
         finally:
