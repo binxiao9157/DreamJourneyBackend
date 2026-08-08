@@ -1910,13 +1910,24 @@ class PostgresStore:
                 id, identity_type, target_hash_key_version, target_hash,
                 code_hash, provider_mode,
                 purpose, status, attempts, max_attempts,
-                internal_verification_enabled, expires_at, created_at, updated_at
+                internal_verification_enabled,
+                delivery_state, recovery_state, provider_receipt_hash,
+                provider_retry_after_seconds, recovery_attempts,
+                provider_checked_at, provider_delivered_at,
+                expires_at, created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
             RETURNING id, identity_type, target_hash_key_version, target_hash,
                       code_hash, provider_mode,
                       purpose, status, attempts, max_attempts,
-                      internal_verification_enabled, expires_at, created_at,
+                      internal_verification_enabled,
+                      delivery_state, recovery_state, provider_receipt_hash,
+                      provider_retry_after_seconds, recovery_attempts,
+                      provider_checked_at, provider_delivered_at,
+                      expires_at, created_at,
                       consumed_at, updated_at
             """,
             (
@@ -1931,6 +1942,13 @@ class PostgresStore:
                 challenge["attempts"],
                 challenge["maxAttempts"],
                 challenge["internalVerificationEnabled"],
+                challenge["deliveryState"],
+                challenge["recoveryState"],
+                challenge.get("providerReceiptHash"),
+                challenge.get("providerRetryAfterSeconds"),
+                challenge.get("recoveryAttempts", 0),
+                challenge.get("providerCheckedAt"),
+                challenge.get("providerDeliveredAt"),
                 challenge["expiresAt"],
                 challenge["createdAt"],
                 challenge["createdAt"],
@@ -1947,7 +1965,11 @@ class PostgresStore:
             SELECT id, identity_type, target_hash_key_version, target_hash,
                    code_hash, provider_mode,
                    purpose, status, attempts, max_attempts,
-                   internal_verification_enabled, expires_at, created_at,
+                   internal_verification_enabled,
+                   delivery_state, recovery_state, provider_receipt_hash,
+                   provider_retry_after_seconds, recovery_attempts,
+                   provider_checked_at, provider_delivered_at,
+                   expires_at, created_at,
                    consumed_at, updated_at
             FROM auth_challenges
             WHERE id = %s
@@ -1955,6 +1977,61 @@ class PostgresStore:
             (challenge_id,),
         )
         return None if row is None else self._auth_challenge_record(row)
+
+    def update_auth_challenge_delivery_state(
+        self,
+        challenge_id: str,
+        *,
+        challenge_status: Optional[str] = None,
+        delivery_state: Optional[str] = None,
+        recovery_state: Optional[str] = None,
+        provider_receipt_hash: Optional[str] = None,
+        provider_retry_after_seconds: Optional[int] = None,
+        checked_at_iso: str,
+        delivered_at_iso: Optional[str] = None,
+        increment_recovery_attempt: bool = False,
+    ) -> Dict[str, Any]:
+        row = self._fetchone(
+            """
+            UPDATE auth_challenges
+            SET status = COALESCE(%s, status),
+                delivery_state = COALESCE(%s, delivery_state),
+                recovery_state = COALESCE(%s, recovery_state),
+                provider_receipt_hash = COALESCE(%s, provider_receipt_hash),
+                provider_retry_after_seconds = COALESCE(
+                    %s, provider_retry_after_seconds
+                ),
+                recovery_attempts = recovery_attempts + %s,
+                provider_checked_at = %s,
+                provider_delivered_at = COALESCE(%s, provider_delivered_at),
+                updated_at = %s
+            WHERE id = %s
+            RETURNING id, identity_type, target_hash_key_version, target_hash,
+                      code_hash, provider_mode,
+                      purpose, status, attempts, max_attempts,
+                      internal_verification_enabled,
+                      delivery_state, recovery_state, provider_receipt_hash,
+                      provider_retry_after_seconds, recovery_attempts,
+                      provider_checked_at, provider_delivered_at,
+                      expires_at, created_at, consumed_at, updated_at
+            """,
+            (
+                challenge_status,
+                delivery_state,
+                recovery_state,
+                provider_receipt_hash,
+                provider_retry_after_seconds,
+                1 if increment_recovery_attempt else 0,
+                checked_at_iso,
+                delivered_at_iso,
+                checked_at_iso,
+                challenge_id,
+            ),
+            commit=True,
+        )
+        if row is None:
+            raise KeyError("identity challenge is missing")
+        return self._auth_challenge_record(row)
 
     def get_latest_auth_challenge(
         self,
@@ -1968,7 +2045,11 @@ class PostgresStore:
             SELECT id, identity_type, target_hash_key_version, target_hash,
                    code_hash, provider_mode,
                    purpose, status, attempts, max_attempts,
-                   internal_verification_enabled, expires_at, created_at,
+                   internal_verification_enabled,
+                   delivery_state, recovery_state, provider_receipt_hash,
+                   provider_retry_after_seconds, recovery_attempts,
+                   provider_checked_at, provider_delivered_at,
+                   expires_at, created_at,
                    consumed_at, updated_at
             FROM auth_challenges
             WHERE identity_type = %s
@@ -7898,10 +7979,31 @@ class PostgresStore:
             "internalVerificationEnabled": bool(
                 row.get("internal_verification_enabled")
             ),
+            "deliveryState": str(row.get("delivery_state") or "accepted"),
+            "recoveryState": str(row.get("recovery_state") or "unsupported"),
+            "providerReceiptHash": (
+                str(row.get("provider_receipt_hash"))
+                if row.get("provider_receipt_hash") is not None
+                else None
+            ),
+            "providerRetryAfterSeconds": (
+                int(row.get("provider_retry_after_seconds"))
+                if row.get("provider_retry_after_seconds") is not None
+                else None
+            ),
+            "recoveryAttempts": int(row.get("recovery_attempts") or 0),
             "expiresAt": cls._iso_value(row.get("expires_at")),
             "createdAt": cls._iso_value(row.get("created_at")),
             "updatedAt": cls._iso_value(row.get("updated_at")),
         }
+        if row.get("provider_checked_at") is not None:
+            record["providerCheckedAt"] = cls._iso_value(
+                row.get("provider_checked_at")
+            )
+        if row.get("provider_delivered_at") is not None:
+            record["providerDeliveredAt"] = cls._iso_value(
+                row.get("provider_delivered_at")
+            )
         if row.get("consumed_at") is not None:
             record["consumedAt"] = cls._iso_value(row.get("consumed_at"))
         return record

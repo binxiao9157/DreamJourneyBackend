@@ -120,6 +120,7 @@ from app.services.identity_bindings import (
     IdentityChallengeConfigurationError,
     IdentityChallengeDeliveryError,
     IdentityChallengeRateLimited,
+    IdentityChallengeStateUnavailable,
     IdentityChallengeValidationError,
     IdentityChallengeVerificationFailed,
     legacy_phone_login_enabled,
@@ -5999,6 +6000,7 @@ ANONYMOUS_AUTH_PATHS = {
 }
 ANONYMOUS_AUTH_PATH_PATTERNS = (
     re.compile(r"^/v2/auth/challenges/[^/]+/verify$"),
+    re.compile(r"^/v2/auth/challenges/[^/]+$"),
 )
 
 
@@ -11014,6 +11016,26 @@ def verify_identity_challenge(
             detail={
                 "code": "identity_challenge_unavailable",
                 "message": "identity challenge is unavailable",
+            },
+        ) from exc
+
+
+@app.get("/v2/auth/challenges/{challenge_id}")
+def get_identity_challenge_state(
+    challenge_id: str,
+    recover: bool = False,
+) -> Dict[str, Any]:
+    try:
+        return _identity_binding_service().challenge_state(
+            challenge_id,
+            recover_delivery=recover,
+        )
+    except IdentityChallengeStateUnavailable as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "identity_challenge_state_unavailable",
+                "message": "identity challenge state is unavailable",
             },
         ) from exc
 

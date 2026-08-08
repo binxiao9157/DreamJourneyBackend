@@ -54,13 +54,44 @@ class AcceptedGateway:
         return {"accepted": True}
 
 
-def service_for(store, gateway):
+class RecoverableGateway:
+    def __init__(self):
+        self.requests = []
+
+    def post_json(self, *, url, headers, payload, timeout_seconds):
+        self.requests.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "payload": deepcopy(payload),
+                "timeoutSeconds": timeout_seconds,
+            }
+        )
+        if url.endswith("/status"):
+            return {
+                "deliveryState": "delivered",
+                "receiptId": "raw-provider-receipt-must-not-persist",
+            }
+        return {
+            "accepted": True,
+            "deliveryState": "accepted",
+            "receiptId": "raw-provider-receipt-must-not-persist",
+            "retryAfterSeconds": 45,
+        }
+
+
+def service_for(store, gateway, *, recovery=False):
     return IdentityBindingService(
         store,
         hmac_key=HMAC_KEY,
         hmac_key_version="v1",
         adapter=HttpJsonIdentityChallengeAdapter(
             endpoint="https://sms.example.test/v1/challenges",
+            status_endpoint=(
+                "https://sms.example.test/v1/challenges/status"
+                if recovery
+                else None
+            ),
             api_key="test-server-only-api-key",
             timeout_seconds=5,
             transport=gateway,
@@ -137,6 +168,49 @@ def main():
     require(TARGET not in persisted, "persistence exposed raw target")
     require("8613800138000" not in persisted, "persistence exposed normalized target")
     require(delivered_code not in persisted, "persistence exposed OTP")
+
+    recoverable_gateway = RecoverableGateway()
+    recoverable_store = InMemoryStore()
+    with (
+        patch.object(main_module, "store", recoverable_store),
+        patch.object(
+            main_module,
+            "_identity_binding_service",
+            return_value=service_for(
+                recoverable_store,
+                recoverable_gateway,
+                recovery=True,
+            ),
+        ),
+    ):
+        client = TestClient(app)
+        accepted = client.post(
+            "/v2/auth/challenges",
+            json={"identityType": "phone", "target": TARGET, "purpose": "login"},
+        )
+        require(accepted.status_code == 202, "recoverable challenge must be accepted")
+        accepted_contract = accepted.json()["challenge"]
+        require(accepted_contract["deliveryState"] == "accepted", "accepted state drift")
+        require(accepted_contract["recoveryState"] == "available", "recovery state drift")
+        require(accepted_contract["retryAfterSeconds"] == 45, "provider retry drift")
+        recovered = client.get(
+            f"/v2/auth/challenges/{accepted_contract['challengeId']}?recover=true"
+        )
+        require(recovered.status_code == 200, "delivery recovery must be readable")
+        recovered_contract = recovered.json()["challenge"]
+        require(recovered_contract["deliveryState"] == "delivered", "delivery receipt drift")
+        require(recovered_contract["recoveryState"] == "notRequired", "terminal recovery drift")
+        require(recovered_contract["recoveryAttempt"] == 1, "recovery attempt drift")
+
+    recoverable_persisted = json.dumps(
+        recoverable_store._auth_challenges,
+        sort_keys=True,
+    )
+    require(
+        "raw-provider-receipt-must-not-persist" not in recoverable_persisted,
+        "raw provider receipt reached persistence",
+    )
+    require(TARGET not in recoverable_persisted, "recovery persistence exposed target")
 
     failed_gateway = AcceptedGateway(accepted=False)
     failed_store = InMemoryStore()

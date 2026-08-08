@@ -64,6 +64,20 @@ def main():
         == "/v2/auth/challenges/{challengeId}/verify",
         "verify endpoint drift",
     )
+    require(
+        identity.get("statusEndpointTemplate")
+        == "/v2/auth/challenges/{challengeId}",
+        "status endpoint drift",
+    )
+    require(identity.get("stateContractVersion") == 1, "state contract drift")
+    require(
+        identity.get("deliveryReceiptSupported") is False,
+        "disabled provider cannot claim receipt support",
+    )
+    require(
+        identity.get("deliveryRecoverySupported") is False,
+        "disabled provider cannot claim recovery support",
+    )
     require(identity.get("providerMode") == "unavailable", "production provider must remain unavailable")
     require(identity.get("productionReady") is False, "production readiness must remain false")
     require(identity.get("clientFlowEnabled") is False, "unverified production client flow must remain disabled")

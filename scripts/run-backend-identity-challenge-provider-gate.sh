@@ -13,7 +13,9 @@ fi
 
 cd "$ROOT_DIR"
 
-PYTHONPATH=. "$PYTHON_BIN" -m unittest tests.test_identity_bindings
+PYTHONPATH=. "$PYTHON_BIN" -m unittest \
+  tests.test_identity_bindings \
+  tests.test_identity_challenge_delivery_state_migration_contract
 
 PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/core/config.py \

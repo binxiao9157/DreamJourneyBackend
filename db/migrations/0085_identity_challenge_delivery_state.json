@@ -1,0 +1,11 @@
+{
+  "version": "0085",
+  "name": "identity_challenge_delivery_state",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "identityChallengeStateFieldsOptionalForLegacyClients",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "identityChallengeProviderRecoveryV1": false
+  }
+}

@@ -75,7 +75,9 @@ class AcceptedGateway:
         )
         if not self.accepted:
             raise IdentityChallengeDeliveryError()
-        return {"accepted": True}
+        if url.endswith("/status"):
+            return {"deliveryState": "delivered", "receiptId": "postgres-smoke-receipt"}
+        return {"accepted": True, "receiptId": "postgres-smoke-receipt"}
 
 
 def service_for(store, gateway):
@@ -85,6 +87,7 @@ def service_for(store, gateway):
         hmac_key_version="v1",
         adapter=HttpJsonIdentityChallengeAdapter(
             endpoint="https://sms.example.test/v1/challenges",
+            status_endpoint="https://sms.example.test/v1/challenges/status",
             api_key="test-server-only-api-key",
             timeout_seconds=5,
             transport=gateway,
@@ -112,6 +115,7 @@ def main():
             statement_timeout_ms=30_000,
         ).apply()
         require(applied["status"] == "ready", "migrations must reach ready")
+        require("0085" in applied["appliedVersions"], "0085 must be applied")
 
         store = PostgresStore(
             dsn=smoke_dsn,
@@ -140,8 +144,24 @@ def main():
         require(persisted is not None, "accepted delivery must persist a challenge")
         require(persisted["providerMode"] == "httpJson", "provider mode drift")
         require(persisted["internalVerificationEnabled"] is True, "server verification drift")
+        require(persisted["deliveryState"] == "accepted", "delivery state drift")
+        require(persisted["recoveryState"] == "available", "recovery state drift")
+        require(
+            persisted["providerReceiptHash"] != "postgres-smoke-receipt",
+            "raw provider receipt reached persistence",
+        )
         for raw in ("8613800138000", delivered_code):
             require(raw not in str(persisted), "raw value reached persisted record")
+
+        recovered = service.challenge_state(challenge_id, recover_delivery=True)
+        require(
+            recovered["challenge"]["deliveryState"] == "delivered",
+            "delivery recovery did not converge",
+        )
+        require(
+            recovered["challenge"]["recoveryState"] == "notRequired",
+            "delivery recovery terminal state drift",
+        )
 
         wrong_code = "111111" if delivered_code != "111111" else "222222"
         try:

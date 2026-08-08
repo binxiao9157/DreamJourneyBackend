@@ -198,6 +198,12 @@ class RouteOwnershipRegistry:
                 public,
                 "publicIdentityChallengeVerify",
             ),
+            _rule(
+                "GET",
+                "/v2/auth/challenges/{challenge_id}",
+                public,
+                "publicIdentityChallengeState",
+            ),
             _rule("POST", "/auth/login", public, "publicLogin"),
             _rule("POST", "/auth/refresh", public, "publicRefresh"),
             _rule("POST", "/auth/logout", session, "userSession"),

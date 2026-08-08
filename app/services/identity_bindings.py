@@ -6,6 +6,7 @@ import re
 import secrets
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Protocol
 from urllib.parse import urlparse
@@ -15,8 +16,22 @@ from app.observability.events import hash_evidence_identifier
 
 
 IDENTITY_BINDING_CONTRACT_VERSION = 1
+IDENTITY_CHALLENGE_STATE_CONTRACT_VERSION = 1
 IDENTITY_CHALLENGE_PURPOSES = {"login", "register", "restore", "invitation"}
 INTERNAL_ADAPTER_ENVIRONMENTS = {"development", "local", "test", "testing"}
+IDENTITY_CHALLENGE_DELIVERY_STATES = {
+    "accepted",
+    "delivered",
+    "undeliverable",
+    "unknown",
+}
+IDENTITY_CHALLENGE_RECOVERY_STATES = {
+    "available",
+    "notRequired",
+    "pending",
+    "terminal",
+    "unsupported",
+}
 
 
 class IdentityChallengeConfigurationError(RuntimeError):
@@ -43,6 +58,45 @@ class IdentityChallengeDeliveryError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("identity challenge delivery failed")
+
+
+class IdentityChallengeStateUnavailable(LookupError):
+    def __init__(self) -> None:
+        super().__init__("identity challenge state is unavailable")
+
+
+@dataclass(frozen=True)
+class IdentityChallengeDeliveryReceipt:
+    """Provider-neutral delivery evidence.
+
+    ``provider_receipt_id`` is accepted only long enough to derive a keyed
+    hash. It is never returned to a client or persisted in raw form.
+    """
+
+    delivery_state: str
+    recovery_state: str
+    provider_receipt_id: Optional[str] = None
+    retry_after_seconds: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.delivery_state not in IDENTITY_CHALLENGE_DELIVERY_STATES:
+            raise IdentityChallengeDeliveryError()
+        if self.recovery_state not in IDENTITY_CHALLENGE_RECOVERY_STATES:
+            raise IdentityChallengeDeliveryError()
+        if self.delivery_state == "delivered" and self.recovery_state != "notRequired":
+            raise IdentityChallengeDeliveryError()
+        if self.delivery_state == "undeliverable" and self.recovery_state != "terminal":
+            raise IdentityChallengeDeliveryError()
+        if self.provider_receipt_id is not None:
+            candidate = str(self.provider_receipt_id).strip()
+            if not candidate or len(candidate) > 512:
+                raise IdentityChallengeDeliveryError()
+            object.__setattr__(self, "provider_receipt_id", candidate)
+        if self.retry_after_seconds is not None:
+            candidate_retry = int(self.retry_after_seconds)
+            if candidate_retry < 0 or candidate_retry > 86_400:
+                raise IdentityChallengeDeliveryError()
+            object.__setattr__(self, "retry_after_seconds", candidate_retry)
 
 
 class IdentityChallengeDeliveryTransport(Protocol):
@@ -87,6 +141,13 @@ class UrllibIdentityChallengeDeliveryTransport:
             # Consume the body so the connection can close; provider content is
             # intentionally never surfaced to API callers or application logs.
             exc.read()
+            if exc.code == 429:
+                retry_after = str(exc.headers.get("Retry-After") or "").strip()
+                try:
+                    retry_after_seconds = int(retry_after)
+                except ValueError:
+                    retry_after_seconds = 30
+                raise IdentityChallengeRateLimited(retry_after_seconds) from exc
             raise IdentityChallengeDeliveryError() from exc
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             raise IdentityChallengeDeliveryError() from exc
@@ -117,9 +178,22 @@ class IdentityChallengeAdapter:
         purpose: str,
         challenge_id: str,
         verification_code: str,
-    ) -> None:
+    ) -> IdentityChallengeDeliveryReceipt:
         raise IdentityChallengeConfigurationError(
             "identity challenge provider is unavailable"
+        )
+
+    @property
+    def delivery_recovery_supported(self) -> bool:
+        return False
+
+    def recover_delivery(
+        self,
+        *,
+        challenge_id: str,
+    ) -> IdentityChallengeDeliveryReceipt:
+        raise IdentityChallengeConfigurationError(
+            "identity challenge delivery recovery is unavailable"
         )
 
 
@@ -148,10 +222,13 @@ class SyntheticIdentityChallengeAdapter(IdentityChallengeAdapter):
         purpose: str,
         challenge_id: str,
         verification_code: str,
-    ) -> None:
+    ) -> IdentityChallengeDeliveryReceipt:
         # The synthetic adapter never emits an external message. It exists only
         # in local/test environments and verifies its configured code locally.
-        return None
+        return IdentityChallengeDeliveryReceipt(
+            delivery_state="delivered",
+            recovery_state="notRequired",
+        )
 
 
 class HttpJsonIdentityChallengeAdapter(IdentityChallengeAdapter):
@@ -173,9 +250,15 @@ class HttpJsonIdentityChallengeAdapter(IdentityChallengeAdapter):
         endpoint: str,
         api_key: str,
         timeout_seconds: float,
+        status_endpoint: Optional[str] = None,
         transport: Optional[IdentityChallengeDeliveryTransport] = None,
     ) -> None:
         candidate_endpoint = self._endpoint(endpoint)
+        candidate_status_endpoint = (
+            self._endpoint(status_endpoint)
+            if str(status_endpoint or "").strip()
+            else None
+        )
         candidate_api_key = str(api_key or "").strip()
         if not candidate_api_key:
             raise IdentityChallengeConfigurationError(
@@ -187,6 +270,7 @@ class HttpJsonIdentityChallengeAdapter(IdentityChallengeAdapter):
                 "identity challenge HTTP JSON timeout must be between 1 and 60 seconds"
             )
         self._endpoint = candidate_endpoint
+        self._status_endpoint = candidate_status_endpoint
         self._api_key = candidate_api_key
         self._timeout_seconds = candidate_timeout
         self._transport = transport or UrllibIdentityChallengeDeliveryTransport()
@@ -199,7 +283,7 @@ class HttpJsonIdentityChallengeAdapter(IdentityChallengeAdapter):
         purpose: str,
         challenge_id: str,
         verification_code: str,
-    ) -> None:
+    ) -> IdentityChallengeDeliveryReceipt:
         try:
             result = self._transport.post_json(
                 url=self._endpoint,
@@ -217,12 +301,91 @@ class HttpJsonIdentityChallengeAdapter(IdentityChallengeAdapter):
                 },
                 timeout_seconds=self._timeout_seconds,
             )
-        except IdentityChallengeDeliveryError:
+        except (IdentityChallengeDeliveryError, IdentityChallengeRateLimited):
             raise
         except Exception as exc:  # Defensive normalization at the provider boundary.
             raise IdentityChallengeDeliveryError() from exc
         if result.get("accepted") is not True:
             raise IdentityChallengeDeliveryError()
+        delivery_state = str(result.get("deliveryState") or "accepted").strip()
+        if delivery_state not in {"accepted", "delivered"}:
+            raise IdentityChallengeDeliveryError()
+        return IdentityChallengeDeliveryReceipt(
+            delivery_state=delivery_state,
+            recovery_state=(
+                "notRequired"
+                if delivery_state == "delivered"
+                else ("available" if self.delivery_recovery_supported else "unsupported")
+            ),
+            provider_receipt_id=(
+                str(result.get("receiptId")).strip()
+                if result.get("receiptId") is not None
+                else None
+            ),
+            retry_after_seconds=self._retry_after(result.get("retryAfterSeconds")),
+        )
+
+    @property
+    def delivery_recovery_supported(self) -> bool:
+        return self._status_endpoint is not None
+
+    def recover_delivery(
+        self,
+        *,
+        challenge_id: str,
+    ) -> IdentityChallengeDeliveryReceipt:
+        if self._status_endpoint is None:
+            raise IdentityChallengeConfigurationError(
+                "identity challenge delivery recovery is unavailable"
+            )
+        try:
+            result = self._transport.post_json(
+                url=self._status_endpoint,
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                payload={"challengeId": challenge_id},
+                timeout_seconds=self._timeout_seconds,
+            )
+        except (IdentityChallengeDeliveryError, IdentityChallengeRateLimited):
+            raise
+        except Exception as exc:
+            raise IdentityChallengeDeliveryError() from exc
+        delivery_state = str(result.get("deliveryState") or "").strip()
+        if delivery_state not in IDENTITY_CHALLENGE_DELIVERY_STATES:
+            raise IdentityChallengeDeliveryError()
+        if delivery_state == "delivered":
+            recovery_state = "notRequired"
+        elif delivery_state == "undeliverable":
+            recovery_state = "terminal"
+        elif delivery_state == "unknown":
+            recovery_state = "pending"
+        else:
+            recovery_state = "available"
+        return IdentityChallengeDeliveryReceipt(
+            delivery_state=delivery_state,
+            recovery_state=recovery_state,
+            provider_receipt_id=(
+                str(result.get("receiptId")).strip()
+                if result.get("receiptId") is not None
+                else None
+            ),
+            retry_after_seconds=self._retry_after(result.get("retryAfterSeconds")),
+        )
+
+    @staticmethod
+    def _retry_after(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            candidate = int(value)
+        except (TypeError, ValueError) as exc:
+            raise IdentityChallengeDeliveryError() from exc
+        if candidate < 0 or candidate > 86_400:
+            raise IdentityChallengeDeliveryError()
+        return candidate
 
     @staticmethod
     def _endpoint(value: str) -> str:
@@ -263,6 +426,7 @@ def make_identity_challenge_adapter(settings: Settings) -> IdentityChallengeAdap
                 endpoint=str(settings.identity_challenge_http_json_url or ""),
                 api_key=str(settings.identity_challenge_http_json_api_key or ""),
                 timeout_seconds=settings.identity_challenge_http_json_timeout_seconds,
+                status_endpoint=settings.identity_challenge_http_json_status_url,
             )
         except IdentityChallengeConfigurationError:
             # A partially configured production provider must be indistinguishable
@@ -301,6 +465,10 @@ def identity_challenge_runtime_descriptor(settings: Settings) -> Dict[str, Any]:
         ),
         "clientFlowEnabled": challenge_enabled,
         "deliverySemantics": "acceptedOnly",
+        "statusEndpointTemplate": "/v2/auth/challenges/{challengeId}",
+        "stateContractVersion": IDENTITY_CHALLENGE_STATE_CONTRACT_VERSION,
+        "deliveryReceiptSupported": bool(adapter.production_ready),
+        "deliveryRecoverySupported": bool(adapter.delivery_recovery_supported),
         "challengeTTLSeconds": max(30, int(settings.identity_challenge_ttl_seconds)),
         "maxAttempts": max(1, int(settings.identity_challenge_max_attempts)),
         "retryAfterSeconds": max(1, int(settings.identity_challenge_retry_after_seconds)),
@@ -424,13 +592,25 @@ class IdentityBindingService:
         challenge_id = self._opaque_id("ach")
         verification_code = self.adapter.verification_code()
         try:
-            self.adapter.deliver(
-                identity_type=normalized_type,
-                target=normalized_target,
-                purpose=normalized_purpose,
-                challenge_id=challenge_id,
-                verification_code=verification_code,
+            delivery_receipt = self._normalize_delivery_receipt(
+                self.adapter.deliver(
+                    identity_type=normalized_type,
+                    target=normalized_target,
+                    purpose=normalized_purpose,
+                    challenge_id=challenge_id,
+                    verification_code=verification_code,
+                )
             )
+        except IdentityChallengeRateLimited as exc:
+            self._record_event(
+                operation_id=challenge_id,
+                resource_id=target_hash,
+                state="denied",
+                reason="providerRateLimited",
+                decision="createProviderRateLimited",
+                occurred_at=created_at,
+            )
+            raise IdentityChallengeRateLimited(exc.retry_after_seconds) from exc
         except IdentityChallengeDeliveryError:
             self._record_event(
                 operation_id=challenge_id,
@@ -460,10 +640,23 @@ class IdentityBindingService:
             "internalVerificationEnabled": bool(
                 self.adapter.server_code_verification_enabled
             ),
+            "deliveryState": delivery_receipt.delivery_state,
+            "recoveryState": delivery_receipt.recovery_state,
+            "providerReceiptHash": self._provider_receipt_hash(
+                delivery_receipt.provider_receipt_id
+            ),
+            "providerRetryAfterSeconds": delivery_receipt.retry_after_seconds,
+            "recoveryAttempts": 0,
+            "providerCheckedAt": None,
+            "providerDeliveredAt": (
+                created_at.isoformat()
+                if delivery_receipt.delivery_state == "delivered"
+                else None
+            ),
             "createdAt": created_at.isoformat(),
             "expiresAt": expires_at.isoformat(),
         }
-        self.store.save_auth_challenge(record)
+        persisted = self.store.save_auth_challenge(record)
         self._record_event(
             operation_id=challenge_id,
             resource_id=challenge_id,
@@ -472,18 +665,107 @@ class IdentityBindingService:
             decision="createAccepted",
             occurred_at=created_at,
         )
-        return {
-            "status": "accepted",
-            "challenge": {
-                "challengeId": challenge_id,
-                "purpose": normalized_purpose,
-                "deliveryMode": "acceptedOnly",
-                "expiresAt": expires_at.isoformat(),
-                "retryAfterSeconds": self.retry_after_seconds,
-                "productionReady": bool(self.adapter.production_ready),
-                "contractVersion": IDENTITY_BINDING_CONTRACT_VERSION,
-            },
-        }
+        return self._public_challenge_state(persisted, response_status="accepted")
+
+    def challenge_state(
+        self,
+        challenge_id: str,
+        *,
+        recover_delivery: bool = False,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        normalized_challenge_id = str(challenge_id or "").strip()
+        if not normalized_challenge_id or len(normalized_challenge_id) > 160:
+            raise IdentityChallengeStateUnavailable()
+        observed_at = self._utc(now)
+        record = self.store.get_auth_challenge(normalized_challenge_id)
+        if record is None or (
+            record.get("providerMode") != self.adapter.provider_mode
+            or record.get("targetHashKeyVersion") != self.hmac_key_version
+        ):
+            raise IdentityChallengeStateUnavailable()
+
+        if (
+            record.get("status") == "active"
+            and self._utc_from_text(record.get("expiresAt")) <= observed_at
+        ):
+            record = self.store.update_auth_challenge_delivery_state(
+                normalized_challenge_id,
+                challenge_status="expired",
+                checked_at_iso=observed_at.isoformat(),
+            )
+
+        provider_checked_at = str(record.get("providerCheckedAt") or "").strip()
+        recovery_retry_seconds = max(
+            1,
+            int(
+                record.get("providerRetryAfterSeconds")
+                if record.get("providerRetryAfterSeconds") is not None
+                else self.retry_after_seconds
+            ),
+        )
+        recovery_due = not provider_checked_at or (
+            self._utc_from_text(provider_checked_at)
+            + timedelta(seconds=recovery_retry_seconds)
+            <= observed_at
+        )
+        can_recover = (
+            recover_delivery
+            and record.get("status") == "active"
+            and record.get("recoveryState") in {"available", "pending"}
+            and self.adapter.delivery_recovery_supported
+            and recovery_due
+        )
+        if can_recover:
+            try:
+                receipt = self._normalize_delivery_receipt(
+                    self.adapter.recover_delivery(challenge_id=normalized_challenge_id)
+                )
+                record = self.store.update_auth_challenge_delivery_state(
+                    normalized_challenge_id,
+                    delivery_state=receipt.delivery_state,
+                    recovery_state=receipt.recovery_state,
+                    provider_receipt_hash=self._provider_receipt_hash(
+                        receipt.provider_receipt_id
+                    ),
+                    provider_retry_after_seconds=receipt.retry_after_seconds,
+                    checked_at_iso=observed_at.isoformat(),
+                    delivered_at_iso=(
+                        observed_at.isoformat()
+                        if receipt.delivery_state == "delivered"
+                        else None
+                    ),
+                    increment_recovery_attempt=True,
+                )
+                self._record_event(
+                    operation_id=normalized_challenge_id,
+                    resource_id=normalized_challenge_id,
+                    state=(
+                        "succeeded"
+                        if receipt.delivery_state == "delivered"
+                        else "pending"
+                    ),
+                    reason=f"delivery{receipt.delivery_state[:1].upper()}{receipt.delivery_state[1:]}",
+                    decision="deliveryRecoveryObserved",
+                    occurred_at=observed_at,
+                )
+            except (IdentityChallengeDeliveryError, IdentityChallengeRateLimited):
+                record = self.store.update_auth_challenge_delivery_state(
+                    normalized_challenge_id,
+                    recovery_state="pending",
+                    checked_at_iso=observed_at.isoformat(),
+                    increment_recovery_attempt=True,
+                )
+                self._record_event(
+                    operation_id=normalized_challenge_id,
+                    resource_id=normalized_challenge_id,
+                    state="pending",
+                    reason="deliveryRecoveryDeferred",
+                    decision="deliveryRecoveryDeferred",
+                    occurred_at=observed_at,
+                )
+
+        return self._public_challenge_state(record, response_status="available")
 
     def verify_challenge(
         self,
@@ -518,6 +800,7 @@ class IdentityBindingService:
             persisted_challenge.get("providerMode") != self.adapter.provider_mode
             or persisted_challenge.get("targetHashKeyVersion")
             != self.hmac_key_version
+            or persisted_challenge.get("deliveryState") == "undeliverable"
         ):
             raise IdentityChallengeVerificationFailed()
         if len(candidate_code) > 128:
@@ -573,6 +856,67 @@ class IdentityBindingService:
             occurred_at=attempted_at,
         )
         return response
+
+    def _public_challenge_state(
+        self,
+        record: Dict[str, Any],
+        *,
+        response_status: str,
+    ) -> Dict[str, Any]:
+        attempts = max(0, int(record.get("attempts") or 0))
+        max_attempts = max(1, int(record.get("maxAttempts") or self.max_attempts))
+        provider_retry = record.get("providerRetryAfterSeconds")
+        retry_after_seconds = self.retry_after_seconds
+        if provider_retry is not None:
+            retry_after_seconds = max(retry_after_seconds, int(provider_retry))
+        challenge_status = str(record.get("status") or "unknown")
+        public_status = {
+            "active": "active",
+            "consumed": "verified",
+            "expired": "expired",
+            "locked": "locked",
+        }.get(challenge_status, "unavailable")
+        return {
+            "status": response_status,
+            "challenge": {
+                "challengeId": str(record.get("challengeId") or ""),
+                "purpose": str(record.get("purpose") or ""),
+                "deliveryMode": "acceptedOnly",
+                "challengeState": public_status,
+                "deliveryState": str(record.get("deliveryState") or "accepted"),
+                "attempt": attempts,
+                "maxAttempts": max_attempts,
+                "remainingAttempts": max(0, max_attempts - attempts),
+                "retryAfterSeconds": retry_after_seconds,
+                "recoveryState": str(record.get("recoveryState") or "unsupported"),
+                "recoveryAttempt": max(0, int(record.get("recoveryAttempts") or 0)),
+                "statusEndpoint": (
+                    f"/v2/auth/challenges/{str(record.get('challengeId') or '')}"
+                ),
+                "expiresAt": str(record.get("expiresAt") or ""),
+                "productionReady": bool(self.adapter.production_ready),
+                "stateContractVersion": IDENTITY_CHALLENGE_STATE_CONTRACT_VERSION,
+                "contractVersion": IDENTITY_BINDING_CONTRACT_VERSION,
+            },
+        }
+
+    @staticmethod
+    def _normalize_delivery_receipt(
+        value: Any,
+    ) -> IdentityChallengeDeliveryReceipt:
+        if value is None:
+            return IdentityChallengeDeliveryReceipt(
+                delivery_state="accepted",
+                recovery_state="unsupported",
+            )
+        if not isinstance(value, IdentityChallengeDeliveryReceipt):
+            raise IdentityChallengeDeliveryError()
+        return value
+
+    def _provider_receipt_hash(self, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return self._keyed_hash(f"provider-receipt:v1:{value}")
 
     def _record_event(
         self,

@@ -60,6 +60,7 @@ class Settings:
     identity_challenge_adapter: str = "disabled"
     identity_challenge_synthetic_code: Optional[str] = None
     identity_challenge_http_json_url: Optional[str] = None
+    identity_challenge_http_json_status_url: Optional[str] = None
     identity_challenge_http_json_api_key: Optional[str] = None
     identity_challenge_http_json_timeout_seconds: float = 10.0
     identity_challenge_ttl_seconds: int = 300
@@ -333,6 +334,9 @@ class Settings:
             ),
             identity_challenge_http_json_url=_env(
                 "IDENTITY_CHALLENGE_HTTP_JSON_URL"
+            ),
+            identity_challenge_http_json_status_url=_env(
+                "IDENTITY_CHALLENGE_HTTP_JSON_STATUS_URL"
             ),
             identity_challenge_http_json_api_key=_env(
                 "IDENTITY_CHALLENGE_HTTP_JSON_API_KEY"

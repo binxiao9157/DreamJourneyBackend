@@ -1,5 +1,9 @@
 # C1 手机号 OTP Provider 适配闭环
 
+> 2026-08-09 起，Provider 受理、送达回执和恢复状态的增量合同以
+> `2026-08-09-identity-challenge-provider-r4.md` 为准；本文保留首次
+> accepted-only 接入与历史部署证据。
+
 ## 范围
 
 本次只完成服务器侧 OTP Provider 抽象和非真机验证，不启用真实短信供应商，也不改变 iOS 的身份挑战合同。

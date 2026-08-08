@@ -58,6 +58,31 @@ class RecordingIdentityChallengeDeliveryTransport:
         return deepcopy(self.result)
 
 
+class RecoverableIdentityChallengeDeliveryTransport:
+    def __init__(self, *, delivery_result, recovery_results):
+        self.delivery_result = deepcopy(delivery_result)
+        self.recovery_results = list(recovery_results)
+        self.requests = []
+
+    def post_json(self, *, url, headers, payload, timeout_seconds):
+        self.requests.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "payload": deepcopy(payload),
+                "timeoutSeconds": timeout_seconds,
+            }
+        )
+        if url.endswith("/status"):
+            if not self.recovery_results:
+                raise IdentityChallengeDeliveryError()
+            result = self.recovery_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return deepcopy(result)
+        return deepcopy(self.delivery_result)
+
+
 class IdentityPostgresCursor:
     def __init__(self, connection):
         self.connection = connection
@@ -96,9 +121,16 @@ class IdentityPostgresCursor:
                 "attempts": params[8],
                 "max_attempts": params[9],
                 "internal_verification_enabled": params[10],
-                "expires_at": params[11],
-                "created_at": params[12],
-                "updated_at": params[13],
+                "delivery_state": params[11],
+                "recovery_state": params[12],
+                "provider_receipt_hash": params[13],
+                "provider_retry_after_seconds": params[14],
+                "recovery_attempts": params[15],
+                "provider_checked_at": params[16],
+                "provider_delivered_at": params[17],
+                "expires_at": params[18],
+                "created_at": params[19],
+                "updated_at": params[20],
                 "consumed_at": None,
             }
             self.connection.challenges[row["id"]] = row
@@ -129,6 +161,26 @@ class IdentityPostgresCursor:
         elif normalized.startswith("UPDATE auth_challenges SET status = 'expired'"):
             row = self.connection.challenges[params[1]]
             row.update(status="expired", updated_at=params[0])
+        elif normalized.startswith(
+            "UPDATE auth_challenges SET status = COALESCE(%s, status)"
+        ):
+            row = self.connection.challenges[params[9]]
+            if params[0] is not None:
+                row["status"] = params[0]
+            if params[1] is not None:
+                row["delivery_state"] = params[1]
+            if params[2] is not None:
+                row["recovery_state"] = params[2]
+            if params[3] is not None:
+                row["provider_receipt_hash"] = params[3]
+            if params[4] is not None:
+                row["provider_retry_after_seconds"] = params[4]
+            row["recovery_attempts"] += params[5]
+            row["provider_checked_at"] = params[6]
+            if params[7] is not None:
+                row["provider_delivered_at"] = params[7]
+            row["updated_at"] = params[8]
+            self.result = deepcopy(row)
         elif (
             normalized.startswith("UPDATE auth_challenges SET attempts = %s")
             and "status = %s" in normalized
@@ -422,17 +474,26 @@ class IdentityBindingServiceTests(unittest.TestCase):
         self.assertEqual(set(existing), {"status", "challenge"})
         self.assertEqual(set(unknown), {"status", "challenge"})
         expected_challenge_keys = {
+            "attempt",
+            "challengeState",
             "challengeId",
+            "deliveryState",
             "purpose",
             "deliveryMode",
             "expiresAt",
+            "maxAttempts",
+            "recoveryAttempt",
+            "recoveryState",
+            "remainingAttempts",
             "retryAfterSeconds",
+            "stateContractVersion",
+            "statusEndpoint",
             "productionReady",
             "contractVersion",
         }
         self.assertEqual(set(existing["challenge"]), expected_challenge_keys)
         self.assertEqual(set(unknown["challenge"]), expected_challenge_keys)
-        for key in expected_challenge_keys - {"challengeId"}:
+        for key in expected_challenge_keys - {"challengeId", "statusEndpoint"}:
             self.assertEqual(existing["challenge"][key], unknown["challenge"][key])
         self.assertEqual(existing["status"], "accepted")
         self.assertNotIn("sent", json.dumps(existing).lower())
@@ -512,6 +573,150 @@ class IdentityBindingServiceTests(unittest.TestCase):
         serialized = json.dumps({"record": record, "response": challenge}, sort_keys=True)
         for raw_value in (TARGET, "8613800138000", delivered_code):
             self.assertNotIn(raw_value, serialized)
+
+    def test_provider_receipt_and_delivery_recovery_are_redacted_and_monotonic(self):
+        raw_receipt = "provider-receipt-must-remain-server-transient"
+        transport = RecoverableIdentityChallengeDeliveryTransport(
+            delivery_result={
+                "accepted": True,
+                "deliveryState": "accepted",
+                "receiptId": raw_receipt,
+                "retryAfterSeconds": 45,
+            },
+            recovery_results=[
+                {
+                    "deliveryState": "delivered",
+                    "receiptId": raw_receipt,
+                }
+            ],
+        )
+        adapter = HttpJsonIdentityChallengeAdapter(
+            endpoint="https://sms.example.test/v1/challenges",
+            status_endpoint="https://sms.example.test/v1/challenges/status",
+            api_key="test-server-only-api-key",
+            timeout_seconds=8,
+            transport=transport,
+        )
+        store, service = self.make_service(adapter=adapter)
+
+        created = self.create(service)
+        challenge_id = self.challenge_id(created)
+        self.assertEqual(created["challenge"]["deliveryState"], "accepted")
+        self.assertEqual(created["challenge"]["recoveryState"], "available")
+        self.assertEqual(created["challenge"]["retryAfterSeconds"], 45)
+        self.assertEqual(created["challenge"]["recoveryAttempt"], 0)
+
+        delivered = service.challenge_state(
+            challenge_id,
+            recover_delivery=True,
+            now=NOW + timedelta(seconds=1),
+        )
+        self.assertEqual(delivered["challenge"]["deliveryState"], "delivered")
+        self.assertEqual(delivered["challenge"]["recoveryState"], "notRequired")
+        self.assertEqual(delivered["challenge"]["recoveryAttempt"], 1)
+        self.assertEqual(len(transport.requests), 2)
+
+        stable = service.challenge_state(
+            challenge_id,
+            recover_delivery=True,
+            now=NOW + timedelta(seconds=2),
+        )
+        self.assertEqual(stable["challenge"]["deliveryState"], "delivered")
+        self.assertEqual(len(transport.requests), 2)
+
+        persisted = store.get_auth_challenge(challenge_id)
+        self.assertRegex(persisted["providerReceiptHash"], r"^[0-9a-f]{64}$")
+        serialized = json.dumps(
+            {"created": created, "delivered": delivered, "persisted": persisted},
+            sort_keys=True,
+        )
+        self.assertNotIn(raw_receipt, serialized)
+        self.assertNotIn(TARGET, serialized)
+        self.assertNotIn("8613800138000", serialized)
+
+    def test_recovery_failure_is_retryable_and_does_not_disable_verification(self):
+        transport = RecoverableIdentityChallengeDeliveryTransport(
+            delivery_result={"accepted": True},
+            recovery_results=[IdentityChallengeDeliveryError()],
+        )
+        adapter = HttpJsonIdentityChallengeAdapter(
+            endpoint="https://sms.example.test/v1/challenges",
+            status_endpoint="https://sms.example.test/v1/challenges/status",
+            api_key="test-server-only-api-key",
+            timeout_seconds=8,
+            transport=transport,
+        )
+        store, service = self.make_service(adapter=adapter)
+        created = self.create(service)
+        challenge_id = self.challenge_id(created)
+        delivered_code = transport.requests[0]["payload"]["code"]
+
+        pending = service.challenge_state(
+            challenge_id,
+            recover_delivery=True,
+            now=NOW + timedelta(seconds=1),
+        )
+        self.assertEqual(pending["challenge"]["deliveryState"], "accepted")
+        self.assertEqual(pending["challenge"]["recoveryState"], "pending")
+        self.assertEqual(pending["challenge"]["recoveryAttempt"], 1)
+        throttled = service.challenge_state(
+            challenge_id,
+            recover_delivery=True,
+            now=NOW + timedelta(seconds=2),
+        )
+        self.assertEqual(throttled["challenge"]["recoveryAttempt"], 1)
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(
+            service.verify_challenge(challenge_id, delivered_code, now=NOW)["status"],
+            "verified",
+        )
+        self.assertEqual(store.get_auth_challenge(challenge_id)["status"], "consumed")
+
+    def test_undeliverable_recovery_closes_challenge_verification(self):
+        transport = RecoverableIdentityChallengeDeliveryTransport(
+            delivery_result={"accepted": True},
+            recovery_results=[{"deliveryState": "undeliverable"}],
+        )
+        adapter = HttpJsonIdentityChallengeAdapter(
+            endpoint="https://sms.example.test/v1/challenges",
+            status_endpoint="https://sms.example.test/v1/challenges/status",
+            api_key="test-server-only-api-key",
+            timeout_seconds=8,
+            transport=transport,
+        )
+        _, service = self.make_service(adapter=adapter)
+        created = self.create(service)
+        challenge_id = self.challenge_id(created)
+        delivered_code = transport.requests[0]["payload"]["code"]
+
+        state = service.challenge_state(
+            challenge_id,
+            recover_delivery=True,
+            now=NOW + timedelta(seconds=1),
+        )
+        self.assertEqual(state["challenge"]["deliveryState"], "undeliverable")
+        self.assertEqual(state["challenge"]["recoveryState"], "terminal")
+        with self.assertRaises(IdentityChallengeVerificationFailed):
+            service.verify_challenge(challenge_id, delivered_code, now=NOW)
+
+    def test_provider_rate_limit_is_normalized_without_persistence(self):
+        class RateLimitedTransport:
+            def post_json(self, **kwargs):
+                raise IdentityChallengeRateLimited(75)
+
+        adapter = HttpJsonIdentityChallengeAdapter(
+            endpoint="https://sms.example.test/v1/challenges",
+            api_key="test-server-only-api-key",
+            timeout_seconds=8,
+            transport=RateLimitedTransport(),
+        )
+        store, service = self.make_service(adapter=adapter)
+
+        with self.assertRaises(IdentityChallengeRateLimited) as limited:
+            self.create(service)
+
+        self.assertEqual(limited.exception.retry_after_seconds, 75)
+        self.assertEqual(store._auth_challenges, {})
 
     def test_provider_delivery_failure_persists_no_challenge(self):
         transport = RecordingIdentityChallengeDeliveryTransport(failure=True)
@@ -822,6 +1027,9 @@ class IdentityBindingEndpointTests(unittest.TestCase):
                 f"/v2/auth/challenges/{challenge.json()['challenge']['challengeId']}/verify",
                 json={"code": "000000"},
             )
+            challenge_state = client.get(
+                f"/v2/auth/challenges/{challenge.json()['challenge']['challengeId']}"
+            )
             verified = client.post(
                 f"/v2/auth/challenges/{challenge.json()['challenge']['challengeId']}/verify",
                 json={"code": SYNTHETIC_CODE},
@@ -834,6 +1042,7 @@ class IdentityBindingEndpointTests(unittest.TestCase):
                 "/v2/auth/challenges/ach_missing/verify",
                 json={"code": SYNTHETIC_CODE},
             )
+            missing_state = client.get("/v2/auth/challenges/ach_missing")
             unrelated = client.post(
                 "/v2/auth/challenges/ach_missing/unrelated",
                 json={"code": SYNTHETIC_CODE},
@@ -848,16 +1057,30 @@ class IdentityBindingEndpointTests(unittest.TestCase):
         self.assertEqual(
             set(challenge.json()["challenge"]),
             {
+                "attempt",
+                "challengeState",
                 "challengeId",
+                "deliveryState",
                 "purpose",
                 "deliveryMode",
                 "expiresAt",
+                "maxAttempts",
+                "recoveryAttempt",
+                "recoveryState",
+                "remainingAttempts",
                 "retryAfterSeconds",
+                "stateContractVersion",
+                "statusEndpoint",
                 "productionReady",
                 "contractVersion",
             },
         )
         self.assertEqual(challenge.headers["cache-control"], "no-store")
+        self.assertEqual(challenge_state.status_code, 200)
+        self.assertEqual(challenge_state.headers["cache-control"], "no-store")
+        self.assertEqual(challenge_state.json()["status"], "available")
+        self.assertEqual(challenge_state.json()["challenge"]["attempt"], 1)
+        self.assertEqual(challenge_state.json()["challenge"]["remainingAttempts"], 2)
         self.assertEqual(verified.status_code, 200)
         self.assertEqual(
             set(verified.json()),
@@ -878,6 +1101,11 @@ class IdentityBindingEndpointTests(unittest.TestCase):
         self.assertEqual(wrong.status_code, 401)
         self.assertEqual(replay.status_code, 401)
         self.assertEqual(missing.status_code, 401)
+        self.assertEqual(missing_state.status_code, 404)
+        self.assertEqual(
+            missing_state.json()["detail"]["code"],
+            "identity_challenge_state_unavailable",
+        )
         self.assertEqual(wrong.json(), replay.json())
         self.assertEqual(replay.json(), missing.json())
         self.assertEqual(unrelated.status_code, 401)
@@ -949,6 +1177,13 @@ class IdentityBindingRuntimeAndSchemaTests(unittest.TestCase):
         self.assertFalse(identity["internalVerificationEnabled"])
         self.assertEqual(identity["providerMode"], "unavailable")
         self.assertEqual(identity["deliverySemantics"], "acceptedOnly")
+        self.assertEqual(
+            identity["statusEndpointTemplate"],
+            "/v2/auth/challenges/{challengeId}",
+        )
+        self.assertEqual(identity["stateContractVersion"], 1)
+        self.assertFalse(identity["deliveryReceiptSupported"])
+        self.assertFalse(identity["deliveryRecoverySupported"])
         self.assertFalse(identity["legacyPhoneLoginEnabled"])
 
     def test_http_json_provider_is_production_ready_only_with_valid_server_config(self):
@@ -970,6 +1205,24 @@ class IdentityBindingRuntimeAndSchemaTests(unittest.TestCase):
         self.assertTrue(ready["productionReady"])
         self.assertFalse(ready["internalVerificationEnabled"])
         self.assertEqual(ready["providerMode"], "httpJson")
+        self.assertTrue(ready["deliveryReceiptSupported"])
+        self.assertFalse(ready["deliveryRecoverySupported"])
+
+        recoverable_settings = Settings(
+            environment="production",
+            identity_binding_hmac_key=HMAC_KEY,
+            identity_binding_hmac_key_version="v1",
+            identity_challenge_adapter="httpJson",
+            identity_challenge_http_json_url="https://sms.example.test/v1/challenges",
+            identity_challenge_http_json_status_url=(
+                "https://sms.example.test/v1/challenges/status"
+            ),
+            identity_challenge_http_json_api_key="test-server-only-api-key",
+        )
+        recoverable = RuntimeConfigService(recoverable_settings).public_config()["auth"][
+            "identityChallenge"
+        ]
+        self.assertTrue(recoverable["deliveryRecoverySupported"])
 
         invalid_settings = Settings(
             environment="production",
@@ -990,16 +1243,20 @@ class IdentityBindingRuntimeAndSchemaTests(unittest.TestCase):
     def test_dynamic_challenge_routes_are_registered_as_public(self):
         registry = RouteOwnershipRegistry()
         create = registry.match("POST", "/v2/auth/challenges")
+        state = registry.match("GET", "/v2/auth/challenges/ach_random")
         verify = registry.match(
             "POST",
             "/v2/auth/challenges/ach_random/verify",
         )
 
         self.assertIsNotNone(create)
+        self.assertIsNotNone(state)
         self.assertIsNotNone(verify)
         self.assertEqual(create.rule.category, RouteOwnershipCategory.PUBLIC)
+        self.assertEqual(state.rule.category, RouteOwnershipCategory.PUBLIC)
         self.assertEqual(verify.rule.category, RouteOwnershipCategory.PUBLIC)
         self.assertEqual(verify.path_parameters, {"challenge_id": "ach_random"})
+        self.assertEqual(state.path_parameters, {"challenge_id": "ach_random"})
         self.assertEqual(registry.audit_summary()["unclassifiedCount"], 0)
 
     def test_0002_schema_is_additive_and_has_no_raw_target_or_code_columns(self):

@@ -1244,11 +1244,18 @@ class InMemoryStore:
             "attempts",
             "maxAttempts",
             "internalVerificationEnabled",
+            "deliveryState",
+            "recoveryState",
+            "providerReceiptHash",
+            "providerRetryAfterSeconds",
+            "recoveryAttempts",
+            "providerCheckedAt",
+            "providerDeliveredAt",
             "createdAt",
             "expiresAt",
         )
         item = {
-            field: deepcopy(challenge[field])
+            field: deepcopy(challenge.get(field))
             for field in persisted_fields
         }
         challenge_id = str(item["challengeId"])
@@ -1262,6 +1269,43 @@ class InMemoryStore:
         with self._identity_lock:
             challenge = self._auth_challenges.get(challenge_id)
             return None if challenge is None else deepcopy(challenge)
+
+    def update_auth_challenge_delivery_state(
+        self,
+        challenge_id: str,
+        *,
+        challenge_status: Optional[str] = None,
+        delivery_state: Optional[str] = None,
+        recovery_state: Optional[str] = None,
+        provider_receipt_hash: Optional[str] = None,
+        provider_retry_after_seconds: Optional[int] = None,
+        checked_at_iso: str,
+        delivered_at_iso: Optional[str] = None,
+        increment_recovery_attempt: bool = False,
+    ) -> Dict[str, Any]:
+        with self._identity_lock:
+            challenge = self._auth_challenges.get(challenge_id)
+            if challenge is None:
+                raise KeyError("identity challenge is missing")
+            if challenge_status is not None:
+                challenge["status"] = challenge_status
+            if delivery_state is not None:
+                challenge["deliveryState"] = delivery_state
+            if recovery_state is not None:
+                challenge["recoveryState"] = recovery_state
+            if provider_receipt_hash is not None:
+                challenge["providerReceiptHash"] = provider_receipt_hash
+            if provider_retry_after_seconds is not None:
+                challenge["providerRetryAfterSeconds"] = provider_retry_after_seconds
+            if increment_recovery_attempt:
+                challenge["recoveryAttempts"] = int(
+                    challenge.get("recoveryAttempts") or 0
+                ) + 1
+            challenge["providerCheckedAt"] = checked_at_iso
+            challenge["updatedAt"] = checked_at_iso
+            if delivered_at_iso is not None:
+                challenge["providerDeliveredAt"] = delivered_at_iso
+            return deepcopy(challenge)
 
     def get_latest_auth_challenge(
         self,
