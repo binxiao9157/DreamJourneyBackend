@@ -38,6 +38,13 @@ Gate 使用 fake Provider，不消耗真实音色槽位，也不会发送真实�
 
 ## 部署边界
 
-本次代码部署不应将 `VOICE_CLONE_DELETION_WORKER_ENABLED` 设为 `true`。部署后可以执行一次 worker CLI，预期返回 `voiceCloneDeletionWorkerDisabled`；这证明默认部署不会误发 Provider 删除请求。
+本次代码部署不应将 `VOICE_CLONE_DELETION_WORKER_ENABLED` 设为 `true`。部署后可以执行一次 worker CLI，预期返回父级或专属 Gate 的关闭原因（例如 `asyncEffectV1Disabled` 或 `voiceCloneDeletionWorkerDisabled`）；这证明默认部署不会误发 Provider 删除请求。
 
 真实 Provider 删除 capability 评审通过后，才允许在独立变更中：配置 Provider Adapter、启用 worker、执行 sandbox 删除/查询/对账 smoke，并将生产回执证据记录到本文件的后续部署记录。
+
+## 本次部署记录
+
+- 代码版本：`af0d30a`（2026-08-08）。
+- 生产 Postgres API 已重新构建并健康，公开 `/ready` 返回 `200`。
+- 容器内执行一次 worker CLI 返回 `asyncEffectV1Disabled`。这是父级 async-effect Gate 仍保持默认关闭的结果，比单独的 `voiceCloneDeletionWorkerDisabled` 更早阻断；没有领取 job、调用 Provider 或改变 Profile。
+- 即使将来启用 async-effect 基础设施，仍需显式设置 `VOICE_CLONE_DELETION_WORKER_ENABLED=true` 才会进入删除 Provider 路径。
