@@ -389,6 +389,36 @@ class InMemoryAsyncEffectLeaseRepository:
             row = self._attempts.get((job_id, attempt))
             return None if row is None else str(row["state"])
 
+    def preview_eligible(
+        self,
+        *,
+        limit: int = 20,
+        job_types: Optional[Iterable[str]] = None,
+    ) -> list[AsyncEffectJobPreview]:
+        """Mirror the Postgres value-free backlog preview for local gates."""
+
+        normalized_limit = _normalize_preview_limit(limit)
+        normalized_job_types = (
+            None if job_types is None else set(_normalize_job_types(job_types))
+        )
+        now = self._now()
+        with self._lock:
+            candidates = [
+                job
+                for job in self._jobs.values()
+                if job["cancelRequestedAt"] is None
+                and self._is_claimable(job, now)
+                and (
+                    normalized_job_types is None
+                    or job["jobType"] in normalized_job_types
+                )
+            ]
+            candidates.sort(key=lambda item: (item["availableAt"], item["jobId"]))
+            return [
+                self._preview_from_job(job)
+                for job in candidates[:normalized_limit]
+            ]
+
     def preview_expired_leases(self, *, limit: int = 20) -> list[AsyncEffectExpiredLeasePreview]:
         """Read expired leases without reclaiming or changing an attempt."""
 
@@ -858,11 +888,26 @@ class PostgresAsyncEffectLeaseRepository:
             )
             return self._preview_from_row(row)
 
-    def preview_eligible(self, *, limit: int = 20) -> list[AsyncEffectJobPreview]:
+    def preview_eligible(
+        self,
+        *,
+        limit: int = 20,
+        job_types: Optional[Iterable[str]] = None,
+    ) -> list[AsyncEffectJobPreview]:
         normalized_limit = _normalize_preview_limit(limit)
+        normalized_job_types = (
+            None if job_types is None else _normalize_job_types(job_types)
+        )
         with self._cursor() as cursor:
+            params: tuple[object, ...]
+            job_type_filter = ""
+            if normalized_job_types is None:
+                params = (normalized_limit,)
+            else:
+                job_type_filter = "AND job_type = ANY(%s)"
+                params = (list(normalized_job_types), normalized_limit)
             cursor.execute(
-                """
+                f"""
                 SELECT job_id, operation_id, job_type, state, attempt, available_at
                 FROM async_effects.jobs
                 WHERE cancel_requested_at IS NULL
@@ -870,10 +915,11 @@ class PostgresAsyncEffectLeaseRepository:
                       (state IN ('pending', 'retryWait') AND available_at <= NOW())
                       OR (state = 'leased' AND lease_until <= NOW())
                   )
+                  {job_type_filter}
                 ORDER BY available_at ASC, created_at ASC, job_id ASC
                 LIMIT %s
                 """,
-                (normalized_limit,),
+                params,
             )
             return [self._preview_from_row(row) for row in cursor.fetchall()]
 

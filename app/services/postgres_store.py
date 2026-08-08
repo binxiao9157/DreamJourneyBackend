@@ -2977,6 +2977,67 @@ class PostgresStore:
             for row in rows
         ]
 
+    def summarize_rights_external_effect_reconciliation(
+        self,
+        *,
+        domains: Optional[Iterable[str]] = None,
+    ) -> Dict[str, Any]:
+        """Return latest state counts without exposing owners or effect keys."""
+
+        normalized_domains = (
+            None
+            if domains is None
+            else tuple(
+                sorted(
+                    {
+                        str(domain or "").strip()
+                        for domain in domains
+                        if str(domain or "").strip()
+                    }
+                )
+            )
+        )
+        domain_filter = ""
+        params: tuple[object, ...] = ()
+        if normalized_domains is not None:
+            domain_filter = "WHERE domain = ANY(%s)"
+            params = (list(normalized_domains),)
+        rows = self._fetchall(
+            f"""
+            WITH ranked AS (
+                SELECT state,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY request_id, effect_identity_hash
+                        ORDER BY observed_at DESC, id DESC
+                    ) AS position
+                FROM rights_external_effect_receipts
+                {domain_filter}
+            )
+            SELECT state, COUNT(*) AS count
+            FROM ranked
+            WHERE position = 1
+            GROUP BY state
+            ORDER BY state
+            """,
+            params,
+        )
+        state_counts = {
+            str(row.get("state") or "unknown"): int(row.get("count") or 0)
+            for row in rows
+        }
+        effect_count = sum(state_counts.values())
+        anomaly_count = sum(
+            count
+            for state, count in state_counts.items()
+            if state in {"failed", "unknown"}
+        )
+        return {
+            "healthy": anomaly_count == 0,
+            "effectCount": effect_count,
+            "anomalyCount": anomaly_count,
+            "stateCounts": state_counts,
+        }
+
     def record_rights_access_revocation_outbox(
         self,
         *,

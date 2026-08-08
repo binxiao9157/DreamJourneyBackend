@@ -54,6 +54,7 @@ class AsyncEffectDeadLetterRepositoryTests(unittest.TestCase):
         self.assertEqual(replay.outcome, "deduplicated")
         self.assertEqual(repository.load(admission.dead_letter_id), admission)
         self.assertEqual(repository.record_count(), 1)
+        self.assertEqual(repository.count_open(), 1)
         self.assertNotIn("owner-dead-letter-store", str(first.value_free_summary()))
         self.assertNotIn("last-receipt", str(first.value_free_summary()))
 

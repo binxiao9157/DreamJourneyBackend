@@ -94,6 +94,13 @@ class Settings:
     # Additional M0 features explicitly approved for server-granted pilot
     # owners. Unsupported or later-stage feature names fail at boot.
     release_policy_closed_pilot_features: Optional[str] = None
+    # Operational capability evidence is intentionally short-lived. A stale
+    # observation closes the affected lane, and a later recovery receives a
+    # new readiness epoch instead of reviving a cached client decision.
+    runtime_capability_readiness_ttl_seconds: int = 180
+    runtime_capability_probe_interval_seconds: float = 5.0
+    runtime_capability_backlog_limit: int = 50
+    runtime_capability_dead_letter_limit: int = 0
     async_effect_v1_enabled: bool = False
     async_effect_worker_enabled: bool = False
     # Both typed Owner Truth workers use this bounded idle delay when their
@@ -421,6 +428,37 @@ class Settings:
             ),
             release_policy_closed_pilot_features=_env(
                 "RELEASE_POLICY_CLOSED_PILOT_FEATURES"
+            ),
+            runtime_capability_readiness_ttl_seconds=max(
+                30,
+                _env_int(
+                    "RUNTIME_CAPABILITY_READINESS_TTL_SECONDS",
+                    cls.runtime_capability_readiness_ttl_seconds,
+                ),
+            ),
+            runtime_capability_probe_interval_seconds=max(
+                0.5,
+                _env_float(
+                    "RUNTIME_CAPABILITY_PROBE_INTERVAL_SECONDS",
+                    cls.runtime_capability_probe_interval_seconds,
+                ),
+            ),
+            runtime_capability_backlog_limit=max(
+                0,
+                min(
+                    99,
+                    _env_int(
+                        "RUNTIME_CAPABILITY_BACKLOG_LIMIT",
+                        cls.runtime_capability_backlog_limit,
+                    ),
+                ),
+            ),
+            runtime_capability_dead_letter_limit=max(
+                0,
+                _env_int(
+                    "RUNTIME_CAPABILITY_DEAD_LETTER_LIMIT",
+                    cls.runtime_capability_dead_letter_limit,
+                ),
             ),
             async_effect_v1_enabled=_env_bool(
                 "ASYNC_EFFECT_V1_ENABLED",

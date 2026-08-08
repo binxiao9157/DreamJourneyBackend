@@ -21,6 +21,10 @@ from app.services.runtime_capabilities import (
     RuntimeCapabilityComposer,
     RuntimeCapabilityInput,
 )
+from app.services.runtime_capability_control import (
+    RuntimeCapabilityControlDecision,
+    RuntimeCapabilityControlRegistry,
+)
 
 
 class RuntimeConfigService:
@@ -29,12 +33,14 @@ class RuntimeConfigService:
         settings: Settings,
         *,
         provider_inventory: Optional[ProviderRuntimeInventory] = None,
+        capability_control_registry: Optional[RuntimeCapabilityControlRegistry] = None,
     ):
         self.settings = settings
         # Tests and maintenance commands may instantiate this service outside
         # FastAPI startup.  They still receive the same fail-closed inventory,
         # marked as a runtime validation rather than a startup receipt.
         self.provider_inventory = provider_inventory or ProviderRuntimeInventory(settings)
+        self.capability_control_registry = capability_control_registry
 
     def public_config(self) -> Dict[str, Any]:
         archive_image_analysis = ArchiveImageAnalysisProviderFactory(self.settings).make()
@@ -69,8 +75,9 @@ class RuntimeConfigService:
                 self.settings.release_policy_closed_pilot_features
             ),
             capability_resolver=lambda capability: (
-                self.provider_inventory.status_for(capability).enabled
-                and self.provider_inventory.status_for(capability).provider_ready
+                self._provider_operational_ready(
+                    self.provider_inventory.status_for(capability)
+                )
             ),
             shadow_mode=self.settings.release_policy_command_mode != "enforce",
         )
@@ -99,6 +106,7 @@ class RuntimeConfigService:
             "capabilitySnapshotSchemaVersion": RuntimeCapabilityComposer.SCHEMA_VERSION,
             "capabilitySnapshots": capability_snapshots,
             "providerInventory": self.provider_inventory.public_descriptor(),
+            "runtimeCapabilityControl": self._capability_control_descriptor(),
             "capabilities": {
                 "deepseekProxy": bool(self.settings.deepseek_api_key),
                 "archiveImageAnalysis": archive_image_analysis.enabled,
@@ -111,8 +119,8 @@ class RuntimeConfigService:
                 # Actual M0 private-media capture has its own authenticated
                 # Owner Truth route and is gated by this startup inventory.
                 "archiveMediaUploadIntent": True,
-                "ownerTruthMediaCapture": media_storage.provider_ready,
-                "ownerTruthMediaProcessing": media_processing.provider_ready,
+                "ownerTruthMediaCapture": self._provider_operational_ready(media_storage),
+                "ownerTruthMediaProcessing": self._provider_operational_ready(media_processing),
                 "voiceClone": voice_clone_provider.is_configured,
                 "digitalHumanSession": False,
                 "digitalHumanSessionLease": False,
@@ -556,22 +564,27 @@ class RuntimeConfigService:
             for item in (composer.compose(value) for value in inputs)
         }
 
-    @staticmethod
     def _provider_input(
+        self,
         *,
         status: ProviderRuntimeStatus,
         release_visible: bool,
     ) -> RuntimeCapabilityInput:
+        control = self._control_decision(status.capability)
         return RuntimeCapabilityInput(
             capability=status.capability,
             implemented=True,
             enabled=status.enabled,
-            provider_ready=status.provider_ready,
+            provider_ready=(
+                status.provider_ready
+                if control is None
+                else status.provider_ready and control.operational_ready
+            ),
             release_visible=release_visible,
             external_verified=False,
             provider=status.provider,
             fallback_mode=status.fallback_mode,
-            reason=status.reason,
+            reason=(status.reason if control is None or control.operational_ready else control.reason),
             provider_kind=status.provider_kind,
             operation=status.operation,
             data_class=status.data_class,
@@ -579,4 +592,29 @@ class RuntimeConfigService:
             retention_policy_version=status.retention_policy_version,
             configuration_status=status.configuration_status,
             evidence_status=status.evidence_status,
+            control_state=("legacy" if control is None else control.state.value),
+            readiness_epoch=(None if control is None else control.readiness_epoch),
+            readiness_observed_at=(None if control is None else control.observed_at),
+            readiness_expires_at=(None if control is None else control.expires_at),
         )
+
+    def _control_decision(
+        self,
+        capability: str,
+    ) -> Optional[RuntimeCapabilityControlDecision]:
+        if self.capability_control_registry is None:
+            return None
+        return self.capability_control_registry.decision(capability)
+
+    def _provider_operational_ready(self, status: ProviderRuntimeStatus) -> bool:
+        control = self._control_decision(status.capability)
+        return bool(
+            status.enabled
+            and status.provider_ready
+            and (control is None or control.operational_ready)
+        )
+
+    def _capability_control_descriptor(self) -> Dict[str, object]:
+        if self.capability_control_registry is None:
+            return {"contractVersion": 1, "capabilities": {}}
+        return self.capability_control_registry.public_descriptor()

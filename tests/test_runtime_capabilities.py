@@ -10,6 +10,10 @@ from app.services.runtime_capabilities import (
 )
 from app.services.runtime_config import RuntimeConfigService
 from app.services.provider_runtime import ProviderRuntimeInventory
+from app.services.runtime_capability_control import (
+    RuntimeCapabilityControlObservation,
+    RuntimeCapabilityControlRegistry,
+)
 
 
 class RuntimeCapabilityComposerTests(unittest.TestCase):
@@ -420,6 +424,77 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
         storage = inventory.status_for("ownerTruthMediaStorage").public_descriptor()
         self.assertTrue(storage["enabled"])
         daemon_ready.assert_called_once_with(host="clamav", port=3310, timeout_seconds=11)
+
+    def test_controlled_media_capability_fails_closed_and_exposes_epoch_contract(self):
+        now = datetime.now(timezone.utc)
+        settings = Settings(
+            owner_truth_media_capture_enabled=True,
+            owner_truth_media_storage_provider="filesystem",
+            owner_truth_media_storage_root="/var/lib/dreamjourney/private-media",
+            owner_truth_media_content_safety_provider="clamav",
+            release_policy_closed_pilot_features="ownerMediaCaptureV1",
+        )
+        inventory = ProviderRuntimeInventory(
+            settings,
+            clamav_scanner_ready=lambda: True,
+        )
+        registry = RuntimeCapabilityControlRegistry(epoch_factory=lambda: "rce-ready")
+        registry.observe(
+            RuntimeCapabilityControlObservation(
+                capability="ownerTruthMediaStorage",
+                observation_id="runtime-observation-blocked",
+                observed_at=now,
+                expires_at=now + timedelta(minutes=5),
+                provider_ready=True,
+                provider_reason="externalEvidenceMissing",
+                scanner_ready=True,
+                deletion_reconciliation_healthy=False,
+            )
+        )
+
+        blocked_config = RuntimeConfigService(
+            settings,
+            provider_inventory=inventory,
+            capability_control_registry=registry,
+        ).public_config()
+        blocked = blocked_config["capabilitySnapshots"]["ownerTruthMediaStorage"]
+
+        self.assertTrue(blocked["enabled"])
+        self.assertFalse(blocked["providerReady"])
+        self.assertFalse(blocked_config["capabilities"]["ownerTruthMediaCapture"])
+        self.assertEqual(blocked["controlState"], "blocked")
+        self.assertIsNone(blocked["readinessEpoch"])
+        self.assertEqual(
+            blocked["reason"],
+            "runtimeCapabilityDeletionReconciliationAnomaly",
+        )
+        self.assertEqual(
+            blocked_config["runtimeCapabilityControl"]["capabilities"][
+                "ownerTruthMediaStorage"
+            ]["controlState"],
+            "blocked",
+        )
+
+        registry.observe(
+            RuntimeCapabilityControlObservation(
+                capability="ownerTruthMediaStorage",
+                observation_id="runtime-observation-ready",
+                observed_at=now + timedelta(seconds=1),
+                expires_at=now + timedelta(minutes=6),
+                provider_ready=True,
+                provider_reason="externalEvidenceMissing",
+                scanner_ready=True,
+                deletion_reconciliation_healthy=True,
+            )
+        )
+        ready = RuntimeConfigService(
+            settings,
+            provider_inventory=inventory,
+            capability_control_registry=registry,
+        ).public_config()["capabilitySnapshots"]["ownerTruthMediaStorage"]
+        self.assertTrue(ready["providerReady"])
+        self.assertEqual(ready["controlState"], "ready")
+        self.assertEqual(ready["readinessEpoch"], "rce-ready")
 
 
 if __name__ == "__main__":

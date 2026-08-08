@@ -82,6 +82,10 @@ def main():
             "retentionPolicyVersion",
             "configurationStatus",
             "evidenceStatus",
+            "controlState",
+            "readinessEpoch",
+            "readinessObservedAt",
+            "readinessExpiresAt",
         ):
             require(field in snapshot, f"{capability}.{field} is missing")
 
@@ -111,7 +115,6 @@ def main():
         snapshot = snapshots[capability]
         for field in (
             "enabled",
-            "providerReady",
             "provider",
             "providerKind",
             "operation",
@@ -119,7 +122,6 @@ def main():
             "region",
             "retentionPolicyVersion",
             "fallbackMode",
-            "reason",
             "configurationStatus",
             "evidenceStatus",
         ):
@@ -127,6 +129,36 @@ def main():
                 descriptor.get(field) == snapshot.get(field),
                 f"{capability}.{field} inventory/snapshot mismatch",
             )
+        require(
+            not snapshot["providerReady"] or descriptor["providerReady"],
+            f"{capability} runtime control cannot make an unready provider ready",
+        )
+
+    runtime_control = runtime.get("runtimeCapabilityControl") or {}
+    require(runtime_control.get("contractVersion") == 1, "runtime control contract must be v1")
+    controlled = runtime_control.get("capabilities") or {}
+    for capability in ("ownerTruthMediaStorage", "ownerTruthMediaProcessing"):
+        decision = controlled.get(capability) or {}
+        snapshot = snapshots[capability]
+        require(
+            decision.get("controlState") in {"ready", "blocked", "stale"},
+            f"{capability} control state is missing",
+        )
+        require(
+            snapshot.get("controlState") == decision.get("controlState"),
+            f"{capability} snapshot/control state mismatch",
+        )
+        require(
+            snapshot.get("readinessEpoch") == decision.get("readinessEpoch"),
+            f"{capability} snapshot/control epoch mismatch",
+        )
+        require(decision.get("observedAt"), f"{capability} observedAt is missing")
+        require(decision.get("expiresAt"), f"{capability} expiresAt is missing")
+        if decision["controlState"] == "ready":
+            require(decision.get("readinessEpoch"), f"{capability} ready epoch is missing")
+        else:
+            require(decision.get("readinessEpoch") is None, f"{capability} blocked epoch must clear")
+            require(snapshot["providerReady"] is False, f"{capability} blocked snapshot must fail closed")
 
     owner_truth_media = runtime.get("ownerTruthMedia") or {}
     require(
@@ -181,7 +213,7 @@ def main():
             f"provider inventory exposed sensitive configuration name: {forbidden}",
         )
 
-    print("Backend runtime capability deployed smoke passed: provider inventory remains fail-closed and value-free")
+    print("Backend runtime capability deployed smoke passed: automatic shutdown and readiness epochs are value-free")
 
 
 if __name__ == "__main__":

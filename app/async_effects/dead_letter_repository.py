@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import RLock
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 from uuid import UUID
 
 from app.async_effects.contracts import (
@@ -109,6 +109,21 @@ class InMemoryAsyncEffectDeadLetterRepository:
         with self._lock:
             return len(self._records)
 
+    def count_open(self, *, job_type: Optional[str] = None) -> int:
+        """Return only an aggregate operational count, never dead-letter data."""
+
+        normalized_job_type = str(job_type or "").strip() or None
+        with self._lock:
+            return sum(
+                1
+                for admission in self._records.values()
+                if admission.state is DeadLetterState.OPEN
+                and (
+                    normalized_job_type is None
+                    or admission.intent.job_type == normalized_job_type
+                )
+            )
+
 
 class PostgresAsyncEffectDeadLetterRepository:
     """Dead-letter admission writer bound to an already-open Postgres UoW."""
@@ -158,6 +173,30 @@ class PostgresAsyncEffectDeadLetterRepository:
             if len(rows) != 1:
                 raise DeadLetterPersistenceError("dead letter is not durably recorded")
             return self._admission_from_row(rows[0])
+
+    def count_open(self, *, job_type: Optional[str] = None) -> int:
+        """Return a value-free count for runtime backlog admission."""
+
+        normalized_job_type = str(job_type or "").strip() or None
+        with self._cursor() as cursor:
+            if normalized_job_type is None:
+                cursor.execute(
+                    "SELECT COUNT(*) AS count FROM async_effects.dead_letters WHERE state = 'open'"
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM async_effects.dead_letters AS dead_letter
+                    INNER JOIN async_effects.jobs AS job
+                        ON job.job_id = dead_letter.job_id
+                    WHERE dead_letter.state = 'open'
+                      AND job.job_type = %s
+                    """,
+                    (normalized_job_type,),
+                )
+            row = cursor.fetchone()
+        return int((row or {}).get("count") or 0)
 
     def load_for_replay(self, dead_letter_id: str) -> DeadLetterAdmission:
         """Lock and reconstruct an open admission before an inert replay request.

@@ -26,6 +26,10 @@ class RuntimeCapabilitySnapshot(BaseModel):
     retentionPolicyVersion: str
     configurationStatus: str
     evidenceStatus: str
+    controlState: str = "legacy"
+    readinessEpoch: Optional[str] = None
+    readinessObservedAt: Optional[datetime] = None
+    readinessExpiresAt: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,10 @@ class RuntimeCapabilityInput:
     retention_policy_version: str = "unknown"
     configuration_status: str = "unknown"
     evidence_status: str = "notVerified"
+    control_state: str = "legacy"
+    readiness_epoch: Optional[str] = None
+    readiness_observed_at: Optional[datetime] = None
+    readiness_expires_at: Optional[datetime] = None
 
 
 class RuntimeCapabilityComposer:
@@ -97,6 +105,10 @@ class RuntimeCapabilityComposer:
             retentionPolicyVersion=value.retention_policy_version,
             configurationStatus=value.configuration_status,
             evidenceStatus=value.evidence_status,
+            controlState=value.control_state,
+            readinessEpoch=value.readiness_epoch,
+            readinessObservedAt=self._normalized_timestamp(value.readiness_observed_at),
+            readinessExpiresAt=self._normalized_timestamp(value.readiness_expires_at),
         )
 
     @staticmethod

@@ -8,6 +8,7 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
+from threading import RLock
 from typing import Any, Dict, Mapping, Optional, Tuple
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -489,6 +490,10 @@ from app.services.archive_store import (
     ResourceVersionConflict,
 )
 from app.services.provider_runtime import ProviderRuntimeInventory
+from app.services.runtime_capability_control import RuntimeCapabilityControlRegistry
+from app.services.runtime_capability_control_collection import (
+    RuntimeCapabilityControlCollector,
+)
 from app.services.runtime_config import RuntimeConfigService
 from app.services.safety_policy import (
     HighRiskCapability,
@@ -593,6 +598,9 @@ from app.services.user_identity import stable_user_id
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 store = make_store(settings)
+RUNTIME_CAPABILITY_CONTROL_REGISTRY = RuntimeCapabilityControlRegistry()
+RUNTIME_CAPABILITY_REFRESH_LOCK = RLock()
+RUNTIME_CAPABILITY_LAST_REFRESH_MONOTONIC = 0.0
 logger = logging.getLogger(__name__)
 
 
@@ -4960,17 +4968,46 @@ RELEASE_POLICY_COMMAND_MODE = (
 )
 
 
+def _refresh_runtime_capability_controls(*, force: bool = False) -> ProviderRuntimeInventory:
+    """Refresh value-free operational evidence behind a short probe interval."""
+
+    global RUNTIME_CAPABILITY_LAST_REFRESH_MONOTONIC
+    now_monotonic = time.monotonic()
+    with RUNTIME_CAPABILITY_REFRESH_LOCK:
+        inventory = getattr(app.state, "provider_runtime_inventory", None)
+        if (
+            not force
+            and isinstance(inventory, ProviderRuntimeInventory)
+            and now_monotonic - RUNTIME_CAPABILITY_LAST_REFRESH_MONOTONIC
+            < settings.runtime_capability_probe_interval_seconds
+        ):
+            return inventory
+        inventory, observations = RuntimeCapabilityControlCollector(
+            settings=settings,
+            store=store,
+        ).collect()
+        for observation in observations:
+            RUNTIME_CAPABILITY_CONTROL_REGISTRY.observe(observation)
+        app.state.provider_runtime_inventory = inventory
+        RUNTIME_CAPABILITY_LAST_REFRESH_MONOTONIC = now_monotonic
+        return inventory
+
+
 def _release_policy_runtime_capability_ready(capability: str) -> bool:
     """Resolve Provider readiness on the server without trusting client hints."""
 
-    inventory = getattr(app.state, "provider_runtime_inventory", None)
-    if not isinstance(inventory, ProviderRuntimeInventory):
-        inventory = ProviderRuntimeInventory(settings)
+    inventory = _refresh_runtime_capability_controls()
     try:
         status = inventory.status_for(capability)
     except KeyError:
         return False
-    return status.enabled and status.provider_ready
+    control = RUNTIME_CAPABILITY_CONTROL_REGISTRY.decision(capability)
+    return bool(
+        status.enabled
+        and status.provider_ready
+        and control is not None
+        and control.operational_ready
+    )
 
 
 RELEASE_POLICY_SERVICE = ReleasePolicyService(
@@ -6514,10 +6551,6 @@ def startup() -> None:
     # partially configured external provider never prevents API startup, but
     # it is recorded as unavailable and stays fail-closed in the public
     # runtime contract.
-    app.state.provider_runtime_inventory = ProviderRuntimeInventory(
-        settings,
-        validated_at_startup=True,
-    )
     validate_route_authentication_startup(
         app,
         registry=ROUTE_AUTHENTICATION_POLICY.registry,
@@ -6526,6 +6559,7 @@ def startup() -> None:
         machine_credential_configured=bool(_configured_backend_api_token()),
     )
     init_store(store)
+    _refresh_runtime_capability_controls(force=True)
 
 
 @app.on_event("shutdown")
@@ -6583,6 +6617,7 @@ def release_policy(
     # A user receives a closed-pilot snapshot only when their authenticated
     # server principal is explicitly allowlisted in deployment configuration.
     _ = cohort
+    _refresh_runtime_capability_controls()
     principal = getattr(request.state, "auth_principal", None)
     if not isinstance(principal, RequestPrincipal):
         principal = RequestPrincipal.anonymous()
@@ -10478,6 +10513,7 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
     principal = getattr(request.state, "auth_principal", None)
     if not isinstance(principal, RequestPrincipal) or principal.kind != PrincipalKind.MACHINE:
         raise HTTPException(status_code=403, detail="machine principal required")
+    _refresh_runtime_capability_controls()
     summary = RELEASE_POLICY_DECISION_RECORDER.summary()
     summary["operationMetrics"] = summarize_operation_metrics_for_observations(
         OPERATION_METRIC_RECORDER.summary()
@@ -10503,6 +10539,7 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
             capability_snapshots=RuntimeConfigService(
                 settings,
                 provider_inventory=getattr(app.state, "provider_runtime_inventory", None),
+                capability_control_registry=RUNTIME_CAPABILITY_CONTROL_REGISTRY,
             ).public_config().get(
                 "capabilitySnapshots",
                 {},
@@ -10511,6 +10548,9 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
             incident_lifecycle=summary["incidentLifecycle"],
             evidence_manifest=_voice_dh_lane_evidence_manifest_summary(),
         )
+    )
+    summary["runtimeCapabilityControl"] = (
+        RUNTIME_CAPABILITY_CONTROL_REGISTRY.public_descriptor()
     )
     return summary
 
@@ -13051,9 +13091,11 @@ def get_profile(request: Request, user_id: str) -> Dict[str, Any]:
 
 @app.get("/config/runtime")
 def runtime_config() -> Dict[str, Any]:
+    inventory = _refresh_runtime_capability_controls()
     return RuntimeConfigService(
         settings,
-        provider_inventory=getattr(app.state, "provider_runtime_inventory", None),
+        provider_inventory=inventory,
+        capability_control_registry=RUNTIME_CAPABILITY_CONTROL_REGISTRY,
     ).public_config()
 
 

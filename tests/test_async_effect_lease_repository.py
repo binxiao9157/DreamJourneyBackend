@@ -164,6 +164,36 @@ class AsyncEffectLeaseRepositoryTests(unittest.TestCase):
         self.assertEqual(completion.operation_state, "failed")
         self.assertEqual(self.repository.attempt_state(lease.job_id, 1), "terminalFailed")
 
+    def test_eligible_preview_is_typed_bounded_and_read_only(self):
+        other = AsyncEffectIntent(
+            operation_type="asyncEffect.synthetic.other",
+            target=AsyncEffectTarget(
+                owner_subject_id="owner-worker-test",
+                vault_id="vault-worker-test",
+                resource_type="syntheticEffect",
+                resource_id="worker-test-2",
+                resource_version=1,
+                purpose="workerFoundation",
+                authority_epoch=0,
+            ),
+            payload_hash=payload_hash("other-metadata-only"),
+        )
+        self.repository.seed(other)
+
+        previews = self.repository.preview_eligible(
+            limit=1,
+            job_types=[self.intent.job_type],
+        )
+
+        self.assertEqual(len(previews), 1)
+        self.assertEqual(previews[0].job_type, self.intent.job_type)
+        self.assertEqual(previews[0].state, "pending")
+        self.assertEqual(self.repository.attempt_state(self.intent.job_id, 1), None)
+        self.assertEqual(
+            self.repository.preview_eligible(limit=5, job_types=[other.job_type])[0].job_id,
+            other.job_id,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

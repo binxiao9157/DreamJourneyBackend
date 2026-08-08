@@ -1906,6 +1906,57 @@ class InMemoryStore:
         # Rehydrate to defend the projection boundary against an invalid store row.
         return [receipt_from_persistence(record).projection_observation() for record in records]
 
+    def summarize_rights_external_effect_reconciliation(
+        self,
+        *,
+        domains: Optional[Iterable[str]] = None,
+    ) -> Dict[str, Any]:
+        """Return current value-free cleanup health across logical effects."""
+
+        normalized_domains = (
+            None
+            if domains is None
+            else {str(domain or "").strip() for domain in domains}
+        )
+        with self._rights_lock:
+            latest: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            for record in self._rights_external_effect_receipts.values():
+                if (
+                    normalized_domains is not None
+                    and str(record.get("domain") or "") not in normalized_domains
+                ):
+                    continue
+                key = (
+                    str(record.get("requestId") or ""),
+                    str(record.get("effectIdentityHash") or ""),
+                )
+                existing = latest.get(key)
+                ordering = (
+                    str(record.get("observedAt") or ""),
+                    str(record.get("id") or ""),
+                )
+                existing_ordering = (
+                    str((existing or {}).get("observedAt") or ""),
+                    str((existing or {}).get("id") or ""),
+                )
+                if existing is None or ordering > existing_ordering:
+                    latest[key] = record
+        state_counts: Dict[str, int] = {}
+        for record in latest.values():
+            state = str(record.get("state") or "unknown")
+            state_counts[state] = state_counts.get(state, 0) + 1
+        anomaly_count = sum(
+            count
+            for state, count in state_counts.items()
+            if state in {"failed", "unknown"}
+        )
+        return {
+            "healthy": anomaly_count == 0,
+            "effectCount": len(latest),
+            "anomalyCount": anomaly_count,
+            "stateCounts": dict(sorted(state_counts.items())),
+        }
+
     def record_rights_access_revocation_outbox(
         self,
         *,

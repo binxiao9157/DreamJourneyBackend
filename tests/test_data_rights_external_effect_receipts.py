@@ -94,6 +94,29 @@ class DataRightsExternalEffectReceiptTests(unittest.TestCase):
                 self._receipt(owner_hash=hashlib.sha256(b"other-owner").hexdigest())
             )
 
+    def test_reconciliation_health_uses_only_latest_state_per_effect(self) -> None:
+        empty = self.store.summarize_rights_external_effect_reconciliation()
+        self.assertTrue(empty["healthy"])
+        self.assertEqual(empty["effectCount"], 0)
+
+        self.store.record_rights_external_effect_receipt(self._receipt(state="failed"))
+        failed = self.store.summarize_rights_external_effect_reconciliation()
+        self.assertFalse(failed["healthy"])
+        self.assertEqual(failed["anomalyCount"], 1)
+        self.assertEqual(failed["stateCounts"], {"failed": 1})
+        object_storage_only = self.store.summarize_rights_external_effect_reconciliation(
+            domains=("objectStorage",)
+        )
+        self.assertTrue(object_storage_only["healthy"])
+        self.assertEqual(object_storage_only["effectCount"], 0)
+
+        self.store.record_rights_external_effect_receipt(self._receipt(state="completed"))
+        recovered = self.store.summarize_rights_external_effect_reconciliation()
+        self.assertTrue(recovered["healthy"])
+        self.assertEqual(recovered["effectCount"], 1)
+        self.assertEqual(recovered["anomalyCount"], 0)
+        self.assertEqual(recovered["stateCounts"], {"completed": 1})
+
 
 if __name__ == "__main__":
     unittest.main()
