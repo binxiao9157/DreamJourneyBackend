@@ -11,7 +11,7 @@
 - App 先从后端申请一次性上传 intent，再把字节上传到已认证的后端内容路由。
 - 后端校验 owner、vault、intent、用途、MIME、文件大小、SHA-256 和安全扫描后写入 COS。
 - 写入后后端必须调用 COS `HEAD Object`，复核 `Content-Length`、`Content-Type`、服务端保存的 SHA-256 metadata 以及显式 SSE；任何一项不匹配都不会把 SourceObject 标记为 `verified`。
-- 读取仍通过已认证的后端内容路由；删除沿用“先撤权、后物理删除、再写 receipt”链路。
+- 读取仍通过已认证的后端内容路由；删除沿用“先撤权、后物理删除、再写 receipt”链路。COS 删除只有在 Provider 返回 2xx 回执且后续 `HEAD Object` 明确返回对象不存在时才算完成；未知回执、对象仍存在或 HEAD 不可用均保持 `partial/retryable`。
 
 这保持了 Stage 2 的所有对象键和供应商细节在服务端，不会让移动端绕过 owner/vault 授权。
 
@@ -57,12 +57,19 @@ OWNER_TRUTH_MEDIA_PROCESSING_WORKER_ENABLED=false
 OWNER_TRUTH_MEDIA_DELETION_WORKER_ENABLED=false
 ```
 
-使用 KMS 时把 `OWNER_TRUTH_MEDIA_S3_SERVER_SIDE_ENCRYPTION` 改为 `cos/kms`，并配置可访问的 `OWNER_TRUTH_MEDIA_S3_KMS_KEY_ID`。缺少 bucket、region、HTTPS endpoint、最小权限凭据或显式 SSE 时，runtime capability 将 fail-closed，不会假装媒体功能可用。
+使用 KMS 时把 `OWNER_TRUTH_MEDIA_S3_SERVER_SIDE_ENCRYPTION` 改为 `cos/kms`，并配置可访问的 `OWNER_TRUTH_MEDIA_S3_KMS_KEY_ID`。缺少 bucket、region、HTTPS endpoint、最小权限凭据或显式 SSE 时，runtime capability 将 fail-closed；endpoint 主机中的 region 与配置 region 不一致时也会在联网前拒绝，不会假装媒体功能可用。
 
 ## 4. 部署与验证顺序
 
-1. 将后端升级到包含 A1 的版本，构建并重启 API 容器。
-2. 在 API 容器内执行：
+1. 在无凭据环境先运行组合合同 Gate：
+
+   ```bash
+   bash scripts/run-backend-owner-truth-media-provider-matrix-gate.sh
+   ```
+
+   该 Gate 使用 fake COS/ClamAV，覆盖缺配置、缺 SSE、错误 region、扫描器离线/超时、EICAR、删除未知回执和删除后对象仍存在；不会连接 Provider 或读取用户媒体。
+2. 将后端升级到包含 A1 的版本，构建并重启 API 容器。
+3. 在 API 容器内执行：
 
    ```bash
    RUN_BACKEND_OWNER_TRUTH_MEDIA_COS_PROVIDER_SMOKE=1 \
@@ -70,9 +77,9 @@ OWNER_TRUTH_MEDIA_DELETION_WORKER_ENABLED=false
    ```
 
    脚本只写入一段随机 probe、执行 HEAD/readback 后立即删除；输出不会包含 bucket、key 或凭据。
-3. 查询 `/config/runtime`，确认 `ownerTruthMediaStorage.provider=cos`、`providerReady=true`，且响应中没有 bucket、endpoint、SecretId 或 SecretKey。
-4. 仅给测试租户打开 server-side closed-pilot policy，跑 Postgres media capture smoke，覆盖上传、授权读取、重复提交、过期、跨 owner、撤权和删除。
-5. 通过后才考虑打开处理 worker；OCR/ASR/视觉分析仍各自需要独立 Provider Gate。
+4. 查询 `/config/runtime`，确认 `ownerTruthMediaStorage.provider=cos`、`providerReady=true`，且响应中没有 bucket、endpoint、SecretId 或 SecretKey。
+5. 仅给测试租户打开 server-side closed-pilot policy，跑 Postgres media capture smoke，覆盖上传、授权读取、重复提交、过期、跨 owner、撤权和删除。
+6. 通过后才考虑打开处理 worker；OCR/ASR/视觉分析仍各自需要独立 Provider Gate。
 
 ## 5. 当前部署结论
 

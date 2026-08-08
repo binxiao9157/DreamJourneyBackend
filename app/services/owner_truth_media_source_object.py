@@ -25,6 +25,7 @@ import struct
 import subprocess
 from threading import RLock
 from typing import Any, Callable, Mapping, Optional, Protocol
+from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 import zipfile
 
@@ -775,6 +776,7 @@ class S3PrivateMediaObjectStore:
         self._bucket = _private_bucket_name(bucket)
         self._prefix = _private_storage_prefix(prefix)
         self._endpoint_url = str(endpoint_url or "").strip() or None
+        self._region = str(region or "").strip() or None
         self._server_side_encryption = _optional_identifier(
             server_side_encryption,
             field="server side encryption",
@@ -792,10 +794,11 @@ class S3PrivateMediaObjectStore:
             "cos/kms",
         }:
             raise OwnerTruthMediaUploadInvalid("kms key requires kms encryption")
-        if self.provider_name == "cos" and (
-            self._endpoint_url is None or not self._endpoint_url.startswith("https://")
+        if self.provider_name == "cos" and not cos_endpoint_matches_region(
+            endpoint_url=self._endpoint_url,
+            region=self._region,
         ):
-            raise OwnerTruthMediaUploadInvalid("cos endpoint must use https")
+            raise OwnerTruthMediaUploadInvalid("cos endpoint and region are invalid")
         if client is None:
             try:
                 import boto3
@@ -803,7 +806,7 @@ class S3PrivateMediaObjectStore:
                 raise OwnerTruthMediaCaptureUnavailable("s3 media storage client is unavailable") from exc
             client = boto3.client(
                 "s3",
-                region_name=str(region or "").strip() or None,
+                region_name=self._region,
                 endpoint_url=self._endpoint_url,
                 aws_access_key_id=str(access_key_id or "").strip() or None,
                 aws_secret_access_key=str(secret_access_key or "").strip() or None,
@@ -900,7 +903,10 @@ class S3PrivateMediaObjectStore:
 
     def delete(self, *, storage_key: str) -> None:
         try:
-            self._client.delete_object(Bucket=self._bucket, Key=self._object_key(storage_key))
+            response = self._client.delete_object(
+                Bucket=self._bucket,
+                Key=self._object_key(storage_key),
+            )
         except Exception as exc:
             # A deletion worker must distinguish an acknowledged removal from
             # an unavailable object store. Upload rollback handles this
@@ -908,6 +914,24 @@ class S3PrivateMediaObjectStore:
             raise OwnerTruthMediaCaptureUnavailable(
                 "private media object delete is unavailable"
             ) from exc
+        if not _provider_response_is_success(response):
+            raise OwnerTruthMediaCaptureUnavailable(
+                "private media object delete acknowledgement is unavailable"
+            )
+        try:
+            self._client.head_object(
+                Bucket=self._bucket,
+                Key=self._object_key(storage_key),
+            )
+        except Exception as exc:
+            if _provider_error_is_object_not_found(exc):
+                return
+            raise OwnerTruthMediaCaptureUnavailable(
+                "private media object delete verification is unavailable"
+            ) from exc
+        raise OwnerTruthMediaCaptureUnavailable(
+            "private media object delete verification failed"
+        )
 
     def read(self, *, storage_key: str) -> bytes:
         try:
@@ -945,6 +969,70 @@ def _private_bucket_name(value: object) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{1,126}[A-Za-z0-9]", bucket):
         raise OwnerTruthMediaUploadInvalid("private media bucket is invalid")
     return bucket
+
+
+def cos_endpoint_matches_region(
+    *,
+    endpoint_url: object,
+    region: object,
+) -> bool:
+    normalized_region = str(region or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,63}", normalized_region):
+        return False
+    try:
+        parsed = urlsplit(str(endpoint_url or "").strip())
+        hostname = str(parsed.hostname or "").strip().lower().rstrip(".")
+        if parsed.port not in {None, 443}:
+            return False
+    except ValueError:
+        return False
+    if (
+        parsed.scheme.lower() != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    expected_host = f"cos.{normalized_region}.myqcloud.com"
+    return hostname == expected_host or hostname.endswith(f".{expected_host}")
+
+
+def _provider_response_is_success(response: object) -> bool:
+    if not isinstance(response, Mapping):
+        return False
+    metadata = response.get("ResponseMetadata")
+    if not isinstance(metadata, Mapping):
+        return False
+    try:
+        status = int(metadata.get("HTTPStatusCode"))
+    except (TypeError, ValueError):
+        return False
+    return 200 <= status < 300
+
+
+def _provider_error_is_object_not_found(error: Exception) -> bool:
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return False
+    metadata = response.get("ResponseMetadata")
+    error_payload = response.get("Error")
+    try:
+        status = (
+            int(metadata.get("HTTPStatusCode"))
+            if isinstance(metadata, Mapping)
+            else None
+        )
+    except (TypeError, ValueError):
+        status = None
+    code = (
+        str(error_payload.get("Code") or "").strip()
+        if isinstance(error_payload, Mapping)
+        else ""
+    )
+    return status == 404 and code in {"", "404", "NoSuchKey", "NotFound", "ObjectNotFound"}
 
 
 def _optional_identifier(value: object, *, field: str) -> Optional[str]:
@@ -3578,5 +3666,6 @@ __all__ = [
     "build_private_media_object_store",
     "clamav_daemon_runtime_ready",
     "clamav_scanner_runtime_ready",
+    "cos_endpoint_matches_region",
     "inspect_magic_mime",
 ]

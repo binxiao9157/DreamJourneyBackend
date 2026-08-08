@@ -344,6 +344,38 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
         self.assertFalse(incomplete["providerReady"])
         self.assertEqual(incomplete["reason"], "providerConfigurationIncomplete")
 
+        missing_sse_settings = Settings(
+            **base,
+            owner_truth_media_s3_endpoint_url="https://cos.ap-shanghai.myqcloud.com",
+        )
+        missing_sse = RuntimeConfigService(
+            missing_sse_settings,
+            provider_inventory=ProviderRuntimeInventory(
+                missing_sse_settings,
+                clamav_scanner_ready=lambda: True,
+            ),
+        ).public_config()["capabilitySnapshots"]["ownerTruthMediaStorage"]
+        self.assertFalse(missing_sse["providerReady"])
+        self.assertEqual(missing_sse["reason"], "providerConfigurationIncomplete")
+
+        wrong_region_settings = Settings(
+            **{
+                **base,
+                "owner_truth_media_s3_region": "ap-guangzhou",
+                "owner_truth_media_s3_endpoint_url": "https://cos.ap-shanghai.myqcloud.com",
+                "owner_truth_media_s3_server_side_encryption": "AES256",
+            }
+        )
+        wrong_region = RuntimeConfigService(
+            wrong_region_settings,
+            provider_inventory=ProviderRuntimeInventory(
+                wrong_region_settings,
+                clamav_scanner_ready=lambda: True,
+            ),
+        ).public_config()["capabilitySnapshots"]["ownerTruthMediaStorage"]
+        self.assertFalse(wrong_region["providerReady"])
+        self.assertEqual(wrong_region["reason"], "providerConfigurationIncomplete")
+
         configured_settings = Settings(
             **base,
             owner_truth_media_s3_endpoint_url="https://cos.ap-shanghai.myqcloud.com",

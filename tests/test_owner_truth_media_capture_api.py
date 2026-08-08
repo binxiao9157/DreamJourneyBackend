@@ -787,7 +787,7 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
             bucket="dreamjourney-private-media",
             prefix="owner-truth/v1",
             region="ap-shanghai",
-            endpoint_url="https://cos.example.test",
+            endpoint_url="https://cos.ap-shanghai.myqcloud.com",
             server_side_encryption="AES256",
             client=client,
         )
@@ -845,6 +845,51 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
         )
         self.assertEqual(adapter.provider_name, "cos")
 
+        mismatched_region = build_private_media_object_store(
+            provider="cos",
+            root=self.media_root.name,
+            s3_bucket="fixture-private-media-1250000000",
+            s3_region="ap-guangzhou",
+            s3_endpoint_url="https://cos.ap-shanghai.myqcloud.com",
+            s3_access_key_id="fixture-access",
+            s3_secret_access_key="fixture-secret",
+            s3_server_side_encryption="AES256",
+        )
+        self.assertEqual(mismatched_region.provider_name, "disabled")
+
+    def test_cos_delete_requires_provider_acknowledgement_and_absence_verification(self) -> None:
+        client = _FakeS3Client()
+        client.delete_removes_object = False
+        adapter = S3PrivateMediaObjectStore(
+            provider_name="cos",
+            bucket="dreamjourney-private-media",
+            prefix="owner-truth/v1",
+            region="ap-shanghai",
+            endpoint_url="https://cos.ap-shanghai.myqcloud.com",
+            server_side_encryption="AES256",
+            client=client,
+        )
+        payload = b"private-delete-verification"
+        storage_key = "vault-a/object-delete.bin"
+        adapter.write(
+            storage_key=storage_key,
+            payload=payload,
+            content_type="text/plain",
+            content_sha256=sha256(payload).hexdigest(),
+        )
+
+        client.delete_response = {}
+        with self.assertRaises(OwnerTruthMediaCaptureUnavailable):
+            adapter.delete(storage_key=storage_key)
+
+        client.delete_response = {"ResponseMetadata": {"HTTPStatusCode": 204}}
+        with self.assertRaises(OwnerTruthMediaCaptureUnavailable):
+            adapter.delete(storage_key=storage_key)
+
+        client.delete_removes_object = True
+        adapter.delete(storage_key=storage_key)
+        self.assertEqual(len(client.delete_requests), 3)
+
     def test_cos_head_mismatch_keeps_source_object_unverified(self) -> None:
         payload = b"private source text"
         client = _FakeS3Client()
@@ -856,7 +901,7 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
                 bucket="dreamjourney-private-media",
                 prefix="owner-truth/v1",
                 region="ap-shanghai",
-                endpoint_url="https://cos.example.test",
+                endpoint_url="https://cos.ap-shanghai.myqcloud.com",
                 server_side_encryption="AES256",
                 client=client,
             ),
@@ -944,6 +989,15 @@ class _FakeS3Body:
         return self._payload
 
 
+class _FakeS3ClientError(Exception):
+    def __init__(self, *, status: int, code: str) -> None:
+        super().__init__(code)
+        self.response = {
+            "ResponseMetadata": {"HTTPStatusCode": status},
+            "Error": {"Code": code},
+        }
+
+
 class _FakeS3Client:
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], bytes] = {}
@@ -952,6 +1006,10 @@ class _FakeS3Client:
         self.head_requests: list[dict[str, object]] = []
         self.delete_requests: list[dict[str, object]] = []
         self.head_override: dict[str, object] | None = None
+        self.delete_response: dict[str, object] = {
+            "ResponseMetadata": {"HTTPStatusCode": 204},
+        }
+        self.delete_removes_object = True
 
     def put_object(self, **kwargs: object) -> None:
         self.put_requests.append(dict(kwargs))
@@ -966,6 +1024,8 @@ class _FakeS3Client:
     def head_object(self, **kwargs: object) -> dict[str, object]:
         self.head_requests.append(dict(kwargs))
         identifier = (str(kwargs["Bucket"]), str(kwargs["Key"]))
+        if identifier not in self.objects:
+            raise _FakeS3ClientError(status=404, code="NoSuchKey")
         response = {
             "ContentLength": len(self.objects[identifier]),
             **self.object_metadata[identifier],
@@ -977,8 +1037,10 @@ class _FakeS3Client:
         payload = self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))]
         return {"Body": _FakeS3Body(payload)}
 
-    def delete_object(self, **kwargs: object) -> None:
+    def delete_object(self, **kwargs: object) -> dict[str, object]:
         self.delete_requests.append(dict(kwargs))
         identifier = (str(kwargs["Bucket"]), str(kwargs["Key"]))
-        self.objects.pop(identifier, None)
-        self.object_metadata.pop(identifier, None)
+        if self.delete_removes_object:
+            self.objects.pop(identifier, None)
+            self.object_metadata.pop(identifier, None)
+        return dict(self.delete_response)

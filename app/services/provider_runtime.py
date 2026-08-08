@@ -18,6 +18,7 @@ from app.services.identity_bindings import identity_challenge_runtime_descriptor
 from app.services.owner_truth_media_source_object import (
     clamav_daemon_runtime_ready,
     clamav_scanner_runtime_ready,
+    cos_endpoint_matches_region,
 )
 
 
@@ -417,7 +418,10 @@ class ProviderRuntimeInventory:
         kms_key_id = str(settings.owner_truth_media_s3_kms_key_id or "").strip()
         if provider == "cos":
             endpoint = str(settings.owner_truth_media_s3_endpoint_url or "").strip()
-            if not endpoint.startswith("https://"):
+            if not cos_endpoint_matches_region(
+                endpoint_url=endpoint,
+                region=settings.owner_truth_media_s3_region,
+            ):
                 return False
             if encryption not in {"AES256", "cos/kms"}:
                 return False

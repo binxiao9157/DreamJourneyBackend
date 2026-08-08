@@ -41,6 +41,8 @@ echo "== Owner Truth Candidate extraction worker G0 gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-candidate-extraction-worker-g0-gate.sh
 echo "== Owner Truth Stage 2 private media processing gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-media-processing-gate.sh
+echo "== Owner Truth media Provider readiness matrix gate =="
+PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-media-provider-matrix-gate.sh
 echo "== Owner Truth worker process gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-worker-process-gate.sh
 
