@@ -35,6 +35,7 @@ OWNER_TRUTH_MEDIA_DELETION_RESPONSE_SCHEMA_VERSION = "owner-truth-media-deletion
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _PURPOSE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,79}$")
+_PRIVATE_MEDIA_OBJECT_SHA256_METADATA_KEY = "dreamjourney-sha256"
 _MEDIA_KINDS = frozenset({"image", "audio", "video", "document"})
 _MIME_TYPES_BY_KIND: dict[str, frozenset[str]] = {
     "image": frozenset({"image/jpeg", "image/png", "image/webp"}),
@@ -442,7 +443,24 @@ class ClamAVMediaContentSafetyScanner:
 class PrivateMediaObjectStore(Protocol):
     provider_name: str
 
-    def write(self, *, storage_key: str, payload: bytes) -> None:
+    def write(
+        self,
+        *,
+        storage_key: str,
+        payload: bytes,
+        content_type: Optional[str] = None,
+        content_sha256: Optional[str] = None,
+    ) -> None:
+        ...
+
+    def verify_upload(
+        self,
+        *,
+        storage_key: str,
+        expected_file_size_bytes: int,
+        expected_content_type: str,
+        expected_content_sha256: str,
+    ) -> None:
         ...
 
     def delete(self, *, storage_key: str) -> None:
@@ -455,8 +473,26 @@ class PrivateMediaObjectStore(Protocol):
 class DisabledPrivateMediaObjectStore:
     provider_name = "disabled"
 
-    def write(self, *, storage_key: str, payload: bytes) -> None:
-        del storage_key, payload
+    def write(
+        self,
+        *,
+        storage_key: str,
+        payload: bytes,
+        content_type: Optional[str] = None,
+        content_sha256: Optional[str] = None,
+    ) -> None:
+        del storage_key, payload, content_type, content_sha256
+        raise OwnerTruthMediaCaptureUnavailable("private media storage is not configured")
+
+    def verify_upload(
+        self,
+        *,
+        storage_key: str,
+        expected_file_size_bytes: int,
+        expected_content_type: str,
+        expected_content_sha256: str,
+    ) -> None:
+        del storage_key, expected_file_size_bytes, expected_content_type, expected_content_sha256
         raise OwnerTruthMediaCaptureUnavailable("private media storage is not configured")
 
     def delete(self, *, storage_key: str) -> None:
@@ -477,7 +513,18 @@ class FilesystemPrivateMediaObjectStore:
         candidate.mkdir(parents=True, exist_ok=True)
         self._root = candidate.resolve()
 
-    def write(self, *, storage_key: str, payload: bytes) -> None:
+    def write(
+        self,
+        *,
+        storage_key: str,
+        payload: bytes,
+        content_type: Optional[str] = None,
+        content_sha256: Optional[str] = None,
+    ) -> None:
+        if content_type is not None:
+            _normalize_content_type(content_type)
+        if content_sha256 is not None and _sha256(payload) != _normalize_sha256(content_sha256):
+            raise OwnerTruthMediaUploadInvalid("private media payload checksum is invalid")
         target = self._resolve(storage_key)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
@@ -495,7 +542,29 @@ class FilesystemPrivateMediaObjectStore:
         self._resolve(storage_key).unlink(missing_ok=True)
 
     def read(self, *, storage_key: str) -> bytes:
-        return self._resolve(storage_key).read_bytes()
+        try:
+            return self._resolve(storage_key).read_bytes()
+        except OSError as exc:
+            raise OwnerTruthMediaCaptureUnavailable("private media object read is unavailable") from exc
+
+    def verify_upload(
+        self,
+        *,
+        storage_key: str,
+        expected_file_size_bytes: int,
+        expected_content_type: str,
+        expected_content_sha256: str,
+    ) -> None:
+        # Filesystem storage exists for local/isolated contract runs. Production
+        # COS uses HEAD plus persisted object metadata below; both paths still
+        # verify the immutable byte length and SHA-256 before DB completion.
+        _normalize_content_type(expected_content_type)
+        payload = self.read(storage_key=storage_key)
+        _assert_private_media_object_integrity(
+            payload=payload,
+            expected_file_size_bytes=expected_file_size_bytes,
+            expected_content_sha256=expected_content_sha256,
+        )
 
     def _resolve(self, storage_key: str) -> Path:
         normalized = _private_storage_key(storage_key)
@@ -515,11 +584,10 @@ class S3PrivateMediaObjectStore:
     transfer and keeps the bucket/key implementation detail server-side.
     """
 
-    provider_name = "s3"
-
     def __init__(
         self,
         *,
+        provider_name: str = "s3",
         bucket: str,
         prefix: str = "dreamjourney/private-media",
         region: Optional[str] = None,
@@ -530,17 +598,34 @@ class S3PrivateMediaObjectStore:
         kms_key_id: Optional[str] = None,
         client: Any = None,
     ) -> None:
+        normalized_provider = str(provider_name or "").strip().lower()
+        if normalized_provider not in {"s3", "cos"}:
+            raise OwnerTruthMediaUploadInvalid("private media storage provider is invalid")
+        self.provider_name = normalized_provider
         self._bucket = _private_bucket_name(bucket)
         self._prefix = _private_storage_prefix(prefix)
+        self._endpoint_url = str(endpoint_url or "").strip() or None
         self._server_side_encryption = _optional_identifier(
             server_side_encryption,
             field="server side encryption",
         )
         self._kms_key_id = _optional_identifier(kms_key_id, field="kms key id")
-        if self._server_side_encryption not in {None, "AES256", "aws:kms"}:
+        allowed_encryption = (
+            {None, "AES256", "cos/kms"}
+            if self.provider_name == "cos"
+            else {None, "AES256", "aws:kms"}
+        )
+        if self._server_side_encryption not in allowed_encryption:
             raise OwnerTruthMediaUploadInvalid("server side encryption is invalid")
-        if self._kms_key_id is not None and self._server_side_encryption != "aws:kms":
-            raise OwnerTruthMediaUploadInvalid("kms key requires aws:kms encryption")
+        if self._kms_key_id is not None and self._server_side_encryption not in {
+            "aws:kms",
+            "cos/kms",
+        }:
+            raise OwnerTruthMediaUploadInvalid("kms key requires kms encryption")
+        if self.provider_name == "cos" and (
+            self._endpoint_url is None or not self._endpoint_url.startswith("https://")
+        ):
+            raise OwnerTruthMediaUploadInvalid("cos endpoint must use https")
         if client is None:
             try:
                 import boto3
@@ -549,18 +634,39 @@ class S3PrivateMediaObjectStore:
             client = boto3.client(
                 "s3",
                 region_name=str(region or "").strip() or None,
-                endpoint_url=str(endpoint_url or "").strip() or None,
+                endpoint_url=self._endpoint_url,
                 aws_access_key_id=str(access_key_id or "").strip() or None,
                 aws_secret_access_key=str(secret_access_key or "").strip() or None,
             )
         self._client = client
 
-    def write(self, *, storage_key: str, payload: bytes) -> None:
+    def write(
+        self,
+        *,
+        storage_key: str,
+        payload: bytes,
+        content_type: Optional[str] = None,
+        content_sha256: Optional[str] = None,
+    ) -> None:
+        normalized_content_type = (
+            _normalize_content_type(content_type) if content_type is not None else None
+        )
+        normalized_content_sha256 = (
+            _normalize_sha256(content_sha256) if content_sha256 is not None else None
+        )
+        if normalized_content_sha256 is not None and _sha256(payload) != normalized_content_sha256:
+            raise OwnerTruthMediaUploadInvalid("private media payload checksum is invalid")
         request: dict[str, Any] = {
             "Bucket": self._bucket,
             "Key": self._object_key(storage_key),
             "Body": payload,
         }
+        if normalized_content_type is not None:
+            request["ContentType"] = normalized_content_type
+        if normalized_content_sha256 is not None:
+            request["Metadata"] = {
+                _PRIVATE_MEDIA_OBJECT_SHA256_METADATA_KEY: normalized_content_sha256,
+            }
         if self._server_side_encryption is not None:
             request["ServerSideEncryption"] = self._server_side_encryption
         if self._kms_key_id is not None:
@@ -569,6 +675,58 @@ class S3PrivateMediaObjectStore:
             self._client.put_object(**request)
         except Exception as exc:
             raise OwnerTruthMediaCaptureUnavailable("private media object write is unavailable") from exc
+
+    def verify_upload(
+        self,
+        *,
+        storage_key: str,
+        expected_file_size_bytes: int,
+        expected_content_type: str,
+        expected_content_sha256: str,
+    ) -> None:
+        expected_size = int(expected_file_size_bytes)
+        expected_type = _normalize_content_type(expected_content_type)
+        expected_sha256 = _normalize_sha256(expected_content_sha256)
+        if expected_size < 1:
+            raise OwnerTruthMediaUploadInvalid("private media expected size is invalid")
+        try:
+            response = self._client.head_object(
+                Bucket=self._bucket,
+                Key=self._object_key(storage_key),
+            )
+        except Exception as exc:
+            raise OwnerTruthMediaCaptureUnavailable(
+                "private media object verification is unavailable"
+            ) from exc
+        try:
+            observed_size = int(response["ContentLength"])
+            observed_type = _normalize_content_type(response.get("ContentType"))
+            metadata = response.get("Metadata") or {}
+            observed_sha256 = _normalize_sha256(
+                metadata.get(_PRIVATE_MEDIA_OBJECT_SHA256_METADATA_KEY)
+            )
+        except (KeyError, TypeError, ValueError, OwnerTruthMediaUploadInvalid) as exc:
+            raise OwnerTruthMediaCaptureUnavailable(
+                "private media object verification is unavailable"
+            ) from exc
+        if (
+            observed_size != expected_size
+            or observed_type != expected_type
+            or observed_sha256 != expected_sha256
+        ):
+            raise OwnerTruthMediaCaptureUnavailable(
+                "private media object metadata verification failed"
+            )
+        if self._server_side_encryption is not None:
+            observed_encryption = str(
+                response.get("ServerSideEncryption")
+                or response.get("x-cos-server-side-encryption")
+                or ""
+            ).strip()
+            if observed_encryption != self._server_side_encryption:
+                raise OwnerTruthMediaCaptureUnavailable(
+                    "private media object encryption verification failed"
+                )
 
     def delete(self, *, storage_key: str) -> None:
         try:
@@ -626,6 +784,21 @@ def _optional_identifier(value: object, *, field: str) -> Optional[str]:
     return normalized
 
 
+def _assert_private_media_object_integrity(
+    *,
+    payload: bytes,
+    expected_file_size_bytes: int,
+    expected_content_sha256: str,
+) -> None:
+    if (
+        len(payload) != int(expected_file_size_bytes)
+        or _sha256(payload) != _normalize_sha256(expected_content_sha256)
+    ):
+        raise OwnerTruthMediaCaptureUnavailable(
+            "private media object metadata verification failed"
+        )
+
+
 def build_private_media_object_store(
     *,
     provider: str,
@@ -643,10 +816,20 @@ def build_private_media_object_store(
     if normalized == "filesystem":
         return FilesystemPrivateMediaObjectStore(root=root)
     if normalized in {"s3", "cos"}:
-        if not str(s3_bucket or "").strip():
+        required = (
+            s3_bucket,
+            s3_region,
+            s3_access_key_id,
+            s3_secret_access_key,
+            s3_server_side_encryption,
+        )
+        if normalized == "cos":
+            required = (*required, s3_endpoint_url)
+        if not all(str(value or "").strip() for value in required):
             return DisabledPrivateMediaObjectStore()
         try:
             return S3PrivateMediaObjectStore(
+                provider_name=normalized,
                 bucket=str(s3_bucket),
                 prefix=s3_prefix,
                 region=s3_region,
@@ -2994,7 +3177,31 @@ class OwnerTruthMediaIngestionService:
             source_object_id=str(source_object["sourceObjectId"]),
             content_sha256=str(source_object["contentSha256"]),
         )
-        self._object_store.write(storage_key=storage_key, payload=payload)
+        wrote_object = False
+        try:
+            self._object_store.write(
+                storage_key=storage_key,
+                payload=payload,
+                content_type=expected_content_type,
+                content_sha256=str(source_object["contentSha256"]),
+            )
+            wrote_object = True
+            self._object_store.verify_upload(
+                storage_key=storage_key,
+                expected_file_size_bytes=int(source_object["fileSizeBytes"]),
+                expected_content_type=expected_content_type,
+                expected_content_sha256=str(source_object["contentSha256"]),
+            )
+        except Exception:
+            if wrote_object:
+                try:
+                    self._object_store.delete(storage_key=storage_key)
+                except OwnerTruthMediaCaptureUnavailable:
+                    # A failed verification is never committed as an uploaded
+                    # SourceObject. Retain the primary failure if rollback is
+                    # unavailable; the object remains inaccessible by API.
+                    pass
+            raise
         try:
             outcome, completed = repository.complete_upload(
                 vault_id=context.vault_id,
@@ -3018,6 +3225,47 @@ class OwnerTruthMediaIngestionService:
                 # through the revocation-first deletion lane.
                 pass
             raise
+
+    def read_content(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        source_object_id: str,
+    ) -> tuple[Mapping[str, Any], bytes]:
+        """Read one verified private object through the authorized API boundary.
+
+        Object-store keys and URLs never leave this service. Each read repeats
+        the storage metadata verification so a later replacement cannot be
+        served merely because its original upload had once been verified.
+        """
+
+        source_object = self.get_source_object(
+            context=context,
+            source_object_id=source_object_id,
+        )
+        if (
+            str(source_object.get("accessState") or "available") != "available"
+            or str(source_object.get("state") or "") != "verified"
+        ):
+            raise OwnerTruthMediaAccessRevoked("media source object access was revoked")
+        if str(source_object.get("storageProvider") or "") != self._object_store.provider_name:
+            raise OwnerTruthMediaCaptureUnavailable("private media storage is unavailable")
+        storage_key = str(source_object.get("storageKey") or "")
+        if not storage_key:
+            raise OwnerTruthMediaCaptureUnavailable("private media storage is unavailable")
+        self._object_store.verify_upload(
+            storage_key=storage_key,
+            expected_file_size_bytes=int(source_object["fileSizeBytes"]),
+            expected_content_type=str(source_object["contentType"]),
+            expected_content_sha256=str(source_object["contentSha256"]),
+        )
+        payload = self._object_store.read(storage_key=storage_key)
+        _assert_private_media_object_integrity(
+            payload=payload,
+            expected_file_size_bytes=int(source_object["fileSizeBytes"]),
+            expected_content_sha256=str(source_object["contentSha256"]),
+        )
+        return source_object, payload
 
     def get_source_object(
         self,

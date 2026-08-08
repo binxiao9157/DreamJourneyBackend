@@ -109,9 +109,10 @@ class Settings:
     owner_truth_media_capture_enabled: bool = False
     owner_truth_media_storage_provider: str = "disabled"
     owner_truth_media_storage_root: str = "/var/lib/dreamjourney/media"
-    # ``s3`` is an S3-compatible private bucket, including Tencent COS through
-    # its S3 endpoint. Credentials stay server-side and no public object URL
-    # is issued by the media API.
+    # ``cos`` is the selected M0 production adapter and uses Tencent COS via
+    # its S3-compatible endpoint. ``s3`` remains available for isolated
+    # compatibility testing. Credentials stay server-side; the media API never
+    # issues a bucket URL or object key to the mobile client.
     owner_truth_media_s3_bucket: Optional[str] = None
     owner_truth_media_s3_prefix: str = "dreamjourney/private-media"
     owner_truth_media_s3_region: Optional[str] = None

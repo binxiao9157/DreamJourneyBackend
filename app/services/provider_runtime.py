@@ -156,13 +156,7 @@ class ProviderRuntimeInventory:
             )
 
         if provider in {"s3", "cos"}:
-            required = (
-                settings.owner_truth_media_s3_bucket,
-                settings.owner_truth_media_s3_region,
-                settings.owner_truth_media_s3_access_key_id,
-                settings.owner_truth_media_s3_secret_access_key,
-            )
-            if all(self._present(value) for value in required):
+            if self._media_object_storage_configuration_is_complete(provider):
                 return ProviderRuntimeStatus(
                     enabled=True,
                     provider_ready=True,
@@ -377,6 +371,32 @@ class ProviderRuntimeInventory:
         if provider in {"s3", "cos"}:
             return self._normalized(self._settings.owner_truth_media_s3_region) or "unknown"
         return "unknown"
+
+    def _media_object_storage_configuration_is_complete(self, provider: str) -> bool:
+        settings = self._settings
+        required = (
+            settings.owner_truth_media_s3_bucket,
+            settings.owner_truth_media_s3_region,
+            settings.owner_truth_media_s3_access_key_id,
+            settings.owner_truth_media_s3_secret_access_key,
+            settings.owner_truth_media_s3_server_side_encryption,
+        )
+        if not all(self._present(value) for value in required):
+            return False
+
+        encryption = str(settings.owner_truth_media_s3_server_side_encryption or "").strip()
+        kms_key_id = str(settings.owner_truth_media_s3_kms_key_id or "").strip()
+        if provider == "cos":
+            endpoint = str(settings.owner_truth_media_s3_endpoint_url or "").strip()
+            if not endpoint.startswith("https://"):
+                return False
+            if encryption not in {"AES256", "cos/kms"}:
+                return False
+            return not kms_key_id or encryption == "cos/kms"
+
+        if encryption not in {"AES256", "aws:kms"}:
+            return False
+        return not kms_key_id or encryption == "aws:kms"
 
     @staticmethod
     def _normalized(value: object) -> str:

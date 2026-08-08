@@ -19,11 +19,13 @@ from app.services.owner_truth_media_source_object import (
     MediaDeletionCommand,
     MediaUploadIntentCommand,
     OwnerTruthMediaAccessRevoked,
+    OwnerTruthMediaCaptureUnavailable,
     OwnerTruthMediaIngestionService,
     OwnerTruthMediaUploadConflict,
     OwnerTruthMediaUploadInvalid,
     S3PrivateMediaObjectStore,
     TestOnlyCleanMediaContentSafetyScanner,
+    build_private_media_object_store,
 )
 
 
@@ -700,21 +702,157 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
     def test_private_s3_adapter_keeps_keys_server_side_and_uses_no_public_acl(self) -> None:
         client = _FakeS3Client()
         adapter = S3PrivateMediaObjectStore(
+            provider_name="cos",
             bucket="dreamjourney-private-media",
             prefix="owner-truth/v1",
             region="ap-shanghai",
             endpoint_url="https://cos.example.test",
+            server_side_encryption="AES256",
             client=client,
         )
 
-        adapter.write(storage_key="vault-a/object-a.bin", payload=b"private-bytes")
+        payload = b"private-bytes"
+        adapter.write(
+            storage_key="vault-a/object-a.bin",
+            payload=payload,
+            content_type="text/plain",
+            content_sha256=sha256(payload).hexdigest(),
+        )
+        adapter.verify_upload(
+            storage_key="vault-a/object-a.bin",
+            expected_file_size_bytes=len(payload),
+            expected_content_type="text/plain",
+            expected_content_sha256=sha256(payload).hexdigest(),
+        )
 
         self.assertEqual(adapter.read(storage_key="vault-a/object-a.bin"), b"private-bytes")
         self.assertEqual(client.put_requests[0]["Bucket"], "dreamjourney-private-media")
         self.assertEqual(client.put_requests[0]["Key"], "owner-truth/v1/vault-a/object-a.bin")
+        self.assertEqual(client.put_requests[0]["ContentType"], "text/plain")
+        self.assertEqual(
+            client.put_requests[0]["Metadata"],
+            {"dreamjourney-sha256": sha256(payload).hexdigest()},
+        )
+        self.assertEqual(client.put_requests[0]["ServerSideEncryption"], "AES256")
         self.assertNotIn("ACL", client.put_requests[0])
+        self.assertEqual(client.head_requests[0]["Key"], "owner-truth/v1/vault-a/object-a.bin")
         adapter.delete(storage_key="vault-a/object-a.bin")
         self.assertEqual(client.delete_requests[0]["Key"], "owner-truth/v1/vault-a/object-a.bin")
+
+    def test_cos_factory_fails_closed_until_explicit_sse_and_https_endpoint_exist(self) -> None:
+        disabled = build_private_media_object_store(
+            provider="cos",
+            root=self.media_root.name,
+            s3_bucket="fixture-private-media-1250000000",
+            s3_region="ap-shanghai",
+            s3_endpoint_url="http://cos.ap-shanghai.myqcloud.com",
+            s3_access_key_id="fixture-access",
+            s3_secret_access_key="fixture-secret",
+            s3_server_side_encryption="AES256",
+        )
+        self.assertEqual(disabled.provider_name, "disabled")
+
+        adapter = build_private_media_object_store(
+            provider="cos",
+            root=self.media_root.name,
+            s3_bucket="fixture-private-media-1250000000",
+            s3_region="ap-shanghai",
+            s3_endpoint_url="https://cos.ap-shanghai.myqcloud.com",
+            s3_access_key_id="fixture-access",
+            s3_secret_access_key="fixture-secret",
+            s3_server_side_encryption="AES256",
+        )
+        self.assertEqual(adapter.provider_name, "cos")
+
+    def test_cos_head_mismatch_keeps_source_object_unverified(self) -> None:
+        payload = b"private source text"
+        client = _FakeS3Client()
+        client.head_override = {"ContentLength": len(payload) + 1}
+        service = OwnerTruthMediaIngestionService(
+            store=InMemoryStore(),
+            object_store=S3PrivateMediaObjectStore(
+                provider_name="cos",
+                bucket="dreamjourney-private-media",
+                prefix="owner-truth/v1",
+                region="ap-shanghai",
+                endpoint_url="https://cos.example.test",
+                server_side_encryption="AES256",
+                client=client,
+            ),
+            safety_scanner=TestOnlyCleanMediaContentSafetyScanner(),
+            enabled=True,
+            max_upload_bytes=1024 * 1024,
+            upload_intent_ttl_seconds=900,
+        )
+        context = OwnerTruthCommandContext(
+            vault_id="vault-cos-head-mismatch",
+            owner_subject_id="owner-cos-head-mismatch",
+            actor_subject_id="owner-cos-head-mismatch",
+        )
+        intent = service.create_upload_intent(
+            context=context,
+            command=MediaUploadIntentCommand.from_payload(self._intent_payload(body=payload)),
+        )
+
+        with self.assertRaises(OwnerTruthMediaCaptureUnavailable):
+            service.upload_content(
+                context=context,
+                intent_id=str(intent.upload_intent["uploadIntentId"]),
+                upload_token=str(intent.upload_token),
+                payload=payload,
+                request_content_type="text/plain",
+            )
+
+        source_object = service.get_source_object(
+            context=context,
+            source_object_id=str(intent.source_object["sourceObjectId"]),
+        )
+        self.assertEqual(source_object["state"], "uploadPending")
+        self.assertEqual(len(client.delete_requests), 1)
+
+    def test_authorized_owner_can_read_private_content_without_storage_details(self) -> None:
+        owner_id, auth_headers, session_id = self._login("13800139720")
+        self._allow_owner(owner_id)
+        headers = self._capture_headers(auth_headers, session_id=session_id)
+        vault_id = "vault-media-content-read"
+        payload = b"private media content"
+        created = self.client.post(
+            self._intent_path(vault_id),
+            headers=headers,
+            json=self._intent_payload(body=payload),
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        intent = created.json()["uploadIntent"]
+        uploaded = self.client.put(
+            f"{self._intent_path(vault_id)}/{intent['uploadIntentId']}/content",
+            headers={
+                **headers,
+                "X-DreamJourney-Upload-Token": intent["uploadToken"],
+                "Content-Type": "text/plain",
+            },
+            content=payload,
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        source_object_id = uploaded.json()["sourceObject"]["sourceObjectId"]
+
+        downloaded = self.client.get(
+            f"/v2/vaults/{vault_id}/source-objects/{source_object_id}/content",
+            headers=headers,
+        )
+
+        self.assertEqual(downloaded.status_code, 200, downloaded.text)
+        self.assertEqual(downloaded.content, payload)
+        self.assertEqual(downloaded.headers["content-type"], "text/plain; charset=utf-8")
+        self.assertEqual(downloaded.headers["cache-control"], "no-store")
+        self.assertEqual(downloaded.headers["content-disposition"], "attachment")
+        self.assertNotIn("storageKey", downloaded.text)
+
+        _, other_headers, other_session = self._login("13800139721")
+        other_response = self.client.get(
+            f"/v2/vaults/{vault_id}/source-objects/{source_object_id}/content",
+            headers=self._capture_headers(other_headers, session_id=other_session),
+        )
+        self.assertIn(other_response.status_code, {403, 404})
 
 
 class _FakeS3Body:
@@ -728,12 +866,31 @@ class _FakeS3Body:
 class _FakeS3Client:
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], bytes] = {}
+        self.object_metadata: dict[tuple[str, str], dict[str, object]] = {}
         self.put_requests: list[dict[str, object]] = []
+        self.head_requests: list[dict[str, object]] = []
         self.delete_requests: list[dict[str, object]] = []
+        self.head_override: dict[str, object] | None = None
 
     def put_object(self, **kwargs: object) -> None:
         self.put_requests.append(dict(kwargs))
-        self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))] = bytes(kwargs["Body"])
+        identifier = (str(kwargs["Bucket"]), str(kwargs["Key"]))
+        self.objects[identifier] = bytes(kwargs["Body"])
+        self.object_metadata[identifier] = {
+            "ContentType": str(kwargs.get("ContentType") or "application/octet-stream"),
+            "Metadata": dict(kwargs.get("Metadata") or {}),
+            "ServerSideEncryption": kwargs.get("ServerSideEncryption"),
+        }
+
+    def head_object(self, **kwargs: object) -> dict[str, object]:
+        self.head_requests.append(dict(kwargs))
+        identifier = (str(kwargs["Bucket"]), str(kwargs["Key"]))
+        response = {
+            "ContentLength": len(self.objects[identifier]),
+            **self.object_metadata[identifier],
+        }
+        response.update(self.head_override or {})
+        return response
 
     def get_object(self, **kwargs: object) -> dict[str, object]:
         payload = self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))]
@@ -741,4 +898,6 @@ class _FakeS3Client:
 
     def delete_object(self, **kwargs: object) -> None:
         self.delete_requests.append(dict(kwargs))
-        self.objects.pop((str(kwargs["Bucket"]), str(kwargs["Key"])), None)
+        identifier = (str(kwargs["Bucket"]), str(kwargs["Key"]))
+        self.objects.pop(identifier, None)
+        self.object_metadata.pop(identifier, None)

@@ -38,6 +38,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
 PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/core/config.py \
   app/services/owner_truth_media_source_object.py \
+  app/services/provider_runtime.py \
   app/services/owner_truth_media_processing.py \
   app/services/owner_truth_media_deletion.py \
   app/async_effects/owner_truth_media_processing_worker.py \
@@ -47,6 +48,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/async_effects/consumer_repository.py \
   app/async_effects/worker_lifecycle.py \
   scripts/backend-owner-truth-media-processing-postgres-smoke.py \
+  scripts/backend-owner-truth-media-cos-provider-smoke.py \
   app/services/route_ownership.py \
   app/services/release_policy.py \
   app/main.py
@@ -108,6 +110,7 @@ bash -n scripts/run-backend-owner-truth-media-deletion-postgres-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-deletion-deployed-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-deletion-lease-heartbeat-postgres-smoke.sh
 bash -n scripts/run-backend-owner-truth-media-deletion-lease-heartbeat-deployed-smoke.sh
+bash -n scripts/run-backend-owner-truth-media-cos-provider-smoke.sh
 bash -n scripts/run-backend-business-message-projection-worker-gate.sh
 bash -n scripts/run-backend-business-message-projection-worker-postgres-smoke.sh
 

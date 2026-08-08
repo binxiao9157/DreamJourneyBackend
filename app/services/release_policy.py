@@ -939,8 +939,10 @@ class ReleasePolicyCommandGate:
             suffix = normalized_path.split("/source-objects", 1)[1]
             if suffix.endswith("/upload-intents"):
                 return f"{normalized_method} /v2/vaults/*/source-objects/upload-intents"
-            if suffix.endswith("/content"):
+            if suffix.startswith("/upload-intents/") and suffix.endswith("/content"):
                 return f"{normalized_method} /v2/vaults/*/source-objects/upload-intents/*/content"
+            if suffix.endswith("/content"):
+                return f"{normalized_method} /v2/vaults/*/source-objects/*/content"
             if suffix.endswith("/processing-retries"):
                 return f"{normalized_method} /v2/vaults/*/source-objects/*/processing-retries"
             if suffix.endswith("/deletion-retries"):

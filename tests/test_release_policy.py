@@ -991,6 +991,14 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
             "POST /v2/vaults/*/source-objects/*/deletions",
         )
         self.assertEqual(
+            gate.route_label_for_request(
+                "GET",
+                "/v2/vaults/vault-a/source-objects/object-a/content",
+                {},
+            ),
+            "GET /v2/vaults/*/source-objects/*/content",
+        )
+        self.assertEqual(
             gate.feature_for_request("POST", "/echo/delayed-replies/dispatch-due", {}),
             "echoTextInput",
         )

@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 try:
     from fastapi import FastAPI, HTTPException, Query, Request
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, Response
 except ImportError as exc:  # pragma: no cover - exercised only without runtime deps
     raise RuntimeError("FastAPI is not installed. Run `pip install -r requirements.txt`.") from exc
 
@@ -1449,6 +1449,8 @@ def _owner_truth_media_capture_context(
         route = "POST /v2/vaults/*/source-objects/upload-intents"
     elif request.method.upper() == "PUT" and normalized_path.endswith("/content"):
         route = "PUT /v2/vaults/*/source-objects/upload-intents/*/content"
+    elif request.method.upper() == "GET" and normalized_path.endswith("/content"):
+        route = "GET /v2/vaults/*/source-objects/*/content"
     elif request.method.upper() == "POST" and normalized_path.endswith("/processing-retries"):
         route = "POST /v2/vaults/*/source-objects/*/processing-retries"
     elif request.method.upper() == "POST" and normalized_path.endswith("/deletions"):
@@ -6679,6 +6681,38 @@ def get_owner_truth_media_source_object(
             "vaultId": context.vault_id,
         },
         headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/source-objects/{source_object_id}/content",
+    include_in_schema=False,
+)
+def get_owner_truth_media_source_object_content(
+    request: Request,
+    vault_id: str,
+    source_object_id: str,
+) -> Response:
+    """Read a verified private object without disclosing storage URLs or keys."""
+
+    try:
+        context = _owner_truth_media_capture_context(request, vault_id=vault_id)
+        source_object, payload = OWNER_TRUTH_MEDIA_INGESTION_SERVICE.read_content(
+            context=context,
+            source_object_id=source_object_id,
+        )
+    except HTTPException:
+        raise
+    except OwnerTruthMediaIngestionError as error:
+        raise _owner_truth_media_capture_http_error(error) from error
+    return Response(
+        content=payload,
+        media_type=str(source_object["contentType"]),
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": "attachment",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

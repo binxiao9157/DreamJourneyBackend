@@ -96,11 +96,11 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
 
         self.assertEqual(development["mode"], "shadow")
         self.assertEqual(production["mode"], "enforce")
-        self.assertEqual(production["routeCount"], 172)
+        self.assertEqual(production["routeCount"], 173)
         self.assertEqual(production["unclassifiedCount"], 0)
         self.assertEqual(
             production["authModeCounts"],
-            {"machine": 15, "public": 10, "user": 147},
+            {"machine": 15, "public": 10, "user": 148},
         )
         self.assertTrue(production["productionEnforceReady"])
 
@@ -247,6 +247,7 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             owner_truth_media_s3_region="ap-shanghai",
             owner_truth_media_s3_access_key_id="fixture-storage-access",
             owner_truth_media_s3_secret_access_key="fixture-storage-secret",
+            owner_truth_media_s3_server_side_encryption="AES256",
             owner_truth_media_content_safety_provider="clamav",
             owner_truth_media_processing_worker_enabled=True,
             async_effect_v1_enabled=True,
@@ -299,6 +300,39 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             "https://otp.example.test/challenge",
         ):
             self.assertNotIn(secret, serialized)
+
+    def test_cos_storage_requires_https_endpoint_and_explicit_cos_encryption(self):
+        base = {
+            "owner_truth_media_capture_enabled": True,
+            "owner_truth_media_storage_provider": "cos",
+            "owner_truth_media_s3_bucket": "fixture-private-media-1250000000",
+            "owner_truth_media_s3_region": "ap-shanghai",
+            "owner_truth_media_s3_access_key_id": "fixture-storage-access",
+            "owner_truth_media_s3_secret_access_key": "fixture-storage-secret",
+            "owner_truth_media_content_safety_provider": "clamav",
+        }
+
+        incomplete = RuntimeConfigService(
+            Settings(
+                **base,
+                owner_truth_media_s3_endpoint_url="http://cos.ap-shanghai.myqcloud.com",
+                owner_truth_media_s3_server_side_encryption="AES256",
+            )
+        ).public_config()["capabilitySnapshots"]["ownerTruthMediaStorage"]
+        self.assertFalse(incomplete["providerReady"])
+        self.assertEqual(incomplete["reason"], "providerConfigurationIncomplete")
+
+        configured = RuntimeConfigService(
+            Settings(
+                **base,
+                owner_truth_media_s3_endpoint_url="https://cos.ap-shanghai.myqcloud.com",
+                owner_truth_media_s3_server_side_encryption="cos/kms",
+                owner_truth_media_s3_kms_key_id="fixture-kms-key",
+            )
+        ).public_config()["capabilitySnapshots"]["ownerTruthMediaStorage"]
+        self.assertTrue(configured["enabled"])
+        self.assertTrue(configured["providerReady"])
+        self.assertEqual(configured["provider"], "cos")
 
     def test_startup_validated_inventory_is_the_runtime_authority(self):
         settings = Settings(

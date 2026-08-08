@@ -247,6 +247,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthMediaSourceObjectRead",
             ),
             _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/source-objects/{source_object_id}/content",
+                session,
+                "ownerTruthMediaSourceObjectContentRead",
+            ),
+            _rule(
                 "POST",
                 "/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletions",
                 session,
