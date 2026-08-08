@@ -398,6 +398,9 @@ def main() -> None:
             main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
                 "echoTextInput"
             )
+            main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
+                "accountDataExport"
+            )
             owner_policy_headers = captured_policy_headers(
                 client,
                 owner_headers,
@@ -777,6 +780,96 @@ def main() -> None:
                 ),
                 "formal media Context must cite the confirmed media-derived Source",
             )
+
+            # Export the same synthetic Owner before revoking the SourceObject.
+            # This keeps Source -> Memory -> Context -> Export in one account
+            # and one disposable database instead of composing unrelated smoke
+            # fixtures that could pass independently.
+            export_headers = captured_policy_headers(
+                client,
+                owner_headers,
+                session_id=owner_session_id,
+                feature="accountDataExport",
+            )
+            export_created = client.post(
+                "/auth/data-export/jobs",
+                headers=export_headers,
+                json={"requestKey": f"v4-synthetic-account-{uuid.uuid4()}"},
+            )
+            require(
+                export_created.status_code == 202,
+                f"synthetic account export job failed: {export_created.text}",
+            )
+            export_job_id = str(export_created.json().get("jobId") or "")
+            require(export_job_id, "synthetic account export job id is missing")
+            export_status = client.get(
+                f"/auth/data-export/jobs/{export_job_id}",
+                headers=export_headers,
+            )
+            require(
+                export_status.status_code == 200
+                and export_status.json().get("status") == "partial"
+                and export_status.json().get("downloadAvailable") is True,
+                f"synthetic account export did not materialize: {export_status.text}",
+            )
+            cross_owner_export = client.get(
+                f"/auth/data-export/jobs/{export_job_id}",
+                headers=captured_policy_headers(
+                    client,
+                    other_headers,
+                    session_id=other_session_id,
+                    feature="accountDataExport",
+                ),
+            )
+            require(
+                cross_owner_export.status_code == 404,
+                "cross Owner export job lookup must stay hidden",
+            )
+            export_download = client.get(
+                f"/auth/data-export/jobs/{export_job_id}/download",
+                headers=export_headers,
+            )
+            require(
+                export_download.status_code == 200,
+                f"synthetic account export download failed: {export_download.text}",
+            )
+            require(
+                "no-store" in export_download.headers.get("cache-control", "")
+                and "private" in export_download.headers.get("cache-control", ""),
+                "synthetic account export must remain private and uncached",
+            )
+            export_artifact = export_download.json()
+            export_manifest = export_artifact.get("manifest") or {}
+            require(
+                export_manifest.get("packageStatus") == "partial",
+                "fake object storage must keep the export package explicitly partial",
+            )
+            export_objects = (
+                ((export_artifact.get("dataExport") or {}).get("machineReadable") or {}).get(
+                    "objects"
+                )
+                or []
+            )
+            owner_truth_counts = {
+                str(item.get("resourceType") or ""): int(item.get("itemCount") or 0)
+                for item in export_objects
+                if item.get("moduleId") == "ownerTruth"
+            }
+            for resource_type in (
+                "ownerTruthSource",
+                "ownerTruthCandidate",
+                "ownerTruthDecisionReceipt",
+                "ownerTruthMemoryVersion",
+            ):
+                require(
+                    owner_truth_counts.get(resource_type, 0) >= 1,
+                    f"synthetic account export omitted {resource_type}",
+                )
+            rendered_export = json.dumps(export_artifact, ensure_ascii=False, sort_keys=True)
+            require(source_text in rendered_export, "Owner export omitted the confirmed memory value")
+            require(upload_token not in rendered_export, "Owner export leaked the upload token")
+            require("storageKey" not in rendered_export, "Owner export leaked the storage key")
+            require(other_id not in rendered_export, "Owner export mixed another account")
 
             deletion_path = (
                 f"/v2/vaults/{vault_id}/source-objects/{source_object_id}/deletions"
@@ -1195,6 +1288,10 @@ def main() -> None:
                         "projectionLagBlocked": True,
                         "projectionReady": True,
                         "contextBuilt": True,
+                        "exportJobCreated": True,
+                        "exportOwnerTruthComplete": True,
+                        "exportOwnerIsolated": True,
+                        "exportExternalBoundaryPartial": True,
                         "deletionAccessRevoked": True,
                         "deletionReplayDeduplicated": True,
                         "deletionRetryRequeued": True,
