@@ -178,7 +178,8 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             requested_feature="ownerMediaCaptureV1",
         ).features[0]
         enabled = ReleasePolicyService(
-            closed_pilot_enabled_features={"ownerMediaCaptureV1"}
+            closed_pilot_enabled_features={"ownerMediaCaptureV1"},
+            capability_resolver=lambda capability: capability == "ownerTruthMediaStorage",
         ).build_snapshot(
             audience="owner",
             cohort="closedPilotAdultSelf",
@@ -190,7 +191,52 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertEqual(disabled.requiredGates, ("G0", "G1", "G2"))
         self.assertEqual(disabled.releaseStage, "M1")
         self.assertTrue(enabled.enabled)
+        self.assertEqual(enabled.requiredCapability, "ownerTruthMediaStorage")
+        self.assertTrue(enabled.capabilityReady)
         self.assertEqual(enabled.reason, "closedPilotOwnerCore")
+
+    def test_media_capture_and_processing_fail_closed_without_runtime_capability(self):
+        service = ReleasePolicyService(
+            closed_pilot_enabled_features={
+                "ownerMediaCaptureV1",
+                "ownerMediaProcessingV1",
+            },
+            capability_resolver=lambda capability: False,
+        )
+
+        capture = service.build_snapshot(
+            audience="owner",
+            cohort="closedPilotAdultSelf",
+            client_build=1,
+            requested_feature="ownerMediaCaptureV1",
+        ).features[0]
+        processing = service.build_snapshot(
+            audience="owner",
+            cohort="closedPilotAdultSelf",
+            client_build=1,
+            requested_feature="ownerMediaProcessingV1",
+        ).features[0]
+
+        self.assertFalse(capture.enabled)
+        self.assertFalse(processing.enabled)
+        self.assertEqual(capture.reason, "capabilityUnavailable")
+        self.assertEqual(processing.reason, "capabilityUnavailable")
+        self.assertEqual(processing.requiredCapability, "ownerTruthMediaProcessing")
+        self.assertFalse(processing.capabilityReady)
+
+    def test_m0_data_export_has_an_independent_server_cohort_decision(self):
+        snapshot = ReleasePolicyService().build_snapshot(
+            audience="owner",
+            cohort="closedPilotAdultSelf",
+            client_build=1,
+            requested_feature="accountDataExport",
+        )
+
+        decision = snapshot.features[0]
+        self.assertTrue(decision.enabled)
+        self.assertEqual(decision.releaseStage, "M0")
+        self.assertIsNone(decision.requiredCapability)
+        self.assertTrue(decision.capabilityReady)
 
     def test_owner_truth_candidate_review_requires_explicit_closed_pilot_feature_grant(self):
         decision = ReleasePolicyService(
@@ -975,6 +1021,14 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
             "POST /v2/vaults/*/source-objects/*/processing-retries",
         )
         self.assertEqual(
+            gate.feature_for_request(
+                "POST",
+                "/v2/vaults/vault-a/source-objects/object-a/processing-retries",
+                {},
+            ),
+            "ownerMediaProcessingV1",
+        )
+        self.assertEqual(
             gate.route_label_for_request(
                 "POST",
                 "/v2/vaults/vault-a/source-objects/object-a/deletion-retries",
@@ -1003,6 +1057,14 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
             "echoTextInput",
         )
         self.assertEqual(gate.feature_for_request("POST", "/auth/delete", {}), "accountDeletion")
+        self.assertEqual(
+            gate.feature_for_request("POST", "/auth/data-export/jobs", {}),
+            "accountDataExport",
+        )
+        self.assertEqual(
+            gate.feature_for_request("GET", "/auth/data-export/jobs/dej_123", {}),
+            "accountDataExport",
+        )
         self.assertEqual(
             gate.feature_for_request("GET", "/archive/items/user-a", {}),
             "archiveRemoteFetch",

@@ -1460,6 +1460,8 @@ def _owner_truth_media_capture_context(
     """Authorize one closed-pilot private media operation for its Vault Owner."""
 
     normalized_path = request.url.path
+    feature = "ownerMediaCaptureV1"
+    user_session_required_code = "ownerTruthMediaCaptureUserSessionRequired"
     if request.method.upper() == "POST" and normalized_path.endswith("/upload-intents"):
         route = "POST /v2/vaults/*/source-objects/upload-intents"
     elif request.method.upper() == "PUT" and normalized_path.endswith("/content"):
@@ -1468,6 +1470,8 @@ def _owner_truth_media_capture_context(
         route = "GET /v2/vaults/*/source-objects/*/content"
     elif request.method.upper() == "POST" and normalized_path.endswith("/processing-retries"):
         route = "POST /v2/vaults/*/source-objects/*/processing-retries"
+        feature = "ownerMediaProcessingV1"
+        user_session_required_code = "ownerTruthMediaProcessingUserSessionRequired"
     elif request.method.upper() == "POST" and normalized_path.endswith("/deletions"):
         route = "POST /v2/vaults/*/source-objects/*/deletions"
     else:
@@ -1475,9 +1479,9 @@ def _owner_truth_media_capture_context(
     return _owner_truth_captured_release_policy_context(
         request,
         vault_id=vault_id,
-        feature="ownerMediaCaptureV1",
+        feature=feature,
         route=route,
-        user_session_required_code="ownerTruthMediaCaptureUserSessionRequired",
+        user_session_required_code=user_session_required_code,
     )
 
 
@@ -4954,6 +4958,21 @@ RELEASE_POLICY_COMMAND_MODE = (
     if settings.release_policy_command_mode in {"observe", "enforce"}
     else "observe"
 )
+
+
+def _release_policy_runtime_capability_ready(capability: str) -> bool:
+    """Resolve Provider readiness on the server without trusting client hints."""
+
+    inventory = getattr(app.state, "provider_runtime_inventory", None)
+    if not isinstance(inventory, ProviderRuntimeInventory):
+        inventory = ProviderRuntimeInventory(settings)
+    try:
+        status = inventory.status_for(capability)
+    except KeyError:
+        return False
+    return status.enabled and status.provider_ready
+
+
 RELEASE_POLICY_SERVICE = ReleasePolicyService(
     policy_revision=settings.release_policy_revision,
     min_client_build=settings.release_policy_min_client_build,
@@ -4968,6 +4987,7 @@ RELEASE_POLICY_SERVICE = ReleasePolicyService(
     closed_pilot_enabled_features=parse_release_policy_feature_set(
         settings.release_policy_closed_pilot_features
     ),
+    capability_resolver=_release_policy_runtime_capability_ready,
     shadow_mode=RELEASE_POLICY_COMMAND_MODE != "enforce",
 )
 RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(

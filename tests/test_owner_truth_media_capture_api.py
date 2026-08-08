@@ -44,6 +44,9 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
         self.previous_closed_pilot_features = set(
             main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
         )
+        self.previous_capability_resolver = (
+            main_module.RELEASE_POLICY_SERVICE.capability_resolver
+        )
         self.media_root = TemporaryDirectory()
         self.store = InMemoryStore()
         main_module.store = self.store
@@ -61,7 +64,12 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
         main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset()
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features = {
-            "ownerMediaCaptureV1"
+            "ownerMediaCaptureV1",
+            "ownerMediaProcessingV1",
+        }
+        main_module.RELEASE_POLICY_SERVICE.capability_resolver = lambda capability: capability in {
+            "ownerTruthMediaStorage",
+            "ownerTruthMediaProcessing",
         }
         self.client = TestClient(app)
 
@@ -75,6 +83,9 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
         main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = self.previous_closed_pilot_owner_ids
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features = (
             self.previous_closed_pilot_features
+        )
+        main_module.RELEASE_POLICY_SERVICE.capability_resolver = (
+            self.previous_capability_resolver
         )
         self.media_root.cleanup()
 
@@ -92,11 +103,16 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
         )
 
     @staticmethod
-    def _capture_headers(headers: dict[str, str], *, session_id: str) -> dict[str, str]:
+    def _capture_headers(
+        headers: dict[str, str],
+        *,
+        session_id: str,
+        feature: str = "ownerMediaCaptureV1",
+    ) -> dict[str, str]:
         captured = dict(headers)
         captured.update(
             {
-                "X-DreamJourney-Feature": "ownerMediaCaptureV1",
+                "X-DreamJourney-Feature": feature,
                 "X-DreamJourney-Feature-Decision-Id": f"decision-{uuid4()}",
                 "X-DreamJourney-Feature-Allowed": "true",
                 "X-DreamJourney-Policy-Version": "release-policy-v1",
@@ -341,7 +357,11 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
 
         retry = self.client.post(
             f"/v2/vaults/{vault_id}/source-objects/{object_id}/processing-retries",
-            headers=headers,
+            headers=self._capture_headers(
+                auth_headers,
+                session_id=session_id,
+                feature="ownerMediaProcessingV1",
+            ),
         )
         self.assertEqual(retry.status_code, 409, retry.text)
         self.assertEqual(retry.json()["detail"]["code"], "ownerTruthMediaAccessRevoked")
@@ -707,7 +727,11 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
 
         retried = self.client.post(
             f"/v2/vaults/{vault_id}/source-objects/{source_object['sourceObjectId']}/processing-retries",
-            headers=headers,
+            headers=self._capture_headers(
+                auth_headers,
+                session_id=session_id,
+                feature="ownerMediaProcessingV1",
+            ),
         )
 
         self.assertEqual(retried.status_code, 202, retried.text)
@@ -721,7 +745,11 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
 
         duplicate = self.client.post(
             f"/v2/vaults/{vault_id}/source-objects/{source_object['sourceObjectId']}/processing-retries",
-            headers=headers,
+            headers=self._capture_headers(
+                auth_headers,
+                session_id=session_id,
+                feature="ownerMediaProcessingV1",
+            ),
         )
         self.assertEqual(duplicate.status_code, 409, duplicate.text)
 

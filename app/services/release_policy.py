@@ -307,6 +307,8 @@ class ReleasePolicyFeatureDecision(BaseModel):
     requiredGates: tuple[Gate, ...]
     releaseStage: ReleaseStage
     reason: str
+    requiredCapability: Optional[str] = None
+    capabilityReady: bool = True
 
 
 class PublicationDefaultClosedPolicy(BaseModel):
@@ -429,6 +431,7 @@ class ReleasePolicyService:
         # independent integrity/safety/worker evidence. It does not inherit
         # text capture visibility or expose a public media browser.
         "ownerMediaCaptureV1": ("G0", "G1", "G2"),
+        "ownerMediaProcessingV1": ("G0", "G1", "G2"),
         "ownerTruthCandidateReview": ("G0", "G1", "G2"),
         # This is a read-only, display-safe presentation of the server-owned
         # M0-B selector. It remains default closed until its product Gate is
@@ -461,6 +464,7 @@ class ReleasePolicyService:
         "familySpace": ("G0", "G1", "G2", "G4"),
         "legalCenter": ("G0", "G1"),
         "accountDeletion": ("G0", "G1", "G2"),
+        "accountDataExport": ("G0", "G1", "G2"),
         "accountPasswordChange": ("G0", "G1", "G2"),
         "careDashboard": ("G0", "G1", "G2", "G4"),
         "careDoctorContact": ("G0", "G1", "G2", "G4"),
@@ -475,6 +479,7 @@ class ReleasePolicyService:
     _FEATURE_STAGES: dict[str, ReleaseStage] = {
         **{feature: "M0" for feature in _FEATURE_GATES},
         "ownerMediaCaptureV1": "M1",
+        "ownerMediaProcessingV1": "M1",
         "voiceCloneShell": "M1",
         "personaSettings": "M2",
         "digitalHumanLivePanel": "M2",
@@ -492,10 +497,12 @@ class ReleasePolicyService:
         "profileSettings",
         "legalCenter",
         "accountDeletion",
+        "accountDataExport",
     }
     _CLOSED_PILOT_OPT_IN_FEATURES = {
         "ownerTextCaptureV1",
         "ownerMediaCaptureV1",
+        "ownerMediaProcessingV1",
         "ownerTruthCandidateReview",
         # Both M0-B read surfaces have their own typed, value-minimized
         # product routes. Keep them default closed, but allow a server-owned
@@ -503,6 +510,10 @@ class ReleasePolicyService:
         "echoGuidedRecommendations",
         "ownerTruthLifeMap",
         "ownerTruthFamilyContribution",
+    }
+    _FEATURE_CAPABILITIES = {
+        "ownerMediaCaptureV1": "ownerTruthMediaStorage",
+        "ownerMediaProcessingV1": "ownerTruthMediaProcessing",
     }
 
     def __init__(
@@ -515,6 +526,7 @@ class ReleasePolicyService:
         emergency_disabled_features: Optional[Iterable[str]] = None,
         enforced_features: Optional[Iterable[str]] = None,
         closed_pilot_enabled_features: Optional[Iterable[str]] = None,
+        capability_resolver: Optional[Callable[[str], bool]] = None,
         shadow_mode: bool = True,
         enforce_default_closed_stages: bool = True,
     ) -> None:
@@ -527,6 +539,7 @@ class ReleasePolicyService:
         self.closed_pilot_enabled_features: Set[str] = set(
             closed_pilot_enabled_features or ()
         )
+        self.capability_resolver = capability_resolver
         unknown_rollout_features = (
             self.emergency_disabled_features
             | self.enforced_features
@@ -592,6 +605,7 @@ class ReleasePolicyService:
             "killSwitchFeatures": sorted(self.emergency_disabled_features),
             "defaultClosedStages": ["M1", "M2", "M3", "M4"],
             "defaultClosedStageEffectsEnforced": self.enforce_default_closed_stages,
+            "capabilityBindings": dict(sorted(self._FEATURE_CAPABILITIES.items())),
             "publicationVisitorPolicy": self.publication_visitor_policy().model_dump(
                 mode="json"
             ),
@@ -677,6 +691,8 @@ class ReleasePolicyService:
         client_below_minimum: bool,
     ) -> ReleasePolicyFeatureDecision:
         required_gates = self._FEATURE_GATES.get(feature)
+        required_capability = self._FEATURE_CAPABILITIES.get(feature)
+        capability_ready = self._capability_ready(required_capability)
         if required_gates is None:
             return ReleasePolicyFeatureDecision(
                 feature=feature,
@@ -687,6 +703,8 @@ class ReleasePolicyService:
                 requiredGates=("G0",),
                 releaseStage="unknown",
                 reason="unknownFeature",
+                requiredCapability=None,
+                capabilityReady=False,
             )
         if feature in self.emergency_disabled_features:
             reason = "emergencyRevoked"
@@ -699,8 +717,12 @@ class ReleasePolicyService:
             and cohort == "closedPilotAdultSelf"
             and feature in self._closed_pilot_owner_visible_features
         ):
-            reason = "closedPilotOwnerCore"
-            allowed = True
+            if required_capability is not None and not capability_ready:
+                reason = "capabilityUnavailable"
+                allowed = False
+            else:
+                reason = "closedPilotOwnerCore"
+                allowed = True
         elif feature in self._PUBLICATION_VISITOR_FEATURES:
             reason = "publicationVisitorNotApproved"
             allowed = False
@@ -716,7 +738,19 @@ class ReleasePolicyService:
             requiredGates=required_gates,
             releaseStage=self.release_stage_for(feature),
             reason=reason,
+            requiredCapability=required_capability,
+            capabilityReady=capability_ready,
         )
+
+    def _capability_ready(self, capability: Optional[str]) -> bool:
+        if capability is None:
+            return True
+        if self.capability_resolver is None:
+            return False
+        try:
+            return self.capability_resolver(capability) is True
+        except Exception:
+            return False
 
 
 class ReleasePolicyCommandGate:
@@ -736,6 +770,7 @@ class ReleasePolicyCommandGate:
         ("/context/build", "echoTextInput"),
         ("/echo/delayed-replies", "echoTextInput"),
         ("/auth/delete", "accountDeletion"),
+        ("/auth/data-export", "accountDataExport"),
         ("/auth/restore", "accountDeletion"),
         ("/auth/purge-expired-deletions", "accountDeletion"),
         ("/auth/password", "accountPasswordChange"),
@@ -872,6 +907,13 @@ class ReleasePolicyCommandGate:
             return self._archive_media_feature(body)
         if normalized_path == "/archive/items" and method.upper() == "POST":
             return self._archive_item_feature(body)
+        if (
+            method.upper() == "POST"
+            and normalized_path.startswith("/v2/vaults/")
+            and normalized_path.endswith("/processing-retries")
+            and "/source-objects/" in normalized_path
+        ):
+            return "ownerMediaProcessingV1"
         if (
             normalized_path.startswith("/v2/vaults/")
             and "/source-objects" in normalized_path

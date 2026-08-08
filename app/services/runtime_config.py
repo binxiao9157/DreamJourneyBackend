@@ -65,6 +65,13 @@ class RuntimeConfigService:
             enforced_features=parse_release_policy_feature_set(
                 self.settings.release_policy_enforced_features
             ),
+            closed_pilot_enabled_features=parse_release_policy_feature_set(
+                self.settings.release_policy_closed_pilot_features
+            ),
+            capability_resolver=lambda capability: (
+                self.provider_inventory.status_for(capability).enabled
+                and self.provider_inventory.status_for(capability).provider_ready
+            ),
             shadow_mode=self.settings.release_policy_command_mode != "enforce",
         )
         recovery_access = RecoveryAccessPolicy(
@@ -396,6 +403,7 @@ class RuntimeConfigService:
                 "voiceCloneShell",
                 "digitalHumanLivePanel",
                 "ownerMediaCaptureV1",
+                "ownerMediaProcessingV1",
             )
         }
 
@@ -474,7 +482,7 @@ class RuntimeConfigService:
             ),
             self._provider_input(
                 status=media_processing,
-                release_visible=release_decisions["ownerMediaCaptureV1"].releaseVisible,
+                release_visible=release_decisions["ownerMediaProcessingV1"].releaseVisible,
             ),
             self._provider_input(
                 status=identity_provider,
