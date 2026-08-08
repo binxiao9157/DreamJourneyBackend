@@ -51,14 +51,22 @@ def main():
     )
     require(snapshot.get("schemaVersion") == 1, "release policy schema must be v1")
     require(snapshot.get("policyVersion") == "release-policy-v1", "unexpected release policy version")
-    require(snapshot.get("policyRevision") == 1, "unexpected release policy revision")
+    policy_revision = snapshot.get("policyRevision")
+    require(isinstance(policy_revision, int) and policy_revision >= 1, "invalid release policy revision")
     require(snapshot.get("source") == "server", "release policy must be server sourced")
     require(snapshot.get("shadowMode") is True, "WI-S0-06-01 must remain shadow-only")
-    require(snapshot.get("minClient") == 1, "minimum client contract is missing")
-    require(snapshot.get("emergencyRevision") == 0, "unexpected emergency revision")
+    require(isinstance(snapshot.get("minClient"), int), "minimum client contract is missing")
+    require(
+        isinstance(snapshot.get("emergencyRevision"), int),
+        "emergency revision contract is missing",
+    )
+    require(snapshot.get("cohort") == "unassigned", "client query must not self-enroll a cohort")
 
     features = {item.get("feature"): item for item in snapshot.get("features", [])}
-    require(features.get("echoTextInput", {}).get("releaseVisible") is True, "owner text core must be explicit")
+    require(
+        features.get("echoTextInput", {}).get("releaseVisible") is False,
+        "unassigned caller must remain outside owner text core",
+    )
     for feature in (
         "familyManagement",
         "timeLetters",
@@ -67,6 +75,19 @@ def main():
         "careDashboard",
     ):
         require(features.get(feature, {}).get("releaseVisible") is False, f"{feature} must remain hidden")
+
+    capture = features.get("ownerMediaCaptureV1", {})
+    processing = features.get("ownerMediaProcessingV1", {})
+    data_export = features.get("accountDataExport", {})
+    require(capture.get("requiredCapability") == "ownerTruthMediaStorage", "capture capability binding missing")
+    require(
+        processing.get("requiredCapability") == "ownerTruthMediaProcessing",
+        "processing capability binding missing",
+    )
+    require(isinstance(capture.get("capabilityReady"), bool), "capture capability state missing")
+    require(isinstance(processing.get("capabilityReady"), bool), "processing capability state missing")
+    require(data_export.get("releaseStage") == "M0", "data export must have an independent M0 decision")
+    require(data_export.get("requiredCapability") is None, "data export must not inherit media capability")
 
     unknown = request_json(
         policy_path(
@@ -86,7 +107,7 @@ def main():
             audience="owner",
             cohort="closedPilotAdultSelf",
             clientBuild=1,
-            knownPolicyRevision=999,
+            knownPolicyRevision=policy_revision + 1,
         ),
         expected=409,
     )
