@@ -47,6 +47,7 @@ def main():
         "trainingAdmissionEnabled",
         "trainingAdmissionReason",
         "trainingAdmissionContractVersion",
+        "operationMatrix",
     ):
         require(field in voice, f"voiceClone.{field} is missing")
     require(
@@ -74,13 +75,32 @@ def main():
             voice["trainingAdmissionReason"] == "identityLivenessProviderUnavailable",
             "missing verifier must expose a safe, explicit reason",
         )
+    operation_matrix = voice["operationMatrix"]
+    require(operation_matrix.get("schemaVersion") == 1, "voice operation matrix version changed")
+    operations = operation_matrix.get("operations") or {}
+    require(
+        set(operations) == {"train", "query", "preview", "accept", "synthesize", "pause", "delete"},
+        "voice operation matrix is incomplete",
+    )
+    require(operations["pause"].get("available") is True, "local pause must remain available")
+    require(operations["delete"].get("available") is True, "local delete must remain available")
+    require(
+        operations["delete"].get("providerCapability") in {"ready", "unsupported", "unavailable"},
+        "voice deletion provider capability is invalid",
+    )
+    if operations["delete"].get("providerCapability") != "ready":
+        require(
+            operations["delete"].get("providerCompletionAvailable") is False,
+            "unsupported deletion must not claim Provider completion",
+        )
     serialized = json.dumps(voice, ensure_ascii=False).lower()
     for forbidden in ("api_key", "accesskey", "secret", "receiptid", "livenessdocument"):
         require(forbidden not in serialized, f"voice runtime exposed sensitive field {forbidden}")
     print(
         "Voice clone C0 runtime smoke passed: "
         f"identityReady={voice['identityEligibilityProviderReady']} "
-        f"trainingAdmissionEnabled={voice['trainingAdmissionEnabled']}"
+        f"trainingAdmissionEnabled={voice['trainingAdmissionEnabled']} "
+        f"deleteProvider={operations['delete']['providerCapability']}"
     )
 
 

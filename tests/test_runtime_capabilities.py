@@ -196,6 +196,27 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
         self.assertFalse(voice["externalVerified"])
         self.assertEqual(voice["reason"], "externalEvidenceMissing")
         self.assertTrue(config["voiceClone"]["realProviderReady"])
+        operation_matrix = config["voiceClone"]["operationMatrix"]
+        self.assertEqual(operation_matrix["schemaVersion"], 1)
+        self.assertEqual(
+            set(operation_matrix["operations"]),
+            {"train", "query", "preview", "accept", "synthesize", "pause", "delete"},
+        )
+        self.assertFalse(operation_matrix["operations"]["train"]["available"])
+        self.assertEqual(
+            operation_matrix["operations"]["train"]["reasonCode"],
+            "identityLivenessProviderUnavailable",
+        )
+        self.assertTrue(operation_matrix["operations"]["query"]["available"])
+        self.assertTrue(operation_matrix["operations"]["synthesize"]["available"])
+        self.assertTrue(operation_matrix["operations"]["delete"]["available"])
+        self.assertEqual(
+            operation_matrix["operations"]["delete"]["providerCapability"],
+            "unsupported",
+        )
+        self.assertFalse(
+            operation_matrix["operations"]["delete"]["providerCompletionAvailable"]
+        )
 
     def test_incomplete_provider_configuration_fails_closed_without_disabling_unrelated_runtime(self):
         settings = Settings(

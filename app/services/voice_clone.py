@@ -170,6 +170,7 @@ class VoiceCloneProfileDeletionObservation:
 class MockVoiceCloneProvider:
     provider_mode = "mockContract"
     is_configured = False
+    profile_deletion_capability = "unsupported"
 
     def submit_training(
         self,
@@ -205,6 +206,7 @@ class MockVoiceCloneProvider:
 
 class VolcEngineVoiceCloneV3Provider:
     provider_mode = "volcengineVoiceCloneV3"
+    profile_deletion_capability = "unsupported"
 
     def __init__(self, settings: Settings):
         self.settings = settings

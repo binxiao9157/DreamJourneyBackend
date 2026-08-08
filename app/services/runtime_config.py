@@ -17,6 +17,9 @@ from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice
 from app.services.voice_identity_eligibility import (
     voice_identity_eligibility_runtime_descriptor,
 )
+from app.services.voice_clone_operation_capabilities import (
+    build_voice_clone_operation_capability_matrix,
+)
 from app.services.runtime_capabilities import (
     RuntimeCapabilityComposer,
     RuntimeCapabilityInput,
@@ -48,6 +51,26 @@ class RuntimeConfigService:
         voice_clone_tts_provider = VoiceCloneTTSProviderFactory(self.settings).make()
         voice_clone_speaker_ids = self._voice_clone_speaker_ids()
         voice_identity_eligibility = voice_identity_eligibility_runtime_descriptor(self.settings)
+        voice_training_admission_enabled = (
+            voice_clone_provider.is_configured
+            and voice_identity_eligibility["ready"]
+        )
+        voice_training_admission_reason = (
+            "ready"
+            if voice_training_admission_enabled
+            else (
+                voice_identity_eligibility["reason"]
+                if not voice_identity_eligibility["ready"]
+                else "voiceCloneProviderUnavailable"
+            )
+        )
+        voice_clone_operation_matrix = build_voice_clone_operation_capability_matrix(
+            training_provider=voice_clone_provider,
+            synthesis_provider=voice_clone_tts_provider,
+            training_admission_enabled=voice_training_admission_enabled,
+            training_admission_reason=voice_training_admission_reason,
+            deletion_worker_enabled=self.settings.voice_clone_deletion_worker_enabled,
+        )
         digital_human_asset_mode = self._digital_human_asset_mode()
         digital_human_access = DigitalHumanAccessPolicy().blocked_mobile_contract()
         route_ownership_audit = RouteOwnershipRegistry().audit_summary()
@@ -268,18 +291,9 @@ class RuntimeConfigService:
                 "identityEligibilityProviderReady": voice_identity_eligibility["ready"],
                 "identityEligibilityProvider": voice_identity_eligibility["provider"],
                 "trainingAdmissionEnabled": (
-                    voice_clone_provider.is_configured
-                    and voice_identity_eligibility["ready"]
+                    voice_training_admission_enabled
                 ),
-                "trainingAdmissionReason": (
-                    "ready"
-                    if voice_clone_provider.is_configured and voice_identity_eligibility["ready"]
-                    else (
-                        voice_identity_eligibility["reason"]
-                        if not voice_identity_eligibility["ready"]
-                        else "voiceCloneProviderUnavailable"
-                    )
-                ),
+                "trainingAdmissionReason": voice_training_admission_reason,
                 "trainingAdmissionContractVersion": voice_identity_eligibility["contractVersion"],
                 "trainEndpoint": "/voice/profiles",
                 "queryEndpoint": "/voice/profiles/{user_id}/{voice_profile_id}/refresh",
@@ -304,6 +318,7 @@ class RuntimeConfigService:
                     and bool(self.settings.volcengine_voice_clone_tts_resource_id)
                 ),
                 "fallbackMode": "hiddenContract" if not voice_clone_provider.is_configured else "providerV3",
+                "operationMatrix": voice_clone_operation_matrix,
                 "lipSyncTimeline": {
                     "field": "visemeTimeline",
                     "source": "providerOptional",
