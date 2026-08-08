@@ -67,6 +67,15 @@ CRITICAL_WORKER_COVERAGE = (
     ),
     OperationMetricCoverageEntry(
         component_id=(
+            "app.async_effects.voice_profile_deletion_worker."
+            "VoiceProfileDeletionWorkerRuntime"
+        ),
+        component_kind="worker",
+        status=OperationMetricCoverageStatus.NOT_INSTRUMENTED,
+        reason_code="workerRecorderNotAttached",
+    ),
+    OperationMetricCoverageEntry(
+        component_id=(
             "app.async_effects.owner_truth_memory_projection_worker."
             "OwnerTruthMemoryProjectionWorkerRuntime"
         ),

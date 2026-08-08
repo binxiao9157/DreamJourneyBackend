@@ -5253,6 +5253,34 @@ def _evaluate_subject_eligibility_payload(
     return decision
 
 
+def _reject_explicit_client_voice_subject_hard_deny(payload: Dict[str, Any]) -> None:
+    """Honor only a complete client-side deny signal for a clone draft.
+
+    Client eligibility JSON is never a source of allow authority. Existing
+    clients may also send an old or incomplete representation, which must not
+    turn a later server-verifiable training request into a 400. A well-formed
+    signal that evaluates to a hard deny is still safe to honor immediately:
+    it prevents persisting an obviously ineligible draft before any Provider
+    work can begin.
+    """
+
+    raw_evidence = payload.get("subjectEligibility")
+    if not isinstance(raw_evidence, dict):
+        return
+    try:
+        evidence = SubjectEligibilityEvidence.model_validate(
+            {**raw_evidence, "capability": HighRiskCapability.CLONED_VOICE.value}
+        )
+    except ValidationError:
+        return
+    decision = evaluate_subject_eligibility(evidence)
+    if not decision.allowed:
+        _subject_eligibility_hard_deny(
+            HighRiskCapability.CLONED_VOICE,
+            decision.reason,
+        )
+
+
 def _resolve_trusted_voice_profile_eligibility(
     *,
     actor_user_id: str,
@@ -12204,6 +12232,9 @@ def _sanitize_voice_profile_payload(
             HighRiskCapability.CLONED_VOICE,
             SubjectEligibilityReason.FAMILY_SUBJECT,
         )
+    # Mobile eligibility claims can never authorize clone training. A complete
+    # explicit denial still stops a draft before persistence or Provider work.
+    _reject_explicit_client_voice_subject_hard_deny(payload)
     try:
         sample_count = int(payload.get("sampleCount") or 0)
     except (TypeError, ValueError):

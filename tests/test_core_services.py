@@ -3465,6 +3465,8 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
 class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
     def setUp(self):
         super().setUp()
+        self._previous_store = main_module.store
+        main_module.store = InMemoryStore()
         self._voice_profile_eligibility_patch = patch(
             "app.main._resolve_trusted_voice_profile_eligibility",
             return_value=server_verified_test_resolution(
@@ -3480,6 +3482,7 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
 
     def tearDown(self):
         self._voice_profile_eligibility_patch.stop()
+        main_module.store = self._previous_store
         super().tearDown()
 
     def test_runtime_config_exposes_volcengine_voice_clone_v3_capability(self):
@@ -4169,7 +4172,10 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
         self.assertEqual(profile["sampleStatus"], "pending")
         self.assertEqual(profile["sampleCount"], 2)
         self.assertTrue(profile["authorizationConfirmed"])
-        self.assertEqual(profile["authorizationVersion"], "voice-clone-consent-v1")
+        self.assertEqual(
+            profile["authorizationVersion"],
+            main_module.VOICE_CLONE_TRAINING_CONSENT_VERSION,
+        )
         self.assertEqual(profile["personaScope"], "personal")
         self.assertEqual(profile["digitalHumanId"], user_id)
         self.assertFalse(profile["isEnabled"])
