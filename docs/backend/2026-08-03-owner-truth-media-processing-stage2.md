@@ -13,6 +13,13 @@
 7. 每次处理任务的终止失败都会在同一数据库事务内写入 value-free dead-letter：先写 SourceObject 失败状态与 typed consumer receipt，再使 job 终止，最后记录 dead-letter。重试耗尽的记录标记为 `maxAttemptsExceeded`，需经已有 restore-fenced 人工授权后才能申请 replay；不可恢复的处理错误标记为 `manualInterventionRequired`，不会被静默重放。
 8. 私有媒体删除同样采用撤权优先：对象存储不可用或存储 Provider 不匹配时，访问仍保持撤销，当前删除 job 终止并写入 `manualInterventionRequired` dead-letter。用户后续的删除重试会创建新的 `deletionGeneration`，不会重放旧 job 或恢复访问。
 
+## 2026-08-08 A2 复核证据
+
+- A2 的首发本地处理范围已复核为可用：`text/plain`、PDF、DOCX 经私有 Worker 读取、解析并转成同 Vault/Owner 的 `import` Source；既有 Candidate Worker 只生成 `pending` Candidate，必须经 Owner 确认后才会创建正式 MemoryVersion。
+- 已运行 `scripts/run-backend-owner-truth-media-processing-gate.sh`：172 项回归通过，覆盖格式、MIME/解析失败、重试、死信、删除竞争、跨 Owner、Candidate handoff、处理回执和默认关闭策略。
+- 已在部署 API 容器运行 `run-backend-owner-truth-media-processing-deployed-smoke.sh`：一次性 PostgreSQL 数据库完成 Owner 绑定上传、私有处理、Candidate、确认、Context 排除与删除回执验证，结束后自动删除；不写生产业务数据。
+- 这不是腾讯 COS 真实 Provider 验收。COS 尚未配置时 runtime 必须保持 fail-closed；COS 配置完成后应复跑 A1 的 `PUT -> HEAD -> readback -> delete` probe，再以真实对象存储补同一条 A2 部署 E2E。
+
 这仍是 closed-pilot 能力：`ownerMediaCaptureV1`、摄入服务、处理 Worker 和内容安全扫描均须独立打开；默认公开发布态不可见。
 
 ## 状态与数据边界
