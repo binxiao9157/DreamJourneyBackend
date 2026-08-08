@@ -202,6 +202,25 @@ class RouteOwnershipRegistry:
             _rule("POST", "/auth/refresh", public, "publicRefresh"),
             _rule("POST", "/auth/logout", session, "userSession"),
             _rule("POST", "/auth/data-export", session, "userDataExport"),
+            _rule("POST", "/auth/data-export/jobs", session, "userDataExportJobCreate"),
+            _rule(
+                "GET",
+                "/auth/data-export/jobs/{job_id}",
+                session,
+                "userDataExportJobRead",
+            ),
+            _rule(
+                "POST",
+                "/auth/data-export/jobs/{job_id}/retry",
+                session,
+                "userDataExportJobRetry",
+            ),
+            _rule(
+                "GET",
+                "/auth/data-export/jobs/{job_id}/download",
+                session,
+                "userDataExportJobDownload",
+            ),
             _owner_body("POST", "/auth/delete", "accountOwner"),
             _rule("POST", "/auth/restore", public, "publicAccountRestore"),
             _rule(

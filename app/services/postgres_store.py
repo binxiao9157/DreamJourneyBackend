@@ -2260,6 +2260,369 @@ class PostgresStore:
             ),
         }
 
+    @staticmethod
+    def _data_export_job_payload(
+        row: Dict[str, Any],
+        *,
+        include_artifact: bool = False,
+    ) -> Dict[str, Any]:
+        payload = {
+            "id": str(row.get("id") or ""),
+            "ownerUserId": str(row.get("owner_user_id") or ""),
+            "requestKeyHash": str(row.get("request_key_hash") or ""),
+            "status": str(row.get("status") or ""),
+            "attempt": int(row.get("attempt") or 0),
+            "artifactHash": row.get("artifact_hash"),
+            "manifest": deepcopy(row.get("manifest_payload")),
+            "failureCode": row.get("failure_code"),
+            "contractVersion": int(row.get("contract_version") or 1),
+            "createdAt": PostgresStore._iso_value(row.get("created_at")),
+            "updatedAt": PostgresStore._iso_value(row.get("updated_at")),
+            "expiresAt": PostgresStore._iso_value(row.get("expires_at")),
+            "readyAt": (
+                None
+                if row.get("ready_at") is None
+                else PostgresStore._iso_value(row.get("ready_at"))
+            ),
+        }
+        if include_artifact:
+            payload["artifact"] = deepcopy(row.get("artifact_payload"))
+        return payload
+
+    @staticmethod
+    def _data_export_job_select() -> str:
+        return """
+            SELECT id, owner_user_id, request_key_hash, status, attempt,
+                artifact_hash, artifact_payload, manifest_payload, failure_code,
+                contract_version, created_at, updated_at, expires_at, ready_at
+            FROM data_export_jobs
+        """
+
+    def create_data_export_job(self, job: Mapping[str, Any]) -> Dict[str, Any]:
+        record = dict(job)
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"data-export-job-{record.get('id')}",
+                command_id=str(record.get("requestKeyHash") or ""),
+            ):
+                return self.create_data_export_job(record)
+        row = self._fetchone(
+            """
+            INSERT INTO data_export_jobs (
+                id, owner_user_id, request_key_hash, status, attempt,
+                artifact_hash, artifact_payload, manifest_payload, failure_code,
+                contract_version, created_at, updated_at, expires_at, ready_at
+            )
+            VALUES (%s, %s, %s, %s, %s, NULL, NULL, NULL, NULL, %s, %s, %s, %s, NULL)
+            ON CONFLICT (owner_user_id, request_key_hash) DO NOTHING
+            RETURNING id, owner_user_id, request_key_hash, status, attempt,
+                artifact_hash, artifact_payload, manifest_payload, failure_code,
+                contract_version, created_at, updated_at, expires_at, ready_at
+            """,
+            (
+                str(record.get("id") or ""),
+                str(record.get("ownerUserId") or ""),
+                str(record.get("requestKeyHash") or ""),
+                str(record.get("status") or "queued"),
+                int(record.get("attempt") or 0),
+                int(record.get("contractVersion") or 1),
+                str(record.get("createdAt") or ""),
+                str(record.get("updatedAt") or ""),
+                str(record.get("expiresAt") or ""),
+            ),
+        )
+        outcome = "created"
+        if row is None:
+            row = self._fetchone(
+                self._data_export_job_select()
+                + " WHERE owner_user_id = %s AND request_key_hash = %s FOR UPDATE",
+                (
+                    str(record.get("ownerUserId") or ""),
+                    str(record.get("requestKeyHash") or ""),
+                ),
+            )
+            outcome = "deduplicated"
+        if row is None:
+            raise RuntimeError("data export job insert did not produce a row")
+        return {
+            "outcome": outcome,
+            "job": self._data_export_job_payload(row, include_artifact=True),
+        }
+
+    def get_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        include_artifact: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            self._data_export_job_select()
+            + " WHERE id = %s AND owner_user_id = %s",
+            (str(job_id), str(owner_user_id)),
+        )
+        return (
+            None
+            if row is None
+            else self._data_export_job_payload(row, include_artifact=include_artifact)
+        )
+
+    def claim_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        updated_at: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"data-export-claim-{job_id}",
+                command_id=str(job_id),
+            ):
+                return self.claim_data_export_job(
+                    job_id,
+                    owner_user_id=owner_user_id,
+                    updated_at=updated_at,
+                )
+        row = self._fetchone(
+            self._data_export_job_select()
+            + " WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+            (str(job_id), str(owner_user_id)),
+        )
+        if row is None:
+            return {"outcome": "notFound", "job": None}
+        if str(row.get("status") or "") != "queued":
+            return {
+                "outcome": "observed",
+                "job": self._data_export_job_payload(row, include_artifact=True),
+            }
+        updated = self._fetchone(
+            """
+            UPDATE data_export_jobs
+            SET status = 'running', attempt = attempt + 1, updated_at = %s
+            WHERE id = %s AND owner_user_id = %s
+            RETURNING id, owner_user_id, request_key_hash, status, attempt,
+                artifact_hash, artifact_payload, manifest_payload, failure_code,
+                contract_version, created_at, updated_at, expires_at, ready_at
+            """,
+            (str(updated_at), str(job_id), str(owner_user_id)),
+        )
+        return {
+            "outcome": "claimed",
+            "job": self._data_export_job_payload(updated, include_artifact=True),
+        }
+
+    def complete_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        status: str,
+        artifact_hash: str,
+        artifact: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        ready_at: str,
+    ) -> Dict[str, Any]:
+        if status not in {"ready", "partial"}:
+            raise ValueError("data export completion status is invalid")
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"data-export-complete-{job_id}",
+                command_id=str(artifact_hash),
+            ):
+                return self.complete_data_export_job(
+                    job_id,
+                    owner_user_id=owner_user_id,
+                    status=status,
+                    artifact_hash=artifact_hash,
+                    artifact=artifact,
+                    manifest=manifest,
+                    ready_at=ready_at,
+                )
+        current = self._fetchone(
+            self._data_export_job_select()
+            + " WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+            (str(job_id), str(owner_user_id)),
+        )
+        if current is None:
+            raise KeyError("data export job not found")
+        if str(current.get("status") or "") in {"ready", "partial"}:
+            if str(current.get("artifact_hash") or "") != str(artifact_hash):
+                raise ValueError("completed export job artifact is immutable")
+            return {
+                "outcome": "deduplicated",
+                "job": self._data_export_job_payload(current, include_artifact=True),
+            }
+        if str(current.get("status") or "") != "running":
+            raise ValueError("data export job is not running")
+        row = self._fetchone(
+            """
+            UPDATE data_export_jobs
+            SET status = %s, artifact_hash = %s, artifact_payload = %s,
+                manifest_payload = %s, failure_code = NULL,
+                ready_at = %s, updated_at = %s
+            WHERE id = %s AND owner_user_id = %s
+            RETURNING id, owner_user_id, request_key_hash, status, attempt,
+                artifact_hash, artifact_payload, manifest_payload, failure_code,
+                contract_version, created_at, updated_at, expires_at, ready_at
+            """,
+            (
+                status,
+                str(artifact_hash),
+                Jsonb(dict(artifact)),
+                Jsonb(dict(manifest)),
+                str(ready_at),
+                str(ready_at),
+                str(job_id),
+                str(owner_user_id),
+            ),
+        )
+        return {
+            "outcome": "completed",
+            "job": self._data_export_job_payload(row, include_artifact=True),
+        }
+
+    def fail_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        failure_code: str,
+        updated_at: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"data-export-fail-{job_id}",
+                command_id=str(job_id),
+            ):
+                return self.fail_data_export_job(
+                    job_id,
+                    owner_user_id=owner_user_id,
+                    failure_code=failure_code,
+                    updated_at=updated_at,
+                )
+        current = self._fetchone(
+            self._data_export_job_select()
+            + " WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+            (str(job_id), str(owner_user_id)),
+        )
+        if current is None:
+            raise KeyError("data export job not found")
+        if str(current.get("status") or "") != "running":
+            return {
+                "outcome": "observed",
+                "job": self._data_export_job_payload(current, include_artifact=True),
+            }
+        row = self._fetchone(
+            """
+            UPDATE data_export_jobs
+            SET status = 'failed', artifact_hash = NULL, artifact_payload = NULL,
+                manifest_payload = NULL, failure_code = %s, ready_at = NULL,
+                updated_at = %s
+            WHERE id = %s AND owner_user_id = %s
+            RETURNING id, owner_user_id, request_key_hash, status, attempt,
+                artifact_hash, artifact_payload, manifest_payload, failure_code,
+                contract_version, created_at, updated_at, expires_at, ready_at
+            """,
+            (str(failure_code), str(updated_at), str(job_id), str(owner_user_id)),
+        )
+        return {
+            "outcome": "failed",
+            "job": self._data_export_job_payload(row, include_artifact=True),
+        }
+
+    def retry_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        updated_at: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"data-export-retry-{job_id}",
+                command_id=str(job_id),
+            ):
+                return self.retry_data_export_job(
+                    job_id,
+                    owner_user_id=owner_user_id,
+                    updated_at=updated_at,
+                )
+        current = self._fetchone(
+            self._data_export_job_select()
+            + " WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+            (str(job_id), str(owner_user_id)),
+        )
+        if current is None:
+            return {"outcome": "notFound", "job": None}
+        if str(current.get("status") or "") != "failed":
+            return {
+                "outcome": "observed",
+                "job": self._data_export_job_payload(current, include_artifact=True),
+            }
+        row = self._fetchone(
+            """
+            UPDATE data_export_jobs
+            SET status = 'queued', failure_code = NULL, updated_at = %s
+            WHERE id = %s AND owner_user_id = %s
+            RETURNING id, owner_user_id, request_key_hash, status, attempt,
+                artifact_hash, artifact_payload, manifest_payload, failure_code,
+                contract_version, created_at, updated_at, expires_at, ready_at
+            """,
+            (str(updated_at), str(job_id), str(owner_user_id)),
+        )
+        return {
+            "outcome": "queued",
+            "job": self._data_export_job_payload(row, include_artifact=True),
+        }
+
+    def expire_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        updated_at: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"data-export-expire-{job_id}",
+                command_id=str(job_id),
+            ):
+                return self.expire_data_export_job(
+                    job_id,
+                    owner_user_id=owner_user_id,
+                    updated_at=updated_at,
+                )
+        current = self._fetchone(
+            self._data_export_job_select()
+            + " WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+            (str(job_id), str(owner_user_id)),
+        )
+        if current is None:
+            return {"outcome": "notFound", "job": None}
+        if str(current.get("status") or "") == "expired":
+            return {
+                "outcome": "deduplicated",
+                "job": self._data_export_job_payload(current, include_artifact=True),
+            }
+        row = self._fetchone(
+            """
+            UPDATE data_export_jobs
+            SET status = 'expired', artifact_hash = NULL, artifact_payload = NULL,
+                manifest_payload = NULL, failure_code = NULL, ready_at = NULL,
+                updated_at = %s
+            WHERE id = %s AND owner_user_id = %s
+            RETURNING id, owner_user_id, request_key_hash, status, attempt,
+                artifact_hash, artifact_payload, manifest_payload, failure_code,
+                contract_version, created_at, updated_at, expires_at, ready_at
+            """,
+            (str(updated_at), str(job_id), str(owner_user_id)),
+        )
+        return {
+            "outcome": "expired",
+            "job": self._data_export_job_payload(row, include_artifact=True),
+        }
+
     def create_rights_request(self, request: DataRightsRequest) -> Dict[str, Any]:
         if not isinstance(request, DataRightsRequest):
             raise TypeError("rights request contract is required")

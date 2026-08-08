@@ -14,7 +14,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from pydantic import ValidationError
 
 try:
-    from fastapi import FastAPI, HTTPException, Query, Request
+    from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
     from fastapi.responses import JSONResponse, Response
 except ImportError as exc:  # pragma: no cover - exercised only without runtime deps
     raise RuntimeError("FastAPI is not installed. Run `pip install -r requirements.txt`.") from exc
@@ -42,6 +42,14 @@ from app.services.data_rights_external_effect_receipts import (
     DataRightsExternalEffectReceipt,
 )
 from app.services.data_rights_module_inventory import build_module_owned_data_export
+from app.services.data_export_jobs import (
+    DATA_EXPORT_DOWNLOADABLE_STATES,
+    DataExportJobError,
+    create_data_export_job_record,
+    is_data_export_job_expired,
+    materialize_data_export_job,
+    public_data_export_job,
+)
 from app.services.client_compatibility import (
     ClientCompatibilityDecision,
     ClientCompatibilityDecisionRecorder,
@@ -10975,6 +10983,164 @@ def export_account_data(request: Request) -> JSONResponse:
         headers={
             "Cache-Control": "no-store, private",
             "Pragma": "no-cache",
+        },
+    )
+
+
+def _active_data_export_user_or_raise(user_id: str) -> Dict[str, Any]:
+    user = _store_get_user(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="account not found")
+    if str(user.get("deletionState") or "active") != "active":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "data_export_unavailable_after_deletion",
+                "message": "data export must be requested before account deletion",
+            },
+        )
+    return user
+
+
+def _materialize_account_data_export_job(job_id: str, owner_user_id: str) -> None:
+    try:
+        materialize_data_export_job(
+            store,
+            job_id=job_id,
+            owner_user_id=owner_user_id,
+            export_builder=build_module_owned_data_export,
+        )
+    except Exception as exc:  # pragma: no cover - route tests assert stored state
+        logger.error(
+            "data export materialization failed job_id=%s error_type=%s",
+            job_id,
+            type(exc).__name__,
+        )
+
+
+def _load_account_data_export_job_or_raise(
+    job_id: str,
+    *,
+    owner_user_id: str,
+    include_artifact: bool = False,
+) -> Dict[str, Any]:
+    job = store.get_data_export_job(
+        job_id,
+        owner_user_id=owner_user_id,
+        include_artifact=include_artifact,
+    )
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "dataExportJobNotFound"})
+    if job.get("status") != "expired" and is_data_export_job_expired(job):
+        expired = store.expire_data_export_job(
+            job_id,
+            owner_user_id=owner_user_id,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        job = expired.get("job") or job
+    return job
+
+
+@app.post("/auth/data-export/jobs", status_code=202)
+def create_account_data_export_job(
+    request: Request,
+    payload: Dict[str, Any],
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="user access token is required")
+    _active_data_export_user_or_raise(user_id)
+    try:
+        record = create_data_export_job_record(
+            owner_user_id=user_id,
+            request_key=payload.get("requestKey"),
+        )
+    except DataExportJobError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "dataExportJobInvalid", "message": str(exc)},
+        ) from exc
+    result = store.create_data_export_job(record)
+    job = result["job"]
+    if job.get("status") == "queued":
+        background_tasks.add_task(
+            _materialize_account_data_export_job,
+            str(job["id"]),
+            user_id,
+        )
+    return public_data_export_job(job)
+
+
+@app.get("/auth/data-export/jobs/{job_id}")
+def read_account_data_export_job(job_id: str, request: Request) -> Dict[str, Any]:
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="user access token is required")
+    job = _load_account_data_export_job_or_raise(job_id, owner_user_id=user_id)
+    return public_data_export_job(job)
+
+
+@app.post("/auth/data-export/jobs/{job_id}/retry", status_code=202)
+def retry_account_data_export_job(
+    job_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="user access token is required")
+    _active_data_export_user_or_raise(user_id)
+    current = _load_account_data_export_job_or_raise(job_id, owner_user_id=user_id)
+    if current.get("status") == "expired":
+        raise HTTPException(status_code=409, detail={"code": "dataExportJobExpired"})
+    result = store.retry_data_export_job(
+        job_id,
+        owner_user_id=user_id,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+    )
+    job = result.get("job")
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "dataExportJobNotFound"})
+    if result.get("outcome") == "queued":
+        background_tasks.add_task(
+            _materialize_account_data_export_job,
+            job_id,
+            user_id,
+        )
+    elif job.get("status") != "failed":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "dataExportJobNotRetryable", "status": job.get("status")},
+        )
+    return public_data_export_job(job)
+
+
+@app.get("/auth/data-export/jobs/{job_id}/download")
+def download_account_data_export_job(job_id: str, request: Request) -> JSONResponse:
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="user access token is required")
+    job = _load_account_data_export_job_or_raise(
+        job_id,
+        owner_user_id=user_id,
+        include_artifact=True,
+    )
+    if job.get("status") not in DATA_EXPORT_DOWNLOADABLE_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "dataExportJobNotReady", "status": job.get("status")},
+        )
+    artifact = job.get("artifact")
+    if not isinstance(artifact, Mapping):
+        raise HTTPException(status_code=503, detail={"code": "dataExportArtifactUnavailable"})
+    return JSONResponse(
+        content=dict(artifact),
+        headers={
+            "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+            "Content-Disposition": f'attachment; filename="dreamjourney-data-{job_id}.json"',
+            "X-Content-SHA256": str(job.get("artifactHash") or ""),
         },
     )
 

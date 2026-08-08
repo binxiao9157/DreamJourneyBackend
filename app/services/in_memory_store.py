@@ -371,6 +371,8 @@ class InMemoryStore:
         self._rights_receipts: Dict[str, Dict[str, Any]] = {}
         self._rights_external_effect_receipts: Dict[str, Dict[str, Any]] = {}
         self._rights_access_revocation_outbox: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._data_export_jobs: Dict[str, Dict[str, Any]] = {}
+        self._data_export_job_ids_by_request: Dict[Tuple[str, str], str] = {}
         self._account_purge_receipts: Dict[str, Dict[str, Any]] = {}
         self._rights_lock = RLock()
 
@@ -1550,6 +1552,172 @@ class InMemoryStore:
     def get_digital_human_session_lease(self, session_id: str) -> Optional[Dict[str, Any]]:
         lease = self._digital_human_sessions.get(session_id)
         return None if lease is None else deepcopy(lease)
+
+    def create_data_export_job(self, job: Mapping[str, Any]) -> Dict[str, Any]:
+        record = deepcopy(dict(job))
+        job_id = str(record.get("id") or "").strip()
+        owner_user_id = str(record.get("ownerUserId") or "").strip()
+        request_key_hash = str(record.get("requestKeyHash") or "").strip()
+        if not job_id or not owner_user_id or len(request_key_hash) != 64:
+            raise ValueError("data export job identity is invalid")
+        key = (owner_user_id, request_key_hash)
+        with self._rights_lock:
+            existing_id = self._data_export_job_ids_by_request.get(key)
+            if existing_id is not None:
+                return {
+                    "outcome": "deduplicated",
+                    "job": deepcopy(self._data_export_jobs[existing_id]),
+                }
+            if job_id in self._data_export_jobs:
+                raise ValueError("data export job id is already bound")
+            self._data_export_jobs[job_id] = record
+            self._data_export_job_ids_by_request[key] = job_id
+            return {"outcome": "created", "job": deepcopy(record)}
+
+    def get_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        include_artifact: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        with self._rights_lock:
+            record = self._data_export_jobs.get(str(job_id or ""))
+            if record is None or record.get("ownerUserId") != str(owner_user_id or ""):
+                return None
+            result = deepcopy(record)
+        if not include_artifact:
+            result.pop("artifact", None)
+        return result
+
+    def claim_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        updated_at: str,
+    ) -> Dict[str, Any]:
+        with self._rights_lock:
+            record = self._data_export_jobs.get(str(job_id or ""))
+            if record is None or record.get("ownerUserId") != str(owner_user_id or ""):
+                return {"outcome": "notFound", "job": None}
+            if record["status"] != "queued":
+                return {"outcome": "observed", "job": deepcopy(record)}
+            record["status"] = "running"
+            record["attempt"] = int(record.get("attempt") or 0) + 1
+            record["updatedAt"] = str(updated_at)
+            return {"outcome": "claimed", "job": deepcopy(record)}
+
+    def complete_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        status: str,
+        artifact_hash: str,
+        artifact: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        ready_at: str,
+    ) -> Dict[str, Any]:
+        if status not in {"ready", "partial"}:
+            raise ValueError("data export completion status is invalid")
+        with self._rights_lock:
+            record = self._data_export_jobs.get(str(job_id or ""))
+            if record is None or record.get("ownerUserId") != str(owner_user_id or ""):
+                raise KeyError("data export job not found")
+            if record["status"] in {"ready", "partial"}:
+                if record.get("artifactHash") != artifact_hash:
+                    raise ValueError("completed export job artifact is immutable")
+                return {"outcome": "deduplicated", "job": deepcopy(record)}
+            if record["status"] != "running":
+                raise ValueError("data export job is not running")
+            record.update(
+                {
+                    "status": status,
+                    "artifactHash": str(artifact_hash),
+                    "artifact": deepcopy(dict(artifact)),
+                    "manifest": deepcopy(dict(manifest)),
+                    "failureCode": None,
+                    "readyAt": str(ready_at),
+                    "updatedAt": str(ready_at),
+                }
+            )
+            return {"outcome": "completed", "job": deepcopy(record)}
+
+    def fail_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        failure_code: str,
+        updated_at: str,
+    ) -> Dict[str, Any]:
+        with self._rights_lock:
+            record = self._data_export_jobs.get(str(job_id or ""))
+            if record is None or record.get("ownerUserId") != str(owner_user_id or ""):
+                raise KeyError("data export job not found")
+            if record["status"] != "running":
+                return {"outcome": "observed", "job": deepcopy(record)}
+            record.update(
+                {
+                    "status": "failed",
+                    "artifactHash": None,
+                    "artifact": None,
+                    "manifest": None,
+                    "failureCode": str(failure_code),
+                    "readyAt": None,
+                    "updatedAt": str(updated_at),
+                }
+            )
+            return {"outcome": "failed", "job": deepcopy(record)}
+
+    def retry_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        updated_at: str,
+    ) -> Dict[str, Any]:
+        with self._rights_lock:
+            record = self._data_export_jobs.get(str(job_id or ""))
+            if record is None or record.get("ownerUserId") != str(owner_user_id or ""):
+                return {"outcome": "notFound", "job": None}
+            if record["status"] != "failed":
+                return {"outcome": "observed", "job": deepcopy(record)}
+            record.update(
+                {
+                    "status": "queued",
+                    "failureCode": None,
+                    "updatedAt": str(updated_at),
+                }
+            )
+            return {"outcome": "queued", "job": deepcopy(record)}
+
+    def expire_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        updated_at: str,
+    ) -> Dict[str, Any]:
+        with self._rights_lock:
+            record = self._data_export_jobs.get(str(job_id or ""))
+            if record is None or record.get("ownerUserId") != str(owner_user_id or ""):
+                return {"outcome": "notFound", "job": None}
+            if record["status"] == "expired":
+                return {"outcome": "deduplicated", "job": deepcopy(record)}
+            record.update(
+                {
+                    "status": "expired",
+                    "artifactHash": None,
+                    "artifact": None,
+                    "manifest": None,
+                    "failureCode": None,
+                    "readyAt": None,
+                    "updatedAt": str(updated_at),
+                }
+            )
+            return {"outcome": "expired", "job": deepcopy(record)}
 
     def create_rights_request(self, request: DataRightsRequest) -> Dict[str, Any]:
         if not isinstance(request, DataRightsRequest):

@@ -1,0 +1,11 @@
+{
+  "version": "0084",
+  "name": "data_export_jobs",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "dataExportJobsDefaultOffUntilClientAdoption",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "dataExportJobsV1": false
+  }
+}
