@@ -143,6 +143,27 @@ class OwnerTruthCandidateReviewHistoryItem:
 
 
 @dataclass(frozen=True)
+class OwnerTruthMemoryVersionHistoryItem:
+    version_number: int
+    status: str
+    decision: CandidateDecision
+    content_schema_version: str
+    content: Mapping[str, Any]
+    source_count: int
+    created_at: str
+
+
+@dataclass(frozen=True)
+class OwnerTruthMemoryVersionHistory:
+    memory_kind: str
+    perspective_type: str
+    epistemic_status: str
+    sensitivity: str
+    memory_status: str
+    versions: tuple[OwnerTruthMemoryVersionHistoryItem, ...]
+
+
+@dataclass(frozen=True)
 class OwnerTruthCandidateReviewResult:
     outcome: str
     receipt_id: str
@@ -248,6 +269,91 @@ def _review_history_item(
         memory_id=memory_id,
         memory_version_id=memory_version_id,
         memory_version=memory_version,
+    )
+
+
+def _memory_version_history_item(
+    *,
+    version_number: Any,
+    is_current: Any,
+    decision: Any,
+    schema_version: Any,
+    payload: Any,
+    created_at: Any,
+) -> OwnerTruthMemoryVersionHistoryItem:
+    try:
+        normalized_version = int(version_number)
+    except (TypeError, ValueError) as exc:
+        raise OwnerTruthCandidateReviewConflict(
+            "MemoryVersion history has an invalid version number"
+        ) from exc
+    try:
+        normalized_decision = (
+            decision if isinstance(decision, CandidateDecision) else CandidateDecision(str(decision))
+        )
+    except ValueError as exc:
+        raise OwnerTruthCandidateReviewConflict(
+            "MemoryVersion history has an invalid decision"
+        ) from exc
+    if normalized_version < 1 or normalized_decision not in {
+        CandidateDecision.ACCEPTED,
+        CandidateDecision.CORRECTED,
+    }:
+        raise OwnerTruthCandidateReviewConflict(
+            "MemoryVersion history is not backed by an activating decision"
+        )
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise OwnerTruthCandidateReviewConflict(
+                "MemoryVersion history payload is malformed"
+            ) from exc
+    if not isinstance(payload, Mapping):
+        raise OwnerTruthCandidateReviewConflict(
+            "MemoryVersion history payload is unavailable"
+        )
+    content = payload.get("content")
+    evidence_refs = payload.get("evidenceRefs")
+    normalized_schema = str(
+        payload.get("contentSchemaVersion") or schema_version or ""
+    ).strip()
+    normalized_created_at = (
+        created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at or "").strip()
+    )
+    if (
+        not isinstance(content, Mapping)
+        or not normalized_schema
+        or not isinstance(evidence_refs, list)
+        or not evidence_refs
+        or not normalized_created_at
+    ):
+        raise OwnerTruthCandidateReviewConflict(
+            "MemoryVersion history is missing Owner-facing content or provenance"
+        )
+    source_refs: set[tuple[str, int]] = set()
+    for item in evidence_refs:
+        if not isinstance(item, Mapping):
+            continue
+        source_id = str(item.get("sourceId") or "").strip()
+        try:
+            source_version = int(item.get("sourceVersion") or 0)
+        except (TypeError, ValueError):
+            continue
+        if source_id and source_version > 0:
+            source_refs.add((source_id, source_version))
+    if not source_refs:
+        raise OwnerTruthCandidateReviewConflict(
+            "MemoryVersion history has no valid source provenance"
+        )
+    return OwnerTruthMemoryVersionHistoryItem(
+        version_number=normalized_version,
+        status="current" if is_current is True else "superseded",
+        decision=normalized_decision,
+        content_schema_version=normalized_schema,
+        content=deepcopy(dict(content)),
+        source_count=len(source_refs),
+        created_at=normalized_created_at,
     )
 
 
@@ -362,6 +468,73 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 key=lambda item: (item.decided_at, item.candidate.candidate_id),
                 reverse=True,
             )
+        )
+
+    def list_memory_version_history(
+        self,
+        *,
+        memory_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthMemoryVersionHistory:
+        _assert_owner_context(context)
+        with self._lock:
+            vault = self._vault_states.get(context.vault_id)
+            if vault is None or vault[0] != context.owner_subject_id or vault[1] != "active":
+                raise OwnerTruthCandidateReviewAccessDenied("Vault is not active for this Owner")
+            records = [
+                record
+                for record in self._memory_activations.values()
+                if str(record.get("memoryId") or "") == memory_id
+            ]
+            if not records:
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "Memory does not exist in this Owner Vault"
+                )
+            candidates: list[OwnerTruthCandidateSnapshot] = []
+            versions: list[OwnerTruthMemoryVersionHistoryItem] = []
+            for record in records:
+                candidate = self._candidates.get(str(record.get("candidateId") or ""))
+                if (
+                    candidate is None
+                    or candidate.vault_id != context.vault_id
+                    or candidate.owner_subject_id != context.owner_subject_id
+                ):
+                    raise OwnerTruthCandidateReviewAccessDenied(
+                        "Memory does not belong to this Owner Vault"
+                    )
+                candidates.append(candidate)
+                versions.append(
+                    _memory_version_history_item(
+                        version_number=record.get("memoryVersion"),
+                        is_current=record.get("isCurrent"),
+                        decision=candidate.decision,
+                        schema_version=(record.get("payload") or {}).get(
+                            "contentSchemaVersion"
+                        )
+                        if isinstance(record.get("payload"), Mapping)
+                        else None,
+                        payload=record.get("payload"),
+                        created_at=record.get("createdAt"),
+                    )
+                )
+            initial_candidate = min(
+                zip(records, candidates),
+                key=lambda value: int(value[0].get("memoryVersion") or 0),
+            )[1]
+        ordered_versions = tuple(
+            sorted(versions, key=lambda item: item.version_number, reverse=True)
+        )
+        if sum(item.status == "current" for item in ordered_versions) != 1:
+            raise OwnerTruthCandidateReviewConflict(
+                "MemoryVersion history must contain exactly one current version"
+            )
+        return OwnerTruthMemoryVersionHistory(
+            memory_kind=initial_candidate.memory_kind.value,
+            perspective_type=initial_candidate.perspective_type.value,
+            epistemic_status=initial_candidate.epistemic_status.value,
+            sensitivity=initial_candidate.sensitivity.value,
+            memory_status="active",
+            versions=ordered_versions,
         )
 
     def assert_active_owner_vault(self, *, context: OwnerTruthCommandContext) -> None:
@@ -672,6 +845,7 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 "memoryId": plan.memory_id,
                 "memoryVersionId": plan.memory_version_id,
                 "memoryVersion": 1,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
                 "payload": deepcopy(dict(plan.payload)),
                 "sourceId": plan.source_id,
                 "sourceVersion": plan.source_version,
@@ -817,6 +991,7 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 "memoryId": plan.memory_id,
                 "memoryVersionId": plan.replacement_memory_version_id,
                 "memoryVersion": plan.replacement_memory_version,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
                 "payload": deepcopy(dict(plan.payload)),
                 "sourceId": plan.source_id,
                 "sourceVersion": plan.source_version,
@@ -1129,6 +1304,67 @@ class PostgresOwnerTruthCandidateReviewRepository:
                 )
             )
         return tuple(history)
+
+    def list_memory_version_history(
+        self,
+        *,
+        memory_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthMemoryVersionHistory:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            self._active_vault(cursor, context=context, lock=False)
+            cursor.execute(
+                """
+                SELECT memory.memory_kind, memory.perspective_type,
+                    memory.epistemic_status, memory.sensitivity, memory.status,
+                    version.version_number, version.is_current,
+                    version.schema_version, version.payload, version.created_at,
+                    receipt.decision
+                FROM owner_truth.memories AS memory
+                JOIN owner_truth.memory_versions AS version
+                  ON version.vault_id = memory.vault_id
+                 AND version.memory_id = memory.id
+                JOIN owner_truth.decision_receipts AS receipt
+                  ON receipt.vault_id = version.vault_id
+                 AND receipt.id = version.decision_receipt_id
+                WHERE memory.vault_id = %s
+                  AND memory.id = %s
+                  AND memory.owner_subject_id = %s
+                  AND memory.status = 'active'
+                ORDER BY version.version_number DESC
+                """,
+                (context.vault_id, memory_id, context.owner_subject_id),
+            )
+            rows = cursor.fetchall()
+        if not rows:
+            raise OwnerTruthCandidateReviewAccessDenied(
+                "Memory does not exist in this Owner Vault"
+            )
+        versions = tuple(
+            _memory_version_history_item(
+                version_number=row.get("version_number"),
+                is_current=row.get("is_current"),
+                decision=row.get("decision"),
+                schema_version=row.get("schema_version"),
+                payload=row.get("payload"),
+                created_at=row.get("created_at"),
+            )
+            for row in rows
+        )
+        if sum(item.status == "current" for item in versions) != 1:
+            raise OwnerTruthCandidateReviewConflict(
+                "MemoryVersion history must contain exactly one current version"
+            )
+        first = rows[0]
+        return OwnerTruthMemoryVersionHistory(
+            memory_kind=str(first.get("memory_kind") or ""),
+            perspective_type=str(first.get("perspective_type") or ""),
+            epistemic_status=str(first.get("epistemic_status") or ""),
+            sensitivity=str(first.get("sensitivity") or ""),
+            memory_status=str(first.get("status") or ""),
+            versions=versions,
+        )
 
     def assert_active_owner_vault(self, *, context: OwnerTruthCommandContext) -> None:
         """Prove the owner/vault boundary without reading Candidate payloads."""
@@ -1941,6 +2177,27 @@ class OwnerTruthCandidateReviewService:
                 context=context
             )
 
+    def list_memory_version_history(
+        self,
+        *,
+        memory_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthMemoryVersionHistory:
+        _assert_owner_context(context)
+        normalized_memory_id = str(memory_id or "").strip()
+        if not normalized_memory_id:
+            raise OwnerTruthCandidateReviewAccessDenied(
+                "Memory does not exist in this Owner Vault"
+            )
+        with self._request_unit_of_work(
+            correlation_id=f"owner-truth-memory-version-history-{context.vault_id}",
+            command_id="ownerTruthMemoryVersionHistory",
+        ):
+            return self._store.owner_truth_candidate_review_repository().list_memory_version_history(
+                memory_id=normalized_memory_id,
+                context=context,
+            )
+
     def decide(
         self,
         *,
@@ -2042,5 +2299,7 @@ __all__ = [
     "OwnerTruthCandidateReviewHistoryItem",
     "OwnerTruthCandidateReviewResult",
     "OwnerTruthCandidateReviewService",
+    "OwnerTruthMemoryVersionHistory",
+    "OwnerTruthMemoryVersionHistoryItem",
     "PostgresOwnerTruthCandidateReviewRepository",
 ]

@@ -317,6 +317,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/memories/{memory_id}/versions",
+                session,
+                "ownerTruthMemoryVersionHistory",
+            ),
+            _rule(
+                "GET",
                 "/v2/internal/owner-authority/vaults/{vault_id}/publications",
                 session,
                 "publicationOwnerManagementRead",

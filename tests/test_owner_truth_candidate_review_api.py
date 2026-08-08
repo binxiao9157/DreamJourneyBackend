@@ -226,6 +226,10 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             headers=headers,
             json={},
         )
+        memory_version_history = client.get(
+            "/v2/vaults/vault-hidden/memories/00000000-0000-0000-0000-000000000001/versions",
+            headers=headers,
+        )
 
         self.assertEqual(owner_id.startswith("user_"), True)
         self.assertEqual(response.status_code, 404)
@@ -289,6 +293,11 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(
             correction_resolution.json()["detail"]["code"],
             "ownerTruthCorrectionRequestUnavailable",
+        )
+        self.assertEqual(memory_version_history.status_code, 404)
+        self.assertEqual(
+            memory_version_history.json()["detail"]["code"],
+            "ownerTruthCandidateReviewUnavailable",
         )
 
     def test_owner_can_list_decide_activate_memory_and_replay(self) -> None:
@@ -580,6 +589,46 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             resolved.json()["correctionResolution"]["supersededMemoryVersionId"],
             memory_activation["memoryVersionId"],
         )
+
+        version_history = client.get(
+            f"/v2/vaults/{vault_id}/memories/{citation['citation']['memoryId']}/versions",
+            headers=self._formal_policy_headers(auth_headers, session_id=session_id),
+        )
+        self.assertEqual(version_history.status_code, 200, version_history.text)
+        self.assertEqual(version_history.headers["cache-control"], "no-store")
+        history_body = version_history.json()
+        self.assertEqual(
+            history_body["schemaVersion"],
+            "owner-truth-memory-version-history-v1",
+        )
+        self.assertEqual(history_body["vaultId"], vault_id)
+        self.assertEqual(history_body["memoryStatus"], "active")
+        self.assertEqual(
+            [(item["versionNumber"], item["status"], item["decision"]) for item in history_body["versions"]],
+            [(2, "current", "corrected"), (1, "superseded", "accepted")],
+        )
+        self.assertEqual(
+            history_body["versions"][0]["content"]["summary"],
+            "外祖父在院子里讲故事",
+        )
+        self.assertGreaterEqual(history_body["versions"][0]["sourceCount"], 1)
+        self.assertTrue(history_body["versions"][0]["createdAt"])
+        minimized_history = json.dumps(history_body, ensure_ascii=False, sort_keys=True)
+        for forbidden in (
+            "memoryId",
+            "memoryVersionId",
+            "contentHash",
+            "actorSubjectId",
+            "decisionReceiptId",
+        ):
+            self.assertNotIn(forbidden, minimized_history)
+
+        _, other_headers = self._login("13800139126")
+        denied_history = client.get(
+            f"/v2/vaults/{vault_id}/memories/{citation['citation']['memoryId']}/versions",
+            headers=other_headers,
+        )
+        self.assertEqual(denied_history.status_code, 403)
 
         receipts = main_module.store.owner_truth_candidate_review_repository().snapshot()["receipts"]
         correction_receipt = next(

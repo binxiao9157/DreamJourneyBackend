@@ -777,6 +777,53 @@ def main() -> None:
             "closed-pilot correction must replace exactly the cited MemoryVersion",
         )
 
+        memory_version_history = client.get(
+            (
+                f"/v2/vaults/{formal_vault_id}/memories/"
+                f"{typed_citation_payload['memoryId']}/versions"
+            ),
+            headers=policy_headers(
+                formal_auth_headers,
+                session_id=formal_session_id,
+                feature="ownerTruthCandidateReview",
+            ),
+        )
+        require(
+            memory_version_history.status_code == 200,
+            f"closed-pilot MemoryVersion history failed: {memory_version_history.text}",
+        )
+        memory_history_body = memory_version_history.json()
+        memory_history_versions = memory_history_body.get("versions") or []
+        require(
+            memory_version_history.headers.get("cache-control") == "no-store"
+            and memory_history_body.get("schemaVersion")
+            == "owner-truth-memory-version-history-v1"
+            and [
+                (item.get("versionNumber"), item.get("status"), item.get("decision"))
+                for item in memory_history_versions
+            ]
+            == [(2, "current", "corrected"), (1, "superseded", "accepted")],
+            "MemoryVersion history must distinguish the corrected current version from its predecessor",
+        )
+        minimized_memory_history = json.dumps(
+            memory_history_body,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        require(
+            all(
+                field not in minimized_memory_history
+                for field in (
+                    "memoryId",
+                    "memoryVersionId",
+                    "contentHash",
+                    "actorSubjectId",
+                    "decisionReceiptId",
+                )
+            ),
+            "MemoryVersion history must not expose internal identifiers or hashes",
+        )
+
         correction_projection_result = OwnerTruthMemoryProjectionWorkerRuntime(
             settings=worker_settings,
             store=store,
@@ -846,6 +893,7 @@ def main() -> None:
             f"schemaHead={verified['expectedHead']} defaultHidden=true qaHeaderRequired=true "
             "ownerInbox=true crossVaultDenied=true crossOwnerDenied=true "
             "decisionCreated=true decisionDeduplicated=true pendingRemoved=true reviewHistory=true "
+            "memoryVersionHistory=true "
             "closedPilotSourceCandidate=true closedPilotProjectionContext=true "
             "closedPilotCitationCorrection=true"
         )

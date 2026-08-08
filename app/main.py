@@ -4313,6 +4313,29 @@ def _owner_truth_candidate_review_history_item_response(item: Any) -> Dict[str, 
     }
 
 
+def _owner_truth_memory_version_history_response(history: Any) -> Dict[str, Any]:
+    return {
+        "schemaVersion": "owner-truth-memory-version-history-v1",
+        "memoryKind": history.memory_kind,
+        "perspectiveType": history.perspective_type,
+        "epistemicStatus": history.epistemic_status,
+        "sensitivity": history.sensitivity,
+        "memoryStatus": history.memory_status,
+        "versions": [
+            {
+                "versionNumber": item.version_number,
+                "status": item.status,
+                "decision": item.decision.value,
+                "contentSchemaVersion": item.content_schema_version,
+                "content": dict(item.content),
+                "sourceCount": item.source_count,
+                "createdAt": item.created_at,
+            }
+            for item in history.versions
+        ],
+    }
+
+
 def _owner_truth_candidate_decision_response(result: Any) -> Dict[str, Any]:
     review = result.review
     activation = result.memory_activation
@@ -7031,6 +7054,37 @@ def owner_truth_candidate_review_history(
         },
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/memories/{memory_id}/versions",
+    include_in_schema=False,
+)
+def owner_truth_memory_version_history(
+    request: Request,
+    vault_id: str,
+    memory_id: str,
+) -> JSONResponse:
+    """Owner-only immutable history for one active formal Memory."""
+
+    try:
+        context = _owner_truth_direct_candidate_review_context(request, vault_id=vault_id)
+        normalized_memory_id = str(UUID(memory_id))
+        history = OwnerTruthCandidateReviewService(store).list_memory_version_history(
+            memory_id=normalized_memory_id,
+            context=context,
+        )
+    except (ValueError, AttributeError) as error:
+        raise _owner_truth_candidate_review_http_error(
+            OwnerTruthCandidateReviewAccessDenied(
+                "Memory does not exist in this Owner Vault"
+            )
+        ) from error
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    body = _owner_truth_memory_version_history_response(history)
+    body["vaultId"] = context.vault_id
+    return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
 
 
 @app.get(
