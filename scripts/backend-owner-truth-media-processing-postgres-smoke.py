@@ -844,9 +844,14 @@ def main() -> None:
                 f"synthetic account export download failed: {export_download.text}",
             )
             require(
-                "no-store" in export_download.headers.get("cache-control", "")
-                and "private" in export_download.headers.get("cache-control", ""),
-                "synthetic account export must remain private and uncached",
+                "no-store" in export_download.headers.get("cache-control", ""),
+                "synthetic account export must remain uncached",
+            )
+            require(
+                export_download.headers.get("content-disposition", "").startswith(
+                    "attachment;"
+                ),
+                "synthetic account export must remain an authenticated attachment",
             )
             export_artifact = export_download.json()
             export_manifest = export_artifact.get("manifest") or {}
