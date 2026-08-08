@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
+import hashlib
 from io import BytesIO
 import unittest
 from unittest.mock import patch
@@ -125,6 +126,7 @@ class VoiceSynthesisRoleBindingTests(unittest.TestCase):
             "personaScope": "personal",
             "digitalHumanId": "owner",
             "requestPurpose": "echo",
+            "expectedProfileVersion": 1,
         }
         payload.update(overrides)
         return payload
@@ -140,7 +142,7 @@ class VoiceSynthesisRoleBindingTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["audio"]["format"], "pcm16kMono")
         self.assertEqual(payload["synthesisBinding"], {
-            "schemaVersion": "voice-synthesis-binding-v1",
+            "schemaVersion": "voice-synthesis-binding-v2",
             "voiceProfileId": "self-profile",
             "profileVersion": 1,
             "ownerUserId": "owner",
@@ -151,8 +153,30 @@ class VoiceSynthesisRoleBindingTests(unittest.TestCase):
             "requestPurpose": "echo",
             "outputMode": "tencentAudioDrive",
             "audioOwner": "tencentDigitalHuman",
+            "textHash": hashlib.sha256("请把这句话送到数字人。".encode("utf-8")).hexdigest(),
         })
         self.assertEqual(provider.call_count, 1)
+
+    def test_echo_synthesis_requires_current_profile_version_before_provider_call(self) -> None:
+        store = InMemoryStore()
+        store.save_voice_profile("owner", _accepted_profile())
+        provider = _TTSProvider()
+
+        missing = self._post(
+            self._payload(expectedProfileVersion=None),
+            provider=provider,
+            store=store,
+        )
+        stale = self._post(
+            self._payload(expectedProfileVersion=2),
+            provider=provider,
+            store=store,
+        )
+
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json()["detail"]["code"], "voice_profile_version_mismatch")
+        self.assertEqual(provider.call_count, 0)
 
     def test_pending_profile_returns_explainable_fallback_without_provider_call(self) -> None:
         store = InMemoryStore()

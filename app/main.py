@@ -5223,7 +5223,7 @@ VOICE_CLONE_PROVIDER_MODE = "mockContract"
 VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE = "echo"
 VOICE_CLONE_QUALITY_PREVIEW_PURPOSE = "qualityPreview"
 VOICE_CLONE_QUALITY_PREVIEW_RECEIPT_TTL_SECONDS = 15 * 60
-VOICE_SYNTHESIS_BINDING_SCHEMA_VERSION = "voice-synthesis-binding-v1"
+VOICE_SYNTHESIS_BINDING_SCHEMA_VERSION = "voice-synthesis-binding-v2"
 VOICE_SYNTHESIS_TENCENT_AUDIO_OWNER = "tencentDigitalHuman"
 VOICE_CLONE_AUTHORIZATION_COPY = (
     "声音克隆必须由用户主动授权，仅使用用户确认提交的声音样本；"
@@ -12475,6 +12475,7 @@ def _resolve_tencent_audio_drive_binding(
     user_id: str,
     voice_profile_id: str,
     profile: Dict[str, Any],
+    text: str,
 ) -> Dict[str, Any]:
     """Bind PCM audio-drive output to the authorized self role only.
 
@@ -12493,6 +12494,25 @@ def _resolve_tencent_audio_drive_binding(
     requested_digital_human_id = str(
         payload.get("digitalHumanId") or profile_digital_human_id
     ).strip()
+    expected_profile_version = _required_nonnegative_payload_integer(
+        payload,
+        "expectedProfileVersion",
+    )
+    current_profile_version = int(profile.get("profileVersion") or 0)
+    if expected_profile_version <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="expectedProfileVersion must be a positive integer",
+        )
+    if expected_profile_version != current_profile_version:
+        raise HTTPException(
+            status_code=409,
+            detail=_voice_synthesis_fallback_detail(
+                code="voice_profile_version_mismatch",
+                fallback_mode="neutralOrText",
+                retryable=True,
+            ),
+        )
 
     if (
         role_key != "personalOwner"
@@ -12523,6 +12543,7 @@ def _resolve_tencent_audio_drive_binding(
         "requestPurpose": VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE,
         "outputMode": "tencentAudioDrive",
         "audioOwner": VOICE_SYNTHESIS_TENCENT_AUDIO_OWNER,
+        "textHash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
     }
 
 
@@ -13504,6 +13525,7 @@ def synthesize_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[
                 user_id=user_id,
                 voice_profile_id=voice_profile_id,
                 profile=profile,
+                text=text,
             )
         provider_speaker_id = _voice_clone_provider_speaker_id(profile)
         provider_audio_format = audio_format

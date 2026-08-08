@@ -804,6 +804,7 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
                     "format": "mp3",
                     "sampleRate": 24000,
                     "outputMode": "tencentAudioDrive",
+                    "expectedProfileVersion": 1,
                     "roleKey": "personalOwner",
                     "subjectEligibility": verified_self_eligibility(),
                 },
