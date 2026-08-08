@@ -307,6 +307,9 @@ def main() -> None:
     previous_closed_pilot_features = set(
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
     )
+    previous_release_policy_capability_resolver = (
+        main_module.RELEASE_POLICY_SERVICE.capability_resolver
+    )
 
     try:
         create_database(admin_dsn, database_name)
@@ -351,6 +354,13 @@ def main() -> None:
             )
             main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.discard(
                 "ownerTruthCandidateReview"
+            )
+            # The disposable filesystem + clean-scanner adapter is the explicit
+            # fake Provider for this Gate. Bind only its two typed capabilities;
+            # the deployed runtime inventory remains unchanged and fail-closed.
+            main_module.RELEASE_POLICY_SERVICE.capability_resolver = (
+                lambda capability: capability
+                in {"ownerTruthMediaStorage", "ownerTruthMediaProcessing"}
             )
 
             client = TestClient(main_module.app)
@@ -1327,6 +1337,9 @@ def main() -> None:
         main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = previous_closed_pilot_owner_ids
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features = (
             previous_closed_pilot_features
+        )
+        main_module.RELEASE_POLICY_SERVICE.capability_resolver = (
+            previous_release_policy_capability_resolver
         )
         if store is not None:
             store.close_pool()
