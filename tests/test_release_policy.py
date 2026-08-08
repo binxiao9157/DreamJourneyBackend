@@ -518,6 +518,41 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
         self.assertNotIn("token", str(payload).lower())
         self.assertNotIn("credential", str(payload).lower())
 
+    def test_authenticated_visitor_can_request_only_the_visitor_policy_audience(self):
+        _, headers = self._login("13800139509")
+
+        visitor = self.client.get(
+            "/v2/release-policy",
+            params={
+                "audience": "visitor",
+                "cohort": "closedPilotAdultSelf",
+                "clientBuild": 1,
+                "feature": "visitorAccess",
+            },
+            headers=headers,
+        )
+        self_claimed_family = self.client.get(
+            "/v2/release-policy",
+            params={
+                "audience": "family",
+                "cohort": "closedPilotAdultSelf",
+                "clientBuild": 1,
+                "feature": "visitorAccess",
+            },
+            headers=headers,
+        )
+
+        self.assertEqual(visitor.status_code, 200, visitor.text)
+        self.assertEqual(visitor.json()["audience"], "visitor")
+        self.assertEqual(visitor.json()["features"][0]["feature"], "visitorAccess")
+        self.assertFalse(visitor.json()["features"][0]["enabled"])
+        self.assertEqual(
+            visitor.json()["features"][0]["reason"],
+            "publicationVisitorNotApproved",
+        )
+        self.assertEqual(self_claimed_family.status_code, 200, self_claimed_family.text)
+        self.assertEqual(self_claimed_family.json()["audience"], "owner")
+
     def test_release_policy_endpoint_uses_server_owned_closed_pilot_allowlist(self):
         main_module.RELEASE_POLICY_SERVICE = ReleasePolicyService(
             closed_pilot_enabled_features={"ownerTruthCandidateReview"}

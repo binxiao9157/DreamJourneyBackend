@@ -6727,14 +6727,15 @@ def release_policy(
     principal = getattr(request.state, "auth_principal", None)
     if not isinstance(principal, RequestPrincipal):
         principal = RequestPrincipal.anonymous()
+    requested_audience = normalize_release_policy_audience(
+        audience,
+        environment=settings.environment,
+        principal_kind=str(principal.get("kind") or "anonymous"),
+    )
     resolved_audience = (
-        "owner"
-        if principal.kind == PrincipalKind.USER
-        else normalize_release_policy_audience(
-            audience,
-            environment=settings.environment,
-            principal_kind=str(principal.get("kind") or "anonymous"),
-        )
+        requested_audience
+        if principal.kind != PrincipalKind.USER or requested_audience == "visitor"
+        else "owner"
     )
     try:
         return RELEASE_POLICY_SERVICE.build_snapshot(
