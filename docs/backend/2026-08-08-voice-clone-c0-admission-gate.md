@@ -79,6 +79,13 @@ BACKEND_BASE_URL=https://dreamjourney-api.liftora.cn \
 
 默认部署 smoke 刻意验证未配置时 `trainingAdmissionEnabled=false`，防止因漏配或升级回退而意外开放声音训练。
 
+## 本次部署记录
+
+- 代码版本：`538cdf5`（2026-08-08）。
+- 部署环境：生产 Postgres API，API 容器已重建并健康。
+- 证据：`/ready` 返回 `200`；对公开 HTTPS API 运行 C0 deployed smoke 通过，确认 `identityEligibilityProviderReady=false`、`trainingAdmissionEnabled=false`，没有暴露身份 Provider 凭据或回执字段。
+- 本次未配置或调用真实身份/活体 Provider，也未提交真实声音样本；这是安全默认关闭验证，不是 M1 生产启用验收。
+
 ## 仍未关闭的外部门
 
 - 选定并接通经过审批的成年人强身份/活体 Provider。
