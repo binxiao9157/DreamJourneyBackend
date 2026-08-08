@@ -63,3 +63,9 @@ ClamAV 官方协议说明确认：TCP 支持 `INSTREAM`，但该 TCP 通道没�
 - 未启动 profile、未配置 host 或未通过 smoke 时，不允许启用真实媒体摄入。
 - 本 Gate 不配置腾讯 COS、不上传任何真实文件，也不启用 OCR、ASR、视觉分析或公开入口。
 - EICAR 被拦截只证明安全扫描链路；COS `PUT -> HEAD -> readback -> delete` 仍由 A1 独立 Gate 验收。
+
+## 当前部署状态
+
+- 后端 `3adf6fb` 已部署，API 健康检查通过，`/config/runtime` 仍返回媒体能力 `disabled/runtimeDisabled`；没有修改服务器私密 `.env`，也没有开启媒体采集。
+- `owner-truth-media-safety` profile 已通过服务器 Compose 解析，但 sidecar 尚未启动。部署前探测到服务器可用内存约为 `2.5 GiB`，不足以为 ClamAV 首次签名加载和后续重载预留可靠余量，因此本次不以生产 API 可用性为代价启动它。
+- 在扩容或确认资源余量后，按本文件“服务器配置与启用顺序”启动 profile，先跑 clean/EICAR smoke；通过前保持 `OWNER_TRUTH_MEDIA_CAPTURE_ENABLED=false`。
