@@ -45,8 +45,8 @@ OWNER_TRUTH_MEDIA_S3_SECRET_ACCESS_KEY=<least-privilege-secret-key>
 OWNER_TRUTH_MEDIA_S3_SERVER_SIDE_ENCRYPTION=AES256
 OWNER_TRUTH_MEDIA_S3_KMS_KEY_ID=
 
-# Capture 还要求 API/worker 镜像中实际存在 clamscan；否则 runtime
-# capability 会继续 fail-closed。
+# Capture 还要求 API/worker 镜像中的 clamscan 能完成无用户数据的启动
+# 探测（包含可读的签名库）；否则 runtime capability 会继续 fail-closed。
 OWNER_TRUTH_MEDIA_CONTENT_SAFETY_PROVIDER=clamav
 
 # 在真实对象存储通过 smoke 前保持其余处理链路关闭。

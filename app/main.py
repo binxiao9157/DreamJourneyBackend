@@ -6479,9 +6479,10 @@ async def shadow_operation_metric_attempt(request: Request, call_next):
 
 @app.on_event("startup")
 def startup() -> None:
-    # This checks configuration shape only.  A partially configured external
-    # Provider never prevents the API from starting, but it is recorded as
-    # unavailable and stays fail-closed in the public runtime contract.
+    # This checks configuration shape plus local runtime dependencies. A
+    # partially configured external provider never prevents API startup, but
+    # it is recorded as unavailable and stays fail-closed in the public
+    # runtime contract.
     app.state.provider_runtime_inventory = ProviderRuntimeInventory(
         settings,
         validated_at_startup=True,

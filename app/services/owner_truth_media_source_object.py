@@ -394,6 +394,36 @@ class TestOnlyCleanMediaContentSafetyScanner:
         return MediaSafetyVerdict(status="clean", provider="testOnlyClean")
 
 
+def clamav_scanner_runtime_ready(
+    *,
+    executable: str = "clamscan",
+    timeout_seconds: int = 5,
+) -> bool:
+    """Return whether a local ClamAV executable can complete an empty scan.
+
+    This is deliberately a dependency readiness probe rather than an upload
+    scan: it never receives user bytes. A missing binary, stale/corrupt
+    signature database, timeout, or execution failure keeps capture disabled.
+    """
+
+    normalized_executable = str(executable or "clamscan").strip() or "clamscan"
+    resolved_executable = shutil.which(normalized_executable)
+    if resolved_executable is None:
+        return False
+    try:
+        completed = subprocess.run(
+            [resolved_executable, "--no-summary", "-"],
+            input=b"",
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=max(1, int(timeout_seconds)),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
 class ClamAVMediaContentSafetyScanner:
     """Uses a locally managed ClamAV binary without sending bytes to a provider."""
 

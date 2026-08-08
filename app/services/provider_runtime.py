@@ -1,19 +1,21 @@
 """Fail-closed, value-free Provider capability inventory.
 
-This module deliberately validates *configuration shape*, not provider health.
-It is built once during API startup and is consumed by ``/config/runtime``.
-No credential, bucket name, endpoint, object key, or user data is included in
-the public descriptor.
+This module validates provider configuration shape and first-party runtime
+dependencies that can be checked without a provider call. It is built once
+during API startup and is consumed by ``/config/runtime``. No credential,
+bucket name, endpoint, object key, or user data is included in the public
+descriptor.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from app.core.config import Settings
 from app.services.identity_bindings import identity_challenge_runtime_descriptor
+from app.services.owner_truth_media_source_object import clamav_scanner_runtime_ready
 
 
 @dataclass(frozen=True)
@@ -67,9 +69,16 @@ class ProviderRuntimeInventory:
     _VOICE_CAPABILITY = "voiceCloneShell"
     _DIGITAL_HUMAN_CAPABILITY = "digitalHumanLivePanel"
 
-    def __init__(self, settings: Settings, *, validated_at_startup: bool = False) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        validated_at_startup: bool = False,
+        clamav_scanner_ready: Callable[[], bool] = clamav_scanner_runtime_ready,
+    ) -> None:
         self._settings = settings
         self._validated_at_startup = validated_at_startup
+        self._clamav_scanner_ready = clamav_scanner_ready
         storage = self._media_storage_status()
         self._statuses = {
             storage.capability: storage,
@@ -360,7 +369,12 @@ class ProviderRuntimeInventory:
         provider = self._normalized(self._settings.owner_truth_media_content_safety_provider)
         environment = self._normalized(self._settings.environment)
         if provider == "clamav":
-            return None
+            try:
+                if self._clamav_scanner_ready():
+                    return None
+            except Exception:
+                pass
+            return "contentSafetyScannerUnavailable"
         if provider == "testclean" and environment not in {"production", "prod"}:
             return None
         return "contentSafetyProviderUnavailable"

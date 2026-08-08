@@ -210,7 +210,13 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             identity_challenge_http_json_api_key=None,
         )
 
-        config = RuntimeConfigService(settings).public_config()
+        config = RuntimeConfigService(
+            settings,
+            provider_inventory=ProviderRuntimeInventory(
+                settings,
+                clamav_scanner_ready=lambda: True,
+            ),
+        ).public_config()
         snapshots = config["capabilitySnapshots"]
         inventory = config["providerInventory"]["capabilities"]
 
@@ -263,7 +269,13 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             tencent_digital_human_asset_virtualman_key="fixture-dh-asset",
         )
 
-        config = RuntimeConfigService(settings).public_config()
+        config = RuntimeConfigService(
+            settings,
+            provider_inventory=ProviderRuntimeInventory(
+                settings,
+                clamav_scanner_ready=lambda: True,
+            ),
+        ).public_config()
         snapshots = config["capabilitySnapshots"]
         inventory = config["providerInventory"]
 
@@ -312,23 +324,33 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             "owner_truth_media_content_safety_provider": "clamav",
         }
 
+        incomplete_settings = Settings(
+            **base,
+            owner_truth_media_s3_endpoint_url="http://cos.ap-shanghai.myqcloud.com",
+            owner_truth_media_s3_server_side_encryption="AES256",
+        )
         incomplete = RuntimeConfigService(
-            Settings(
-                **base,
-                owner_truth_media_s3_endpoint_url="http://cos.ap-shanghai.myqcloud.com",
-                owner_truth_media_s3_server_side_encryption="AES256",
-            )
+            incomplete_settings,
+            provider_inventory=ProviderRuntimeInventory(
+                incomplete_settings,
+                clamav_scanner_ready=lambda: True,
+            ),
         ).public_config()["capabilitySnapshots"]["ownerTruthMediaStorage"]
         self.assertFalse(incomplete["providerReady"])
         self.assertEqual(incomplete["reason"], "providerConfigurationIncomplete")
 
+        configured_settings = Settings(
+            **base,
+            owner_truth_media_s3_endpoint_url="https://cos.ap-shanghai.myqcloud.com",
+            owner_truth_media_s3_server_side_encryption="cos/kms",
+            owner_truth_media_s3_kms_key_id="fixture-kms-key",
+        )
         configured = RuntimeConfigService(
-            Settings(
-                **base,
-                owner_truth_media_s3_endpoint_url="https://cos.ap-shanghai.myqcloud.com",
-                owner_truth_media_s3_server_side_encryption="cos/kms",
-                owner_truth_media_s3_kms_key_id="fixture-kms-key",
-            )
+            configured_settings,
+            provider_inventory=ProviderRuntimeInventory(
+                configured_settings,
+                clamav_scanner_ready=lambda: True,
+            ),
         ).public_config()["capabilitySnapshots"]["ownerTruthMediaStorage"]
         self.assertTrue(configured["enabled"])
         self.assertTrue(configured["providerReady"])
@@ -341,7 +363,11 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             owner_truth_media_storage_root="/var/lib/dreamjourney/private-media",
             owner_truth_media_content_safety_provider="clamav",
         )
-        inventory = ProviderRuntimeInventory(settings, validated_at_startup=True)
+        inventory = ProviderRuntimeInventory(
+            settings,
+            validated_at_startup=True,
+            clamav_scanner_ready=lambda: True,
+        )
 
         config = RuntimeConfigService(
             settings,
@@ -354,6 +380,25 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             config["providerInventory"]["capabilities"]["ownerTruthMediaStorage"],
             inventory.public_descriptor()["capabilities"]["ownerTruthMediaStorage"],
         )
+
+    def test_media_storage_fails_closed_when_clamav_runtime_is_unavailable(self):
+        settings = Settings(
+            owner_truth_media_capture_enabled=True,
+            owner_truth_media_storage_provider="filesystem",
+            owner_truth_media_storage_root="/var/lib/dreamjourney/private-media",
+            owner_truth_media_content_safety_provider="clamav",
+        )
+        inventory = ProviderRuntimeInventory(
+            settings,
+            clamav_scanner_ready=lambda: False,
+        )
+
+        storage = inventory.status_for("ownerTruthMediaStorage").public_descriptor()
+
+        self.assertFalse(storage["enabled"])
+        self.assertFalse(storage["providerReady"])
+        self.assertEqual(storage["reason"], "contentSafetyScannerUnavailable")
+        self.assertEqual(storage["configurationStatus"], "incomplete")
 
 
 if __name__ == "__main__":
