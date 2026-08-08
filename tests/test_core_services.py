@@ -55,7 +55,7 @@ from app.services.voice_profile_lifecycle import (
     apply_voice_profile_lifecycle,
     make_voice_profile_consent,
 )
-from app.services.voice_profile_eligibility import synthetic_test_resolution
+from app.services.voice_profile_eligibility import server_verified_test_resolution
 from app.services.voice_sample_authorization import issue_voice_sample_authorization_challenge
 
 
@@ -123,7 +123,7 @@ def p1_voice_profile(
             decision="allow",
             reason=SubjectEligibilityReason.ELIGIBLE_LIVING_ADULT_SELF,
         ),
-        eligibility_provenance="syntheticTest",
+        eligibility_provenance="serverVerified",
         now=now,
     )
 
@@ -3467,7 +3467,7 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
         super().setUp()
         self._voice_profile_eligibility_patch = patch(
             "app.main._resolve_trusted_voice_profile_eligibility",
-            return_value=synthetic_test_resolution(
+            return_value=server_verified_test_resolution(
                 SubjectEligibilityDecision(
                     capability=HighRiskCapability.CLONED_VOICE,
                     allowed=True,

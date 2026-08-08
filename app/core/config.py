@@ -65,6 +65,14 @@ class Settings:
     identity_challenge_ttl_seconds: int = 300
     identity_challenge_max_attempts: int = 5
     identity_challenge_retry_after_seconds: int = 30
+    # Voice cloning requires a separate strong adult identity + liveness
+    # verifier. OTP/phone authentication is intentionally insufficient.
+    # ``disabled`` is the only default and causes the training path to fail
+    # closed even when a voice provider key is present.
+    voice_identity_eligibility_provider: str = "disabled"
+    voice_identity_eligibility_http_json_url: Optional[str] = None
+    voice_identity_eligibility_http_json_api_key: Optional[str] = None
+    voice_identity_eligibility_http_json_timeout_seconds: float = 10.0
     auth_legacy_phone_login_enabled: bool = False
     auth_access_ttl_seconds: int = 900
     auth_refresh_ttl_seconds: int = 30 * 24 * 60 * 60
@@ -326,6 +334,20 @@ class Settings:
             identity_challenge_retry_after_seconds=_env_int(
                 "IDENTITY_CHALLENGE_RETRY_AFTER_SECONDS",
                 cls.identity_challenge_retry_after_seconds,
+            ),
+            voice_identity_eligibility_provider=_env(
+                "VOICE_IDENTITY_ELIGIBILITY_PROVIDER",
+                cls.voice_identity_eligibility_provider,
+            ) or cls.voice_identity_eligibility_provider,
+            voice_identity_eligibility_http_json_url=_env(
+                "VOICE_IDENTITY_ELIGIBILITY_HTTP_JSON_URL"
+            ),
+            voice_identity_eligibility_http_json_api_key=_env(
+                "VOICE_IDENTITY_ELIGIBILITY_HTTP_JSON_API_KEY"
+            ),
+            voice_identity_eligibility_http_json_timeout_seconds=_env_float(
+                "VOICE_IDENTITY_ELIGIBILITY_HTTP_JSON_TIMEOUT_SECONDS",
+                cls.voice_identity_eligibility_http_json_timeout_seconds,
             ),
             auth_legacy_phone_login_enabled=_env_bool(
                 "AUTH_LEGACY_PHONE_LOGIN_ENABLED",

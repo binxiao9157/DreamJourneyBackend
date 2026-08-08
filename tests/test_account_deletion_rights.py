@@ -212,7 +212,7 @@ class AccountDeletionRightsAdapterAPITests(unittest.TestCase):
                 decision="allow",
                 reason=SubjectEligibilityReason.ELIGIBLE_LIVING_ADULT_SELF,
             ),
-            eligibility_provenance="syntheticTest",
+            eligibility_provenance="serverVerified",
             now=now,
         )
         main_module.store.save_voice_profile(user_id, profile)

@@ -48,7 +48,7 @@ def _accepted_profile(*, profile_id: str = "self-profile", owner: str = "owner")
             decision="allow",
             reason=SubjectEligibilityReason.ELIGIBLE_LIVING_ADULT_SELF,
         ),
-        eligibility_provenance="syntheticTest",
+        eligibility_provenance="serverVerified",
         now=datetime.now(timezone.utc),
     )
 

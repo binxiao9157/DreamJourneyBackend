@@ -554,6 +554,7 @@ from app.services.voice_profile_lifecycle import (
     canonical_lifecycle_state,
     is_voice_profile_synthesizable,
     make_voice_profile_consent,
+    make_voice_profile_training_consent_receipt,
     profile_public_projection,
     provider_observed_lifecycle_state,
 )
@@ -564,6 +565,9 @@ from app.services.voice_profile_deletion_effects import (
 from app.services.voice_profile_eligibility import (
     VoiceProfileEligibilityResolution,
     VoiceProfileEligibilityResolver,
+)
+from app.services.voice_identity_eligibility import (
+    make_voice_identity_eligibility_provider,
 )
 from app.services.voice_sample_assessment import (
     VoiceSampleAssessment,
@@ -5107,7 +5111,8 @@ ARCHIVE_MEDIA_UPLOAD_LIMITS = {
     "video": ARCHIVE_VIDEO_UPLOAD_LIMIT_BYTES,
 }
 VOICE_CLONE_SAMPLE_STATUSES = {"notProvided", "pending", "ready", "disabled", "deleted", "failed"}
-VOICE_CLONE_CONTRACT_VERSION = 7
+VOICE_CLONE_CONTRACT_VERSION = 8
+VOICE_CLONE_TRAINING_CONSENT_VERSION = "voice-private-training-consent-v2"
 VOICE_CLONE_PROVIDER_MODE = "mockContract"
 VOICE_CLONE_ECHO_SYNTHESIS_PURPOSE = "echo"
 VOICE_CLONE_QUALITY_PREVIEW_PURPOSE = "qualityPreview"
@@ -5255,10 +5260,21 @@ def _resolve_trusted_voice_profile_eligibility(
 ) -> VoiceProfileEligibilityResolution:
     """Resolve VoiceProfile eligibility without trusting mobile JSON claims."""
 
-    resolution = VoiceProfileEligibilityResolver().resolve(
+    resolution = VoiceProfileEligibilityResolver(
+        make_voice_identity_eligibility_provider(settings)
+    ).resolve(
         actor_user_id=actor_user_id,
         profile_user_id=profile_user_id,
     )
+    if resolution.availability != "ready":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "voice_identity_verification_unavailable",
+                "message": "voice training requires server-side adult identity and liveness verification",
+                "retryable": True,
+            },
+        )
     if not resolution.decision.allowed:
         _subject_eligibility_hard_deny(
             HighRiskCapability.CLONED_VOICE,
@@ -11645,6 +11661,9 @@ def _voice_clone_public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
         "qualityPreviewReceiptConsumedAt",
         "qualityAcceptanceReceiptHash",
         "qualityAcceptanceReceiptIssuedAt",
+        "eligibilityReceipt",
+        "trainingConsentReceipt",
+        "sampleAuthorizationStatementId",
         "sampleAuthorizationReceiptHash",
         "sampleAuthorizationChallengeId",
         "sampleAuthorizationReceiptExpiresAt",
@@ -12168,8 +12187,7 @@ def _sanitize_voice_profile_payload(
     if not isinstance(privacy_metadata, dict) or privacy_metadata.get("scope") not in {"generationAllowed", "familyCircle"}:
         raise HTTPException(status_code=403, detail="voice clone profile requires syncable authorization scope")
 
-    authorization_confirmed = bool(payload.get("authorizationConfirmed"))
-    if not authorization_confirmed:
+    if payload.get("authorizationConfirmed") is not True:
         raise HTTPException(status_code=403, detail="authorizationConfirmed is required")
 
     sample_status = str(payload.get("sampleStatus") or "notProvided").strip()
@@ -12200,23 +12218,11 @@ def _sanitize_voice_profile_payload(
     audio_base64 = str(payload.get("audioBase64") or "").strip()
     sample_assessment: Optional[VoiceSampleAssessment] = None
     sample_authorization: Optional[VerifiedVoiceSampleAuthorization] = None
+    training_consent: Optional[Dict[str, Any]] = None
     eligibility_resolution = None
-    # A profile may remain a local draft before a sample exists. Once it
-    # contains a sample, only a server-trusted eligibility result can trigger
-    # provider work; caller-supplied JSON is intentionally ignored here.
-    if audio_base64 or payload.get("subjectEligibility") is not None:
-        eligibility_resolution = _resolve_trusted_voice_profile_eligibility(
-            actor_user_id=actor_user_id,
-            profile_user_id=user_id,
-        )
-    consent_purpose = _required_text(payload, "purpose", 64)
-    if consent_purpose != "training":
+    requested_purpose = str(payload.get("purpose") or "training").strip()
+    if requested_purpose != "training":
         raise HTTPException(status_code=400, detail="voice profile creation purpose must be training")
-    consent_version = str(
-        payload.get("consentVersion") or payload.get("authorizationVersion") or ""
-    ).strip()
-    if not consent_version:
-        raise HTTPException(status_code=400, detail="consentVersion is required")
     existing_profile = existing_profile_override or store.get_voice_profile(user_id, voice_profile_id) or {}
     if audio_base64 and existing_profile:
         existing_state = canonical_lifecycle_state(existing_profile)
@@ -12237,6 +12243,19 @@ def _sanitize_voice_profile_payload(
             payload,
             user_id=user_id,
             voice_profile_id=voice_profile_id,
+            now=now_at,
+        )
+        # A caller-provided subjectEligibility, consentVersion, authorization
+        # text, or QA override must never admit a provider training request.
+        # The server resolves a current adult/liveness receipt only after the
+        # signed owner/profile-bound sample statement has been verified.
+        eligibility_resolution = _resolve_trusted_voice_profile_eligibility(
+            actor_user_id=actor_user_id,
+            profile_user_id=user_id,
+        )
+        training_consent = make_voice_profile_consent(
+            purpose="training",
+            version=VOICE_CLONE_TRAINING_CONSENT_VERSION,
             now=now_at,
         )
         # The provider, not a mobile client, determines a terminal status.
@@ -12305,10 +12324,12 @@ def _sanitize_voice_profile_payload(
         "digitalHumanId": digital_human_id,
         "sampleStatus": sample_status,
         "sampleCount": sample_count,
-        "authorizationConfirmed": True,
-        "authorizationVersion": consent_version,
-        "authorizationText": str(payload.get("authorizationText") or VOICE_CLONE_AUTHORIZATION_COPY)[:300],
-        "authorizationConfirmedAt": str(payload.get("authorizationConfirmedAt") or now),
+        # Client confirmation is an explicit UI action, but authority comes
+        # from the server-signed sample statement plus identity receipt below.
+        "authorizationConfirmed": sample_authorization is not None,
+        "authorizationVersion": VOICE_CLONE_TRAINING_CONSENT_VERSION if sample_authorization else "",
+        "authorizationText": VOICE_CLONE_AUTHORIZATION_COPY,
+        "authorizationConfirmedAt": now if sample_authorization else "",
         "authorizationCopy": VOICE_CLONE_AUTHORIZATION_COPY,
         "providerMode": provider_mode,
         "realCloneProviderReady": provider.is_configured,
@@ -12344,6 +12365,17 @@ def _sanitize_voice_profile_payload(
         profile["sampleAuthorizationChallengeId"] = sample_authorization.challenge_id
         profile["sampleAuthorizationReceiptExpiresAt"] = sample_authorization.expires_at
         profile["sampleAuthorizationConfirmedAt"] = now
+        profile["trainingConsentReceipt"] = make_voice_profile_training_consent_receipt(
+            policy_version=VOICE_CLONE_TRAINING_CONSENT_VERSION,
+            statement_id=sample_authorization.statement_id,
+            receipt_hash=sample_authorization.receipt_hash,
+            issued_at=now_at,
+            expires_at=datetime.fromisoformat(
+                str(training_consent["expiresAt"]).replace("Z", "+00:00")
+            ),
+        )
+        if eligibility_resolution and eligibility_resolution.receipt_summary:
+            profile["eligibilityReceipt"] = dict(eligibility_resolution.receipt_summary)
         profile["retryGeneration"] = int(
             retry_generation
             if retry_generation is not None
@@ -12377,10 +12409,10 @@ def _sanitize_voice_profile_payload(
             lifecycle_state = VoiceProfileLifecycleState.UPLOAD_PENDING
     else:
         lifecycle_state = canonical_lifecycle_state(profile)
-    consent = make_voice_profile_consent(
-        purpose=consent_purpose,
-        version=consent_version,
-        now=now_at,
+    consent = (
+        training_consent
+        if training_consent is not None
+        else existing_profile.get("consent")
     )
     profile = apply_voice_profile_lifecycle(
         profile,

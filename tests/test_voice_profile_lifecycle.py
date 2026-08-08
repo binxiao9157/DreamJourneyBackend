@@ -36,7 +36,7 @@ from app.services.voice_profile_lifecycle import (
     profile_public_projection,
     provider_observed_lifecycle_state,
 )
-from app.services.voice_profile_eligibility import synthetic_test_resolution
+from app.services.voice_profile_eligibility import server_verified_test_resolution
 from app.services.in_memory_store import InMemoryStore
 from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 
@@ -115,7 +115,7 @@ class VoiceProfileLifecycleTests(unittest.TestCase):
                 now=NOW,
             ),
             eligibility_decision=eligible_self(),
-            eligibility_provenance="syntheticTest",
+            eligibility_provenance="serverVerified",
             now=NOW,
         )
 
@@ -145,7 +145,7 @@ class VoiceProfileLifecycleTests(unittest.TestCase):
                 now=NOW,
             ),
             eligibility_decision=eligible_self(),
-            eligibility_provenance="syntheticTest",
+            eligibility_provenance="serverVerified",
             now=NOW,
         )
         accepted = apply_voice_profile_lifecycle(
@@ -178,7 +178,7 @@ class VoiceProfileLifecycleTests(unittest.TestCase):
                 now=NOW,
             ),
             eligibility_decision=eligible_self(),
-            eligibility_provenance="syntheticTest",
+            eligibility_provenance="serverVerified",
             now=NOW,
         )
 
@@ -213,7 +213,7 @@ class VoiceProfileLifecycleTests(unittest.TestCase):
                 expires_at=NOW - timedelta(days=1),
             ),
             eligibility_decision=eligible_self(),
-            eligibility_provenance="syntheticTest",
+            eligibility_provenance="serverVerified",
             now=NOW - timedelta(days=2),
         )
 
@@ -256,7 +256,7 @@ class VoiceProfileLifecycleTests(unittest.TestCase):
                 now=NOW,
             ),
             eligibility_decision=denied,
-            eligibility_provenance="syntheticTest",
+            eligibility_provenance="serverVerified",
             now=NOW,
         )
         projection = profile_public_projection(profile, now=NOW)
@@ -369,7 +369,7 @@ class VoiceProfileLifecycleAPITests(unittest.TestCase):
             "app.main.VoiceCloneProviderFactory"
         ) as training_factory, patch("app.main.VoiceCloneTTSProviderFactory") as tts_factory, patch(
             "app.main._resolve_trusted_voice_profile_eligibility",
-            return_value=synthetic_test_resolution(eligible_self()),
+            return_value=server_verified_test_resolution(eligible_self()),
         ):
             training_factory.return_value.make.return_value = ReadyTrainingProvider()
             tts_factory.return_value.make.return_value = PreviewTTSProvider()
@@ -460,14 +460,16 @@ class VoiceProfileLifecycleAPITests(unittest.TestCase):
             Settings(identity_binding_hmac_key="test-sample-authorization-key"),
         ), patch("app.main.VoiceCloneProviderFactory") as factory:
             factory.return_value.make.return_value = provider
+            payload["sampleAuthorizationReceiptId"] = issue_sample_authorization_receipt(
+                client,
+                user_id=payload["userId"],
+                voice_profile_id=payload["voiceProfileId"],
+            )
             response = client.post("/voice/profiles", json=payload)
 
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["detail"]["code"], "subject_eligibility_hard_denied")
-        self.assertEqual(
-            response.json()["detail"]["eligibilityDecision"]["reason"],
-            "ageVerificationMissingHardDeny",
-        )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["code"], "voice_identity_verification_unavailable")
+        self.assertTrue(response.json()["detail"]["retryable"])
         self.assertEqual(provider.submit_count, 0)
         self.assertIsNone(store.get_voice_profile(payload["userId"], payload["voiceProfileId"]))
 
@@ -509,7 +511,7 @@ class VoiceProfileLifecycleAPITests(unittest.TestCase):
                 now=now,
             ),
             eligibility_decision=eligible_self(),
-            eligibility_provenance="syntheticTest",
+            eligibility_provenance="serverVerified",
             now=now,
         )
         store = InMemoryStore()
@@ -567,7 +569,7 @@ class VoiceProfileLifecycleAPITests(unittest.TestCase):
                 now=now,
             ),
             eligibility_decision=eligible_self(),
-            eligibility_provenance="syntheticTest",
+            eligibility_provenance="serverVerified",
             now=now,
         )
         store = InMemoryStore()
@@ -675,7 +677,7 @@ class VoiceProfileLifecycleAPITests(unittest.TestCase):
                 now=now,
             ),
             eligibility_decision=eligible_self(),
-            eligibility_provenance="syntheticTest",
+            eligibility_provenance="serverVerified",
             now=now,
         )
         store = InMemoryStore()

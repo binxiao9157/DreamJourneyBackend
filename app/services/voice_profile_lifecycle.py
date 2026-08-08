@@ -21,8 +21,12 @@ from app.services.safety_policy import (
 
 VOICE_PROFILE_LIFECYCLE_SCHEMA_VERSION = "voice-profile-lifecycle-v1"
 VOICE_PROFILE_ELIGIBILITY_POLICY_VERSION = "voice-profile-eligibility-v1"
+VOICE_PROFILE_TRAINING_CONSENT_RECEIPT_SCHEMA_VERSION = "voice-training-consent-receipt-v1"
 VOICE_PROFILE_CONSENT_DEFAULT_TTL_DAYS = 365
-_TRUSTED_ELIGIBILITY_PROVENANCES = frozenset({"serverVerified", "syntheticTest"})
+# A test fixture may model a profile, but it must never be treated as a
+# production authorization source.  The write path stores ``serverVerified``
+# only after the server-owned adult identity/liveness receipt has passed.
+_TRUSTED_ELIGIBILITY_PROVENANCES = frozenset({"serverVerified"})
 
 
 class VoiceProfileLifecycleState(str, Enum):
@@ -135,9 +139,44 @@ def make_voice_profile_consent(
     return {
         "purpose": normalized_purpose,
         "version": normalized_version,
+        # The API never accepts a client-provided consent object.  This marker
+        # lets legacy profile blobs (which predate the server receipt flow)
+        # stay visible but fail closed for training, preview, and synthesis.
+        "source": "serverReceipt",
         "state": "active",
         "issuedAt": issued_at.isoformat(),
         "expiresAt": resolved_expiry.isoformat(),
+    }
+
+
+def make_voice_profile_training_consent_receipt(
+    *,
+    policy_version: str,
+    statement_id: str,
+    receipt_hash: str,
+    issued_at: datetime,
+    expires_at: datetime,
+) -> dict[str, str]:
+    """Persist only the server-verified training-consent receipt summary."""
+
+    normalized_policy = str(policy_version or "").strip()
+    normalized_statement = str(statement_id or "").strip()
+    normalized_hash = str(receipt_hash or "").strip()
+    start = _aware(issued_at)
+    end = _aware(expires_at)
+    if not normalized_policy or not normalized_statement or not normalized_hash:
+        raise ValueError("voice profile training consent receipt is incomplete")
+    if not normalized_hash.startswith("sha256:") or len(normalized_hash) != 71:
+        raise ValueError("voice profile training consent receipt hash is invalid")
+    if end <= start:
+        raise ValueError("voice profile training consent receipt expiry is invalid")
+    return {
+        "schemaVersion": VOICE_PROFILE_TRAINING_CONSENT_RECEIPT_SCHEMA_VERSION,
+        "policyVersion": normalized_policy,
+        "statementId": normalized_statement,
+        "receiptHash": normalized_hash,
+        "issuedAt": start.isoformat(),
+        "expiresAt": end.isoformat(),
     }
 
 
@@ -221,6 +260,8 @@ def profile_public_projection(
     )
     projected.pop("subjectEligibilityDecision", None)
     projected.pop("eligibilityProvenance", None)
+    projected.pop("eligibilityReceipt", None)
+    projected.pop("trainingConsentReceipt", None)
     return projected
 
 
@@ -281,6 +322,9 @@ def _eligibility_projection(
     if consent.get("state") != "active":
         allowed = False
         reason_code = SubjectEligibilityReason.PURPOSE_CONSENT_MISSING.value
+    elif consent.get("source") != "serverReceipt":
+        allowed = False
+        reason_code = SubjectEligibilityReason.PURPOSE_CONSENT_MISSING.value
     return {
         "allowed": allowed,
         "reasonCode": reason_code,
@@ -295,17 +339,20 @@ def _normalize_consent(raw: object, *, now: datetime) -> dict[str, Any]:
         return {
             "purpose": None,
             "version": None,
+            "source": None,
             "state": "missing",
             "expiresAt": None,
         }
     purpose = str(raw.get("purpose") or "").strip() or None
     version = str(raw.get("version") or "").strip() or None
+    source = str(raw.get("source") or "").strip() or None
     expires_at = _parse_datetime(raw.get("expiresAt"))
     issued_at = _parse_datetime(raw.get("issuedAt"))
     if not purpose or not version or expires_at is None:
         return {
             "purpose": purpose,
             "version": version,
+            "source": source,
             "state": "missing",
             "expiresAt": str(raw.get("expiresAt") or "") or None,
         }
@@ -313,6 +360,7 @@ def _normalize_consent(raw: object, *, now: datetime) -> dict[str, Any]:
         return {
             "purpose": purpose,
             "version": version,
+            "source": source,
             "state": "expired",
             "expiresAt": expires_at.isoformat(),
         }
@@ -326,6 +374,7 @@ def _normalize_consent(raw: object, *, now: datetime) -> dict[str, Any]:
     return {
         "purpose": purpose,
         "version": version,
+        "source": source,
         "state": "active",
         "expiresAt": expires_at.isoformat(),
     }
@@ -363,11 +412,13 @@ def _positive_int_or_zero(value: object) -> int:
 __all__ = [
     "VOICE_PROFILE_ELIGIBILITY_POLICY_VERSION",
     "VOICE_PROFILE_LIFECYCLE_SCHEMA_VERSION",
+    "VOICE_PROFILE_TRAINING_CONSENT_RECEIPT_SCHEMA_VERSION",
     "VoiceProfileLifecycleState",
     "apply_voice_profile_lifecycle",
     "canonical_lifecycle_state",
     "is_voice_profile_synthesizable",
     "make_voice_profile_consent",
+    "make_voice_profile_training_consent_receipt",
     "profile_public_projection",
     "provider_observed_lifecycle_state",
 ]

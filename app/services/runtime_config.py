@@ -14,6 +14,9 @@ from app.services.provider_runtime import ProviderRuntimeInventory, ProviderRunt
 from app.services.tokens import TokenService
 from app.services.tts import VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice_clone_speaker_ids
+from app.services.voice_identity_eligibility import (
+    voice_identity_eligibility_runtime_descriptor,
+)
 from app.services.runtime_capabilities import (
     RuntimeCapabilityComposer,
     RuntimeCapabilityInput,
@@ -38,6 +41,7 @@ class RuntimeConfigService:
         voice_clone_provider = VoiceCloneProviderFactory(self.settings).make()
         voice_clone_tts_provider = VoiceCloneTTSProviderFactory(self.settings).make()
         voice_clone_speaker_ids = self._voice_clone_speaker_ids()
+        voice_identity_eligibility = voice_identity_eligibility_runtime_descriptor(self.settings)
         digital_human_asset_mode = self._digital_human_asset_mode()
         digital_human_access = DigitalHumanAccessPolicy().blocked_mobile_contract()
         route_ownership_audit = RouteOwnershipRegistry().audit_summary()
@@ -242,6 +246,26 @@ class RuntimeConfigService:
                 "enabled": voice_clone_provider.is_configured,
                 "provider": voice_clone_provider.provider_mode,
                 "realProviderReady": voice_clone_provider.is_configured,
+                # A configured voice provider alone is never permission to
+                # train. The active profile path additionally requires a
+                # server-side adult/liveness receipt from this independent
+                # verifier capability.
+                "identityEligibilityProviderReady": voice_identity_eligibility["ready"],
+                "identityEligibilityProvider": voice_identity_eligibility["provider"],
+                "trainingAdmissionEnabled": (
+                    voice_clone_provider.is_configured
+                    and voice_identity_eligibility["ready"]
+                ),
+                "trainingAdmissionReason": (
+                    "ready"
+                    if voice_clone_provider.is_configured and voice_identity_eligibility["ready"]
+                    else (
+                        voice_identity_eligibility["reason"]
+                        if not voice_identity_eligibility["ready"]
+                        else "voiceCloneProviderUnavailable"
+                    )
+                ),
+                "trainingAdmissionContractVersion": voice_identity_eligibility["contractVersion"],
                 "trainEndpoint": "/voice/profiles",
                 "queryEndpoint": "/voice/profiles/{user_id}/{voice_profile_id}/refresh",
                 "synthesisEndpoint": "/voice/synthesis",
@@ -284,7 +308,7 @@ class RuntimeConfigService:
                     "fallbackMode": "providerTextDrive",
                     "contractVersion": 1,
                 },
-                "contractVersion": 2,
+                "contractVersion": 3,
             },
             "digitalHuman": {
                 **digital_human_access,

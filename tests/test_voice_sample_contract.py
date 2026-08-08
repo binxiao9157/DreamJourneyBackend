@@ -23,7 +23,7 @@ from app.services.safety_policy import (
     SubjectEligibilityDecision,
     SubjectEligibilityReason,
 )
-from app.services.voice_profile_eligibility import synthetic_test_resolution
+from app.services.voice_profile_eligibility import server_verified_test_resolution
 from app.services.voice_profile_lifecycle import (
     VoiceProfileLifecycleState,
     apply_voice_profile_lifecycle,
@@ -185,7 +185,7 @@ class VoiceSampleRouteTests(unittest.TestCase):
             "app.main.VoiceCloneProviderFactory"
         ) as factory, patch(
             "app.main._resolve_trusted_voice_profile_eligibility",
-            return_value=synthetic_test_resolution(_eligible_self()),
+            return_value=server_verified_test_resolution(_eligible_self()),
         ):
             factory.return_value.make.return_value = provider
             response = self.client.post("/voice/profiles", json=payload)
@@ -235,7 +235,7 @@ class VoiceSampleRouteTests(unittest.TestCase):
                 now=datetime.now(timezone.utc),
             ),
             eligibility_decision=_eligible_self(),
-            eligibility_provenance="syntheticTest",
+            eligibility_provenance="serverVerified",
             now=datetime.now(timezone.utc),
         )
         self.store.save_voice_profile(owner_id, profile)
@@ -246,7 +246,7 @@ class VoiceSampleRouteTests(unittest.TestCase):
             "app.main.VoiceCloneProviderFactory"
         ) as factory, patch(
             "app.main._resolve_trusted_voice_profile_eligibility",
-            return_value=synthetic_test_resolution(_eligible_self()),
+            return_value=server_verified_test_resolution(_eligible_self()),
         ):
             factory.return_value.make.return_value = provider
             receipt = self._issue_receipt(owner_id, profile_id)
