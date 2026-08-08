@@ -11064,12 +11064,22 @@ def _active_data_export_user_or_raise(user_id: str) -> Dict[str, Any]:
 
 def _materialize_account_data_export_job(job_id: str, owner_user_id: str) -> None:
     try:
-        materialize_data_export_job(
-            store,
-            job_id=job_id,
-            owner_user_id=owner_user_id,
-            export_builder=build_module_owned_data_export,
-        )
+        detached_context = getattr(store, "detached_background_context", None)
+        if callable(detached_context):
+            with detached_context():
+                materialize_data_export_job(
+                    store,
+                    job_id=job_id,
+                    owner_user_id=owner_user_id,
+                    export_builder=build_module_owned_data_export,
+                )
+        else:
+            materialize_data_export_job(
+                store,
+                job_id=job_id,
+                owner_user_id=owner_user_id,
+                export_builder=build_module_owned_data_export,
+            )
     except Exception as exc:  # pragma: no cover - route tests assert stored state
         logger.error(
             "data export materialization failed job_id=%s error_type=%s",

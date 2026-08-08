@@ -200,6 +200,38 @@ class DatabaseUnitOfWorkTests(unittest.TestCase):
         self.assertEqual(store.uow_metrics()["committed"], 1)
         self.assertFalse(hasattr(store, "_connection"))
 
+    def test_data_export_background_task_uses_fresh_uow_when_context_is_stale(self):
+        connection = FakeConnection("background-export")
+        store = PostgresStore(pool=RecordingPool([connection]))
+
+        with store.request_unit_of_work(
+            correlation_id="corr-request",
+            command_id="cmd-request",
+        ) as request_uow:
+            self.assertIsNotNone(request_uow.connection)
+
+        self.assertIsNone(request_uow.connection)
+        inherited_token = store._current_uow.set(request_uow)
+        observed = {}
+
+        def materialize(candidate_store, **_kwargs):
+            active = candidate_store._current_uow.get()
+            observed["active"] = active
+            observed["row"] = candidate_store._fetchone("SELECT background export")
+
+        try:
+            with (
+                patch.object(main_module, "store", store),
+                patch.object(main_module, "materialize_data_export_job", materialize),
+            ):
+                main_module._materialize_account_data_export_job("job-1", "owner-1")
+        finally:
+            store._current_uow.reset(inherited_token)
+
+        self.assertIsNot(observed["active"], request_uow)
+        self.assertEqual(observed["row"], {"value": 1})
+        self.assertEqual(connection.commits, 2)
+
 
 class DatabaseRequestUnitOfWorkTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod

@@ -275,6 +275,22 @@ class PostgresStore:
             finally:
                 self._current_uow.reset(token)
 
+    @contextmanager
+    def detached_background_context(self):
+        """Detach a background job from an inherited request transaction.
+
+        Starlette background tasks may inherit the request ContextVar after
+        the request Unit of Work has already returned its connection. Clearing
+        it lets each repository operation establish its intended job boundary
+        instead of attempting to reuse that closed transaction.
+        """
+
+        token = self._current_uow.set(None)
+        try:
+            yield
+        finally:
+            self._current_uow.reset(token)
+
     def uow_metrics(self) -> Dict[str, Any]:
         return {
             **self._uow_metrics.snapshot(),
