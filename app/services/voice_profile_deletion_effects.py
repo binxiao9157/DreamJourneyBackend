@@ -156,17 +156,10 @@ def enqueue_voice_profile_deletion_effect(
         authority_epoch=authority_epoch,
     )
     deletion_effect = store.effect_kernel_repository().accept(intent)
-    provider_intent = ProviderEffectIntent(
-        effect_intent=intent,
-        provider=VOICE_PROFILE_DELETION_PROVIDER,
-        capability=VOICE_PROFILE_DELETION_CAPABILITY,
-        request_hash=_canonical_hash(
-            {
-                "operationStableKey": intent.stable_key,
-                "profileVersion": intent.target.resource_version,
-                "schemaVersion": VOICE_PROFILE_DELETION_EFFECT_SCHEMA_VERSION,
-            }
-        ),
+    provider_intent = build_voice_profile_deletion_provider_effect_intent(
+        user_id=user_id,
+        profile=profile,
+        authority_epoch=authority_epoch,
     )
     provider_effect = store.provider_effect_repository().record(
         ProviderEffectReceipt(
@@ -182,6 +175,36 @@ def enqueue_voice_profile_deletion_effect(
     )
 
 
+def build_voice_profile_deletion_provider_effect_intent(
+    *,
+    user_id: str,
+    profile: Mapping[str, Any],
+    authority_epoch: int,
+) -> ProviderEffectIntent:
+    """Rebuild the deterministic provider-effect identity for a worker.
+
+    The async job carries only opaque target coordinates.  The worker loads
+    the locally tombstoned profile by its accepted operation id, then uses
+    this helper to verify it is still bound to the original provider effect.
+    """
+
+    intent = build_voice_profile_deletion_effect_intent(
+        user_id=user_id,
+        profile=profile,
+        authority_epoch=authority_epoch,
+    )
+    return ProviderEffectIntent(
+        effect_intent=intent,
+        provider=VOICE_PROFILE_DELETION_PROVIDER,
+        capability=VOICE_PROFILE_DELETION_CAPABILITY,
+        request_hash=_canonical_hash(
+            {
+                "operationStableKey": intent.stable_key,
+                "profileVersion": intent.target.resource_version,
+                "schemaVersion": VOICE_PROFILE_DELETION_EFFECT_SCHEMA_VERSION,
+            }
+        ),
+    )
 __all__ = [
     "VOICE_PROFILE_DELETION_CAPABILITY",
     "VOICE_PROFILE_DELETION_EFFECT_SCHEMA_VERSION",
@@ -194,5 +217,6 @@ __all__ = [
     "VoiceProfileDeletionEffectError",
     "VoiceProfileDeletionEffectResult",
     "build_voice_profile_deletion_effect_intent",
+    "build_voice_profile_deletion_provider_effect_intent",
     "enqueue_voice_profile_deletion_effect",
 ]

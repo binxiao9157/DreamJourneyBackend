@@ -2,6 +2,9 @@ import json
 import uuid
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from enum import Enum
+from hashlib import sha256
 from typing import Any, Dict, Optional
 
 from app.core.config import Settings
@@ -63,6 +66,107 @@ class VoiceCloneProviderError(ValueError):
         self.provider_log_id = provider_log_id
 
 
+class VoiceCloneProfileDeletionDisposition(str, Enum):
+    """Provider-observed result for one already-revoked voice profile.
+
+    The current VolcEngine training/TTS integration has no reviewed audio
+    profile deletion API.  Keeping that absence explicit prevents the local
+    tombstone from being presented as provider-side deletion.  A future
+    provider adapter may return ``completed`` or ``failed`` only with a
+    hashed upstream receipt.
+    """
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+    UNSUPPORTED = "unsupported"
+
+
+@dataclass(frozen=True)
+class VoiceCloneProfileDeletionObservation:
+    """Value-minimized provider deletion observation for the worker.
+
+    ``provider_receipt_hash`` must already be an irreversible SHA-256 digest.
+    Raw provider response bodies, request IDs, speaker IDs and credentials
+    never leave the provider adapter.
+    """
+
+    disposition: VoiceCloneProfileDeletionDisposition
+    reason_code: str
+    provider_receipt_hash: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.disposition, VoiceCloneProfileDeletionDisposition):
+            raise TypeError("voice profile deletion disposition is required")
+        reason = str(self.reason_code or "").strip()
+        if not reason or len(reason) > 128:
+            raise ValueError("voice profile deletion reason code is required")
+        object.__setattr__(self, "reason_code", reason)
+        if self.provider_receipt_hash is not None:
+            receipt_hash = str(self.provider_receipt_hash).strip().lower()
+            if len(receipt_hash) != 64 or any(character not in "0123456789abcdef" for character in receipt_hash):
+                raise ValueError("voice profile deletion provider receipt hash is invalid")
+            object.__setattr__(self, "provider_receipt_hash", receipt_hash)
+
+    @property
+    def provider_receipt_present(self) -> bool:
+        return self.provider_receipt_hash is not None
+
+    @classmethod
+    def unsupported(cls, *, provider_mode: str) -> "VoiceCloneProfileDeletionObservation":
+        # This is a local capability observation, not a provider receipt.
+        # It therefore intentionally has no provider_receipt_hash.
+        _ = provider_mode
+        return cls(
+            disposition=VoiceCloneProfileDeletionDisposition.UNSUPPORTED,
+            reason_code="providerVoiceDeletionUnsupported",
+        )
+
+    @classmethod
+    def unknown(cls, *, provider_mode: str) -> "VoiceCloneProfileDeletionObservation":
+        _ = provider_mode
+        return cls(
+            disposition=VoiceCloneProfileDeletionDisposition.UNKNOWN,
+            reason_code="providerVoiceDeletionReceiptUnknown",
+        )
+
+    @classmethod
+    def completed_from_reference(
+        cls,
+        *,
+        provider_mode: str,
+        provider_reference: str,
+    ) -> "VoiceCloneProfileDeletionObservation":
+        reference = str(provider_reference or "").strip()
+        if not reference:
+            raise ValueError("provider deletion completion requires a provider reference")
+        return cls(
+            disposition=VoiceCloneProfileDeletionDisposition.COMPLETED,
+            reason_code="providerVoiceDeletionCompleted",
+            provider_receipt_hash=sha256(
+                f"{provider_mode}:voice-profile-delete:{reference}".encode("utf-8")
+            ).hexdigest(),
+        )
+
+    @classmethod
+    def failed_from_reference(
+        cls,
+        *,
+        provider_mode: str,
+        provider_reference: str,
+    ) -> "VoiceCloneProfileDeletionObservation":
+        reference = str(provider_reference or "").strip()
+        if not reference:
+            raise ValueError("provider deletion failure requires a provider reference")
+        return cls(
+            disposition=VoiceCloneProfileDeletionDisposition.FAILED,
+            reason_code="providerVoiceDeletionFailed",
+            provider_receipt_hash=sha256(
+                f"{provider_mode}:voice-profile-delete:{reference}".encode("utf-8")
+            ).hexdigest(),
+        )
+
+
 class MockVoiceCloneProvider:
     provider_mode = "mockContract"
     is_configured = False
@@ -79,6 +183,24 @@ class MockVoiceCloneProvider:
 
     def query_status(self, *, voice_profile_id: str) -> Dict[str, Any]:
         raise VoiceCloneProviderUnavailable("VolcEngine voice clone provider is not configured")
+
+    def request_profile_deletion(
+        self,
+        *,
+        voice_profile_id: str,
+        provider_request_id: str,
+    ) -> VoiceCloneProfileDeletionObservation:
+        _ = (voice_profile_id, provider_request_id)
+        return VoiceCloneProfileDeletionObservation.unsupported(provider_mode=self.provider_mode)
+
+    def query_profile_deletion(
+        self,
+        *,
+        voice_profile_id: str,
+        provider_request_id: str,
+    ) -> VoiceCloneProfileDeletionObservation:
+        _ = (voice_profile_id, provider_request_id)
+        return VoiceCloneProfileDeletionObservation.unsupported(provider_mode=self.provider_mode)
 
 
 class VolcEngineVoiceCloneV3Provider:
@@ -159,6 +281,32 @@ class VolcEngineVoiceCloneV3Provider:
     def query_status(self, *, voice_profile_id: str) -> Dict[str, Any]:
         response = self._post_json(self.build_query_request(voice_profile_id=voice_profile_id))
         return self._normalize_response(response, fallback_voice_profile_id=voice_profile_id)
+
+    def request_profile_deletion(
+        self,
+        *,
+        voice_profile_id: str,
+        provider_request_id: str,
+    ) -> VoiceCloneProfileDeletionObservation:
+        """Return an explicit unsupported result until a reviewed API exists.
+
+        The configured V3 train/query endpoints do not define a deletion
+        operation.  Sending a guessed HTTP request could mutate a purchased
+        speaker slot or expose a raw speaker ID, so this adapter deliberately
+        reports ``unsupported`` instead of attempting it.
+        """
+
+        _ = (voice_profile_id, provider_request_id)
+        return VoiceCloneProfileDeletionObservation.unsupported(provider_mode=self.provider_mode)
+
+    def query_profile_deletion(
+        self,
+        *,
+        voice_profile_id: str,
+        provider_request_id: str,
+    ) -> VoiceCloneProfileDeletionObservation:
+        _ = (voice_profile_id, provider_request_id)
+        return VoiceCloneProfileDeletionObservation.unsupported(provider_mode=self.provider_mode)
 
     def _required_api_key(self) -> str:
         api_key = self.settings.volcengine_voice_clone_api_key

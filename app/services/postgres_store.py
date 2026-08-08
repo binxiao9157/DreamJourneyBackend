@@ -6269,6 +6269,31 @@ class PostgresStore:
         )
         return None if row is None else deepcopy(row["payload"])
 
+    def find_voice_profile_by_deletion_operation(
+        self,
+        operation_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve a queued deletion job to its local profile tombstone.
+
+        ``operation_id`` is an opaque async-effect identifier, never a user
+        supplied profile selector.  The result remains inside the worker's
+        request Unit of Work and is not exposed by an API route.
+        """
+
+        normalized_operation_id = str(operation_id or "").strip()
+        if not normalized_operation_id:
+            return None
+        row = self._fetchone(
+            """
+            SELECT payload FROM voice_profiles
+            WHERE payload->'providerEffectReceipt'->>'operationId' = %s
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (normalized_operation_id,),
+        )
+        return None if row is None else deepcopy(row["payload"])
+
     def allocate_voice_clone_slot(
         self,
         provider_speaker_ids: List[str],

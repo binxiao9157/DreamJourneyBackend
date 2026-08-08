@@ -3443,6 +3443,29 @@ class InMemoryStore:
                 return deepcopy(profile)
         return None
 
+    def find_voice_profile_by_deletion_operation(
+        self,
+        operation_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Find the local tombstone bound to one opaque deletion operation.
+
+        Workers receive only async-effect coordinates.  The original profile
+        ID is intentionally not embedded in those coordinates, so the stable
+        operation id is the only safe lookup bridge back to the local
+        revocation record.
+        """
+
+        normalized_operation_id = str(operation_id or "").strip()
+        if not normalized_operation_id:
+            return None
+        with self._voice_profile_lock:
+            for profiles in self._voice_profiles.values():
+                for profile in profiles:
+                    receipt = profile.get("providerEffectReceipt")
+                    if isinstance(receipt, dict) and str(receipt.get("operationId") or "").strip() == normalized_operation_id:
+                        return deepcopy(profile)
+        return None
+
     def allocate_voice_clone_slot(
         self,
         provider_speaker_ids: List[str],

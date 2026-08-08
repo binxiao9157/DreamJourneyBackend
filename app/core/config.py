@@ -138,6 +138,11 @@ class Settings:
     # Private physical deletion is a separate revocation-first worker lane.
     # It must not run merely because media capture or processing is enabled.
     owner_truth_media_deletion_worker_enabled: bool = False
+    # Voice-profile deletion follows the same revocation-first rule.  The
+    # mobile delete request fences synthesis immediately, while this separate
+    # worker may later obtain a provider cleanup receipt.  It remains off
+    # until the selected provider exposes a reviewed deletion contract.
+    voice_clone_deletion_worker_enabled: bool = False
     # Business message projections stay separate from the public mailbox and
     # notification delivery. This worker only writes metadata-only shadows.
     business_message_projection_worker_enabled: bool = False
@@ -492,6 +497,10 @@ class Settings:
             owner_truth_media_deletion_worker_enabled=_env_bool(
                 "OWNER_TRUTH_MEDIA_DELETION_WORKER_ENABLED",
                 cls.owner_truth_media_deletion_worker_enabled,
+            ),
+            voice_clone_deletion_worker_enabled=_env_bool(
+                "VOICE_CLONE_DELETION_WORKER_ENABLED",
+                cls.voice_clone_deletion_worker_enabled,
             ),
             business_message_projection_worker_enabled=_env_bool(
                 "BUSINESS_MESSAGE_PROJECTION_WORKER_ENABLED",
