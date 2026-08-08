@@ -343,6 +343,95 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             [],
         )
 
+    def test_owner_can_read_terminal_candidate_history_without_reopening_review(self) -> None:
+        owner_id, headers = self._login("13800139122")
+        vault_id = "vault-api-review-history"
+        accepted_candidate = self._candidate(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        rejected_candidate = self._candidate(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+        )
+        self._seed(accepted_candidate)
+        self._seed(rejected_candidate)
+
+        accepted = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{accepted_candidate.candidate_id}/decisions",
+            headers=headers,
+            json={
+                "commandId": "candidate-api-history-accept-001",
+                "expectedCandidateVersion": 1,
+                "action": "accept",
+                "reasonCode": "ownerReviewed",
+            },
+        )
+        rejected = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{rejected_candidate.candidate_id}/decisions",
+            headers=headers,
+            json={
+                "commandId": "candidate-api-history-reject-001",
+                "expectedCandidateVersion": 1,
+                "action": "reject",
+                "reasonCode": "ownerReviewed",
+            },
+        )
+        self.assertEqual(accepted.status_code, 201, accepted.text)
+        self.assertEqual(rejected.status_code, 201, rejected.text)
+
+        history = client.get(
+            f"/v2/vaults/{vault_id}/candidate-review-history",
+            headers=headers,
+        )
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertEqual(history.headers["cache-control"], "no-store")
+        body = history.json()
+        self.assertEqual(
+            body["schemaVersion"],
+            "owner-truth-candidate-review-history-v1",
+        )
+        self.assertEqual(body["vaultId"], vault_id)
+        self.assertEqual(len(body["reviews"]), 2)
+        by_candidate_id = {
+            item["candidate"]["candidateId"]: item
+            for item in body["reviews"]
+        }
+        accepted_history = by_candidate_id[accepted_candidate.candidate_id]
+        rejected_history = by_candidate_id[rejected_candidate.candidate_id]
+        self.assertEqual(accepted_history["decision"], "accepted")
+        self.assertEqual(accepted_history["memoryActivation"]["status"], "current")
+        self.assertTrue(accepted_history["memoryActivation"]["memoryId"])
+        self.assertTrue(accepted_history["memoryActivation"]["memoryVersionId"])
+        self.assertEqual(accepted_history["memoryActivation"]["memoryVersion"], 1)
+        self.assertEqual(rejected_history["decision"], "rejected")
+        self.assertEqual(
+            rejected_history["memoryActivation"],
+            {
+                "status": "notApplicable",
+                "memoryId": None,
+                "memoryVersionId": None,
+                "memoryVersion": None,
+            },
+        )
+        self.assertTrue(accepted_history["decidedAt"])
+        self.assertTrue(rejected_history["decidedAt"])
+        self.assertNotIn("actorSubjectId", str(body))
+        self.assertEqual(
+            client.get(
+                f"/v2/vaults/{vault_id}/candidates",
+                headers=headers,
+            ).json()["candidates"],
+            [],
+        )
+
+        _, other_headers = self._login("13800139123")
+        denied = client.get(
+            f"/v2/vaults/{vault_id}/candidate-review-history",
+            headers=other_headers,
+        )
+        self.assertEqual(denied.status_code, 403)
+
     def test_server_authorized_owner_reviews_candidate_without_qa_header(self) -> None:
         owner_id, auth_headers, session_id = self._formal_login("13800139105")
         self._allow_closed_pilot_owner(owner_id)

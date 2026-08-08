@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from threading import RLock
@@ -131,6 +132,17 @@ class OwnerTruthCandidateInboxItem:
 
 
 @dataclass(frozen=True)
+class OwnerTruthCandidateReviewHistoryItem:
+    candidate: OwnerTruthCandidateInboxItem
+    decision: CandidateDecision
+    decided_at: str
+    memory_activation_status: str
+    memory_id: str | None
+    memory_version_id: str | None
+    memory_version: int | None
+
+
+@dataclass(frozen=True)
 class OwnerTruthCandidateReviewResult:
     outcome: str
     receipt_id: str
@@ -199,6 +211,46 @@ def _inbox_item(candidate: OwnerTruthCandidateSnapshot, *, created_at: str | Non
     )
 
 
+def _review_history_item(
+    *,
+    candidate: OwnerTruthCandidateSnapshot,
+    created_at: str | None,
+    decided_at: str,
+    activation: Mapping[str, Any] | None,
+) -> OwnerTruthCandidateReviewHistoryItem:
+    if candidate.decision in {CandidateDecision.REJECTED, CandidateDecision.INVALIDATED}:
+        activation_status = "notApplicable"
+        memory_id = None
+        memory_version_id = None
+        memory_version = None
+    elif activation is None:
+        activation_status = "pending"
+        memory_id = None
+        memory_version_id = None
+        memory_version = None
+    else:
+        activation_status = "current" if activation.get("isCurrent") is True else "superseded"
+        memory_id = str(activation.get("memoryId") or "").strip() or None
+        memory_version_id = str(activation.get("memoryVersionId") or "").strip() or None
+        try:
+            memory_version = int(activation.get("memoryVersion"))
+        except (TypeError, ValueError):
+            memory_version = None
+        if memory_id is None or memory_version_id is None or not memory_version or memory_version < 1:
+            raise OwnerTruthCandidateReviewConflict(
+                "Candidate review history has an incomplete MemoryVersion activation"
+            )
+    return OwnerTruthCandidateReviewHistoryItem(
+        candidate=_inbox_item(candidate, created_at=created_at),
+        decision=candidate.decision,
+        decided_at=str(decided_at),
+        memory_activation_status=activation_status,
+        memory_id=memory_id,
+        memory_version_id=memory_version_id,
+        memory_version=memory_version,
+    )
+
+
 class InMemoryOwnerTruthCandidateReviewRepository:
     """Thread-safe semantic double for command/CAS/receipt behavior."""
 
@@ -211,6 +263,7 @@ class InMemoryOwnerTruthCandidateReviewRepository:
         self._lock = RLock()
         self._candidates: dict[str, OwnerTruthCandidateSnapshot] = {}
         self._candidate_created_at: dict[str, str | None] = {}
+        self._candidate_decided_at: dict[str, str] = {}
         self._source_states: dict[tuple[str, str], str] = {}
         self._vault_states: dict[str, tuple[str, str, int]] = {}
         self._receipts: dict[str, dict[str, Any]] = {}
@@ -264,6 +317,52 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 and self._source_states.get((candidate.vault_id, candidate.source_id)) == "active"
             ]
         return tuple(sorted(items, key=lambda item: item.candidate_id))
+
+    def list_review_history(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthCandidateReviewHistoryItem, ...]:
+        _assert_owner_context(context)
+        with self._lock:
+            vault = self._vault_states.get(context.vault_id)
+            if vault is None or vault[0] != context.owner_subject_id or vault[1] != "active":
+                raise OwnerTruthCandidateReviewAccessDenied("Vault is not active for this Owner")
+            receipts_by_id = {
+                str(receipt.get("id") or ""): receipt
+                for receipt in self._receipts.values()
+            }
+            history: list[OwnerTruthCandidateReviewHistoryItem] = []
+            for candidate in self._candidates.values():
+                if (
+                    candidate.vault_id != context.vault_id
+                    or candidate.owner_subject_id != context.owner_subject_id
+                    or not candidate.decision.is_terminal
+                ):
+                    continue
+                receipt_id = self._candidate_receipts.get(candidate.candidate_id)
+                receipt = receipts_by_id.get(str(receipt_id or ""))
+                decided_at = self._candidate_decided_at.get(candidate.candidate_id)
+                if receipt is None or decided_at is None:
+                    raise OwnerTruthCandidateReviewConflict(
+                        "terminal Candidate is missing its review audit record"
+                    )
+                activation = self._memory_activations.get(str(receipt_id))
+                history.append(
+                    _review_history_item(
+                        candidate=candidate,
+                        created_at=self._candidate_created_at.get(candidate.candidate_id),
+                        decided_at=decided_at,
+                        activation=activation,
+                    )
+                )
+        return tuple(
+            sorted(
+                history,
+                key=lambda item: (item.decided_at, item.candidate.candidate_id),
+                reverse=True,
+            )
+        )
 
     def assert_active_owner_vault(self, *, context: OwnerTruthCommandContext) -> None:
         """Prove an active owner/vault boundary without loading Candidate content."""
@@ -455,6 +554,9 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 ),
             }
             self._candidates[candidate.candidate_id] = decided
+            self._candidate_decided_at[candidate.candidate_id] = datetime.now(
+                timezone.utc
+            ).isoformat()
             self._receipts[record.command_id_hash] = receipt
             self._candidate_receipts[candidate.candidate_id] = record.receipt_id
             if record.corrected_value is not None:
@@ -957,6 +1059,76 @@ class PostgresOwnerTruthCandidateReviewRepository:
             )
             for row in rows
         )
+
+    def list_review_history(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthCandidateReviewHistoryItem, ...]:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            self._active_vault(cursor, context=context, lock=False)
+            cursor.execute(
+                """
+                SELECT c.id, c.vault_id, c.owner_subject_id, c.source_id,
+                    c.candidate_kind, c.perspective_type, c.epistemic_status,
+                    c.sensitivity, c.decision_status, c.policy_version,
+                    c.authority_epoch, c.row_version, c.content_hash,
+                    c.payload_schema_version, c.payload, c.created_at,
+                    receipt.created_at AS decided_at,
+                    memory.id AS memory_id,
+                    version.id AS memory_version_id,
+                    version.version_number AS memory_version,
+                    version.is_current AS memory_version_is_current
+                FROM owner_truth.memory_candidates AS c
+                JOIN owner_truth.decision_receipts AS receipt
+                  ON receipt.vault_id = c.vault_id
+                 AND receipt.candidate_id = c.id
+                 AND receipt.decision = c.decision_status
+                LEFT JOIN owner_truth.memories AS memory
+                  ON memory.vault_id = receipt.vault_id
+                 AND memory.decision_receipt_id = receipt.id
+                LEFT JOIN owner_truth.memory_versions AS version
+                  ON version.vault_id = receipt.vault_id
+                 AND version.decision_receipt_id = receipt.id
+                WHERE c.vault_id = %s
+                  AND c.owner_subject_id = %s
+                  AND c.decision_status <> 'pending'
+                ORDER BY receipt.created_at DESC, c.id DESC
+                """,
+                (context.vault_id, context.owner_subject_id),
+            )
+            rows = cursor.fetchall()
+
+        history: list[OwnerTruthCandidateReviewHistoryItem] = []
+        for row in rows:
+            candidate = self._candidate_from_row(row)
+            decided_at = row.get("decided_at")
+            if decided_at is None:
+                raise OwnerTruthCandidateReviewConflict(
+                    "terminal Candidate is missing its review timestamp"
+                )
+            activation: dict[str, Any] | None = None
+            if row.get("memory_id") is not None or row.get("memory_version_id") is not None:
+                activation = {
+                    "isCurrent": row.get("memory_version_is_current"),
+                    "memoryId": str(row.get("memory_id") or ""),
+                    "memoryVersionId": str(row.get("memory_version_id") or ""),
+                    "memoryVersion": row.get("memory_version"),
+                }
+            history.append(
+                _review_history_item(
+                    candidate=candidate,
+                    created_at=(
+                        row.get("created_at").isoformat()
+                        if row.get("created_at")
+                        else None
+                    ),
+                    decided_at=decided_at.isoformat(),
+                    activation=activation,
+                )
+            )
+        return tuple(history)
 
     def assert_active_owner_vault(self, *, context: OwnerTruthCommandContext) -> None:
         """Prove the owner/vault boundary without reading Candidate payloads."""
@@ -1755,6 +1927,20 @@ class OwnerTruthCandidateReviewService:
         ):
             return self._store.owner_truth_candidate_review_repository().list_pending(context=context)
 
+    def list_review_history(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthCandidateReviewHistoryItem, ...]:
+        _assert_owner_context(context)
+        with self._request_unit_of_work(
+            correlation_id=f"owner-truth-candidate-review-history-{context.vault_id}",
+            command_id="ownerTruthCandidateReviewHistory",
+        ):
+            return self._store.owner_truth_candidate_review_repository().list_review_history(
+                context=context
+            )
+
     def decide(
         self,
         *,
@@ -1853,6 +2039,7 @@ __all__ = [
     "InMemoryOwnerTruthCandidateReviewRepository",
     "OwnerTruthCandidateDecisionActivationResult",
     "OwnerTruthCandidateInboxItem",
+    "OwnerTruthCandidateReviewHistoryItem",
     "OwnerTruthCandidateReviewResult",
     "OwnerTruthCandidateReviewService",
     "PostgresOwnerTruthCandidateReviewRepository",

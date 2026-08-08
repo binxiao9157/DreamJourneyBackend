@@ -4299,6 +4299,20 @@ def _owner_truth_candidate_inbox_item_response(item: Any) -> Dict[str, Any]:
     }
 
 
+def _owner_truth_candidate_review_history_item_response(item: Any) -> Dict[str, Any]:
+    return {
+        "candidate": _owner_truth_candidate_inbox_item_response(item.candidate),
+        "decision": item.decision.value,
+        "decidedAt": item.decided_at,
+        "memoryActivation": {
+            "status": item.memory_activation_status,
+            "memoryId": item.memory_id,
+            "memoryVersionId": item.memory_version_id,
+            "memoryVersion": item.memory_version,
+        },
+    }
+
+
 def _owner_truth_candidate_decision_response(result: Any) -> Dict[str, Any]:
     review = result.review
     activation = result.memory_activation
@@ -6989,6 +7003,34 @@ def owner_truth_candidate_inbox(
             _owner_truth_candidate_inbox_item_response(item) for item in items
         ],
     }
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/candidate-review-history",
+    include_in_schema=False,
+)
+def owner_truth_candidate_review_history(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """Owner-only terminal Candidate decisions and their Memory activation state."""
+
+    try:
+        context = _owner_truth_direct_candidate_review_context(request, vault_id=vault_id)
+        items = OwnerTruthCandidateReviewService(store).list_review_history(context=context)
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    return JSONResponse(
+        content={
+            "schemaVersion": "owner-truth-candidate-review-history-v1",
+            "vaultId": context.vault_id,
+            "reviews": [
+                _owner_truth_candidate_review_history_item_response(item)
+                for item in items
+            ],
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get(

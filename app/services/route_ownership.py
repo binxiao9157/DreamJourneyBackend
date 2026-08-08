@@ -311,6 +311,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/candidate-review-history",
+                session,
+                "ownerTruthCandidateReviewHistory",
+            ),
+            _rule(
+                "GET",
                 "/v2/internal/owner-authority/vaults/{vault_id}/publications",
                 session,
                 "publicationOwnerManagementRead",

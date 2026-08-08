@@ -271,6 +271,18 @@ def main() -> None:
             route_code(default_hidden) == "ownerTruthCandidateReviewUnavailable",
             "hidden candidate route must return its typed unavailable code",
         )
+        default_hidden_history = client.get(
+            f"/v2/vaults/{vault_id}/candidate-review-history",
+            headers=owner_headers,
+        )
+        require(
+            default_hidden_history.status_code == 404,
+            "candidate review history must remain hidden with the inbox",
+        )
+        require(
+            route_code(default_hidden_history) == "ownerTruthCandidateReviewUnavailable",
+            "hidden candidate review history must return its typed unavailable code",
+        )
 
         main_module.OWNER_TRUTH_CANDIDATE_REVIEW_QA_ENABLED = True
         missing_policy_capture = client.get(
@@ -371,6 +383,51 @@ def main() -> None:
         empty_inbox = client.get(f"/v2/vaults/{vault_id}/candidates", headers=owner_headers)
         require(empty_inbox.status_code == 200, "post-decision inbox lookup failed")
         require(empty_inbox.json().get("candidates") == [], "terminal candidate must leave pending inbox")
+
+        history = client.get(
+            f"/v2/vaults/{vault_id}/candidate-review-history",
+            headers=owner_headers,
+        )
+        require(history.status_code == 200, f"owner review history failed: {history.text}")
+        require(
+            history.headers.get("cache-control") == "no-store",
+            "candidate review history must be no-store",
+        )
+        history_body = history.json()
+        require(
+            history_body.get("schemaVersion") == "owner-truth-candidate-review-history-v1",
+            "candidate review history schema drift",
+        )
+        reviews = history_body.get("reviews") or []
+        require(len(reviews) == 1, "owner review history must preserve one terminal candidate")
+        terminal_review = reviews[0]
+        require(
+            terminal_review.get("decision") == "accepted"
+            and (terminal_review.get("candidate") or {}).get("candidateId") == candidate_id,
+            "candidate review history must bind the immutable terminal decision",
+        )
+        require(
+            (terminal_review.get("memoryActivation") or {}).get("status") == "current"
+            and (terminal_review.get("memoryActivation") or {}).get("memoryVersion") == 1,
+            "accepted candidate history must expose the current formal MemoryVersion state",
+        )
+        require(
+            (terminal_review.get("candidate") or {}).get("content", {}).get("summary")
+            == proposal_summary,
+            "owner audit history must preserve the reviewable candidate value",
+        )
+        require(
+            "actorSubjectId" not in json.dumps(history_body, sort_keys=True),
+            "candidate review history must not expose internal actor identity",
+        )
+        other_owner_history = client.get(
+            f"/v2/vaults/{vault_id}/candidate-review-history",
+            headers=other_owner_headers,
+        )
+        require(
+            other_owner_history.status_code == 403,
+            "non-owner candidate review history lookup must be denied",
+        )
 
         # Closed-pilot must use the same Postgres store and the real workers,
         # never a QA header or a manually seeded Candidate.
@@ -788,7 +845,7 @@ def main() -> None:
             "owner truth candidate route postgres smoke passed "
             f"schemaHead={verified['expectedHead']} defaultHidden=true qaHeaderRequired=true "
             "ownerInbox=true crossVaultDenied=true crossOwnerDenied=true "
-            "decisionCreated=true decisionDeduplicated=true pendingRemoved=true "
+            "decisionCreated=true decisionDeduplicated=true pendingRemoved=true reviewHistory=true "
             "closedPilotSourceCandidate=true closedPilotProjectionContext=true "
             "closedPilotCitationCorrection=true"
         )
