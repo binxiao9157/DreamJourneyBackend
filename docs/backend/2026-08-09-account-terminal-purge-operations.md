@@ -2,6 +2,13 @@
 
 日期：2026-08-09
 
+当前部署证据：
+
+- 后端提交 `c2ce275` 已部署，迁移 head 保持 `0085`，`/ready` 与 deployed readiness smoke 通过。
+- 部署容器已使用临时 PostgreSQL 数据库通过终态清理 smoke；没有修改生产业务数据。
+- 已验证截止日恢复、一次恢复限制、保留令阻断/释放、重复清理幂等、终态不可复活和脱敏回执。
+- systemd 单元已安装并通过语法检查；timer 当前保持 `disabled`，等待生产不可逆删除审批后再启用。
+
 ## 目标与边界
 
 `dreamjourney-account-terminal-purge.timer` 每小时触发一次终态清理。作业只处理已经进入 `softDeleted`、恢复期限已到且没有有效保留令的账号。
@@ -13,6 +20,8 @@
 - 应用数据库中的媒体、声音和数字人记录会终止或清除；第三方 Provider 的异步删除仍以数据权利回执为准，不得把“已请求”表述为“第三方已删除”。
 
 ## 安装
+
+安装单元不会执行清理。`enable --now` 会使后续到期账号进入不可逆删除，必须先取得生产数据删除审批。
 
 ```bash
 sudo install -m 644 deploy/systemd/dreamjourney-account-terminal-purge.service /etc/systemd/system/
