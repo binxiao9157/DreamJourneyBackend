@@ -8,4 +8,5 @@ __pycache__/
 .mypy_cache/
 .DS_Store
 private/
+tmp/
 deployed-backend-access.md
