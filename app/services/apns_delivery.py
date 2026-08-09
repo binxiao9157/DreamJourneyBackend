@@ -36,6 +36,7 @@ class APNSConfiguration:
     topic: str | None = None
     environment: str = "sandbox"
     max_attempts: int = 3
+    token_encryption_key_configured: bool = False
 
     def __post_init__(self) -> None:
         provider = str(self.provider or "disabled").strip()
@@ -44,7 +45,7 @@ class APNSConfiguration:
         topic = str(self.topic or "").strip() or None
         if provider not in {"disabled", "fake"}:
             raise APNSDeliveryError("apnsProviderUnsupported")
-        if vault not in {"disabled", "ephemeral"}:
+        if vault not in {"disabled", "ephemeral", "postgresEncrypted"}:
             raise APNSDeliveryError("apnsTokenVaultUnsupported")
         if environment not in _ENVIRONMENTS:
             raise APNSDeliveryError("apnsEnvironmentInvalid")
@@ -53,6 +54,8 @@ class APNSConfiguration:
                 raise APNSDeliveryError("apnsTopicInvalid")
             if vault == "disabled":
                 raise APNSDeliveryError("apnsTokenVaultRequired")
+            if vault == "postgresEncrypted" and not self.token_encryption_key_configured:
+                raise APNSDeliveryError("apnsTokenEncryptionKeyRequired")
         if int(self.max_attempts) < 1:
             raise APNSDeliveryError("apnsMaxAttemptsInvalid")
         object.__setattr__(self, "provider", provider)
@@ -72,6 +75,7 @@ class APNSConfiguration:
             "environment": self.environment,
             "topicConfigured": self.topic is not None,
             "externalVerified": False,
+            "durableOutbox": self.token_vault_provider == "postgresEncrypted",
             "reason": "fakeProviderOnly" if enabled else "apnsDisabled",
         }
 
@@ -92,7 +96,7 @@ def apns_runtime_descriptor(configuration: APNSConfiguration) -> dict[str, Any]:
 class APNSDeviceRegistration:
     registration_id: str
     owner_user_id: str
-    installation_id: str
+    installation_digest: str
     token_hash: str
     token_reference: str
     topic: str
@@ -104,7 +108,7 @@ class APNSDeviceRegistration:
         return {
             "schemaVersion": APNS_DELIVERY_SCHEMA_VERSION,
             "registrationId": self.registration_id,
-            "installationDigest": _digest(self.installation_id),
+            "installationDigest": self.installation_digest,
             "environment": self.environment,
             "topic": self.topic,
             "generation": self.generation,
@@ -247,6 +251,101 @@ class InMemoryAPNSDeliveryRepository:
             self._jobs[job.job_id] = job
         return job
 
+    def claim_due(
+        self,
+        *,
+        worker_id: str,
+        limit: int,
+        lease_seconds: int,
+    ) -> list[APNSDeliveryJob]:
+        del worker_id, lease_seconds
+        with self._lock:
+            claimed = [
+                replace(job, state="dispatching", reason_code="workerLeaseClaimed")
+                for job in self._jobs.values()
+                if job.state == "queued"
+            ][: max(0, int(limit))]
+            for job in claimed:
+                self._jobs[job.job_id] = job
+        return claimed
+
+
+class APNSDeliveryRepository(Protocol):
+    def upsert(self, job: APNSDeliveryJob) -> APNSDeliveryJob:
+        ...
+
+    def get(self, job_id: str) -> APNSDeliveryJob:
+        ...
+
+    def save(self, job: APNSDeliveryJob) -> APNSDeliveryJob:
+        ...
+
+    def claim_due(
+        self,
+        *,
+        worker_id: str,
+        limit: int,
+        lease_seconds: int,
+    ) -> list[APNSDeliveryJob]:
+        ...
+
+
+class APNSRegistrationRepository(Protocol):
+    def upsert_registration(
+        self,
+        registration: APNSDeviceRegistration,
+    ) -> APNSDeviceRegistration:
+        ...
+
+    def get_registration(self, registration_id: str) -> APNSDeviceRegistration | None:
+        ...
+
+    def list_active_registrations(self, owner_user_id: str) -> list[APNSDeviceRegistration]:
+        ...
+
+
+class InMemoryAPNSRegistrationRepository:
+    def __init__(self) -> None:
+        self._registrations: dict[str, APNSDeviceRegistration] = {}
+        self._lock = RLock()
+
+    def upsert_registration(
+        self,
+        registration: APNSDeviceRegistration,
+    ) -> APNSDeviceRegistration:
+        with self._lock:
+            current = self._registrations.get(registration.registration_id)
+            if current is not None:
+                if (
+                    current.owner_user_id != registration.owner_user_id
+                    or current.installation_digest != registration.installation_digest
+                    or current.topic != registration.topic
+                    or current.environment != registration.environment
+                ):
+                    raise APNSDeliveryError("apnsRegistrationConflict")
+                registration = replace(
+                    registration,
+                    generation=(
+                        current.generation + 1
+                        if current.token_hash != registration.token_hash
+                        else current.generation
+                    ),
+                )
+            self._registrations[registration.registration_id] = registration
+            return registration
+
+    def get_registration(self, registration_id: str) -> APNSDeviceRegistration | None:
+        with self._lock:
+            return self._registrations.get(registration_id)
+
+    def list_active_registrations(self, owner_user_id: str) -> list[APNSDeviceRegistration]:
+        with self._lock:
+            return [
+                item
+                for item in self._registrations.values()
+                if item.owner_user_id == owner_user_id and item.active
+            ]
+
 
 class APNSDeliveryService:
     def __init__(
@@ -255,12 +354,16 @@ class APNSDeliveryService:
         configuration: APNSConfiguration,
         token_vault: APNSTokenVault,
         provider: APNSProvider,
-        repository: InMemoryAPNSDeliveryRepository | None = None,
+        repository: APNSDeliveryRepository | None = None,
+        registration_repository: APNSRegistrationRepository | None = None,
     ) -> None:
         self.configuration = configuration
         self.token_vault = token_vault
         self.provider = provider
         self.repository = repository or InMemoryAPNSDeliveryRepository()
+        self.registration_repository = (
+            registration_repository or InMemoryAPNSRegistrationRepository()
+        )
 
     def register(
         self,
@@ -284,18 +387,34 @@ class APNSDeliveryService:
         registration_id = str(
             uuid5(NAMESPACE_URL, f"dreamjourney-apns:{owner}:{installation}")
         )
+        previous = self.registration_repository.get_registration(registration_id)
         token_reference = self.token_vault.store(
             registration_id=registration_id,
             token=token,
         )
-        return APNSDeviceRegistration(
+        registration = APNSDeviceRegistration(
             registration_id=registration_id,
             owner_user_id=owner,
-            installation_id=installation,
+            installation_digest=_digest(installation),
             token_hash=_digest(token),
             token_reference=token_reference,
             topic=topic,
             environment=environment,
+        )
+        try:
+            persisted = self.registration_repository.upsert_registration(registration)
+        except Exception:
+            if previous is None or previous.token_reference != token_reference:
+                self.token_vault.delete(token_reference=token_reference)
+            raise
+        if previous is not None and previous.token_reference != persisted.token_reference:
+            self.token_vault.delete(token_reference=previous.token_reference)
+        return persisted
+
+    def list_active_registrations(self, owner_user_id: str) -> list[APNSDeviceRegistration]:
+        self._require_enabled()
+        return self.registration_repository.list_active_registrations(
+            _required(owner_user_id, "apnsOwnerInvalid")
         )
 
     def enqueue(
@@ -331,6 +450,23 @@ class APNSDeliveryService:
         job = self.repository.get(job_id)
         if job.state in _TERMINAL_STATES:
             return job
+        current_registration = self.registration_repository.get_registration(
+            job.registration.registration_id
+        )
+        if (
+            current_registration is None
+            or not current_registration.active
+            or current_registration.generation != job.registration.generation
+            or current_registration.token_reference != job.registration.token_reference
+        ):
+            return self.repository.save(
+                replace(
+                    job,
+                    state="failed",
+                    reason_code="apnsRegistrationSuperseded",
+                    retryable=False,
+                )
+            )
         if job.attempt >= self.configuration.max_attempts:
             return self.repository.save(
                 replace(
@@ -340,16 +476,37 @@ class APNSDeliveryService:
                     retryable=False,
                 )
             )
-        token = self.token_vault.resolve(
-            token_reference=job.registration.token_reference
-        )
-        receipt = self.provider.send(
-            device_token=token,
-            topic=job.registration.topic,
-            environment=job.registration.environment,
-            payload=job.payload,
-            attempt=job.attempt + 1,
-        )
+        try:
+            token = self.token_vault.resolve(
+                token_reference=job.registration.token_reference
+            )
+            receipt = self.provider.send(
+                device_token=token,
+                topic=job.registration.topic,
+                environment=job.registration.environment,
+                payload=job.payload,
+                attempt=job.attempt + 1,
+            )
+        except APNSDeliveryError:
+            return self.repository.save(
+                replace(
+                    job,
+                    state="unknown",
+                    attempt=job.attempt + 1,
+                    reason_code="apnsTokenOrProviderUnavailable",
+                    retryable=True,
+                )
+            )
+        except Exception:
+            return self.repository.save(
+                replace(
+                    job,
+                    state="unknown",
+                    attempt=job.attempt + 1,
+                    reason_code="apnsProviderException",
+                    retryable=True,
+                )
+            )
         if receipt.state not in {"accepted", "failed", "unknown", "arrived"}:
             raise APNSDeliveryError("apnsProviderReceiptInvalid")
         provider_receipt_hash = (
@@ -366,6 +523,27 @@ class APNSDeliveryService:
             retryable=receipt.retryable,
         )
         return self.repository.save(updated)
+
+    def dispatch_due(
+        self,
+        *,
+        worker_id: str,
+        limit: int = 25,
+        lease_seconds: int = 60,
+    ) -> list[APNSDeliveryJob]:
+        self._require_enabled()
+        claimed = self.repository.claim_due(
+            worker_id=_required(worker_id, "apnsWorkerInvalid"),
+            limit=max(1, min(int(limit), 100)),
+            lease_seconds=max(5, int(lease_seconds)),
+        )
+        results: list[APNSDeliveryJob] = []
+        for job in claimed:
+            delivered = self.dispatch(job.job_id)
+            results.append(delivered)
+            if delivered.retryable and delivered.attempt < self.configuration.max_attempts:
+                self.retry(job.job_id)
+        return results
 
     def retry(self, job_id: str) -> APNSDeliveryJob:
         job = self.repository.get(job_id)
@@ -396,10 +574,13 @@ __all__ = [
     "APNSDeliveryError",
     "APNSDeliveryJob",
     "APNSDeliveryService",
+    "APNSDeliveryRepository",
     "APNSDeviceRegistration",
+    "APNSRegistrationRepository",
     "APNSProviderReceipt",
     "apns_runtime_descriptor",
     "EphemeralAPNSTokenVault",
     "FakeAPNSProvider",
     "InMemoryAPNSDeliveryRepository",
+    "InMemoryAPNSRegistrationRepository",
 ]

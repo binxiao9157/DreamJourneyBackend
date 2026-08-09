@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule DreamJourney APNs outbox dispatch
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+RandomizedDelaySec=10s
+Persistent=true
+Unit=dreamjourney-apns-outbox.service
+
+[Install]
+WantedBy=timers.target

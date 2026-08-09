@@ -248,6 +248,24 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         self.assertEqual(accepted.status_code, 200, accepted.text)
         self.assertEqual(accepted.json()["submission"]["status"], "accepted")
         self.assertEqual(accepted.json()["candidateExtraction"], {"status": "requested"})
+        self.assertEqual(
+            accepted.json()["submission"]["handoff"]["status"],
+            "candidateExtractionRequested",
+        )
+        self.assertEqual(
+            accepted.json()["submission"]["handoff"]["sourceId"],
+            accepted.json()["submission"]["sourceId"],
+        )
+
+        refreshed = client.get(
+            f"/v2/vaults/{self.vault_id}/family-contribution/submissions",
+            headers=policy_headers,
+        )
+        self.assertEqual(refreshed.status_code, 200, refreshed.text)
+        self.assertEqual(
+            refreshed.json()["submissions"][0]["handoff"]["status"],
+            "candidateExtractionRequested",
+        )
 
         cross_account = client.post(
             f"{create_path}/{grant['grantId']}/submissions",
@@ -460,6 +478,25 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         self.assertIn("no-store", owner_content.headers["cache-control"])
         contributor_content = client.get(content_path, headers=member_headers)
         self.assertNotEqual(contributor_content.status_code, 200)
+
+        accepted = client.post(
+            f"/v2/vaults/{self.vault_id}/family-contribution/submissions/{submission_id}/decisions",
+            headers=policy_headers,
+            json={
+                "commandId": "formal-family-image-review-001",
+                "expectedVersion": 1,
+                "decision": "accepted",
+            },
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(
+            accepted.json()["submission"]["handoff"]["status"],
+            "mediaProcessing",
+        )
+        self.assertIn(
+            accepted.json()["submission"]["handoff"]["processingStatus"],
+            {"queued", "processing", "succeeded"},
+        )
 
         revoked = client.post(
             f"{grant_path}/{grant['grantId']}/revoke",

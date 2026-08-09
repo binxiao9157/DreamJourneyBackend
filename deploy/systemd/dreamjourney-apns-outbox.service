@@ -1,0 +1,14 @@
+[Unit]
+Description=Dispatch one bounded DreamJourney APNs outbox batch
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/services/dreamjourney/DreamJourneyBackend
+ExecStart=/usr/bin/docker compose exec -T api python scripts/apns-outbox-worker.py
+TimeoutStartSec=2min
+UMask=0077

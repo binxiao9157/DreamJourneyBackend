@@ -28,7 +28,17 @@ from app.async_effects.owner_truth_worker_activation import (
     evaluate_owner_truth_worker_activation,
 )
 from app.services.amap import AMapDistrictProxy
-from app.services.apns_delivery import APNSConfiguration, APNSDeliveryError
+from app.services.apns_delivery import (
+    APNSConfiguration,
+    APNSDeliveryError,
+    APNSDeliveryService,
+    EphemeralAPNSTokenVault,
+    FakeAPNSProvider,
+)
+from app.services.apns_postgres_outbox import (
+    EncryptedPostgresAPNSTokenVault,
+    PostgresAPNSPersistence,
+)
 from app.services.auth_sessions import AuthSessionError, AuthSessionService
 from app.services.authorization_policy import (
     CrossAccountAuthorizationPolicy,
@@ -5896,6 +5906,41 @@ def _release_policy_server_cohort(principal: RequestPrincipal) -> str:
     return "unassigned"
 
 
+_LEGACY_ARCHIVE_NON_AUTHORITY_KINDS = frozenset({"timeLetter"})
+
+
+def _legacy_archive_v2_authority_retirement(
+    *,
+    owner_user_id: str,
+    payload: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Fence new legacy authority after an Owner enters the V2 capture cohort.
+
+    Existing archive records remain readable. TimeLetter keeps its independent
+    lifecycle contract, while new memory-bearing text and media must use the
+    Source -> Candidate -> MemoryVersion pipeline. The decision is entirely
+    server-owned so an old client cannot opt back into the legacy writer.
+    """
+
+    normalized_owner = str(owner_user_id or "").strip()
+    kind = str(payload.get("kind") or "").strip()
+    if (
+        not normalized_owner
+        or normalized_owner not in RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+        or "ownerTextCaptureV1"
+        not in RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
+        or kind in _LEGACY_ARCHIVE_NON_AUTHORITY_KINDS
+    ):
+        return None
+    return {
+        "code": "legacyArchiveAuthorityRetired",
+        "authority": "ownerTruthV2",
+        "feature": "ownerTextCaptureV1",
+        "requiredRoute": "/v2/vaults/{vaultId}/sources",
+        "retryable": False,
+    }
+
+
 def _owner_truth_context_authority_context(
     request: Request,
     *,
@@ -8624,6 +8669,20 @@ def review_owner_truth_family_contribution_product_submission(
             }
     content = result.public_contract(include_material=True)
     content["mediaProcessing"] = processing
+    if command.decision == "accepted" and processing["status"] != "notRequested":
+        content["submission"]["handoff"] = {
+            "status": (
+                "mediaProcessingFailed"
+                if processing["status"] == "notQueued"
+                else "mediaProcessing"
+            ),
+            "sourceId": None,
+            "candidateId": None,
+            "memoryId": None,
+            "memoryVersionId": None,
+            "processingStatus": processing["status"],
+            "retryable": bool(processing.get("retryable")),
+        }
     return JSONResponse(
         content=content,
         headers={"Cache-Control": "no-store"},
@@ -15578,6 +15637,12 @@ def create_archive_item(request: Request, payload: Dict[str, Any]) -> Dict[str, 
         payload,
         aliases=("ownerId", "ownerUserId", "uploadedByUserId", "uploaderUserId"),
     )
+    retired = _legacy_archive_v2_authority_retirement(
+        owner_user_id=user_id,
+        payload=payload,
+    )
+    if retired is not None:
+        raise HTTPException(status_code=409, detail=retired)
     try:
         safe_payload = sanitize_archive_item_payload(payload)
     except ValueError as exc:
@@ -15919,6 +15984,47 @@ _ALLOWED_PUSH_ENVIRONMENTS = {"sandbox", "production"}
 _DEVICE_TOKEN_PATTERN = re.compile(r"^[0-9a-fA-F]{16,256}$")
 
 
+def _apns_configuration() -> APNSConfiguration:
+    return APNSConfiguration(
+        provider=settings.apns_delivery_provider,
+        token_vault_provider=settings.apns_token_vault_provider,
+        topic=settings.apns_topic,
+        environment=settings.apns_environment,
+        max_attempts=settings.apns_max_attempts,
+        token_encryption_key_configured=bool(settings.apns_token_encryption_key),
+    )
+
+
+def _make_apns_delivery_service() -> Optional[APNSDeliveryService]:
+    configuration = _apns_configuration()
+    if not configuration.public_descriptor()["enabled"]:
+        return None
+    if configuration.provider != "fake":
+        raise APNSDeliveryError("apnsProviderUnsupported")
+    if configuration.token_vault_provider == "ephemeral":
+        return APNSDeliveryService(
+            configuration=configuration,
+            token_vault=EphemeralAPNSTokenVault(),
+            provider=FakeAPNSProvider(),
+        )
+    if configuration.token_vault_provider == "postgresEncrypted":
+        if not callable(getattr(store, "_fetchone", None)):
+            raise APNSDeliveryError("apnsPostgresOutboxRequired")
+        persistence = PostgresAPNSPersistence(store)
+        return APNSDeliveryService(
+            configuration=configuration,
+            token_vault=EncryptedPostgresAPNSTokenVault(
+                persistence=persistence,
+                encryption_key=str(settings.apns_token_encryption_key or ""),
+                key_version=settings.apns_token_encryption_key_version,
+            ),
+            provider=FakeAPNSProvider(),
+            repository=persistence,
+            registration_repository=persistence,
+        )
+    raise APNSDeliveryError("apnsTokenVaultUnsupported")
+
+
 def _sanitize_push_device_token_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id = str(payload.get("userId") or "").strip()
     device_token = str(payload.get("deviceToken") or "").strip().replace(" ", "")
@@ -15941,13 +16047,7 @@ def _sanitize_push_device_token_payload(payload: Dict[str, Any]) -> Dict[str, An
         raise HTTPException(status_code=400, detail="deviceId is too long")
 
     try:
-        apns_configuration = APNSConfiguration(
-            provider=settings.apns_delivery_provider,
-            token_vault_provider=settings.apns_token_vault_provider,
-            topic=settings.apns_topic,
-            environment=settings.apns_environment,
-            max_attempts=settings.apns_max_attempts,
-        )
+        apns_configuration = _apns_configuration()
     except APNSDeliveryError as exc:
         raise HTTPException(
             status_code=503,
@@ -16203,6 +16303,26 @@ def _sanitize_echo_dispatch_due_payload(payload: Dict[str, Any]) -> Dict[str, An
 def register_push_device_token(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     _, payload = _principal_owned_payload(request, payload)
     item = _sanitize_push_device_token_payload(payload)
+    try:
+        service = _make_apns_delivery_service()
+        if service is not None:
+            normalized_device_token = (
+                str(payload.get("deviceToken") or "").strip().replace(" ", "").lower()
+            )
+            registration = service.register(
+                owner_user_id=item["userId"],
+                installation_id=item["deviceId"],
+                device_token=normalized_device_token,
+                topic=str(item.get("topic") or ""),
+                environment=item["environment"],
+            )
+            item["deliveryRegistration"] = registration.public_contract()
+            item["deliveryProviderState"] = "registered"
+    except APNSDeliveryError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "retryable": False},
+        ) from exc
     saved = store.save_push_device_token(item["userId"], item)
     return {"status": "registered", "item": saved}
 
@@ -16236,7 +16356,58 @@ def dispatch_due_echo_delayed_replies(payload: Dict[str, Any]) -> Dict[str, Any]
 @app.post("/archive/time-letters/dispatch-due")
 def dispatch_due_time_letters(payload: Dict[str, Any]) -> Dict[str, Any]:
     contract = _sanitize_echo_dispatch_due_payload(payload)
-    return dispatch_due_time_letters_for_store(store, now_iso=contract["now"], limit=contract["limit"])
+    result = dispatch_due_time_letters_for_store(
+        store,
+        now_iso=contract["now"],
+        limit=contract["limit"],
+    )
+    try:
+        service = _make_apns_delivery_service()
+        if service is None:
+            result["providerOutbox"] = {
+                "status": "disabled",
+                "jobCount": 0,
+                "reason": "apnsDisabled",
+            }
+            return result
+        jobs = []
+        for reminder in result["reminders"]:
+            target_user_id = str(reminder.get("userId") or "")
+            for registration in service.list_active_registrations(target_user_id):
+                jobs.append(
+                    service.enqueue(
+                        message_id=str(reminder.get("id") or ""),
+                        registration=registration,
+                        payload={
+                            "aps": {
+                                "alert": {
+                                    "title": "时间信件已抵达",
+                                    "body": "你有一封可以打开的时间信件。",
+                                },
+                                "sound": "default",
+                            },
+                            "kind": "timeLetterReminder",
+                            "messageId": str(reminder.get("id") or ""),
+                            "sourceArchiveItemId": str(
+                                reminder.get("sourceArchiveItemId") or ""
+                            ),
+                        },
+                    ).public_contract()
+                )
+        result["providerOutbox"] = {
+            "status": "queued",
+            "jobCount": len(jobs),
+            "jobs": jobs,
+        }
+        result["providerDeliveryAttempted"] = False
+    except APNSDeliveryError as exc:
+        result["providerOutbox"] = {
+            "status": "failed",
+            "jobCount": 0,
+            "reason": exc.code,
+            "retryable": True,
+        }
+    return result
 
 
 @app.get("/echo/delayed-replies/{user_id}")

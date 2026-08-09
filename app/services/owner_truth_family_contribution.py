@@ -29,6 +29,7 @@ from app.domain.owner_truth.source_commands import (
     OwnerTruthSourceCommandResult,
 )
 from app.services.owner_truth_source import OwnerTruthSourceAsyncEffectCommandService
+from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 
 
 OWNER_TRUTH_FAMILY_CONTRIBUTION_SCHEMA_VERSION = "owner-truth-family-contribution-v1"
@@ -335,6 +336,7 @@ class FamilyContributionReviewResult:
     outcome: str
     submission: Mapping[str, Any]
     source: OwnerTruthSourceCommandResult | None = None
+    handoff: Mapping[str, Any] | None = None
 
     def public_contract(self, *, include_material: bool) -> dict[str, Any]:
         return {
@@ -343,6 +345,7 @@ class FamilyContributionReviewResult:
             "submission": _public_submission(
                 self.submission,
                 include_material=include_material,
+                handoff=self.handoff,
             ),
             "source": None if self.source is None else self.source.public_receipt(),
             "candidateExtraction": {
@@ -681,12 +684,21 @@ class OwnerTruthFamilyContributionService:
         context: OwnerTruthCommandContext,
     ) -> list[dict[str, Any]]:
         self._require_owner_context(context)
-        return [
-            _public_submission(item, include_material=True)
+        submissions = [
+            item
             for item in self._store.list_owner_truth_family_contribution_submissions(
                 owner_subject_id=context.owner_subject_id,
             )
             if str(item.get("vaultId") or "") == context.vault_id
+        ]
+        handoffs = self._owner_handoffs(context=context, submissions=submissions)
+        return [
+            _public_submission(
+                item,
+                include_material=True,
+                handoff=handoffs.get(str(item.get("id") or "")),
+            )
+            for item in submissions
         ]
 
     def list_submissions_for_contributor(
@@ -699,7 +711,11 @@ class OwnerTruthFamilyContributionService:
             field="contributor_subject_id",
         )
         return [
-            _public_submission(item, include_material=False)
+            _public_submission(
+                item,
+                include_material=False,
+                handoff=_base_handoff(item),
+            )
             for item in self._store.list_owner_truth_family_contribution_submissions(
                 contributor_subject_id=subject_id,
             )
@@ -821,10 +837,14 @@ class OwnerTruthFamilyContributionService:
                         "familyContributionSubmissionVersionMismatch"
                     )
         outcome = "deduplicated" if bool(updated.get("deduplicated")) else command.decision
+        handoff = self._owner_handoffs(context=context, submissions=[updated]).get(
+            str(updated.get("id") or "")
+        )
         return FamilyContributionReviewResult(
             outcome=outcome,
             submission=updated,
             source=source_result,
+            handoff=handoff,
         )
 
     def submit_text_source(
@@ -1039,6 +1059,98 @@ class OwnerTruthFamilyContributionService:
             relationship_id=relationship_id,
         )
 
+    def _owner_handoffs(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        submissions: list[Mapping[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """Project Source -> Candidate -> Memory without exposing private content."""
+
+        pending_by_source: dict[str, Any] = {}
+        history_by_source: dict[str, Any] = {}
+        try:
+            review_service = OwnerTruthCandidateReviewService(self._store)
+            for item in review_service.list_pending(context=context):
+                pending_by_source.setdefault(item.source_id, item)
+            for item in review_service.list_review_history(context=context):
+                history_by_source.setdefault(item.candidate.source_id, item)
+        except (OwnerTruthContractError, AttributeError, TypeError, ValueError):
+            # Older stores can still serve the contribution contract. They must
+            # report an unresolved handoff rather than inventing a Memory state.
+            pass
+
+        result: dict[str, dict[str, Any]] = {}
+        for submission in submissions:
+            submission_id = str(submission.get("id") or "")
+            base = _base_handoff(submission)
+            if base["status"] not in {"candidateExtractionRequested", "mediaProcessing"}:
+                result[submission_id] = base
+                continue
+
+            source_id = str(submission.get("sourceId") or "").strip()
+            if not source_id and str(submission.get("materialKind") or "") == "image":
+                source_object_id = str(submission.get("sourceObjectId") or "").strip()
+                if source_object_id:
+                    media = self._store.get_owner_truth_family_contribution_media_source_object(
+                        vault_id=context.vault_id,
+                        owner_subject_id=context.owner_subject_id,
+                        source_object_id=source_object_id,
+                    )
+                    if media is not None:
+                        source_id = str(media.get("derivedSourceId") or "").strip()
+                        processing_status = str(media.get("processingStatus") or "notRequested")
+                        if not source_id:
+                            result[submission_id] = {
+                                **base,
+                                "status": (
+                                    "mediaProcessingFailed"
+                                    if processing_status in {"retryableFailed", "terminalFailed"}
+                                    else "mediaProcessing"
+                                ),
+                                "processingStatus": processing_status,
+                                "retryable": processing_status == "retryableFailed",
+                            }
+                            continue
+            if not source_id:
+                result[submission_id] = base
+                continue
+
+            pending = pending_by_source.get(source_id)
+            if pending is not None:
+                result[submission_id] = {
+                    "status": "candidatePendingReview",
+                    "sourceId": source_id,
+                    "candidateId": pending.candidate_id,
+                    "memoryId": None,
+                    "memoryVersionId": None,
+                    "retryable": False,
+                }
+                continue
+
+            history = history_by_source.get(source_id)
+            if history is None:
+                result[submission_id] = {
+                    **base,
+                    "sourceId": source_id,
+                }
+                continue
+            if history.decision.value in {"rejected", "invalidated"}:
+                status = "candidateRejected"
+            elif history.memory_activation_status == "current":
+                status = "memoryCurrent"
+            else:
+                status = "memoryActivationPending"
+            result[submission_id] = {
+                "status": status,
+                "sourceId": source_id,
+                "candidateId": history.candidate.candidate_id,
+                "memoryId": history.memory_id,
+                "memoryVersionId": history.memory_version_id,
+                "retryable": status == "memoryActivationPending",
+            }
+        return result
+
 
 def _public_grant(value: Mapping[str, Any]) -> dict[str, Any]:
     return {
@@ -1065,6 +1177,7 @@ def _public_submission(
     value: Mapping[str, Any],
     *,
     include_material: bool,
+    handoff: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     material_kind = str(value.get("materialKind") or "")
     payload = {
@@ -1085,10 +1198,33 @@ def _public_submission(
         "decidedAt": value.get("decidedAt"),
         "decisionReason": value.get("decisionReason"),
         "materialIncluded": include_material,
+        "handoff": dict(handoff or _base_handoff(value)),
     }
     if include_material and material_kind == "text":
         payload["text"] = str(value.get("text") or "")
     return payload
+
+
+def _base_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
+    submission_status = str(value.get("status") or "")
+    if submission_status == "pendingReview":
+        status = "ownerReviewPending"
+    elif submission_status == "rejected":
+        status = "ownerRejected"
+    elif submission_status == "withdrawn":
+        status = "withdrawn"
+    elif str(value.get("materialKind") or "") == "image":
+        status = "mediaProcessing"
+    else:
+        status = "candidateExtractionRequested"
+    return {
+        "status": status,
+        "sourceId": str(value.get("sourceId") or "") or None,
+        "candidateId": None,
+        "memoryId": None,
+        "memoryVersionId": None,
+        "retryable": False,
+    }
 
 
 __all__ = [

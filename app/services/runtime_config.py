@@ -127,6 +127,9 @@ class RuntimeConfigService:
                     topic=self.settings.apns_topic,
                     environment=self.settings.apns_environment,
                     max_attempts=self.settings.apns_max_attempts,
+                    token_encryption_key_configured=bool(
+                        self.settings.apns_token_encryption_key
+                    ),
                 )
             )
         except APNSDeliveryError as exc:

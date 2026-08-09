@@ -1,0 +1,11 @@
+{
+  "version": "0088",
+  "name": "apns_postgres_outbox",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "postgresEncryptedApnsOutboxRequires0088",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "apnsDelivery": false
+  }
+}

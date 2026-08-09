@@ -111,6 +111,45 @@ class APNSDeliveryTests(unittest.TestCase):
         self.assertEqual(accepted.attempt, 2)
         self.assertEqual(len(provider.calls), 2)
 
+    def test_registration_rotation_and_worker_claim_are_generation_fenced(self):
+        service, provider = self.service()
+        first = service.register(
+            owner_user_id="owner-apns",
+            installation_id="ios-installation-rotation",
+            device_token="c3" * 32,
+            topic="com.yxj.dreamjourney.app",
+            environment="sandbox",
+        )
+        stale_job = service.enqueue(
+            message_id="message-apns-stale-generation",
+            registration=first,
+            payload={"aps": {"content-available": 1}},
+        )
+        rotated = service.register(
+            owner_user_id="owner-apns",
+            installation_id="ios-installation-rotation",
+            device_token="d4" * 32,
+            topic="com.yxj.dreamjourney.app",
+            environment="sandbox",
+        )
+        self.assertEqual(first.registration_id, rotated.registration_id)
+        self.assertEqual(rotated.generation, first.generation + 1)
+        self.assertEqual(service.list_active_registrations("owner-apns"), [rotated])
+        stale = service.dispatch(stale_job.job_id)
+        self.assertEqual(stale.state, "failed")
+        self.assertEqual(stale.reason_code, "apnsRegistrationSuperseded")
+        self.assertEqual(provider.calls, [])
+        job = service.enqueue(
+            message_id="message-apns-worker",
+            registration=rotated,
+            payload={"aps": {"content-available": 1}},
+        )
+        dispatched = service.dispatch_due(worker_id="worker-1", limit=10)
+        self.assertEqual([item.job_id for item in dispatched], [job.job_id])
+        self.assertEqual(dispatched[0].state, "accepted")
+        self.assertEqual(provider.calls[0]["device_token"], "d4" * 32)
+        self.assertEqual(service.dispatch_due(worker_id="worker-2", limit=10), [])
+
     def test_disabled_configuration_is_fail_closed(self):
         configuration = APNSConfiguration()
         self.assertFalse(configuration.public_descriptor()["enabled"])
@@ -128,6 +167,25 @@ class APNSDeliveryTests(unittest.TestCase):
                 environment="sandbox",
             )
         self.assertEqual(raised.exception.code, "apnsDeliveryDisabled")
+
+    def test_postgres_token_vault_requires_an_encryption_key(self):
+        with self.assertRaises(APNSDeliveryError) as raised:
+            APNSConfiguration(
+                provider="fake",
+                token_vault_provider="postgresEncrypted",
+                topic="com.yxj.dreamjourney.app",
+                environment="sandbox",
+            )
+        self.assertEqual(raised.exception.code, "apnsTokenEncryptionKeyRequired")
+
+        configured = APNSConfiguration(
+            provider="fake",
+            token_vault_provider="postgresEncrypted",
+            topic="com.yxj.dreamjourney.app",
+            environment="sandbox",
+            token_encryption_key_configured=True,
+        )
+        self.assertTrue(configured.public_descriptor()["durableOutbox"])
 
     def test_runtime_config_is_secret_free_and_fail_closed(self):
         disabled = RuntimeConfigService(Settings()).public_config()

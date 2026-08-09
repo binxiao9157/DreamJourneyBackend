@@ -161,6 +161,54 @@ class OwnerTruthTextCaptureAPITests(unittest.TestCase):
         self.assertEqual(response.json()["detail"]["code"], "release_policy_denied")
         self.assertEqual(self.store.owner_truth_source_count("vault-forged-owner-text-capture"), 0)
 
+    def test_v2_authority_owner_cannot_create_new_legacy_archive_authority(self) -> None:
+        owner_id, auth_headers, _session_id = self._login("13800139962")
+        self._allow_owner(owner_id)
+
+        for kind in ("text", "photo", "audio", "video"):
+            with self.subTest(kind=kind):
+                response = client.post(
+                    "/archive/items",
+                    headers=auth_headers,
+                    json={
+                        "id": f"legacy-{kind}-must-not-write",
+                        "userId": owner_id,
+                        "kind": kind,
+                        "note": "不得形成第二套权威数据",
+                    },
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                detail = response.json()["detail"]
+                self.assertEqual(detail["code"], "legacyArchiveAuthorityRetired")
+                self.assertEqual(detail["authority"], "ownerTruthV2")
+                self.assertEqual(detail["requiredRoute"], "/v2/vaults/{vaultId}/sources")
+
+        self.assertEqual(self.store.list_archive_items(owner_id), [])
+
+    def test_v2_authority_switch_does_not_retire_time_letter_contract(self) -> None:
+        owner_id, _auth_headers, _session_id = self._login("13800139963")
+        self._allow_owner(owner_id)
+
+        self.assertIsNone(
+            main_module._legacy_archive_v2_authority_retirement(
+                owner_user_id=owner_id,
+                payload={"kind": "timeLetter"},
+            )
+        )
+        self.assertEqual(
+            main_module._legacy_archive_v2_authority_retirement(
+                owner_user_id=owner_id,
+                payload={"kind": "photo"},
+            ),
+            {
+                "code": "legacyArchiveAuthorityRetired",
+                "authority": "ownerTruthV2",
+                "feature": "ownerTextCaptureV1",
+                "requiredRoute": "/v2/vaults/{vaultId}/sources",
+                "retryable": False,
+            },
+        )
+
     def test_cross_owner_and_stale_epoch_cannot_create_another_source(self) -> None:
         owner_a, headers_a, session_a = self._login("13800139953")
         owner_b, headers_b, session_b = self._login("13800139954")

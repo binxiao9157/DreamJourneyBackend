@@ -316,6 +316,8 @@ class Settings:
     apns_topic: Optional[str] = None
     apns_environment: str = "sandbox"
     apns_max_attempts: int = 3
+    apns_token_encryption_key: Optional[str] = None
+    apns_token_encryption_key_version: str = "v1"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -874,6 +876,11 @@ class Settings:
                 "APNS_MAX_ATTEMPTS",
                 cls.apns_max_attempts,
             ),
+            apns_token_encryption_key=_env("APNS_TOKEN_ENCRYPTION_KEY"),
+            apns_token_encryption_key_version=_env(
+                "APNS_TOKEN_ENCRYPTION_KEY_VERSION",
+                cls.apns_token_encryption_key_version,
+            ) or cls.apns_token_encryption_key_version,
         )
 
 
