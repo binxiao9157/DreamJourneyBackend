@@ -4,10 +4,11 @@
 
 当前部署证据：
 
-- 后端提交 `c2ce275` 已部署，迁移 head 保持 `0085`，`/ready` 与 deployed readiness smoke 通过。
+- 后端代码提交 `c2ce275` 已部署，服务器 checkout 已更新到文档提交 `1b8d730`；迁移 head 保持 `0085`，`/ready` 与 deployed readiness smoke 通过。
 - 部署容器已使用临时 PostgreSQL 数据库通过终态清理 smoke；没有修改生产业务数据。
 - 已验证截止日恢复、一次恢复限制、保留令阻断/释放、重复清理幂等、终态不可复活和脱敏回执。
-- systemd 单元已安装并通过语法检查；timer 当前保持 `disabled`，等待生产不可逆删除审批后再启用。
+- 生产不可逆删除已于 2026-08-09 获得明确授权，systemd timer 已启用并处于 `active`。
+- 首轮生产作业于 2026-08-09 15:54 CST 手动触发成功，脱敏回执为 `status=completed`、`purgedCount=0`；没有删除现有账号。
 
 ## 目标与边界
 
@@ -21,7 +22,7 @@
 
 ## 安装
 
-安装单元不会执行清理。`enable --now` 会使后续到期账号进入不可逆删除，必须先取得生产数据删除审批。
+安装单元不会执行清理。`enable --now` 会使后续到期账号进入不可逆删除；本环境已取得授权并完成启用，以下命令保留为恢复或新环境部署步骤。
 
 ```bash
 sudo install -m 644 deploy/systemd/dreamjourney-account-terminal-purge.service /etc/systemd/system/
@@ -56,3 +57,13 @@ sudo journalctl -u dreamjourney-account-terminal-purge.service -n 30 --no-pager
 ```
 
 日志不得包含用户 ID、手机号、Token 或被删除资源列表。作业失败时保留失败状态，修复依赖后再次启动即可；不得通过修改截止时间跳过恢复期。
+
+## 当前生产状态
+
+- `dreamjourney-account-terminal-purge.timer`：`enabled / active`
+- 调度：每小时一次，带随机延迟，`Persistent=true`
+- 首轮人工触发：成功
+- 首轮清理数量：`0`
+- 日志边界：仅截止时间来源、作业名、状态、清理数量和合同版本
+
+后续每次执行由 systemd journal 保留聚合回执。任何非零清理数量都只允许通过受限运维渠道核对数据权利回执，不得把账号或资源标识写入普通部署日志。
