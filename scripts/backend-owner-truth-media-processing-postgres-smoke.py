@@ -844,9 +844,22 @@ def main() -> None:
                 cross_owner_export.status_code == 404,
                 "cross Owner export job lookup must stay hidden",
             )
+            export_credential = client.post(
+                f"/auth/data-export/jobs/{export_job_id}/download-credential",
+                headers=export_headers,
+                json={},
+            )
+            require(
+                export_credential.status_code == 200,
+                f"synthetic account export credential failed: {export_credential.text}",
+            )
+            export_download_headers = dict(export_headers)
+            export_download_headers["X-DreamJourney-Export-Token"] = str(
+                export_credential.json().get("downloadToken") or ""
+            )
             export_download = client.get(
                 f"/auth/data-export/jobs/{export_job_id}/download",
-                headers=export_headers,
+                headers=export_download_headers,
             )
             require(
                 export_download.status_code == 200,

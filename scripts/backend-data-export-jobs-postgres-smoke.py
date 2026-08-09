@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import sys
@@ -19,6 +20,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.services.data_export_jobs import (
+    create_data_export_download_credential,
     create_data_export_job_record,
     materialize_data_export_job,
 )
@@ -102,6 +104,35 @@ def exercise(dsn: str) -> None:
         require("owner-only-export" in serialized, "owner data must be present")
         require("postgres-export-request-key" not in serialized, "raw request key must not persist")
 
+        credential = create_data_export_download_credential(
+            job_id=job["id"],
+            owner_user_id=owner["id"],
+            job_expires_at=job["expiresAt"],
+            now="2026-08-08T08:02:00+00:00",
+        )
+        issued = store.issue_data_export_download_credential(
+            job_id=job["id"],
+            owner_user_id=owner["id"],
+            token_hash=credential["tokenHash"],
+            issued_at=credential["issuedAt"],
+            expires_at=credential["expiresAt"],
+        )
+        require(issued["outcome"] == "issued", "download credential must persist")
+        consumed = store.consume_data_export_download_credential(
+            job_id=job["id"],
+            owner_user_id=owner["id"],
+            token_hash=hashlib.sha256(credential["token"].encode("utf-8")).hexdigest(),
+            consumed_at="2026-08-08T08:02:10+00:00",
+        )
+        replayed = store.consume_data_export_download_credential(
+            job_id=job["id"],
+            owner_user_id=owner["id"],
+            token_hash=credential["tokenHash"],
+            consumed_at="2026-08-08T08:02:11+00:00",
+        )
+        require(consumed["outcome"] == "consumed", "credential must be consumed once")
+        require(replayed["outcome"] == "invalid", "credential replay must fail")
+
         expired = store.expire_data_export_job(
             job["id"],
             owner_user_id=owner["id"],
@@ -111,7 +142,7 @@ def exercise(dsn: str) -> None:
         require(expired["job"].get("artifact") is None, "expiry must clear artifact bytes")
         print(
             "Data export job Postgres smoke passed "
-            "(idempotency, owner fence, partial manifest and expiry verified)."
+            "(idempotency, owner fence, partial manifest, one-time download and expiry verified)."
         )
     finally:
         store.close_pool()
@@ -136,6 +167,7 @@ def main() -> None:
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         require("0084" in applied["appliedVersions"], "0084 must be applied")
+        require("0086" in applied["appliedVersions"], "0086 must be applied")
         require(applied["appliedHead"] == verified["expectedHead"], "migration head mismatch")
         exercise(test_dsn)
     finally:

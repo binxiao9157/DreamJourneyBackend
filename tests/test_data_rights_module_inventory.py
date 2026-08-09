@@ -201,6 +201,18 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
         self.assertEqual(export["status"], "ready")
         self.assertEqual(export["generatedAt"], "2026-07-18T12:00:00+00:00")
         self.assertEqual(archive["itemCount"], 1)
+        permission_manifest = export["machineReadable"]["permissionManifest"]
+        self.assertEqual(permission_manifest["ownerUserId"], user_id)
+        self.assertEqual(
+            permission_manifest["exportAuthorization"],
+            "authenticatedOwnerOnly",
+        )
+        self.assertTrue(
+            any(
+                item["resourceType"] == "ownerRelationship"
+                for item in permission_manifest["resources"]
+            )
+        )
         relationship_export = next(
             item
             for item in export["machineReadable"]["objects"]

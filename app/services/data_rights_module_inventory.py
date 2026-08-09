@@ -186,6 +186,29 @@ def build_module_owned_data_export(
         }
         for record in module_records
     ]
+    permission_resources = [
+        {
+            "moduleId": record["moduleId"],
+            "resourceType": record["resourceType"],
+            "itemCount": record["itemCount"],
+            "status": record["status"],
+            **(
+                {"reasonCode": record["reasonCode"]}
+                if record.get("reasonCode")
+                else {}
+            ),
+        }
+        for record in module_records
+        if record["moduleId"] == "family"
+        or record["resourceType"] == "ownerTruthFamilyContributionGrant"
+    ]
+    permission_manifest = {
+        "schemaVersion": 1,
+        "ownerUserId": subject_id,
+        "exportAuthorization": "authenticatedOwnerOnly",
+        "accessScope": "ownerScopedDataCopy",
+        "resources": permission_resources,
+    }
     return {
         "schemaVersion": DATA_RIGHTS_EXPORT_SCHEMA_VERSION,
         "status": "ready",
@@ -199,6 +222,7 @@ def build_module_owned_data_export(
         "machineReadable": {
             "objects": module_records,
             "statusSummary": status_summary,
+            "permissionManifest": permission_manifest,
             "sourceManifest": [
                 {
                     "moduleId": record["moduleId"],

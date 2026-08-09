@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Mapping, Optional
 from uuid import uuid4
@@ -21,6 +22,7 @@ DATA_EXPORT_JOB_STATES = frozenset(
 )
 DATA_EXPORT_DOWNLOADABLE_STATES = frozenset({"ready", "partial"})
 DEFAULT_DATA_EXPORT_TTL_SECONDS = 15 * 60
+DEFAULT_DATA_EXPORT_DOWNLOAD_CREDENTIAL_TTL_SECONDS = 60
 
 
 class DataExportJobError(ValueError):
@@ -82,8 +84,13 @@ def build_copy_export_manifest(
     if not isinstance(export, Mapping):
         raise DataExportJobError("export must be an object")
     objects = export.get("machineReadable", {}).get("objects", [])
+    permission_manifest = export.get("machineReadable", {}).get("permissionManifest")
     boundaries = export.get("externalBoundaries", [])
-    if not isinstance(objects, list) or not isinstance(boundaries, list):
+    if (
+        not isinstance(objects, list)
+        or not isinstance(permission_manifest, Mapping)
+        or not isinstance(boundaries, list)
+    ):
         raise DataExportJobError("export inventory is malformed")
 
     module_summaries = []
@@ -137,6 +144,8 @@ def build_copy_export_manifest(
         "generatedAt": _timestamp(generated_at),
         "expiresAt": _timestamp(expires_at),
         "dataHash": _hash_json(export),
+        "permissionManifestHash": _hash_json(permission_manifest),
+        "permissionResourceCount": len(permission_manifest.get("resources") or []),
         "moduleSummaries": module_summaries,
         "externalBoundaries": boundary_summaries,
     }
@@ -214,6 +223,48 @@ def public_data_export_job(job: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def create_data_export_download_credential(
+    *,
+    job_id: Any,
+    owner_user_id: Any,
+    job_expires_at: Any,
+    now: Optional[Any] = None,
+    ttl_seconds: int = DEFAULT_DATA_EXPORT_DOWNLOAD_CREDENTIAL_TTL_SECONDS,
+) -> Dict[str, Any]:
+    normalized_job_id = _required_text(job_id, field="job_id", maximum=80)
+    if not normalized_job_id.startswith("dej_"):
+        raise DataExportJobError("job_id is invalid")
+    owner = _required_text(owner_user_id, field="owner_user_id", maximum=256)
+    issued_at = _timestamp(now)
+    issued = datetime.fromisoformat(issued_at)
+    job_expiry = datetime.fromisoformat(_timestamp(job_expires_at))
+    bounded_ttl = max(15, min(int(ttl_seconds), 5 * 60))
+    expires = min(job_expiry, issued + timedelta(seconds=bounded_ttl))
+    if expires <= issued:
+        raise DataExportJobStateError("data export job is expired")
+    token = f"dec_{secrets.token_urlsafe(32)}"
+    return {
+        "jobId": normalized_job_id,
+        "ownerUserId": owner,
+        "token": token,
+        "tokenHash": _sha256(token),
+        "issuedAt": issued_at,
+        "expiresAt": expires.astimezone(timezone.utc).isoformat(),
+    }
+
+
+def public_data_export_download_credential(credential: Mapping[str, Any]) -> Dict[str, Any]:
+    token = _required_text(credential.get("token"), field="token", maximum=128)
+    if not token.startswith("dec_"):
+        raise DataExportJobError("download credential token is invalid")
+    return {
+        "schemaVersion": 1,
+        "jobId": _required_text(credential.get("jobId"), field="job_id", maximum=80),
+        "downloadToken": token,
+        "expiresAt": _timestamp(credential.get("expiresAt")),
+    }
+
+
 def is_data_export_job_expired(job: Mapping[str, Any], *, now: Optional[Any] = None) -> bool:
     current = datetime.fromisoformat(_timestamp(now))
     expiry = datetime.fromisoformat(_timestamp(job.get("expiresAt")))
@@ -264,14 +315,17 @@ def _sha256(value: str) -> str:
 
 __all__ = [
     "COPY_EXPORT_MANIFEST_SCHEMA_VERSION",
+    "DEFAULT_DATA_EXPORT_DOWNLOAD_CREDENTIAL_TTL_SECONDS",
     "DATA_EXPORT_DOWNLOADABLE_STATES",
     "DATA_EXPORT_JOB_SCHEMA_VERSION",
     "DATA_EXPORT_JOB_STATES",
     "DataExportJobError",
     "DataExportJobStateError",
     "build_copy_export_manifest",
+    "create_data_export_download_credential",
     "create_data_export_job_record",
     "is_data_export_job_expired",
     "materialize_data_export_job",
+    "public_data_export_download_credential",
     "public_data_export_job",
 ]

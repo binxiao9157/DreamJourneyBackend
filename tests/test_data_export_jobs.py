@@ -89,26 +89,61 @@ class DataExportJobRouteTests(unittest.TestCase):
             f"/auth/data-export/jobs/{job_id}",
             headers=self._headers(other),
         )
-        download = self.client.get(
+        download_without_credential = self.client.get(
             f"/auth/data-export/jobs/{job_id}/download",
             headers=self._headers(owner),
+        )
+        cross_owner_credential = self.client.post(
+            f"/auth/data-export/jobs/{job_id}/download-credential",
+            headers=self._headers(other),
+            json={},
+        )
+        credential = self.client.post(
+            f"/auth/data-export/jobs/{job_id}/download-credential",
+            headers=self._headers(owner),
+            json={},
+        )
+        download_headers = {
+            **self._headers(owner),
+            "X-DreamJourney-Export-Token": credential.json().get("downloadToken", ""),
+        }
+        download = self.client.get(
+            f"/auth/data-export/jobs/{job_id}/download",
+            headers=download_headers,
+        )
+        replay_download = self.client.get(
+            f"/auth/data-export/jobs/{job_id}/download",
+            headers=download_headers,
         )
 
         self.assertEqual(status.status_code, 200, status.text)
         self.assertEqual(status.json()["status"], "partial")
         self.assertEqual(status.json()["manifest"]["packageStatus"], "partial")
         self.assertEqual(cross_owner.status_code, 404, cross_owner.text)
+        self.assertEqual(download_without_credential.status_code, 401)
+        self.assertEqual(cross_owner_credential.status_code, 404)
+        self.assertEqual(credential.status_code, 200, credential.text)
+        self.assertIn("no-store", credential.headers["cache-control"])
+        self.assertTrue(credential.json()["downloadToken"].startswith("dec_"))
         self.assertEqual(download.status_code, 200, download.text)
+        self.assertEqual(replay_download.status_code, 401, replay_download.text)
         self.assertIn("no-store", download.headers["cache-control"])
         payload = download.json()
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         self.assertEqual(payload["manifest"]["jobId"], job_id)
         self.assertEqual(payload["manifest"]["packageStatus"], "partial")
+        self.assertEqual(len(payload["manifest"]["permissionManifestHash"]), 64)
+        self.assertGreaterEqual(payload["manifest"]["permissionResourceCount"], 1)
         self.assertEqual(payload["dataExport"]["ownerUserId"], owner_id)
+        self.assertEqual(
+            payload["dataExport"]["machineReadable"]["permissionManifest"]["ownerUserId"],
+            owner_id,
+        )
         self.assertIn("仅本人可导出的内容", serialized)
         self.assertNotIn("must-not-leak-export-job", serialized)
         self.assertNotIn(other["user"]["id"], serialized)
         self.assertNotIn("requestKey", serialized)
+        self.assertNotIn(credential.json()["downloadToken"], serialized)
 
     def test_failed_job_can_retry_without_changing_job_identity(self) -> None:
         owner = self._login("13900008803")
@@ -163,6 +198,42 @@ class DataExportJobRouteTests(unittest.TestCase):
             response.json()["detail"]["code"],
             "data_export_unavailable_after_deletion",
         )
+
+    def test_account_is_rechecked_before_credential_issue_and_download(self) -> None:
+        owner = self._login("13900008805")
+        headers = self._headers(owner)
+        created = self.client.post(
+            "/auth/data-export/jobs",
+            headers=headers,
+            json={"requestKey": "export-active-recheck"},
+        )
+        self.assertEqual(created.status_code, 202, created.text)
+        job_id = created.json()["jobId"]
+        credential = self.client.post(
+            f"/auth/data-export/jobs/{job_id}/download-credential",
+            headers=headers,
+            json={},
+        )
+        self.assertEqual(credential.status_code, 200, credential.text)
+
+        inactive = dict(self.store.get_user(owner["user"]["id"]) or {})
+        inactive["deletionState"] = "softDeleted"
+        with patch.object(main_module, "_store_get_user", return_value=inactive):
+            blocked_download = self.client.get(
+                f"/auth/data-export/jobs/{job_id}/download",
+                headers={
+                    **headers,
+                    "X-DreamJourney-Export-Token": credential.json()["downloadToken"],
+                },
+            )
+            blocked_issue = self.client.post(
+                f"/auth/data-export/jobs/{job_id}/download-credential",
+                headers=headers,
+                json={},
+            )
+
+        self.assertEqual(blocked_download.status_code, 409, blocked_download.text)
+        self.assertEqual(blocked_issue.status_code, 409, blocked_issue.text)
 
 
 if __name__ == "__main__":

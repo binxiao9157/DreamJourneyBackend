@@ -2715,9 +2715,135 @@ class PostgresStore:
             """,
             (str(updated_at), str(job_id), str(owner_user_id)),
         )
+        self._execute(
+            """
+            UPDATE data_export_download_credentials
+            SET status = 'revoked'
+            WHERE job_id = %s AND owner_user_id = %s AND status = 'active'
+            """,
+            (str(job_id), str(owner_user_id)),
+        )
         return {
             "outcome": "expired",
             "job": self._data_export_job_payload(row, include_artifact=True),
+        }
+
+    def issue_data_export_download_credential(
+        self,
+        *,
+        job_id: str,
+        owner_user_id: str,
+        token_hash: str,
+        issued_at: str,
+        expires_at: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"data-export-download-credential-{job_id}",
+                command_id=str(token_hash),
+            ):
+                return self.issue_data_export_download_credential(
+                    job_id=job_id,
+                    owner_user_id=owner_user_id,
+                    token_hash=token_hash,
+                    issued_at=issued_at,
+                    expires_at=expires_at,
+                )
+        row = self._fetchone(
+            """
+            INSERT INTO data_export_download_credentials (
+                job_id, owner_user_id, token_hash, status, generation,
+                issued_at, expires_at, consumed_at
+            )
+            SELECT id, owner_user_id, %s, 'active', 1, %s, %s, NULL
+            FROM data_export_jobs
+            WHERE id = %s AND owner_user_id = %s
+            ON CONFLICT (job_id) DO UPDATE
+            SET token_hash = EXCLUDED.token_hash,
+                status = 'active',
+                generation = data_export_download_credentials.generation + 1,
+                issued_at = EXCLUDED.issued_at,
+                expires_at = EXCLUDED.expires_at,
+                consumed_at = NULL
+            RETURNING job_id, owner_user_id, token_hash, status, generation,
+                issued_at, expires_at, consumed_at
+            """,
+            (
+                str(token_hash),
+                str(issued_at),
+                str(expires_at),
+                str(job_id),
+                str(owner_user_id),
+            ),
+        )
+        if row is None:
+            return {"outcome": "notFound", "credential": None}
+        return {"outcome": "issued", "credential": self._data_export_credential_payload(row)}
+
+    def consume_data_export_download_credential(
+        self,
+        *,
+        job_id: str,
+        owner_user_id: str,
+        token_hash: str,
+        consumed_at: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"data-export-download-consume-{job_id}",
+                command_id=str(token_hash),
+            ):
+                return self.consume_data_export_download_credential(
+                    job_id=job_id,
+                    owner_user_id=owner_user_id,
+                    token_hash=token_hash,
+                    consumed_at=consumed_at,
+                )
+        row = self._fetchone(
+            """
+            UPDATE data_export_download_credentials
+            SET status = 'consumed', consumed_at = %s
+            WHERE job_id = %s
+                AND owner_user_id = %s
+                AND token_hash = %s
+                AND status = 'active'
+                AND expires_at > %s
+                AND EXISTS (
+                    SELECT 1
+                    FROM users
+                    WHERE users.id = data_export_download_credentials.owner_user_id
+                        AND COALESCE(users.payload->>'deletionState', 'active') = 'active'
+                )
+            RETURNING job_id, owner_user_id, token_hash, status, generation,
+                issued_at, expires_at, consumed_at
+            """,
+            (
+                str(consumed_at),
+                str(job_id),
+                str(owner_user_id),
+                str(token_hash),
+                str(consumed_at),
+            ),
+        )
+        if row is None:
+            return {"outcome": "invalid", "credential": None}
+        return {"outcome": "consumed", "credential": self._data_export_credential_payload(row)}
+
+    @staticmethod
+    def _data_export_credential_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "jobId": str(row.get("job_id") or ""),
+            "ownerUserId": str(row.get("owner_user_id") or ""),
+            "tokenHash": str(row.get("token_hash") or ""),
+            "status": str(row.get("status") or ""),
+            "generation": int(row.get("generation") or 0),
+            "issuedAt": PostgresStore._iso_value(row.get("issued_at")),
+            "expiresAt": PostgresStore._iso_value(row.get("expires_at")),
+            "consumedAt": (
+                None
+                if row.get("consumed_at") is None
+                else PostgresStore._iso_value(row.get("consumed_at"))
+            ),
         }
 
     def create_rights_request(self, request: DataRightsRequest) -> Dict[str, Any]:

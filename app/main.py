@@ -51,9 +51,12 @@ from app.services.data_rights_module_inventory import build_module_owned_data_ex
 from app.services.data_export_jobs import (
     DATA_EXPORT_DOWNLOADABLE_STATES,
     DataExportJobError,
+    DataExportJobStateError,
+    create_data_export_download_credential,
     create_data_export_job_record,
     is_data_export_job_expired,
     materialize_data_export_job,
+    public_data_export_download_credential,
     public_data_export_job,
 )
 from app.services.client_compatibility import (
@@ -11983,11 +11986,50 @@ def retry_account_data_export_job(
     return public_data_export_job(job)
 
 
+@app.post("/auth/data-export/jobs/{job_id}/download-credential")
+def issue_account_data_export_download_credential(
+    job_id: str,
+    request: Request,
+) -> JSONResponse:
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="user access token is required")
+    _active_data_export_user_or_raise(user_id)
+    job = _load_account_data_export_job_or_raise(job_id, owner_user_id=user_id)
+    if job.get("status") not in DATA_EXPORT_DOWNLOADABLE_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "dataExportJobNotReady", "status": job.get("status")},
+        )
+    try:
+        credential = create_data_export_download_credential(
+            job_id=job_id,
+            owner_user_id=user_id,
+            job_expires_at=job.get("expiresAt"),
+        )
+    except DataExportJobStateError as exc:
+        raise HTTPException(status_code=409, detail={"code": "dataExportJobExpired"}) from exc
+    result = store.issue_data_export_download_credential(
+        job_id=job_id,
+        owner_user_id=user_id,
+        token_hash=str(credential["tokenHash"]),
+        issued_at=str(credential["issuedAt"]),
+        expires_at=str(credential["expiresAt"]),
+    )
+    if result.get("outcome") != "issued":
+        raise HTTPException(status_code=404, detail={"code": "dataExportJobNotFound"})
+    return JSONResponse(
+        content=public_data_export_download_credential(credential),
+        headers={"Cache-Control": "no-store, private", "Pragma": "no-cache"},
+    )
+
+
 @app.get("/auth/data-export/jobs/{job_id}/download")
 def download_account_data_export_job(job_id: str, request: Request) -> JSONResponse:
     user_id = _request_user_principal_id(request)
     if user_id is None:
         raise HTTPException(status_code=401, detail="user access token is required")
+    _active_data_export_user_or_raise(user_id)
     job = _load_account_data_export_job_or_raise(
         job_id,
         owner_user_id=user_id,
@@ -12001,6 +12043,25 @@ def download_account_data_export_job(job_id: str, request: Request) -> JSONRespo
     artifact = job.get("artifact")
     if not isinstance(artifact, Mapping):
         raise HTTPException(status_code=503, detail={"code": "dataExportArtifactUnavailable"})
+    download_token = str(
+        request.headers.get("x-dreamjourney-export-token") or ""
+    ).strip()
+    if not download_token.startswith("dec_") or len(download_token) > 128:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "dataExportDownloadCredentialRequired"},
+        )
+    consumed = store.consume_data_export_download_credential(
+        job_id=job_id,
+        owner_user_id=user_id,
+        token_hash=hashlib.sha256(download_token.encode("utf-8")).hexdigest(),
+        consumed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    if consumed.get("outcome") != "consumed":
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "dataExportDownloadCredentialInvalid"},
+        )
     return JSONResponse(
         content=dict(artifact),
         headers={

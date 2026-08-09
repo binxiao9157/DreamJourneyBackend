@@ -17,6 +17,7 @@ class V4SyntheticAccountE2EContractTests(unittest.TestCase):
             "/candidates/{candidate_id}/decisions",
             "/context/build",
             "/auth/data-export/jobs",
+            "/auth/data-export/jobs/{export_job_id}/download-credential",
             "/auth/data-export/jobs/{export_job_id}/download",
             "/source-objects/{source_object_id}/deletions",
         ):
@@ -31,6 +32,7 @@ class V4SyntheticAccountE2EContractTests(unittest.TestCase):
             self.assertIn(evidence, smoke)
         self.assertIn('"no-store" in export_download.headers', smoke)
         self.assertIn('"content-disposition"', smoke)
+        self.assertIn('"X-DreamJourney-Export-Token"', smoke)
         self.assertIn("cross Owner export job lookup must stay hidden", smoke)
         self.assertIn('feature="ownerMediaProcessingV1"', smoke)
         self.assertIn("headers=processing_policy_headers", smoke)

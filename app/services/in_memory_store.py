@@ -373,6 +373,7 @@ class InMemoryStore:
         self._rights_access_revocation_outbox: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._data_export_jobs: Dict[str, Dict[str, Any]] = {}
         self._data_export_job_ids_by_request: Dict[Tuple[str, str], str] = {}
+        self._data_export_download_credentials: Dict[str, Dict[str, Any]] = {}
         self._account_purge_receipts: Dict[str, Dict[str, Any]] = {}
         self._rights_lock = RLock()
 
@@ -1761,7 +1762,62 @@ class InMemoryStore:
                     "updatedAt": str(updated_at),
                 }
             )
+            credential = self._data_export_download_credentials.get(str(job_id or ""))
+            if credential is not None and credential.get("status") == "active":
+                credential["status"] = "revoked"
             return {"outcome": "expired", "job": deepcopy(record)}
+
+    def issue_data_export_download_credential(
+        self,
+        *,
+        job_id: str,
+        owner_user_id: str,
+        token_hash: str,
+        issued_at: str,
+        expires_at: str,
+    ) -> Dict[str, Any]:
+        with self._rights_lock:
+            job = self._data_export_jobs.get(str(job_id or ""))
+            if job is None or job.get("ownerUserId") != str(owner_user_id or ""):
+                return {"outcome": "notFound", "credential": None}
+            previous = self._data_export_download_credentials.get(str(job_id))
+            generation = int((previous or {}).get("generation") or 0) + 1
+            credential = {
+                "jobId": str(job_id),
+                "ownerUserId": str(owner_user_id),
+                "tokenHash": str(token_hash),
+                "status": "active",
+                "generation": generation,
+                "issuedAt": str(issued_at),
+                "expiresAt": str(expires_at),
+                "consumedAt": None,
+            }
+            self._data_export_download_credentials[str(job_id)] = credential
+            return {"outcome": "issued", "credential": deepcopy(credential)}
+
+    def consume_data_export_download_credential(
+        self,
+        *,
+        job_id: str,
+        owner_user_id: str,
+        token_hash: str,
+        consumed_at: str,
+    ) -> Dict[str, Any]:
+        with self._rights_lock:
+            credential = self._data_export_download_credentials.get(str(job_id or ""))
+            if credential is None or credential.get("ownerUserId") != str(owner_user_id or ""):
+                return {"outcome": "invalid", "credential": None}
+            account = self._users.get(str(owner_user_id or ""))
+            if account is None or str(account.get("deletionState") or "active") != "active":
+                return {"outcome": "invalid", "credential": None}
+            if credential.get("status") != "active" or credential.get("tokenHash") != token_hash:
+                return {"outcome": "invalid", "credential": None}
+            if str(credential.get("expiresAt") or "") <= str(consumed_at):
+                credential["status"] = "expired"
+                return {"outcome": "expired", "credential": deepcopy(credential)}
+            credential["status"] = "consumed"
+            credential["consumedAt"] = str(consumed_at)
+            return {"outcome": "consumed", "credential": deepcopy(credential)}
 
     def create_rights_request(self, request: DataRightsRequest) -> Dict[str, Any]:
         if not isinstance(request, DataRightsRequest):

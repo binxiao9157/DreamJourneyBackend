@@ -222,6 +222,12 @@ class RouteOwnershipRegistry:
                 "userDataExportJobRetry",
             ),
             _rule(
+                "POST",
+                "/auth/data-export/jobs/{job_id}/download-credential",
+                session,
+                "userDataExportJobDownloadCredential",
+            ),
+            _rule(
                 "GET",
                 "/auth/data-export/jobs/{job_id}/download",
                 session,
