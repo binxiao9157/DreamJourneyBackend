@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule DreamJourney terminal account purges
+
+[Timer]
+OnCalendar=*-*-* *:15:00
+RandomizedDelaySec=5m
+Persistent=true
+Unit=dreamjourney-account-terminal-purge.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Purge DreamJourney accounts after the restore window expires
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/services/dreamjourney/DreamJourneyBackend
+ExecStart=/usr/bin/docker compose exec -T -e ACCOUNT_TERMINAL_PURGE_RUN=1 api python scripts/purge_expired_account_deletions.py
+TimeoutStartSec=15min
+UMask=0077
