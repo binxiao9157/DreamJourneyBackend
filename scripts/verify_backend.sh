@@ -240,6 +240,8 @@ test -f scripts/run-backend-publication-authority-postgres-smoke.sh
 test -f scripts/backend-readiness-deployed-smoke.py
 test -f scripts/backend-operation-metrics-deployed-smoke.py
 test -f scripts/run-backend-operation-metrics-deployed-smoke.sh
+test -f scripts/backend-production-readiness-deployed-smoke.py
+test -f scripts/run-backend-production-readiness-deployed-smoke.sh
 test -f scripts/backend-incident-lifecycle-deployed-smoke.py
 test -f scripts/run-backend-incident-lifecycle-deployed-smoke.sh
 test -f scripts/backend-provider-redaction-smoke.py

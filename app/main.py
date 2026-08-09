@@ -22,6 +22,10 @@ except ImportError as exc:  # pragma: no cover - exercised only without runtime 
 
 from app.core.config import settings
 from app.async_effects.contracts import is_async_effect_store_ready
+from app.async_effects.owner_truth_worker_activation import (
+    OwnerTruthWorkerKind,
+    evaluate_owner_truth_worker_activation,
+)
 from app.services.amap import AMapDistrictProxy
 from app.services.auth_sessions import AuthSessionError, AuthSessionService
 from app.services.authorization_policy import (
@@ -492,6 +496,8 @@ from app.services.archive_store import (
     ResourceVersionConflict,
 )
 from app.services.provider_runtime import ProviderRuntimeInventory
+from app.services.clamav_runtime_evidence import collect_clamav_runtime_evidence
+from app.services.production_readiness_report import build_production_readiness_report
 from app.services.runtime_capability_control import RuntimeCapabilityControlRegistry
 from app.services.runtime_capability_control_collection import (
     RuntimeCapabilityControlCollector,
@@ -5107,6 +5113,82 @@ def _async_effect_schema_ready() -> bool:
         return is_async_effect_store_ready(readiness_probe())
     except Exception:
         return False
+
+
+def _production_readiness_report(
+    *,
+    operation_metrics: Mapping[str, Any],
+    provider_metrics: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Aggregate machine-only M0 promotion evidence without Provider values."""
+
+    inventory = _refresh_runtime_capability_controls()
+    schema_ready = _async_effect_schema_ready()
+    worker_activations = tuple(
+        evaluate_owner_truth_worker_activation(
+            worker=worker,
+            settings=settings,
+            schema_ready=schema_ready,
+            provider_inventory=inventory,
+        ).public_descriptor()
+        for worker in OwnerTruthWorkerKind
+    )
+    reconciliation_source = getattr(
+        store,
+        "summarize_rights_external_effect_reconciliation",
+        None,
+    )
+    reconciliation_healthy: Optional[bool]
+    if callable(reconciliation_source):
+        try:
+            reconciliation_healthy = bool(
+                reconciliation_source(domains=("objectStorage",)).get("healthy", False)
+            )
+        except Exception:
+            reconciliation_healthy = None
+    else:
+        reconciliation_healthy = None
+    application_export_ready = all(
+        callable(getattr(store, method, None))
+        for method in (
+            "get_user",
+            "create_data_export_job",
+            "claim_data_export_job",
+            "complete_data_export_job",
+            "get_data_export_job",
+        )
+    )
+    incident_component_source = (
+        _incident_lifecycle_service().readiness_component
+        if callable(getattr(store, "list_evidence_events", None))
+        else None
+    )
+    core_readiness = ReadinessService(
+        settings=settings,
+        store=store,
+        incident_component_source=incident_component_source,
+    ).evaluate()
+    return build_production_readiness_report(
+        core_readiness=core_readiness,
+        provider_inventory=inventory.public_descriptor(),
+        runtime_capability_control=(
+            RUNTIME_CAPABILITY_CONTROL_REGISTRY.public_descriptor()
+        ),
+        worker_activations=worker_activations,
+        context_authority_enabled=(
+            settings.owner_truth_context_authority_closed_pilot_enabled
+        ),
+        application_export_ready=application_export_ready,
+        # D1 has not yet admitted private object bytes to the export package.
+        media_export_ready=False,
+        deletion_reconciliation_healthy=reconciliation_healthy,
+        scanner_evidence=collect_clamav_runtime_evidence(settings),
+        operation_metrics=operation_metrics,
+        provider_metrics=provider_metrics,
+        active_kill_switches=parse_release_policy_feature_set(
+            settings.release_policy_emergency_disabled_features
+        ),
+    )
 
 
 def _release_policy_runtime_capability_ready(capability: str) -> bool:
@@ -11223,6 +11305,10 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
     )
     summary["runtimeCapabilityControl"] = (
         RUNTIME_CAPABILITY_CONTROL_REGISTRY.public_descriptor()
+    )
+    summary["productionReadiness"] = _production_readiness_report(
+        operation_metrics=summary["operationMetrics"],
+        provider_metrics=summary["providerCostEvidence"],
     )
     return summary
 
