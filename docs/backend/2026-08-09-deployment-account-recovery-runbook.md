@@ -64,22 +64,28 @@ bash scripts/deployment-preflight.sh
 
 ## 4. 固定提交部署
 
-记录部署前版本，并只接受 `main` 的 fast-forward：
+先记录部署前版本，并在仓库代码仍与当前数据库 schema 一致时生成迁移前备份：
 
 ```bash
 export REPO=/opt/services/dreamjourney/DreamJourneyBackend
 export PREVIOUS_COMMIT="$(sudo -iu miao git -C "$REPO" rev-parse HEAD)"
+cd "$REPO"
+sudo systemctl start dreamjourney-db-backup.service
+```
+
+确认备份服务成功且 manifest 的 `schemaHead` 等于当前数据库 head 后，才拉取目标提交；只接受 `main` 的 fast-forward：
+
+```bash
 sudo -iu miao git -C "$REPO" fetch origin main
 sudo -iu miao git -C "$REPO" pull --ff-only origin main
 export TARGET_COMMIT="$(sudo -iu miao git -C "$REPO" rev-parse HEAD)"
 ```
 
-先验证当前加密备份和 schema，再构建：
+随后构建并执行前向迁移：
 
 ```bash
 cd "$REPO"
 export DEPLOY_BUILD_ID="$(sudo -iu miao git -C "$REPO" rev-parse --short HEAD)"
-sudo systemctl start dreamjourney-db-backup.service
 sudo docker compose up -d postgres redis
 sudo docker compose build api
 sudo docker compose run --rm --no-deps api \
@@ -89,7 +95,10 @@ sudo docker compose run --rm --no-deps api \
 sudo docker compose run --rm --no-deps api \
   python scripts/migrate_db.py --verify --build-id "$DEPLOY_BUILD_ID"
 sudo docker compose up -d --force-recreate api
+sudo systemctl start dreamjourney-db-backup.service
 ```
+
+最后一次备份必须对应迁移后的新 schema head。这样迁移前、迁移后各有一个可验证恢复点，也避免新代码 head 在迁移执行前把旧数据库误判为未知 schema。
 
 放流 Gate：
 
