@@ -167,6 +167,34 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
         self.assertIsNotNone(revoked_record)
         return revoked_record
 
+    def _seed_owner_truth_family_contribution_submission(
+        self,
+        *,
+        user_id: str,
+        vault_id: str,
+        grant: dict,
+        marker: str,
+    ) -> dict:
+        return self.store.create_owner_truth_family_contribution_submission(
+            {
+                "id": str(uuid4()),
+                "vaultId": vault_id,
+                "grantId": grant["id"],
+                "ownerSubjectId": user_id,
+                "contributorSubjectId": f"private-submitter-{marker}",
+                "relationshipId": grant["relationshipId"],
+                "relationshipEpoch": grant["relationshipEpoch"],
+                "grantVersion": grant["rowVersion"],
+                "materialKind": "text",
+                "text": f"家庭贡献正文-{marker}",
+                "sourceObjectId": None,
+                "createCommandIdHash": self._hash({"privateSubmitCommand": marker}),
+                "createPayloadHash": self._hash({"privateSubmitPayload": marker}),
+                "createdAt": "2026-08-09T08:30:00+00:00",
+                "updatedAt": "2026-08-09T08:30:00+00:00",
+            }
+        )
+
     def test_owner_export_contains_module_data_but_redacts_credentials_and_media_boundary(self):
         login = self._login()
         user_id = login["user"]["id"]
@@ -421,6 +449,64 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
         self.assertEqual(grant_record["itemCount"], 1000)
         self.assertEqual(grant_record["totalItemCount"], 1001)
 
+    def test_owner_truth_export_includes_minimized_family_contribution_submissions(self):
+        owner_login = self._login("13900007781")
+        other_login = self._login("13900007782")
+        owner_id = owner_login["user"]["id"]
+        other_id = other_login["user"]["id"]
+        owner_vault_id = self._seed_owner_truth_candidate(
+            owner_id,
+            summary="家庭贡献提交属于本人的私有 Vault。",
+        )
+        other_vault_id = self._seed_owner_truth_candidate(
+            other_id,
+            summary="其他用户的家庭贡献不得出现在本人导出中。",
+        )
+        owner_grant = self._seed_owner_truth_family_contribution_grant(
+            user_id=owner_id,
+            vault_id=owner_vault_id,
+            marker="submission-owner",
+        )
+        other_grant = self._seed_owner_truth_family_contribution_grant(
+            user_id=other_id,
+            vault_id=other_vault_id,
+            marker="submission-other",
+        )
+        owner_submission = self._seed_owner_truth_family_contribution_submission(
+            user_id=owner_id,
+            vault_id=owner_vault_id,
+            grant=owner_grant,
+            marker="owner-private-marker",
+        )
+        other_submission = self._seed_owner_truth_family_contribution_submission(
+            user_id=other_id,
+            vault_id=other_vault_id,
+            grant=other_grant,
+            marker="other-private-marker",
+        )
+
+        export = build_module_owned_data_export(
+            self.store,
+            user_id=owner_id,
+            generated_at="2026-08-09T12:00:00+00:00",
+        )
+        serialized = json.dumps(export, ensure_ascii=False, sort_keys=True)
+        submissions = next(
+            item
+            for item in export["machineReadable"]["objects"]
+            if item["resourceType"] == "ownerTruthFamilyContributionSubmission"
+        )
+
+        self.assertEqual(submissions["status"], "completed")
+        self.assertEqual(submissions["itemCount"], 1)
+        self.assertEqual(submissions["totalItemCount"], 1)
+        self.assertEqual(submissions["items"][0]["submissionId"], owner_submission["id"])
+        self.assertIn("家庭贡献正文-owner-private-marker", serialized)
+        self.assertNotIn(other_submission["id"], serialized)
+        self.assertNotIn("private-submitter-owner-private-marker", serialized)
+        self.assertNotIn(owner_submission["createCommandIdHash"], serialized)
+        self.assertNotIn(owner_submission["createPayloadHash"], serialized)
+
     def test_owner_truth_terminal_cleanup_counts_family_contribution_grants_as_pending(self):
         login = self._login("13900007780")
         user_id = login["user"]["id"]
@@ -428,10 +514,16 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
             user_id,
             summary="终端清理前披露的家庭授权记录。",
         )
-        self._seed_owner_truth_family_contribution_grant(
+        grant = self._seed_owner_truth_family_contribution_grant(
             user_id=user_id,
             vault_id=vault_id,
             marker="cleanup-private-marker",
+        )
+        submission = self._seed_owner_truth_family_contribution_submission(
+            user_id=user_id,
+            vault_id=vault_id,
+            grant=grant,
+            marker="cleanup-submission-private-marker",
         )
 
         plans = build_terminal_cleanup_plan(
@@ -445,6 +537,8 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
         self.assertEqual(owner_truth_plan["outcome"], "pending")
         counts = self.store._terminal_account_cleanup_counts_locked(user_id)
         self.assertEqual(counts["ownerTruthFamilyContributionGrant"], 1)
+        self.assertEqual(counts["ownerTruthFamilyContributionSubmission"], 1)
+        self.assertTrue(submission["id"])
 
     def test_owner_truth_export_discloses_when_a_bounded_read_omits_records(self):
         login = self._login("13900007776")
@@ -464,6 +558,7 @@ class DataRightsModuleInventoryTests(unittest.TestCase):
                 "ownerTruthAnswerFeedback": 0,
                 "ownerTruthCorrection": 0,
                 "ownerTruthFamilyContributionGrant": 0,
+                "ownerTruthFamilyContributionSubmission": 0,
             },
         ):
             export = build_module_owned_data_export(

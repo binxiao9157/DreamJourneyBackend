@@ -29,7 +29,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 192)
+        self.assertEqual(len(app_routes), 201)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
 
@@ -98,6 +98,15 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
             ("POST", "/v2/vaults/{vault_id}/family-contribution/grants"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/revoke"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/sources"): RouteOwnershipCategory.USER_SESSION,
+            ("GET", "/v2/vaults/{vault_id}/family-contribution/grants"): RouteOwnershipCategory.USER_SESSION,
+            ("GET", "/v2/family-contribution/grants"): RouteOwnershipCategory.USER_SESSION,
+            ("POST", "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/submissions"): RouteOwnershipCategory.USER_SESSION,
+            ("GET", "/v2/vaults/{vault_id}/family-contribution/submissions"): RouteOwnershipCategory.USER_SESSION,
+            ("GET", "/v2/family-contribution/submissions"): RouteOwnershipCategory.USER_SESSION,
+            ("POST", "/v2/vaults/{vault_id}/family-contribution/submissions/{submission_id}/decisions"): RouteOwnershipCategory.USER_SESSION,
+            ("GET", "/v2/vaults/{vault_id}/family-contribution/submissions/{submission_id}/content"): RouteOwnershipCategory.USER_SESSION,
+            ("POST", "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/image-upload-intents"): RouteOwnershipCategory.USER_SESSION,
+            ("PUT", "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/image-upload-intents/{intent_id}/content"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/interview-sessions/{session_id}/state"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/interview-sessions/{session_id}/presentation"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/interview-sessions/current"): RouteOwnershipCategory.USER_SESSION,
@@ -165,8 +174,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 192)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 192)
+        self.assertEqual(summary["routeCount"], 201)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 201)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)

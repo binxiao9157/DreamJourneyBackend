@@ -14,7 +14,9 @@ from app.services.owner_truth_family_contribution import (
     CreateFamilyContributionGrantCommand,
     OwnerTruthFamilyContributionError,
     OwnerTruthFamilyContributionService,
+    ReviewFamilyContributionSubmissionCommand,
     RevokeFamilyContributionGrantCommand,
+    SubmitFamilyContributionForReviewCommand,
     SubmitFamilyContributionTextCommand,
 )
 from app.services.owner_truth_source import OwnerTruthSourceCommandService
@@ -153,6 +155,132 @@ class OwnerTruthFamilyContributionServiceTests(unittest.TestCase):
         self.assertEqual(receipt["actorSubjectId"], self.contributor)
         self.assertEqual(self.store.effect_kernel_repository().record_count(), 0)
         self.assertEqual(self.store.owner_truth_source_count(self.vault_id), 2)
+
+    def test_formal_submission_requires_owner_review_and_revoke_hides_accepted_source(self) -> None:
+        self.seed_vault()
+        relationship = self.accepted_relationship()
+        grant = self.create_grant(relationship["id"]).grant
+        submission_id = str(uuid4())
+
+        pending = self.service.submit_for_review(
+            command=SubmitFamilyContributionForReviewCommand(
+                command_id="family-review-submission-001",
+                submission_id=submission_id,
+                grant_id=grant["id"],
+                expected_grant_version=grant["rowVersion"],
+                material_kind="text",
+                text="家人记得 Owner 在雨天修理自行车。",
+            ),
+            context=self.contributor_context(),
+        )
+
+        self.assertEqual(pending.outcome, "pendingReview")
+        self.assertEqual(self.store.owner_truth_source_count(self.vault_id), 1)
+        contributor_view = pending.public_contract(include_material=False)
+        self.assertNotIn("自行车", str(contributor_view))
+        owner_items = self.service.list_submissions_for_owner(
+            context=self.owner_context()
+        )
+        self.assertEqual(owner_items[0]["status"], "pendingReview")
+        self.assertIn("自行车", owner_items[0]["text"])
+
+        accepted = self.service.review_submission(
+            command=ReviewFamilyContributionSubmissionCommand(
+                command_id="family-review-decision-001",
+                submission_id=submission_id,
+                expected_version=1,
+                decision="accepted",
+            ),
+            context=self.owner_context(),
+        )
+        self.assertEqual(accepted.outcome, "accepted")
+        self.assertIsNotNone(accepted.source)
+        self.assertEqual(self.store.owner_truth_source_count(self.vault_id), 2)
+        self.assertEqual(self.store.effect_kernel_repository().record_count(), 1)
+        source_id = str(accepted.submission["sourceId"])
+        self.assertEqual(
+            self.store._owner_truth_sources[(self.vault_id, source_id)]["state"],
+            "active",
+        )
+
+        revoked = self.service.revoke_grant(
+            command=RevokeFamilyContributionGrantCommand(
+                command_id="family-review-revoke-001",
+                grant_id=grant["id"],
+                expected_version=grant["rowVersion"],
+            ),
+            context=self.owner_context(),
+        )
+        self.assertEqual(revoked.outcome, "revoked")
+        self.assertEqual(
+            self.service.list_submissions_for_owner(context=self.owner_context())[0][
+                "status"
+            ],
+            "withdrawn",
+        )
+        self.assertEqual(
+            self.store._owner_truth_sources[(self.vault_id, source_id)]["state"],
+            "deleted",
+        )
+
+    def test_image_submission_stays_unprocessed_until_owner_acceptance_and_revoke_hides_object(self) -> None:
+        self.seed_vault()
+        relationship = self.accepted_relationship()
+        grant = self.create_grant(relationship["id"]).grant
+        source_object_id = str(uuid4())
+        repository = self.store._owner_truth_media_source_object_repository
+        repository._objects[(self.vault_id, source_object_id)] = {
+            "sourceObjectId": source_object_id,
+            "vaultId": self.vault_id,
+            "ownerSubjectId": self.owner,
+            "mediaKind": "image",
+            "state": "verified",
+            "accessState": "available",
+            "processingStatus": "notQueued",
+            "rowVersion": 1,
+        }
+        submission_id = str(uuid4())
+
+        pending = self.service.submit_for_review(
+            command=SubmitFamilyContributionForReviewCommand(
+                command_id="family-image-submission-001",
+                submission_id=submission_id,
+                grant_id=grant["id"],
+                expected_grant_version=1,
+                material_kind="image",
+                source_object_id=source_object_id,
+            ),
+            context=self.contributor_context(),
+        )
+        self.assertEqual(pending.outcome, "pendingReview")
+        self.assertEqual(
+            repository._objects[(self.vault_id, source_object_id)]["processingStatus"],
+            "notQueued",
+        )
+
+        accepted = self.service.review_submission(
+            command=ReviewFamilyContributionSubmissionCommand(
+                command_id="family-image-review-001",
+                submission_id=submission_id,
+                expected_version=1,
+                decision="accepted",
+            ),
+            context=self.owner_context(),
+        )
+        self.assertEqual(accepted.outcome, "accepted")
+        self.assertIsNone(accepted.source)
+
+        self.service.revoke_grant(
+            command=RevokeFamilyContributionGrantCommand(
+                command_id="family-image-revoke-001",
+                grant_id=grant["id"],
+                expected_version=1,
+            ),
+            context=self.owner_context(),
+        )
+        media = repository._objects[(self.vault_id, source_object_id)]
+        self.assertEqual(media["accessState"], "revoked")
+        self.assertEqual(media["processingStatus"], "blocked")
 
     def test_submission_fails_closed_for_wrong_actor_stale_relationship_or_revoke(self) -> None:
         self.seed_vault()

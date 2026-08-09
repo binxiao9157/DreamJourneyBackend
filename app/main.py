@@ -16,7 +16,8 @@ from pydantic import ValidationError
 
 try:
     from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
-    from fastapi.responses import JSONResponse, Response
+    from fastapi.responses import FileResponse, JSONResponse, Response
+    from starlette.background import BackgroundTask
 except ImportError as exc:  # pragma: no cover - exercised only without runtime deps
     raise RuntimeError("FastAPI is not installed. Run `pip install -r requirements.txt`.") from exc
 
@@ -27,6 +28,7 @@ from app.async_effects.owner_truth_worker_activation import (
     evaluate_owner_truth_worker_activation,
 )
 from app.services.amap import AMapDistrictProxy
+from app.services.apns_delivery import APNSConfiguration, APNSDeliveryError
 from app.services.auth_sessions import AuthSessionError, AuthSessionService
 from app.services.authorization_policy import (
     CrossAccountAuthorizationPolicy,
@@ -58,6 +60,10 @@ from app.services.data_export_jobs import (
     materialize_data_export_job,
     public_data_export_download_credential,
     public_data_export_job,
+)
+from app.services.data_export_package import (
+    DataExportPackageError,
+    materialize_data_export_package,
 )
 from app.services.client_compatibility import (
     ClientCompatibilityDecision,
@@ -173,9 +179,11 @@ from app.services.owner_truth_media_processing import (
 )
 from app.services.owner_truth_family_contribution import (
     CreateFamilyContributionGrantCommand,
+    ReviewFamilyContributionSubmissionCommand,
     OwnerTruthFamilyContributionError,
     OwnerTruthFamilyContributionService,
     RevokeFamilyContributionGrantCommand,
+    SubmitFamilyContributionForReviewCommand,
     SubmitFamilyContributionTextCommand,
 )
 from app.domain.owner_truth.candidate_decisions import (
@@ -662,7 +670,10 @@ def _request_owner_truth_media_processing_retry(
     return _queue_verified_owner_truth_media_processing(context, source_object)
 
 
-def _make_owner_truth_media_ingestion_service() -> OwnerTruthMediaIngestionService:
+def _make_owner_truth_media_ingestion_service(
+    *,
+    queue_processing_on_verified: bool = True,
+) -> OwnerTruthMediaIngestionService:
     return OwnerTruthMediaIngestionService(
         store=store,
         object_store=build_private_media_object_store(
@@ -687,11 +698,18 @@ def _make_owner_truth_media_ingestion_service() -> OwnerTruthMediaIngestionServi
         enabled=settings.owner_truth_media_capture_enabled,
         max_upload_bytes=settings.owner_truth_media_max_upload_bytes,
         upload_intent_ttl_seconds=settings.owner_truth_media_upload_intent_ttl_seconds,
-        on_verified=_queue_verified_owner_truth_media_processing,
+        on_verified=(
+            _queue_verified_owner_truth_media_processing
+            if queue_processing_on_verified
+            else None
+        ),
     )
 
 
 OWNER_TRUTH_MEDIA_INGESTION_SERVICE = _make_owner_truth_media_ingestion_service()
+OWNER_TRUTH_FAMILY_CONTRIBUTION_MEDIA_INGESTION_SERVICE = (
+    _make_owner_truth_media_ingestion_service(queue_processing_on_verified=False)
+)
 
 
 def _delegated_access_service() -> DelegatedAccessService:
@@ -3682,6 +3700,8 @@ def _owner_truth_family_contribution_http_error(
         "familyContributionVaultNotFound",
         "familyContributionRelationshipNotFound",
         "familyContributionGrantNotFound",
+        "familyContributionSubmissionNotFound",
+        "familyContributionMediaSourceNotFound",
     }:
         return HTTPException(status_code=404, detail={"code": code})
     if code in {
@@ -3702,6 +3722,10 @@ def _owner_truth_family_contribution_http_error(
         "familyContributionGrantCommandConflict",
         "familyContributionGrantScopeInvalid",
         "familyContributionGrantAdmissionModeMismatch",
+        "familyContributionSubmissionVersionMismatch",
+        "familyContributionSubmissionCommandConflict",
+        "familyContributionSubmissionNotReviewable",
+        "familyContributionMediaSourceInvalid",
     }:
         return HTTPException(status_code=409, detail={"code": code})
     if code in {"familyContributionAuthorizationCaptureInvalid"}:
@@ -8317,6 +8341,70 @@ def create_owner_truth_family_contribution_product_grant(
     )
 
 
+@app.get(
+    "/v2/vaults/{vault_id}/family-contribution/grants",
+    include_in_schema=False,
+)
+def list_owner_truth_family_contribution_product_grants(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    context = _owner_truth_family_contribution_product_context(
+        request,
+        vault_id=vault_id,
+    )
+    grants = [
+        item
+        for item in OwnerTruthFamilyContributionService(store).list_grants(
+            owner_subject_id=context.owner_subject_id,
+        )
+        if item["vaultId"] == vault_id
+    ]
+    return JSONResponse(
+        content={
+            "schemaVersion": "owner-truth-family-contribution-v1",
+            "vaultId": vault_id,
+            "grants": grants,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/family-contribution/grants",
+    include_in_schema=False,
+)
+def list_contributor_family_contribution_product_grants(
+    request: Request,
+) -> JSONResponse:
+    contributor_subject_id = _request_user_principal_id(request)
+    if contributor_subject_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthFamilyContributionUserSessionRequired"},
+        )
+    if "ownerTruthFamilyContribution" not in RELEASE_POLICY_SERVICE.closed_pilot_enabled_features:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthFamilyContributionUnavailable"},
+        )
+    grants = [
+        item
+        for item in OwnerTruthFamilyContributionService(store).list_grants(
+            contributor_subject_id=contributor_subject_id,
+        )
+        if item["ownerSubjectId"] in RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+        and item["admissionMode"] == "closedPilot"
+    ]
+    return JSONResponse(
+        content={
+            "schemaVersion": "owner-truth-family-contribution-v1",
+            "grants": grants,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post(
     "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/revoke",
     include_in_schema=False,
@@ -8363,7 +8451,7 @@ def submit_owner_truth_family_contribution_product_source(
     grant_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """Formal contributor write; no private Vault reads are added to this lane."""
+    """Compatibility alias which now creates inert material pending Owner review."""
 
     try:
         context = _owner_truth_family_contribution_product_contributor_context(
@@ -8371,14 +8459,16 @@ def submit_owner_truth_family_contribution_product_source(
             vault_id=vault_id,
             grant_id=grant_id,
         )
-        command = SubmitFamilyContributionTextCommand(
+        command = SubmitFamilyContributionForReviewCommand(
+            command_id=str(payload.get("commandId") or payload.get("sourceCommandId") or ""),
+            submission_id=str(payload.get("submissionId") or payload.get("sourceId") or ""),
             grant_id=grant_id,
             expected_grant_version=payload.get("expectedGrantVersion"),
-            source_command_id=str(payload.get("sourceCommandId") or ""),
-            source_id=str(payload.get("sourceId") or ""),
+            material_kind=str(payload.get("materialKind") or "text"),
             text=str(payload.get("text") or ""),
+            source_object_id=str(payload.get("sourceObjectId") or "") or None,
         )
-        result = OwnerTruthFamilyContributionService(store).submit_text_source(
+        result = OwnerTruthFamilyContributionService(store).submit_for_review(
             command=command,
             context=context,
             required_admission_mode="closedPilot",
@@ -8386,8 +8476,307 @@ def submit_owner_truth_family_contribution_product_source(
     except OwnerTruthContractError as error:
         raise _owner_truth_family_contribution_http_error(error) from error
     return JSONResponse(
-        status_code=201 if result.source.outcome == "created" else 200,
-        content=result.public_contract(),
+        status_code=202 if result.outcome == "pendingReview" else 200,
+        content=result.public_contract(include_material=False),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/submissions",
+    include_in_schema=False,
+)
+def submit_owner_truth_family_contribution_product_submission(
+    request: Request,
+    vault_id: str,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    return submit_owner_truth_family_contribution_product_source(
+        request,
+        vault_id,
+        grant_id,
+        payload,
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/family-contribution/submissions",
+    include_in_schema=False,
+)
+def list_owner_truth_family_contribution_product_submissions(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    context = _owner_truth_family_contribution_product_context(
+        request,
+        vault_id=vault_id,
+    )
+    submissions = OwnerTruthFamilyContributionService(store).list_submissions_for_owner(
+        context=context,
+    )
+    return JSONResponse(
+        content={
+            "schemaVersion": "owner-truth-family-contribution-v1",
+            "vaultId": vault_id,
+            "submissions": submissions,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/family-contribution/submissions",
+    include_in_schema=False,
+)
+def list_contributor_family_contribution_product_submissions(
+    request: Request,
+) -> JSONResponse:
+    contributor_subject_id = _request_user_principal_id(request)
+    if contributor_subject_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ownerTruthFamilyContributionUserSessionRequired"},
+        )
+    if "ownerTruthFamilyContribution" not in RELEASE_POLICY_SERVICE.closed_pilot_enabled_features:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ownerTruthFamilyContributionUnavailable"},
+        )
+    submissions = OwnerTruthFamilyContributionService(
+        store
+    ).list_submissions_for_contributor(
+        contributor_subject_id=contributor_subject_id,
+    )
+    allowed_owner_ids = RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
+    allowed_grant_ids = {
+        item["grantId"]
+        for item in OwnerTruthFamilyContributionService(store).list_grants(
+            contributor_subject_id=contributor_subject_id,
+        )
+        if item["ownerSubjectId"] in allowed_owner_ids
+        and item["admissionMode"] == "closedPilot"
+    }
+    return JSONResponse(
+        content={
+            "schemaVersion": "owner-truth-family-contribution-v1",
+            "submissions": [
+                item for item in submissions if item["grantId"] in allowed_grant_ids
+            ],
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/family-contribution/submissions/{submission_id}/decisions",
+    include_in_schema=False,
+)
+def review_owner_truth_family_contribution_product_submission(
+    request: Request,
+    vault_id: str,
+    submission_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    try:
+        context = _owner_truth_family_contribution_product_context(
+            request,
+            vault_id=vault_id,
+        )
+        command = ReviewFamilyContributionSubmissionCommand(
+            command_id=str(payload.get("commandId") or ""),
+            submission_id=submission_id,
+            expected_version=payload.get("expectedVersion"),
+            decision=str(payload.get("decision") or ""),
+            reason=str(payload.get("reason") or "ownerReviewed"),
+        )
+        result = OwnerTruthFamilyContributionService(store).review_submission(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_family_contribution_http_error(error) from error
+
+    processing = {"status": "notRequested"}
+    if (
+        command.decision == "accepted"
+        and str(result.submission.get("materialKind") or "") == "image"
+    ):
+        source_object_id = str(result.submission.get("sourceObjectId") or "")
+        try:
+            source_object = (
+                OWNER_TRUTH_FAMILY_CONTRIBUTION_MEDIA_INGESTION_SERVICE.get_source_object(
+                    context=context,
+                    source_object_id=source_object_id,
+                )
+            )
+            queued = _queue_verified_owner_truth_media_processing(context, source_object)
+            processing = {
+                "status": str(queued.get("processingStatus") or "queued"),
+                "sourceObjectId": source_object_id,
+            }
+        except (OwnerTruthMediaIngestionError, OwnerTruthMediaProcessingError):
+            processing = {
+                "status": "notQueued",
+                "sourceObjectId": source_object_id,
+                "retryable": True,
+                "reason": "ownerTruthMediaProcessingUnavailable",
+            }
+    content = result.public_contract(include_material=True)
+    content["mediaProcessing"] = processing
+    return JSONResponse(
+        content=content,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/family-contribution/submissions/{submission_id}/content",
+    include_in_schema=False,
+)
+def read_owner_truth_family_contribution_product_submission_content(
+    request: Request,
+    vault_id: str,
+    submission_id: str,
+) -> Response:
+    """Owner-only read of an image while reviewing a family contribution."""
+
+    try:
+        context = _owner_truth_family_contribution_product_context(
+            request,
+            vault_id=vault_id,
+        )
+        submission = OwnerTruthFamilyContributionService(store).get_submission_for_owner(
+            context=context,
+            submission_id=submission_id,
+        )
+        if str(submission.get("materialKind") or "") != "image":
+            raise OwnerTruthFamilyContributionError("familyContributionMaterialInvalid")
+        if str(submission.get("status") or "") == "withdrawn":
+            raise OwnerTruthFamilyContributionError("familyContributionSubmissionNotReviewable")
+        source_object_id = str(submission.get("sourceObjectId") or "")
+        source_object, payload = (
+            OWNER_TRUTH_FAMILY_CONTRIBUTION_MEDIA_INGESTION_SERVICE.read_content(
+                context=context,
+                source_object_id=source_object_id,
+            )
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_family_contribution_http_error(error) from error
+    except OwnerTruthMediaIngestionError as error:
+        raise _owner_truth_media_capture_http_error(error) from error
+    return Response(
+        content=payload,
+        media_type=str(source_object["contentType"]),
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": "inline",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/image-upload-intents",
+    include_in_schema=False,
+)
+def create_owner_truth_family_contribution_image_upload_intent(
+    request: Request,
+    vault_id: str,
+    grant_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    try:
+        context = _owner_truth_family_contribution_product_contributor_context(
+            request,
+            vault_id=vault_id,
+            grant_id=grant_id,
+        )
+        authority_epoch = _owner_truth_text_capture_state(context=context)[
+            "authorityEpoch"
+        ]
+        normalized_payload = {
+            **payload,
+            # The contributor is authorized by this grant, not by knowledge of
+            # the Owner Vault epoch. Bind the upload to the server-read epoch so
+            # a client cannot target another authority generation.
+            "expectedAuthorityEpoch": authority_epoch,
+            "mediaKind": "image",
+            "purpose": "familyContributionImage",
+            "allowExternalProcessing": False,
+        }
+        command = MediaUploadIntentCommand.from_payload(normalized_payload)
+        _owner_truth_media_capture_preflight(context=context, command=command)
+        result = (
+            OWNER_TRUTH_FAMILY_CONTRIBUTION_MEDIA_INGESTION_SERVICE.create_upload_intent(
+                context=context,
+                command=command,
+            )
+        )
+    except HTTPException:
+        raise
+    except OwnerTruthContractError as error:
+        raise _owner_truth_family_contribution_http_error(error) from error
+    except OwnerTruthMediaIngestionError as error:
+        raise _owner_truth_media_capture_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={
+            **OWNER_TRUTH_FAMILY_CONTRIBUTION_MEDIA_INGESTION_SERVICE.public_upload_intent_response(
+                result
+            ),
+            "vaultId": context.vault_id,
+            "grantId": grant_id,
+            "processingDeferredUntilOwnerAcceptance": True,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.put(
+    "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/image-upload-intents/{intent_id}/content",
+    include_in_schema=False,
+)
+async def upload_owner_truth_family_contribution_image_content(
+    request: Request,
+    vault_id: str,
+    grant_id: str,
+    intent_id: str,
+) -> JSONResponse:
+    try:
+        context = _owner_truth_family_contribution_product_contributor_context(
+            request,
+            vault_id=vault_id,
+            grant_id=grant_id,
+        )
+        upload_token = str(request.headers.get("x-dreamjourney-upload-token") or "")
+        payload = await _read_bounded_owner_truth_media_body(request)
+        outcome, source_object = (
+            OWNER_TRUTH_FAMILY_CONTRIBUTION_MEDIA_INGESTION_SERVICE.upload_content(
+                context=context,
+                intent_id=intent_id,
+                upload_token=upload_token,
+                payload=payload,
+                request_content_type=request.headers.get("content-type"),
+            )
+        )
+    except HTTPException:
+        raise
+    except OwnerTruthContractError as error:
+        raise _owner_truth_family_contribution_http_error(error) from error
+    except OwnerTruthMediaIngestionError as error:
+        raise _owner_truth_media_capture_http_error(error) from error
+    return JSONResponse(
+        status_code=202 if outcome == "quarantined" else 200,
+        content={
+            **OWNER_TRUTH_FAMILY_CONTRIBUTION_MEDIA_INGESTION_SERVICE.public_source_object_response(
+                source_object
+            ),
+            "vaultId": context.vault_id,
+            "grantId": grant_id,
+            "status": outcome,
+            "processingDeferredUntilOwnerAcceptance": True,
+        },
         headers={"Cache-Control": "no-store"},
     )
 
@@ -11911,6 +12300,39 @@ def _load_account_data_export_job_or_raise(
     return job
 
 
+def _data_export_media_objects(owner_user_id: str) -> list[Mapping[str, Any]]:
+    lister = getattr(store, "list_owner_truth_media_export_objects", None)
+    if not callable(lister):
+        return []
+    return list(lister(owner_user_id))
+
+
+def _read_data_export_media_object(
+    owner_user_id: str,
+    item: Mapping[str, Any],
+) -> bytes:
+    vault_id = str(item.get("vaultId") or "").strip()
+    source_object_id = str(item.get("sourceObjectId") or "").strip()
+    if not vault_id or not source_object_id:
+        raise DataExportPackageError("dataExportMediaReferenceInvalid")
+    context = OwnerTruthCommandContext(
+        vault_id=vault_id,
+        owner_subject_id=owner_user_id,
+        actor_subject_id=owner_user_id,
+    )
+    with store.request_unit_of_work(
+        correlation_id=f"data-export-media-read:{source_object_id}",
+        command_id=None,
+    ):
+        source_object, payload = OWNER_TRUTH_MEDIA_INGESTION_SERVICE.read_content(
+            context=context,
+            source_object_id=source_object_id,
+        )
+    if str(source_object.get("ownerSubjectId") or "") != owner_user_id:
+        raise DataExportPackageError("dataExportMediaOwnerMismatch")
+    return payload
+
+
 @app.post("/auth/data-export/jobs", status_code=202)
 def create_account_data_export_job(
     request: Request,
@@ -12025,7 +12447,11 @@ def issue_account_data_export_download_credential(
 
 
 @app.get("/auth/data-export/jobs/{job_id}/download")
-def download_account_data_export_job(job_id: str, request: Request) -> JSONResponse:
+def download_account_data_export_job(
+    job_id: str,
+    request: Request,
+    format: str = Query(default="json", pattern="^(json|zip)$"),
+) -> Response:
     user_id = _request_user_principal_id(request)
     if user_id is None:
         raise HTTPException(status_code=401, detail="user access token is required")
@@ -12051,6 +12477,23 @@ def download_account_data_export_job(job_id: str, request: Request) -> JSONRespo
             status_code=401,
             detail={"code": "dataExportDownloadCredentialRequired"},
         )
+    package = None
+    if format == "zip":
+        try:
+            package = materialize_data_export_package(
+                job_id=job_id,
+                owner_user_id=user_id,
+                artifact=artifact,
+                media_objects=_data_export_media_objects(user_id),
+                media_reader=lambda item: _read_data_export_media_object(user_id, item),
+            )
+        except DataExportPackageError as exc:
+            raise HTTPException(status_code=503, detail={"code": exc.code}) from exc
+        except OwnerTruthMediaIngestionError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "dataExportMediaUnavailable"},
+            ) from exc
     consumed = store.consume_data_export_download_credential(
         job_id=job_id,
         owner_user_id=user_id,
@@ -12058,9 +12501,24 @@ def download_account_data_export_job(job_id: str, request: Request) -> JSONRespo
         consumed_at=datetime.now(timezone.utc).isoformat(),
     )
     if consumed.get("outcome") != "consumed":
+        if package is not None:
+            package.cleanup()
         raise HTTPException(
             status_code=401,
             detail={"code": "dataExportDownloadCredentialInvalid"},
+        )
+    if package is not None:
+        return FileResponse(
+            path=package.path,
+            media_type="application/zip",
+            filename=f"dreamjourney-data-{job_id}.zip",
+            headers={
+                "Cache-Control": "no-store, private",
+                "Pragma": "no-cache",
+                "X-Content-SHA256": package.content_sha256,
+                "X-DreamJourney-Media-Count": str(package.media_count),
+            },
+            background=BackgroundTask(package.cleanup),
         )
     return JSONResponse(
         content=dict(artifact),
@@ -15467,6 +15925,7 @@ def _sanitize_push_device_token_payload(payload: Dict[str, Any]) -> Dict[str, An
     platform = str(payload.get("platform") or "").strip().lower()
     environment = str(payload.get("environment") or "").strip().lower()
     device_id = str(payload.get("deviceId") or "").strip()
+    requested_topic = str(payload.get("topic") or "").strip()
 
     if not user_id:
         raise HTTPException(status_code=400, detail="userId is required")
@@ -15481,6 +15940,38 @@ def _sanitize_push_device_token_payload(payload: Dict[str, Any]) -> Dict[str, An
     if len(device_id) > 64:
         raise HTTPException(status_code=400, detail="deviceId is too long")
 
+    try:
+        apns_configuration = APNSConfiguration(
+            provider=settings.apns_delivery_provider,
+            token_vault_provider=settings.apns_token_vault_provider,
+            topic=settings.apns_topic,
+            environment=settings.apns_environment,
+            max_attempts=settings.apns_max_attempts,
+        )
+    except APNSDeliveryError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "retryable": False},
+        ) from exc
+
+    expected_topic = str(apns_configuration.topic or "").strip()
+    if expected_topic:
+        if requested_topic and requested_topic != expected_topic:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "apnsTopicMismatch", "retryable": False},
+            )
+        if environment != apns_configuration.environment:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "apnsEnvironmentMismatch", "retryable": False},
+            )
+    elif requested_topic:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "apnsTopicNotConfigured", "retryable": False},
+        )
+
     token_hash = hashlib.sha256(device_token.lower().encode("utf-8")).hexdigest()
     device_token_id = f"push_{user_id}_{token_hash[:16]}"
     return {
@@ -15489,10 +15980,15 @@ def _sanitize_push_device_token_payload(payload: Dict[str, Any]) -> Dict[str, An
         "userId": user_id,
         "platform": platform,
         "environment": environment,
+        "topic": expected_topic or None,
         "deviceId": device_id or f"ios_{token_hash[:12]}",
         "deviceTokenHash": token_hash,
         "deviceTokenPreview": f"{device_token[:6].lower()}...{device_token[-4:].lower()}",
         "deliveryProviderState": "pending",
+        "deliveryCapabilityState": (
+            "qaOnly" if apns_configuration.public_descriptor()["enabled"] else "disabled"
+        ),
+        "deliveryCapabilityReason": apns_configuration.public_descriptor()["reason"],
         "containsRawToken": False,
     }
 

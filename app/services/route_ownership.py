@@ -496,6 +496,18 @@ class RouteOwnershipRegistry:
                 "ownerTruthFamilyContributionFormalGrant",
             ),
             _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/family-contribution/grants",
+                session,
+                "ownerTruthFamilyContributionFormalGrantList",
+            ),
+            _rule(
+                "GET",
+                "/v2/family-contribution/grants",
+                session,
+                "ownerTruthFamilyContributionContributorGrantList",
+            ),
+            _rule(
                 "POST",
                 "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/revoke",
                 session,
@@ -506,6 +518,48 @@ class RouteOwnershipRegistry:
                 "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/sources",
                 session,
                 "ownerTruthFamilyContributionFormalSource",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/submissions",
+                session,
+                "ownerTruthFamilyContributionFormalSubmission",
+            ),
+            _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/family-contribution/submissions",
+                session,
+                "ownerTruthFamilyContributionOwnerReviewList",
+            ),
+            _rule(
+                "GET",
+                "/v2/family-contribution/submissions",
+                session,
+                "ownerTruthFamilyContributionContributorSubmissionList",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/family-contribution/submissions/{submission_id}/decisions",
+                session,
+                "ownerTruthFamilyContributionOwnerDecision",
+            ),
+            _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/family-contribution/submissions/{submission_id}/content",
+                session,
+                "ownerTruthFamilyContributionOwnerContentRead",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/image-upload-intents",
+                session,
+                "ownerTruthFamilyContributionImageUploadIntent",
+            ),
+            _rule(
+                "PUT",
+                "/v2/vaults/{vault_id}/family-contribution/grants/{grant_id}/image-upload-intents/{intent_id}/content",
+                session,
+                "ownerTruthFamilyContributionImageUploadContent",
             ),
             _rule(
                 "POST",

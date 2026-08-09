@@ -10,6 +10,7 @@ from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import main as main_module
@@ -3237,6 +3238,42 @@ class EchoDelayedReplyAPITests(unittest.TestCase):
         self.assertEqual(delayed_item["deviceTokenId"], token_item["deviceTokenId"])
         self.assertNotIn(raw_token, str(delayed_item))
         self.assertNotIn(raw_token, str(listed.json()))
+
+    def test_push_device_token_registration_enforces_configured_topic_and_environment(self):
+        original_settings = main_module.settings
+        main_module.settings = Settings(
+            apns_delivery_provider="fake",
+            apns_token_vault_provider="ephemeral",
+            apns_topic="com.yxj.dreamjourney.app",
+            apns_environment="sandbox",
+        )
+        base = {
+            "userId": "echo_user_1",
+            "deviceToken": "a1" * 32,
+            "platform": "ios",
+            "environment": "sandbox",
+            "deviceId": "iphone-qa-apns",
+        }
+        try:
+            accepted = main_module._sanitize_push_device_token_payload(base)
+            with self.assertRaises(HTTPException) as topic_error:
+                main_module._sanitize_push_device_token_payload(
+                    {**base, "topic": "com.other.app"}
+                )
+            with self.assertRaises(HTTPException) as environment_error:
+                main_module._sanitize_push_device_token_payload(
+                    {**base, "environment": "production"}
+                )
+        finally:
+            main_module.settings = original_settings
+
+        self.assertEqual(accepted["topic"], "com.yxj.dreamjourney.app")
+        self.assertEqual(accepted["deliveryCapabilityState"], "qaOnly")
+        self.assertEqual(topic_error.exception.detail["code"], "apnsTopicMismatch")
+        self.assertEqual(
+            environment_error.exception.detail["code"],
+            "apnsEnvironmentMismatch",
+        )
 
     def test_push_device_token_api_rejects_invalid_payloads(self):
         client = TestClient(app)

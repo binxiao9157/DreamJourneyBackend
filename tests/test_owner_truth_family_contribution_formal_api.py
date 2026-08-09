@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
+from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
@@ -16,6 +17,11 @@ from app.main import app
 from app.services.delegated_access import DelegatedAccessService
 from app.services.in_memory_store import InMemoryStore
 from app.services.owner_truth_source import OwnerTruthSourceCommandService
+from app.services.owner_truth_media_source_object import (
+    FilesystemPrivateMediaObjectStore,
+    OwnerTruthMediaIngestionService,
+    TestOnlyCleanMediaContentSafetyScanner,
+)
 
 
 client = TestClient(app)
@@ -31,11 +37,28 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         self.previous_route_mode = main_module.AUTH_ROUTE_MODE
         self.previous_ownership_mode = main_module.AUTH_OWNERSHIP_MODE
         self.previous_qa_enabled = main_module.OWNER_TRUTH_FAMILY_CONTRIBUTION_QA_ENABLED
+        self.previous_family_media_service = (
+            main_module.OWNER_TRUTH_FAMILY_CONTRIBUTION_MEDIA_INGESTION_SERVICE
+        )
         self.previous_closed_pilot_owner_ids = main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
         self.previous_closed_pilot_features = set(
             main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
         )
+        self.previous_capability_resolver = (
+            main_module.RELEASE_POLICY_SERVICE.capability_resolver
+        )
+        self.media_root = TemporaryDirectory()
         main_module.store = InMemoryStore()
+        main_module.OWNER_TRUTH_FAMILY_CONTRIBUTION_MEDIA_INGESTION_SERVICE = (
+            OwnerTruthMediaIngestionService(
+                store=main_module.store,
+                object_store=FilesystemPrivateMediaObjectStore(root=self.media_root.name),
+                safety_scanner=TestOnlyCleanMediaContentSafetyScanner(),
+                enabled=True,
+                max_upload_bytes=1024 * 1024,
+                upload_intent_ttl_seconds=900,
+            )
+        )
         main_module.BACKEND_API_TOKEN = ""
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         main_module.AUTH_ROUTE_MODE = "enforce"
@@ -45,6 +68,10 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.discard(
             "ownerTruthFamilyContribution"
         )
+        main_module.RELEASE_POLICY_SERVICE.capability_resolver = lambda capability: capability in {
+            "ownerTruthMediaStorage",
+            "ownerTruthMediaProcessing",
+        }
         self.vault_id = "vault-family-contribution-formal-api"
 
     def tearDown(self) -> None:
@@ -54,10 +81,17 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         main_module.AUTH_ROUTE_MODE = self.previous_route_mode
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
         main_module.OWNER_TRUTH_FAMILY_CONTRIBUTION_QA_ENABLED = self.previous_qa_enabled
+        main_module.OWNER_TRUTH_FAMILY_CONTRIBUTION_MEDIA_INGESTION_SERVICE = (
+            self.previous_family_media_service
+        )
         main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = self.previous_closed_pilot_owner_ids
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features = (
             self.previous_closed_pilot_features
         )
+        main_module.RELEASE_POLICY_SERVICE.capability_resolver = (
+            self.previous_capability_resolver
+        )
+        self.media_root.cleanup()
 
     @staticmethod
     def _login(phone: str, nickname: str) -> tuple[str, dict[str, str], str]:
@@ -178,22 +212,45 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         self.assertEqual(grant["scope"], "submitTextSource")
         self.assertNotIn("authorizationEvidence", json.dumps(created.json()))
 
+        submission_id = str(uuid4())
         submitted = client.post(
-            f"{create_path}/{grant['grantId']}/sources",
+            f"{create_path}/{grant['grantId']}/submissions",
             headers=member_headers,
             json={
                 "expectedGrantVersion": grant["rowVersion"],
                 "sourceCommandId": "formal-family-source-001",
-                "sourceId": str(uuid4()),
+                "sourceId": submission_id,
                 "text": "这是一条由受邀家人提交的静态材料。",
             },
         )
-        self.assertEqual(submitted.status_code, 201, submitted.text)
+        self.assertEqual(submitted.status_code, 202, submitted.text)
         self.assertEqual(submitted.json()["candidateExtraction"], {"status": "notRequested"})
         self.assertNotIn("静态材料", json.dumps(submitted.json(), ensure_ascii=False))
 
+        review_list = client.get(
+            f"/v2/vaults/{self.vault_id}/family-contribution/submissions",
+            headers=policy_headers,
+        )
+        self.assertEqual(review_list.status_code, 200, review_list.text)
+        self.assertIn(
+            "静态材料",
+            review_list.json()["submissions"][0]["text"],
+        )
+        accepted = client.post(
+            f"/v2/vaults/{self.vault_id}/family-contribution/submissions/{submission_id}/decisions",
+            headers=policy_headers,
+            json={
+                "commandId": "formal-family-review-001",
+                "expectedVersion": 1,
+                "decision": "accepted",
+            },
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.json()["submission"]["status"], "accepted")
+        self.assertEqual(accepted.json()["candidateExtraction"], {"status": "requested"})
+
         cross_account = client.post(
-            f"{create_path}/{grant['grantId']}/sources",
+            f"{create_path}/{grant['grantId']}/submissions",
             headers=other_headers,
             json={
                 "expectedGrantVersion": grant["rowVersion"],
@@ -319,6 +376,105 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         self.assertEqual(
             rejected_qa_grant.json()["detail"]["code"],
             "familyContributionGrantAdmissionModeMismatch",
+        )
+
+    def test_family_image_submission_is_owner_readable_and_revoke_immediately_hides_content(self) -> None:
+        (
+            owner_id,
+            owner_headers,
+            owner_session_id,
+            member_id,
+            member_headers,
+            _other_id,
+            _other_headers,
+            relationship,
+        ) = self._accepted_relationship()
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset({owner_id})
+        main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
+            "ownerTruthFamilyContribution"
+        )
+        policy_headers = self._product_headers(
+            owner_headers,
+            session_id=owner_session_id,
+            decision_id="formal-family-image-decision-001",
+        )
+        grant_path = f"/v2/vaults/{self.vault_id}/family-contribution/grants"
+        created = client.post(
+            grant_path,
+            headers=policy_headers,
+            json={
+                "commandId": "formal-family-image-grant-001",
+                "relationshipId": relationship["id"],
+                "contributorSubjectId": member_id,
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        grant = created.json()["grant"]
+        body = b"\x89PNG\r\n\x1a\nprivate-family-image-content"
+        intent = client.post(
+            f"{grant_path}/{grant['grantId']}/image-upload-intents",
+            headers=member_headers,
+            json={
+                "commandId": str(uuid4()),
+                "fileName": "family-memory.png",
+                "contentType": "image/png",
+                "fileSizeBytes": len(body),
+                "contentSha256": sha256(body).hexdigest(),
+                "clientCreatedAt": "2026-08-09T10:00:00Z",
+            },
+        )
+        self.assertEqual(intent.status_code, 201, intent.text)
+        upload_intent = intent.json()["uploadIntent"]
+        uploaded = client.put(
+            f"{grant_path}/{grant['grantId']}/image-upload-intents/{upload_intent['uploadIntentId']}/content",
+            headers={
+                **member_headers,
+                "X-DreamJourney-Upload-Token": upload_intent["uploadToken"],
+                "Content-Type": "image/png",
+            },
+            content=body,
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        source_object_id = uploaded.json()["sourceObject"]["sourceObjectId"]
+        submission_id = str(uuid4())
+        submitted = client.post(
+            f"{grant_path}/{grant['grantId']}/submissions",
+            headers=member_headers,
+            json={
+                "commandId": "formal-family-image-submit-001",
+                "submissionId": submission_id,
+                "expectedGrantVersion": grant["rowVersion"],
+                "materialKind": "image",
+                "sourceObjectId": source_object_id,
+            },
+        )
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+
+        content_path = (
+            f"/v2/vaults/{self.vault_id}/family-contribution/submissions/"
+            f"{submission_id}/content"
+        )
+        owner_content = client.get(content_path, headers=policy_headers)
+        self.assertEqual(owner_content.status_code, 200, owner_content.text)
+        self.assertEqual(owner_content.content, body)
+        self.assertIn("no-store", owner_content.headers["cache-control"])
+        contributor_content = client.get(content_path, headers=member_headers)
+        self.assertNotEqual(contributor_content.status_code, 200)
+
+        revoked = client.post(
+            f"{grant_path}/{grant['grantId']}/revoke",
+            headers=policy_headers,
+            json={
+                "commandId": "formal-family-image-revoke-001",
+                "expectedVersion": grant["rowVersion"],
+            },
+        )
+        self.assertEqual(revoked.status_code, 200, revoked.text)
+        hidden = client.get(content_path, headers=policy_headers)
+        self.assertNotEqual(hidden.status_code, 200)
+        self.assertEqual(
+            hidden.json()["detail"]["code"],
+            "familyContributionSubmissionNotReviewable",
         )
 
 

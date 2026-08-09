@@ -1,6 +1,8 @@
 import json
+from io import BytesIO
 import unittest
 from unittest.mock import patch
+import zipfile
 
 from fastapi.testclient import TestClient
 
@@ -198,6 +200,50 @@ class DataExportJobRouteTests(unittest.TestCase):
             response.json()["detail"]["code"],
             "data_export_unavailable_after_deletion",
         )
+
+    def test_one_time_credential_can_download_readable_zip_package(self) -> None:
+        owner = self._login("13900008806")
+        headers = self._headers(owner)
+        created = self.client.post(
+            "/auth/data-export/jobs",
+            headers=headers,
+            json={"requestKey": "export-package-zip"},
+        )
+        self.assertEqual(created.status_code, 202, created.text)
+        job_id = created.json()["jobId"]
+        credential = self.client.post(
+            f"/auth/data-export/jobs/{job_id}/download-credential",
+            headers=headers,
+            json={},
+        )
+        downloaded = self.client.get(
+            f"/auth/data-export/jobs/{job_id}/download?format=zip",
+            headers={
+                **headers,
+                "X-DreamJourney-Export-Token": credential.json()["downloadToken"],
+            },
+        )
+        self.assertEqual(downloaded.status_code, 200, downloaded.text)
+        self.assertEqual(downloaded.headers["content-type"], "application/zip")
+        self.assertEqual(len(downloaded.headers["x-content-sha256"]), 64)
+        with zipfile.ZipFile(BytesIO(downloaded.content)) as archive:
+            self.assertEqual(
+                {"data-export.json", "permissions.json", "package-manifest.json"},
+                set(archive.namelist()),
+            )
+            manifest = json.loads(archive.read("package-manifest.json"))
+            self.assertEqual(manifest["jobId"], job_id)
+            self.assertEqual(manifest["ownerUserId"], owner["user"]["id"])
+            self.assertEqual(manifest["mediaCount"], 0)
+
+        replay = self.client.get(
+            f"/auth/data-export/jobs/{job_id}/download?format=zip",
+            headers={
+                **headers,
+                "X-DreamJourney-Export-Token": credential.json()["downloadToken"],
+            },
+        )
+        self.assertEqual(replay.status_code, 401)
 
     def test_account_is_rechecked_before_credential_issue_and_download(self) -> None:
         owner = self._login("13900008805")

@@ -121,6 +121,7 @@ from app.services.owner_truth_candidate_extraction import (
     PostgresOwnerTruthCandidateExtractionRepository,
 )
 from app.services.owner_truth_media_source_object import (
+    OwnerTruthMediaIngestionError,
     PostgresOwnerTruthMediaSourceObjectRepository,
 )
 from app.services.owner_truth_candidate_review import (
@@ -6065,6 +6066,240 @@ class PostgresStore:
         )
         return None if row is None else self._owner_truth_family_contribution_grant_payload(row)
 
+    def list_owner_truth_family_contribution_grants(
+        self,
+        *,
+        owner_subject_id: Optional[str] = None,
+        contributor_subject_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if bool(owner_subject_id) == bool(contributor_subject_id):
+            return []
+        field = "owner_subject_id" if owner_subject_id else "contributor_subject_id"
+        subject_id = owner_subject_id or contributor_subject_id
+        rows = self._fetchall(
+            f"""
+            SELECT *
+            FROM owner_truth.family_contribution_grants
+            WHERE {field} = %s
+            ORDER BY updated_at DESC, id
+            LIMIT 500
+            """,
+            (subject_id,),
+        )
+        return [self._owner_truth_family_contribution_grant_payload(row) for row in rows]
+
+    def create_owner_truth_family_contribution_submission(
+        self,
+        submission: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        row = self._fetchone(
+            """
+            INSERT INTO owner_truth.family_contribution_submissions (
+                id, vault_id, grant_id, owner_subject_id, contributor_subject_id,
+                relationship_id, relationship_epoch, grant_version,
+                material_kind, text_content, source_object_id, status, row_version,
+                create_command_id_hash, create_payload_hash, created_at, updated_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, 'pendingReview', 1, %s, %s, %s, %s
+            )
+            ON CONFLICT (vault_id, create_command_id_hash) DO NOTHING
+            RETURNING *
+            """,
+            (
+                submission["id"],
+                submission["vaultId"],
+                submission["grantId"],
+                submission["ownerSubjectId"],
+                submission["contributorSubjectId"],
+                submission["relationshipId"],
+                submission["relationshipEpoch"],
+                submission["grantVersion"],
+                submission["materialKind"],
+                submission.get("text"),
+                submission.get("sourceObjectId"),
+                submission["createCommandIdHash"],
+                submission["createPayloadHash"],
+                submission["createdAt"],
+                submission["updatedAt"],
+            ),
+        )
+        if row is not None:
+            return self._owner_truth_family_contribution_submission_payload(row)
+        existing = self._fetchone(
+            """
+            SELECT * FROM owner_truth.family_contribution_submissions
+            WHERE vault_id = %s AND create_command_id_hash = %s
+            """,
+            (submission["vaultId"], submission["createCommandIdHash"]),
+        )
+        if (
+            existing is None
+            or str(existing.get("id") or "") != str(submission["id"])
+            or str(existing.get("create_payload_hash") or "")
+            != str(submission["createPayloadHash"])
+        ):
+            raise ValueError("family contribution submission command conflict")
+        result = self._owner_truth_family_contribution_submission_payload(existing)
+        result["deduplicated"] = True
+        return result
+
+    def get_owner_truth_family_contribution_submission(
+        self,
+        vault_id: str,
+        submission_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT * FROM owner_truth.family_contribution_submissions
+            WHERE vault_id = %s AND id = %s
+            """,
+            (vault_id, submission_id),
+        )
+        return None if row is None else self._owner_truth_family_contribution_submission_payload(row)
+
+    def list_owner_truth_family_contribution_submissions(
+        self,
+        *,
+        owner_subject_id: Optional[str] = None,
+        contributor_subject_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if bool(owner_subject_id) == bool(contributor_subject_id):
+            return []
+        field = "owner_subject_id" if owner_subject_id else "contributor_subject_id"
+        subject_id = owner_subject_id or contributor_subject_id
+        rows = self._fetchall(
+            f"""
+            SELECT * FROM owner_truth.family_contribution_submissions
+            WHERE {field} = %s
+            ORDER BY updated_at DESC, id
+            LIMIT 500
+            """,
+            (subject_id,),
+        )
+        return [self._owner_truth_family_contribution_submission_payload(row) for row in rows]
+
+    def decide_owner_truth_family_contribution_submission(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        submission_id: str,
+        expected_version: int,
+        decision: str,
+        decision_command_id_hash: str,
+        decision_payload_hash: str,
+        decided_at_iso: str,
+        reason: str,
+        source_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        existing = self._fetchone(
+            """
+            SELECT * FROM owner_truth.family_contribution_submissions
+            WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+            FOR UPDATE
+            """,
+            (vault_id, submission_id, owner_subject_id),
+        )
+        if existing is None:
+            return None
+        if str(existing.get("status") or "") == decision:
+            if (
+                str(existing.get("decision_command_id_hash") or "")
+                == decision_command_id_hash
+                and str(existing.get("decision_payload_hash") or "")
+                == decision_payload_hash
+            ):
+                result = self._owner_truth_family_contribution_submission_payload(existing)
+                result["deduplicated"] = True
+                return result
+            return None
+        if (
+            str(existing.get("status") or "") != "pendingReview"
+            or int(existing.get("row_version") or 0) != expected_version
+        ):
+            return None
+        updated = self._fetchone(
+            """
+            UPDATE owner_truth.family_contribution_submissions
+            SET status = %s, row_version = row_version + 1,
+                decision_command_id_hash = %s, decision_payload_hash = %s,
+                decided_at = %s, decision_reason = %s, source_id = %s,
+                updated_at = %s
+            WHERE vault_id = %s AND id = %s AND owner_subject_id = %s
+              AND status = 'pendingReview' AND row_version = %s
+            RETURNING *
+            """,
+            (
+                decision,
+                decision_command_id_hash,
+                decision_payload_hash,
+                decided_at_iso,
+                reason,
+                source_id,
+                decided_at_iso,
+                vault_id,
+                submission_id,
+                owner_subject_id,
+                expected_version,
+            ),
+        )
+        return None if updated is None else self._owner_truth_family_contribution_submission_payload(updated)
+
+    def withdraw_owner_truth_family_contributions(
+        self,
+        *,
+        vault_id: str,
+        grant_id: str,
+        withdrawn_at_iso: str,
+    ) -> None:
+        rows = self._fetchall(
+            """
+            UPDATE owner_truth.family_contribution_submissions
+            SET status = 'withdrawn', row_version = row_version + 1,
+                decision_reason = 'grantRevoked', updated_at = %s
+            WHERE vault_id = %s AND grant_id = %s AND status <> 'withdrawn'
+            RETURNING source_id, source_object_id
+            """,
+            (withdrawn_at_iso, vault_id, grant_id),
+        )
+        for row in rows:
+            source_id = row.get("source_id")
+            if source_id is not None:
+                self._fetchone(
+                    """
+                    UPDATE owner_truth.sources
+                    SET state = 'deleted', updated_at = NOW()
+                    WHERE vault_id = %s AND id = %s
+                    RETURNING id
+                    """,
+                    (vault_id, source_id),
+                )
+            source_object_id = row.get("source_object_id")
+            if source_object_id is not None:
+                self.owner_truth_media_source_object_repository().revoke_access_for_family_contribution(
+                    vault_id=vault_id,
+                    source_object_id=str(source_object_id),
+                )
+
+    def get_owner_truth_family_contribution_media_source_object(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        source_object_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            return dict(
+                self.owner_truth_media_source_object_repository().get_source_object(
+                    vault_id=vault_id,
+                    source_object_id=source_object_id,
+                    owner_subject_id=owner_subject_id,
+                )
+            )
+        except OwnerTruthMediaIngestionError:
+            return None
+
     def revoke_owner_truth_family_contribution_grant(
         self,
         *,
@@ -6136,6 +6371,25 @@ class PostgresStore:
             subject_id=user_id,
             fetchall=self._fetchall,
         )
+
+    def list_owner_truth_media_export_objects(self, user_id: str) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT media.*
+            FROM owner_truth.media_source_objects AS media
+            INNER JOIN owner_truth.vaults AS vault
+                ON vault.vault_id = media.vault_id
+            WHERE vault.owner_subject_id = %s
+              AND media.owner_subject_id = vault.owner_subject_id
+            ORDER BY media.created_at, media.id
+            LIMIT 1000
+            """,
+            (user_id,),
+        )
+        return [
+            PostgresOwnerTruthMediaSourceObjectRepository._source_object_record(row)
+            for row in rows
+        ]
 
     def owner_truth_data_rights_counts(self, user_id: str) -> Dict[str, int]:
         return count_owner_truth_data_rights_records(
@@ -7977,6 +8231,44 @@ class PostgresStore:
             "revokePayloadHash": row.get("revoke_payload_hash"),
             "revokedAt": cls._iso_value(row.get("revoked_at")),
             "revocationReason": row.get("revocation_reason"),
+            "createdAt": cls._iso_value(row.get("created_at")),
+            "updatedAt": cls._iso_value(row.get("updated_at")),
+        }
+
+    @classmethod
+    def _owner_truth_family_contribution_submission_payload(
+        cls,
+        row: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "vaultId": str(row["vault_id"]),
+            "grantId": str(row["grant_id"]),
+            "ownerSubjectId": str(row["owner_subject_id"]),
+            "contributorSubjectId": str(row["contributor_subject_id"]),
+            "relationshipId": str(row["relationship_id"]),
+            "relationshipEpoch": int(row.get("relationship_epoch") or 0),
+            "grantVersion": int(row.get("grant_version") or 0),
+            "materialKind": str(row["material_kind"]),
+            "text": row.get("text_content"),
+            "sourceObjectId": (
+                str(row["source_object_id"])
+                if row.get("source_object_id") is not None
+                else None
+            ),
+            "sourceId": (
+                str(row["source_id"])
+                if row.get("source_id") is not None
+                else None
+            ),
+            "status": str(row["status"]),
+            "rowVersion": int(row.get("row_version") or 1),
+            "createCommandIdHash": str(row["create_command_id_hash"]),
+            "createPayloadHash": str(row["create_payload_hash"]),
+            "decisionCommandIdHash": row.get("decision_command_id_hash"),
+            "decisionPayloadHash": row.get("decision_payload_hash"),
+            "decidedAt": cls._iso_value(row.get("decided_at")),
+            "decisionReason": row.get("decision_reason"),
             "createdAt": cls._iso_value(row.get("created_at")),
             "updatedAt": cls._iso_value(row.get("updated_at")),
         }

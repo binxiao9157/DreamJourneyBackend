@@ -72,6 +72,69 @@ class OwnerTruthDataRightsTests(unittest.TestCase):
         )
         self.assertNotIn(" AS grant", queries[0])
 
+    def test_family_contribution_submission_projection_is_owner_scoped_and_omits_authority_hashes(self) -> None:
+        queries: list[str] = []
+        submission = {
+            "submissionId": "submission-owner-1",
+            "vaultId": "vault-owner-1",
+            "grantId": "grant-owner-1",
+            "relationshipId": "relationship-owner-1",
+            "relationshipEpoch": 3,
+            "grantVersion": 1,
+            "materialKind": "text",
+            "text": "家人贡献的一段记忆",
+            "sourceObjectId": None,
+            "sourceId": "source-owner-1",
+            "status": "accepted",
+            "rowVersion": 2,
+            "decidedAt": "2026-08-09T09:00:00+00:00",
+            "decisionReason": "ownerAccepted",
+            "createdAt": "2026-08-09T08:00:00+00:00",
+            "updatedAt": "2026-08-09T09:00:00+00:00",
+        }
+
+        def fetchall(query: str, params: tuple[str]) -> list[dict]:
+            self.assertEqual(params, ("subject-owner",))
+            if "owner_truth.family_contribution_submissions" not in query:
+                return []
+            queries.append(query)
+            return [{"payload": submission}]
+
+        records = read_owner_truth_data_rights_records(
+            subject_id="subject-owner",
+            fetchall=fetchall,
+        )
+
+        self.assertEqual(records["familyContributionSubmission"], [submission])
+        self.assertEqual(len(queries), 1)
+        query = queries[0]
+        self.assertIn("submission.owner_subject_id = vault.owner_subject_id", query)
+        self.assertIn("LIMIT 1000", query)
+        self.assertNotIn("contributor_subject_id", query)
+        self.assertNotIn("create_command_id_hash", query)
+        self.assertNotIn("create_payload_hash", query)
+        self.assertNotIn("decision_command_id_hash", query)
+        self.assertNotIn("decision_payload_hash", query)
+
+    def test_family_contribution_submission_count_uses_owner_vault_boundary(self) -> None:
+        queries: list[str] = []
+
+        def fetchone(query: str, params: tuple[str]) -> dict:
+            self.assertEqual(params, ("subject-owner",))
+            if "owner_truth.family_contribution_submissions" in query:
+                queries.append(query)
+                return {"count": 3}
+            return {"count": 0}
+
+        counts = count_owner_truth_data_rights_records(
+            subject_id="subject-owner",
+            fetchone=fetchone,
+        )
+
+        self.assertEqual(counts["ownerTruthFamilyContributionSubmission"], 3)
+        self.assertEqual(len(queries), 1)
+        self.assertIn("submission.owner_subject_id = vault.owner_subject_id", queries[0])
+
 
 if __name__ == "__main__":
     unittest.main()

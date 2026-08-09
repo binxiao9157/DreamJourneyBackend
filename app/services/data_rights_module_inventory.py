@@ -200,7 +200,11 @@ def build_module_owned_data_export(
         }
         for record in module_records
         if record["moduleId"] == "family"
-        or record["resourceType"] == "ownerTruthFamilyContributionGrant"
+        or record["resourceType"]
+        in {
+            "ownerTruthFamilyContributionGrant",
+            "ownerTruthFamilyContributionSubmission",
+        }
     ]
     permission_manifest = {
         "schemaVersion": 1,
@@ -383,6 +387,7 @@ _LOCAL_CLEANUP_MODULES = (
             "ownerTruthAnswerFeedback",
             "ownerTruthCorrection",
             "ownerTruthFamilyContributionGrant",
+            "ownerTruthFamilyContributionSubmission",
         ),
         "pending",
     ),
@@ -450,6 +455,11 @@ def _owner_truth_module_records(store: Any, subject_id: str) -> List[Dict[str, A
             "ownerTruthFamilyContributionGrant",
             "owner_truth.family_contribution_grants",
             "familyContributionGrant",
+        ),
+        (
+            "ownerTruthFamilyContributionSubmission",
+            "owner_truth.family_contribution_submissions",
+            "familyContributionSubmission",
         ),
     )
     module_records = []

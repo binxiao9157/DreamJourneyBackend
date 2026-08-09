@@ -28,6 +28,7 @@ from app.services.runtime_capability_control import (
     RuntimeCapabilityControlDecision,
     RuntimeCapabilityControlRegistry,
 )
+from app.services.apns_delivery import APNSConfiguration, APNSDeliveryError, apns_runtime_descriptor
 
 
 class RuntimeConfigService:
@@ -118,6 +119,32 @@ class RuntimeConfigService:
             # lane. Configuration flags alone remain fail-closed.
             schema_ready=self.async_effect_schema_ready,
         )
+        try:
+            apns_delivery = apns_runtime_descriptor(
+                APNSConfiguration(
+                    provider=self.settings.apns_delivery_provider,
+                    token_vault_provider=self.settings.apns_token_vault_provider,
+                    topic=self.settings.apns_topic,
+                    environment=self.settings.apns_environment,
+                    max_attempts=self.settings.apns_max_attempts,
+                )
+            )
+        except APNSDeliveryError as exc:
+            apns_delivery = {
+                "schemaVersion": 1,
+                "implemented": True,
+                "enabled": False,
+                "provider": "invalid",
+                "tokenVault": "invalid",
+                "environment": str(self.settings.apns_environment or ""),
+                "topicConfigured": bool(self.settings.apns_topic),
+                "externalVerified": False,
+                "realProviderReady": False,
+                "defaultReleaseVisible": False,
+                "registrationEndpoint": "/devices/push-token",
+                "deliveryReceiptStates": ["accepted", "arrived", "failed", "unknown"],
+                "reason": exc.code,
+            }
         capability_snapshots = self._capability_snapshots(
             archive_image_analysis=archive_image_analysis,
             identity_challenge=identity_challenge,
@@ -152,6 +179,7 @@ class RuntimeConfigService:
                 "identityChallenge": identity_provider.enabled,
                 "releasePolicy": True,
                 "asyncEffect": async_effect_runtime.enabled,
+                "apnsDelivery": bool(apns_delivery["enabled"]),
             },
             "auth": {
                 "mode": "opaqueAccessRefresh",
@@ -239,6 +267,11 @@ class RuntimeConfigService:
                 "serverCompletionAvailable": async_effect_runtime.allowed,
                 "reason": async_effect_runtime.reason,
                 "defaultReleaseVisible": False,
+                "contractVersion": 1,
+            },
+            "notifications": {
+                "apns": apns_delivery,
+                "inAppMailbox": True,
                 "contractVersion": 1,
             },
             "recovery": recovery_access.public_descriptor(),

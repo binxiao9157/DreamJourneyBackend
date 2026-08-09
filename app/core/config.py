@@ -308,6 +308,15 @@ class Settings:
     tencent_digital_human_heartbeat_interval_seconds: int = 45
     tencent_digital_human_max_concurrent_sessions: int = 1
 
+    # APNs remains disabled until both a production Provider and a durable
+    # token vault are configured. The bundled fake/ephemeral pair is only for
+    # deterministic contract and worker smoke tests.
+    apns_delivery_provider: str = "disabled"
+    apns_token_vault_provider: str = "disabled"
+    apns_topic: Optional[str] = None
+    apns_environment: str = "sandbox"
+    apns_max_attempts: int = 3
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -847,6 +856,23 @@ class Settings:
             tencent_digital_human_max_concurrent_sessions=_env_int(
                 "TENCENT_DIGITAL_HUMAN_MAX_CONCURRENT_SESSIONS",
                 cls.tencent_digital_human_max_concurrent_sessions,
+            ),
+            apns_delivery_provider=_env(
+                "APNS_DELIVERY_PROVIDER",
+                cls.apns_delivery_provider,
+            ) or cls.apns_delivery_provider,
+            apns_token_vault_provider=_env(
+                "APNS_TOKEN_VAULT_PROVIDER",
+                cls.apns_token_vault_provider,
+            ) or cls.apns_token_vault_provider,
+            apns_topic=_env("APNS_TOPIC"),
+            apns_environment=_env(
+                "APNS_ENVIRONMENT",
+                cls.apns_environment,
+            ) or cls.apns_environment,
+            apns_max_attempts=_env_int(
+                "APNS_MAX_ATTEMPTS",
+                cls.apns_max_attempts,
             ),
         )
 

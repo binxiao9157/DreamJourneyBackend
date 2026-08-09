@@ -1282,6 +1282,21 @@ class OwnerTruthMediaSourceObjectRepository(Protocol):
     ) -> Mapping[str, Any]:
         ...
 
+    def list_exportable_source_objects(
+        self,
+        *,
+        owner_subject_id: str,
+    ) -> list[Mapping[str, Any]]:
+        ...
+
+    def revoke_access_for_family_contribution(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+    ) -> None:
+        ...
+
     def request_deletion(
         self,
         *,
@@ -1680,6 +1695,46 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
             if source_object is None or source_object["ownerSubjectId"] != owner_subject_id:
                 raise OwnerTruthMediaVaultNotFound("source object was not found")
             return deepcopy(source_object)
+
+    def list_exportable_source_objects(
+        self,
+        *,
+        owner_subject_id: str,
+    ) -> list[Mapping[str, Any]]:
+        """List Owner metadata only; bytes remain behind ``read_content``."""
+
+        normalized_owner = str(owner_subject_id or "").strip()
+        if not normalized_owner:
+            return []
+        with self._lock:
+            return [
+                deepcopy(item)
+                for item in sorted(
+                    self._objects.values(),
+                    key=lambda value: (
+                        str(value.get("createdAt") or ""),
+                        str(value.get("sourceObjectId") or ""),
+                    ),
+                )
+                if str(item.get("ownerSubjectId") or "") == normalized_owner
+            ]
+
+    def revoke_access_for_family_contribution(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+    ) -> None:
+        with self._lock:
+            value = self._objects.get((vault_id, source_object_id))
+            if value is None:
+                return
+            value["accessState"] = "revoked"
+            value["processingStatus"] = "blocked"
+            value["retryable"] = False
+            value["failureCode"] = "familyContributionGrantRevoked"
+            value["rowVersion"] = int(value.get("rowVersion") or 0) + 1
+            value["updatedAt"] = _utc_iso(_utc_now())
 
     def request_deletion(
         self,
@@ -2548,6 +2603,27 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
             if row is None:
                 raise OwnerTruthMediaVaultNotFound("source object was not found")
             return self._source_object_record(row)
+
+    def revoke_access_for_family_contribution(
+        self,
+        *,
+        vault_id: str,
+        source_object_id: str,
+    ) -> None:
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE owner_truth.media_source_objects
+                SET access_state = 'revoked', processing_status = 'blocked',
+                    retryable = FALSE,
+                    failure_code = 'familyContributionGrantRevoked',
+                    row_version = row_version + 1,
+                    updated_at = NOW()
+                WHERE vault_id = %s AND id = %s
+                  AND access_state = 'available'
+                """,
+                (vault_id, source_object_id),
+            )
 
     def request_deletion(
         self,

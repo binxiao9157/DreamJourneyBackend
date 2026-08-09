@@ -28,6 +28,7 @@ from app.domain.owner_truth.source_commands import (
     OwnerTruthCommandContext,
     OwnerTruthSourceCommandResult,
 )
+from app.services.owner_truth_source import OwnerTruthSourceAsyncEffectCommandService
 
 
 OWNER_TRUTH_FAMILY_CONTRIBUTION_SCHEMA_VERSION = "owner-truth-family-contribution-v1"
@@ -42,6 +43,9 @@ _FAMILY_CONTRIBUTION_ADMISSION_MODES = frozenset(
     }
 )
 _GRANT_NAMESPACE = UUID("7cbbf18a-32a5-434a-a1a8-3d4046bb5ced")
+_SOURCE_NAMESPACE = UUID("c21b93a1-f64d-4de8-9bf0-99d103b3254d")
+_SUBMISSION_KINDS = frozenset({"text", "image"})
+_SUBMISSION_DECISIONS = frozenset({"accepted", "rejected"})
 
 
 class OwnerTruthFamilyContributionError(OwnerTruthContractError):
@@ -208,6 +212,98 @@ class SubmitFamilyContributionTextCommand:
 
 
 @dataclass(frozen=True)
+class SubmitFamilyContributionForReviewCommand:
+    """Contributor-authored material which remains inert until Owner review."""
+
+    command_id: str
+    submission_id: str
+    grant_id: str
+    expected_grant_version: int
+    material_kind: str
+    text: str | None = None
+    source_object_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
+        object.__setattr__(self, "submission_id", require_uuid(self.submission_id, field="submission_id"))
+        object.__setattr__(self, "grant_id", require_uuid(self.grant_id, field="grant_id"))
+        if not isinstance(self.expected_grant_version, int) or self.expected_grant_version < 1:
+            raise OwnerTruthFamilyContributionError("familyContributionGrantVersionInvalid")
+        kind = str(self.material_kind or "").strip()
+        if kind not in _SUBMISSION_KINDS:
+            raise OwnerTruthFamilyContributionError("familyContributionMaterialKindInvalid")
+        text = str(self.text or "").strip() or None
+        source_object_id = str(self.source_object_id or "").strip() or None
+        if kind == "text":
+            text = require_nonblank(text, field="text")
+            if source_object_id is not None:
+                raise OwnerTruthFamilyContributionError("familyContributionMaterialInvalid")
+        else:
+            if text is not None:
+                raise OwnerTruthFamilyContributionError("familyContributionMaterialInvalid")
+            source_object_id = require_uuid(source_object_id, field="source_object_id")
+        object.__setattr__(self, "material_kind", kind)
+        object.__setattr__(self, "text", text)
+        object.__setattr__(self, "source_object_id", source_object_id)
+
+    @property
+    def command_id_hash(self) -> str:
+        return _sha256(self.command_id)
+
+    def payload_hash(self) -> str:
+        return _sha256(
+            _canonical_json(
+                {
+                    "schemaVersion": OWNER_TRUTH_FAMILY_CONTRIBUTION_SCHEMA_VERSION,
+                    "submissionId": self.submission_id,
+                    "grantId": self.grant_id,
+                    "expectedGrantVersion": self.expected_grant_version,
+                    "materialKind": self.material_kind,
+                    "text": self.text,
+                    "sourceObjectId": self.source_object_id,
+                }
+            )
+        )
+
+
+@dataclass(frozen=True)
+class ReviewFamilyContributionSubmissionCommand:
+    command_id: str
+    submission_id: str
+    expected_version: int
+    decision: str
+    reason: str = "ownerReviewed"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
+        object.__setattr__(self, "submission_id", require_uuid(self.submission_id, field="submission_id"))
+        if not isinstance(self.expected_version, int) or self.expected_version < 1:
+            raise OwnerTruthFamilyContributionError("familyContributionSubmissionVersionInvalid")
+        decision = str(self.decision or "").strip()
+        if decision not in _SUBMISSION_DECISIONS:
+            raise OwnerTruthFamilyContributionError("familyContributionDecisionInvalid")
+        object.__setattr__(self, "decision", decision)
+        object.__setattr__(self, "reason", require_nonblank(self.reason, field="reason"))
+
+    @property
+    def command_id_hash(self) -> str:
+        return _sha256(self.command_id)
+
+    def payload_hash(self) -> str:
+        return _sha256(
+            _canonical_json(
+                {
+                    "schemaVersion": OWNER_TRUTH_FAMILY_CONTRIBUTION_SCHEMA_VERSION,
+                    "submissionId": self.submission_id,
+                    "expectedVersion": self.expected_version,
+                    "decision": self.decision,
+                    "reason": self.reason,
+                }
+            )
+        )
+
+
+@dataclass(frozen=True)
 class FamilyContributionGrantResult:
     outcome: str
     grant: Mapping[str, Any]
@@ -231,6 +327,27 @@ class FamilyContributionSubmissionResult:
             "grant": _public_grant(self.grant),
             "source": self.source.public_receipt(),
             "candidateExtraction": {"status": "notRequested"},
+        }
+
+
+@dataclass(frozen=True)
+class FamilyContributionReviewResult:
+    outcome: str
+    submission: Mapping[str, Any]
+    source: OwnerTruthSourceCommandResult | None = None
+
+    def public_contract(self, *, include_material: bool) -> dict[str, Any]:
+        return {
+            "schemaVersion": OWNER_TRUTH_FAMILY_CONTRIBUTION_SCHEMA_VERSION,
+            "status": self.outcome,
+            "submission": _public_submission(
+                self.submission,
+                include_material=include_material,
+            ),
+            "source": None if self.source is None else self.source.public_receipt(),
+            "candidateExtraction": {
+                "status": "requested" if self.source is not None else "notRequested"
+            },
         }
 
 
@@ -289,6 +406,69 @@ class OwnerTruthFamilyContributionStore(Protocol):
         ...
 
     def create_owner_truth_source(self, record: Any) -> OwnerTruthSourceCommandResult:
+        ...
+
+    def list_owner_truth_family_contribution_grants(
+        self,
+        *,
+        owner_subject_id: str | None = None,
+        contributor_subject_id: str | None = None,
+    ) -> list[Mapping[str, Any]]:
+        ...
+
+    def create_owner_truth_family_contribution_submission(
+        self,
+        submission: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        ...
+
+    def get_owner_truth_family_contribution_submission(
+        self,
+        vault_id: str,
+        submission_id: str,
+    ) -> Mapping[str, Any] | None:
+        ...
+
+    def list_owner_truth_family_contribution_submissions(
+        self,
+        *,
+        owner_subject_id: str | None = None,
+        contributor_subject_id: str | None = None,
+    ) -> list[Mapping[str, Any]]:
+        ...
+
+    def decide_owner_truth_family_contribution_submission(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        submission_id: str,
+        expected_version: int,
+        decision: str,
+        decision_command_id_hash: str,
+        decision_payload_hash: str,
+        decided_at_iso: str,
+        reason: str,
+        source_id: str | None,
+    ) -> Mapping[str, Any] | None:
+        ...
+
+    def withdraw_owner_truth_family_contributions(
+        self,
+        *,
+        vault_id: str,
+        grant_id: str,
+        withdrawn_at_iso: str,
+    ) -> None:
+        ...
+
+    def get_owner_truth_family_contribution_media_source_object(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        source_object_id: str,
+    ) -> Mapping[str, Any] | None:
         ...
 
 class OwnerTruthFamilyContributionService:
@@ -390,8 +570,262 @@ class OwnerTruthFamilyContributionService:
                 )
                 if revoked is None:
                     raise OwnerTruthFamilyContributionError("familyContributionGrantVersionMismatch")
+                if str(revoked.get("status") or "") == "revoked":
+                    self._store.withdraw_owner_truth_family_contributions(
+                        vault_id=context.vault_id,
+                        grant_id=command.grant_id,
+                        withdrawn_at_iso=str(revoked.get("revokedAt") or _now_iso(self._now_provider)),
+                    )
         outcome = "deduplicated" if bool(revoked.get("deduplicated")) else "revoked"
         return FamilyContributionGrantResult(outcome=outcome, grant=revoked)
+
+    def list_grants(
+        self,
+        *,
+        owner_subject_id: str | None = None,
+        contributor_subject_id: str | None = None,
+    ) -> list[Mapping[str, Any]]:
+        if bool(owner_subject_id) == bool(contributor_subject_id):
+            raise OwnerTruthFamilyContributionError("familyContributionListScopeInvalid")
+        return [
+            _public_grant(item)
+            for item in self._store.list_owner_truth_family_contribution_grants(
+                owner_subject_id=owner_subject_id,
+                contributor_subject_id=contributor_subject_id,
+            )
+        ]
+
+    def submit_for_review(
+        self,
+        *,
+        command: SubmitFamilyContributionForReviewCommand,
+        context: OwnerTruthCommandContext,
+        required_admission_mode: str | None = None,
+    ) -> FamilyContributionReviewResult:
+        existing = self._require_grant(vault_id=context.vault_id, grant_id=command.grant_id)
+        relationship_id = require_nonblank(
+            str(existing.get("relationshipId") or ""),
+            field="relationship_id",
+        )
+        owner_subject_id = require_nonblank(
+            str(existing.get("ownerSubjectId") or ""),
+            field="owner_subject_id",
+        )
+        with self._relationship_scope(
+            owner_subject_id=owner_subject_id,
+            relationship_id=relationship_id,
+        ):
+            with self._store.request_unit_of_work(
+                correlation_id=f"owner-truth-family-contribution-submission-{command.submission_id}",
+                command_id=command.command_id_hash,
+            ):
+                grant = self._require_grant(vault_id=context.vault_id, grant_id=command.grant_id)
+                self._assert_submission_allowed(
+                    grant=grant,
+                    context=context,
+                    expected_grant_version=command.expected_grant_version,
+                    required_admission_mode=required_admission_mode,
+                )
+                if command.material_kind == "image":
+                    media = self._store.get_owner_truth_family_contribution_media_source_object(
+                        vault_id=context.vault_id,
+                        owner_subject_id=owner_subject_id,
+                        source_object_id=str(command.source_object_id),
+                    )
+                    if media is None:
+                        raise OwnerTruthFamilyContributionError(
+                            "familyContributionMediaSourceNotFound"
+                        )
+                    if (
+                        str(media.get("mediaKind") or "") != "image"
+                        or str(media.get("state") or "") != "verified"
+                        or str(media.get("accessState") or "available") != "available"
+                    ):
+                        raise OwnerTruthFamilyContributionError(
+                            "familyContributionMediaSourceInvalid"
+                        )
+                now_iso = _now_iso(self._now_provider)
+                submission = {
+                    "id": command.submission_id,
+                    "vaultId": context.vault_id,
+                    "grantId": command.grant_id,
+                    "ownerSubjectId": owner_subject_id,
+                    "contributorSubjectId": context.actor_subject_id,
+                    "relationshipId": str(grant["relationshipId"]),
+                    "relationshipEpoch": int(grant["relationshipEpoch"]),
+                    "grantVersion": int(grant["rowVersion"]),
+                    "materialKind": command.material_kind,
+                    "text": command.text,
+                    "sourceObjectId": command.source_object_id,
+                    "status": "pendingReview",
+                    "rowVersion": 1,
+                    "createCommandIdHash": command.command_id_hash,
+                    "createPayloadHash": command.payload_hash(),
+                    "createdAt": now_iso,
+                    "updatedAt": now_iso,
+                }
+                try:
+                    persisted = self._store.create_owner_truth_family_contribution_submission(
+                        submission
+                    )
+                except ValueError as exc:
+                    raise OwnerTruthFamilyContributionError(
+                        "familyContributionSubmissionCommandConflict"
+                    ) from exc
+        outcome = "deduplicated" if bool(persisted.get("deduplicated")) else "pendingReview"
+        return FamilyContributionReviewResult(outcome=outcome, submission=persisted)
+
+    def list_submissions_for_owner(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> list[dict[str, Any]]:
+        self._require_owner_context(context)
+        return [
+            _public_submission(item, include_material=True)
+            for item in self._store.list_owner_truth_family_contribution_submissions(
+                owner_subject_id=context.owner_subject_id,
+            )
+            if str(item.get("vaultId") or "") == context.vault_id
+        ]
+
+    def list_submissions_for_contributor(
+        self,
+        *,
+        contributor_subject_id: str,
+    ) -> list[dict[str, Any]]:
+        subject_id = require_nonblank(
+            contributor_subject_id,
+            field="contributor_subject_id",
+        )
+        return [
+            _public_submission(item, include_material=False)
+            for item in self._store.list_owner_truth_family_contribution_submissions(
+                contributor_subject_id=subject_id,
+            )
+        ]
+
+    def get_submission_for_owner(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        submission_id: str,
+    ) -> Mapping[str, Any]:
+        self._require_owner_context(context)
+        submission = self._store.get_owner_truth_family_contribution_submission(
+            context.vault_id,
+            require_uuid(submission_id, field="submission_id"),
+        )
+        if submission is None:
+            raise OwnerTruthFamilyContributionError("familyContributionSubmissionNotFound")
+        if str(submission.get("ownerSubjectId") or "") != context.owner_subject_id:
+            raise OwnerTruthFamilyContributionError("familyContributionGrantOwnerMismatch")
+        return submission
+
+    def review_submission(
+        self,
+        *,
+        command: ReviewFamilyContributionSubmissionCommand,
+        context: OwnerTruthCommandContext,
+    ) -> FamilyContributionReviewResult:
+        self._require_owner_context(context)
+        existing = self._store.get_owner_truth_family_contribution_submission(
+            context.vault_id,
+            command.submission_id,
+        )
+        if existing is None:
+            raise OwnerTruthFamilyContributionError("familyContributionSubmissionNotFound")
+        if str(existing.get("ownerSubjectId") or "") != context.owner_subject_id:
+            raise OwnerTruthFamilyContributionError("familyContributionGrantOwnerMismatch")
+        grant_id = str(existing.get("grantId") or "")
+        grant = self._require_grant(vault_id=context.vault_id, grant_id=grant_id)
+        self._assert_grant_owner(grant, context.owner_subject_id)
+        source_result: OwnerTruthSourceCommandResult | None = None
+        source_id: str | None = None
+        with self._relationship_scope(
+            owner_subject_id=context.owner_subject_id,
+            relationship_id=str(existing.get("relationshipId") or ""),
+        ):
+            with self._store.request_unit_of_work(
+                correlation_id=f"owner-truth-family-contribution-review-{command.submission_id}",
+                command_id=command.command_id_hash,
+            ):
+                current = self._store.get_owner_truth_family_contribution_submission(
+                    context.vault_id,
+                    command.submission_id,
+                )
+                if current is None:
+                    raise OwnerTruthFamilyContributionError(
+                        "familyContributionSubmissionNotFound"
+                    )
+                if str(grant.get("status") or "") != "active":
+                    raise OwnerTruthFamilyContributionError("familyContributionGrantInactive")
+                if str(current.get("status") or "") not in {
+                    "pendingReview",
+                    command.decision,
+                }:
+                    raise OwnerTruthFamilyContributionError(
+                        "familyContributionSubmissionNotReviewable"
+                    )
+                if command.decision == "accepted" and str(
+                    current.get("materialKind") or ""
+                ) == "text":
+                    source_id = str(
+                        uuid5(
+                            _SOURCE_NAMESPACE,
+                            f"{context.vault_id}:{command.submission_id}",
+                        )
+                    )
+                    source_command = CreateTextSourceCommand(
+                        command_id=f"family-contribution-review:{command.submission_id}",
+                        source_id=source_id,
+                        expected_version=0,
+                        text=str(current.get("text") or ""),
+                        metadata={
+                            "origin": "familyContributionReview",
+                            "perspectiveType": "familyReport",
+                            "epistemicStatus": "reported",
+                            "familyContributionGrantId": grant_id,
+                            "familyContributionSubmissionId": command.submission_id,
+                            "relationshipId": str(current.get("relationshipId") or ""),
+                            "relationshipEpoch": int(current.get("relationshipEpoch") or 0),
+                            "ownerReviewed": True,
+                        },
+                        source_kind=SourceKind.TEXT,
+                    )
+                    source_context = OwnerTruthCommandContext(
+                        vault_id=context.vault_id,
+                        owner_subject_id=context.owner_subject_id,
+                        actor_subject_id=str(current.get("contributorSubjectId") or ""),
+                    )
+                    source_result = OwnerTruthSourceAsyncEffectCommandService(
+                        self._store
+                    ).create_text_source(
+                        command=source_command,
+                        context=source_context,
+                    ).source
+                updated = self._store.decide_owner_truth_family_contribution_submission(
+                    vault_id=context.vault_id,
+                    owner_subject_id=context.owner_subject_id,
+                    submission_id=command.submission_id,
+                    expected_version=command.expected_version,
+                    decision=command.decision,
+                    decision_command_id_hash=command.command_id_hash,
+                    decision_payload_hash=command.payload_hash(),
+                    decided_at_iso=_now_iso(self._now_provider),
+                    reason=command.reason,
+                    source_id=source_id,
+                )
+                if updated is None:
+                    raise OwnerTruthFamilyContributionError(
+                        "familyContributionSubmissionVersionMismatch"
+                    )
+        outcome = "deduplicated" if bool(updated.get("deduplicated")) else command.decision
+        return FamilyContributionReviewResult(
+            outcome=outcome,
+            submission=updated,
+            source=source_result,
+        )
 
     def submit_text_source(
         self,
@@ -627,6 +1061,36 @@ def _public_grant(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _public_submission(
+    value: Mapping[str, Any],
+    *,
+    include_material: bool,
+) -> dict[str, Any]:
+    material_kind = str(value.get("materialKind") or "")
+    payload = {
+        "submissionId": str(value.get("id") or ""),
+        "vaultId": str(value.get("vaultId") or ""),
+        "grantId": str(value.get("grantId") or ""),
+        "contributorSubjectId": str(value.get("contributorSubjectId") or ""),
+        "relationshipId": str(value.get("relationshipId") or ""),
+        "materialKind": material_kind,
+        "status": str(value.get("status") or ""),
+        "rowVersion": int(value.get("rowVersion") or 0),
+        "sourceObjectId": (
+            str(value.get("sourceObjectId") or "") or None
+        ),
+        "sourceId": str(value.get("sourceId") or "") or None,
+        "createdAt": value.get("createdAt"),
+        "updatedAt": value.get("updatedAt"),
+        "decidedAt": value.get("decidedAt"),
+        "decisionReason": value.get("decisionReason"),
+        "materialIncluded": include_material,
+    }
+    if include_material and material_kind == "text":
+        payload["text"] = str(value.get("text") or "")
+    return payload
+
+
 __all__ = [
     "CreateFamilyContributionGrantCommand",
     "FAMILY_CONTRIBUTION_ADMISSION_CLOSED_PILOT",
@@ -635,9 +1099,12 @@ __all__ = [
     "FAMILY_CONTRIBUTION_SCOPE",
     "FamilyContributionGrantResult",
     "FamilyContributionSubmissionResult",
+    "FamilyContributionReviewResult",
     "OWNER_TRUTH_FAMILY_CONTRIBUTION_SCHEMA_VERSION",
     "OwnerTruthFamilyContributionError",
     "OwnerTruthFamilyContributionService",
     "RevokeFamilyContributionGrantCommand",
+    "ReviewFamilyContributionSubmissionCommand",
+    "SubmitFamilyContributionForReviewCommand",
     "SubmitFamilyContributionTextCommand",
 ]

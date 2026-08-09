@@ -29,6 +29,7 @@ def empty_owner_truth_data_rights_records() -> Dict[str, List[Dict[str, Any]]]:
         "answerFeedback": [],
         "correction": [],
         "familyContributionGrant": [],
+        "familyContributionSubmission": [],
     }
 
 
@@ -331,6 +332,35 @@ def read_owner_truth_data_rights_records(
             LIMIT 1000
             """
         ),
+        "familyContributionSubmission": rows(
+            """
+            SELECT jsonb_build_object(
+                'submissionId', submission.id,
+                'vaultId', submission.vault_id,
+                'grantId', submission.grant_id,
+                'relationshipId', submission.relationship_id,
+                'relationshipEpoch', submission.relationship_epoch,
+                'grantVersion', submission.grant_version,
+                'materialKind', submission.material_kind,
+                'text', submission.text_content,
+                'sourceObjectId', submission.source_object_id,
+                'sourceId', submission.source_id,
+                'status', submission.status,
+                'rowVersion', submission.row_version,
+                'decidedAt', submission.decided_at,
+                'decisionReason', submission.decision_reason,
+                'createdAt', submission.created_at,
+                'updatedAt', submission.updated_at
+            ) AS payload
+            FROM owner_truth.family_contribution_submissions AS submission
+            INNER JOIN owner_truth.vaults AS vault
+                ON vault.vault_id = submission.vault_id
+            WHERE vault.owner_subject_id = %s
+              AND submission.owner_subject_id = vault.owner_subject_id
+            ORDER BY submission.created_at, submission.id
+            LIMIT 1000
+            """
+        ),
     }
 
 
@@ -352,6 +382,7 @@ def count_owner_truth_data_rights_records(
         "ownerTruthAnswerFeedback",
         "ownerTruthCorrection",
         "ownerTruthFamilyContributionGrant",
+        "ownerTruthFamilyContributionSubmission",
     )
     if not owner_id:
         return {key: 0 for key in keys}
@@ -438,6 +469,15 @@ def count_owner_truth_data_rights_records(
             INNER JOIN owner_truth.vaults AS vault ON vault.vault_id = family_grant.vault_id
             WHERE vault.owner_subject_id = %s
               AND family_grant.owner_subject_id = vault.owner_subject_id
+            """
+        ),
+        "ownerTruthFamilyContributionSubmission": count(
+            """
+            SELECT COUNT(*) AS count
+            FROM owner_truth.family_contribution_submissions AS submission
+            INNER JOIN owner_truth.vaults AS vault ON vault.vault_id = submission.vault_id
+            WHERE vault.owner_subject_id = %s
+              AND submission.owner_subject_id = vault.owner_subject_id
             """
         ),
     }

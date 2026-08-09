@@ -73,6 +73,7 @@ from app.services.publication_external_cleanup import (
 )
 from app.services.owner_truth_media_source_object import (
     InMemoryOwnerTruthMediaSourceObjectRepository,
+    OwnerTruthMediaIngestionError,
 )
 from app.services.owner_truth_conversation import (
     InMemoryOwnerTruthConversationRepository,
@@ -188,6 +189,8 @@ class InMemoryStore:
         )
         self._owner_truth_family_contribution_grants: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._owner_truth_family_contribution_grant_commands: Dict[Tuple[str, str], str] = {}
+        self._owner_truth_family_contribution_submissions: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._owner_truth_family_contribution_submission_commands: Dict[Tuple[str, str], str] = {}
         self._effect_kernel_repository = InMemoryEffectKernelRepository()
         self._provider_effect_repository = InMemoryProviderEffectRepository()
         self._publication_external_cleanup_repository = (
@@ -3058,6 +3061,201 @@ class InMemoryStore:
             )
             return None if grant is None else deepcopy(grant)
 
+    def list_owner_truth_family_contribution_grants(
+        self,
+        *,
+        owner_subject_id: Optional[str] = None,
+        contributor_subject_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if bool(owner_subject_id) == bool(contributor_subject_id):
+            return []
+        with self._delegated_access_lock:
+            values = [
+                deepcopy(value)
+                for value in self._owner_truth_family_contribution_grants.values()
+                if (
+                    str(value.get("ownerSubjectId") or "") == owner_subject_id
+                    if owner_subject_id
+                    else str(value.get("contributorSubjectId") or "")
+                    == contributor_subject_id
+                )
+            ]
+        return sorted(values, key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
+
+    def create_owner_truth_family_contribution_submission(
+        self,
+        submission: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        candidate = deepcopy(dict(submission))
+        vault_id = str(candidate.get("vaultId") or "")
+        submission_id = str(candidate.get("id") or "")
+        command_hash = str(candidate.get("createCommandIdHash") or "")
+        payload_hash = str(candidate.get("createPayloadHash") or "")
+        if not all((vault_id, submission_id, command_hash, payload_hash)):
+            raise ValueError("family contribution submission is incomplete")
+        with self._delegated_access_lock:
+            command_key = (vault_id, command_hash)
+            existing_id = self._owner_truth_family_contribution_submission_commands.get(
+                command_key
+            )
+            if existing_id is not None:
+                existing = self._owner_truth_family_contribution_submissions[
+                    (vault_id, existing_id)
+                ]
+                if (
+                    str(existing.get("createPayloadHash") or "") != payload_hash
+                    or str(existing.get("id") or "") != submission_id
+                ):
+                    raise ValueError("family contribution submission command conflict")
+                result = deepcopy(existing)
+                result["deduplicated"] = True
+                return result
+            key = (vault_id, submission_id)
+            if key in self._owner_truth_family_contribution_submissions:
+                raise ValueError("family contribution submission id conflict")
+            candidate.setdefault("status", "pendingReview")
+            candidate.setdefault("rowVersion", 1)
+            candidate.setdefault("sourceId", None)
+            candidate.setdefault("decidedAt", None)
+            candidate.setdefault("decisionReason", None)
+            candidate.setdefault("decisionCommandIdHash", None)
+            candidate.setdefault("decisionPayloadHash", None)
+            self._owner_truth_family_contribution_submissions[key] = candidate
+            self._owner_truth_family_contribution_submission_commands[command_key] = submission_id
+            return deepcopy(candidate)
+
+    def get_owner_truth_family_contribution_submission(
+        self,
+        vault_id: str,
+        submission_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            value = self._owner_truth_family_contribution_submissions.get(
+                (str(vault_id), str(submission_id))
+            )
+            return None if value is None else deepcopy(value)
+
+    def list_owner_truth_family_contribution_submissions(
+        self,
+        *,
+        owner_subject_id: Optional[str] = None,
+        contributor_subject_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if bool(owner_subject_id) == bool(contributor_subject_id):
+            return []
+        with self._delegated_access_lock:
+            values = [
+                deepcopy(value)
+                for value in self._owner_truth_family_contribution_submissions.values()
+                if (
+                    str(value.get("ownerSubjectId") or "") == owner_subject_id
+                    if owner_subject_id
+                    else str(value.get("contributorSubjectId") or "")
+                    == contributor_subject_id
+                )
+            ]
+        return sorted(values, key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
+
+    def decide_owner_truth_family_contribution_submission(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        submission_id: str,
+        expected_version: int,
+        decision: str,
+        decision_command_id_hash: str,
+        decision_payload_hash: str,
+        decided_at_iso: str,
+        reason: str,
+        source_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            value = self._owner_truth_family_contribution_submissions.get(
+                (str(vault_id), str(submission_id))
+            )
+            if value is None or str(value.get("ownerSubjectId") or "") != owner_subject_id:
+                return None
+            if str(value.get("status") or "") == decision:
+                if (
+                    value.get("decisionCommandIdHash") == decision_command_id_hash
+                    and value.get("decisionPayloadHash") == decision_payload_hash
+                ):
+                    result = deepcopy(value)
+                    result["deduplicated"] = True
+                    return result
+                return None
+            if (
+                str(value.get("status") or "") != "pendingReview"
+                or int(value.get("rowVersion") or 0) != expected_version
+            ):
+                return None
+            value["status"] = decision
+            value["rowVersion"] = expected_version + 1
+            value["decisionCommandIdHash"] = decision_command_id_hash
+            value["decisionPayloadHash"] = decision_payload_hash
+            value["decidedAt"] = decided_at_iso
+            value["updatedAt"] = decided_at_iso
+            value["decisionReason"] = reason
+            value["sourceId"] = source_id
+            return deepcopy(value)
+
+    def withdraw_owner_truth_family_contributions(
+        self,
+        *,
+        vault_id: str,
+        grant_id: str,
+        withdrawn_at_iso: str,
+    ) -> None:
+        with self._delegated_access_lock:
+            source_ids: List[str] = []
+            source_object_ids: List[str] = []
+            for value in self._owner_truth_family_contribution_submissions.values():
+                if (
+                    str(value.get("vaultId") or "") != vault_id
+                    or str(value.get("grantId") or "") != grant_id
+                    or str(value.get("status") or "") == "withdrawn"
+                ):
+                    continue
+                value["status"] = "withdrawn"
+                value["rowVersion"] = int(value.get("rowVersion") or 0) + 1
+                value["updatedAt"] = withdrawn_at_iso
+                value["decisionReason"] = "grantRevoked"
+                if value.get("sourceId"):
+                    source_ids.append(str(value["sourceId"]))
+                if value.get("sourceObjectId"):
+                    source_object_ids.append(str(value["sourceObjectId"]))
+        with self._owner_truth_lock:
+            for source_id in source_ids:
+                source = self._owner_truth_sources.get((vault_id, source_id))
+                if source is not None:
+                    source["state"] = "deleted"
+                    source["accessState"] = "revoked"
+        repository = self._owner_truth_media_source_object_repository
+        for source_object_id in source_object_ids:
+            repository.revoke_access_for_family_contribution(
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+            )
+
+    def get_owner_truth_family_contribution_media_source_object(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        source_object_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            return deepcopy(
+                self._owner_truth_media_source_object_repository.get_source_object(
+                    vault_id=vault_id,
+                    source_object_id=source_object_id,
+                    owner_subject_id=owner_subject_id,
+                )
+            )
+        except OwnerTruthMediaIngestionError:
+            return None
+
     def revoke_owner_truth_family_contribution_grant(
         self,
         *,
@@ -3111,6 +3309,14 @@ class InMemoryStore:
         with self._owner_truth_lock:
             source = self._owner_truth_sources.get((str(vault_id), str(source_id)))
             return deepcopy(source) if source is not None else None
+
+    def list_owner_truth_media_export_objects(self, user_id: str) -> List[Dict[str, Any]]:
+        return [
+            deepcopy(dict(item))
+            for item in self._owner_truth_media_source_object_repository.list_exportable_source_objects(
+                owner_subject_id=user_id
+            )
+        ]
 
     def list_owner_truth_data_rights_records(self, user_id: str) -> Dict[str, List[Dict[str, Any]]]:
         """Return a bounded, owner-filtered Owner Truth export projection.
@@ -3262,6 +3468,29 @@ class InMemoryStore:
                 if str(grant.get("ownerSubjectId") or "") == subject_id
                 and str(grant.get("vaultId") or "") in vault_ids
             ]
+            family_contribution_submissions = [
+                {
+                    "submissionId": str(submission.get("id") or ""),
+                    "vaultId": str(submission.get("vaultId") or ""),
+                    "grantId": str(submission.get("grantId") or ""),
+                    "relationshipId": str(submission.get("relationshipId") or ""),
+                    "relationshipEpoch": int(submission.get("relationshipEpoch") or 0),
+                    "grantVersion": int(submission.get("grantVersion") or 0),
+                    "materialKind": str(submission.get("materialKind") or ""),
+                    "text": submission.get("text"),
+                    "sourceObjectId": submission.get("sourceObjectId"),
+                    "sourceId": submission.get("sourceId"),
+                    "status": str(submission.get("status") or ""),
+                    "rowVersion": int(submission.get("rowVersion") or 0),
+                    "decidedAt": submission.get("decidedAt"),
+                    "decisionReason": submission.get("decisionReason"),
+                    "createdAt": submission.get("createdAt"),
+                    "updatedAt": submission.get("updatedAt"),
+                }
+                for submission in self._owner_truth_family_contribution_submissions.values()
+                if str(submission.get("ownerSubjectId") or "") == subject_id
+                and str(submission.get("vaultId") or "") in vault_ids
+            ]
 
         return {
             "vault": self._sorted_owner_truth_data_rights_records(vault_by_id.values()),
@@ -3274,6 +3503,9 @@ class InMemoryStore:
             "correction": self._sorted_owner_truth_data_rights_records(corrections),
             "familyContributionGrant": self._sorted_owner_truth_data_rights_records(
                 family_contribution_grants
+            )[:1000],
+            "familyContributionSubmission": self._sorted_owner_truth_data_rights_records(
+                family_contribution_submissions
             )[:1000],
         }
 
@@ -3293,6 +3525,12 @@ class InMemoryStore:
                 if str(grant.get("ownerSubjectId") or "") == subject_id
                 and str(grant.get("vaultId") or "") in owner_vault_ids
             )
+            family_contribution_submission_count = sum(
+                1
+                for submission in self._owner_truth_family_contribution_submissions.values()
+                if str(submission.get("ownerSubjectId") or "") == subject_id
+                and str(submission.get("vaultId") or "") in owner_vault_ids
+            )
         return {
             "ownerTruthVault": len(records["vault"]),
             "ownerTruthSource": len(records["source"]),
@@ -3303,6 +3541,7 @@ class InMemoryStore:
             "ownerTruthAnswerFeedback": len(records["answerFeedback"]),
             "ownerTruthCorrection": len(records["correction"]),
             "ownerTruthFamilyContributionGrant": family_contribution_grant_count,
+            "ownerTruthFamilyContributionSubmission": family_contribution_submission_count,
         }
 
     @staticmethod
@@ -3317,6 +3556,7 @@ class InMemoryStore:
             "answerFeedback": [],
             "correction": [],
             "familyContributionGrant": [],
+            "familyContributionSubmission": [],
         }
 
     @staticmethod

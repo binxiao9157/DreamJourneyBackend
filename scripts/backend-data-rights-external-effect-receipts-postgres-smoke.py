@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Exercise P0-S3 external data-rights receipts in a disposable Postgres DB.
 
-The smoke intentionally performs no Provider call.  It proves the durable
-contract instead: owner fencing, append-only observations, replay idempotency,
-state progression and the value-minimized evidence projection.
+The smoke performs only in-process fake Provider calls. It proves the durable
+contract: owner fencing, append-only observations, replay idempotency, unified
+five-domain execution, state progression and value-minimized evidence.
 """
 
 from __future__ import annotations
@@ -32,7 +32,11 @@ from app.services.data_rights_evidence_projection import (
 from app.services.data_rights_external_effect_receipts import (
     DataRightsExternalEffectReceipt,
 )
+from app.services.data_rights_external_deletion_executor import (
+    DataRightsExternalDeletionExecutor,
+)
 from app.services.data_rights_external_effect_reconciler import (
+    DATA_RIGHTS_EXTERNAL_EFFECT_RECONCILIATION_DOMAINS,
     DataRightsExternalEffectAdapterObservation,
     DataRightsExternalEffectReconciler,
 )
@@ -140,6 +144,23 @@ class FakeReconciliationAdapter:
                 reason_code="externalEffectAdapterUnsupported",
             )
         raise TimeoutError("raw Provider detail must not persist")
+
+
+class FakeDeletionProvider:
+    def __init__(self, domain: str) -> None:
+        self.domain = domain
+        self.calls = 0
+
+    def delete(self, *, effect_identity_hash: str, attempt: int):
+        self.calls += 1
+        return DataRightsExternalEffectAdapterObservation(
+            state="completed",
+            provider_receipt_present=True,
+            reason_code="fakeProviderDeleted",
+            evidence_hash=sha256(
+                f"{self.domain}:{effect_identity_hash}:{attempt}".encode("utf-8")
+            ).hexdigest(),
+        )
 
 
 def exercise(dsn: str) -> None:
@@ -277,9 +298,54 @@ def exercise(dsn: str) -> None:
             not in json.dumps(second_reconcile, ensure_ascii=False, sort_keys=True),
             "raw Provider failures must stay outside reconciliation evidence",
         )
+
+        executor_request = DataRightsRequestAuthority().create_request(
+            command_id="external-deletion-executor-postgres-command",
+            subject_id="external-deletion-executor-postgres-owner",
+            identity_proof={"kind": "reauthenticated"},
+            payload={"action": "account.delete", "scope": ["all"]},
+            now="2026-08-05T11:00:00+00:00",
+        ).request
+        store.create_rights_request(executor_request)
+        providers = {
+            domain: FakeDeletionProvider(domain)
+            for domain in DATA_RIGHTS_EXTERNAL_EFFECT_RECONCILIATION_DOMAINS
+        }
+        executor = DataRightsExternalDeletionExecutor(
+            store,
+            providers=providers,
+            max_attempts=2,
+        )
+        executed = executor.execute(
+            request_id=executor_request.request_id,
+            access_revocation_status="revoked",
+            now="2026-08-05T11:01:00+00:00",
+        )
+        replayed = executor.execute(
+            request_id=executor_request.request_id,
+            access_revocation_status="revoked",
+            now="2026-08-05T11:02:00+00:00",
+        )
+        require(executed["status"] == "completed", "all fake deletion domains must complete")
+        require(replayed["status"] == "completed", "executor replay must remain completed")
+        require(
+            all(provider.calls == 1 for provider in providers.values()),
+            "completed external deletion effects must not call a Provider twice",
+        )
+        require(
+            receipt_count(dsn, executor_request.request_id)
+            == len(DATA_RIGHTS_EXTERNAL_EFFECT_RECONCILIATION_DOMAINS),
+            "one durable completion receipt must exist for every external domain",
+        )
+        require(
+            "external-deletion-executor-postgres-owner"
+            not in json.dumps(replayed, ensure_ascii=False, sort_keys=True),
+            "executor evidence must remain value-minimized",
+        )
         print(
             "Data-rights external effect receipt Postgres smoke passed "
-            "(owner fence, replay, append-only, reconciliation and redacted projection verified)."
+            "(owner fence, replay, append-only, unified deletion execution, "
+            "reconciliation and redacted projection verified)."
         )
     finally:
         store.close_pool()
