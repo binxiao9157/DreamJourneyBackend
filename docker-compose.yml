@@ -8,6 +8,10 @@ services:
       - "127.0.0.1:3100:8080"
     volumes:
       - archive_media_data:/var/lib/dreamjourney/media
+      # Optional APNs token-auth key. The /dev/null fallback keeps default-off
+      # deployments runnable; production sets APNS_PRIVATE_KEY_HOST_PATH to a
+      # root-readable mode-600 .p8 outside the repository.
+      - ${APNS_PRIVATE_KEY_HOST_PATH:-/dev/null}:/run/secrets/apns-auth-key.p8:ro
     depends_on:
       postgres:
         condition: service_healthy

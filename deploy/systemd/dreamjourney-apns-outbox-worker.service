@@ -1,0 +1,19 @@
+[Unit]
+Description=Run the DreamJourney APNs HTTP/2 outbox worker
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/services/dreamjourney/DreamJourneyBackend
+ExecStart=/usr/bin/docker compose exec -T api python scripts/apns-outbox-worker.py --loop
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

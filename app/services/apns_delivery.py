@@ -1,19 +1,21 @@
-"""Default-off APNs registration and delivery foundation.
-
-Production token persistence deliberately stays behind a vault protocol. The
-only bundled vault is ephemeral and the only bundled Provider is fake, so this
-module can prove environment/topic isolation, retries and receipts without
-claiming that Apple accepted or delivered a real notification.
-"""
+"""Default-off APNs registration and delivery foundation."""
 
 from __future__ import annotations
 
+from base64 import urlsafe_b64encode
 from dataclasses import dataclass, replace
 from hashlib import sha256
+import json
 import re
 from threading import RLock
-from typing import Any, Mapping, Protocol
+import time
+from typing import Any, Callable, Mapping, Protocol
 from uuid import NAMESPACE_URL, uuid5
+
+import httpx
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 
 APNS_DELIVERY_SCHEMA_VERSION = 1
@@ -21,6 +23,8 @@ _TOKEN_PATTERN = re.compile(r"^[0-9a-f]{16,256}$")
 _TOPIC_PATTERN = re.compile(r"^[A-Za-z0-9.-]{3,255}$")
 _ENVIRONMENTS = frozenset({"sandbox", "production"})
 _TERMINAL_STATES = frozenset({"accepted", "failed", "arrived"})
+_APPLE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9]{10}$")
+_MAX_APNS_PAYLOAD_BYTES = 4096
 
 
 class APNSDeliveryError(RuntimeError):
@@ -37,13 +41,21 @@ class APNSConfiguration:
     environment: str = "sandbox"
     max_attempts: int = 3
     token_encryption_key_configured: bool = False
+    team_id: str | None = None
+    key_id: str | None = None
+    private_key_path: str | None = None
+    request_timeout_seconds: int = 15
+    external_verified: bool = False
 
     def __post_init__(self) -> None:
         provider = str(self.provider or "disabled").strip()
         vault = str(self.token_vault_provider or "disabled").strip()
         environment = str(self.environment or "").strip().lower()
         topic = str(self.topic or "").strip() or None
-        if provider not in {"disabled", "fake"}:
+        team_id = str(self.team_id or "").strip() or None
+        key_id = str(self.key_id or "").strip() or None
+        private_key_path = str(self.private_key_path or "").strip() or None
+        if provider not in {"disabled", "fake", "appleToken"}:
             raise APNSDeliveryError("apnsProviderUnsupported")
         if vault not in {"disabled", "ephemeral", "postgresEncrypted"}:
             raise APNSDeliveryError("apnsTokenVaultUnsupported")
@@ -56,16 +68,40 @@ class APNSConfiguration:
                 raise APNSDeliveryError("apnsTokenVaultRequired")
             if vault == "postgresEncrypted" and not self.token_encryption_key_configured:
                 raise APNSDeliveryError("apnsTokenEncryptionKeyRequired")
+        if provider == "appleToken":
+            if vault != "postgresEncrypted":
+                raise APNSDeliveryError("apnsDurableTokenVaultRequired")
+            if team_id is None or _APPLE_IDENTIFIER_PATTERN.fullmatch(team_id) is None:
+                raise APNSDeliveryError("apnsTeamIdInvalid")
+            if key_id is None or _APPLE_IDENTIFIER_PATTERN.fullmatch(key_id) is None:
+                raise APNSDeliveryError("apnsKeyIdInvalid")
+            if private_key_path is None:
+                raise APNSDeliveryError("apnsPrivateKeyPathRequired")
         if int(self.max_attempts) < 1:
             raise APNSDeliveryError("apnsMaxAttemptsInvalid")
+        if int(self.request_timeout_seconds) < 1:
+            raise APNSDeliveryError("apnsRequestTimeoutInvalid")
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "token_vault_provider", vault)
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "topic", topic)
         object.__setattr__(self, "max_attempts", int(self.max_attempts))
+        object.__setattr__(self, "team_id", team_id)
+        object.__setattr__(self, "key_id", key_id)
+        object.__setattr__(self, "private_key_path", private_key_path)
+        object.__setattr__(self, "request_timeout_seconds", int(self.request_timeout_seconds))
 
     def public_descriptor(self) -> dict[str, Any]:
         enabled = self.provider != "disabled" and self.token_vault_provider != "disabled"
+        real_provider = self.provider == "appleToken"
+        if not enabled:
+            reason = "apnsDisabled"
+        elif self.provider == "fake":
+            reason = "fakeProviderOnly"
+        elif not self.external_verified:
+            reason = "apnsExternalVerificationRequired"
+        else:
+            reason = "ready"
         return {
             "schemaVersion": APNS_DELIVERY_SCHEMA_VERSION,
             "implemented": True,
@@ -74,20 +110,26 @@ class APNSConfiguration:
             "tokenVault": self.token_vault_provider,
             "environment": self.environment,
             "topicConfigured": self.topic is not None,
-            "externalVerified": False,
+            "credentialConfigured": real_provider,
+            "externalVerified": bool(real_provider and self.external_verified),
             "durableOutbox": self.token_vault_provider == "postgresEncrypted",
-            "reason": "fakeProviderOnly" if enabled else "apnsDisabled",
+            "reason": reason,
         }
 
 
 def apns_runtime_descriptor(configuration: APNSConfiguration) -> dict[str, Any]:
     """Return a secret-free runtime contract for mobile capability gating."""
 
+    descriptor = configuration.public_descriptor()
     return {
-        **configuration.public_descriptor(),
+        **descriptor,
         "registrationEndpoint": "/devices/push-token",
         "deliveryReceiptStates": ["accepted", "arrived", "failed", "unknown"],
-        "realProviderReady": False,
+        "realProviderReady": bool(
+            configuration.provider == "appleToken"
+            and descriptor["externalVerified"]
+            and descriptor["durableOutbox"]
+        ),
         "defaultReleaseVisible": False,
     }
 
@@ -194,6 +236,160 @@ class FakeAPNSProvider:
                 retryable=True,
             )
         return self.receipts.pop(0)
+
+
+class AppleTokenAPNSProvider:
+    """Send device notifications through Apple's token-authenticated HTTP/2 API."""
+
+    def __init__(
+        self,
+        *,
+        team_id: str,
+        key_id: str,
+        private_key_pem: bytes,
+        timeout_seconds: int = 15,
+        client_factory: Callable[..., httpx.Client] = httpx.Client,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self._team_id = _required(team_id, "apnsTeamIdInvalid")
+        self._key_id = _required(key_id, "apnsKeyIdInvalid")
+        self._timeout_seconds = max(1, int(timeout_seconds))
+        self._client_factory = client_factory
+        self._clock = clock
+        self._lock = RLock()
+        self._cached_token: str | None = None
+        self._cached_token_issued_at = 0
+        self._client: httpx.Client | None = None
+        try:
+            private_key = serialization.load_pem_private_key(
+                private_key_pem,
+                password=None,
+            )
+        except (TypeError, ValueError) as exc:
+            raise APNSDeliveryError("apnsPrivateKeyInvalid") from exc
+        if not isinstance(private_key, ec.EllipticCurvePrivateKey) or not isinstance(
+            private_key.curve,
+            ec.SECP256R1,
+        ):
+            raise APNSDeliveryError("apnsPrivateKeyInvalid")
+        self._private_key = private_key
+
+    def send(
+        self,
+        *,
+        device_token: str,
+        topic: str,
+        environment: str,
+        payload: Mapping[str, Any],
+        attempt: int,
+    ) -> APNSProviderReceipt:
+        del attempt
+        token = str(device_token or "").strip().lower()
+        if _TOKEN_PATTERN.fullmatch(token) is None:
+            raise APNSDeliveryError("apnsDeviceTokenInvalid")
+        normalized_topic = _required(topic, "apnsTopicInvalid")
+        if _TOPIC_PATTERN.fullmatch(normalized_topic) is None:
+            raise APNSDeliveryError("apnsTopicInvalid")
+        normalized_environment = str(environment or "").strip().lower()
+        if normalized_environment not in _ENVIRONMENTS:
+            raise APNSDeliveryError("apnsEnvironmentInvalid")
+        body = json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(body) > _MAX_APNS_PAYLOAD_BYTES:
+            return APNSProviderReceipt(
+                state="failed",
+                reason_code="apnsPayloadTooLarge",
+                retryable=False,
+            )
+        push_type = _push_type(payload)
+        host = (
+            "api.sandbox.push.apple.com"
+            if normalized_environment == "sandbox"
+            else "api.push.apple.com"
+        )
+        headers = {
+            "authorization": f"bearer {self._provider_token()}",
+            "apns-topic": normalized_topic,
+            "apns-push-type": push_type,
+            "apns-priority": "5" if push_type == "background" else "10",
+            "content-type": "application/json",
+        }
+        try:
+            response = self._http_client().post(
+                f"https://{host}/3/device/{token}",
+                headers=headers,
+                content=body,
+            )
+        except httpx.HTTPError:
+            return APNSProviderReceipt(
+                state="unknown",
+                reason_code="apnsNetworkUnavailable",
+                retryable=True,
+            )
+        provider_receipt_id = str(response.headers.get("apns-id") or "").strip() or None
+        if response.status_code == 200:
+            return APNSProviderReceipt(
+                state="accepted",
+                reason_code="appleAccepted",
+                provider_receipt_id=provider_receipt_id,
+                retryable=False,
+            )
+        reason = _apple_response_reason(response)
+        if reason in {"ExpiredProviderToken", "TooManyProviderTokenUpdates"}:
+            self._invalidate_provider_token()
+        retryable = response.status_code in {429, 500, 503} or reason in {
+            "ExpiredProviderToken",
+            "TooManyProviderTokenUpdates",
+        }
+        return APNSProviderReceipt(
+            state="unknown" if retryable else "failed",
+            reason_code=_apple_reason_code(response.status_code, reason),
+            provider_receipt_id=provider_receipt_id,
+            retryable=retryable,
+        )
+
+    def _provider_token(self) -> str:
+        now = int(self._clock())
+        with self._lock:
+            if self._cached_token is not None and now - self._cached_token_issued_at < 3000:
+                return self._cached_token
+            header = _base64url_json({"alg": "ES256", "kid": self._key_id})
+            claims = _base64url_json({"iss": self._team_id, "iat": now})
+            signing_input = f"{header}.{claims}".encode("ascii")
+            der_signature = self._private_key.sign(
+                signing_input,
+                ec.ECDSA(hashes.SHA256()),
+            )
+            r, s = decode_dss_signature(der_signature)
+            signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+            token = f"{header}.{claims}.{_base64url(signature)}"
+            self._cached_token = token
+            self._cached_token_issued_at = now
+            return token
+
+    def _http_client(self) -> httpx.Client:
+        with self._lock:
+            if self._client is None:
+                self._client = self._client_factory(
+                    http2=True,
+                    timeout=self._timeout_seconds,
+                )
+            return self._client
+
+    def close(self) -> None:
+        with self._lock:
+            client = self._client
+            self._client = None
+        if client is not None:
+            client.close()
+
+    def _invalidate_provider_token(self) -> None:
+        with self._lock:
+            self._cached_token = None
+            self._cached_token_issued_at = 0
 
 
 @dataclass(frozen=True)
@@ -557,6 +753,11 @@ class APNSDeliveryService:
         if not self.configuration.public_descriptor()["enabled"]:
             raise APNSDeliveryError("apnsDeliveryDisabled")
 
+    def close(self) -> None:
+        close = getattr(self.provider, "close", None)
+        if callable(close):
+            close()
+
 
 def _required(value: Any, code: str) -> str:
     normalized = str(value or "").strip()
@@ -569,6 +770,50 @@ def _digest(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
 
 
+def _base64url(value: bytes) -> str:
+    return urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _base64url_json(value: Mapping[str, Any]) -> str:
+    return _base64url(
+        json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+
+
+def _push_type(payload: Mapping[str, Any]) -> str:
+    aps = payload.get("aps")
+    if isinstance(aps, Mapping) and aps.get("content-available") == 1 and "alert" not in aps:
+        return "background"
+    return "alert"
+
+
+def _apple_response_reason(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError):
+        return "Unknown"
+    if not isinstance(payload, Mapping):
+        return "Unknown"
+    reason = str(payload.get("reason") or "").strip()
+    return reason if reason and len(reason) <= 128 else "Unknown"
+
+
+def _apple_reason_code(status_code: int, reason: str) -> str:
+    known = {
+        "BadDeviceToken": "apnsBadDeviceToken",
+        "DeviceTokenNotForTopic": "apnsDeviceTokenNotForTopic",
+        "Unregistered": "apnsDeviceTokenUnregistered",
+        "ExpiredProviderToken": "apnsProviderTokenExpired",
+        "InvalidProviderToken": "apnsProviderTokenInvalid",
+        "TooManyProviderTokenUpdates": "apnsProviderTokenRateLimited",
+        "TooManyRequests": "apnsRateLimited",
+        "PayloadEmpty": "apnsPayloadEmpty",
+        "PayloadTooLarge": "apnsPayloadTooLarge",
+        "TopicDisallowed": "apnsTopicDisallowed",
+    }
+    return known.get(reason, f"apnsRejected{int(status_code)}")
+
+
 __all__ = [
     "APNSConfiguration",
     "APNSDeliveryError",
@@ -578,6 +823,7 @@ __all__ = [
     "APNSDeviceRegistration",
     "APNSRegistrationRepository",
     "APNSProviderReceipt",
+    "AppleTokenAPNSProvider",
     "apns_runtime_descriptor",
     "EphemeralAPNSTokenVault",
     "FakeAPNSProvider",

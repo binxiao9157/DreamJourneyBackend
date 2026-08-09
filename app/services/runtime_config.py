@@ -130,6 +130,11 @@ class RuntimeConfigService:
                     token_encryption_key_configured=bool(
                         self.settings.apns_token_encryption_key
                     ),
+                    team_id=self.settings.apns_team_id,
+                    key_id=self.settings.apns_key_id,
+                    private_key_path=self.settings.apns_private_key_path,
+                    request_timeout_seconds=self.settings.apns_request_timeout_seconds,
+                    external_verified=self.settings.apns_external_verified,
                 )
             )
         except APNSDeliveryError as exc:

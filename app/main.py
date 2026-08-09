@@ -7,7 +7,7 @@ import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from threading import RLock
 from typing import Any, Dict, Mapping, Optional, Tuple
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -32,6 +32,7 @@ from app.services.apns_delivery import (
     APNSConfiguration,
     APNSDeliveryError,
     APNSDeliveryService,
+    AppleTokenAPNSProvider,
     EphemeralAPNSTokenVault,
     FakeAPNSProvider,
 )
@@ -15992,6 +15993,11 @@ def _apns_configuration() -> APNSConfiguration:
         environment=settings.apns_environment,
         max_attempts=settings.apns_max_attempts,
         token_encryption_key_configured=bool(settings.apns_token_encryption_key),
+        team_id=settings.apns_team_id,
+        key_id=settings.apns_key_id,
+        private_key_path=settings.apns_private_key_path,
+        request_timeout_seconds=settings.apns_request_timeout_seconds,
+        external_verified=settings.apns_external_verified,
     )
 
 
@@ -15999,13 +16005,29 @@ def _make_apns_delivery_service() -> Optional[APNSDeliveryService]:
     configuration = _apns_configuration()
     if not configuration.public_descriptor()["enabled"]:
         return None
-    if configuration.provider != "fake":
+    if configuration.provider == "fake":
+        provider = FakeAPNSProvider()
+    elif configuration.provider == "appleToken":
+        private_key_path = Path(str(configuration.private_key_path or "")).expanduser()
+        try:
+            private_key_pem = private_key_path.read_bytes()
+        except OSError as exc:
+            raise APNSDeliveryError("apnsPrivateKeyUnavailable") from exc
+        if not private_key_pem or len(private_key_pem) > 32 * 1024:
+            raise APNSDeliveryError("apnsPrivateKeyInvalid")
+        provider = AppleTokenAPNSProvider(
+            team_id=str(configuration.team_id or ""),
+            key_id=str(configuration.key_id or ""),
+            private_key_pem=private_key_pem,
+            timeout_seconds=configuration.request_timeout_seconds,
+        )
+    else:
         raise APNSDeliveryError("apnsProviderUnsupported")
     if configuration.token_vault_provider == "ephemeral":
         return APNSDeliveryService(
             configuration=configuration,
             token_vault=EphemeralAPNSTokenVault(),
-            provider=FakeAPNSProvider(),
+            provider=provider,
         )
     if configuration.token_vault_provider == "postgresEncrypted":
         if not callable(getattr(store, "_fetchone", None)):
@@ -16018,7 +16040,7 @@ def _make_apns_delivery_service() -> Optional[APNSDeliveryService]:
                 encryption_key=str(settings.apns_token_encryption_key or ""),
                 key_version=settings.apns_token_encryption_key_version,
             ),
-            provider=FakeAPNSProvider(),
+            provider=provider,
             repository=persistence,
             registration_repository=persistence,
         )

@@ -318,6 +318,11 @@ class Settings:
     apns_max_attempts: int = 3
     apns_token_encryption_key: Optional[str] = None
     apns_token_encryption_key_version: str = "v1"
+    apns_team_id: Optional[str] = None
+    apns_key_id: Optional[str] = None
+    apns_private_key_path: Optional[str] = None
+    apns_request_timeout_seconds: int = 15
+    apns_external_verified: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -881,6 +886,17 @@ class Settings:
                 "APNS_TOKEN_ENCRYPTION_KEY_VERSION",
                 cls.apns_token_encryption_key_version,
             ) or cls.apns_token_encryption_key_version,
+            apns_team_id=_env("APNS_TEAM_ID"),
+            apns_key_id=_env("APNS_KEY_ID"),
+            apns_private_key_path=_env("APNS_PRIVATE_KEY_PATH"),
+            apns_request_timeout_seconds=_env_int(
+                "APNS_REQUEST_TIMEOUT_SECONDS",
+                cls.apns_request_timeout_seconds,
+            ),
+            apns_external_verified=_env_bool(
+                "APNS_EXTERNAL_VERIFIED",
+                cls.apns_external_verified,
+            ),
         )
 
 

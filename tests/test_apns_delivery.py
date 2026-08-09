@@ -1,10 +1,17 @@
+from base64 import urlsafe_b64decode
+import json
 import unittest
+
+import httpx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from app.services.apns_delivery import (
     APNSConfiguration,
     APNSDeliveryError,
     APNSDeliveryService,
     APNSProviderReceipt,
+    AppleTokenAPNSProvider,
     EphemeralAPNSTokenVault,
     FakeAPNSProvider,
 )
@@ -214,6 +221,126 @@ class APNSDeliveryTests(unittest.TestCase):
         ).public_config()["notifications"]["apns"]
         self.assertFalse(invalid["enabled"])
         self.assertEqual(invalid["reason"], "apnsTokenVaultRequired")
+
+    def test_apple_token_provider_uses_http2_jwt_and_minimized_receipt(self):
+        requests = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                headers={"apns-id": "9b1d3511-2fd4-40a7-acc5-08e767881cb4"},
+            )
+
+        provider = AppleTokenAPNSProvider(
+            team_id="TEAMID1234",
+            key_id="KEYID12345",
+            private_key_pem=self._private_key_pem(),
+            client_factory=lambda **kwargs: httpx.Client(
+                transport=httpx.MockTransport(handler),
+                **kwargs,
+            ),
+            clock=lambda: 1_786_257_600,
+        )
+        self.addCleanup(provider.close)
+        receipt = provider.send(
+            device_token="a1" * 32,
+            topic="com.yxj.dreamjourney.app",
+            environment="sandbox",
+            payload={"aps": {"content-available": 1}, "route": "mailbox"},
+            attempt=1,
+        )
+
+        self.assertEqual(receipt.state, "accepted")
+        self.assertEqual(receipt.reason_code, "appleAccepted")
+        self.assertEqual(len(requests), 1)
+        request = requests[0]
+        self.assertEqual(
+            str(request.url),
+            f"https://api.sandbox.push.apple.com/3/device/{'a1' * 32}",
+        )
+        self.assertEqual(request.headers["apns-topic"], "com.yxj.dreamjourney.app")
+        self.assertEqual(request.headers["apns-push-type"], "background")
+        self.assertEqual(request.headers["apns-priority"], "5")
+        token = request.headers["authorization"].removeprefix("bearer ")
+        header, claims, signature = token.split(".")
+        self.assertEqual(self._decode_segment(header)["kid"], "KEYID12345")
+        self.assertEqual(self._decode_segment(claims)["iss"], "TEAMID1234")
+        self.assertEqual(len(urlsafe_b64decode(signature + "==")), 64)
+        self.assertNotIn("a1" * 32, str(receipt))
+
+    def test_apple_token_provider_classifies_terminal_and_retryable_failures(self):
+        responses = iter(
+            [
+                httpx.Response(410, json={"reason": "Unregistered"}),
+                httpx.Response(503, json={"reason": "ServiceUnavailable"}),
+            ]
+        )
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return next(responses)
+
+        provider = AppleTokenAPNSProvider(
+            team_id="TEAMID1234",
+            key_id="KEYID12345",
+            private_key_pem=self._private_key_pem(),
+            client_factory=lambda **kwargs: httpx.Client(
+                transport=httpx.MockTransport(handler),
+                **kwargs,
+            ),
+        )
+        self.addCleanup(provider.close)
+        common = {
+            "device_token": "b2" * 32,
+            "topic": "com.yxj.dreamjourney.app",
+            "environment": "production",
+            "payload": {"aps": {"alert": "到期提醒"}},
+        }
+        terminal = provider.send(**common, attempt=1)
+        retryable = provider.send(**common, attempt=2)
+
+        self.assertEqual(terminal.state, "failed")
+        self.assertEqual(terminal.reason_code, "apnsDeviceTokenUnregistered")
+        self.assertFalse(terminal.retryable)
+        self.assertEqual(retryable.state, "unknown")
+        self.assertEqual(retryable.reason_code, "apnsRejected503")
+        self.assertTrue(retryable.retryable)
+
+    def test_apple_token_configuration_requires_durable_secret_boundaries(self):
+        required = {
+            "provider": "appleToken",
+            "token_vault_provider": "postgresEncrypted",
+            "topic": "com.yxj.dreamjourney.app",
+            "token_encryption_key_configured": True,
+            "team_id": "TEAMID1234",
+            "key_id": "KEYID12345",
+            "private_key_path": "/run/secrets/apns-auth-key.p8",
+        }
+        configured = APNSConfiguration(**required)
+        descriptor = configured.public_descriptor()
+        self.assertTrue(descriptor["enabled"])
+        self.assertTrue(descriptor["durableOutbox"])
+        self.assertFalse(descriptor["externalVerified"])
+        self.assertEqual(descriptor["reason"], "apnsExternalVerificationRequired")
+        self.assertNotIn("TEAMID1234", str(descriptor))
+        self.assertNotIn("KEYID12345", str(descriptor))
+
+        with self.assertRaises(APNSDeliveryError) as raised:
+            APNSConfiguration(**{**required, "token_vault_provider": "ephemeral"})
+        self.assertEqual(raised.exception.code, "apnsDurableTokenVaultRequired")
+
+    @staticmethod
+    def _private_key_pem() -> bytes:
+        return ec.generate_private_key(ec.SECP256R1()).private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+
+    @staticmethod
+    def _decode_segment(value: str):
+        padding = "=" * (-len(value) % 4)
+        return json.loads(urlsafe_b64decode(value + padding))
 
 
 if __name__ == "__main__":
