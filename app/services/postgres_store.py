@@ -2715,11 +2715,12 @@ class PostgresStore:
             """,
             (str(updated_at), str(job_id), str(owner_user_id)),
         )
-        self._execute(
+        self._fetchone(
             """
             UPDATE data_export_download_credentials
             SET status = 'revoked'
             WHERE job_id = %s AND owner_user_id = %s AND status = 'active'
+            RETURNING job_id
             """,
             (str(job_id), str(owner_user_id)),
         )

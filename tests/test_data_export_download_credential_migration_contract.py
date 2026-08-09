@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SQL_PATH = ROOT / "db/migrations/0086_data_export_download_credentials.sql"
 MANIFEST_PATH = ROOT / "db/migrations/0086_data_export_download_credentials.json"
+POSTGRES_STORE_PATH = ROOT / "app/services/postgres_store.py"
 
 
 class DataExportDownloadCredentialMigrationContractTests(unittest.TestCase):
@@ -23,6 +24,13 @@ class DataExportDownloadCredentialMigrationContractTests(unittest.TestCase):
         self.assertIn("REVOKE ALL ON TABLE data_export_download_credentials FROM PUBLIC", sql)
         self.assertNotIn("download_token", sql)
         self.assertNotIn("token TEXT", sql)
+
+    def test_postgres_store_uses_supported_atomic_statement_path(self) -> None:
+        source = POSTGRES_STORE_PATH.read_text(encoding="utf-8")
+
+        self.assertNotIn("self._execute(", source)
+        self.assertIn("SET status = 'revoked'", source)
+        self.assertIn("RETURNING job_id", source)
 
 
 if __name__ == "__main__":
