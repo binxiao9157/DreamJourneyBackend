@@ -28,13 +28,21 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 import app.main as main_module
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
+from app.async_effects.owner_truth_candidate_extraction_worker import (
+    OwnerTruthCandidateExtractionWorkerRuntime,
+)
+from app.domain.owner_truth.candidate_decisions import (
+    CandidateReviewAction,
+    OwnerTruthCandidateReviewCommand,
+)
 from app.domain.owner_truth.source_commands import (
     CreateTextSourceCommand,
     OwnerTruthCommandContext,
 )
 from app.services.delegated_access import DelegatedAccessService
+from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.owner_truth_source import OwnerTruthSourceCommandService
 from app.services.postgres_store import PostgresStore
 
@@ -363,6 +371,87 @@ def main() -> None:
             "persisted source lost its reviewed contribution boundary",
         )
 
+        candidate_worker = OwnerTruthCandidateExtractionWorkerRuntime(
+            settings=Settings(
+                async_effect_v1_enabled=True,
+                async_effect_worker_enabled=True,
+                owner_truth_candidate_extraction_worker_enabled=True,
+            ),
+            store=store,
+            worker_id="formal-family-candidate-worker",
+            retry_seconds=1,
+        )
+        candidate_result = candidate_worker.run_once()
+        require(
+            candidate_result.get("status") == "completed"
+            and candidate_result.get("candidateCount") == 1,
+            "accepted family Source must produce one reviewable Candidate",
+        )
+        pending_handoff = client.get(
+            f"/v2/vaults/{vault_id}/family-contribution/submissions",
+            headers=owner_policy_headers,
+        )
+        pending_submission = next(
+            item
+            for item in pending_handoff.json().get("submissions", [])
+            if item.get("submissionId") == submission_id
+        )
+        require(
+            pending_submission.get("handoff", {}).get("status")
+            == "candidatePendingReview",
+            "family handoff must expose the Owner review state",
+        )
+
+        candidate_context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        candidate_service = OwnerTruthCandidateReviewService(store)
+        pending_candidates = candidate_service.list_pending(context=candidate_context)
+        require(
+            len(pending_candidates) == 1
+            and pending_candidates[0].source_id == source_id,
+            "family Candidate must remain bound to the reviewed Source",
+        )
+        candidate = pending_candidates[0]
+        activation = candidate_service.decide_and_activate(
+            command=OwnerTruthCandidateReviewCommand(
+                command_id="formal-family-candidate-accept-001",
+                candidate_id=candidate.candidate_id,
+                expected_candidate_version=candidate.candidate_row_version,
+                action=CandidateReviewAction.ACCEPT,
+                corrected_value=None,
+                corrected_value_schema_version=candidate.content_schema_version,
+                reason_code="ownerReviewedFamilyContribution",
+            ),
+            context=candidate_context,
+        )
+        require(
+            activation.memory_activation.outcome == "created"
+            and bool(activation.memory_activation.memory_id)
+            and bool(activation.memory_activation.memory_version_id),
+            "Owner-confirmed family Candidate must activate one MemoryVersion",
+        )
+        current_handoff = client.get(
+            f"/v2/vaults/{vault_id}/family-contribution/submissions",
+            headers=owner_policy_headers,
+        )
+        current_submission = next(
+            item
+            for item in current_handoff.json().get("submissions", [])
+            if item.get("submissionId") == submission_id
+        )
+        current_contract = current_submission.get("handoff", {})
+        require(
+            current_contract.get("status") == "memoryCurrent"
+            and current_contract.get("memoryId")
+            == activation.memory_activation.memory_id
+            and current_contract.get("memoryVersionId")
+            == activation.memory_activation.memory_version_id,
+            "family handoff must resolve to the activated authoritative Memory",
+        )
+
         outsider = client.post(
             f"{formal_path}/{grant['grantId']}/submissions",
             headers=other_headers,
@@ -431,6 +520,8 @@ def main() -> None:
                     "formalGrant": True,
                     "ownerReviewRequired": True,
                     "acceptedSourceOnly": True,
+                    "candidateReviewRequired": True,
+                    "memoryActivatedAfterOwnerConfirmation": True,
                     "submissionContentHiddenFromContributor": True,
                     "outsiderDenied": True,
                     "privateReadDenied": True,
