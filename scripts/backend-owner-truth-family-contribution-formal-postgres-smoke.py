@@ -283,38 +283,94 @@ def main() -> None:
             "stored evidence must not contain bearer/session material",
         )
 
-        source_id = str(uuid.uuid4())
+        submission_id = str(uuid.uuid4())
         submitted = client.post(
-            f"{formal_path}/{grant['grantId']}/sources",
+            f"{formal_path}/{grant['grantId']}/submissions",
             headers=member_headers,
             json={
+                "commandId": "formal-family-postgres-submit-001",
+                "submissionId": submission_id,
                 "expectedGrantVersion": grant["rowVersion"],
-                "sourceCommandId": "formal-family-postgres-source-001",
-                "sourceId": source_id,
+                "materialKind": "text",
                 "text": "由已接受家人提交的隔离验证静态材料。",
             },
         )
-        require(submitted.status_code == 201, f"formal source submission failed: {submitted.text}")
+        require(submitted.status_code == 202, f"formal review submission failed: {submitted.text}")
+        require(
+            submitted.json().get("submission", {}).get("status") == "pendingReview",
+            "family material must remain pending until Owner review",
+        )
         require(
             submitted.json().get("candidateExtraction") == {"status": "notRequested"},
-            "family contributor must not trigger candidate extraction",
+            "family contributor must not trigger extraction before review",
         )
-        require("隔离验证静态材料" not in submitted.text, "source receipt leaked content")
+        require("隔离验证静态材料" not in submitted.text, "submission receipt leaked content")
+
+        review_list = client.get(
+            f"/v2/vaults/{vault_id}/family-contribution/submissions",
+            headers=owner_policy_headers,
+        )
+        require(review_list.status_code == 200, f"Owner review list failed: {review_list.text}")
+        owner_submission = next(
+            item
+            for item in review_list.json().get("submissions", [])
+            if item.get("submissionId") == submission_id
+        )
+        require(
+            "隔离验证静态材料" in str(owner_submission.get("text") or ""),
+            "Owner review list must include the submitted text",
+        )
+        contributor_list = client.get(
+            "/v2/family-contribution/submissions",
+            headers=member_headers,
+        )
+        require(
+            contributor_list.status_code == 200,
+            f"contributor submission list failed: {contributor_list.text}",
+        )
+        require(
+            "隔离验证静态材料" not in contributor_list.text,
+            "contributor status list must not echo submitted material",
+        )
+
+        accepted = client.post(
+            f"/v2/vaults/{vault_id}/family-contribution/submissions/{submission_id}/decisions",
+            headers=owner_policy_headers,
+            json={
+                "commandId": "formal-family-postgres-review-001",
+                "expectedVersion": 1,
+                "decision": "accepted",
+                "reason": "ownerAccepted",
+            },
+        )
+        require(accepted.status_code == 200, f"Owner review failed: {accepted.text}")
+        accepted_payload = accepted.json()
+        require(
+            accepted_payload.get("submission", {}).get("status") == "accepted",
+            "accepted review must persist the terminal state",
+        )
+        require(
+            accepted_payload.get("candidateExtraction") == {"status": "requested"},
+            "only Owner acceptance may request Candidate extraction",
+        )
+        source_id = str(accepted_payload.get("source", {}).get("sourceId") or "")
+        require(bool(source_id), "accepted text contribution must create a Source")
         metadata = persisted_source_metadata(test_dsn, vault_id=vault_id, source_id=source_id)
         require(
-            metadata.get("origin") == "familyContributionGrant"
-            and metadata.get("candidateExtraction") == "defaultOff"
-            and metadata.get("familyContributionAdmissionMode") == "closedPilot",
-            "persisted source lost its narrow contribution boundary",
+            metadata.get("origin") == "familyContributionReview"
+            and metadata.get("ownerReviewed") is True
+            and metadata.get("familyContributionSubmissionId") == submission_id,
+            "persisted source lost its reviewed contribution boundary",
         )
 
         outsider = client.post(
-            f"{formal_path}/{grant['grantId']}/sources",
+            f"{formal_path}/{grant['grantId']}/submissions",
             headers=other_headers,
             json={
+                "commandId": "formal-family-postgres-submit-outsider",
+                "submissionId": str(uuid.uuid4()),
                 "expectedGrantVersion": grant["rowVersion"],
-                "sourceCommandId": "formal-family-postgres-source-outsider",
-                "sourceId": str(uuid.uuid4()),
+                "materialKind": "text",
                 "text": "Outsider must never contribute.",
             },
         )
@@ -337,17 +393,35 @@ def main() -> None:
         )
         require(revoked.status_code == 200, f"formal revoke failed: {revoked.text}")
         replay = client.post(
-            f"{formal_path}/{grant['grantId']}/sources",
+            f"{formal_path}/{grant['grantId']}/submissions",
             headers=member_headers,
             json={
+                "commandId": "formal-family-postgres-submit-after-revoke",
+                "submissionId": str(uuid.uuid4()),
                 "expectedGrantVersion": 1,
-                "sourceCommandId": "formal-family-postgres-source-after-revoke",
-                "sourceId": str(uuid.uuid4()),
+                "materialKind": "text",
                 "text": "Revoked contribution must not be admitted.",
             },
         )
         require(replay.status_code == 409, "revoked grant must block submission")
         require(route_code(replay) == "familyContributionGrantInactive", "revoke denial changed")
+        withdrawn = client.get(
+            "/v2/family-contribution/submissions",
+            headers=member_headers,
+        )
+        withdrawn_submission = next(
+            item
+            for item in withdrawn.json().get("submissions", [])
+            if item.get("submissionId") == submission_id
+        )
+        require(
+            withdrawn_submission.get("status") == "withdrawn",
+            "revocation must immediately withdraw prior contribution status",
+        )
+        require(
+            "隔离验证静态材料" not in withdrawn.text,
+            "withdrawn contributor projection must remain material-free",
+        )
 
         print(
             json.dumps(
@@ -355,11 +429,12 @@ def main() -> None:
                     "schemaHead": applied.get("appliedHead"),
                     "defaultClosed": True,
                     "formalGrant": True,
-                    "staticSourceOnly": True,
-                    "sourceContentHidden": True,
+                    "ownerReviewRequired": True,
+                    "acceptedSourceOnly": True,
+                    "submissionContentHiddenFromContributor": True,
                     "outsiderDenied": True,
                     "privateReadDenied": True,
-                    "revocationEnforced": True,
+                    "revocationWithdrawsContribution": True,
                     "ownerId": owner_id,
                     "memberId": member_id,
                     "outsiderId": other_id,
