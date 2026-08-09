@@ -162,6 +162,10 @@ class OwnerTruthContextAuthorityTests(unittest.TestCase):
         self.assertEqual(packet["contextVersion"], "echo-context-v4-owner")
         self.assertFalse(packet["contextAuthority"]["legacyContextRead"])
         self.assertEqual(packet["contextAuthority"]["mode"], "ownerTruthConfirmedProjection")
+        self.assertEqual(packet["contextAuthority"]["cohort"], "closedPilotAdultSelf")
+        self.assertEqual(packet["contextAuthority"]["fallbackPolicy"], "failClosedNoLegacy")
+        self.assertFalse(packet["contextAuthority"]["mixedAuthorityAllowed"])
+        self.assertEqual(len(packet["contextAuthority"]["authorityGeneration"]), 64)
         self.assertEqual(packet["memory"]["archiveItems"], [])
         self.assertEqual(packet["memory"]["kbFacts"], [])
         self.assertEqual(len(packet["selectedContext"]), 1)
@@ -193,6 +197,8 @@ class OwnerTruthContextAuthorityTests(unittest.TestCase):
         self.assertEqual(packet["generationContext"]["text"], "")
         self.assertIn("owner_truth_context_unavailable_no_personal_memory", packet["fallbacks"])
         self.assertFalse(packet["contextAuthority"]["legacyContextRead"])
+        self.assertEqual(packet["contextAuthority"]["fallbackPolicy"], "failClosedNoLegacy")
+        self.assertEqual(len(packet["contextAuthority"]["authorityGeneration"]), 64)
 
     def test_builder_rejects_non_self_persona_for_owner_truth_authority(self) -> None:
         materialization = self.authority.materialize(context=self.context, payload={"intent": "echo_chat"})

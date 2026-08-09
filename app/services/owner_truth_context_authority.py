@@ -33,6 +33,9 @@ from app.services.owner_truth_context_shadow_build import (
 
 OWNER_TRUTH_CONTEXT_AUTHORITY_MODE = "ownerTruthConfirmedProjection"
 OWNER_TRUTH_CONTEXT_AUTHORITY_VERSION = "echo-context-v4-owner"
+OWNER_TRUTH_CONTEXT_AUTHORITY_SCHEMA_VERSION = "owner-truth-context-authority-v1"
+OWNER_TRUTH_CONTEXT_AUTHORITY_COHORT = "closedPilotAdultSelf"
+OWNER_TRUTH_CONTEXT_FALLBACK_POLICY = "failClosedNoLegacy"
 _FALLBACK_PROJECTION_UNAVAILABLE = "owner_truth_context_unavailable_no_personal_memory"
 
 
@@ -99,13 +102,49 @@ class OwnerTruthContextAuthorityService:
             "intent": _text(payload.get("intent"), "echo_chat"),
             "query": _text(payload.get("query")),
         }
-        return OwnerTruthContextMaterializationService(
+        materialization = OwnerTruthContextMaterializationService(
             self._store,
             enabled=self._enabled,
         ).build(
             context=context,
             payload=materialization_payload,
         )
+        return self._bind_authority_contract(materialization=materialization, context=context)
+
+    @staticmethod
+    def _bind_authority_contract(
+        *,
+        materialization: Mapping[str, Any],
+        context: OwnerTruthCommandContext,
+    ) -> dict[str, Any]:
+        bound = deepcopy(dict(materialization))
+        authority = deepcopy(dict(bound.get("authority") or {}))
+        generation_material = {
+            "authorityEpoch": authority.get("authorityEpoch"),
+            "materializationHash": bound.get("materializationHash"),
+            "ownerSubjectId": context.owner_subject_id,
+            "projectionCheckpoint": authority.get("projectionCheckpoint"),
+            "vaultId": context.vault_id,
+        }
+        authority.update(
+            {
+                "schemaVersion": OWNER_TRUTH_CONTEXT_AUTHORITY_SCHEMA_VERSION,
+                "mode": OWNER_TRUTH_CONTEXT_AUTHORITY_MODE,
+                "cohort": OWNER_TRUTH_CONTEXT_AUTHORITY_COHORT,
+                "fallbackPolicy": OWNER_TRUTH_CONTEXT_FALLBACK_POLICY,
+                "mixedAuthorityAllowed": False,
+                "authorityGeneration": sha256(
+                    json.dumps(
+                        generation_material,
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+        bound["authority"] = authority
+        return bound
 
     @staticmethod
     def _empty_materialization(
@@ -147,7 +186,8 @@ class OwnerTruthContextAuthorityService:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        return {
+        return OwnerTruthContextAuthorityService._bind_authority_contract(
+            materialization={
             "schemaVersion": OWNER_TRUTH_CONTEXT_MATERIALIZATION_SCHEMA_VERSION,
             "contextVersion": OWNER_TRUTH_CONTEXT_MATERIALIZATION_VERSION,
             "policyVersion": OWNER_TRUTH_CONTEXT_MATERIALIZATION_POLICY_VERSION,
@@ -173,11 +213,16 @@ class OwnerTruthContextAuthorityService:
                 "generationContextTruncated": False,
                 "fallbackCount": len(fallbacks),
             },
-        }
+            },
+            context=context,
+        )
 
 
 __all__ = [
     "OWNER_TRUTH_CONTEXT_AUTHORITY_MODE",
+    "OWNER_TRUTH_CONTEXT_AUTHORITY_SCHEMA_VERSION",
+    "OWNER_TRUTH_CONTEXT_AUTHORITY_COHORT",
+    "OWNER_TRUTH_CONTEXT_FALLBACK_POLICY",
     "OWNER_TRUTH_CONTEXT_AUTHORITY_VERSION",
     "OwnerTruthContextAuthorityService",
 ]

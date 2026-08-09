@@ -180,6 +180,10 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         packet = response.json()["contextPacket"]
         self.assertEqual(packet["contextVersion"], "echo-context-v4-owner")
         self.assertEqual(packet["contextAuthority"]["mode"], "ownerTruthConfirmedProjection")
+        self.assertEqual(packet["contextAuthority"]["cohort"], "closedPilotAdultSelf")
+        self.assertEqual(packet["contextAuthority"]["fallbackPolicy"], "failClosedNoLegacy")
+        self.assertFalse(packet["contextAuthority"]["mixedAuthorityAllowed"])
+        self.assertEqual(len(packet["contextAuthority"]["authorityGeneration"]), 64)
         self.assertFalse(packet["contextAuthority"]["legacyContextRead"])
         self.assertEqual(packet["selectedContext"][0]["citation"]["sourceId"], candidate.source_id)
         self.assertNotIn("X-DreamJourney-QA-Owner-Truth", headers)

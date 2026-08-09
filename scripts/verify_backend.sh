@@ -383,6 +383,7 @@ test -f docs/backend/2026-07-29-owner-truth-c10-retirement-candidate-g0.md
 test -f app/domain/owner_truth/migration_removal_authorization_shadow.py
 test -f tests/test_owner_truth_migration_removal_authorization_shadow.py
 test -f scripts/run-backend-owner-truth-migration-removal-authorization-g0-gate.sh
+test -f scripts/run-backend-owner-truth-c2-c3-authority-gate.sh
 test -f docs/backend/2026-07-29-owner-truth-c11-removal-authorization-g0.md
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.sql
 test -f db/migrations/0024_echo_delayed_reply_answer_completion.json

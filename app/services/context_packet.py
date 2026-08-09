@@ -423,7 +423,12 @@ class ContextPacketBuilder:
             ranking_trace=ranking_trace,
         )
         context_authority = {
+            "schemaVersion": str(authority.get("schemaVersion") or "owner-truth-context-authority-v1"),
             "mode": "ownerTruthConfirmedProjection",
+            "cohort": str(authority.get("cohort") or "closedPilotAdultSelf"),
+            "fallbackPolicy": str(authority.get("fallbackPolicy") or "failClosedNoLegacy"),
+            "mixedAuthorityAllowed": bool(authority.get("mixedAuthorityAllowed", False)),
+            "authorityGeneration": str(authority.get("authorityGeneration") or ""),
             "state": str(materialization.get("state") or authority.get("state") or "unavailable"),
             "source": str(authority["source"]),
             "vaultId": user_id,
