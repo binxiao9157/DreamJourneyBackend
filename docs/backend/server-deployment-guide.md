@@ -1,5 +1,7 @@
 # DreamJourney 后端服务器部署流程
 
+> 历史初始化文档：仅用于理解首次建机背景。当前日常部署、账号边界、回滚和恢复统一以 `docs/backend/2026-08-09-deployment-account-recovery-runbook.md` 为准。
+
 本文档基于当前云服务器交接信息整理，用于把 `DreamJourneyBackend` 部署到已有服务器上，并尽量不影响当前已经运行的 `miao` 服务。
 
 参考信息来源：

@@ -171,6 +171,8 @@ BACKEND_BASE_URL=https://dreamjourney-api.liftora.cn \
 
 ## PostgreSQL backups
 
+生产部署、账号边界、回滚和恢复的当前唯一入口：`docs/backend/2026-08-09-deployment-account-recovery-runbook.md`。
+
 Compose volume 不是备份。`scripts/db/backup_postgres.sh` 生成加密 custom-format artifact，并在成功后写 value-free manifest；`scripts/db/verify_backup_manifest.py` 校验 schema head、checksum、size 和有效期。systemd service/timer、失败 alert receipt、audit-only retention 和服务器安装步骤见 `docs/backend/2026-07-16-postgres-backup-operations.md`。
 
 本地不访问真实数据库的合同 smoke：

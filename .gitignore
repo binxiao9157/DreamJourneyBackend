@@ -1,4 +1,6 @@
 .env
+.env.backup*
+.env.bak*
 .venv/
 __pycache__/
 *.py[cod]
