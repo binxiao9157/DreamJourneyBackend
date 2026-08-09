@@ -172,6 +172,16 @@ class Settings:
     owner_truth_media_audio_asr_api_key: Optional[str] = None
     owner_truth_media_external_processor_timeout_seconds: float = 30.0
     owner_truth_media_external_processor_max_payload_bytes: int = 10 * 1024 * 1024
+    # TXT/PDF/DOCX extraction runs in a separate process with independent
+    # timeout and resource ceilings. These limits never enable media capture.
+    owner_truth_document_parser_timeout_seconds: int = 15
+    owner_truth_document_parser_max_input_bytes: int = 20 * 1024 * 1024
+    owner_truth_document_parser_max_memory_bytes: int = 512 * 1024 * 1024
+    owner_truth_document_parser_max_cpu_seconds: int = 10
+    owner_truth_document_parser_max_pdf_pages: int = 100
+    owner_truth_document_parser_max_docx_entries: int = 2_048
+    owner_truth_document_parser_max_docx_uncompressed_bytes: int = 20 * 1024 * 1024
+    owner_truth_document_parser_max_docx_compression_ratio: int = 200
     delegated_access_contract_api_enabled: bool = False
     # Publication is an M2 capability.  The first owner-authority writer is
     # intentionally QA-only until visitor grants and revocation propagation
@@ -604,6 +614,86 @@ class Settings:
                     _env_int(
                         "OWNER_TRUTH_MEDIA_EXTERNAL_PROCESSOR_MAX_PAYLOAD_BYTES",
                         cls.owner_truth_media_external_processor_max_payload_bytes,
+                    ),
+                ),
+            ),
+            owner_truth_document_parser_timeout_seconds=max(
+                1,
+                min(
+                    120,
+                    _env_int(
+                        "OWNER_TRUTH_DOCUMENT_PARSER_TIMEOUT_SECONDS",
+                        cls.owner_truth_document_parser_timeout_seconds,
+                    ),
+                ),
+            ),
+            owner_truth_document_parser_max_input_bytes=max(
+                1,
+                min(
+                    50 * 1024 * 1024,
+                    _env_int(
+                        "OWNER_TRUTH_DOCUMENT_PARSER_MAX_INPUT_BYTES",
+                        cls.owner_truth_document_parser_max_input_bytes,
+                    ),
+                ),
+            ),
+            owner_truth_document_parser_max_memory_bytes=max(
+                64 * 1024 * 1024,
+                min(
+                    2 * 1024 * 1024 * 1024,
+                    _env_int(
+                        "OWNER_TRUTH_DOCUMENT_PARSER_MAX_MEMORY_BYTES",
+                        cls.owner_truth_document_parser_max_memory_bytes,
+                    ),
+                ),
+            ),
+            owner_truth_document_parser_max_cpu_seconds=max(
+                1,
+                min(
+                    60,
+                    _env_int(
+                        "OWNER_TRUTH_DOCUMENT_PARSER_MAX_CPU_SECONDS",
+                        cls.owner_truth_document_parser_max_cpu_seconds,
+                    ),
+                ),
+            ),
+            owner_truth_document_parser_max_pdf_pages=max(
+                1,
+                min(
+                    1_000,
+                    _env_int(
+                        "OWNER_TRUTH_DOCUMENT_PARSER_MAX_PDF_PAGES",
+                        cls.owner_truth_document_parser_max_pdf_pages,
+                    ),
+                ),
+            ),
+            owner_truth_document_parser_max_docx_entries=max(
+                1,
+                min(
+                    10_000,
+                    _env_int(
+                        "OWNER_TRUTH_DOCUMENT_PARSER_MAX_DOCX_ENTRIES",
+                        cls.owner_truth_document_parser_max_docx_entries,
+                    ),
+                ),
+            ),
+            owner_truth_document_parser_max_docx_uncompressed_bytes=max(
+                1,
+                min(
+                    100 * 1024 * 1024,
+                    _env_int(
+                        "OWNER_TRUTH_DOCUMENT_PARSER_MAX_DOCX_UNCOMPRESSED_BYTES",
+                        cls.owner_truth_document_parser_max_docx_uncompressed_bytes,
+                    ),
+                ),
+            ),
+            owner_truth_document_parser_max_docx_compression_ratio=max(
+                1,
+                min(
+                    1_000,
+                    _env_int(
+                        "OWNER_TRUTH_DOCUMENT_PARSER_MAX_DOCX_COMPRESSION_RATIO",
+                        cls.owner_truth_document_parser_max_docx_compression_ratio,
                     ),
                 ),
             ),

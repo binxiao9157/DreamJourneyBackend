@@ -807,6 +807,8 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
         )
 
         self.assertEqual(adapter.read(storage_key="vault-a/object-a.bin"), b"private-bytes")
+        with self.assertRaises(OwnerTruthMediaCaptureUnavailable):
+            adapter.read(storage_key="vault-a/object-a.bin", max_bytes=4)
         self.assertEqual(client.put_requests[0]["Bucket"], "dreamjourney-private-media")
         self.assertEqual(client.put_requests[0]["Key"], "owner-truth/v1/vault-a/object-a.bin")
         self.assertEqual(client.put_requests[0]["ContentType"], "text/plain")
@@ -985,8 +987,8 @@ class _FakeS3Body:
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
 
-    def read(self) -> bytes:
-        return self._payload
+    def read(self, size: int = -1) -> bytes:
+        return self._payload if size < 0 else self._payload[:size]
 
 
 class _FakeS3ClientError(Exception):

@@ -16,6 +16,7 @@ cd "$ROOT_DIR"
 PYTHONPATH=. "$PYTHON_BIN" -m unittest \
   tests.test_owner_truth_media_capture_api \
   tests.test_owner_truth_media_content_safety_runtime \
+  tests.test_owner_truth_document_parser_runtime \
   tests.test_owner_truth_media_processing_worker \
   tests.test_owner_truth_media_deletion_worker \
   tests.test_owner_truth_candidate_extraction_worker \
@@ -39,6 +40,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
 PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/core/config.py \
   app/services/owner_truth_media_source_object.py \
+  app/services/owner_truth_document_parser_runtime.py \
   app/services/provider_runtime.py \
   app/services/owner_truth_media_processing.py \
   app/services/owner_truth_media_deletion.py \

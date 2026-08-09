@@ -13,9 +13,15 @@ from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
 import json
+import os
+from pathlib import Path, PurePosixPath
+import subprocess
+import sys
+import tempfile
 from typing import Any, Callable, Mapping, Optional, Protocol
 from urllib.parse import urlparse
 from uuid import NAMESPACE_URL, UUID, uuid5
+import zipfile
 
 import httpx
 
@@ -34,6 +40,21 @@ OWNER_TRUTH_MEDIA_PROCESSING_JOB_TYPE = "ownerTruth.mediaSourceObject.process"
 OWNER_TRUTH_MEDIA_PROCESSING_CONSUMER = "ownerTruth.mediaProcessing"
 OWNER_TRUTH_MEDIA_PROCESSING_MAX_ATTEMPTS = 3
 _MAX_EXTRACTED_TEXT_CHARACTERS = 20_000
+_DOCUMENT_CONTENT_TYPES = frozenset(
+    {
+        "text/plain",
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+)
+_DEFAULT_DOCUMENT_MAX_INPUT_BYTES = 20 * 1024 * 1024
+_DEFAULT_DOCUMENT_PARSER_TIMEOUT_SECONDS = 15
+_DEFAULT_DOCUMENT_PARSER_MAX_MEMORY_BYTES = 512 * 1024 * 1024
+_DEFAULT_DOCUMENT_PARSER_MAX_CPU_SECONDS = 10
+_DEFAULT_PDF_MAX_PAGES = 100
+_DEFAULT_DOCX_MAX_ENTRIES = 2_048
+_DEFAULT_DOCX_MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
+_DEFAULT_DOCX_MAX_COMPRESSION_RATIO = 200
 
 
 class OwnerTruthMediaProcessingError(RuntimeError):
@@ -97,6 +118,7 @@ class MediaTextExtraction:
     processor_version: str
     extracted_text: str
     truncated: bool = False
+    fragment_evidence: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "processor_id", _opaque_identifier(self.processor_id, field="processor_id"))
@@ -112,10 +134,19 @@ class MediaTextExtraction:
             normalized = normalized[:_MAX_EXTRACTED_TEXT_CHARACTERS]
             object.__setattr__(self, "truncated", True)
         object.__setattr__(self, "extracted_text", normalized)
+        object.__setattr__(
+            self,
+            "fragment_evidence",
+            _normalize_fragment_evidence(self.fragment_evidence),
+        )
 
     @property
     def extracted_text_sha256(self) -> str:
         return _hash(self.extracted_text)
+
+    @property
+    def fragment_evidence_hash(self) -> str:
+        return _hash(_canonical_json({"fragments": list(self.fragment_evidence)}))
 
     def result_hash(self, *, source_object: Mapping[str, Any]) -> str:
         return _hash(
@@ -128,6 +159,7 @@ class MediaTextExtraction:
                     "schemaVersion": OWNER_TRUTH_MEDIA_PROCESSING_SCHEMA_VERSION,
                     "sourceObjectId": str(source_object["sourceObjectId"]),
                     "truncated": self.truncated,
+                    "fragmentEvidenceHash": self.fragment_evidence_hash,
                 }
             )
         )
@@ -139,10 +171,29 @@ class OwnerTruthMediaProcessor(Protocol):
 
 
 class LocalDocumentTextProcessor:
-    """Parses private text, PDF and DOCX content without a network provider."""
+    """Pure parser used only inside the isolated document runtime."""
 
     processor_id = "localDocumentText"
-    processor_version = "v1"
+    processor_version = "v2"
+
+    def __init__(
+        self,
+        *,
+        max_pdf_pages: int = _DEFAULT_PDF_MAX_PAGES,
+        max_docx_entries: int = _DEFAULT_DOCX_MAX_ENTRIES,
+        max_docx_uncompressed_bytes: int = _DEFAULT_DOCX_MAX_UNCOMPRESSED_BYTES,
+        max_docx_compression_ratio: int = _DEFAULT_DOCX_MAX_COMPRESSION_RATIO,
+    ) -> None:
+        self._max_pdf_pages = _positive_int(max_pdf_pages, field="max_pdf_pages")
+        self._max_docx_entries = _positive_int(max_docx_entries, field="max_docx_entries")
+        self._max_docx_uncompressed_bytes = _positive_int(
+            max_docx_uncompressed_bytes,
+            field="max_docx_uncompressed_bytes",
+        )
+        self._max_docx_compression_ratio = _positive_int(
+            max_docx_compression_ratio,
+            field="max_docx_compression_ratio",
+        )
 
     def extract(self, *, source_object: Mapping[str, Any], payload: bytes) -> MediaTextExtraction:
         content_type = str(source_object.get("contentType") or "")
@@ -155,6 +206,7 @@ class LocalDocumentTextProcessor:
                 processor_id=self.processor_id,
                 processor_version=self.processor_version,
                 extracted_text=_normalize_extracted_text(text),
+                fragment_evidence=_fragment_evidence(text.splitlines(), locator_type="line"),
             )
         if content_type == "application/pdf":
             return self._extract_pdf(payload)
@@ -169,13 +221,21 @@ class LocalDocumentTextProcessor:
             raise OwnerTruthMediaProcessingRetryableError("documentParserUnavailable") from exc
         try:
             reader = PdfReader(BytesIO(payload), strict=True)
-            text = "\n".join((page.extract_text() or "") for page in reader.pages[:100])
+            if reader.is_encrypted:
+                raise OwnerTruthMediaProcessingTerminalError("pdfEncryptedUnsupported")
+            if len(reader.pages) > self._max_pdf_pages:
+                raise OwnerTruthMediaProcessingTerminalError("pdfPageLimitExceeded")
+            pages = [(page.extract_text() or "") for page in reader.pages]
+            text = "\n".join(pages)
+        except OwnerTruthMediaProcessingTerminalError:
+            raise
         except Exception as exc:
             raise OwnerTruthMediaProcessingTerminalError("pdfTextExtractionFailed") from exc
         return MediaTextExtraction(
             processor_id=self.processor_id,
             processor_version=self.processor_version,
             extracted_text=_normalize_extracted_text(text),
+            fragment_evidence=_fragment_evidence(pages, locator_type="page"),
         )
 
     def _extract_docx(self, payload: bytes) -> MediaTextExtraction:
@@ -183,15 +243,129 @@ class LocalDocumentTextProcessor:
             from docx import Document
         except ImportError as exc:  # pragma: no cover - packaging contract covers this
             raise OwnerTruthMediaProcessingRetryableError("documentParserUnavailable") from exc
+        _validate_docx_archive(
+            payload,
+            max_entries=self._max_docx_entries,
+            max_uncompressed_bytes=self._max_docx_uncompressed_bytes,
+            max_compression_ratio=self._max_docx_compression_ratio,
+        )
         try:
             document = Document(BytesIO(payload))
-            text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+            paragraphs = [paragraph.text for paragraph in document.paragraphs]
+            text = "\n".join(paragraphs)
         except Exception as exc:
             raise OwnerTruthMediaProcessingTerminalError("docxTextExtractionFailed") from exc
         return MediaTextExtraction(
             processor_id=self.processor_id,
             processor_version=self.processor_version,
             extracted_text=_normalize_extracted_text(text),
+            fragment_evidence=_fragment_evidence(paragraphs, locator_type="paragraph"),
+        )
+
+
+class IsolatedDocumentTextProcessor:
+    """Runs untrusted TXT/PDF/DOCX parsing in a bounded child process."""
+
+    processor_id = "isolatedDocumentText"
+    processor_version = "v1"
+
+    def __init__(
+        self,
+        *,
+        timeout_seconds: int = _DEFAULT_DOCUMENT_PARSER_TIMEOUT_SECONDS,
+        max_input_bytes: int = _DEFAULT_DOCUMENT_MAX_INPUT_BYTES,
+        max_memory_bytes: int = _DEFAULT_DOCUMENT_PARSER_MAX_MEMORY_BYTES,
+        max_cpu_seconds: int = _DEFAULT_DOCUMENT_PARSER_MAX_CPU_SECONDS,
+        max_pdf_pages: int = _DEFAULT_PDF_MAX_PAGES,
+        max_docx_entries: int = _DEFAULT_DOCX_MAX_ENTRIES,
+        max_docx_uncompressed_bytes: int = _DEFAULT_DOCX_MAX_UNCOMPRESSED_BYTES,
+        max_docx_compression_ratio: int = _DEFAULT_DOCX_MAX_COMPRESSION_RATIO,
+        runner: Callable[..., Any] | None = None,
+    ) -> None:
+        self._timeout_seconds = _positive_int(timeout_seconds, field="timeout_seconds")
+        self._max_input_bytes = _positive_int(max_input_bytes, field="max_input_bytes")
+        self._max_memory_bytes = _positive_int(max_memory_bytes, field="max_memory_bytes")
+        self._max_cpu_seconds = _positive_int(max_cpu_seconds, field="max_cpu_seconds")
+        self._max_pdf_pages = _positive_int(max_pdf_pages, field="max_pdf_pages")
+        self._max_docx_entries = _positive_int(max_docx_entries, field="max_docx_entries")
+        self._max_docx_uncompressed_bytes = _positive_int(
+            max_docx_uncompressed_bytes,
+            field="max_docx_uncompressed_bytes",
+        )
+        self._max_docx_compression_ratio = _positive_int(
+            max_docx_compression_ratio,
+            field="max_docx_compression_ratio",
+        )
+        self._runner = runner or subprocess.run
+
+    def extract(self, *, source_object: Mapping[str, Any], payload: bytes) -> MediaTextExtraction:
+        content_type = str(source_object.get("contentType") or "")
+        if content_type not in _DOCUMENT_CONTENT_TYPES:
+            raise OwnerTruthMediaProcessingTerminalError("documentContentTypeUnsupported")
+        if len(payload) > self._max_input_bytes:
+            raise OwnerTruthMediaProcessingTerminalError("documentInputTooLarge")
+
+        path: Optional[Path] = None
+        try:
+            descriptor, raw_path = tempfile.mkstemp(prefix="dreamjourney-document-", suffix=".private")
+            path = Path(raw_path)
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            command = [
+                sys.executable,
+                "-m",
+                "app.services.owner_truth_document_parser_runtime",
+                "--input",
+                str(path),
+                "--content-type",
+                content_type,
+                "--max-input-bytes",
+                str(self._max_input_bytes),
+                "--max-memory-bytes",
+                str(self._max_memory_bytes),
+                "--max-cpu-seconds",
+                str(self._max_cpu_seconds),
+                "--max-pdf-pages",
+                str(self._max_pdf_pages),
+                "--max-docx-entries",
+                str(self._max_docx_entries),
+                "--max-docx-uncompressed-bytes",
+                str(self._max_docx_uncompressed_bytes),
+                "--max-docx-compression-ratio",
+                str(self._max_docx_compression_ratio),
+            ]
+            completed = self._runner(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout_seconds,
+                env=_document_parser_environment(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise OwnerTruthMediaProcessingRetryableError("documentParserTimedOut") from exc
+        except OSError as exc:
+            raise OwnerTruthMediaProcessingRetryableError("documentParserUnavailable") from exc
+        finally:
+            if path is not None:
+                path.unlink(missing_ok=True)
+
+        result = _document_parser_result(completed)
+        if result.get("status") != "succeeded":
+            reason = _opaque_identifier(result.get("reason"), field="reason_code")
+            error_type = str(result.get("errorType") or "terminal")
+            if error_type == "retryable":
+                raise OwnerTruthMediaProcessingRetryableError(reason)
+            raise OwnerTruthMediaProcessingTerminalError(reason)
+        return MediaTextExtraction(
+            processor_id=self.processor_id,
+            processor_version=self.processor_version,
+            extracted_text=str(result.get("extractedText") or ""),
+            truncated=bool(result.get("truncated", False)),
+            fragment_evidence=tuple(result.get("fragmentEvidence") or ()),
         )
 
 
@@ -363,7 +537,7 @@ class OwnerTruthMediaProcessorRouter:
         image_processor: OwnerTruthMediaProcessor | None = None,
         audio_processor: OwnerTruthMediaProcessor | None = None,
     ) -> None:
-        self._document_processor = document_processor or LocalDocumentTextProcessor()
+        self._document_processor = document_processor or IsolatedDocumentTextProcessor()
         self._image_processor = image_processor or DisabledImageOCRProcessor()
         self._audio_processor = audio_processor or DisabledAudioASRProcessor()
 
@@ -375,6 +549,48 @@ class OwnerTruthMediaProcessorRouter:
         client_factory: Callable[..., Any] | None = None,
     ) -> "OwnerTruthMediaProcessorRouter":
         return cls(
+            document_processor=IsolatedDocumentTextProcessor(
+                timeout_seconds=getattr(
+                    settings,
+                    "owner_truth_document_parser_timeout_seconds",
+                    _DEFAULT_DOCUMENT_PARSER_TIMEOUT_SECONDS,
+                ),
+                max_input_bytes=getattr(
+                    settings,
+                    "owner_truth_document_parser_max_input_bytes",
+                    _DEFAULT_DOCUMENT_MAX_INPUT_BYTES,
+                ),
+                max_memory_bytes=getattr(
+                    settings,
+                    "owner_truth_document_parser_max_memory_bytes",
+                    _DEFAULT_DOCUMENT_PARSER_MAX_MEMORY_BYTES,
+                ),
+                max_cpu_seconds=getattr(
+                    settings,
+                    "owner_truth_document_parser_max_cpu_seconds",
+                    _DEFAULT_DOCUMENT_PARSER_MAX_CPU_SECONDS,
+                ),
+                max_pdf_pages=getattr(
+                    settings,
+                    "owner_truth_document_parser_max_pdf_pages",
+                    _DEFAULT_PDF_MAX_PAGES,
+                ),
+                max_docx_entries=getattr(
+                    settings,
+                    "owner_truth_document_parser_max_docx_entries",
+                    _DEFAULT_DOCX_MAX_ENTRIES,
+                ),
+                max_docx_uncompressed_bytes=getattr(
+                    settings,
+                    "owner_truth_document_parser_max_docx_uncompressed_bytes",
+                    _DEFAULT_DOCX_MAX_UNCOMPRESSED_BYTES,
+                ),
+                max_docx_compression_ratio=getattr(
+                    settings,
+                    "owner_truth_document_parser_max_docx_compression_ratio",
+                    _DEFAULT_DOCX_MAX_COMPRESSION_RATIO,
+                ),
+            ),
             image_processor=_processor_from_settings(
                 provider=getattr(settings, "owner_truth_media_image_ocr_provider", "disabled"),
                 endpoint=getattr(settings, "owner_truth_media_image_ocr_url", None),
@@ -649,11 +865,15 @@ def build_import_source_command(
         metadata={
             "contentSha256": str(source_object["contentSha256"]),
             "extractedTextSha256": extraction.extracted_text_sha256,
+            "fragmentEvidence": list(extraction.fragment_evidence),
+            "fragmentEvidenceHash": extraction.fragment_evidence_hash,
             "mediaKind": str(source_object["mediaKind"]),
             "origin": "mediaSourceObjectProcessing",
+            "processingGeneration": int(source_object["processingGeneration"]),
             "processorId": extraction.processor_id,
             "processorVersion": extraction.processor_version,
             "sourceObjectId": source_object_id,
+            "storageVersion": int(source_object["storageVersion"]),
             "textTruncated": extraction.truncated,
         },
         source_kind=SourceKind.IMPORT,
@@ -685,10 +905,152 @@ def _normalize_extracted_text(value: object) -> str:
     return "\n".join(line for line in lines if line).strip()
 
 
+def _fragment_evidence(
+    fragments: list[str],
+    *,
+    locator_type: str,
+) -> tuple[Mapping[str, Any], ...]:
+    evidence = []
+    for index, value in enumerate(fragments, start=1):
+        normalized = _normalize_extracted_text(value)
+        if not normalized:
+            continue
+        evidence.append(
+            {
+                "ordinal": len(evidence) + 1,
+                "locatorType": locator_type,
+                "locatorValue": index,
+                "characterCount": len(normalized),
+                "textSha256": _hash(normalized),
+            }
+        )
+        if len(evidence) >= 128:
+            break
+    return tuple(evidence)
+
+
+def _normalize_fragment_evidence(
+    values: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(values, (tuple, list)) or len(values) > 128:
+        raise OwnerTruthMediaProcessingError("fragment evidence is invalid")
+    normalized = []
+    for expected_ordinal, value in enumerate(values, start=1):
+        if not isinstance(value, Mapping) or set(value) != {
+            "ordinal",
+            "locatorType",
+            "locatorValue",
+            "characterCount",
+            "textSha256",
+        }:
+            raise OwnerTruthMediaProcessingError("fragment evidence is invalid")
+        locator_type = str(value.get("locatorType") or "")
+        if locator_type not in {"line", "page", "paragraph"}:
+            raise OwnerTruthMediaProcessingError("fragment evidence is invalid")
+        ordinal = value.get("ordinal")
+        locator_value = value.get("locatorValue")
+        character_count = value.get("characterCount")
+        text_hash = str(value.get("textSha256") or "")
+        if (
+            ordinal != expected_ordinal
+            or type(locator_value) is not int
+            or locator_value < 1
+            or type(character_count) is not int
+            or character_count < 1
+            or character_count > _MAX_EXTRACTED_TEXT_CHARACTERS
+            or len(text_hash) != 64
+            or any(character not in "0123456789abcdef" for character in text_hash)
+        ):
+            raise OwnerTruthMediaProcessingError("fragment evidence is invalid")
+        normalized.append(
+            {
+                "ordinal": ordinal,
+                "locatorType": locator_type,
+                "locatorValue": locator_value,
+                "characterCount": character_count,
+                "textSha256": text_hash,
+            }
+        )
+    return tuple(normalized)
+
+
+def _validate_docx_archive(
+    payload: bytes,
+    *,
+    max_entries: int,
+    max_uncompressed_bytes: int,
+    max_compression_ratio: int,
+) -> None:
+    try:
+        with zipfile.ZipFile(BytesIO(payload)) as archive:
+            entries = archive.infolist()
+            if len(entries) > max_entries:
+                raise OwnerTruthMediaProcessingTerminalError("docxArchiveEntryLimitExceeded")
+            total_uncompressed = 0
+            total_compressed = 0
+            for entry in entries:
+                path = PurePosixPath(entry.filename)
+                if path.is_absolute() or ".." in path.parts or entry.flag_bits & 0x1:
+                    raise OwnerTruthMediaProcessingTerminalError("docxArchiveInvalid")
+                total_uncompressed += int(entry.file_size)
+                total_compressed += int(entry.compress_size)
+                if total_uncompressed > max_uncompressed_bytes:
+                    raise OwnerTruthMediaProcessingTerminalError(
+                        "docxArchiveUncompressedLimitExceeded"
+                    )
+            if total_uncompressed and total_uncompressed > max(1, total_compressed) * max_compression_ratio:
+                raise OwnerTruthMediaProcessingTerminalError("docxArchiveCompressionRatioExceeded")
+    except OwnerTruthMediaProcessingTerminalError:
+        raise
+    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        raise OwnerTruthMediaProcessingTerminalError("docxArchiveInvalid") from exc
+
+
+def _positive_int(value: object, *, field: str) -> int:
+    if type(value) is not int or value < 1:
+        raise OwnerTruthMediaProcessingError(f"{field} is invalid")
+    return value
+
+
+def _document_parser_environment() -> dict[str, str]:
+    environment = {
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+    }
+    # The child receives no inherited provider/database environment. It only
+    # needs import roots already used by this interpreter so the module works
+    # from an installed container as well as a source checkout.
+    python_paths = [entry for entry in sys.path if str(entry or "").strip()]
+    if python_paths:
+        environment["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(python_paths))
+    return environment
+
+
+def _document_parser_result(completed: Any) -> Mapping[str, Any]:
+    if not isinstance(getattr(completed, "stdout", None), str):
+        raise OwnerTruthMediaProcessingRetryableError("documentParserUnavailable")
+    try:
+        result = json.loads(completed.stdout)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        reason = (
+            "documentParserResourceLimitExceeded"
+            if int(getattr(completed, "returncode", 0) or 0) < 0
+            else "documentParserResponseInvalid"
+        )
+        raise OwnerTruthMediaProcessingRetryableError(reason) from exc
+    if not isinstance(result, Mapping):
+        raise OwnerTruthMediaProcessingRetryableError("documentParserResponseInvalid")
+    if int(getattr(completed, "returncode", 0) or 0) != 0 and result.get("status") == "succeeded":
+        raise OwnerTruthMediaProcessingRetryableError("documentParserResponseInvalid")
+    return result
+
+
 __all__ = [
     "DisabledAudioASRProcessor",
     "DisabledImageOCRProcessor",
     "HTTPPrivateMediaTextProcessor",
+    "IsolatedDocumentTextProcessor",
     "LocalDocumentTextProcessor",
     "MediaProcessingEnqueueResult",
     "MediaTextExtraction",

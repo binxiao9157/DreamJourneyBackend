@@ -47,6 +47,7 @@ from app.services.owner_truth_media_processing import (
 )
 from app.services.owner_truth_media_source_object import (
     OwnerTruthMediaAccessRevoked,
+    OwnerTruthMediaObjectNotFound,
     OwnerTruthMediaUploadInvalid,
     PrivateMediaObjectStore,
     build_private_media_object_store,
@@ -124,11 +125,7 @@ class OwnerTruthMediaProcessingWorkerRuntime:
             return self._payload(status="idle", reason="noEligibleMediaProcessingJob")
 
         try:
-            with self._unit_of_work(
-                correlation_id=f"owner-truth-media-processing-worker-{lease.job_id}",
-                command_id=f"ownerTruthMediaProcessingWorker:{lease.operation_id}",
-            ):
-                result = self._consume_current_lease(lease)
+            result = self._consume_current_lease(lease)
         except AsyncEffectLeaseCancelled:
             result = self._payload(
                 status="cancelled",
@@ -150,7 +147,7 @@ class OwnerTruthMediaProcessingWorkerRuntime:
             result = self._retry_or_terminal(lease, reason=error.reason_code)
         except OwnerTruthMediaProcessingTerminalError as error:
             result = self._terminalize(lease, reason=error.reason_code)
-        except FileNotFoundError:
+        except OwnerTruthMediaObjectNotFound:
             result = self._terminalize(lease, reason="privateMediaObjectMissing")
         except OwnerTruthMediaUploadInvalid:
             result = self._terminalize(lease, reason="privateMediaObjectInvalid")
@@ -205,71 +202,100 @@ class OwnerTruthMediaProcessingWorkerRuntime:
             return
 
     def _consume_current_lease(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
-        lease_repository = self._store.async_effect_lease_repository()
-        intent = lease_repository.load_intent(lease)
-        self._assert_typed_intent(intent)
-        repository = self._store.owner_truth_media_source_object_repository()
-        source_object = repository.begin_processing(
-            vault_id=intent.target.vault_id,
-            source_object_id=intent.target.resource_id,
-            owner_subject_id=intent.target.owner_subject_id,
-            expected_authority_epoch=intent.target.authority_epoch,
-            expected_processing_generation=intent.target.resource_version,
-            attempt=lease.attempt,
-        )
+        # Claim/begin and commit are short, independent transactions. Private
+        # object I/O and document/provider parsing must never hold a database
+        # transaction open.
+        with self._unit_of_work(
+            correlation_id=f"owner-truth-media-processing-worker-begin-{lease.job_id}",
+            command_id=f"ownerTruthMediaProcessingWorkerBegin:{lease.operation_id}",
+        ):
+            lease_repository = self._store.async_effect_lease_repository()
+            intent = lease_repository.load_intent(lease)
+            self._assert_typed_intent(intent)
+            repository = self._store.owner_truth_media_source_object_repository()
+            source_object = repository.begin_processing(
+                vault_id=intent.target.vault_id,
+                source_object_id=intent.target.resource_id,
+                owner_subject_id=intent.target.owner_subject_id,
+                expected_authority_epoch=intent.target.authority_epoch,
+                expected_processing_generation=intent.target.resource_version,
+                attempt=lease.attempt,
+            )
         storage_key = str(source_object.get("storageKey") or "").strip()
         if not storage_key:
             raise OwnerTruthMediaProcessingTerminalError("privateMediaObjectMissing")
+        if str(source_object.get("storageProvider") or "") != self._object_store.provider_name:
+            raise OwnerTruthMediaProcessingTerminalError("privateMediaStorageProviderMismatch")
         extraction = self._read_and_extract_with_lease_heartbeat(
             lease=lease,
             source_object=source_object,
             storage_key=storage_key,
         )
-        # Extraction can take long enough for an Owner delete request to land.
-        # Re-read behind the repository's commit fence before creating a
-        # derived Source or Candidate effect, so deleted media cannot leak
-        # downstream through an in-flight worker.
-        source_object = repository.assert_processing_commit_allowed(
-            vault_id=intent.target.vault_id,
-            source_object_id=intent.target.resource_id,
-            owner_subject_id=intent.target.owner_subject_id,
-            expected_processing_generation=int(source_object["processingGeneration"]),
-        )
-        derived_source_id, candidate_effect = build_media_processing_candidate_effect(
-            context=OwnerTruthCommandContext(
+        with self._unit_of_work(
+            correlation_id=f"owner-truth-media-processing-worker-commit-{lease.job_id}",
+            command_id=f"ownerTruthMediaProcessingWorkerCommit:{lease.operation_id}",
+        ):
+            lease_repository = self._store.async_effect_lease_repository()
+            lease_repository.heartbeat(lease, lease_seconds=self._lease_seconds)
+            commit_intent = lease_repository.load_intent(lease)
+            self._assert_typed_intent(commit_intent)
+            if commit_intent != intent:
+                raise AsyncEffectLeaseLost("media processing intent changed")
+            repository = self._store.owner_truth_media_source_object_repository()
+            # Extraction can take long enough for an Owner delete request to
+            # land. Re-read behind the commit fence before creating a derived
+            # Source or Candidate effect.
+            committed_source_object = repository.assert_processing_commit_allowed(
                 vault_id=intent.target.vault_id,
+                source_object_id=intent.target.resource_id,
                 owner_subject_id=intent.target.owner_subject_id,
-                actor_subject_id=intent.target.owner_subject_id,
-            ),
-            source_object=source_object,
-            extraction=extraction,
-            store=self._store,
-        )
-        updated = repository.record_processing_outcome(
-            vault_id=intent.target.vault_id,
-            source_object_id=intent.target.resource_id,
-            owner_subject_id=intent.target.owner_subject_id,
-            processing_generation=int(source_object["processingGeneration"]),
-            attempt=lease.attempt,
-            processor_id=extraction.processor_id,
-            processor_version=extraction.processor_version,
-            outcome="succeeded",
-            result_hash=extraction.result_hash(source_object=source_object),
-            extracted_text_sha256=extraction.extracted_text_sha256,
-            derived_source_id=derived_source_id,
-        )
-        receipt = self._store.async_effect_consumer_repository().consume(
-            OwnerTruthMediaProcessingConsumerCommand(
-                intent=intent,
-                consumer_name=OWNER_TRUTH_MEDIA_PROCESSING_CONSUMER,
-                business_target_key=intent.business_target_key,
-                outcome="completed",
-                reason_code="mediaTextExtracted",
-                result_ref_hash=extraction.result_hash(source_object=source_object),
-                processing_state="succeeded",
+                expected_processing_generation=int(source_object["processingGeneration"]),
             )
-        )
-        completion = lease_repository.complete(lease, outcome="succeeded")
+            if (
+                int(committed_source_object.get("storageVersion") or 0)
+                != int(source_object.get("storageVersion") or 0)
+                or str(committed_source_object.get("contentSha256") or "")
+                != str(source_object.get("contentSha256") or "")
+            ):
+                raise OwnerTruthMediaProcessingTerminalError(
+                    "privateMediaObjectVersionChanged"
+                )
+            derived_source_id, candidate_effect = build_media_processing_candidate_effect(
+                context=OwnerTruthCommandContext(
+                    vault_id=intent.target.vault_id,
+                    owner_subject_id=intent.target.owner_subject_id,
+                    actor_subject_id=intent.target.owner_subject_id,
+                ),
+                source_object=committed_source_object,
+                extraction=extraction,
+                store=self._store,
+            )
+            result_hash = extraction.result_hash(source_object=committed_source_object)
+            updated = repository.record_processing_outcome(
+                vault_id=intent.target.vault_id,
+                source_object_id=intent.target.resource_id,
+                owner_subject_id=intent.target.owner_subject_id,
+                processing_generation=int(committed_source_object["processingGeneration"]),
+                attempt=lease.attempt,
+                processor_id=extraction.processor_id,
+                processor_version=extraction.processor_version,
+                outcome="succeeded",
+                result_hash=result_hash,
+                extracted_text_sha256=extraction.extracted_text_sha256,
+                derived_source_id=derived_source_id,
+            )
+            receipt = self._store.async_effect_consumer_repository().consume(
+                OwnerTruthMediaProcessingConsumerCommand(
+                    intent=intent,
+                    consumer_name=OWNER_TRUTH_MEDIA_PROCESSING_CONSUMER,
+                    business_target_key=intent.business_target_key,
+                    outcome="completed",
+                    reason_code="mediaTextExtracted",
+                    result_ref_hash=result_hash,
+                    processing_state="succeeded",
+                )
+            )
+            completion = lease_repository.complete(lease, outcome="succeeded")
         return self._payload(
             status="completed",
             reason="mediaTextExtracted",
@@ -526,7 +552,20 @@ class OwnerTruthMediaProcessingWorkerRuntime:
 
         heartbeat = self._start_lease_heartbeat(lease)
         try:
-            payload = self._object_store.read(storage_key=storage_key)
+            expected_size = int(source_object.get("fileSizeBytes") or 0)
+            if expected_size < 1:
+                raise OwnerTruthMediaProcessingTerminalError("privateMediaObjectInvalid")
+            if (
+                str(source_object.get("mediaKind") or "") == "document"
+                and expected_size > self._settings.owner_truth_document_parser_max_input_bytes
+            ):
+                raise OwnerTruthMediaProcessingTerminalError("documentInputTooLarge")
+            payload = self._object_store.read(
+                storage_key=storage_key,
+                max_bytes=expected_size,
+            )
+            if len(payload) != expected_size:
+                raise OwnerTruthMediaProcessingTerminalError("privateMediaObjectIntegrityMismatch")
             if sha256(payload).hexdigest() != str(source_object.get("contentSha256") or ""):
                 raise OwnerTruthMediaProcessingTerminalError("privateMediaObjectIntegrityMismatch")
             extraction = self._processor_router.extract(source_object=source_object, payload=payload)

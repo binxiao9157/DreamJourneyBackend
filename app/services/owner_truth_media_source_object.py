@@ -72,6 +72,12 @@ class OwnerTruthMediaCaptureUnavailable(OwnerTruthMediaIngestionError):
     code = "ownerTruthMediaCaptureUnavailable"
 
 
+class OwnerTruthMediaObjectNotFound(OwnerTruthMediaIngestionError):
+    """The authoritative private object no longer exists in its configured store."""
+
+    code = "ownerTruthMediaObjectNotFound"
+
+
 class OwnerTruthMediaUploadInvalid(OwnerTruthMediaIngestionError):
     code = "ownerTruthMediaUploadInvalid"
 
@@ -637,7 +643,7 @@ class PrivateMediaObjectStore(Protocol):
     def delete(self, *, storage_key: str) -> None:
         ...
 
-    def read(self, *, storage_key: str) -> bytes:
+    def read(self, *, storage_key: str, max_bytes: Optional[int] = None) -> bytes:
         ...
 
 
@@ -669,8 +675,8 @@ class DisabledPrivateMediaObjectStore:
     def delete(self, *, storage_key: str) -> None:
         del storage_key
 
-    def read(self, *, storage_key: str) -> bytes:
-        del storage_key
+    def read(self, *, storage_key: str, max_bytes: Optional[int] = None) -> bytes:
+        del storage_key, max_bytes
         raise OwnerTruthMediaCaptureUnavailable("private media storage is not configured")
 
 
@@ -712,11 +718,18 @@ class FilesystemPrivateMediaObjectStore:
     def delete(self, *, storage_key: str) -> None:
         self._resolve(storage_key).unlink(missing_ok=True)
 
-    def read(self, *, storage_key: str) -> bytes:
+    def read(self, *, storage_key: str, max_bytes: Optional[int] = None) -> bytes:
+        limit = _optional_read_limit(max_bytes)
         try:
-            return self._resolve(storage_key).read_bytes()
+            with self._resolve(storage_key).open("rb") as handle:
+                payload = handle.read() if limit is None else handle.read(limit + 1)
+        except FileNotFoundError as exc:
+            raise OwnerTruthMediaObjectNotFound("private media object does not exist") from exc
         except OSError as exc:
             raise OwnerTruthMediaCaptureUnavailable("private media object read is unavailable") from exc
+        if limit is not None and len(payload) > limit:
+            raise OwnerTruthMediaCaptureUnavailable("private media object exceeds read limit")
+        return payload
 
     def verify_upload(
         self,
@@ -933,15 +946,25 @@ class S3PrivateMediaObjectStore:
             "private media object delete verification failed"
         )
 
-    def read(self, *, storage_key: str) -> bytes:
+    def read(self, *, storage_key: str, max_bytes: Optional[int] = None) -> bytes:
+        limit = _optional_read_limit(max_bytes)
         try:
             response = self._client.get_object(Bucket=self._bucket, Key=self._object_key(storage_key))
             body = response["Body"]
-            payload = body.read()
+            content_length = response.get("ContentLength")
+            if limit is not None and content_length is not None and int(content_length) > limit:
+                raise OwnerTruthMediaCaptureUnavailable("private media object exceeds read limit")
+            payload = body.read() if limit is None else body.read(limit + 1)
+        except OwnerTruthMediaCaptureUnavailable:
+            raise
         except Exception as exc:
+            if _provider_error_is_object_not_found(exc):
+                raise OwnerTruthMediaObjectNotFound("private media object does not exist") from exc
             raise OwnerTruthMediaCaptureUnavailable("private media object read is unavailable") from exc
         if not isinstance(payload, bytes):
             raise OwnerTruthMediaCaptureUnavailable("private media object read is unavailable")
+        if limit is not None and len(payload) > limit:
+            raise OwnerTruthMediaCaptureUnavailable("private media object exceeds read limit")
         return payload
 
     def _object_key(self, storage_key: str) -> str:
@@ -1040,6 +1063,14 @@ def _optional_identifier(value: object, *, field: str) -> Optional[str]:
     if normalized is not None and (len(normalized) > 512 or any(character.isspace() for character in normalized)):
         raise OwnerTruthMediaUploadInvalid(f"{field} is invalid")
     return normalized
+
+
+def _optional_read_limit(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if type(value) is not int or value < 1 or value > 50 * 1024 * 1024:
+        raise OwnerTruthMediaUploadInvalid("private media read limit is invalid")
+    return value
 
 
 def _assert_private_media_object_integrity(
@@ -1952,10 +1983,17 @@ class InMemoryOwnerTruthMediaSourceObjectRepository:
                 )
             if int(source_object.get("processingGeneration") or 0) != expected_processing_generation:
                 raise OwnerTruthMediaUploadConflict("media processing generation is no longer current")
-            if (
-                source_object["state"] != "verified"
-                or source_object["safetyStatus"] != "clean"
-                or source_object["processingStatus"] not in {"queued", "retryableFailed"}
+            fresh_start = (
+                source_object["state"] == "verified"
+                and source_object["processingStatus"] in {"queued", "retryableFailed"}
+            )
+            expired_lease_recovery = (
+                source_object["state"] == "processing"
+                and source_object["processingStatus"] == "processing"
+                and attempt > int(source_object.get("processingAttempt") or 0)
+            )
+            if source_object["safetyStatus"] != "clean" or not (
+                fresh_start or expired_lease_recovery
             ):
                 raise OwnerTruthMediaUploadConflict("media source object is not eligible for processing")
             now = _utc_now()
@@ -2881,10 +2919,17 @@ class PostgresOwnerTruthMediaSourceObjectRepository:
                 )
             if int(source_object.get("processingGeneration") or 0) != expected_processing_generation:
                 raise OwnerTruthMediaUploadConflict("media processing generation is no longer current")
-            if (
-                source_object["state"] != "verified"
-                or source_object["safetyStatus"] != "clean"
-                or source_object["processingStatus"] not in {"queued", "retryableFailed"}
+            fresh_start = (
+                source_object["state"] == "verified"
+                and source_object["processingStatus"] in {"queued", "retryableFailed"}
+            )
+            expired_lease_recovery = (
+                source_object["state"] == "processing"
+                and source_object["processingStatus"] == "processing"
+                and attempt > int(source_object.get("processingAttempt") or 0)
+            )
+            if source_object["safetyStatus"] != "clean" or not (
+                fresh_start or expired_lease_recovery
             ):
                 raise OwnerTruthMediaUploadConflict("media source object is not eligible for processing")
             cursor.execute(
@@ -3526,7 +3571,10 @@ class OwnerTruthMediaIngestionService:
             expected_content_type=str(source_object["contentType"]),
             expected_content_sha256=str(source_object["contentSha256"]),
         )
-        payload = self._object_store.read(storage_key=storage_key)
+        payload = self._object_store.read(
+            storage_key=storage_key,
+            max_bytes=int(source_object["fileSizeBytes"]),
+        )
         _assert_private_media_object_integrity(
             payload=payload,
             expected_file_size_bytes=int(source_object["fileSizeBytes"]),
@@ -3649,6 +3697,7 @@ __all__ = [
     "OwnerTruthMediaCaptureUnavailable",
     "OwnerTruthMediaIngestionError",
     "OwnerTruthMediaIngestionService",
+    "OwnerTruthMediaObjectNotFound",
     "OwnerTruthMediaSourceObjectRepository",
     "OwnerTruthMediaUploadConflict",
     "OwnerTruthMediaUploadExpired",

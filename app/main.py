@@ -6931,6 +6931,24 @@ def create_owner_truth_media_upload_intent(
     )
 
 
+async def _read_bounded_owner_truth_media_body(request: Request) -> bytes:
+    limit = int(settings.owner_truth_media_max_upload_bytes)
+    content_length = str(request.headers.get("content-length") or "").strip()
+    if content_length:
+        try:
+            declared_length = int(content_length)
+        except ValueError as exc:
+            raise OwnerTruthMediaUploadInvalid("private media content length is invalid") from exc
+        if declared_length < 0 or declared_length > limit:
+            raise OwnerTruthMediaUploadInvalid("private media payload exceeds maximum size")
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise OwnerTruthMediaUploadInvalid("private media payload exceeds maximum size")
+    return bytes(body)
+
+
 @app.put(
     "/v2/vaults/{vault_id}/source-objects/upload-intents/{intent_id}/content",
     include_in_schema=False,
@@ -6945,11 +6963,12 @@ async def upload_owner_truth_media_source_object_content(
     try:
         context = _owner_truth_media_capture_context(request, vault_id=vault_id)
         upload_token = str(request.headers.get("x-dreamjourney-upload-token") or "")
+        payload = await _read_bounded_owner_truth_media_body(request)
         outcome, source_object = OWNER_TRUTH_MEDIA_INGESTION_SERVICE.upload_content(
             context=context,
             intent_id=intent_id,
             upload_token=upload_token,
-            payload=await request.body(),
+            payload=payload,
             request_content_type=request.headers.get("content-type"),
         )
     except HTTPException:

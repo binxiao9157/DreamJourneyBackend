@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -30,6 +31,7 @@ from app.services.owner_truth_media_source_object import (
     FilesystemPrivateMediaObjectStore,
     MediaUploadIntentCommand,
     OwnerTruthMediaIngestionService,
+    OwnerTruthMediaUploadConflict,
     TestOnlyCleanMediaContentSafetyScanner,
 )
 
@@ -42,6 +44,16 @@ class _MediaWorkerStore(InMemoryStore):
         self._lease_repository = InMemoryAsyncEffectLeaseRepository()
         self._consumer_repository = InMemoryAsyncEffectConsumerRepository()
         self._dead_letter_repository = InMemoryAsyncEffectDeadLetterRepository()
+        self.unit_of_work_depth = 0
+
+    @contextmanager
+    def request_unit_of_work(self, **kwargs):
+        self.unit_of_work_depth += 1
+        try:
+            with super().request_unit_of_work(**kwargs) as unit_of_work:
+                yield unit_of_work
+        finally:
+            self.unit_of_work_depth -= 1
 
     def readiness_probe(self):
         return {"status": "ready"}
@@ -103,6 +115,24 @@ class _TerminalProcessorRouter:
         return "terminalProcessor", "v1"
 
 
+class _TransactionBoundaryProcessorRouter:
+    def __init__(self, store: _MediaWorkerStore) -> None:
+        self._store = store
+        self.observed_depths: list[int] = []
+
+    def extract(self, *, source_object, payload) -> MediaTextExtraction:
+        del source_object, payload
+        self.observed_depths.append(self._store.unit_of_work_depth)
+        return MediaTextExtraction(
+            processor_id="transactionBoundaryProcessor",
+            processor_version="v1",
+            extracted_text="Private parsing runs outside a database transaction.",
+        )
+
+    def identity_for(self, _source_object):
+        return "transactionBoundaryProcessor", "v1"
+
+
 class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.media_root = TemporaryDirectory()
@@ -160,6 +190,88 @@ class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
         # One effect for media work and one independent effect for the derived
         # Source's owner-reviewed Candidate extraction; neither contains text.
         self.assertEqual(self.store.effect_kernel_repository().record_count(), 2)
+
+        source = self.store._owner_truth_sources[
+            (self.context.vault_id, str(completed["derivedSourceId"]))
+        ]
+        metadata = source["metadata"]
+        self.assertEqual(metadata["processingGeneration"], 1)
+        self.assertEqual(metadata["storageVersion"], 1)
+        self.assertEqual(metadata["fragmentEvidence"][0]["locatorType"], "line")
+        self.assertEqual(len(metadata["fragmentEvidenceHash"]), 64)
+        self.assertNotIn("A private memory", json.dumps(metadata, sort_keys=True))
+
+    def test_private_read_and_parse_run_outside_database_transaction(self) -> None:
+        self._upload_and_queue(
+            payload=b"A private memory written in a document.",
+            media_kind="document",
+            content_type="text/plain",
+            file_name="memory.txt",
+        )
+        router = _TransactionBoundaryProcessorRouter(self.store)
+
+        result = self._worker(processor_router=router).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(router.observed_depths, [0])
+        self.assertEqual(self.store.unit_of_work_depth, 0)
+
+    def test_expired_lease_attempt_can_resume_processing_after_worker_crash(self) -> None:
+        source_object, _intent = self._upload_and_queue(
+            payload=b"A private memory whose first worker crashes.",
+            media_kind="document",
+            content_type="text/plain",
+            file_name="worker-crash.txt",
+        )
+        repository = self.store.owner_truth_media_source_object_repository()
+        first = repository.begin_processing(
+            vault_id=self.context.vault_id,
+            source_object_id=str(source_object["sourceObjectId"]),
+            owner_subject_id=self.context.owner_subject_id,
+            expected_authority_epoch=0,
+            expected_processing_generation=int(source_object["processingGeneration"]),
+            attempt=1,
+        )
+
+        recovered = repository.begin_processing(
+            vault_id=self.context.vault_id,
+            source_object_id=str(source_object["sourceObjectId"]),
+            owner_subject_id=self.context.owner_subject_id,
+            expected_authority_epoch=0,
+            expected_processing_generation=int(source_object["processingGeneration"]),
+            attempt=2,
+        )
+
+        self.assertEqual(first["processingAttempt"], 1)
+        self.assertEqual(recovered["processingAttempt"], 2)
+        self.assertEqual(recovered["processingStatus"], "processing")
+        with self.assertRaises(OwnerTruthMediaUploadConflict):
+            repository.begin_processing(
+                vault_id=self.context.vault_id,
+                source_object_id=str(source_object["sourceObjectId"]),
+                owner_subject_id=self.context.owner_subject_id,
+                expected_authority_epoch=0,
+                expected_processing_generation=int(source_object["processingGeneration"]),
+                attempt=2,
+            )
+
+    def test_missing_private_object_is_terminal_and_not_retried(self) -> None:
+        source_object, intent = self._upload_and_queue(
+            payload=b"A private object removed before processing.",
+            media_kind="document",
+            content_type="text/plain",
+            file_name="missing.txt",
+        )
+        self.object_store.delete(storage_key=str(source_object["storageKey"]))
+
+        result = self._worker().run_once()
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "privateMediaObjectMissing")
+        self.assertEqual(
+            self.store._lease_repository.attempt_state(intent.job_id, 1),
+            "terminalFailed",
+        )
 
     def test_claimed_job_records_a_redacted_worker_metric(self) -> None:
         source_text = "A private memory written in a document."
