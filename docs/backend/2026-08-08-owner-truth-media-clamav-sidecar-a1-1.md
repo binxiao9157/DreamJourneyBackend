@@ -66,6 +66,8 @@ ClamAV 官方协议说明确认：TCP 支持 `INSTREAM`，但该 TCP 通道没�
 
 ## 当前部署状态
 
-- 后端 `3adf6fb` 已部署，API 健康检查通过，`/config/runtime` 仍返回媒体能力 `disabled/runtimeDisabled`；没有修改服务器私密 `.env`，也没有开启媒体采集。
-- `owner-truth-media-safety` profile 已通过服务器 Compose 解析，但 sidecar 尚未启动。部署前探测到服务器可用内存约为 `2.5 GiB`，不足以为 ClamAV 首次签名加载和后续重载预留可靠余量，因此本次不以生产 API 可用性为代价启动它。
-- 在扩容或确认资源余量后，按本文件“服务器配置与启用顺序”启动 profile，先跑 clean/EICAR smoke；通过前保持 `OWNER_TRUTH_MEDIA_CAPTURE_ENABLED=false`。
+- 2026-08-09 已在生产服务器启动 `owner-truth-media-safety` profile。服务器不能直接访问 Docker Hub，因此镜像由受信开发机按 `linux/amd64` 拉取官方 `clamav/clamav:1.5.3-debian13-slim` 后离线导入；上游 manifest digest 为 `sha256:741e6c447241220e0792a901befcaec1d55a755c5097fc9cd88d7fd8be251a5c`。
+- sidecar 已进入 `healthy`，真实 clean/EICAR smoke 通过：干净探针返回 `clean`，标准 EICAR 探针返回 `blocked/contentSafetyScanBlocked`。API `/ready` 同时保持通过。
+- 稳态观测中 ClamAV 使用约 `1.0 GiB` 内存；服务器仍有约 `1.6 GiB` available memory 和可用 swap。该结果只证明当前容量可承载 sidecar，后续仍需监控签名库重载和业务峰值。
+- 服务器私密 `.env` 已显式配置内部 `clamav:3310`，但 `OWNER_TRUTH_MEDIA_CAPTURE_ENABLED=false`、存储 Provider 仍为 `disabled`，处理和删除 Worker 仍关闭。真实 COS E2E 通过前，公开媒体采集继续 fail-closed。
+- 详细部署证据见 `docs/backend/2026-08-09-owner-truth-media-clamav-deployed-evidence.md`。
