@@ -38,6 +38,16 @@ class OwnerTruthDataRightsProjectionTests(unittest.TestCase):
                         }
                     }
                 ]
+            if "FROM owner_truth.family_contribution_submissions" in query:
+                return [
+                    {
+                        "payload": {
+                            "submissionId": "submission-a",
+                            "vaultId": "vault-a",
+                            "status": "accepted",
+                        }
+                    }
+                ]
             if "FROM owner_truth.vaults" in query:
                 return [{"payload": {"vaultId": "vault-a", "ownerSubjectId": "owner-a"}}]
             self.fail("unexpected owner truth export query")
@@ -56,7 +66,11 @@ class OwnerTruthDataRightsProjectionTests(unittest.TestCase):
         self.assertEqual(records["answerFeedback"][0]["feedbackId"], "feedback-a")
         self.assertEqual(records["correction"][0]["correctionRequestId"], "correction-a")
         self.assertEqual(records["familyContributionGrant"][0]["grantId"], "grant-a")
-        self.assertEqual(len(queries), 9)
+        self.assertEqual(
+            records["familyContributionSubmission"][0]["submissionId"],
+            "submission-a",
+        )
+        self.assertEqual(len(queries), 10)
         self.assertTrue(all("DELETE" not in query.upper() for query, _ in queries))
 
     def test_count_projection_is_owner_parameterized_and_empty_subject_is_zero(self):
@@ -82,9 +96,10 @@ class OwnerTruthDataRightsProjectionTests(unittest.TestCase):
             "ownerTruthAnswerFeedback",
             "ownerTruthCorrection",
             "ownerTruthFamilyContributionGrant",
+            "ownerTruthFamilyContributionSubmission",
         })
         self.assertTrue(all(value == 3 for value in counts.values()))
-        self.assertEqual(len(queries), 9)
+        self.assertEqual(len(queries), 10)
         self.assertTrue(all("DELETE" not in query.upper() for query, _ in queries))
         self.assertEqual(
             count_owner_truth_data_rights_records(subject_id="", fetchone=fetchone),
@@ -92,6 +107,10 @@ class OwnerTruthDataRightsProjectionTests(unittest.TestCase):
         )
         self.assertEqual(empty_owner_truth_data_rights_records()["source"], [])
         self.assertEqual(empty_owner_truth_data_rights_records()["familyContributionGrant"], [])
+        self.assertEqual(
+            empty_owner_truth_data_rights_records()["familyContributionSubmission"],
+            [],
+        )
 
 
 if __name__ == "__main__":

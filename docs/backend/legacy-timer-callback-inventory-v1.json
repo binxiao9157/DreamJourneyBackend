@@ -39,7 +39,7 @@
           "markers": [
             "@app.post(\"/archive/time-letters/dispatch-due\")",
             "def dispatch_due_time_letters(payload: Dict[str, Any])",
-            "return dispatch_due_time_letters_for_store(store"
+            "result = dispatch_due_time_letters_for_store("
           ]
         }
       ]
