@@ -268,6 +268,7 @@ test -f deploy/systemd/dreamjourney-evidence-manifest-retention.service
 test -f deploy/systemd/dreamjourney-evidence-manifest-retention.timer
 test -f deploy/systemd/dreamjourney-account-terminal-purge.service
 test -f deploy/systemd/dreamjourney-account-terminal-purge.timer
+test -f scripts/run-backend-owner-truth-worker-activation-deployed-smoke.sh
 test -f db/migrations/0001_existing_schema_baseline.sql
 test -f db/migrations/0001_existing_schema_baseline.json
 test -f db/migrations/0009_account_purge_receipts.sql

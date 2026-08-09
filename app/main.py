@@ -21,6 +21,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without runtime 
     raise RuntimeError("FastAPI is not installed. Run `pip install -r requirements.txt`.") from exc
 
 from app.core.config import settings
+from app.async_effects.contracts import is_async_effect_store_ready
 from app.services.amap import AMapDistrictProxy
 from app.services.auth_sessions import AuthSessionError, AuthSessionService
 from app.services.authorization_policy import (
@@ -5094,6 +5095,18 @@ def _refresh_runtime_capability_controls(*, force: bool = False) -> ProviderRunt
         app.state.provider_runtime_inventory = inventory
         RUNTIME_CAPABILITY_LAST_REFRESH_MONOTONIC = now_monotonic
         return inventory
+
+
+def _async_effect_schema_ready() -> bool:
+    """Resolve the async schema from the live store without trusting flags."""
+
+    readiness_probe = getattr(store, "readiness_probe", None)
+    if not callable(readiness_probe):
+        return False
+    try:
+        return is_async_effect_store_ready(readiness_probe())
+    except Exception:
+        return False
 
 
 def _release_policy_runtime_capability_ready(capability: str) -> bool:
@@ -11198,6 +11211,7 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
                 settings,
                 provider_inventory=getattr(app.state, "provider_runtime_inventory", None),
                 capability_control_registry=RUNTIME_CAPABILITY_CONTROL_REGISTRY,
+                async_effect_schema_ready=_async_effect_schema_ready(),
             ).public_config().get(
                 "capabilitySnapshots",
                 {},
@@ -13805,6 +13819,7 @@ def runtime_config() -> Dict[str, Any]:
         settings,
         provider_inventory=inventory,
         capability_control_registry=RUNTIME_CAPABILITY_CONTROL_REGISTRY,
+        async_effect_schema_ready=_async_effect_schema_ready(),
     ).public_config()
 
 

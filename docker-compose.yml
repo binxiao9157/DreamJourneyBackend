@@ -54,7 +54,13 @@ services:
       - owner-truth-worker
     restart: unless-stopped
     stop_grace_period: 150s
-    command: ["python", "-m", "app.async_effects.owner_truth_candidate_extraction_worker", "--loop"]
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.async_effects.owner_truth_worker_activation
+        --worker ownerTruthCandidateExtraction &&
+        exec python -m app.async_effects.owner_truth_candidate_extraction_worker --loop
     env_file:
       - .env
     depends_on:
@@ -69,7 +75,13 @@ services:
       - owner-truth-worker
     restart: unless-stopped
     stop_grace_period: 150s
-    command: ["python", "-m", "app.async_effects.owner_truth_memory_projection_worker", "--loop"]
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.async_effects.owner_truth_worker_activation
+        --worker ownerTruthMemoryProjection &&
+        exec python -m app.async_effects.owner_truth_memory_projection_worker --loop
     env_file:
       - .env
     depends_on:
@@ -84,7 +96,13 @@ services:
       - owner-truth-media-worker
     restart: unless-stopped
     stop_grace_period: 150s
-    command: ["python", "-m", "app.async_effects.owner_truth_media_processing_worker", "--loop"]
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.async_effects.owner_truth_worker_activation
+        --worker ownerTruthMediaProcessing &&
+        exec python -m app.async_effects.owner_truth_media_processing_worker --loop
     env_file:
       - .env
     volumes:
@@ -101,7 +119,13 @@ services:
       - owner-truth-media-worker
     restart: unless-stopped
     stop_grace_period: 150s
-    command: ["python", "-m", "app.async_effects.owner_truth_media_deletion_worker", "--loop"]
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.async_effects.owner_truth_worker_activation
+        --worker ownerTruthMediaDeletion &&
+        exec python -m app.async_effects.owner_truth_media_deletion_worker --loop
     env_file:
       - .env
     volumes:

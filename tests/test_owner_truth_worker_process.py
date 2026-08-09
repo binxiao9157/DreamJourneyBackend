@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import yaml
+
 from app.async_effects import business_message_projection_worker
 from app.async_effects import owner_truth_candidate_extraction_worker
 from app.async_effects import owner_truth_media_deletion_worker
@@ -169,6 +171,8 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
 
     def test_compose_profile_keeps_typed_workers_out_of_default_api_startup(self) -> None:
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        compose_config = yaml.safe_load(compose)
+        env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
         self.assertIn("owner-truth-candidate-extraction-worker:", compose)
         self.assertIn("owner-truth-memory-projection-worker:", compose)
@@ -185,22 +189,38 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
         self.assertIn("clamav/clamav:1.5.3-debian13-slim", compose)
         self.assertIn("clamav_data:/var/lib/clamav", compose)
         self.assertNotIn('"3310:3310"', compose)
-        self.assertIn(
-            '"app.async_effects.owner_truth_candidate_extraction_worker", "--loop"',
-            compose,
-        )
-        self.assertIn(
-            '"app.async_effects.owner_truth_memory_projection_worker", "--loop"',
-            compose,
-        )
-        self.assertIn(
-            '"app.async_effects.owner_truth_media_processing_worker", "--loop"',
-            compose,
-        )
-        self.assertIn(
-            '"app.async_effects.owner_truth_media_deletion_worker", "--loop"',
-            compose,
-        )
+        for worker, module in (
+            (
+                "ownerTruthCandidateExtraction",
+                "app.async_effects.owner_truth_candidate_extraction_worker",
+            ),
+            (
+                "ownerTruthMemoryProjection",
+                "app.async_effects.owner_truth_memory_projection_worker",
+            ),
+            (
+                "ownerTruthMediaProcessing",
+                "app.async_effects.owner_truth_media_processing_worker",
+            ),
+            (
+                "ownerTruthMediaDeletion",
+                "app.async_effects.owner_truth_media_deletion_worker",
+            ),
+        ):
+            service_name = {
+                "ownerTruthCandidateExtraction": "owner-truth-candidate-extraction-worker",
+                "ownerTruthMemoryProjection": "owner-truth-memory-projection-worker",
+                "ownerTruthMediaProcessing": "owner-truth-media-processing-worker",
+                "ownerTruthMediaDeletion": "owner-truth-media-deletion-worker",
+            }[worker]
+            command = compose_config["services"][service_name]["command"]
+            self.assertEqual(command[:2], ["sh", "-c"])
+            self.assertEqual(
+                command[2],
+                "python -m app.async_effects.owner_truth_worker_activation "
+                f"--worker {worker} && "
+                f"exec python -m {module} --loop",
+            )
         self.assertIn(
             '"app.async_effects.business_message_projection_worker", "--loop"',
             compose,
@@ -211,6 +231,7 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
         )
         self.assertIn("restart: unless-stopped", compose)
         self.assertEqual(compose.count("stop_grace_period: 150s"), 6)
+        self.assertIn("OWNER_TRUTH_MEDIA_DELETION_WORKER_ENABLED=false", env_example)
 
 
 if __name__ == "__main__":

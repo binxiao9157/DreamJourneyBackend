@@ -37,6 +37,7 @@ class RuntimeConfigService:
         *,
         provider_inventory: Optional[ProviderRuntimeInventory] = None,
         capability_control_registry: Optional[RuntimeCapabilityControlRegistry] = None,
+        async_effect_schema_ready: bool = False,
     ):
         self.settings = settings
         # Tests and maintenance commands may instantiate this service outside
@@ -44,6 +45,7 @@ class RuntimeConfigService:
         # marked as a runtime validation rather than a startup receipt.
         self.provider_inventory = provider_inventory or ProviderRuntimeInventory(settings)
         self.capability_control_registry = capability_control_registry
+        self.async_effect_schema_ready = bool(async_effect_schema_ready)
 
     def public_config(self) -> Dict[str, Any]:
         archive_image_analysis = ArchiveImageAnalysisProviderFactory(self.settings).make()
@@ -112,10 +114,9 @@ class RuntimeConfigService:
         async_effect_runtime = resolve_async_effect_runtime_status(
             async_effect_v1_enabled=self.settings.async_effect_v1_enabled,
             worker_enabled=self.settings.async_effect_worker_enabled,
-            # Schema-only migration is intentionally not a signal that a worker
-            # or any external effect is safe to execute. WI-S1-02-03 will wire
-            # a readiness-backed value when the worker exists.
-            schema_ready=False,
+            # Only a live store readiness probe may open the server-completion
+            # lane. Configuration flags alone remain fail-closed.
+            schema_ready=self.async_effect_schema_ready,
         )
         capability_snapshots = self._capability_snapshots(
             archive_image_analysis=archive_image_analysis,
