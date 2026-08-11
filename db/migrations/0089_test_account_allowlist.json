@@ -1,0 +1,11 @@
+{
+  "version": "0089",
+  "name": "test_account_allowlist",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "machineManagedTestAccountAllowlistRequires0089",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "testAccountAllowlist": false
+  }
+}

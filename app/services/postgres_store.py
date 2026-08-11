@@ -1844,6 +1844,224 @@ class PostgresStore:
             "contractVersion": 1,
         }
 
+    def create_test_account_allowlist(
+        self,
+        record: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        row = self._fetchone(
+            """
+            INSERT INTO test_account_allowlist (
+                id, identity_type, target_hash_key_version, target_hash,
+                target_hint, code_hash_key_version, code_hash, code_version,
+                label, status, subject_id, expires_at, created_by_hash,
+                use_count, last_used_at, contract_version, created_at, updated_at
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (identity_type, target_hash_key_version, target_hash)
+            DO NOTHING
+            RETURNING *
+            """,
+            (
+                record["accountId"],
+                record["identityType"],
+                record["targetHashKeyVersion"],
+                record["targetHash"],
+                record["targetHint"],
+                record["codeHashKeyVersion"],
+                record["codeHash"],
+                int(record["codeVersion"]),
+                record["label"],
+                record["status"],
+                record.get("subjectId"),
+                record["expiresAt"],
+                record["createdByHash"],
+                int(record.get("useCount") or 0),
+                record.get("lastUsedAt"),
+                int(record.get("contractVersion") or 1),
+                record["createdAt"],
+                record["updatedAt"],
+            ),
+        )
+        if row is not None:
+            return {"outcome": "created", "account": self._test_account_record(row)}
+        existing = self._fetchone(
+            """
+            SELECT * FROM test_account_allowlist
+            WHERE identity_type = %s
+              AND target_hash_key_version = %s
+              AND target_hash = %s
+            """,
+            (
+                record["identityType"],
+                record["targetHashKeyVersion"],
+                record["targetHash"],
+            ),
+        )
+        return {
+            "outcome": "conflict",
+            "account": self._test_account_record(existing or {}),
+        }
+
+    def list_test_account_allowlist(
+        self,
+        *,
+        include_disabled: bool,
+    ) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT * FROM test_account_allowlist
+            WHERE %s OR status = 'active'
+            ORDER BY created_at ASC, id ASC
+            """,
+            (bool(include_disabled),),
+        )
+        return [self._test_account_record(row) for row in rows]
+
+    def get_test_account_allowlist(
+        self,
+        account_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            "SELECT * FROM test_account_allowlist WHERE id = %s",
+            (account_id,),
+        )
+        return None if row is None else self._test_account_record(row)
+
+    def get_active_test_account_allowlist_by_target_hash(
+        self,
+        *,
+        identity_type: str,
+        target_hash_key_version: str,
+        target_hash: str,
+        observed_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT * FROM test_account_allowlist
+            WHERE identity_type = %s
+              AND target_hash_key_version = %s
+              AND target_hash = %s
+              AND status = 'active'
+              AND expires_at > %s
+            """,
+            (
+                identity_type,
+                target_hash_key_version,
+                target_hash,
+                observed_at_iso,
+            ),
+        )
+        return None if row is None else self._test_account_record(row)
+
+    def rotate_test_account_allowlist_code(
+        self,
+        account_id: str,
+        *,
+        code_hash: str,
+        code_hash_key_version: str,
+        code_version: int,
+        updated_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            UPDATE test_account_allowlist
+            SET code_hash = %s,
+                code_hash_key_version = %s,
+                code_version = %s,
+                updated_at = %s
+            WHERE id = %s
+            RETURNING *
+            """,
+            (
+                code_hash,
+                code_hash_key_version,
+                int(code_version),
+                updated_at_iso,
+                account_id,
+            ),
+        )
+        return None if row is None else self._test_account_record(row)
+
+    def update_test_account_allowlist_status(
+        self,
+        account_id: str,
+        *,
+        status: str,
+        expires_at_iso: Optional[str],
+        updated_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            UPDATE test_account_allowlist
+            SET status = %s,
+                expires_at = COALESCE(%s, expires_at),
+                updated_at = %s
+            WHERE id = %s
+            RETURNING *
+            """,
+            (status, expires_at_iso, updated_at_iso, account_id),
+        )
+        return None if row is None else self._test_account_record(row)
+
+    def record_test_account_allowlist_use(
+        self,
+        account_id: str,
+        *,
+        subject_id: str,
+        used_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            UPDATE test_account_allowlist
+            SET subject_id = COALESCE(subject_id, %s),
+                last_used_at = %s,
+                use_count = use_count + 1,
+                updated_at = %s
+            WHERE id = %s
+              AND status = 'active'
+              AND expires_at > %s
+              AND (subject_id IS NULL OR subject_id = %s)
+            RETURNING *
+            """,
+            (
+                subject_id,
+                used_at_iso,
+                used_at_iso,
+                account_id,
+                used_at_iso,
+                subject_id,
+            ),
+        )
+        return None if row is None else self._test_account_record(row)
+
+    @classmethod
+    def _test_account_record(cls, row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "accountId": str(row.get("id") or ""),
+            "identityType": str(row.get("identity_type") or "phone"),
+            "targetHashKeyVersion": str(
+                row.get("target_hash_key_version") or ""
+            ),
+            "targetHash": str(row.get("target_hash") or ""),
+            "targetHint": str(row.get("target_hint") or ""),
+            "codeHashKeyVersion": str(row.get("code_hash_key_version") or ""),
+            "codeHash": str(row.get("code_hash") or ""),
+            "codeVersion": int(row.get("code_version") or 0),
+            "label": str(row.get("label") or ""),
+            "status": str(row.get("status") or "disabled"),
+            "subjectId": row.get("subject_id"),
+            "expiresAt": cls._iso_value(row.get("expires_at")),
+            "createdByHash": str(row.get("created_by_hash") or ""),
+            "createdAt": cls._iso_value(row.get("created_at")),
+            "updatedAt": cls._iso_value(row.get("updated_at")),
+            "lastUsedAt": cls._iso_value(row.get("last_used_at")),
+            "useCount": int(row.get("use_count") or 0),
+            "contractVersion": int(row.get("contract_version") or 1),
+        }
+
     def ensure_identity_hash_key_version(
         self,
         version: str,

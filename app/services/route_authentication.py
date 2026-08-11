@@ -30,6 +30,7 @@ MACHINE_SYSTEM_SCOPES = frozenset(
         "incident:manage",
         "incident:observe",
         "rightsEvidence:observe",
+        "testAccount:manage",
     }
 )
 

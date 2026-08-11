@@ -151,6 +151,13 @@ from app.services.identity_bindings import (
     legacy_phone_login_enabled,
     make_identity_binding_service,
 )
+from app.services.test_account_allowlist import (
+    TestAccountAllowlistConflict,
+    TestAccountAllowlistDisabled,
+    TestAccountAllowlistNotFound,
+    TestAccountAllowlistValidationError,
+    make_test_account_allowlist_service,
+)
 from app.services.privacy import (
     filter_syncable_graph,
     sanitize_archive_item_payload,
@@ -5642,6 +5649,10 @@ def _identity_binding_service():
     )
 
 
+def _test_account_allowlist_service():
+    return make_test_account_allowlist_service(store, settings)
+
+
 def _tokens_match(left: str, right: str) -> bool:
     return bool(left and right and secrets.compare_digest(left, right))
 
@@ -6212,6 +6223,7 @@ NO_STORE_PATH_PREFIXES = (
     "/voice/",
     "/digital-human/",
     "/ops/incidents",
+    "/ops/test-accounts",
 )
 NO_STORE_EXACT_PATHS = {
     "/health",
@@ -12060,6 +12072,147 @@ def release_digital_human_session(request: Request, session_id: str, payload: Di
             "releasedAt": result["lease"].get("releasedAt"),
         },
     }
+
+
+def _test_account_actor_id(request: Request) -> str:
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, RequestPrincipal) or principal.kind != PrincipalKind.MACHINE:
+        raise HTTPException(status_code=403, detail={"code": "machine_principal_required"})
+    return str(principal.principal_id or "backend-service")
+
+
+def _test_account_error_response(error: Exception) -> HTTPException:
+    if isinstance(error, TestAccountAllowlistDisabled):
+        status_code = 503
+        code = "test_account_allowlist_unavailable"
+    elif isinstance(error, TestAccountAllowlistConflict):
+        status_code = 409
+        code = "test_account_target_conflict"
+    elif isinstance(error, TestAccountAllowlistNotFound):
+        status_code = 404
+        code = "test_account_not_found"
+    else:
+        status_code = 400
+        code = "test_account_invalid_request"
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": str(error)},
+    )
+
+
+@app.post("/ops/test-accounts", status_code=201)
+def create_test_account(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return _test_account_allowlist_service().create(
+            target=str(payload.get("target") or ""),
+            label=str(payload.get("label") or ""),
+            actor_id=_test_account_actor_id(request),
+            ttl_days=payload.get("ttlDays"),
+        )
+    except (
+        TestAccountAllowlistDisabled,
+        TestAccountAllowlistValidationError,
+        TestAccountAllowlistConflict,
+        TestAccountAllowlistNotFound,
+    ) as exc:
+        raise _test_account_error_response(exc) from exc
+
+
+@app.get("/ops/test-accounts")
+def list_test_accounts(
+    request: Request,
+    include_disabled: bool = True,
+) -> Dict[str, Any]:
+    _test_account_actor_id(request)
+    try:
+        return _test_account_allowlist_service().list(
+            include_disabled=include_disabled
+        )
+    except TestAccountAllowlistDisabled as exc:
+        raise _test_account_error_response(exc) from exc
+
+
+@app.post("/ops/test-accounts/{account_id}/rotate-code")
+def rotate_test_account_code(
+    request: Request,
+    account_id: str,
+) -> Dict[str, Any]:
+    try:
+        return _test_account_allowlist_service().rotate_code(
+            account_id,
+            actor_id=_test_account_actor_id(request),
+        )
+    except (
+        TestAccountAllowlistDisabled,
+        TestAccountAllowlistValidationError,
+        TestAccountAllowlistNotFound,
+    ) as exc:
+        raise _test_account_error_response(exc) from exc
+
+
+@app.post("/ops/test-accounts/{account_id}/disable")
+def disable_test_account(
+    request: Request,
+    account_id: str,
+) -> Dict[str, Any]:
+    try:
+        result = _test_account_allowlist_service().disable(
+            account_id,
+            actor_id=_test_account_actor_id(request),
+        )
+        subject_id = str(result["testAccount"].get("subjectId") or "").strip()
+        if subject_id:
+            result["sessionRevocation"] = _auth_session_service().revoke_all_for_user(
+                subject_id,
+                reason="testAccountDisabled",
+            )
+        else:
+            result["sessionRevocation"] = {"status": "notRequired"}
+        return result
+    except (
+        TestAccountAllowlistDisabled,
+        TestAccountAllowlistValidationError,
+        TestAccountAllowlistNotFound,
+    ) as exc:
+        raise _test_account_error_response(exc) from exc
+
+
+@app.post("/ops/test-accounts/{account_id}/enable")
+def enable_test_account(
+    request: Request,
+    account_id: str,
+) -> Dict[str, Any]:
+    try:
+        return _test_account_allowlist_service().enable(
+            account_id,
+            actor_id=_test_account_actor_id(request),
+        )
+    except (
+        TestAccountAllowlistDisabled,
+        TestAccountAllowlistValidationError,
+        TestAccountAllowlistNotFound,
+    ) as exc:
+        raise _test_account_error_response(exc) from exc
+
+
+@app.post("/ops/test-accounts/{account_id}/renew")
+def renew_test_account(
+    request: Request,
+    account_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        return _test_account_allowlist_service().renew(
+            account_id,
+            actor_id=_test_account_actor_id(request),
+            ttl_days=payload.get("ttlDays"),
+        )
+    except (
+        TestAccountAllowlistDisabled,
+        TestAccountAllowlistValidationError,
+        TestAccountAllowlistNotFound,
+    ) as exc:
+        raise _test_account_error_response(exc) from exc
 
 
 @app.post("/v2/auth/challenges", status_code=202)

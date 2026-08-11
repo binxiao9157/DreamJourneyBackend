@@ -13,6 +13,11 @@ from urllib.parse import urlparse
 
 from app.core.config import Settings
 from app.observability.events import hash_evidence_identifier
+from app.services.test_account_allowlist import (
+    TEST_ACCOUNT_PROVIDER_MODE,
+    make_test_account_allowlist_service,
+    test_account_allowlist_configured,
+)
 
 
 IDENTITY_BINDING_CONTRACT_VERSION = 1
@@ -438,6 +443,7 @@ def make_identity_challenge_adapter(settings: Settings) -> IdentityChallengeAdap
 def identity_challenge_runtime_descriptor(settings: Settings) -> Dict[str, Any]:
     adapter = make_identity_challenge_adapter(settings)
     key_configured = len(str(settings.identity_binding_hmac_key or "").encode("utf-8")) >= 32
+    test_account_enabled = test_account_allowlist_configured(settings)
     try:
         hash_key_version = _hash_key_version(settings.identity_binding_hmac_key_version)
         key_version_valid = True
@@ -448,17 +454,20 @@ def identity_challenge_runtime_descriptor(settings: Settings) -> Dict[str, Any]:
         adapter.internal_verification_enabled
         and key_configured
         and key_version_valid
-    )
+    ) or (test_account_enabled and key_version_valid)
     challenge_enabled = bool(
         (adapter.internal_verification_enabled or adapter.production_ready)
         and key_configured
         and key_version_valid
-    )
+    ) or bool(test_account_enabled and key_version_valid)
+    provider_mode = adapter.provider_mode
+    if provider_mode == "unavailable" and test_account_enabled:
+        provider_mode = TEST_ACCOUNT_PROVIDER_MODE
     return {
         "enabled": challenge_enabled,
         "challengeEndpoint": "/v2/auth/challenges",
         "verifyEndpointTemplate": "/v2/auth/challenges/{challengeId}/verify",
-        "providerMode": adapter.provider_mode,
+        "providerMode": provider_mode,
         "internalVerificationEnabled": internal_enabled,
         "productionReady": bool(
             adapter.production_ready and key_configured and key_version_valid
@@ -469,6 +478,8 @@ def identity_challenge_runtime_descriptor(settings: Settings) -> Dict[str, Any]:
         "stateContractVersion": IDENTITY_CHALLENGE_STATE_CONTRACT_VERSION,
         "deliveryReceiptSupported": bool(adapter.production_ready),
         "deliveryRecoverySupported": bool(adapter.delivery_recovery_supported),
+        "testAccountFlowEnabled": bool(test_account_enabled and key_version_valid),
+        "testAccountTargetRestricted": True,
         "challengeTTLSeconds": max(30, int(settings.identity_challenge_ttl_seconds)),
         "maxAttempts": max(1, int(settings.identity_challenge_max_attempts)),
         "retryAfterSeconds": max(1, int(settings.identity_challenge_retry_after_seconds)),
@@ -508,6 +519,7 @@ class IdentityBindingService:
         retry_after_seconds: int = 30,
         auth_session_service: Optional[Any] = None,
         event_sink: Optional[Any] = None,
+        test_account_allowlist_service: Optional[Any] = None,
         environment: str = "test",
         evidence_retention_days: int = 30,
     ):
@@ -530,6 +542,7 @@ class IdentityBindingService:
         self.retry_after_seconds = max(1, int(retry_after_seconds))
         self.auth_session_service = auth_session_service
         self.event_sink = event_sink
+        self.test_account_allowlist_service = test_account_allowlist_service
         self.environment = self._machine_code(environment, fallback="unknown")
         self.evidence_retention_days = max(1, int(evidence_retention_days))
 
@@ -541,13 +554,6 @@ class IdentityBindingService:
         purpose: str,
         now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        if not (
-            self.adapter.internal_verification_enabled
-            or self.adapter.production_ready
-        ):
-            raise IdentityChallengeConfigurationError(
-                "identity challenge provider is unavailable"
-            )
         key_state = self.store.ensure_identity_hash_key_version(
             self.hmac_key_version,
             self._hmac_key_fingerprint,
@@ -567,6 +573,18 @@ class IdentityBindingService:
         target_hash = self._keyed_hash(
             f"target:{self.hmac_key_version}:{normalized_type}:{normalized_target}"
         )
+        test_account = self._active_test_account(
+            identity_type=normalized_type,
+            target_hash=target_hash,
+            now=created_at,
+        )
+        if test_account is None and not (
+            self.adapter.internal_verification_enabled
+            or self.adapter.production_ready
+        ):
+            raise IdentityChallengeConfigurationError(
+                "identity challenge provider is unavailable"
+            )
         latest = self.store.get_latest_auth_challenge(
             identity_type=normalized_type,
             target_hash_key_version=self.hmac_key_version,
@@ -590,46 +608,64 @@ class IdentityBindingService:
                     math.ceil((retry_at - created_at).total_seconds())
                 )
         challenge_id = self._opaque_id("ach")
-        verification_code = self.adapter.verification_code()
-        try:
-            delivery_receipt = self._normalize_delivery_receipt(
-                self.adapter.deliver(
-                    identity_type=normalized_type,
-                    target=normalized_target,
-                    purpose=normalized_purpose,
-                    challenge_id=challenge_id,
-                    verification_code=verification_code,
+        if test_account is not None:
+            provider_mode = TEST_ACCOUNT_PROVIDER_MODE
+            code_hash = self.test_account_allowlist_service.challenge_code_hash(
+                account=test_account,
+                challenge_id=challenge_id,
+                keyed_hash=self._keyed_hash,
+            )
+            server_code_verification_enabled = True
+            delivery_receipt = IdentityChallengeDeliveryReceipt(
+                delivery_state="delivered",
+                recovery_state="notRequired",
+            )
+        else:
+            provider_mode = self.adapter.provider_mode
+            verification_code = self.adapter.verification_code()
+            code_hash = self._keyed_hash(
+                f"code:v1:{challenge_id}:{verification_code}"
+            )
+            server_code_verification_enabled = bool(
+                self.adapter.server_code_verification_enabled
+            )
+            try:
+                delivery_receipt = self._normalize_delivery_receipt(
+                    self.adapter.deliver(
+                        identity_type=normalized_type,
+                        target=normalized_target,
+                        purpose=normalized_purpose,
+                        challenge_id=challenge_id,
+                        verification_code=verification_code,
+                    )
                 )
-            )
-        except IdentityChallengeRateLimited as exc:
-            self._record_event(
-                operation_id=challenge_id,
-                resource_id=target_hash,
-                state="denied",
-                reason="providerRateLimited",
-                decision="createProviderRateLimited",
-                occurred_at=created_at,
-            )
-            raise IdentityChallengeRateLimited(exc.retry_after_seconds) from exc
-        except IdentityChallengeDeliveryError:
-            self._record_event(
-                operation_id=challenge_id,
-                resource_id=target_hash,
-                state="failed",
-                reason="providerDeliveryFailed",
-                decision="createDeliveryFailed",
-                occurred_at=created_at,
-            )
-            raise
+            except IdentityChallengeRateLimited as exc:
+                self._record_event(
+                    operation_id=challenge_id,
+                    resource_id=target_hash,
+                    state="denied",
+                    reason="providerRateLimited",
+                    decision="createProviderRateLimited",
+                    occurred_at=created_at,
+                )
+                raise IdentityChallengeRateLimited(exc.retry_after_seconds) from exc
+            except IdentityChallengeDeliveryError:
+                self._record_event(
+                    operation_id=challenge_id,
+                    resource_id=target_hash,
+                    state="failed",
+                    reason="providerDeliveryFailed",
+                    decision="createDeliveryFailed",
+                    occurred_at=created_at,
+                )
+                raise
         record = {
             "challengeId": challenge_id,
             "identityType": normalized_type,
             "targetHashKeyVersion": self.hmac_key_version,
             "targetHash": target_hash,
-            "codeHash": self._keyed_hash(
-                f"code:v1:{challenge_id}:{verification_code}"
-            ),
-            "providerMode": self.adapter.provider_mode,
+            "codeHash": code_hash,
+            "providerMode": provider_mode,
             "purpose": normalized_purpose,
             "status": "active",
             "attempts": 0,
@@ -637,9 +673,7 @@ class IdentityBindingService:
             # This historical persistence field controls whether the server can
             # compare its OTP hash. It is distinct from the public runtime flag
             # `internalVerificationEnabled`, which only identifies synthetic use.
-            "internalVerificationEnabled": bool(
-                self.adapter.server_code_verification_enabled
-            ),
+            "internalVerificationEnabled": server_code_verification_enabled,
             "deliveryState": delivery_receipt.delivery_state,
             "recoveryState": delivery_receipt.recovery_state,
             "providerReceiptHash": self._provider_receipt_hash(
@@ -679,10 +713,17 @@ class IdentityBindingService:
             raise IdentityChallengeStateUnavailable()
         observed_at = self._utc(now)
         record = self.store.get_auth_challenge(normalized_challenge_id)
-        if record is None or (
-            record.get("providerMode") != self.adapter.provider_mode
-            or record.get("targetHashKeyVersion") != self.hmac_key_version
-        ):
+        if record is None or record.get("targetHashKeyVersion") != self.hmac_key_version:
+            raise IdentityChallengeStateUnavailable()
+        test_account_mode = record.get("providerMode") == TEST_ACCOUNT_PROVIDER_MODE
+        if test_account_mode:
+            if self._active_test_account(
+                identity_type=str(record.get("identityType") or ""),
+                target_hash=str(record.get("targetHash") or ""),
+                now=observed_at,
+            ) is None:
+                raise IdentityChallengeStateUnavailable()
+        elif record.get("providerMode") != self.adapter.provider_mode:
             raise IdentityChallengeStateUnavailable()
 
         if (
@@ -710,7 +751,8 @@ class IdentityBindingService:
             <= observed_at
         )
         can_recover = (
-            recover_delivery
+            not test_account_mode
+            and recover_delivery
             and record.get("status") == "active"
             and record.get("recoveryState") in {"available", "pending"}
             and self.adapter.delivery_recovery_supported
@@ -775,13 +817,6 @@ class IdentityBindingService:
         nickname: str = "",
         now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        if not (
-            self.adapter.internal_verification_enabled
-            or self.adapter.production_ready
-        ):
-            raise IdentityChallengeConfigurationError(
-                "identity challenge provider is unavailable"
-            )
         key_state = self.store.ensure_identity_hash_key_version(
             self.hmac_key_version,
             self._hmac_key_fingerprint,
@@ -797,17 +832,44 @@ class IdentityBindingService:
             raise IdentityChallengeVerificationFailed()
         persisted_challenge = self.store.get_auth_challenge(normalized_challenge_id)
         if persisted_challenge is None or (
-            persisted_challenge.get("providerMode") != self.adapter.provider_mode
-            or persisted_challenge.get("targetHashKeyVersion")
-            != self.hmac_key_version
+            persisted_challenge.get("targetHashKeyVersion") != self.hmac_key_version
             or persisted_challenge.get("deliveryState") == "undeliverable"
         ):
             raise IdentityChallengeVerificationFailed()
+        test_account = None
+        if persisted_challenge.get("providerMode") == TEST_ACCOUNT_PROVIDER_MODE:
+            test_account = self._active_test_account(
+                identity_type=str(persisted_challenge.get("identityType") or ""),
+                target_hash=str(persisted_challenge.get("targetHash") or ""),
+                now=attempted_at,
+            )
+            if test_account is None:
+                raise IdentityChallengeVerificationFailed()
+        else:
+            if not (
+                self.adapter.internal_verification_enabled
+                or self.adapter.production_ready
+            ):
+                raise IdentityChallengeConfigurationError(
+                    "identity challenge provider is unavailable"
+                )
+            if persisted_challenge.get("providerMode") != self.adapter.provider_mode:
+                raise IdentityChallengeVerificationFailed()
         if len(candidate_code) > 128:
             candidate_code = "invalid-oversized-code"
-        code_hash = self._keyed_hash(
-            f"code:v1:{normalized_challenge_id}:{candidate_code}"
-        )
+        if test_account is not None and self.test_account_allowlist_service.verify_code(
+            test_account,
+            candidate_code,
+        ):
+            code_hash = self.test_account_allowlist_service.challenge_code_hash(
+                account=test_account,
+                challenge_id=normalized_challenge_id,
+                keyed_hash=self._keyed_hash,
+            )
+        else:
+            code_hash = self._keyed_hash(
+                f"code:v1:{normalized_challenge_id}:{candidate_code}"
+            )
         result = self.store.verify_auth_challenge(
             normalized_challenge_id,
             code_hash=code_hash,
@@ -828,6 +890,12 @@ class IdentityBindingService:
             raise IdentityChallengeVerificationFailed()
 
         subject_id = str(result["subjectId"])
+        if test_account is not None and not self.test_account_allowlist_service.record_successful_login(
+            str(test_account.get("accountId") or ""),
+            subject_id=subject_id,
+            now=attempted_at,
+        ):
+            raise IdentityChallengeVerificationFailed()
         response = {
             "status": "verified",
             "subject": {
@@ -962,6 +1030,23 @@ class IdentityBindingService:
             expires_at_iso=expires_at.isoformat(),
         )
 
+    def _active_test_account(
+        self,
+        *,
+        identity_type: str,
+        target_hash: str,
+        now: datetime,
+    ) -> Optional[Dict[str, Any]]:
+        service = self.test_account_allowlist_service
+        if service is None:
+            return None
+        return service.active_account_for_target_hash(
+            identity_type=identity_type,
+            target_hash_key_version=self.hmac_key_version,
+            target_hash=target_hash,
+            now=now,
+        )
+
     def _keyed_hash(self, value: str) -> str:
         return hmac.new(
             self._hmac_key,
@@ -1034,6 +1119,10 @@ def make_identity_binding_service(
         retry_after_seconds=settings.identity_challenge_retry_after_seconds,
         auth_session_service=auth_session_service,
         event_sink=getattr(store, "append_evidence_event", None),
+        test_account_allowlist_service=make_test_account_allowlist_service(
+            store,
+            settings,
+        ),
         environment=settings.environment,
         evidence_retention_days=settings.evidence_rollout_retention_days,
     )

@@ -66,6 +66,13 @@ class Settings:
     identity_challenge_ttl_seconds: int = 300
     identity_challenge_max_attempts: int = 5
     identity_challenge_retry_after_seconds: int = 30
+    # A machine-managed, target-restricted login lane for synthetic QA
+    # accounts. It is disabled by default and accepts only explicitly
+    # configured phone prefixes so it cannot become an arbitrary OTP bypass.
+    test_account_allowlist_enabled: bool = False
+    test_account_allowed_phone_prefixes: Optional[str] = None
+    test_account_default_ttl_days: int = 7
+    test_account_max_ttl_days: int = 30
     # Voice cloning requires a separate strong adult identity + liveness
     # verifier. OTP/phone authentication is intentionally insufficient.
     # ``disabled`` is the only default and causes the training path to fail
@@ -382,6 +389,21 @@ class Settings:
             identity_challenge_retry_after_seconds=_env_int(
                 "IDENTITY_CHALLENGE_RETRY_AFTER_SECONDS",
                 cls.identity_challenge_retry_after_seconds,
+            ),
+            test_account_allowlist_enabled=_env_bool(
+                "TEST_ACCOUNT_ALLOWLIST_ENABLED",
+                cls.test_account_allowlist_enabled,
+            ),
+            test_account_allowed_phone_prefixes=_env(
+                "TEST_ACCOUNT_ALLOWED_PHONE_PREFIXES"
+            ),
+            test_account_default_ttl_days=_env_int(
+                "TEST_ACCOUNT_DEFAULT_TTL_DAYS",
+                cls.test_account_default_ttl_days,
+            ),
+            test_account_max_ttl_days=_env_int(
+                "TEST_ACCOUNT_MAX_TTL_DAYS",
+                cls.test_account_max_ttl_days,
             ),
             voice_identity_eligibility_provider=_env(
                 "VOICE_IDENTITY_ELIGIBILITY_PROVIDER",

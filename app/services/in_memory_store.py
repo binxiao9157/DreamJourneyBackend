@@ -366,6 +366,8 @@ class InMemoryStore:
         self._identity_bindings: Dict[str, Dict[str, Any]] = {}
         self._identity_binding_ids_by_target: Dict[Tuple[str, str, str], str] = {}
         self._identity_proofs: Dict[str, Dict[str, Any]] = {}
+        self._test_account_allowlist: Dict[str, Dict[str, Any]] = {}
+        self._test_account_ids_by_target: Dict[Tuple[str, str, str], str] = {}
         self._identity_lock = RLock()
         self._evidence_events: Dict[str, Dict[str, Any]] = {}
         self._rights_requests: Dict[str, Dict[str, Any]] = {}
@@ -1234,6 +1236,133 @@ class InMemoryStore:
                 return {"outcome": "conflict", "version": version}
             self._identity_hash_key_versions[version] = fingerprint
             return {"outcome": "ready", "version": version}
+
+    def create_test_account_allowlist(
+        self,
+        record: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        item = deepcopy(record)
+        account_id = str(item.get("accountId") or "")
+        target_key = (
+            str(item.get("identityType") or ""),
+            str(item.get("targetHashKeyVersion") or ""),
+            str(item.get("targetHash") or ""),
+        )
+        with self._identity_lock:
+            existing_id = self._test_account_ids_by_target.get(target_key)
+            if existing_id is not None:
+                return {
+                    "outcome": "conflict",
+                    "account": deepcopy(self._test_account_allowlist[existing_id]),
+                }
+            self._test_account_allowlist[account_id] = item
+            self._test_account_ids_by_target[target_key] = account_id
+            return {"outcome": "created", "account": deepcopy(item)}
+
+    def list_test_account_allowlist(
+        self,
+        *,
+        include_disabled: bool,
+    ) -> List[Dict[str, Any]]:
+        with self._identity_lock:
+            records = [
+                deepcopy(item)
+                for item in self._test_account_allowlist.values()
+                if include_disabled or item.get("status") == "active"
+            ]
+        return sorted(records, key=lambda item: str(item.get("createdAt") or ""))
+
+    def get_test_account_allowlist(
+        self,
+        account_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._identity_lock:
+            item = self._test_account_allowlist.get(account_id)
+            return None if item is None else deepcopy(item)
+
+    def get_active_test_account_allowlist_by_target_hash(
+        self,
+        *,
+        identity_type: str,
+        target_hash_key_version: str,
+        target_hash: str,
+        observed_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        target_key = (identity_type, target_hash_key_version, target_hash)
+        observed_at = self._parse_iso_datetime(observed_at_iso)
+        with self._identity_lock:
+            account_id = self._test_account_ids_by_target.get(target_key)
+            item = self._test_account_allowlist.get(account_id or "")
+            if item is None or item.get("status") != "active":
+                return None
+            if self._parse_iso_datetime(str(item.get("expiresAt") or "")) <= observed_at:
+                return None
+            return deepcopy(item)
+
+    def rotate_test_account_allowlist_code(
+        self,
+        account_id: str,
+        *,
+        code_hash: str,
+        code_hash_key_version: str,
+        code_version: int,
+        updated_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._identity_lock:
+            item = self._test_account_allowlist.get(account_id)
+            if item is None:
+                return None
+            item.update(
+                codeHash=code_hash,
+                codeHashKeyVersion=code_hash_key_version,
+                codeVersion=int(code_version),
+                updatedAt=updated_at_iso,
+            )
+            return deepcopy(item)
+
+    def update_test_account_allowlist_status(
+        self,
+        account_id: str,
+        *,
+        status: str,
+        expires_at_iso: Optional[str],
+        updated_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._identity_lock:
+            item = self._test_account_allowlist.get(account_id)
+            if item is None:
+                return None
+            item["status"] = status
+            item["updatedAt"] = updated_at_iso
+            if expires_at_iso is not None:
+                item["expiresAt"] = expires_at_iso
+            return deepcopy(item)
+
+    def record_test_account_allowlist_use(
+        self,
+        account_id: str,
+        *,
+        subject_id: str,
+        used_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        used_at = self._parse_iso_datetime(used_at_iso)
+        with self._identity_lock:
+            item = self._test_account_allowlist.get(account_id)
+            if (
+                item is None
+                or item.get("status") != "active"
+                or self._parse_iso_datetime(str(item.get("expiresAt") or "")) <= used_at
+                or (
+                    item.get("subjectId") is not None
+                    and item.get("subjectId") != subject_id
+                )
+            ):
+                return None
+            item["subjectId"] = subject_id
+            item["lastUsedAt"] = used_at_iso
+            item["useCount"] = int(item.get("useCount") or 0) + 1
+            item["updatedAt"] = used_at_iso
+            return deepcopy(item)
 
     def save_auth_challenge(self, challenge: Dict[str, Any]) -> Dict[str, Any]:
         persisted_fields = (
