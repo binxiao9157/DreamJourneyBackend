@@ -46,6 +46,7 @@ def make_allowlist(store: InMemoryStore) -> TestAccountAllowlistService:
         allowed_phone_prefixes=(TARGET_PREFIX,),
         default_ttl_days=7,
         max_ttl_days=30,
+        event_sink=store.append_evidence_event,
         environment="test",
     )
 
@@ -128,6 +129,31 @@ class TestAccountAllowlistServiceTests(unittest.TestCase):
         )
         self.assertEqual(renewed["testAccount"]["status"], "active")
         self.assertEqual(renewed["testAccount"]["subjectId"], "sub_test_account")
+        service.disable(
+            account_id,
+            actor_id="backend-service-v1",
+            now=NOW + timedelta(days=40, minutes=1),
+        )
+        enabled = service.enable(
+            account_id,
+            actor_id="backend-service-v1",
+            now=NOW + timedelta(days=40, minutes=2),
+        )
+        self.assertEqual(enabled["testAccount"]["status"], "active")
+        self.assertEqual(
+            {
+                event["payload"]["route"]
+                for event in store.list_evidence_events()
+            },
+            {
+                "POST /ops/test-accounts",
+                "POST /ops/test-accounts/{account_id}/rotate-code",
+                "POST /ops/test-accounts/{account_id}/disable",
+                "POST /ops/test-accounts/{account_id}/enable",
+                "POST /ops/test-accounts/{account_id}/renew",
+                "POST /v2/auth/challenges/{challenge_id}/verify",
+            },
+        )
 
     def test_target_must_match_explicit_synthetic_prefix(self):
         service = make_allowlist(InMemoryStore())

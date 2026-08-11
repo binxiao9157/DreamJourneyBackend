@@ -153,6 +153,7 @@ class TestAccountAllowlistService:
             account_id=account_id,
             actor_id=actor_id,
             action="created",
+            route="POST /ops/test-accounts",
             occurred_at=created_at,
         )
         return {
@@ -201,6 +202,7 @@ class TestAccountAllowlistService:
             account_id=str(account["accountId"]),
             actor_id=actor_id,
             action="codeRotated",
+            route="POST /ops/test-accounts/{account_id}/rotate-code",
             occurred_at=rotated_at,
         )
         return {
@@ -224,6 +226,7 @@ class TestAccountAllowlistService:
             status="disabled",
             actor_id=actor_id,
             action="disabled",
+            route="POST /ops/test-accounts/{account_id}/disable",
             now=now,
         )
 
@@ -245,6 +248,7 @@ class TestAccountAllowlistService:
             status="active",
             actor_id=actor_id,
             action="enabled",
+            route="POST /ops/test-accounts/{account_id}/enable",
             now=observed_at,
         )
 
@@ -272,6 +276,7 @@ class TestAccountAllowlistService:
             account_id=str(result["accountId"]),
             actor_id=actor_id,
             action="renewed",
+            route="POST /ops/test-accounts/{account_id}/renew",
             occurred_at=renewed_at,
         )
         return {"status": "renewed", "testAccount": self._public_record(result)}
@@ -342,6 +347,7 @@ class TestAccountAllowlistService:
             account_id=str(account_id),
             actor_id=str(subject_id),
             action="loginVerified",
+            route="POST /v2/auth/challenges/{challenge_id}/verify",
             occurred_at=used_at,
         )
         return True
@@ -358,6 +364,7 @@ class TestAccountAllowlistService:
         status: str,
         actor_id: str,
         action: str,
+        route: str,
         now: Optional[datetime],
     ) -> Dict[str, Any]:
         self._require_configured()
@@ -375,6 +382,7 @@ class TestAccountAllowlistService:
             account_id=str(result["accountId"]),
             actor_id=actor_id,
             action=action,
+            route=route,
             occurred_at=changed_at,
         )
         return {"status": status, "testAccount": self._public_record(result)}
@@ -483,6 +491,7 @@ class TestAccountAllowlistService:
         account_id: str,
         actor_id: str,
         action: str,
+        route: str,
         occurred_at: datetime,
     ) -> None:
         if not callable(self.event_sink):
@@ -506,7 +515,7 @@ class TestAccountAllowlistService:
                 "build": "backend",
                 "redactionVersion": 1,
                 "operation": "testAccountAllowlist",
-                "route": "machineOnly",
+                "route": route,
                 "feature": "testAccountAccess",
                 "decision": action,
             },
