@@ -95,6 +95,7 @@ def main() -> None:
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         require("0089" in applied["appliedVersions"], "migration 0089 must apply")
+        require("0090" in applied["appliedVersions"], "migration 0090 must apply")
 
         store = PostgresStore(
             test_dsn,
@@ -108,8 +109,6 @@ def main() -> None:
             hmac_key_version="v1",
             enabled=True,
             allowed_phone_prefixes=(TARGET_PREFIX,),
-            default_ttl_days=7,
-            max_ttl_days=30,
             environment="smoke",
         )
         created = allowlist.create(
@@ -124,13 +123,15 @@ def main() -> None:
         with psycopg.connect(test_dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT target_hash, code_hash, target_hint "
+                    "SELECT target_hash, code_hash, target_hint, expires_at "
                     "FROM test_account_allowlist WHERE id = %s",
                     (account_id,),
                 )
                 persisted = json.dumps(cursor.fetchone(), ensure_ascii=False)
         require(NORMALIZED_TARGET not in persisted, "raw target must not persist")
         require(code not in persisted, "plaintext verification code must not persist")
+        require(created["expiresAt"] is None, "test account must be permanent")
+        require(created["validity"] == "permanent", "validity must be permanent")
 
         sessions = AuthSessionService(
             store,

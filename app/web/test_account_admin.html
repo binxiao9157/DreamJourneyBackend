@@ -1,0 +1,662 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>测试账号白名单</title>
+  <style nonce="__CSP_NONCE__">
+    :root {
+      color-scheme: light;
+      --page: #f3f5f3;
+      --surface: #ffffff;
+      --surface-muted: #f7f8f6;
+      --ink: #1d2521;
+      --muted: #65706a;
+      --line: #d8ded9;
+      --accent: #1e6047;
+      --accent-strong: #154b37;
+      --warning: #9a6113;
+      --danger: #a43737;
+      --success-bg: #e5f3eb;
+      --disabled-bg: #ecefed;
+      --focus: #2479c8;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background: var(--page);
+      font-size: 15px;
+      line-height: 1.5;
+      letter-spacing: 0;
+    }
+
+    button, input { font: inherit; letter-spacing: 0; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: 0.55; }
+
+    :focus-visible {
+      outline: 3px solid color-mix(in srgb, var(--focus) 34%, transparent);
+      outline-offset: 2px;
+    }
+
+    .topbar {
+      min-height: 64px;
+      color: #ffffff;
+      background: #202824;
+      border-bottom: 3px solid #d5a13d;
+    }
+
+    .topbar-inner,
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .topbar-inner {
+      min-height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .brand strong { font-size: 19px; font-weight: 650; }
+    .brand span { color: #bfc8c2; font-size: 13px; }
+
+    main { padding: 28px 0 52px; }
+
+    .login-shell {
+      width: min(420px, 100%);
+      margin: 9vh auto 0;
+      padding: 28px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 12px 30px rgba(29, 37, 33, 0.08);
+    }
+
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 6px; font-size: 24px; font-weight: 680; }
+    h2 { margin-bottom: 14px; font-size: 17px; font-weight: 660; }
+    .subtitle { color: var(--muted); margin-bottom: 24px; }
+
+    .field {
+      display: grid;
+      gap: 7px;
+      margin-bottom: 16px;
+    }
+
+    label { font-weight: 610; }
+
+    input {
+      width: 100%;
+      min-height: 42px;
+      padding: 9px 11px;
+      color: var(--ink);
+      background: var(--surface);
+      border: 1px solid #bdc7c1;
+      border-radius: 5px;
+    }
+
+    input::placeholder { color: #929c96; }
+
+    .button {
+      min-height: 40px;
+      padding: 8px 15px;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      font-weight: 620;
+      white-space: nowrap;
+    }
+
+    .button-primary { color: #ffffff; background: var(--accent); }
+    .button-primary:hover { background: var(--accent-strong); }
+    .button-secondary { color: var(--ink); background: #ffffff; border-color: #b9c3bd; }
+    .button-danger { color: var(--danger); background: #ffffff; border-color: #d9adad; }
+    .button-link { min-height: 34px; padding: 4px 8px; color: var(--accent); background: transparent; }
+    .button-link.button-danger { color: var(--danger); }
+    .button-block { width: 100%; }
+
+    .message {
+      min-height: 23px;
+      margin: 12px 0 0;
+      color: var(--danger);
+      font-size: 14px;
+    }
+
+    .workspace[hidden],
+    .login-shell[hidden] { display: none; }
+
+    .workspace-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 22px;
+    }
+
+    .session-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .create-band {
+      display: grid;
+      grid-template-columns: minmax(210px, 0.9fr) minmax(240px, 1.4fr) auto;
+      align-items: end;
+      gap: 14px;
+      padding: 18px;
+      margin-bottom: 22px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+    }
+
+    .create-band .field { margin: 0; }
+
+    .table-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 10px;
+    }
+
+    .count { color: var(--muted); font-size: 13px; }
+
+    .table-frame {
+      overflow-x: auto;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+    }
+
+    table {
+      width: 100%;
+      min-width: 920px;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      padding: 13px 14px;
+      text-align: left;
+      vertical-align: middle;
+      border-bottom: 1px solid #e7ebe8;
+    }
+
+    th {
+      color: #4d5953;
+      background: var(--surface-muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #fafbf9; }
+
+    .account-label { font-weight: 650; }
+    .secondary { color: var(--muted); font-size: 13px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .status-active { color: #15543d; background: var(--success-bg); }
+    .status-disabled { color: #59615d; background: var(--disabled-bg); }
+
+    .row-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .empty {
+      padding: 46px 20px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    dialog {
+      width: min(450px, calc(100% - 32px));
+      padding: 0;
+      color: var(--ink);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 20px 60px rgba(20, 28, 24, 0.22);
+    }
+
+    dialog::backdrop { background: rgba(18, 24, 21, 0.48); }
+    .dialog-body { padding: 24px; }
+    .credential-line { margin: 14px 0; }
+    .credential-value {
+      display: block;
+      margin-top: 5px;
+      padding: 10px 12px;
+      background: var(--surface-muted);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .dialog-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 22px;
+    }
+
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      max-width: min(380px, calc(100% - 40px));
+      padding: 11px 14px;
+      color: #ffffff;
+      background: #26312b;
+      border-radius: 5px;
+      box-shadow: 0 8px 24px rgba(20, 28, 24, 0.2);
+    }
+
+    @media (max-width: 760px) {
+      .topbar-inner, main { width: min(100% - 22px, 1180px); }
+      .brand span { display: none; }
+      .workspace-header { display: block; }
+      .session-actions { margin-top: 12px; justify-content: space-between; }
+      .create-band { grid-template-columns: 1fr; align-items: stretch; }
+      .create-band .button { width: 100%; }
+      .login-shell { margin-top: 4vh; padding: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <strong>DreamJourney</strong>
+        <span>后台管理</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="loginShell" class="login-shell" aria-labelledby="loginTitle">
+      <h1 id="loginTitle">管理员登录</h1>
+      <p class="subtitle">测试账号白名单</p>
+      <form id="loginForm">
+        <div class="field">
+          <label for="username">管理员用户名</label>
+          <input id="username" name="username" autocomplete="username" required maxlength="80">
+        </div>
+        <div class="field">
+          <label for="password">管理员密码</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+        </div>
+        <button class="button button-primary button-block" type="submit">登录</button>
+        <p id="loginMessage" class="message" role="alert" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section id="workspace" class="workspace" hidden aria-labelledby="pageTitle">
+      <div class="workspace-header">
+        <div>
+          <h1 id="pageTitle">测试账号白名单</h1>
+          <p class="subtitle">账号永久有效，停用后立即撤销登录会话。</p>
+        </div>
+        <div class="session-actions">
+          <span id="administratorName"></span>
+          <button id="logoutButton" class="button button-secondary" type="button">退出登录</button>
+        </div>
+      </div>
+
+      <form id="createForm" class="create-band">
+        <div class="field">
+          <label for="target">测试手机号</label>
+          <input id="target" name="target" inputmode="numeric" pattern="100[0-9]{8}" placeholder="10000000002" required maxlength="11">
+        </div>
+        <div class="field">
+          <label for="label">备注</label>
+          <input id="label" name="label" placeholder="测试设备或使用人" required maxlength="80">
+        </div>
+        <button class="button button-primary" type="submit">新增白名单</button>
+      </form>
+
+      <div class="table-toolbar">
+        <h2>账号列表</h2>
+        <div>
+          <span id="accountCount" class="count"></span>
+          <button id="refreshButton" class="button button-link" type="button">刷新</button>
+        </div>
+      </div>
+
+      <div class="table-frame">
+        <table aria-label="测试账号白名单">
+          <thead>
+            <tr>
+              <th>账号</th>
+              <th>状态</th>
+              <th>有效期</th>
+              <th>绑定用户</th>
+              <th>登录次数</th>
+              <th>最近登录</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="accountRows"></tbody>
+        </table>
+        <div id="emptyState" class="empty" hidden>暂无测试账号</div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="credentialDialog" aria-labelledby="credentialTitle">
+    <div class="dialog-body">
+      <h2 id="credentialTitle">测试账号凭据</h2>
+      <div id="loginTargetLine" class="credential-line">
+        <span class="secondary">手机号</span>
+        <strong id="credentialTarget" class="credential-value mono"></strong>
+      </div>
+      <div class="credential-line">
+        <span class="secondary">固定验证码</span>
+        <strong id="credentialCode" class="credential-value mono"></strong>
+      </div>
+      <div class="dialog-actions">
+        <button id="copyCredentialButton" class="button button-secondary" type="button">复制凭据</button>
+        <button id="closeCredentialButton" class="button button-primary" type="button">完成</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script nonce="__CSP_NONCE__">
+    (() => {
+      "use strict";
+
+      const apiBase = window.location.pathname.replace(/\/admin\/?$/, "");
+      const loginShell = document.getElementById("loginShell");
+      const workspace = document.getElementById("workspace");
+      const loginForm = document.getElementById("loginForm");
+      const createForm = document.getElementById("createForm");
+      const loginMessage = document.getElementById("loginMessage");
+      const accountRows = document.getElementById("accountRows");
+      const emptyState = document.getElementById("emptyState");
+      const accountCount = document.getElementById("accountCount");
+      const administratorName = document.getElementById("administratorName");
+      const credentialDialog = document.getElementById("credentialDialog");
+      const credentialTarget = document.getElementById("credentialTarget");
+      const credentialCode = document.getElementById("credentialCode");
+      const loginTargetLine = document.getElementById("loginTargetLine");
+      const toast = document.getElementById("toast");
+      let toastTimer = null;
+
+      async function api(path, options = {}, redirectOnAuthFailure = true) {
+        const response = await fetch(`${apiBase}${path}`, {
+          credentials: "same-origin",
+          cache: "no-store",
+          ...options,
+          headers: {
+            Accept: "application/json",
+            ...(options.body ? { "Content-Type": "application/json" } : {}),
+            ...(options.headers || {})
+          }
+        });
+        let body = {};
+        try { body = await response.json(); } catch (_) { body = {}; }
+        if (!response.ok) {
+          if (redirectOnAuthFailure && (response.status === 401 || response.status === 403)) {
+            showLogin();
+          }
+          const detail = body.detail || {};
+          const error = new Error(detail.message || detail.code || "请求失败");
+          error.status = response.status;
+          error.detail = detail;
+          throw error;
+        }
+        return body;
+      }
+
+      function showLogin() {
+        workspace.hidden = true;
+        loginShell.hidden = false;
+        document.getElementById("password").value = "";
+      }
+
+      function showWorkspace(session) {
+        loginShell.hidden = true;
+        workspace.hidden = false;
+        administratorName.textContent = session.administrator.username;
+      }
+
+      function notify(message) {
+        toast.textContent = message;
+        toast.hidden = false;
+        window.clearTimeout(toastTimer);
+        toastTimer = window.setTimeout(() => { toast.hidden = true; }, 2600);
+      }
+
+      function formatDate(value) {
+        if (!value) return "尚未登录";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return "-";
+        return new Intl.DateTimeFormat("zh-CN", {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false
+        }).format(date);
+      }
+
+      function shortSubject(value) {
+        if (!value) return "未绑定";
+        return value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value;
+      }
+
+      function cell(text, className = "") {
+        const element = document.createElement("td");
+        element.textContent = text;
+        if (className) element.className = className;
+        return element;
+      }
+
+      function actionButton(label, action, accountId, danger = false) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `button button-link${danger ? " button-danger" : ""}`;
+        button.textContent = label;
+        button.dataset.action = action;
+        button.dataset.accountId = accountId;
+        return button;
+      }
+
+      function renderAccounts(accounts) {
+        accountRows.replaceChildren();
+        emptyState.hidden = accounts.length !== 0;
+        accountCount.textContent = `${accounts.length} 个账号`;
+
+        for (const account of accounts) {
+          const row = document.createElement("tr");
+          const identity = document.createElement("td");
+          const label = document.createElement("div");
+          label.className = "account-label";
+          label.textContent = account.label;
+          const hint = document.createElement("div");
+          hint.className = "secondary mono";
+          hint.textContent = account.targetHint;
+          identity.append(label, hint);
+
+          const statusCell = document.createElement("td");
+          const status = document.createElement("span");
+          status.className = `status status-${account.status}`;
+          status.textContent = account.status === "active" ? "已启用" : "已停用";
+          statusCell.append(status);
+
+          const subject = cell(shortSubject(account.subjectId), "mono secondary");
+          subject.title = account.subjectId || "";
+          const actions = document.createElement("td");
+          const actionGroup = document.createElement("div");
+          actionGroup.className = "row-actions";
+          actionGroup.append(actionButton("重置验证码", "rotate", account.accountId));
+          if (account.status === "active") {
+            actionGroup.append(actionButton("停用", "disable", account.accountId, true));
+          } else {
+            actionGroup.append(actionButton("启用", "enable", account.accountId));
+          }
+          actions.append(actionGroup);
+
+          row.append(
+            identity,
+            statusCell,
+            cell("永久"),
+            subject,
+            cell(String(account.useCount || 0)),
+            cell(formatDate(account.lastUsedAt)),
+            actions
+          );
+          accountRows.append(row);
+        }
+      }
+
+      async function loadAccounts() {
+        const result = await api("?include_disabled=true");
+        renderAccounts(result.testAccounts || []);
+      }
+
+      function showCredentials(account) {
+        const target = account.loginTarget || "";
+        credentialTarget.textContent = target;
+        credentialCode.textContent = account.verificationCode || "";
+        loginTargetLine.hidden = !target;
+        credentialDialog.showModal();
+      }
+
+      loginForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        loginMessage.textContent = "";
+        const button = loginForm.querySelector("button[type=submit]");
+        button.disabled = true;
+        try {
+          const session = await api("/admin/login", {
+            method: "POST",
+            body: JSON.stringify({
+              username: document.getElementById("username").value,
+              password: document.getElementById("password").value
+            })
+          }, false);
+          showWorkspace(session);
+          await loadAccounts();
+        } catch (error) {
+          loginMessage.textContent = error.status === 429
+            ? "登录尝试过多，请稍后重试"
+            : "用户名或密码错误";
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      createForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = createForm.querySelector("button[type=submit]");
+        button.disabled = true;
+        try {
+          const result = await api("", {
+            method: "POST",
+            body: JSON.stringify({
+              target: document.getElementById("target").value,
+              label: document.getElementById("label").value
+            })
+          });
+          createForm.reset();
+          showCredentials(result.testAccount);
+          await loadAccounts();
+        } catch (error) {
+          notify(error.status === 409 ? "该测试手机号已存在" : error.message);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      accountRows.addEventListener("click", async (event) => {
+        const button = event.target.closest("button[data-action]");
+        if (!button) return;
+        const action = button.dataset.action;
+        const accountId = button.dataset.accountId;
+        if (action === "disable" && !window.confirm("停用后将立即撤销该账号的登录会话。确认停用？")) return;
+        if (action === "enable" && !window.confirm("确认重新启用该测试账号？")) return;
+        if (action === "rotate" && !window.confirm("旧验证码将立即失效。确认重置？")) return;
+        button.disabled = true;
+        try {
+          const result = await api(`/${encodeURIComponent(accountId)}/${action === "rotate" ? "rotate-code" : action}`, {
+            method: "POST"
+          });
+          if (action === "rotate") showCredentials(result.testAccount);
+          notify(action === "disable" ? "账号已停用" : action === "enable" ? "账号已启用" : "验证码已重置");
+          await loadAccounts();
+        } catch (error) {
+          notify(error.message);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      document.getElementById("refreshButton").addEventListener("click", async () => {
+        try { await loadAccounts(); notify("列表已刷新"); } catch (error) { notify(error.message); }
+      });
+
+      document.getElementById("logoutButton").addEventListener("click", async () => {
+        try { await api("/admin/logout", { method: "POST" }, false); } finally { showLogin(); }
+      });
+
+      document.getElementById("closeCredentialButton").addEventListener("click", () => credentialDialog.close());
+
+      document.getElementById("copyCredentialButton").addEventListener("click", async () => {
+        const lines = [];
+        if (!loginTargetLine.hidden) lines.push(`手机号：${credentialTarget.textContent}`);
+        lines.push(`验证码：${credentialCode.textContent}`);
+        try {
+          await navigator.clipboard.writeText(lines.join("\n"));
+          notify("凭据已复制");
+        } catch (_) {
+          notify("复制失败，请手动记录");
+        }
+      });
+
+      (async () => {
+        try {
+          const session = await api("/admin/session");
+          showWorkspace(session);
+          await loadAccounts();
+        } catch (_) {
+          showLogin();
+        }
+      })();
+    })();
+  </script>
+</body>
+</html>

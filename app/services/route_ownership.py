@@ -1017,6 +1017,31 @@ class RouteOwnershipRegistry:
                 required_scopes=("incident:manage",),
             ),
             _rule(
+                "GET",
+                "/ops/test-accounts/admin",
+                public,
+                "publicTestAccountAdminPage",
+            ),
+            _rule(
+                "POST",
+                "/ops/test-accounts/admin/login",
+                public,
+                "publicTestAccountAdminLogin",
+            ),
+            _rule(
+                "POST",
+                "/ops/test-accounts/admin/logout",
+                public,
+                "publicTestAccountAdminLogout",
+            ),
+            _rule(
+                "GET",
+                "/ops/test-accounts/admin/session",
+                system,
+                "systemTestAccountAdminSession",
+                required_scopes=("testAccount:manage",),
+            ),
+            _rule(
                 "POST",
                 "/ops/test-accounts",
                 system,

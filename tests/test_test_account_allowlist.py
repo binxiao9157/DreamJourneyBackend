@@ -44,8 +44,6 @@ def make_allowlist(store: InMemoryStore) -> TestAccountAllowlistService:
         hmac_key_version="v1",
         enabled=True,
         allowed_phone_prefixes=(TARGET_PREFIX,),
-        default_ttl_days=7,
-        max_ttl_days=30,
         event_sink=store.append_evidence_event,
         environment="test",
     )
@@ -69,6 +67,8 @@ class TestAccountAllowlistServiceTests(unittest.TestCase):
 
         self.assertRegex(code, r"^[0-9]{6}$")
         self.assertEqual(account["loginTarget"], TARGET)
+        self.assertIsNone(account["expiresAt"])
+        self.assertEqual(account["validity"], "permanent")
         self.assertNotIn("verificationCode", persisted)
         self.assertNotIn("target", persisted)
         serialized = json.dumps(store._test_account_allowlist, sort_keys=True)
@@ -124,11 +124,20 @@ class TestAccountAllowlistServiceTests(unittest.TestCase):
         renewed = service.renew(
             account_id,
             actor_id="backend-service-v1",
-            ttl_days=2,
             now=NOW + timedelta(days=40),
         )
         self.assertEqual(renewed["testAccount"]["status"], "active")
+        self.assertIsNone(renewed["testAccount"]["expiresAt"])
+        self.assertEqual(renewed["testAccount"]["validity"], "permanent")
         self.assertEqual(renewed["testAccount"]["subjectId"], "sub_test_account")
+        self.assertIsNotNone(
+            service.active_account_for_target_hash(
+                identity_type="phone",
+                target_hash_key_version="v1",
+                target_hash=target_hash,
+                now=NOW + timedelta(days=36500),
+            )
+        )
         service.disable(
             account_id,
             actor_id="backend-service-v1",
@@ -262,7 +271,7 @@ class TestAccountEndpointAndContractTests(unittest.TestCase):
             created = client.post(
                 "/ops/test-accounts",
                 headers={"X-DreamJourney-Api-Token": MACHINE_TOKEN},
-                json={"target": TARGET, "label": "API QA", "ttlDays": 3},
+                json={"target": TARGET, "label": "API QA"},
             )
             listed = client.get(
                 "/ops/test-accounts",
@@ -273,6 +282,8 @@ class TestAccountEndpointAndContractTests(unittest.TestCase):
         self.assertEqual(created.status_code, 201)
         self.assertEqual(created.headers["cache-control"], "no-store")
         self.assertIn("verificationCode", created.json()["testAccount"])
+        self.assertIsNone(created.json()["testAccount"]["expiresAt"])
+        self.assertEqual(created.json()["testAccount"]["validity"], "permanent")
         self.assertEqual(listed.status_code, 200)
         self.assertNotIn("verificationCode", listed.text)
         self.assertNotIn(NORMALIZED_TARGET, listed.text)
@@ -333,6 +344,22 @@ class TestAccountEndpointAndContractTests(unittest.TestCase):
         self.assertNotIn("phone_number", sql)
         self.assertNotIn("verification_code TEXT", sql)
         self.assertNotIn("ON DELETE CASCADE", sql)
+
+    def test_0090_migration_promotes_all_test_accounts_to_permanent(self):
+        migrations = Path(__file__).resolve().parents[1] / "db" / "migrations"
+        sql = (migrations / "0090_permanent_test_accounts.sql").read_text(
+            encoding="utf-8"
+        )
+        metadata = json.loads(
+            (migrations / "0090_permanent_test_accounts.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(metadata["version"], "0090")
+        self.assertEqual(metadata["phase"], "expand")
+        self.assertIn("ALTER COLUMN expires_at DROP NOT NULL", sql)
+        self.assertIn("SET expires_at = NULL", sql)
+        self.assertIn("WHERE status = 'active'", sql)
 
 
 if __name__ == "__main__":

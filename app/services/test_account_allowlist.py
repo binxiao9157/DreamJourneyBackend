@@ -84,8 +84,6 @@ class TestAccountAllowlistService:
         hmac_key_version: str,
         enabled: bool,
         allowed_phone_prefixes: Iterable[str],
-        default_ttl_days: int = 7,
-        max_ttl_days: int = 30,
         event_sink: Optional[Any] = None,
         environment: str = "unknown",
     ) -> None:
@@ -94,8 +92,6 @@ class TestAccountAllowlistService:
         self.hmac_key_version = str(hmac_key_version or "v1").strip() or "v1"
         self.enabled = bool(enabled)
         self.allowed_phone_prefixes = tuple(sorted(set(allowed_phone_prefixes)))
-        self.default_ttl_days = max(1, int(default_ttl_days))
-        self.max_ttl_days = max(self.default_ttl_days, int(max_ttl_days))
         self.event_sink = event_sink
         self.environment = self._machine_code(environment, fallback="unknown")
 
@@ -114,7 +110,6 @@ class TestAccountAllowlistService:
         target: str,
         label: str,
         actor_id: str,
-        ttl_days: Optional[int] = None,
         now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         self._require_configured()
@@ -122,7 +117,6 @@ class TestAccountAllowlistService:
         normalized_target = normalize_test_phone_target(target)
         self._require_allowed_target(normalized_target)
         normalized_label = self._label(label)
-        bounded_ttl = self._ttl_days(ttl_days)
         account_id = secrets.token_hex(16)
         code = self._new_code()
         code_version = 1
@@ -138,7 +132,7 @@ class TestAccountAllowlistService:
             "label": normalized_label,
             "status": "active",
             "subjectId": None,
-            "expiresAt": (created_at + timedelta(days=bounded_ttl)).isoformat(),
+            "expiresAt": None,
             "createdByHash": hash_evidence_identifier(actor_id),
             "createdAt": created_at.isoformat(),
             "updatedAt": created_at.isoformat(),
@@ -238,11 +232,7 @@ class TestAccountAllowlistService:
         now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         observed_at = self._utc(now)
-        account = self._account(account_id)
-        if self._utc_from_text(account.get("expiresAt")) <= observed_at:
-            raise TestAccountAllowlistValidationError(
-                "expired test account must be renewed before enabling"
-            )
+        self._account(account_id)
         return self._set_status(
             account_id,
             status="active",
@@ -257,17 +247,16 @@ class TestAccountAllowlistService:
         account_id: str,
         *,
         actor_id: str,
-        ttl_days: Optional[int] = None,
         now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         self._require_configured()
         renewed_at = self._utc(now)
         self._account(account_id)
-        expires_at = renewed_at + timedelta(days=self._ttl_days(ttl_days))
         result = self.store.update_test_account_allowlist_status(
             str(account_id or "").strip(),
             status="active",
-            expires_at_iso=expires_at.isoformat(),
+            expires_at_iso=None,
+            clear_expiration=True,
             updated_at_iso=renewed_at.isoformat(),
         )
         if result is None:
@@ -374,6 +363,7 @@ class TestAccountAllowlistService:
             str(account_id or "").strip(),
             status=status,
             expires_at_iso=None,
+            clear_expiration=False,
             updated_at_iso=changed_at.isoformat(),
         )
         if result is None:
@@ -414,19 +404,6 @@ class TestAccountAllowlistService:
             raise TestAccountAllowlistValidationError(
                 "test account phone is outside the configured synthetic range"
             )
-
-    def _ttl_days(self, value: Optional[int]) -> int:
-        try:
-            candidate = self.default_ttl_days if value is None else int(value)
-        except (TypeError, ValueError) as exc:
-            raise TestAccountAllowlistValidationError(
-                "ttlDays must be an integer"
-            ) from exc
-        if candidate < 1 or candidate > self.max_ttl_days:
-            raise TestAccountAllowlistValidationError(
-                f"ttlDays must be between 1 and {self.max_ttl_days}"
-            )
-        return candidate
 
     @staticmethod
     def _label(value: Any) -> str:
@@ -477,7 +454,8 @@ class TestAccountAllowlistService:
             "status": str(record.get("status") or "disabled"),
             "subjectId": record.get("subjectId"),
             "codeVersion": int(record.get("codeVersion") or 0),
-            "expiresAt": str(record.get("expiresAt") or ""),
+            "expiresAt": record.get("expiresAt"),
+            "validity": "permanent" if record.get("expiresAt") is None else "limited",
             "createdAt": str(record.get("createdAt") or ""),
             "updatedAt": str(record.get("updatedAt") or ""),
             "lastUsedAt": record.get("lastUsedAt"),
@@ -560,10 +538,6 @@ def make_test_account_allowlist_service(
         allowed_phone_prefixes=configured_test_phone_prefixes(
             getattr(settings, "test_account_allowed_phone_prefixes", None)
         ),
-        default_ttl_days=int(
-            getattr(settings, "test_account_default_ttl_days", 7) or 7
-        ),
-        max_ttl_days=int(getattr(settings, "test_account_max_ttl_days", 30) or 30),
         event_sink=getattr(store, "append_evidence_event", None),
         environment=str(getattr(settings, "environment", "unknown") or "unknown"),
     )

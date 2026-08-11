@@ -1295,7 +1295,9 @@ class InMemoryStore:
             item = self._test_account_allowlist.get(account_id or "")
             if item is None or item.get("status") != "active":
                 return None
-            if self._parse_iso_datetime(str(item.get("expiresAt") or "")) <= observed_at:
+            if item.get("expiresAt") is not None and self._parse_iso_datetime(
+                str(item.get("expiresAt"))
+            ) <= observed_at:
                 return None
             return deepcopy(item)
 
@@ -1326,6 +1328,7 @@ class InMemoryStore:
         *,
         status: str,
         expires_at_iso: Optional[str],
+        clear_expiration: bool = False,
         updated_at_iso: str,
     ) -> Optional[Dict[str, Any]]:
         with self._identity_lock:
@@ -1334,7 +1337,9 @@ class InMemoryStore:
                 return None
             item["status"] = status
             item["updatedAt"] = updated_at_iso
-            if expires_at_iso is not None:
+            if clear_expiration:
+                item["expiresAt"] = None
+            elif expires_at_iso is not None:
                 item["expiresAt"] = expires_at_iso
             return deepcopy(item)
 
@@ -1351,7 +1356,10 @@ class InMemoryStore:
             if (
                 item is None
                 or item.get("status") != "active"
-                or self._parse_iso_datetime(str(item.get("expiresAt") or "")) <= used_at
+                or (
+                    item.get("expiresAt") is not None
+                    and self._parse_iso_datetime(str(item.get("expiresAt"))) <= used_at
+                )
                 or (
                     item.get("subjectId") is not None
                     and item.get("subjectId") != subject_id

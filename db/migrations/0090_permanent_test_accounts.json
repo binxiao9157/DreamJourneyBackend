@@ -1,0 +1,12 @@
+{
+  "version": "0090",
+  "name": "permanent_test_accounts",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "permanentTestAccountValidityRequires0090",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "testAccountAllowlist": true,
+    "testAccountAdmin": false
+  }
+}

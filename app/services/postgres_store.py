@@ -1945,7 +1945,7 @@ class PostgresStore:
               AND target_hash_key_version = %s
               AND target_hash = %s
               AND status = 'active'
-              AND expires_at > %s
+              AND (expires_at IS NULL OR expires_at > %s)
             """,
             (
                 identity_type,
@@ -1991,18 +1991,28 @@ class PostgresStore:
         *,
         status: str,
         expires_at_iso: Optional[str],
+        clear_expiration: bool = False,
         updated_at_iso: str,
     ) -> Optional[Dict[str, Any]]:
         row = self._fetchone(
             """
             UPDATE test_account_allowlist
             SET status = %s,
-                expires_at = COALESCE(%s, expires_at),
+                expires_at = CASE
+                    WHEN %s THEN NULL
+                    ELSE COALESCE(%s, expires_at)
+                END,
                 updated_at = %s
             WHERE id = %s
             RETURNING *
             """,
-            (status, expires_at_iso, updated_at_iso, account_id),
+            (
+                status,
+                bool(clear_expiration),
+                expires_at_iso,
+                updated_at_iso,
+                account_id,
+            ),
         )
         return None if row is None else self._test_account_record(row)
 
@@ -2022,7 +2032,7 @@ class PostgresStore:
                 updated_at = %s
             WHERE id = %s
               AND status = 'active'
-              AND expires_at > %s
+              AND (expires_at IS NULL OR expires_at > %s)
               AND (subject_id IS NULL OR subject_id = %s)
             RETURNING *
             """,
@@ -2053,11 +2063,19 @@ class PostgresStore:
             "label": str(row.get("label") or ""),
             "status": str(row.get("status") or "disabled"),
             "subjectId": row.get("subject_id"),
-            "expiresAt": cls._iso_value(row.get("expires_at")),
+            "expiresAt": (
+                None
+                if row.get("expires_at") is None
+                else cls._iso_value(row.get("expires_at"))
+            ),
             "createdByHash": str(row.get("created_by_hash") or ""),
             "createdAt": cls._iso_value(row.get("created_at")),
             "updatedAt": cls._iso_value(row.get("updated_at")),
-            "lastUsedAt": cls._iso_value(row.get("last_used_at")),
+            "lastUsedAt": (
+                None
+                if row.get("last_used_at") is None
+                else cls._iso_value(row.get("last_used_at"))
+            ),
             "useCount": int(row.get("use_count") or 0),
             "contractVersion": int(row.get("contract_version") or 1),
         }

@@ -71,8 +71,14 @@ class Settings:
     # configured phone prefixes so it cannot become an arbitrary OTP bypass.
     test_account_allowlist_enabled: bool = False
     test_account_allowed_phone_prefixes: Optional[str] = None
-    test_account_default_ttl_days: int = 7
-    test_account_max_ttl_days: int = 30
+    test_account_admin_enabled: bool = False
+    test_account_admin_username: Optional[str] = None
+    test_account_admin_password_hash: Optional[str] = None
+    test_account_admin_session_hmac_key: Optional[str] = None
+    test_account_admin_session_ttl_seconds: int = 7200
+    test_account_admin_cookie_name: str = "dj_test_account_admin"
+    test_account_admin_cookie_path: str = "/ops/test-accounts"
+    test_account_admin_cookie_secure: bool = True
     # Voice cloning requires a separate strong adult identity + liveness
     # verifier. OTP/phone authentication is intentionally insufficient.
     # ``disabled`` is the only default and causes the training path to fail
@@ -397,13 +403,34 @@ class Settings:
             test_account_allowed_phone_prefixes=_env(
                 "TEST_ACCOUNT_ALLOWED_PHONE_PREFIXES"
             ),
-            test_account_default_ttl_days=_env_int(
-                "TEST_ACCOUNT_DEFAULT_TTL_DAYS",
-                cls.test_account_default_ttl_days,
+            test_account_admin_enabled=_env_bool(
+                "TEST_ACCOUNT_ADMIN_ENABLED",
+                cls.test_account_admin_enabled,
             ),
-            test_account_max_ttl_days=_env_int(
-                "TEST_ACCOUNT_MAX_TTL_DAYS",
-                cls.test_account_max_ttl_days,
+            test_account_admin_username=_env("TEST_ACCOUNT_ADMIN_USERNAME"),
+            test_account_admin_password_hash=_env(
+                "TEST_ACCOUNT_ADMIN_PASSWORD_HASH"
+            ),
+            test_account_admin_session_hmac_key=_env(
+                "TEST_ACCOUNT_ADMIN_SESSION_HMAC_KEY"
+            ),
+            test_account_admin_session_ttl_seconds=_env_int(
+                "TEST_ACCOUNT_ADMIN_SESSION_TTL_SECONDS",
+                cls.test_account_admin_session_ttl_seconds,
+            ),
+            test_account_admin_cookie_name=_env(
+                "TEST_ACCOUNT_ADMIN_COOKIE_NAME",
+                cls.test_account_admin_cookie_name,
+            )
+            or cls.test_account_admin_cookie_name,
+            test_account_admin_cookie_path=_env(
+                "TEST_ACCOUNT_ADMIN_COOKIE_PATH",
+                cls.test_account_admin_cookie_path,
+            )
+            or cls.test_account_admin_cookie_path,
+            test_account_admin_cookie_secure=_env_bool(
+                "TEST_ACCOUNT_ADMIN_COOKIE_SECURE",
+                cls.test_account_admin_cookie_secure,
             ),
             voice_identity_eligibility_provider=_env(
                 "VOICE_IDENTITY_ELIGIBILITY_PROVIDER",

@@ -158,6 +158,13 @@ from app.services.test_account_allowlist import (
     TestAccountAllowlistValidationError,
     make_test_account_allowlist_service,
 )
+from app.services.test_account_admin_auth import (
+    TestAccountAdminAuthenticationFailed,
+    TestAccountAdminAuthUnavailable,
+    TestAccountAdminLoginLimiter,
+    TestAccountAdminRateLimited,
+    make_test_account_admin_auth_service,
+)
 from app.services.privacy import (
     filter_syncable_graph,
     sanitize_archive_item_payload,
@@ -5653,6 +5660,33 @@ def _test_account_allowlist_service():
     return make_test_account_allowlist_service(store, settings)
 
 
+TEST_ACCOUNT_ADMIN_LOGIN_LIMITER = TestAccountAdminLoginLimiter()
+
+
+def _test_account_admin_auth_service():
+    return make_test_account_admin_auth_service(
+        settings,
+        limiter=TEST_ACCOUNT_ADMIN_LOGIN_LIMITER,
+    )
+
+
+def _test_account_admin_session_principal(
+    request: Request,
+) -> Optional[RequestPrincipal]:
+    if not str(request.url.path).startswith("/ops/test-accounts"):
+        return None
+    service = _test_account_admin_auth_service()
+    session = service.resolve_session(request.cookies.get(service.cookie_name, ""))
+    if session is None:
+        return None
+    principal_hash = hashlib.sha256(session.username.encode("utf-8")).hexdigest()[:32]
+    return RequestPrincipal.machine(
+        principal_id=f"test-account-admin-{principal_hash}",
+        audience=MACHINE_API_AUDIENCE,
+        scopes=("testAccount:manage",),
+    )
+
+
 def _tokens_match(left: str, right: str) -> bool:
     return bool(left and right and secrets.compare_digest(left, right))
 
@@ -6433,6 +6467,7 @@ async def require_backend_api_token(request: Request, call_next):
     bearer_token = _request_bearer_token(request)
     backend_header_token = _request_backend_api_token(request)
     configured_backend_token = _configured_backend_api_token()
+    test_account_admin_principal = _test_account_admin_session_principal(request)
     principal = RequestPrincipal.anonymous()
 
     if bearer_token and _tokens_match(bearer_token, configured_backend_token):
@@ -6455,6 +6490,8 @@ async def require_backend_api_token(request: Request, call_next):
         if not _tokens_match(backend_header_token, configured_backend_token):
             return JSONResponse(status_code=401, content={"detail": "invalid backend api token"})
         principal = _configured_machine_principal()
+    elif test_account_admin_principal is not None:
+        principal = test_account_admin_principal
 
     request.state.auth_principal = principal
     try:
@@ -12100,6 +12137,150 @@ def _test_account_error_response(error: Exception) -> HTTPException:
     )
 
 
+TEST_ACCOUNT_ADMIN_PAGE_PATH = (
+    Path(__file__).resolve().parent / "web" / "test_account_admin.html"
+)
+
+
+def _test_account_admin_client_key(request: Request) -> str:
+    candidate = str(request.headers.get("x-real-ip") or "").strip()
+    if not candidate:
+        forwarded = str(request.headers.get("x-forwarded-for") or "")
+        candidate = forwarded.rsplit(",", 1)[-1].strip()
+    if not candidate:
+        candidate = str(getattr(request.client, "host", "") or "unknown").strip()
+    return candidate[:128]
+
+
+def _test_account_admin_page_response() -> Response:
+    nonce = secrets.token_urlsafe(24)
+    html = TEST_ACCOUNT_ADMIN_PAGE_PATH.read_text(encoding="utf-8").replace(
+        "__CSP_NONCE__",
+        nonce,
+    )
+    return Response(
+        content=html,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+            "Content-Security-Policy": (
+                "default-src 'none'; "
+                f"style-src 'nonce-{nonce}'; "
+                f"script-src 'nonce-{nonce}'; "
+                "connect-src 'self'; img-src 'self' data:; "
+                "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+            ),
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+        },
+    )
+
+
+@app.get("/ops/test-accounts/admin", include_in_schema=False)
+def test_account_admin_page() -> Response:
+    try:
+        return _test_account_admin_page_response()
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "test_account_admin_page_unavailable"},
+        ) from exc
+
+
+@app.post("/ops/test-accounts/admin/login", include_in_schema=False)
+def test_account_admin_login(
+    request: Request,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    service = _test_account_admin_auth_service()
+    try:
+        session = service.authenticate(
+            username=str(payload.get("username") or ""),
+            password=str(payload.get("password") or ""),
+            client_key=_test_account_admin_client_key(request),
+        )
+    except TestAccountAdminRateLimited as exc:
+        request.state.commit_security_attempt = True
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "test_account_admin_rate_limited",
+                "message": "administrator login is temporarily unavailable",
+                "retryAfterSeconds": exc.retry_after_seconds,
+            },
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+    except TestAccountAdminAuthenticationFailed as exc:
+        request.state.commit_security_attempt = True
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "test_account_admin_authentication_failed",
+                "message": "administrator credentials are invalid",
+            },
+        ) from exc
+    except TestAccountAdminAuthUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "test_account_admin_unavailable",
+                "message": "administrator login is unavailable",
+            },
+        ) from exc
+
+    response = JSONResponse(
+        content={
+            "status": "authenticated",
+            "administrator": {"username": session.username},
+            "expiresAt": session.expires_at.isoformat(),
+        }
+    )
+    response.set_cookie(
+        key=service.cookie_name,
+        value=session.token,
+        max_age=service.session_ttl_seconds,
+        expires=session.expires_at,
+        path=service.cookie_path,
+        secure=service.cookie_secure,
+        httponly=True,
+        samesite="strict",
+    )
+    return _set_no_store_headers(response)
+
+
+@app.post("/ops/test-accounts/admin/logout", include_in_schema=False)
+def test_account_admin_logout() -> JSONResponse:
+    service = _test_account_admin_auth_service()
+    response = JSONResponse(content={"status": "signedOut"})
+    response.delete_cookie(
+        key=service.cookie_name,
+        path=service.cookie_path,
+        secure=service.cookie_secure,
+        httponly=True,
+        samesite="strict",
+    )
+    return _set_no_store_headers(response)
+
+
+@app.get("/ops/test-accounts/admin/session", include_in_schema=False)
+def test_account_admin_session(request: Request) -> Dict[str, Any]:
+    _test_account_actor_id(request)
+    service = _test_account_admin_auth_service()
+    session = service.resolve_session(request.cookies.get(service.cookie_name, ""))
+    if session is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "test_account_admin_session_invalid"},
+        )
+    return {
+        "status": "authenticated",
+        "administrator": {"username": session.username},
+        "expiresAt": session.expires_at.isoformat(),
+    }
+
+
 @app.post("/ops/test-accounts", status_code=201)
 def create_test_account(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
@@ -12107,7 +12288,6 @@ def create_test_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
             target=str(payload.get("target") or ""),
             label=str(payload.get("label") or ""),
             actor_id=_test_account_actor_id(request),
-            ttl_days=payload.get("ttlDays"),
         )
     except (
         TestAccountAllowlistDisabled,
@@ -12199,13 +12379,11 @@ def enable_test_account(
 def renew_test_account(
     request: Request,
     account_id: str,
-    payload: Dict[str, Any],
 ) -> Dict[str, Any]:
     try:
         return _test_account_allowlist_service().renew(
             account_id,
             actor_id=_test_account_actor_id(request),
-            ttl_days=payload.get("ttlDays"),
         )
     except (
         TestAccountAllowlistDisabled,
