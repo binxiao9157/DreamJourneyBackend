@@ -14907,6 +14907,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
     )
     provider = "safety-policy"
     model = "none"
+    fallback_reason = ""
 
     if provider_effects_allowed:
         generation = packet.get("generationContext") or {}
@@ -14943,21 +14944,14 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                 reason="providerCallFailed",
                 started_at=provider_started_at,
             )
-            configured = bool(settings.deepseek_api_key)
-            raise HTTPException(
-                status_code=502 if configured else 503,
-                detail=provider_error_detail(
-                    code=(
-                        "echoAnswerProviderFailed"
-                        if configured
-                        else "echoAnswerProviderNotConfigured"
-                    ),
-                    provider="deepseek",
-                    capability="echoAnswer",
-                    retryable=configured,
-                    configured=configured,
-                ),
-            ) from exc
+            answer_text = proxy.fallback_answer(
+                query=query,
+                generation_context=str(generation.get("text") or ""),
+                persona_scope=str(persona.get("personaScope") or "personal"),
+                persona_name=str(payload.get("personaName") or ""),
+            )
+            provider = "memory-extractive-fallback"
+            fallback_reason = "providerUnavailable"
     else:
         neutral_response = safety.get("neutralResponse") if isinstance(safety, dict) else None
         answer_text = str(
@@ -14991,6 +14985,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                 "contextVersion": str(packet.get("contextVersion") or ""),
                 "citations": citations,
                 "aiDisclosure": packet.get("aiDisclosure") or {},
+                "fallbackReason": fallback_reason,
             },
         },
         headers={"Cache-Control": "no-store"},

@@ -28,6 +28,18 @@ class DeepSeekEchoAnswerProxyTests(unittest.TestCase):
         self.assertIn("父亲在西交利物浦大学读书", request["json"]["messages"][1]["content"])
         self.assertNotIn("server-secret", str(request["json"]))
 
+    def test_memory_fallback_selects_the_most_relevant_confirmed_memory(self) -> None:
+        answer = DeepSeekEchoAnswerProxy.fallback_answer(
+            query="我在哪里读大学？",
+            generation_context=(
+                "[archive] kind=text; title=生活近况; note=我最近睡眠不太好。\n"
+                "[archive] kind=text; title=求学经历; note=我的大学是在西交利物浦读的。"
+            ),
+            persona_scope="personal",
+        )
+
+        self.assertEqual(answer, "根据已确认的记忆：我的大学是在西交利物浦读的。")
+
 
 class EchoAnswerAPITests(unittest.TestCase):
     def setUp(self) -> None:
@@ -99,6 +111,45 @@ class EchoAnswerAPITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "query is required")
+
+    def test_answer_falls_back_to_authorized_memory_when_provider_fails(self) -> None:
+        user_id = "echo_answer_fallback_owner"
+        self.client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "memory_university_fallback",
+                "kind": "text",
+                "title": "求学经历",
+                "note": "我的大学是在西交利物浦读的。",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+
+        with patch.object(
+            main_module.DeepSeekEchoAnswerProxy,
+            "request_answer",
+            side_effect=RuntimeError("provider unavailable"),
+        ):
+            response = self.client.post(
+                "/echo/answers",
+                json={
+                    "userId": user_id,
+                    "query": "我在哪里读大学？",
+                    "personaScope": "personal",
+                    "digitalHumanId": user_id,
+                    "lifecycleMode": "sunlight",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        answer = response.json()["answer"]
+        self.assertEqual(answer["provider"], "memory-extractive-fallback")
+        self.assertEqual(answer["fallbackReason"], "providerUnavailable")
+        self.assertIn("西交利物浦", answer["text"])
+        self.assertEqual(answer["citations"][0]["refId"], "memory_university_fallback")
 
 
 if __name__ == "__main__":

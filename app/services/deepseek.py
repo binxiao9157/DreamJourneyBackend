@@ -640,3 +640,72 @@ class DeepSeekEchoAnswerProxy:
         if not answer:
             raise ValueError("DeepSeek returned an empty Echo answer")
         return answer[: self.maximum_answer_characters]
+
+    @classmethod
+    def fallback_answer(
+        cls,
+        *,
+        query: str,
+        generation_context: str,
+        persona_scope: str,
+        persona_name: str = "",
+    ) -> str:
+        """Return a bounded, memory-only answer when the model is unavailable."""
+
+        candidates: List[tuple[int, int, str]] = []
+        normalized_query = "".join(str(query or "").lower().split())
+        query_characters = {
+            character
+            for character in normalized_query
+            if character not in "，。！？、；：,.!?;:的了吗呢啊呀我你他她它这那"
+        }
+        query_bigrams = {
+            normalized_query[index : index + 2]
+            for index in range(max(0, len(normalized_query) - 1))
+        }
+
+        for position, raw_line in enumerate(str(generation_context or "").splitlines()):
+            line = " ".join(raw_line.split()).strip()
+            if not line or line.startswith("[persona]") or line.startswith("[care]"):
+                continue
+            candidate = cls._fallback_candidate_text(line)
+            if not candidate:
+                continue
+            normalized_candidate = "".join(candidate.lower().split())
+            character_score = len(query_characters.intersection(set(normalized_candidate)))
+            bigram_score = sum(1 for value in query_bigrams if value in normalized_candidate)
+            candidates.append((bigram_score * 4 + character_score, -position, candidate))
+
+        if candidates:
+            _, _, selected = max(candidates, key=lambda item: (item[0], item[1]))
+            selected = selected[:220].rstrip("，,；; ")
+            return f"根据已确认的记忆：{selected}"
+
+        normalized_scope = str(persona_scope or "personal").strip().lower()
+        if normalized_scope == "family":
+            subject = str(persona_name or "这位家人").strip() or "这位家人"
+            return f"我还没有从{subject}已确认的记忆中找到这个答案。"
+        return "我还没有从你已确认的记忆中找到这个答案，可以先在记忆档案中补充相关内容。"
+
+    @staticmethod
+    def _fallback_candidate_text(line: str) -> str:
+        if line.startswith("[kbFact]"):
+            return line[len("[kbFact]") :].strip()
+
+        segments = [segment.strip() for segment in line.split(";") if segment.strip()]
+        fields: Dict[str, str] = {}
+        for segment in segments:
+            if "=" not in segment:
+                continue
+            key, value = segment.split("=", 1)
+            normalized_key = key.rsplit(" ", 1)[-1].strip().lower()
+            normalized_value = value.strip()
+            if normalized_key and normalized_value:
+                fields[normalized_key] = normalized_value
+        for key in ("note", "description", "statement", "summary", "title"):
+            if fields.get(key):
+                return fields[key]
+
+        if line.startswith("[") and "]" in line:
+            line = line.split("]", 1)[1].strip()
+        return line[:220].strip()
