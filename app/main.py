@@ -494,7 +494,7 @@ from app.services.owner_truth_legacy_shadow_parity import (
     legacy_shadow_parity_summary,
 )
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
-from app.services.deepseek import DeepSeekKnowledgeExtractionProxy
+from app.services.deepseek import DeepSeekEchoAnswerProxy, DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
     KB_OPERATION_GOVERNANCE,
     KB_OPERATION_MUTATION,
@@ -14845,9 +14845,12 @@ def runtime_config() -> Dict[str, Any]:
     ).public_config()
 
 
-@app.post("/context/build")
-def build_context(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
-    owner_subject_id, payload = _principal_owned_payload(request, payload)
+def _build_authorized_echo_context_packet(
+    request: Request,
+    *,
+    owner_subject_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
     authority_context = _owner_truth_context_authority_context(
         request,
         owner_subject_id=owner_subject_id,
@@ -14869,7 +14872,129 @@ def build_context(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise _owner_truth_memory_projection_http_error(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return packet
+
+
+@app.post("/context/build")
+def build_context(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    owner_subject_id, payload = _principal_owned_payload(request, payload)
+    packet = _build_authorized_echo_context_packet(
+        request,
+        owner_subject_id=owner_subject_id,
+        payload=payload,
+    )
     return {"status": "built", "contextPacket": packet}
+
+
+@app.post("/echo/answers")
+def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONResponse:
+    owner_subject_id, payload = _principal_owned_payload(request, payload)
+    query = str(payload.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    if len(query) > DeepSeekEchoAnswerProxy.maximum_query_characters:
+        raise HTTPException(status_code=400, detail="query is too long")
+
+    packet = _build_authorized_echo_context_packet(
+        request,
+        owner_subject_id=owner_subject_id,
+        payload=payload,
+    )
+    safety = packet.get("safetyPolicy") if isinstance(packet, dict) else None
+    effects = safety.get("effects") if isinstance(safety, dict) else None
+    provider_effects_allowed = bool(
+        isinstance(effects, dict) and effects.get("providerEffectsAllowed")
+    )
+    provider = "safety-policy"
+    model = "none"
+
+    if provider_effects_allowed:
+        generation = packet.get("generationContext") or {}
+        persona = packet.get("persona") or {}
+        proxy = DeepSeekEchoAnswerProxy(settings)
+        provider_started_at = time.monotonic()
+        try:
+            answer_text = proxy.request_answer(
+                query=query,
+                generation_context=str(generation.get("text") or ""),
+                persona_scope=str(persona.get("personaScope") or "personal"),
+                persona_name=str(payload.get("personaName") or ""),
+            )
+            _record_provider_cost_attempt(
+                request,
+                provider="deepseek",
+                capability="echoAnswer",
+                unit_type="request",
+                units=1,
+                state="succeeded",
+                reason="providerUsageObserved",
+                started_at=provider_started_at,
+            )
+            provider = "deepseek"
+            model = proxy.model
+        except Exception as exc:
+            _record_provider_cost_attempt(
+                request,
+                provider="deepseek",
+                capability="echoAnswer",
+                unit_type="request",
+                units=1,
+                state="failed",
+                reason="providerCallFailed",
+                started_at=provider_started_at,
+            )
+            configured = bool(settings.deepseek_api_key)
+            raise HTTPException(
+                status_code=502 if configured else 503,
+                detail=provider_error_detail(
+                    code=(
+                        "echoAnswerProviderFailed"
+                        if configured
+                        else "echoAnswerProviderNotConfigured"
+                    ),
+                    provider="deepseek",
+                    capability="echoAnswer",
+                    retryable=configured,
+                    configured=configured,
+                ),
+            ) from exc
+    else:
+        neutral_response = safety.get("neutralResponse") if isinstance(safety, dict) else None
+        answer_text = str(
+            neutral_response.get("message")
+            if isinstance(neutral_response, dict)
+            else "我注意到你可能正处在危险中。请立即联系身边可信任的人；如有紧迫危险，请联系当地紧急服务。"
+        ).strip()
+
+    generation = packet.get("generationContext") or {}
+    raw_source_refs = generation.get("sourceRefs") or []
+    citations = [
+        {
+            "source": str(item.get("source") or "memory"),
+            "refId": str(item.get("refId") or ""),
+            "kind": str(item.get("kind") or "memory"),
+        }
+        for item in raw_source_refs
+        if isinstance(item, dict) and str(item.get("refId") or "").strip()
+    ]
+    return JSONResponse(
+        content={
+            "status": "answered",
+            "answer": {
+                "schemaVersion": "echo-answer-v1",
+                "answerId": "ans_" + secrets.token_hex(12),
+                "text": answer_text,
+                "provider": provider,
+                "model": model,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "contextTraceId": str(packet.get("traceId") or ""),
+                "contextVersion": str(packet.get("contextVersion") or ""),
+                "citations": citations,
+                "aiDisclosure": packet.get("aiDisclosure") or {},
+            },
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/voice/realtime-token")

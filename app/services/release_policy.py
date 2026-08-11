@@ -794,6 +794,7 @@ class ReleasePolicyCommandGate:
         ("/archive/photos", "archiveRemoteFetch"),
         ("/profile", "profileSettings"),
         ("/context/build", "echoTextInput"),
+        ("/echo/answers", "echoTextInput"),
         ("/echo/delayed-replies", "echoTextInput"),
         ("/auth/delete", "accountDeletion"),
         ("/auth/data-export", "accountDataExport"),

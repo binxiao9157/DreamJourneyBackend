@@ -1,0 +1,105 @@
+import unittest
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+from app import main as main_module
+from app.core.config import Settings
+from app.main import app
+from app.services.deepseek import DeepSeekEchoAnswerProxy
+from app.services.in_memory_store import InMemoryStore
+
+
+class DeepSeekEchoAnswerProxyTests(unittest.TestCase):
+    def test_family_prompt_is_memory_bounded(self) -> None:
+        proxy = DeepSeekEchoAnswerProxy(
+            Settings(deepseek_api_key="server-secret", deepseek_base_url="https://provider.invalid")
+        )
+
+        request = proxy.build_request(
+            query="父亲在哪里读大学？",
+            generation_context="[archive] note=父亲在西交利物浦大学读书",
+            persona_scope="family",
+            persona_name="父亲",
+        )
+
+        self.assertEqual(request["json"]["model"], proxy.model)
+        self.assertIn("资料不足时必须明确说", request["json"]["messages"][0]["content"])
+        self.assertIn("父亲在西交利物浦大学读书", request["json"]["messages"][1]["content"])
+        self.assertNotIn("server-secret", str(request["json"]))
+
+
+class EchoAnswerAPITests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = InMemoryStore()
+        self.store_patch = patch.object(main_module, "store", self.store)
+        self.store_patch.start()
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        self.store_patch.stop()
+
+    def test_answer_uses_authorized_context_and_returns_citations(self) -> None:
+        user_id = "echo_answer_owner"
+        created = self.client.post(
+            "/archive/items",
+            json={
+                "userId": user_id,
+                "id": "memory_university",
+                "kind": "text",
+                "title": "求学经历",
+                "note": "我的大学是在西交利物浦读的。",
+                "personaScope": "personal",
+                "digitalHumanId": user_id,
+                "privacyMetadata": {"scope": "generationAllowed"},
+            },
+        )
+        self.assertEqual(created.status_code, 200)
+
+        with patch.object(
+            main_module.DeepSeekEchoAnswerProxy,
+            "request_answer",
+            return_value="根据你记录的记忆，你在西交利物浦读大学。",
+        ) as request_answer:
+            response = self.client.post(
+                "/echo/answers",
+                json={
+                    "userId": user_id,
+                    "query": "我在哪里读大学？",
+                    "personaScope": "personal",
+                    "digitalHumanId": user_id,
+                    "lifecycleMode": "sunlight",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "answered")
+        self.assertEqual(
+            body["answer"]["text"],
+            "根据你记录的记忆，你在西交利物浦读大学。",
+        )
+        self.assertEqual(body["answer"]["provider"], "deepseek")
+        self.assertIn(
+            {"source": "archive", "refId": "memory_university", "kind": "text"},
+            body["answer"]["citations"],
+        )
+        self.assertIn("西交利物浦", request_answer.call_args.kwargs["generation_context"])
+
+    def test_answer_rejects_empty_query_before_provider_call(self) -> None:
+        response = self.client.post(
+            "/echo/answers",
+            json={
+                "userId": "echo_answer_empty",
+                "query": "   ",
+                "personaScope": "personal",
+                "digitalHumanId": "echo_answer_empty",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "query is required")
+
+
+if __name__ == "__main__":
+    unittest.main()

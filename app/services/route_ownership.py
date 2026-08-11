@@ -1084,6 +1084,7 @@ class RouteOwnershipRegistry:
                 required_scopes=("testAccount:manage",),
             ),
             _owner_body("POST", "/context/build", "contextOwner"),
+            _owner_body("POST", "/echo/answers", "echoOwner"),
             _owner_body("POST", "/voice/realtime-token", "voiceOwner"),
             _owner_body("POST", "/voice/profiles", "voiceOwner"),
             _owner_path("GET", "/voice/profiles/{user_id}", "voiceOwner"),
