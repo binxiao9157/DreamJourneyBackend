@@ -5943,12 +5943,18 @@ def _release_policy_audience(request: Request, principal: RequestPrincipal) -> s
 def _release_policy_server_cohort(principal: RequestPrincipal) -> str:
     """Resolve pilot membership from server configuration, never client input."""
 
-    if (
-        principal.kind == PrincipalKind.USER
-        and str(principal.principal_id or "").strip()
-        in RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
-    ):
-        return "closedPilotAdultSelf"
+    if principal.kind == PrincipalKind.USER:
+        subject_id = str(principal.principal_id or "").strip()
+        if subject_id in RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS:
+            return "closedPilotAdultSelf"
+        try:
+            if _test_account_allowlist_service().is_active_subject(subject_id):
+                return "closedPilotAdultSelf"
+        except Exception:
+            logger.warning(
+                "test account pilot cohort lookup failed; access remains closed",
+                exc_info=True,
+            )
     return "unassigned"
 
 

@@ -287,6 +287,22 @@ class TestAccountAllowlistService:
             observed_at_iso=self._utc(now).isoformat(),
         )
 
+    def is_active_subject(
+        self,
+        subject_id: str,
+        *,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        if not self.configured:
+            return False
+        normalized_subject_id = str(subject_id or "").strip()
+        if not normalized_subject_id:
+            return False
+        return self.store.get_active_test_account_allowlist_by_subject_id(
+            subject_id=normalized_subject_id,
+            observed_at_iso=self._utc(now).isoformat(),
+        ) is not None
+
     def verify_code(self, account: Dict[str, Any], code: str) -> bool:
         if not self.configured:
             return False

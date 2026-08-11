@@ -84,7 +84,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             "qa",
         )
 
-    def test_closed_pilot_snapshot_explicitly_allows_only_owner_text_core(self):
+    def test_closed_pilot_snapshot_allows_owner_core_and_family_pilot(self):
         now = datetime(2026, 7, 16, 1, 0, tzinfo=timezone.utc)
         snapshot = ReleasePolicyService().build_snapshot(
             audience="owner",
@@ -109,6 +109,9 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertEqual(decisions["echoTextInput"].releaseStage, "M0")
         self.assertTrue(decisions["profileSettings"].releaseVisible)
         self.assertTrue(decisions["accountDeletion"].releaseVisible)
+        for feature in ["familyManagement", "familySpace", "careDashboard"]:
+            self.assertTrue(decisions[feature].releaseVisible, feature)
+            self.assertEqual(decisions[feature].reason, "closedPilotOwnerCore")
         for feature in [
             "ownerTextCaptureV1",
             "ownerMediaCaptureV1",
@@ -116,11 +119,9 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             "ownerTruthLifeMap",
             "ownerTruthMemorySearch",
             "ownerTruthInterviewOutcome",
-            "familyManagement",
             "timeLetters",
             "voiceCloneShell",
             "digitalHumanLivePanel",
-            "careDashboard",
             "archiveAudioUpload",
             "archiveVideoUpload",
         ]:
@@ -271,7 +272,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             self.assertTrue(decision.releaseVisible, feature)
             self.assertEqual(decision.reason, "closedPilotOwnerCore")
 
-    def test_m1_through_m4_are_explicit_default_closed_stages_during_shadow_rollout(self):
+    def test_unapproved_m1_through_m4_stay_default_closed_during_shadow_rollout(self):
         service = ReleasePolicyService(shadow_mode=True)
 
         self.assertEqual(service.command_mode_for("echoTextInput"), "observe")
@@ -280,7 +281,6 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             "digitalHumanLivePanel",
             "publication",
             "visitorAccess",
-            "careDashboard",
             "digitalInheritance",
         ]:
             decision = service.build_snapshot(
@@ -293,12 +293,38 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             self.assertFalse(decision.releaseVisible, feature)
             self.assertIn(decision.releaseStage, {"M1", "M2", "M3", "M4"})
             self.assertEqual(service.command_mode_for(feature), "enforce")
+        for feature in ["familySpace", "careDashboard"]:
+            decision = service.build_snapshot(
+                audience="owner",
+                cohort="closedPilotAdultSelf",
+                client_build=1,
+                requested_feature=feature,
+            ).features[0]
+            self.assertTrue(decision.enabled, feature)
+            self.assertTrue(decision.releaseVisible, feature)
+            self.assertEqual(service.command_mode_for(feature), "enforce")
         self.assertEqual(
             service.public_descriptor()["defaultClosedStages"],
             ["M1", "M2", "M3", "M4"],
         )
         self.assertTrue(
             service.public_descriptor()["defaultClosedStageEffectsEnforced"]
+        )
+
+    def test_active_managed_test_account_receives_closed_pilot_cohort(self):
+        principal = main_module.RequestPrincipal.user(
+            principal_id="sub_test_account",
+            session_id="session-test-account",
+            token_family_id="family-test-account",
+            session_version=1,
+        )
+        with patch.object(main_module, "_test_account_allowlist_service") as factory:
+            factory.return_value.is_active_subject.return_value = True
+            cohort = main_module._release_policy_server_cohort(principal)
+
+        self.assertEqual(cohort, "closedPilotAdultSelf")
+        factory.return_value.is_active_subject.assert_called_once_with(
+            "sub_test_account"
         )
 
     def test_publication_visitor_policy_is_versioned_frozen_and_default_deny(self):

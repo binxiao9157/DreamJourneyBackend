@@ -1301,6 +1301,27 @@ class InMemoryStore:
                 return None
             return deepcopy(item)
 
+    def get_active_test_account_allowlist_by_subject_id(
+        self,
+        *,
+        subject_id: str,
+        observed_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        observed_at = self._parse_iso_datetime(observed_at_iso)
+        with self._identity_lock:
+            for item in self._test_account_allowlist.values():
+                if (
+                    item.get("subjectId") != subject_id
+                    or item.get("status") != "active"
+                ):
+                    continue
+                if item.get("expiresAt") is not None and self._parse_iso_datetime(
+                    str(item.get("expiresAt"))
+                ) <= observed_at:
+                    continue
+                return deepcopy(item)
+        return None
+
     def rotate_test_account_allowlist_code(
         self,
         account_id: str,

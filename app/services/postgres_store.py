@@ -1956,6 +1956,25 @@ class PostgresStore:
         )
         return None if row is None else self._test_account_record(row)
 
+    def get_active_test_account_allowlist_by_subject_id(
+        self,
+        *,
+        subject_id: str,
+        observed_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT * FROM test_account_allowlist
+            WHERE subject_id = %s
+              AND status = 'active'
+              AND (expires_at IS NULL OR expires_at > %s)
+            ORDER BY updated_at DESC, id ASC
+            LIMIT 1
+            """,
+            (subject_id, observed_at_iso),
+        )
+        return None if row is None else self._test_account_record(row)
+
     def rotate_test_account_allowlist_code(
         self,
         account_id: str,

@@ -495,9 +495,12 @@ class ReleasePolicyService:
     _CLOSED_PILOT_OWNER_VISIBLE = {
         "echoTextInput",
         "profileSettings",
+        "familyManagement",
+        "familySpace",
         "legalCenter",
         "accountDeletion",
         "accountDataExport",
+        "careDashboard",
     }
     _CLOSED_PILOT_OPT_IN_FEATURES = {
         "ownerTextCaptureV1",

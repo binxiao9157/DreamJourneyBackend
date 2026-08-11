@@ -106,12 +106,25 @@ class TestAccountAllowlistServiceTests(unittest.TestCase):
                 now=NOW + timedelta(minutes=2),
             )
         )
+        self.assertTrue(
+            service.is_active_subject(
+                "sub_test_account",
+                now=NOW + timedelta(minutes=2),
+            )
+        )
+        self.assertFalse(service.is_active_subject("sub_other", now=NOW))
         disabled = service.disable(
             account_id,
             actor_id="backend-service-v1",
             now=NOW + timedelta(minutes=3),
         )
         self.assertEqual(disabled["testAccount"]["status"], "disabled")
+        self.assertFalse(
+            service.is_active_subject(
+                "sub_test_account",
+                now=NOW + timedelta(minutes=4),
+            )
+        )
         target_hash = service.target_hash("phone", NORMALIZED_TARGET)
         self.assertIsNone(
             service.active_account_for_target_hash(
@@ -130,6 +143,12 @@ class TestAccountAllowlistServiceTests(unittest.TestCase):
         self.assertIsNone(renewed["testAccount"]["expiresAt"])
         self.assertEqual(renewed["testAccount"]["validity"], "permanent")
         self.assertEqual(renewed["testAccount"]["subjectId"], "sub_test_account")
+        self.assertTrue(
+            service.is_active_subject(
+                "sub_test_account",
+                now=NOW + timedelta(days=36500),
+            )
+        )
         self.assertIsNotNone(
             service.active_account_for_target_hash(
                 identity_type="phone",
