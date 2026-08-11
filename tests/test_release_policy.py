@@ -111,7 +111,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertTrue(decisions["accountDeletion"].releaseVisible)
         for feature in ["familyManagement", "familySpace", "careDashboard"]:
             self.assertTrue(decisions[feature].releaseVisible, feature)
-            self.assertEqual(decisions[feature].reason, "closedPilotOwnerCore")
+            self.assertEqual(decisions[feature].reason, "authenticatedOwnerCore")
         for feature in [
             "ownerTextCaptureV1",
             "ownerMediaCaptureV1",
@@ -325,6 +325,37 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertEqual(cohort, "closedPilotAdultSelf")
         factory.return_value.is_active_subject.assert_called_once_with(
             "sub_test_account"
+        )
+
+    def test_regular_signed_in_account_receives_authenticated_owner_cohort(self):
+        principal = main_module.RequestPrincipal.user(
+            principal_id="sub_regular_account",
+            session_id="session-regular-account",
+            token_family_id="family-regular-account",
+            session_version=1,
+        )
+        with patch.object(main_module, "_test_account_allowlist_service") as factory:
+            factory.return_value.is_active_subject.return_value = False
+            cohort = main_module._release_policy_server_cohort(principal)
+
+        self.assertEqual(cohort, "authenticatedOwner")
+
+    def test_authenticated_owner_receives_general_family_capabilities_without_pilot(self):
+        snapshot = ReleasePolicyService().build_snapshot(
+            audience="owner",
+            cohort="authenticatedOwner",
+            client_build=1,
+        )
+        decisions = {item.feature: item for item in snapshot.features}
+
+        for feature in ["familyManagement", "familySpace", "careDashboard"]:
+            self.assertTrue(decisions[feature].enabled, feature)
+            self.assertTrue(decisions[feature].releaseVisible, feature)
+            self.assertEqual(decisions[feature].reason, "authenticatedOwnerCore")
+        self.assertFalse(decisions["voiceCloneShell"].enabled)
+        self.assertEqual(
+            decisions["voiceCloneShell"].reason,
+            "notApprovedForClosedPilot",
         )
 
     def test_publication_visitor_policy_is_versioned_frozen_and_default_deny(self):
@@ -579,6 +610,28 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
         self.assertEqual(self_claimed_family.status_code, 200, self_claimed_family.text)
         self.assertEqual(self_claimed_family.json()["audience"], "owner")
 
+    def test_regular_authenticated_owner_receives_family_management_without_pilot(self):
+        _, headers = self._login("13800139508")
+
+        response = self.client.get(
+            "/v2/release-policy",
+            params={
+                "audience": "owner",
+                "cohort": "closedPilotAdultSelf",
+                "clientBuild": 1,
+                "feature": "familyManagement",
+            },
+            headers=headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["cohort"], "authenticatedOwner")
+        decision = payload["features"][0]
+        self.assertTrue(decision["enabled"])
+        self.assertTrue(decision["releaseVisible"])
+        self.assertEqual(decision["reason"], "authenticatedOwnerCore")
+
     def test_release_policy_endpoint_uses_server_owned_closed_pilot_allowlist(self):
         main_module.RELEASE_POLICY_SERVICE = ReleasePolicyService(
             closed_pilot_enabled_features={"ownerTruthCandidateReview"}
@@ -616,7 +669,7 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
         self.assertEqual(allowed.json()["cohort"], "closedPilotAdultSelf")
         self.assertTrue(allowed.json()["features"][0]["enabled"])
         self.assertEqual(denied.status_code, 200)
-        self.assertEqual(denied.json()["cohort"], "unassigned")
+        self.assertEqual(denied.json()["cohort"], "authenticatedOwner")
         self.assertFalse(denied.json()["features"][0]["enabled"])
         self.assertEqual(
             denied.json()["features"][0]["reason"],

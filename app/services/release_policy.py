@@ -495,11 +495,16 @@ class ReleasePolicyService:
     _CLOSED_PILOT_OWNER_VISIBLE = {
         "echoTextInput",
         "profileSettings",
-        "familyManagement",
-        "familySpace",
         "legalCenter",
         "accountDeletion",
         "accountDataExport",
+    }
+    # Family management is a normal signed-in product capability. It remains
+    # server-policy controlled for emergency revocation and minimum-client
+    # enforcement, but it must not depend on Closed Pilot membership.
+    _AUTHENTICATED_OWNER_VISIBLE = {
+        "familyManagement",
+        "familySpace",
         "careDashboard",
     }
     _CLOSED_PILOT_OPT_IN_FEATURES = {
@@ -581,7 +586,11 @@ class ReleasePolicyService:
         return cls._FEATURE_STAGES.get(feature, "unknown")
 
     def minimum_client_access_mode(self, feature: str) -> str:
-        return "readOnly" if feature in self._closed_pilot_owner_visible_features else "deny"
+        owner_visible = (
+            self._closed_pilot_owner_visible_features
+            | self._AUTHENTICATED_OWNER_VISIBLE
+        )
+        return "readOnly" if feature in owner_visible else "deny"
 
     @property
     def _closed_pilot_owner_visible_features(self) -> Set[str]:
@@ -604,6 +613,9 @@ class ReleasePolicyService:
             "canaryFeatures": sorted(self.enforced_features),
             "closedPilotOwnerFeatures": sorted(
                 self._closed_pilot_owner_visible_features
+            ),
+            "authenticatedOwnerFeatures": sorted(
+                self._AUTHENTICATED_OWNER_VISIBLE
             ),
             "killSwitchFeatures": sorted(self.emergency_disabled_features),
             "defaultClosedStages": ["M1", "M2", "M3", "M4"],
@@ -715,6 +727,17 @@ class ReleasePolicyService:
         elif client_below_minimum:
             reason = "clientBelowMinimum"
             allowed = False
+        elif (
+            audience == "owner"
+            and cohort in {"authenticatedOwner", "closedPilotAdultSelf"}
+            and feature in self._AUTHENTICATED_OWNER_VISIBLE
+        ):
+            if required_capability is not None and not capability_ready:
+                reason = "capabilityUnavailable"
+                allowed = False
+            else:
+                reason = "authenticatedOwnerCore"
+                allowed = True
         elif (
             audience == "owner"
             and cohort == "closedPilotAdultSelf"
