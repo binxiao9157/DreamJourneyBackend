@@ -5258,11 +5258,17 @@ def _release_policy_runtime_capability_ready(capability: str) -> bool:
     except KeyError:
         return False
     control = RUNTIME_CAPABILITY_CONTROL_REGISTRY.decision(capability)
+    control_required = capability in {
+        "ownerTruthMediaStorage",
+        "ownerTruthMediaProcessing",
+    }
     return bool(
         status.enabled
         and status.provider_ready
-        and control is not None
-        and control.operational_ready
+        and (
+            (control is not None and control.operational_ready)
+            or (control is None and not control_required)
+        )
     )
 
 

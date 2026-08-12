@@ -8,7 +8,10 @@ from pydantic import ValidationError
 
 import app.main as main_module
 from app.main import app
+from app.core.config import Settings
 from app.services.in_memory_store import InMemoryStore
+from app.services.provider_runtime import ProviderRuntimeInventory
+from app.services.runtime_capability_control import RuntimeCapabilityControlRegistry
 from app.services.release_policy import (
     PublicationVisitorReleasePolicy,
     ReleasePolicyCommandGate,
@@ -324,6 +327,43 @@ class ReleasePolicyServiceTests(unittest.TestCase):
 
         self.assertEqual(cohort, "authenticatedOwner")
         factory.assert_not_called()
+
+    def test_provider_capability_without_dynamic_control_uses_provider_readiness(self):
+        inventory = ProviderRuntimeInventory(
+            Settings(
+                volcengine_voice_clone_api_key="fixture-training-key",
+                volcengine_voice_clone_tts_api_key="fixture-synthesis-key",
+            )
+        )
+        registry = RuntimeCapabilityControlRegistry()
+
+        with (
+            patch.object(
+                main_module,
+                "_refresh_runtime_capability_controls",
+                return_value=inventory,
+            ),
+            patch.object(
+                main_module,
+                "RUNTIME_CAPABILITY_CONTROL_REGISTRY",
+                registry,
+            ),
+        ):
+            self.assertTrue(
+                main_module._release_policy_runtime_capability_ready(
+                    "voiceCloneShell"
+                )
+            )
+            self.assertFalse(
+                main_module._release_policy_runtime_capability_ready(
+                    "digitalHumanLivePanel"
+                )
+            )
+            self.assertFalse(
+                main_module._release_policy_runtime_capability_ready(
+                    "ownerTruthMediaStorage"
+                )
+            )
 
     def test_authenticated_owner_v4_chain_does_not_require_pilot_membership(self):
         service = ReleasePolicyService(
