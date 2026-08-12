@@ -26,6 +26,9 @@ class OwnerTruthTextCaptureAPITests(unittest.TestCase):
         self.previous_closed_pilot_features = set(
             main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
         )
+        self.previous_authenticated_owner_v4_enabled = (
+            main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled
+        )
         self.store = InMemoryStore()
         main_module.store = self.store
         main_module.BACKEND_API_TOKEN = ""
@@ -36,6 +39,7 @@ class OwnerTruthTextCaptureAPITests(unittest.TestCase):
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features = {
             "ownerTextCaptureV1"
         }
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = True
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -46,6 +50,9 @@ class OwnerTruthTextCaptureAPITests(unittest.TestCase):
         main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = self.previous_closed_pilot_owner_ids
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features = (
             self.previous_closed_pilot_features
+        )
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = (
+            self.previous_authenticated_owner_v4_enabled
         )
 
     @staticmethod
@@ -146,9 +153,9 @@ class OwnerTruthTextCaptureAPITests(unittest.TestCase):
         self.assertEqual(self.store.owner_truth_source_count(vault_id), 1)
         self.assertEqual(self.store.effect_kernel_repository().record_count(), 1)
 
-    def test_forged_client_capture_and_qa_header_do_not_grant_text_capture(self) -> None:
+    def test_authenticated_owner_can_capture_without_pilot_but_anonymous_cannot(self) -> None:
         _owner_id, auth_headers, session_id = self._login("13800139952")
-        response = client.post(
+        authenticated = client.post(
             self._path("vault-forged-owner-text-capture"),
             headers={
                 **self._capture_headers(auth_headers, session_id=session_id),
@@ -157,9 +164,20 @@ class OwnerTruthTextCaptureAPITests(unittest.TestCase):
             json=self._payload(),
         )
 
-        self.assertEqual(response.status_code, 403, response.text)
-        self.assertEqual(response.json()["detail"]["code"], "release_policy_denied")
-        self.assertEqual(self.store.owner_truth_source_count("vault-forged-owner-text-capture"), 0)
+        self.assertEqual(authenticated.status_code, 201, authenticated.text)
+        self.assertEqual(self.store.owner_truth_source_count("vault-forged-owner-text-capture"), 1)
+
+        anonymous = client.post(
+            self._path("vault-anonymous-owner-text-capture"),
+            headers={"X-DreamJourney-QA-Owner-Truth": "1"},
+            json=self._payload(),
+        )
+        self.assertEqual(anonymous.status_code, 401, anonymous.text)
+        self.assertEqual(
+            anonymous.json()["detail"]["code"],
+            "route_authentication_denied",
+        )
+        self.assertEqual(self.store.owner_truth_source_count("vault-anonymous-owner-text-capture"), 0)
 
     def test_v2_authority_owner_cannot_create_new_legacy_archive_authority(self) -> None:
         owner_id, auth_headers, _session_id = self._login("13800139962")

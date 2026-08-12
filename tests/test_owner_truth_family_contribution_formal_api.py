@@ -28,7 +28,7 @@ client = TestClient(app)
 
 
 class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
-    """The closed-pilot lane must never inherit the QA-only bypass."""
+    """The authenticated product lane must never inherit the QA-only bypass."""
 
     def setUp(self) -> None:
         self.previous_store = main_module.store
@@ -43,6 +43,9 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         self.previous_closed_pilot_owner_ids = main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
         self.previous_closed_pilot_features = set(
             main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
+        )
+        self.previous_authenticated_owner_v4_enabled = (
+            main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled
         )
         self.previous_capability_resolver = (
             main_module.RELEASE_POLICY_SERVICE.capability_resolver
@@ -68,6 +71,7 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.discard(
             "ownerTruthFamilyContribution"
         )
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = False
         main_module.RELEASE_POLICY_SERVICE.capability_resolver = lambda capability: capability in {
             "ownerTruthMediaStorage",
             "ownerTruthMediaProcessing",
@@ -87,6 +91,9 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = self.previous_closed_pilot_owner_ids
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features = (
             self.previous_closed_pilot_features
+        )
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = (
+            self.previous_authenticated_owner_v4_enabled
         )
         main_module.RELEASE_POLICY_SERVICE.capability_resolver = (
             self.previous_capability_resolver
@@ -165,7 +172,7 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
             relationship,
         )
 
-    def test_closed_pilot_grant_accepts_only_static_submission_and_can_be_revoked(self) -> None:
+    def test_authenticated_grant_accepts_only_static_submission_and_can_be_revoked(self) -> None:
         (
             owner_id,
             owner_headers,
@@ -195,10 +202,7 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         )
         self.assertEqual(qa_header_only.status_code, 403)
 
-        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset({owner_id})
-        main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
-            "ownerTruthFamilyContribution"
-        )
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = True
         policy_headers = self._product_headers(
             owner_headers,
             session_id=owner_session_id,
@@ -208,7 +212,7 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         self.assertEqual(created.status_code, 201, created.text)
         self.assertEqual(created.headers["cache-control"], "no-store")
         grant = created.json()["grant"]
-        self.assertEqual(grant["admissionMode"], "closedPilot")
+        self.assertEqual(grant["admissionMode"], "authenticatedOwner")
         self.assertEqual(grant["scope"], "submitTextSource")
         self.assertNotIn("authorizationEvidence", json.dumps(created.json()))
 
@@ -317,10 +321,7 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
             _other_headers,
             relationship,
         ) = self._accepted_relationship()
-        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset({owner_id})
-        main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
-            "ownerTruthFamilyContribution"
-        )
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = True
         formal_path = f"/v2/vaults/{self.vault_id}/family-contribution/grants"
         policy_headers = self._product_headers(
             owner_headers,
@@ -339,9 +340,7 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
         self.assertEqual(formal.status_code, 201, formal.text)
         formal_grant = formal.json()["grant"]
 
-        main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.discard(
-            "ownerTruthFamilyContribution"
-        )
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = False
         disabled = client.post(
             f"{formal_path}/{formal_grant['grantId']}/sources",
             headers=member_headers,
@@ -359,9 +358,7 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
 
         # Revoke the formal grant, then create an old QA fixture for the same
         # relationship. The product contributor route must never accept it.
-        main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
-            "ownerTruthFamilyContribution"
-        )
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = True
         revoke = client.post(
             f"{formal_path}/{formal_grant['grantId']}/revoke",
             headers=policy_headers,
@@ -407,10 +404,7 @@ class OwnerTruthFamilyContributionFormalAPITests(unittest.TestCase):
             _other_headers,
             relationship,
         ) = self._accepted_relationship()
-        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset({owner_id})
-        main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
-            "ownerTruthFamilyContribution"
-        )
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = True
         policy_headers = self._product_headers(
             owner_headers,
             session_id=owner_session_id,

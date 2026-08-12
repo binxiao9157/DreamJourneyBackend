@@ -1,8 +1,8 @@
-"""Server-owned Owner Truth Context authority for the closed-pilot Echo path.
+"""Server-owned Owner Truth Context authority for the authenticated Echo path.
 
 The existing Context V4 shadow/materialization services prove that a current,
 confirmed MemoryProjection can be selected safely. This adapter is the small
-production bridge for the server-granted pilot: it creates an empty V4 Context
+production bridge for a signed-in Owner: it creates an empty V4 Context
 when the Projection is absent or rebuilding and never falls back to legacy
 Archive, KBLite, or Care reads.
 """
@@ -34,7 +34,7 @@ from app.services.owner_truth_context_shadow_build import (
 OWNER_TRUTH_CONTEXT_AUTHORITY_MODE = "ownerTruthConfirmedProjection"
 OWNER_TRUTH_CONTEXT_AUTHORITY_VERSION = "echo-context-v4-owner"
 OWNER_TRUTH_CONTEXT_AUTHORITY_SCHEMA_VERSION = "owner-truth-context-authority-v1"
-OWNER_TRUTH_CONTEXT_AUTHORITY_COHORT = "closedPilotAdultSelf"
+OWNER_TRUTH_CONTEXT_AUTHORITY_COHORT = "authenticatedOwner"
 OWNER_TRUTH_CONTEXT_FALLBACK_POLICY = "failClosedNoLegacy"
 _FALLBACK_PROJECTION_UNAVAILABLE = "owner_truth_context_unavailable_no_personal_memory"
 

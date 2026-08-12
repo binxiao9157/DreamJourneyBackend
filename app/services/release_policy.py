@@ -507,6 +507,29 @@ class ReleasePolicyService:
         "familySpace",
         "careDashboard",
     }
+    # The private V4 production chain is a normal authenticated-owner
+    # capability. It is independent from login allowlists and from the
+    # explicit closed-pilot cohort. Provider-backed media steps still fail
+    # closed through their capability bindings.
+    _AUTHENTICATED_OWNER_V4_FEATURES = {
+        "echoTextInput",
+        "ownerTextCaptureV1",
+        "ownerMediaCaptureV1",
+        "ownerMediaProcessingV1",
+        "ownerTruthCandidateReview",
+        "echoGuidedRecommendations",
+        "ownerTruthLifeMap",
+        "ownerTruthMemorySearch",
+        "ownerTruthInterviewOutcome",
+        "ownerTruthFamilyContribution",
+        "personaSettings",
+        "voiceCloneShell",
+        "digitalHumanLivePanel",
+        "profileSettings",
+        "legalCenter",
+        "accountDeletion",
+        "accountDataExport",
+    }
     _CLOSED_PILOT_OPT_IN_FEATURES = {
         "ownerTextCaptureV1",
         "ownerMediaCaptureV1",
@@ -522,6 +545,8 @@ class ReleasePolicyService:
     _FEATURE_CAPABILITIES = {
         "ownerMediaCaptureV1": "ownerTruthMediaStorage",
         "ownerMediaProcessingV1": "ownerTruthMediaProcessing",
+        "voiceCloneShell": "voiceCloneShell",
+        "digitalHumanLivePanel": "digitalHumanLivePanel",
     }
 
     def __init__(
@@ -534,6 +559,7 @@ class ReleasePolicyService:
         emergency_disabled_features: Optional[Iterable[str]] = None,
         enforced_features: Optional[Iterable[str]] = None,
         closed_pilot_enabled_features: Optional[Iterable[str]] = None,
+        authenticated_owner_v4_enabled: bool = False,
         capability_resolver: Optional[Callable[[str], bool]] = None,
         shadow_mode: bool = True,
         enforce_default_closed_stages: bool = True,
@@ -547,6 +573,7 @@ class ReleasePolicyService:
         self.closed_pilot_enabled_features: Set[str] = set(
             closed_pilot_enabled_features or ()
         )
+        self.authenticated_owner_v4_enabled = bool(authenticated_owner_v4_enabled)
         self.capability_resolver = capability_resolver
         unknown_rollout_features = (
             self.emergency_disabled_features
@@ -588,13 +615,31 @@ class ReleasePolicyService:
     def minimum_client_access_mode(self, feature: str) -> str:
         owner_visible = (
             self._closed_pilot_owner_visible_features
-            | self._AUTHENTICATED_OWNER_VISIBLE
+            | self._authenticated_owner_visible_features
         )
         return "readOnly" if feature in owner_visible else "deny"
 
     @property
     def _closed_pilot_owner_visible_features(self) -> Set[str]:
         return self._CLOSED_PILOT_OWNER_VISIBLE | self.closed_pilot_enabled_features
+
+    @property
+    def _authenticated_owner_visible_features(self) -> Set[str]:
+        features = set(self._AUTHENTICATED_OWNER_VISIBLE)
+        if self.authenticated_owner_v4_enabled:
+            features.update(self._AUTHENTICATED_OWNER_V4_FEATURES)
+        return features
+
+    def authenticated_owner_feature_enabled(self, feature: str) -> bool:
+        """Return the server-owned production decision for a signed-in Owner."""
+
+        decision = self.build_snapshot(
+            audience="owner",
+            cohort="authenticatedOwner",
+            client_build=self.min_client_build,
+            requested_feature=feature,
+        ).features[0]
+        return bool(decision.enabled)
 
     def public_descriptor(self) -> dict[str, object]:
         return {
@@ -615,7 +660,7 @@ class ReleasePolicyService:
                 self._closed_pilot_owner_visible_features
             ),
             "authenticatedOwnerFeatures": sorted(
-                self._AUTHENTICATED_OWNER_VISIBLE
+                self._authenticated_owner_visible_features
             ),
             "killSwitchFeatures": sorted(self.emergency_disabled_features),
             "defaultClosedStages": ["M1", "M2", "M3", "M4"],
@@ -730,7 +775,7 @@ class ReleasePolicyService:
         elif (
             audience == "owner"
             and cohort in {"authenticatedOwner", "closedPilotAdultSelf"}
-            and feature in self._AUTHENTICATED_OWNER_VISIBLE
+            and feature in self._authenticated_owner_visible_features
         ):
             if required_capability is not None and not capability_ready:
                 reason = "capabilityUnavailable"

@@ -108,6 +108,10 @@ class Settings:
     # Additional M0 features explicitly approved for server-granted pilot
     # owners. Unsupported or later-stage feature names fail at boot.
     release_policy_closed_pilot_features: Optional[str] = None
+    # Promote the private V4 Source -> Candidate -> MemoryVersion -> Projection
+    # -> Search/Echo chain to every authenticated Owner. Login test-account
+    # allowlists do not participate in this decision.
+    release_policy_authenticated_owner_v4_enabled: bool = False
     # Operational capability evidence is intentionally short-lived. A stale
     # observation closes the affected lane, and a later recovery receives a
     # new readiness epoch instead of reviving a cached client decision.
@@ -128,9 +132,11 @@ class Settings:
     # default-off MemoryProjection worker succeeds. This never exposes search
     # or enables a public retrieval surface by itself.
     owner_truth_memory_search_projection_worker_enabled: bool = False
-    # A server-owned closed-pilot can opt into confirmed V4 Projection Context
-    # for personal Echo only. It remains off until the worker/profile and
-    # allowlist rollout are separately verified in the target environment.
+    # Enable confirmed V4 Projection Context for an authenticated Owner's
+    # personal Echo. This is independent of login test-account allowlists.
+    owner_truth_context_authority_enabled: bool = False
+    # Deprecated deployment alias retained while older environments migrate to
+    # OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED.
     owner_truth_context_authority_closed_pilot_enabled: bool = False
     # Stage 2 media ingestion stays separately default-off. When enabled it
     # writes only into a server-private object adapter and still requires a
@@ -508,6 +514,10 @@ class Settings:
             release_policy_closed_pilot_features=_env(
                 "RELEASE_POLICY_CLOSED_PILOT_FEATURES"
             ),
+            release_policy_authenticated_owner_v4_enabled=_env_bool(
+                "RELEASE_POLICY_AUTHENTICATED_OWNER_V4_ENABLED",
+                cls.release_policy_authenticated_owner_v4_enabled,
+            ),
             runtime_capability_readiness_ttl_seconds=max(
                 30,
                 _env_int(
@@ -565,6 +575,13 @@ class Settings:
             owner_truth_memory_search_projection_worker_enabled=_env_bool(
                 "OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_WORKER_ENABLED",
                 cls.owner_truth_memory_search_projection_worker_enabled,
+            ),
+            owner_truth_context_authority_enabled=_env_bool(
+                "OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED",
+                _env_bool(
+                    "OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED",
+                    cls.owner_truth_context_authority_enabled,
+                ),
             ),
             owner_truth_context_authority_closed_pilot_enabled=_env_bool(
                 "OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED",

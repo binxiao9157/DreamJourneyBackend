@@ -68,13 +68,22 @@ class OwnerTruthContextAuthorityTests(unittest.TestCase):
         )
 
     def test_context_authority_switch_defaults_off_and_requires_explicit_environment_enablement(self) -> None:
+        self.assertFalse(Settings().owner_truth_context_authority_enabled)
         self.assertFalse(Settings().owner_truth_context_authority_closed_pilot_enabled)
+        with patch.dict(
+            os.environ,
+            {"OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED": "true"},
+            clear=False,
+        ):
+            self.assertTrue(Settings.from_env().owner_truth_context_authority_enabled)
+
+    def test_context_authority_switch_accepts_legacy_environment_alias(self) -> None:
         with patch.dict(
             os.environ,
             {"OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED": "true"},
             clear=False,
         ):
-            self.assertTrue(Settings.from_env().owner_truth_context_authority_closed_pilot_enabled)
+            self.assertTrue(Settings.from_env().owner_truth_context_authority_enabled)
 
     def _activate_memory(
         self,
@@ -162,7 +171,7 @@ class OwnerTruthContextAuthorityTests(unittest.TestCase):
         self.assertEqual(packet["contextVersion"], "echo-context-v4-owner")
         self.assertFalse(packet["contextAuthority"]["legacyContextRead"])
         self.assertEqual(packet["contextAuthority"]["mode"], "ownerTruthConfirmedProjection")
-        self.assertEqual(packet["contextAuthority"]["cohort"], "closedPilotAdultSelf")
+        self.assertEqual(packet["contextAuthority"]["cohort"], "authenticatedOwner")
         self.assertEqual(packet["contextAuthority"]["fallbackPolicy"], "failClosedNoLegacy")
         self.assertFalse(packet["contextAuthority"]["mixedAuthorityAllowed"])
         self.assertEqual(len(packet["contextAuthority"]["authorityGeneration"]), 64)

@@ -52,6 +52,9 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         self.previous_context_authority = (
             main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED
         )
+        self.previous_production_context_authority = (
+            main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED
+        )
         self.previous_pilot_owner_ids = main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
         self.previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
         self.previous_release_policy_command_gate = main_module.RELEASE_POLICY_COMMAND_GATE
@@ -61,6 +64,7 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         main_module.AUTH_ROUTE_MODE = "enforce"
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
         main_module.RELEASE_POLICY_COMMAND_MODE = "observe"
+        main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED = True
         main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = True
 
     def tearDown(self) -> None:
@@ -70,6 +74,9 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         main_module.AUTH_ROUTE_MODE = self.previous_route_mode
         main_module.AUTH_OWNERSHIP_MODE = self.previous_ownership_mode
         main_module.RELEASE_POLICY_COMMAND_MODE = self.previous_release_policy_command_mode
+        main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED = (
+            self.previous_production_context_authority
+        )
         main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = (
             self.previous_context_authority
         )
@@ -89,15 +96,15 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         return payload["user"]["id"], {"Authorization": f"Bearer {payload['auth']['accessToken']}"}
 
     @staticmethod
-    def _set_closed_pilot(owner_id: str) -> None:
+    def _enable_authenticated_owner_v4(_owner_id: str) -> None:
         service = ReleasePolicyService(
             policy_revision=1,
             min_client_build=1,
             ttl_seconds=300,
-            closed_pilot_enabled_features={"ownerTruthCandidateReview"},
+            authenticated_owner_v4_enabled=True,
             shadow_mode=True,
         )
-        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset({owner_id})
+        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset()
         main_module.RELEASE_POLICY_SERVICE = service
         main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(service)
 
@@ -172,7 +179,7 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
     def test_server_allowlisted_owner_uses_v4_context_without_qa_header(self) -> None:
         owner_id, headers = self._login("13800139761")
         candidate = self._seed_confirmed_memory(owner_id)
-        self._set_closed_pilot(owner_id)
+        self._enable_authenticated_owner_v4(owner_id)
 
         response = client.post("/context/build", headers=headers, json=self._payload(owner_id))
 
@@ -180,7 +187,7 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         packet = response.json()["contextPacket"]
         self.assertEqual(packet["contextVersion"], "echo-context-v4-owner")
         self.assertEqual(packet["contextAuthority"]["mode"], "ownerTruthConfirmedProjection")
-        self.assertEqual(packet["contextAuthority"]["cohort"], "closedPilotAdultSelf")
+        self.assertEqual(packet["contextAuthority"]["cohort"], "authenticatedOwner")
         self.assertEqual(packet["contextAuthority"]["fallbackPolicy"], "failClosedNoLegacy")
         self.assertFalse(packet["contextAuthority"]["mixedAuthorityAllowed"])
         self.assertEqual(len(packet["contextAuthority"]["authorityGeneration"]), 64)
@@ -188,21 +195,26 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         self.assertEqual(packet["selectedContext"][0]["citation"]["sourceId"], candidate.source_id)
         self.assertNotIn("X-DreamJourney-QA-Owner-Truth", headers)
 
-    def test_non_allowlisted_owner_keeps_legacy_context_route(self) -> None:
+    def test_authenticated_owner_uses_v4_context_regardless_of_client_cohort(self) -> None:
         owner_id, headers = self._login("13800139762")
-        self._set_closed_pilot("different-owner")
+        self._seed_confirmed_memory(owner_id)
+        self._enable_authenticated_owner_v4(owner_id)
         headers["X-DreamJourney-Policy-Cohort"] = "closedPilotAdultSelf"
 
         response = client.post("/context/build", headers=headers, json=self._payload(owner_id))
 
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["contextPacket"]["contextVersion"], "echo-context-v2")
-        self.assertNotIn("contextAuthority", response.json()["contextPacket"])
+        self.assertEqual(response.json()["contextPacket"]["contextVersion"], "echo-context-v4-owner")
+        self.assertEqual(
+            response.json()["contextPacket"]["contextAuthority"]["cohort"],
+            "authenticatedOwner",
+        )
 
     def test_server_switch_defaults_off_even_for_an_allowlisted_owner(self) -> None:
         owner_id, headers = self._login("13800139764")
         self._seed_confirmed_memory(owner_id)
-        self._set_closed_pilot(owner_id)
+        self._enable_authenticated_owner_v4(owner_id)
+        main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED = False
         main_module.OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = False
 
         response = client.post("/context/build", headers=headers, json=self._payload(owner_id))
@@ -213,7 +225,7 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
 
     def test_allowlisted_owner_without_projection_fails_closed_to_empty_v4_context(self) -> None:
         owner_id, headers = self._login("13800139763")
-        self._set_closed_pilot(owner_id)
+        self._enable_authenticated_owner_v4(owner_id)
 
         response = client.post("/context/build", headers=headers, json=self._payload(owner_id))
 

@@ -311,7 +311,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             service.public_descriptor()["defaultClosedStageEffectsEnforced"]
         )
 
-    def test_active_managed_test_account_receives_closed_pilot_cohort(self):
+    def test_active_managed_test_account_keeps_authenticated_owner_cohort(self):
         principal = main_module.RequestPrincipal.user(
             principal_id="sub_test_account",
             session_id="session-test-account",
@@ -322,10 +322,45 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             factory.return_value.is_active_subject.return_value = True
             cohort = main_module._release_policy_server_cohort(principal)
 
-        self.assertEqual(cohort, "closedPilotAdultSelf")
-        factory.return_value.is_active_subject.assert_called_once_with(
-            "sub_test_account"
+        self.assertEqual(cohort, "authenticatedOwner")
+        factory.assert_not_called()
+
+    def test_authenticated_owner_v4_chain_does_not_require_pilot_membership(self):
+        service = ReleasePolicyService(
+            authenticated_owner_v4_enabled=True,
+            capability_resolver=lambda capability: capability == "voiceCloneShell",
         )
+
+        for feature in {
+            "echoTextInput",
+            "ownerTextCaptureV1",
+            "ownerTruthCandidateReview",
+            "echoGuidedRecommendations",
+            "ownerTruthLifeMap",
+            "ownerTruthMemorySearch",
+            "ownerTruthInterviewOutcome",
+            "ownerTruthFamilyContribution",
+            "personaSettings",
+            "voiceCloneShell",
+        }:
+            decision = service.build_snapshot(
+                audience="owner",
+                cohort="authenticatedOwner",
+                client_build=1,
+                requested_feature=feature,
+            ).features[0]
+            self.assertTrue(decision.enabled, feature)
+            self.assertEqual(decision.reason, "authenticatedOwnerCore")
+
+        digital_human = service.build_snapshot(
+            audience="owner",
+            cohort="authenticatedOwner",
+            client_build=1,
+            requested_feature="digitalHumanLivePanel",
+        ).features[0]
+        self.assertFalse(digital_human.enabled)
+        self.assertEqual(digital_human.reason, "capabilityUnavailable")
+        self.assertEqual(digital_human.requiredCapability, "digitalHumanLivePanel")
 
     def test_regular_signed_in_account_receives_authenticated_owner_cohort(self):
         principal = main_module.RequestPrincipal.user(

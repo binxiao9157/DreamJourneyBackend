@@ -88,9 +88,9 @@ class OwnerTruthCandidateExtractor(Protocol):
 class DeterministicOwnerTruthCandidateExtractor:
     """Create one reviewable Candidate from an explicit owner-authored Source.
 
-    This worker is reached only from the closed-pilot ``/sources`` command,
+    This worker is reached only from the production ``/sources`` command,
     which accepts text authored and explicitly submitted by the authenticated
-    Vault Owner.  The proposal therefore preserves that first-person recalled
+    Vault Owner. The proposal therefore preserves that first-person recalled
     perspective, but remains pending until the Owner accepts it.  It does not
     turn a model inference into a fact, call a provider, or bypass review.
     """

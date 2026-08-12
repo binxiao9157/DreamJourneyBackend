@@ -37,10 +37,20 @@ FAMILY_CONTRIBUTION_SCOPE = "submitTextSource"
 FAMILY_CONTRIBUTION_FORMAL_FEATURE = "ownerTruthFamilyContribution"
 FAMILY_CONTRIBUTION_ADMISSION_QA = "qa"
 FAMILY_CONTRIBUTION_ADMISSION_CLOSED_PILOT = "closedPilot"
+FAMILY_CONTRIBUTION_ADMISSION_AUTHENTICATED_OWNER = "authenticatedOwner"
+# Request-time selector used to accept both newly created production grants
+# and grants issued by the previous closed-pilot rollout.
+FAMILY_CONTRIBUTION_ADMISSION_FORMAL = "formal"
+FAMILY_CONTRIBUTION_FORMAL_ADMISSION_MODES = frozenset(
+    {
+        FAMILY_CONTRIBUTION_ADMISSION_CLOSED_PILOT,
+        FAMILY_CONTRIBUTION_ADMISSION_AUTHENTICATED_OWNER,
+    }
+)
 _FAMILY_CONTRIBUTION_ADMISSION_MODES = frozenset(
     {
         FAMILY_CONTRIBUTION_ADMISSION_QA,
-        FAMILY_CONTRIBUTION_ADMISSION_CLOSED_PILOT,
+        *FAMILY_CONTRIBUTION_FORMAL_ADMISSION_MODES,
     }
 )
 _GRANT_NAMESPACE = UUID("7cbbf18a-32a5-434a-a1a8-3d4046bb5ced")
@@ -1012,7 +1022,7 @@ class OwnerTruthFamilyContributionService:
         if capture.feature != FAMILY_CONTRIBUTION_FORMAL_FEATURE:
             raise OwnerTruthFamilyContributionError("familyContributionAuthorizationCaptureInvalid")
         return (
-            FAMILY_CONTRIBUTION_ADMISSION_CLOSED_PILOT,
+            FAMILY_CONTRIBUTION_ADMISSION_AUTHENTICATED_OWNER,
             capture.value_minimized_payload(),
         )
 
@@ -1026,6 +1036,12 @@ class OwnerTruthFamilyContributionService:
         stored_mode = str(
             grant.get("admissionMode") or FAMILY_CONTRIBUTION_ADMISSION_QA
         )
+        if required_admission_mode == FAMILY_CONTRIBUTION_ADMISSION_FORMAL:
+            if stored_mode in FAMILY_CONTRIBUTION_FORMAL_ADMISSION_MODES:
+                return
+            raise OwnerTruthFamilyContributionError(
+                "familyContributionGrantAdmissionModeMismatch"
+            )
         if stored_mode != required_admission_mode:
             raise OwnerTruthFamilyContributionError("familyContributionGrantAdmissionModeMismatch")
 
@@ -1036,7 +1052,12 @@ class OwnerTruthFamilyContributionService:
         context: OwnerTruthCommandContext,
     ) -> None:
         expected_mode, _evidence = cls._grant_admission(context)
-        cls._assert_grant_admission_mode(grant, expected_mode)
+        required_mode = (
+            FAMILY_CONTRIBUTION_ADMISSION_FORMAL
+            if expected_mode in FAMILY_CONTRIBUTION_FORMAL_ADMISSION_MODES
+            else expected_mode
+        )
+        cls._assert_grant_admission_mode(grant, required_mode)
 
     @staticmethod
     def _require_owner_context(context: OwnerTruthCommandContext) -> None:
@@ -1229,8 +1250,11 @@ def _base_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "CreateFamilyContributionGrantCommand",
+    "FAMILY_CONTRIBUTION_ADMISSION_AUTHENTICATED_OWNER",
     "FAMILY_CONTRIBUTION_ADMISSION_CLOSED_PILOT",
+    "FAMILY_CONTRIBUTION_ADMISSION_FORMAL",
     "FAMILY_CONTRIBUTION_ADMISSION_QA",
+    "FAMILY_CONTRIBUTION_FORMAL_ADMISSION_MODES",
     "FAMILY_CONTRIBUTION_FORMAL_FEATURE",
     "FAMILY_CONTRIBUTION_SCOPE",
     "FamilyContributionGrantResult",

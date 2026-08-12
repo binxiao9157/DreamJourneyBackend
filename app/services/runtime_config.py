@@ -100,6 +100,9 @@ class RuntimeConfigService:
             closed_pilot_enabled_features=parse_release_policy_feature_set(
                 self.settings.release_policy_closed_pilot_features
             ),
+            authenticated_owner_v4_enabled=(
+                self.settings.release_policy_authenticated_owner_v4_enabled
+            ),
             capability_resolver=lambda capability: (
                 self._provider_operational_ready(
                     self.provider_inventory.status_for(capability)
@@ -454,7 +457,7 @@ class RuntimeConfigService:
         release_decisions = {
             feature: release_policy.build_snapshot(
                 audience="owner",
-                cohort="closedPilotAdultSelf",
+                cohort="authenticatedOwner",
                 client_build=release_policy.min_client_build,
                 requested_feature=feature,
             ).features[0]

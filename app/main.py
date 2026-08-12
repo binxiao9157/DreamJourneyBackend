@@ -204,6 +204,8 @@ from app.services.owner_truth_media_processing import (
 )
 from app.services.owner_truth_family_contribution import (
     CreateFamilyContributionGrantCommand,
+    FAMILY_CONTRIBUTION_ADMISSION_FORMAL,
+    FAMILY_CONTRIBUTION_FORMAL_ADMISSION_MODES,
     ReviewFamilyContributionSubmissionCommand,
     OwnerTruthFamilyContributionError,
     OwnerTruthFamilyContributionService,
@@ -782,6 +784,11 @@ PUBLICATION_VISITOR_ACCESS_QA_ENABLED = bool(
 )
 PUBLICATION_LIFECYCLE_QA_ENABLED = bool(settings.publication_lifecycle_qa_enabled)
 PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER = DenyPublicationVisitorEligibilityResolver()
+OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED = bool(
+    settings.owner_truth_context_authority_enabled
+)
+# Temporary process-level alias for older smoke tools. Runtime authorization
+# accepts either switch during the deployment migration.
 OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED = bool(
     settings.owner_truth_context_authority_closed_pilot_enabled
 )
@@ -1545,8 +1552,8 @@ def _owner_truth_text_capture_context(
     """Authorize explicit personal text capture through a server policy capture.
 
     This is intentionally independent from Echo natural input and Candidate
-    review. A durable Source/outbox write requires its own closed-pilot grant;
-    a QA header can neither enable nor bypass this path.
+    review. A durable Source/outbox write requires its own authenticated-owner
+    production grant; a QA header can neither enable nor bypass this path.
     """
 
     return _owner_truth_captured_release_policy_context(
@@ -1584,7 +1591,7 @@ def _owner_truth_media_capture_context(
     *,
     vault_id: str,
 ) -> OwnerTruthCommandContext:
-    """Authorize one closed-pilot private media operation for its Vault Owner."""
+    """Authorize one production private-media operation for its Vault Owner."""
 
     normalized_path = request.url.path
     feature = "ownerMediaCaptureV1"
@@ -1641,11 +1648,11 @@ def _owner_truth_family_contribution_product_contributor_context(
 ) -> OwnerTruthCommandContext:
     """Resolve a formal contributor without turning family membership into read access.
 
-    The persistent grant is the narrow contributor capability.  The service
+    The persistent grant is the narrow contributor capability. The service
     validates its relationship epoch on every submission; this helper also
-    checks the server-owned Owner allowlist and feature toggle so emergency
-    rollout disablement immediately stops old grants without trusting a
-    contributor-supplied cohort or release header.
+    checks the authenticated-owner production policy so emergency rollout
+    disablement immediately stops old grants without trusting a contributor-
+    supplied cohort or release header.
     """
 
     actor_subject_id = _request_user_principal_id(request)
@@ -1659,12 +1666,10 @@ def _owner_truth_family_contribution_product_contributor_context(
         vault_id=vault_id,
         grant_id=grant_id,
         actor_subject_id=actor_subject_id,
-        required_admission_mode="closedPilot",
+        required_admission_mode=FAMILY_CONTRIBUTION_ADMISSION_FORMAL,
     )
-    if (
-        context.owner_subject_id not in RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
-        or "ownerTruthFamilyContribution"
-        not in RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
+    if not RELEASE_POLICY_SERVICE.authenticated_owner_feature_enabled(
+        "ownerTruthFamilyContribution"
     ):
         raise HTTPException(
             status_code=404,
@@ -5228,7 +5233,8 @@ def _production_readiness_report(
         ),
         worker_activations=worker_activations,
         context_authority_enabled=(
-            settings.owner_truth_context_authority_closed_pilot_enabled
+            settings.owner_truth_context_authority_enabled
+            or settings.owner_truth_context_authority_closed_pilot_enabled
         ),
         application_export_ready=application_export_ready,
         # D1 has not yet admitted private object bytes to the export package.
@@ -5273,6 +5279,9 @@ RELEASE_POLICY_SERVICE = ReleasePolicyService(
     ),
     closed_pilot_enabled_features=parse_release_policy_feature_set(
         settings.release_policy_closed_pilot_features
+    ),
+    authenticated_owner_v4_enabled=(
+        settings.release_policy_authenticated_owner_v4_enabled
     ),
     capability_resolver=_release_policy_runtime_capability_ready,
     shadow_mode=RELEASE_POLICY_COMMAND_MODE != "enforce",
@@ -5941,20 +5950,17 @@ def _release_policy_audience(request: Request, principal: RequestPrincipal) -> s
 
 
 def _release_policy_server_cohort(principal: RequestPrincipal) -> str:
-    """Resolve signed-in and pilot membership from server authority."""
+    """Resolve signed-in and explicit pilot membership from server authority.
+
+    Authentication test-account allowlists are deliberately irrelevant here:
+    they may bypass OTP in an approved environment, but they never alter a
+    product feature cohort.
+    """
 
     if principal.kind == PrincipalKind.USER:
         subject_id = str(principal.principal_id or "").strip()
         if subject_id in RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS:
             return "closedPilotAdultSelf"
-        try:
-            if _test_account_allowlist_service().is_active_subject(subject_id):
-                return "closedPilotAdultSelf"
-        except Exception:
-            logger.warning(
-                "test account pilot cohort lookup failed; pilot-only access remains closed",
-                exc_info=True,
-            )
         return "authenticatedOwner"
     return "unassigned"
 
@@ -5967,7 +5973,7 @@ def _legacy_archive_v2_authority_retirement(
     owner_user_id: str,
     payload: Mapping[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    """Fence new legacy authority after an Owner enters the V2 capture cohort.
+    """Fence new legacy authority after V4 capture becomes production authority.
 
     Existing archive records remain readable. TimeLetter keeps its independent
     lifecycle contract, while new memory-bearing text and media must use the
@@ -5979,9 +5985,9 @@ def _legacy_archive_v2_authority_retirement(
     kind = str(payload.get("kind") or "").strip()
     if (
         not normalized_owner
-        or normalized_owner not in RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
-        or "ownerTextCaptureV1"
-        not in RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
+        or not RELEASE_POLICY_SERVICE.authenticated_owner_feature_enabled(
+            "ownerTextCaptureV1"
+        )
         or kind in _LEGACY_ARCHIVE_NON_AUTHORITY_KINDS
     ):
         return None
@@ -6000,16 +6006,18 @@ def _owner_truth_context_authority_context(
     owner_subject_id: str,
     payload: Dict[str, Any],
 ) -> Optional[OwnerTruthCommandContext]:
-    """Grant production V4 Context only to a server-owned personal-self pilot."""
+    """Grant production V4 Context to an authenticated personal-self Owner."""
 
-    if not OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED:
+    if not (
+        OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED
+        or OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED
+    ):
         return None
     principal = getattr(request.state, "auth_principal", None)
     if (
         not isinstance(principal, RequestPrincipal)
         or principal.kind != PrincipalKind.USER
         or str(principal.principal_id or "").strip() != owner_subject_id
-        or _release_policy_server_cohort(principal) != "closedPilotAdultSelf"
     ):
         return None
     persona_scope = str(payload.get("personaScope") or "personal").strip()
@@ -6019,7 +6027,7 @@ def _owner_truth_context_authority_context(
         return None
     decision = RELEASE_POLICY_SERVICE.build_snapshot(
         audience="owner",
-        cohort="closedPilotAdultSelf",
+        cohort=_release_policy_server_cohort(principal),
         client_build=RELEASE_POLICY_SERVICE.min_client_build,
         requested_feature="ownerTruthCandidateReview",
     ).features[0]
@@ -6938,14 +6946,14 @@ def ready() -> JSONResponse:
 def release_policy(
     request: Request,
     audience: str = Query(default="owner", pattern="^(owner|family|visitor|qa)$"),
-    cohort: str = Query(default="closedPilotAdultSelf", min_length=1, max_length=80),
+    cohort: str = Query(default="authenticatedOwner", min_length=1, max_length=80),
     clientBuild: int = Query(default=1, ge=0),
     knownPolicyRevision: int = Query(default=0, ge=0),
     feature: Optional[str] = Query(default=None, min_length=1, max_length=100),
 ) -> ReleasePolicySnapshot:
     # Retain the legacy query field for older clients, but never trust it.
-    # A user receives a closed-pilot snapshot only when their authenticated
-    # server principal is explicitly allowlisted in deployment configuration.
+    # The server resolves the effective cohort. Client input cannot grant a
+    # pilot or production entitlement.
     _ = cohort
     _refresh_runtime_capability_controls()
     principal = getattr(request.state, "auth_principal", None)
@@ -8485,7 +8493,9 @@ def list_contributor_family_contribution_product_grants(
             status_code=401,
             detail={"code": "ownerTruthFamilyContributionUserSessionRequired"},
         )
-    if "ownerTruthFamilyContribution" not in RELEASE_POLICY_SERVICE.closed_pilot_enabled_features:
+    if not RELEASE_POLICY_SERVICE.authenticated_owner_feature_enabled(
+        "ownerTruthFamilyContribution"
+    ):
         raise HTTPException(
             status_code=404,
             detail={"code": "ownerTruthFamilyContributionUnavailable"},
@@ -8495,8 +8505,7 @@ def list_contributor_family_contribution_product_grants(
         for item in OwnerTruthFamilyContributionService(store).list_grants(
             contributor_subject_id=contributor_subject_id,
         )
-        if item["ownerSubjectId"] in RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
-        and item["admissionMode"] == "closedPilot"
+        if item["admissionMode"] in FAMILY_CONTRIBUTION_FORMAL_ADMISSION_MODES
     ]
     return JSONResponse(
         content={
@@ -8517,7 +8526,7 @@ def revoke_owner_truth_family_contribution_product_grant(
     grant_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """Closed-pilot Owner revocation; previous source material remains immutable."""
+    """Owner revocation; previously accepted source material remains immutable."""
 
     try:
         context = _owner_truth_family_contribution_product_context(
@@ -8573,7 +8582,7 @@ def submit_owner_truth_family_contribution_product_source(
         result = OwnerTruthFamilyContributionService(store).submit_for_review(
             command=command,
             context=context,
-            required_admission_mode="closedPilot",
+            required_admission_mode=FAMILY_CONTRIBUTION_ADMISSION_FORMAL,
         )
     except OwnerTruthContractError as error:
         raise _owner_truth_family_contribution_http_error(error) from error
@@ -8640,7 +8649,9 @@ def list_contributor_family_contribution_product_submissions(
             status_code=401,
             detail={"code": "ownerTruthFamilyContributionUserSessionRequired"},
         )
-    if "ownerTruthFamilyContribution" not in RELEASE_POLICY_SERVICE.closed_pilot_enabled_features:
+    if not RELEASE_POLICY_SERVICE.authenticated_owner_feature_enabled(
+        "ownerTruthFamilyContribution"
+    ):
         raise HTTPException(
             status_code=404,
             detail={"code": "ownerTruthFamilyContributionUnavailable"},
@@ -8650,14 +8661,12 @@ def list_contributor_family_contribution_product_submissions(
     ).list_submissions_for_contributor(
         contributor_subject_id=contributor_subject_id,
     )
-    allowed_owner_ids = RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS
     allowed_grant_ids = {
         item["grantId"]
         for item in OwnerTruthFamilyContributionService(store).list_grants(
             contributor_subject_id=contributor_subject_id,
         )
-        if item["ownerSubjectId"] in allowed_owner_ids
-        and item["admissionMode"] == "closedPilot"
+        if item["admissionMode"] in FAMILY_CONTRIBUTION_FORMAL_ADMISSION_MODES
     }
     return JSONResponse(
         content={
