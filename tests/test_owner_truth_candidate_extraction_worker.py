@@ -9,6 +9,8 @@ from time import sleep
 import unittest
 from uuid import uuid4
 
+import httpx
+
 from app.async_effects.consumer_repository import InMemoryAsyncEffectConsumerRepository
 from app.async_effects.dead_letter_repository import InMemoryAsyncEffectDeadLetterRepository
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
@@ -146,6 +148,22 @@ class _RecordingLiveMemoryOrganizer:
         self.turns = list(turns)
         self.calls.append(list(turns))
         return {"memories": self.memories}
+
+
+class _UnavailableLiveMemoryOrganizer(_RecordingLiveMemoryOrganizer):
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def request_organization(self, *, turns):
+        self.turns = list(turns)
+        self.calls.append(list(turns))
+        request = httpx.Request("POST", "https://api.deepseek.com/v1/chat/completions")
+        response = httpx.Response(402, request=request)
+        raise httpx.HTTPStatusError(
+            "Insufficient Balance",
+            request=request,
+            response=response,
+        )
 
 
 class _BlockingExtractor:
@@ -418,6 +436,60 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(payloads["emotion"]["content"]["label"], "我一直很怀念外公。")
         self.assertTrue(all(payload["reviewMode"] == "single" for payload in payloads.values()))
         self.assertTrue(all(payload["confidence"] == 0.0 for payload in payloads.values()))
+
+    def test_closed_live_conversation_falls_back_when_organizer_is_unavailable(self) -> None:
+        first_user_turn = "我小时候住在河边，常和外公去散步。"
+        assistant_turn = "那段经历让你学到了什么？"
+        second_user_turn = "我觉得陪伴比讲道理更重要。"
+        source_text = f"{first_user_turn}\n\n{second_user_turn}"
+        organizer = _UnavailableLiveMemoryOrganizer()
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(source_text),
+            source_text=source_text,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {
+                        "index": 1,
+                        "role": "user",
+                        "text": first_user_turn,
+                        "captureMode": "live",
+                    },
+                    {
+                        "index": 2,
+                        "role": "assistant",
+                        "text": assistant_turn,
+                        "captureMode": "live",
+                    },
+                    {
+                        "index": 3,
+                        "role": "user",
+                        "text": second_user_turn,
+                        "captureMode": "live",
+                    },
+                ],
+            },
+        )
+        store.lease_repository.seed(self.intent)
+
+        result = self._worker(store=store, extractor=extractor).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["candidateCount"], 1)
+        self.assertEqual(len(organizer.calls), 1)
+        candidate = next(iter(store.candidate_repository.snapshot()["candidates"].values()))
+        summary = candidate["payload"]["content"]["summary"]
+        self.assertIn("我小时候住在河边", summary)
+        self.assertIn("陪伴比讲道理更重要", summary)
+        self.assertNotIn(assistant_turn, summary)
 
     def test_live_organization_cannot_use_an_assistant_turn_as_evidence(self) -> None:
         owner_turn = "我小时候住在河边。"

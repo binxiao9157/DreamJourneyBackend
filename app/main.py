@@ -9416,18 +9416,23 @@ def pause_owner_truth_interview_for_topic_switch(
 ) -> JSONResponse:
     """Pause one private thread before an explicit new-topic session starts.
 
-    This remains an Owner QA contract until the released natural-input product
-    flow has its own Gate.  It records no topic text, classifier result,
-    Candidate, MemoryVersion, transcript, or Provider effect.  The caller must
-    use the existing start route to create the next thread after this fence.
+    Formal callers must carry the same captured ``echoTextInput`` policy used
+    by the rest of the natural-input lifecycle. It records no topic text,
+    classifier result, Candidate, MemoryVersion, transcript, or Provider
+    effect. The caller must use the existing start route to create the next
+    thread after this fence.
     """
 
     try:
-        context = _owner_truth_candidate_review_context(request, vault_id=vault_id)
+        context = _owner_truth_interview_natural_input_context(
+            request,
+            vault_id=vault_id,
+        )
         command = _owner_truth_pause_interview_for_topic_switch_command(
             payload=payload,
             session_id=session_id,
         )
+        formal_review_batch_session_version: Optional[int] = None
         with store.request_unit_of_work(
             correlation_id=(
                 "owner-truth-interview-topic-switch:"
@@ -9441,6 +9446,13 @@ def pause_owner_truth_interview_for_topic_switch(
                 command=command,
                 context=context,
             )
+            formal_review_batch_session_version = (
+                _owner_truth_formal_review_batch_automation_in_active_unit_of_work(
+                    session_id=command.session_id,
+                    transition_command_id=command.command_id,
+                    context=context,
+                )
+            )
         automation = _owner_truth_review_batch_automation_after_qa_transition(
             request=request,
             session_id=command.session_id,
@@ -9452,6 +9464,10 @@ def pause_owner_truth_interview_for_topic_switch(
     response = _owner_truth_interview_session_command_response(
         vault_id=context.vault_id,
         result=result,
+    )
+    response = _attach_owner_truth_formal_review_batch_session_version(
+        response=response,
+        session_version=formal_review_batch_session_version,
     )
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,

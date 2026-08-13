@@ -107,7 +107,7 @@ class ArchiveImageAnalysisProviderFactory:
 
 
 class DeepSeekImageAnalysisProxy:
-    model = "DeepSeek-V4-Flash"
+    model = "deepseek-v4-flash"
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -312,7 +312,7 @@ class DeepSeekImageAnalysisProxy:
 
 
 class DeepSeekKnowledgeExtractionProxy:
-    model = "DeepSeek-V4-Flash"
+    model = "deepseek-v4-flash"
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -545,7 +545,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
     has no authority to create a confirmed MemoryVersion.
     """
 
-    model = "DeepSeek-V4-Flash"
+    model = "deepseek-v4-flash"
     prompt_version = "owner-truth-live-memory-organization-v1"
     maximum_turn_count = 200
     maximum_turn_characters = 4_000
@@ -740,7 +740,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
 class DeepSeekEchoAnswerProxy:
     """Server-owned Echo answer generation over an authorized Context Packet."""
 
-    model = "DeepSeek-V4-Flash"
+    model = "deepseek-v4-flash"
     memory_gap_marker = "<MEMORY_GAP>"
     maximum_query_characters = 2000
     maximum_context_characters = 12000
