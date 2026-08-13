@@ -127,6 +127,10 @@ class Settings:
     # Candidate extraction is a separate, deterministic QA worker. It remains
     # off unless all async-effect flags and this explicit switch are enabled.
     owner_truth_candidate_extraction_worker_enabled: bool = False
+    # Closed Live sessions may contain the complete user/assistant text
+    # transcript. Sending that transcript to DeepSeek for semantic memory
+    # organization requires this separate, explicit production switch.
+    owner_truth_live_memory_organization_enabled: bool = False
     owner_truth_memory_projection_worker_enabled: bool = False
     # SearchDocument rebuilds are an optional private derived step after the
     # default-off MemoryProjection worker succeeds. This never exposes search
@@ -302,6 +306,16 @@ class Settings:
     volcengine_realtime_resource_id: str = "volc.speech.dialog"
     volcengine_realtime_address: str = "wss://openspeech.bytedance.com"
     volcengine_realtime_uri: str = "/api/v3/realtime/dialogue"
+    # Realtime Dialog credentials stay server-side. Mobile receives a
+    # single-purpose, short-lived ticket for this backend WebSocket proxy.
+    realtime_voice_proxy_enabled: bool = False
+    realtime_voice_ticket_ttl_seconds: int = 60
+    realtime_voice_max_session_seconds: int = 60 * 60
+    realtime_voice_max_concurrent_sessions_per_user: int = 1
+    realtime_voice_auth_recheck_seconds: float = 10.0
+    realtime_voice_upstream_connect_timeout_seconds: float = 10.0
+    realtime_voice_max_frame_bytes: int = 2 * 1024 * 1024
+    realtime_voice_max_session_bytes: int = 512 * 1024 * 1024
     volcengine_voice_clone_api_key: Optional[str] = None
     volcengine_voice_clone_train_url: str = "https://openspeech.bytedance.com/api/v3/tts/voice_clone"
     volcengine_voice_clone_query_url: str = "https://openspeech.bytedance.com/api/v3/tts/get_voice"
@@ -567,6 +581,10 @@ class Settings:
             owner_truth_candidate_extraction_worker_enabled=_env_bool(
                 "OWNER_TRUTH_CANDIDATE_EXTRACTION_WORKER_ENABLED",
                 cls.owner_truth_candidate_extraction_worker_enabled,
+            ),
+            owner_truth_live_memory_organization_enabled=_env_bool(
+                "OWNER_TRUTH_LIVE_MEMORY_ORGANIZATION_ENABLED",
+                cls.owner_truth_live_memory_organization_enabled,
             ),
             owner_truth_memory_projection_worker_enabled=_env_bool(
                 "OWNER_TRUTH_MEMORY_PROJECTION_WORKER_ENABLED",
@@ -898,6 +916,38 @@ class Settings:
             volcengine_realtime_resource_id=_env("VOLCENGINE_REALTIME_RESOURCE_ID", cls.volcengine_realtime_resource_id) or cls.volcengine_realtime_resource_id,
             volcengine_realtime_address=_env("VOLCENGINE_REALTIME_ADDRESS", cls.volcengine_realtime_address) or cls.volcengine_realtime_address,
             volcengine_realtime_uri=_env("VOLCENGINE_REALTIME_URI", cls.volcengine_realtime_uri) or cls.volcengine_realtime_uri,
+            realtime_voice_proxy_enabled=_env_bool(
+                "REALTIME_VOICE_PROXY_ENABLED",
+                cls.realtime_voice_proxy_enabled,
+            ),
+            realtime_voice_ticket_ttl_seconds=_env_int(
+                "REALTIME_VOICE_TICKET_TTL_SECONDS",
+                cls.realtime_voice_ticket_ttl_seconds,
+            ),
+            realtime_voice_max_session_seconds=_env_int(
+                "REALTIME_VOICE_MAX_SESSION_SECONDS",
+                cls.realtime_voice_max_session_seconds,
+            ),
+            realtime_voice_max_concurrent_sessions_per_user=_env_int(
+                "REALTIME_VOICE_MAX_CONCURRENT_SESSIONS_PER_USER",
+                cls.realtime_voice_max_concurrent_sessions_per_user,
+            ),
+            realtime_voice_auth_recheck_seconds=_env_float(
+                "REALTIME_VOICE_AUTH_RECHECK_SECONDS",
+                cls.realtime_voice_auth_recheck_seconds,
+            ),
+            realtime_voice_upstream_connect_timeout_seconds=_env_float(
+                "REALTIME_VOICE_UPSTREAM_CONNECT_TIMEOUT_SECONDS",
+                cls.realtime_voice_upstream_connect_timeout_seconds,
+            ),
+            realtime_voice_max_frame_bytes=_env_int(
+                "REALTIME_VOICE_MAX_FRAME_BYTES",
+                cls.realtime_voice_max_frame_bytes,
+            ),
+            realtime_voice_max_session_bytes=_env_int(
+                "REALTIME_VOICE_MAX_SESSION_BYTES",
+                cls.realtime_voice_max_session_bytes,
+            ),
             volcengine_voice_clone_api_key=_env("VOLCENGINE_VOICE_CLONE_API_KEY"),
             volcengine_voice_clone_train_url=_env("VOLCENGINE_VOICE_CLONE_TRAIN_URL", cls.volcengine_voice_clone_train_url) or cls.volcengine_voice_clone_train_url,
             volcengine_voice_clone_query_url=_env("VOLCENGINE_VOICE_CLONE_QUERY_URL", cls.volcengine_voice_clone_query_url) or cls.volcengine_voice_clone_query_url,

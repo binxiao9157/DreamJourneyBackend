@@ -1729,6 +1729,291 @@ class PostgresStore:
             for row in rows
         ]
 
+    def issue_realtime_voice_session_ticket(
+        self,
+        record: Dict[str, Any],
+        *,
+        max_concurrent_sessions: int,
+        now_iso: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"realtime-voice-issue-{uuid.uuid4().hex}",
+                command_id="issueRealtimeVoiceSessionTicket",
+            ):
+                return self.issue_realtime_voice_session_ticket(
+                    record,
+                    max_concurrent_sessions=max_concurrent_sessions,
+                    now_iso=now_iso,
+                )
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("realtime voice ticket issue requires a unit of work")
+        item = deepcopy(record)
+        user_id = str(item["userId"])
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                (f"realtime-voice-user:{user_id}",),
+            )
+            cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT id, payload
+                FROM realtime_voice_session_tickets
+                WHERE user_id = %s AND status IN ('issued', 'active')
+                FOR UPDATE
+                """,
+                (user_id,),
+            )
+            for row in cursor.fetchall():
+                existing = deepcopy(row["payload"])
+                status = str(existing.get("status") or "")
+                expires_at = self._parse_iso_datetime(str(existing.get("expiresAt") or ""))
+                now = self._parse_iso_datetime(now_iso)
+                if expires_at <= now:
+                    existing["status"] = "expired"
+                    existing["updatedAt"] = now_iso
+                    next_status = "expired"
+                elif status == "issued":
+                    existing["status"] = "revoked"
+                    existing["revokeReason"] = "supersededBeforeConnect"
+                    existing["updatedAt"] = now_iso
+                    next_status = "revoked"
+                else:
+                    continue
+                cursor.execute(
+                    """
+                    UPDATE realtime_voice_session_tickets
+                    SET status = %s, payload = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    self._adapt_params((next_status, existing, now_iso, row["id"])),
+                )
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM realtime_voice_session_tickets
+                WHERE user_id = %s AND status = 'active' AND expires_at > %s
+                """,
+                (user_id, now_iso),
+            )
+            active_count = int((cursor.fetchone() or {}).get("count") or 0)
+            if active_count >= max(1, int(max_concurrent_sessions)):
+                raise ValueError("realtime voice concurrent session limit reached")
+            cursor.execute(
+                """
+                INSERT INTO realtime_voice_session_tickets (
+                    id, ticket_hash, user_id, auth_session_id, status, expires_at,
+                    payload, contract_version, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, 'issued', %s, %s, 1, %s, %s)
+                RETURNING payload
+                """,
+                self._adapt_params(
+                    (
+                        item["ticketId"],
+                        item["ticketHash"],
+                        user_id,
+                        item["authSessionId"],
+                        item["expiresAt"],
+                        item,
+                        item["createdAt"],
+                        item["updatedAt"],
+                    )
+                ),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("realtime voice ticket insert did not produce a row")
+        return deepcopy(row["payload"])
+
+    def consume_realtime_voice_session_ticket(
+        self,
+        ticket_hash: str,
+        *,
+        now_iso: str,
+        session_expires_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"realtime-voice-consume-{uuid.uuid4().hex}",
+                command_id="consumeRealtimeVoiceSessionTicket",
+            ):
+                return self.consume_realtime_voice_session_ticket(
+                    ticket_hash,
+                    now_iso=now_iso,
+                    session_expires_at_iso=session_expires_at_iso,
+                )
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("realtime voice ticket consume requires a unit of work")
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                """
+                SELECT t.id, t.payload, t.status, t.expires_at,
+                       a.status AS auth_status,
+                       COALESCE(f.status, 'legacy') AS family_status,
+                       EXISTS (
+                           SELECT 1
+                           FROM auth_sessions AS current_session
+                           WHERE current_session.family_id = f.id
+                             AND current_session.user_id = t.user_id
+                             AND current_session.session_version = f.current_session_version
+                             AND current_session.status = 'active'
+                       ) AS family_current_session_active,
+                       u.payload AS user_payload
+                FROM realtime_voice_session_tickets AS t
+                JOIN auth_sessions AS a ON a.id = t.auth_session_id
+                LEFT JOIN token_families AS f ON f.id = a.family_id
+                JOIN users AS u ON u.id = t.user_id
+                WHERE t.ticket_hash = %s
+                FOR UPDATE OF t
+                """,
+                (ticket_hash,),
+            )
+            row = cursor.fetchone()
+            if row is None or str(row.get("status") or "") != "issued":
+                return None
+            item = deepcopy(row["payload"])
+            if self._parse_iso_datetime(self._iso_value(row.get("expires_at"))) <= self._parse_iso_datetime(now_iso):
+                item["status"] = "expired"
+                item["updatedAt"] = now_iso
+                cursor.execute(
+                    """
+                    UPDATE realtime_voice_session_tickets
+                    SET status = 'expired', payload = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    self._adapt_params((item, now_iso, row["id"])),
+                )
+                return None
+            if not self._realtime_voice_authority_row_is_active(row):
+                item["status"] = "revoked"
+                item["revokeReason"] = "authSessionUnavailable"
+                item["updatedAt"] = now_iso
+                cursor.execute(
+                    """
+                    UPDATE realtime_voice_session_tickets
+                    SET status = 'revoked', payload = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    self._adapt_params((item, now_iso, row["id"])),
+                )
+                return None
+            item["status"] = "active"
+            item["consumedAt"] = now_iso
+            item["expiresAt"] = session_expires_at_iso
+            item["updatedAt"] = now_iso
+            cursor.execute(
+                """
+                UPDATE realtime_voice_session_tickets
+                SET status = 'active', expires_at = %s, consumed_at = %s,
+                    payload = %s, updated_at = %s
+                WHERE id = %s
+                RETURNING payload
+                """,
+                self._adapt_params(
+                    (session_expires_at_iso, now_iso, item, now_iso, row["id"])
+                ),
+            )
+            updated = cursor.fetchone()
+        return None if updated is None else deepcopy(updated["payload"])
+
+    def is_realtime_voice_auth_session_active(
+        self,
+        auth_session_id: str,
+        user_id: str,
+    ) -> bool:
+        row = self._fetchone(
+            """
+            SELECT a.status AS auth_status,
+                   COALESCE(f.status, 'legacy') AS family_status,
+                   EXISTS (
+                       SELECT 1
+                       FROM auth_sessions AS current_session
+                       WHERE current_session.family_id = f.id
+                         AND current_session.user_id = a.user_id
+                         AND current_session.session_version = f.current_session_version
+                         AND current_session.status = 'active'
+                   ) AS family_current_session_active,
+                   u.payload AS user_payload
+            FROM auth_sessions AS a
+            LEFT JOIN token_families AS f ON f.id = a.family_id
+            JOIN users AS u ON u.id = a.user_id
+            WHERE a.id = %s AND a.user_id = %s
+            """,
+            (auth_session_id, user_id),
+        )
+        return row is not None and self._realtime_voice_authority_row_is_active(row)
+
+    @staticmethod
+    def _realtime_voice_authority_row_is_active(row: Dict[str, Any]) -> bool:
+        auth_status = str(row.get("auth_status") or "")
+        if auth_status not in {"active", "rotated"}:
+            return False
+        family_status = str(row.get("family_status") or "legacy")
+        if family_status not in {"active", "legacy"}:
+            return False
+        if auth_status == "rotated" and (
+            family_status != "active"
+            or not bool(row.get("family_current_session_active"))
+        ):
+            return False
+        user = row.get("user_payload") if isinstance(row.get("user_payload"), dict) else {}
+        return (
+            str(user.get("deletionState") or "active") == "active"
+            and str(user.get("accessState") or "active") == "active"
+            and str(user.get("providerCapabilityState") or "enabled") == "enabled"
+        )
+
+    def release_realtime_voice_session_ticket(
+        self,
+        ticket_id: str,
+        *,
+        released_at_iso: str,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"realtime-voice-release-{uuid.uuid4().hex}",
+                command_id="releaseRealtimeVoiceSessionTicket",
+            ):
+                return self.release_realtime_voice_session_ticket(
+                    ticket_id,
+                    released_at_iso=released_at_iso,
+                    reason=reason,
+                )
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("realtime voice ticket release requires a unit of work")
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                "SELECT payload, status FROM realtime_voice_session_tickets WHERE id = %s FOR UPDATE",
+                (ticket_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            item = deepcopy(row["payload"])
+            if str(row.get("status") or "") not in {"issued", "active"}:
+                return item
+            item["status"] = "released"
+            item["releasedAt"] = released_at_iso
+            item["releaseReason"] = str(reason or "clientDisconnected")[:80]
+            item["updatedAt"] = released_at_iso
+            cursor.execute(
+                """
+                UPDATE realtime_voice_session_tickets
+                SET status = 'released', released_at = %s, payload = %s, updated_at = %s
+                WHERE id = %s
+                RETURNING payload
+                """,
+                self._adapt_params((released_at_iso, item, released_at_iso, ticket_id)),
+            )
+            updated = cursor.fetchone()
+        return None if updated is None else deepcopy(updated["payload"])
+
     def _insert_auth_session_cursor(self, cursor: Any, item: Dict[str, Any]) -> None:
         cursor.execute(
             """
@@ -3882,6 +4167,10 @@ class PostgresStore:
                 (user_id,),
             )
             self._fetchall(
+                "DELETE FROM realtime_voice_session_tickets WHERE user_id = %s RETURNING id",
+                (user_id,),
+            )
+            self._fetchall(
                 "DELETE FROM token_families WHERE user_id = %s RETURNING id",
                 (user_id,),
             )
@@ -4008,6 +4297,10 @@ class PostgresStore:
             "authSession": count_query("SELECT COUNT(*) AS count FROM auth_sessions WHERE user_id = %s", (user_id,)),
             "authTokenFamily": count_query("SELECT COUNT(*) AS count FROM token_families WHERE user_id = %s", (user_id,)),
             "authSessionEvent": count_query("SELECT COUNT(*) AS count FROM session_events WHERE user_id = %s", (user_id,)),
+            "realtimeVoiceSessionTicket": count_query(
+                "SELECT COUNT(*) AS count FROM realtime_voice_session_tickets WHERE user_id = %s",
+                (user_id,),
+            ),
         }
         counts.update(self.owner_truth_data_rights_counts(user_id))
         return counts

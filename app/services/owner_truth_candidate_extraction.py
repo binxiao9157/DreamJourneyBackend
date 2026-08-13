@@ -68,6 +68,7 @@ class OwnerTruthCandidateExtractionInput:
 
     source_content_hash: str
     source_text: str
+    source_metadata: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_content_hash, str) or len(self.source_content_hash) != 64:
@@ -78,6 +79,18 @@ class OwnerTruthCandidateExtractionInput:
             raise OwnerTruthCandidateExtractionInputUnavailable(
                 "candidate extraction Source text has an invalid type"
             )
+        metadata = self.source_metadata or {}
+        if not isinstance(metadata, Mapping):
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction Source metadata has an invalid type"
+            )
+        try:
+            normalized_metadata = json.loads(_canonical_json(dict(metadata)))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction Source metadata is not recoverable"
+            ) from error
+        object.__setattr__(self, "source_metadata", normalized_metadata)
 
 
 class OwnerTruthCandidateExtractionStore(Protocol):
@@ -469,7 +482,7 @@ class PostgresOwnerTruthCandidateExtractionInputRepository:
         with self._cursor() as cursor:
             cursor.execute(
                 """
-                SELECT source_version, content_hash, content_payload
+                SELECT source_version, content_hash, content_payload, metadata
                 FROM owner_truth.sources
                 WHERE vault_id = %s AND id = %s
                 FOR SHARE
@@ -493,9 +506,16 @@ class PostgresOwnerTruthCandidateExtractionInputRepository:
             except json.JSONDecodeError:
                 payload = None
         text = payload.get("text") if isinstance(payload, Mapping) else ""
+        metadata = source.get("metadata")
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                metadata = None
         return OwnerTruthCandidateExtractionInput(
             source_content_hash=str(source["content_hash"]),
             source_text=text if isinstance(text, str) else "",
+            source_metadata=metadata if isinstance(metadata, Mapping) else {},
         )
 
     def _cursor(self):

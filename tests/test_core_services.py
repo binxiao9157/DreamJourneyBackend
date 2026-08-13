@@ -37,7 +37,11 @@ from app.services.tts import VolcTTSProxy, VolcVoiceCloneTTSProxy
 from app.services.user_identity import stable_user_id
 from app.services.voice_clone import VolcEngineVoiceCloneV3Provider, VoiceCloneProviderFactory
 from app.services.amap import AMapDistrictProxy
-from app.services.deepseek import DeepSeekImageAnalysisProxy, DeepSeekKnowledgeExtractionProxy
+from app.services.deepseek import (
+    DeepSeekImageAnalysisProxy,
+    DeepSeekKnowledgeExtractionProxy,
+    DeepSeekLiveMemoryOrganizationProxy,
+)
 from app.services.echo_delayed_reply_effects import ECHO_DELAYED_REPLY_SCHEMA_VERSION
 from app.services.safety_policy import (
     HighRiskCapability,
@@ -959,6 +963,63 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
                 "outOfRangeSourceTurnIndices": 1,
             },
         )
+
+    def test_live_memory_organization_requires_user_evidence_for_every_memory(self):
+        turns = [
+            {"index": 4, "role": "user", "text": "我小时候常和外公去河边散步。"},
+            {"index": 5, "role": "assistant", "text": "所以你在上海长大，对吗？"},
+        ]
+        valid = DeepSeekLiveMemoryOrganizationProxy.parse_organization(
+            json.dumps(
+                {
+                    "memories": [
+                        {
+                            "memoryKind": "experience",
+                            "summary": "我小时候常和外公去河边散步。",
+                            "sourceTurnIndices": [4],
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            turns=turns,
+        )
+        self.assertEqual(valid["memories"][0]["sourceTurnIndices"], [4])
+
+        with self.assertRaises(ValueError):
+            DeepSeekLiveMemoryOrganizationProxy.parse_organization(
+                json.dumps(
+                    {
+                        "memories": [
+                            {
+                                "memoryKind": "experience",
+                                "summary": "我在上海长大。",
+                                "sourceTurnIndices": [5],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                turns=turns,
+            )
+
+    def test_live_memory_organization_prompt_contains_full_text_turns_but_no_audio(self):
+        proxy = DeepSeekLiveMemoryOrganizationProxy(
+            Settings(deepseek_api_key="deepseek-secret")
+        )
+        request = proxy.build_request(
+            turns=[
+                {"index": 1, "role": "user", "text": "我记得外公的笑声。"},
+                {"index": 2, "role": "assistant", "text": "那让你有什么感受？"},
+            ]
+        )
+
+        prompt = request["json"]["messages"][1]["content"]
+        self.assertIn("我记得外公的笑声", prompt)
+        self.assertIn("那让你有什么感受", prompt)
+        self.assertIn("role=assistant", prompt)
+        self.assertNotIn("audio", request["json"])
+        self.assertNotIn("pcm", prompt.lower())
 
     def test_kb_extract_endpoint_rejects_non_ai_privacy_scope(self):
         client = TestClient(app)

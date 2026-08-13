@@ -223,6 +223,19 @@ def _should_consume_skip_once_after_append(
     )
 
 
+def _assert_message_capture_mode(
+    *,
+    record: AppendInterviewMessageWriteRecord,
+    thread: Mapping[str, Any],
+) -> None:
+    capture_mode = str(record.content_payload.get("captureMode") or "naturalInput")
+    entry_mode = str(thread.get("entry_mode") or thread.get("entryMode") or "naturalInput")
+    if (capture_mode == "live") != (entry_mode == "live"):
+        raise OwnerTruthInterviewSessionStateConflict(
+            "message capture mode does not match the interview session entry mode"
+        )
+
+
 class OwnerTruthConversationService:
     """Applies typed M0-A commands through an isolated persistence port."""
 
@@ -783,6 +796,39 @@ class InMemoryOwnerTruthConversationRepository:
                     )
                 recovered_messages.append((int(message["sequence"]), text))
 
+            first_sequence = int(selected_messages[0]["sequence"])
+            last_sequence = int(selected_messages[-1]["sequence"])
+            recovered_turns: list[dict[str, Any]] = []
+            conversation_messages = sorted(
+                (
+                    message
+                    for message in self._messages.values()
+                    if str(message["vaultId"]) == str(record.vault_id)
+                    and str(message["ownerSubjectId"]) == str(record.owner_subject_id)
+                    and str(message["threadId"]) == str(item["threadId"])
+                    and str(message["sessionId"]) == str(item["sessionId"])
+                    and first_sequence <= int(message["sequence"]) <= last_sequence
+                    and int(message["authorityEpoch"]) == current_epoch
+                ),
+                key=lambda message: int(message["sequence"]),
+            )
+            for message in conversation_messages:
+                payload = message["contentPayload"]
+                author = str(getattr(message["author"], "value", message["author"]))
+                text = str(payload.get("text") or "").strip() if isinstance(payload, Mapping) else ""
+                if not text or author not in {"owner", "assistant"}:
+                    raise OwnerTruthConversationConflict(
+                        "review batch conversation context is not recoverable"
+                    )
+                recovered_turns.append(
+                    {
+                        "index": int(message["sequence"]),
+                        "role": "user" if author == "owner" else "assistant",
+                        "text": text,
+                        "captureMode": str(payload.get("captureMode") or "naturalInput"),
+                    }
+                )
+
             state = item["state"]
             return {
                 "reviewBatchId": str(item["id"]),
@@ -797,6 +843,7 @@ class InMemoryOwnerTruthConversationRepository:
                 "ownerTurnEndCount": int(item["ownerTurnEndCount"]),
                 "throughMessageSequence": int(item["throughMessageSequence"]),
                 "ownerMessages": tuple(recovered_messages),
+                "conversationTurns": tuple(recovered_turns),
             }
 
     def candidate_proposal_review_batch_status_snapshot(
@@ -861,6 +908,7 @@ class InMemoryOwnerTruthConversationRepository:
                 raise OwnerTruthInterviewSessionStateConflict(
                     "interview session is not active for a new message"
                 )
+            _assert_message_capture_mode(record=record, thread=thread)
             self._assert_version(
                 resource="thread",
                 expected=record.expected_thread_version,
@@ -1196,6 +1244,7 @@ class InMemoryOwnerTruthConversationRepository:
                 pending_review_batch_id=session["pendingReviewBatchId"],
                 fatigue=session["fatigue"],
                 authority_epoch=int(vault["authorityEpoch"]),
+                entry_mode=str(thread["entryMode"]),
             )
 
     def get_current_interview_session(
@@ -1249,6 +1298,7 @@ class InMemoryOwnerTruthConversationRepository:
                 pending_review_batch_id=session["pendingReviewBatchId"],
                 fatigue=session["fatigue"],
                 authority_epoch=int(vault["authorityEpoch"]),
+                entry_mode=str(thread["entryMode"]),
             )
 
     def get_interview_message_authority(
@@ -1797,6 +1847,7 @@ class PostgresOwnerTruthConversationRepository:
                 raise OwnerTruthInterviewSessionStateConflict(
                     "interview session is not active for a new message"
                 )
+            _assert_message_capture_mode(record=record, thread=thread)
             self._assert_version(
                 resource="thread",
                 expected=record.expected_thread_version,
@@ -2741,7 +2792,8 @@ class PostgresOwnerTruthConversationRepository:
                     s.state, s.boundary, s.row_version, s.turn_count,
                     s.deepening_turn_count, s.candidate_batch_turn_count,
                     s.pending_review_batch_id, s.fatigue,
-                    s.authority_epoch, t.row_version AS thread_row_version
+                    s.authority_epoch, t.row_version AS thread_row_version,
+                    t.entry_mode AS thread_entry_mode
                 FROM owner_truth.interview_sessions AS s
                 JOIN owner_truth.conversation_threads AS t
                   ON t.vault_id = s.vault_id AND t.id = s.current_thread_id
@@ -2785,6 +2837,7 @@ class PostgresOwnerTruthConversationRepository:
             ),
             fatigue=InterviewFatigue(str(row["fatigue"])),
             authority_epoch=int(row["authority_epoch"]),
+            entry_mode=str(row["thread_entry_mode"]),
         )
 
     def get_current_interview_session(
@@ -2806,7 +2859,8 @@ class PostgresOwnerTruthConversationRepository:
                     s.state, s.boundary, s.row_version, s.turn_count,
                     s.deepening_turn_count, s.candidate_batch_turn_count,
                     s.pending_review_batch_id, s.fatigue,
-                    s.authority_epoch, t.row_version AS thread_row_version
+                    s.authority_epoch, t.row_version AS thread_row_version,
+                    t.entry_mode AS thread_entry_mode
                 FROM owner_truth.interview_sessions AS s
                 JOIN owner_truth.conversation_threads AS t
                   ON t.vault_id = s.vault_id AND t.id = s.current_thread_id
@@ -2857,6 +2911,7 @@ class PostgresOwnerTruthConversationRepository:
             ),
             fatigue=InterviewFatigue(str(row["fatigue"])),
             authority_epoch=int(row["authority_epoch"]),
+            entry_mode=str(row["thread_entry_mode"]),
         )
 
     def get_interview_message_authority(
@@ -3459,7 +3514,8 @@ class PostgresOwnerTruthConversationRepository:
                 t.id AS thread_id, t.state AS thread_state,
                 t.owner_subject_id AS thread_owner_subject_id,
                 t.authority_epoch AS thread_authority_epoch,
-                t.row_version AS thread_row_version
+                t.row_version AS thread_row_version,
+                t.entry_mode AS thread_entry_mode
             FROM owner_truth.interview_sessions AS s
             JOIN owner_truth.conversation_threads AS t
               ON t.vault_id = s.vault_id AND t.id = s.current_thread_id
@@ -3497,6 +3553,7 @@ class PostgresOwnerTruthConversationRepository:
             "owner_subject_id": str(row["thread_owner_subject_id"]),
             "authority_epoch": int(row["thread_authority_epoch"]),
             "row_version": int(row["thread_row_version"]),
+            "entry_mode": str(row["thread_entry_mode"]),
         }
         return session, thread
 

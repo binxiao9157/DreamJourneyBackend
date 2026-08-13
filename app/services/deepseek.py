@@ -1,6 +1,6 @@
 import json
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import httpx
 
@@ -536,10 +536,212 @@ class DeepSeekKnowledgeExtractionProxy:
         return [item for item in value if isinstance(item, dict)]
 
 
+class DeepSeekLiveMemoryOrganizationProxy:
+    """Organize one closed Live transcript into evidence-bound memory drafts.
+
+    Audio never reaches this adapter. Assistant turns provide conversational
+    context only, while every returned draft must cite one or more user turns.
+    The caller still persists the result as pending Candidates; this adapter
+    has no authority to create a confirmed MemoryVersion.
+    """
+
+    model = "DeepSeek-V4-Flash"
+    prompt_version = "owner-truth-live-memory-organization-v1"
+    maximum_turn_count = 200
+    maximum_turn_characters = 4_000
+    maximum_total_characters = 30_000
+    maximum_memory_count = 8
+    maximum_memory_characters = 1_000
+    _primary_fields = {
+        "experience": "summary",
+        "knowledge": "claim",
+        "emotion": "label",
+    }
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def build_request(self, *, turns: List[Dict[str, Any]]) -> Dict[str, Any]:
+        normalized_turns = self.normalize_turns(turns)
+        prompt = self.build_prompt(normalized_turns)
+        return {
+            "url": self.settings.deepseek_base_url,
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.settings.deepseek_api_key or ''}",
+            },
+            "json": {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是家庭记忆整理器，只输出严格 JSON。"
+                            "助手发言只用于理解上下文，绝不是事实证据。"
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.1,
+                "max_tokens": 2_048,
+            },
+        }
+
+    def request_organization(self, *, turns: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not self.settings.deepseek_api_key:
+            raise ValueError("DEEPSEEK_API_KEY is not configured")
+        normalized_turns = self.normalize_turns(turns)
+        request = self.build_request(turns=normalized_turns)
+        with httpx.Client(timeout=60) as client:
+            response = client.post(
+                request["url"],
+                headers=request["headers"],
+                json=request["json"],
+            )
+            response.raise_for_status()
+        content = DeepSeekImageAnalysisProxy._extract_content(response.json())
+        return self.parse_organization(content, turns=normalized_turns)
+
+    @classmethod
+    def normalize_turns(cls, turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not isinstance(turns, list) or not turns:
+            raise ValueError("live conversation turns are required")
+        if len(turns) > cls.maximum_turn_count:
+            raise ValueError("live conversation contains too many turns")
+
+        normalized: List[Dict[str, Any]] = []
+        seen_indices: set[int] = set()
+        total_characters = 0
+        user_turn_count = 0
+        for position, turn in enumerate(turns):
+            if not isinstance(turn, Mapping):
+                raise ValueError(f"live conversation turn {position} must be an object")
+            index = turn.get("index")
+            if (
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or index < 0
+                or index in seen_indices
+            ):
+                raise ValueError(f"live conversation turn {position} has an invalid index")
+            role = turn.get("role")
+            if role not in {"user", "assistant"}:
+                raise ValueError(f"live conversation turn {position} has an invalid role")
+            text = turn.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"live conversation turn {position} has invalid text")
+            text = text.strip()
+            if len(text) > cls.maximum_turn_characters:
+                raise ValueError(f"live conversation turn {position} is too long")
+            total_characters += len(text)
+            if total_characters > cls.maximum_total_characters:
+                raise ValueError("live conversation transcript is too long")
+            seen_indices.add(index)
+            if role == "user":
+                user_turn_count += 1
+            normalized.append({"index": index, "role": role, "text": text})
+        if user_turn_count == 0:
+            raise ValueError("live conversation requires user evidence")
+        return normalized
+
+    @classmethod
+    def build_prompt(cls, turns: List[Dict[str, Any]]) -> str:
+        first_user_index = next(turn["index"] for turn in turns if turn["role"] == "user")
+        serialized_turns = json.dumps(turns, ensure_ascii=False, separators=(",", ":"))
+        return f"""请把一次已经结束的 Live 对话整理成少量、原子化、可由用户确认的记忆草稿。
+
+【结构化对话】
+{serialized_turns}
+
+只输出以下严格 JSON：
+{{
+  "memories": [
+    {{"memoryKind":"experience","summary":"第一人称经历摘要","sourceTurnIndices":[{first_user_index}]}},
+    {{"memoryKind":"knowledge","claim":"用户明确表达的经验、知识或观点","sourceTurnIndices":[{first_user_index}]}},
+    {{"memoryKind":"emotion","label":"用户明确表达的感受及其对象或原因","sourceTurnIndices":[{first_user_index}]}}
+  ]
+}}
+
+规则：
+1. 最多输出 {cls.maximum_memory_count} 条；没有可靠新记忆时输出 {{"memories":[]}}。
+2. experience 使用 summary，knowledge 使用 claim，emotion 使用 label；字段不得混用。
+3. 每条记忆都必须能被 role=user 的原话直接支持，并列出全部相关 sourceTurnIndices。
+4. role=assistant 只用于理解问题和上下文，不得成为证据，不得把助手的猜测、建议或诱导写成用户记忆。
+5. 不得补写用户没说过的人名、地点、时间、关系、因果、知识、情绪或态度。
+6. 合并重复表达，但不要把不同主题混成一条；保留第一人称语义，语言自然、简洁。
+7. 不要输出诊断、评价、行动建议、模型解释或 JSON 之外的文字。"""
+
+    @classmethod
+    def parse_organization(
+        cls,
+        content: str,
+        *,
+        turns: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        normalized_turns = cls.normalize_turns(turns)
+        cleaned = content.replace("```json", "").replace("```", "").strip()
+        parsed = DeepSeekImageAnalysisProxy._loads_json(cleaned)
+        if parsed is None:
+            extracted = DeepSeekImageAnalysisProxy.extract_json_substring(cleaned)
+            parsed = (
+                DeepSeekImageAnalysisProxy._loads_json(extracted)
+                if extracted is not None
+                else None
+            )
+        if parsed is None or not isinstance(parsed.get("memories"), list):
+            raise ValueError("DeepSeek live memory organization returned invalid JSON")
+        raw_memories = parsed["memories"]
+        if len(raw_memories) > cls.maximum_memory_count:
+            raise ValueError("DeepSeek live memory organization returned too many memories")
+
+        all_indices = {turn["index"] for turn in normalized_turns}
+        user_indices = {
+            turn["index"] for turn in normalized_turns if turn["role"] == "user"
+        }
+        memories: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for position, raw_memory in enumerate(raw_memories):
+            if not isinstance(raw_memory, Mapping):
+                raise ValueError(f"organized memory {position} must be an object")
+            memory_kind = str(raw_memory.get("memoryKind") or "").strip()
+            primary_field = cls._primary_fields.get(memory_kind)
+            if primary_field is None:
+                raise ValueError(f"organized memory {position} has an invalid kind")
+            primary_value = raw_memory.get(primary_field)
+            if not isinstance(primary_value, str) or not primary_value.strip():
+                raise ValueError(f"organized memory {position} misses {primary_field}")
+            primary_value = primary_value.strip()
+            if len(primary_value) > cls.maximum_memory_characters:
+                raise ValueError(f"organized memory {position} is too long")
+            source_indices = raw_memory.get("sourceTurnIndices")
+            if (
+                not isinstance(source_indices, list)
+                or not source_indices
+                or any(isinstance(index, bool) or not isinstance(index, int) for index in source_indices)
+                or any(index not in all_indices for index in source_indices)
+                or any(index not in user_indices for index in source_indices)
+            ):
+                raise ValueError(f"organized memory {position} has invalid user evidence")
+            source_indices = list(dict.fromkeys(source_indices))
+            dedupe_key = (memory_kind, primary_value)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            memories.append(
+                {
+                    "memoryKind": memory_kind,
+                    primary_field: primary_value,
+                    "sourceTurnIndices": source_indices,
+                }
+            )
+        return {"memories": memories}
+
+
 class DeepSeekEchoAnswerProxy:
     """Server-owned Echo answer generation over an authorized Context Packet."""
 
     model = "DeepSeek-V4-Flash"
+    memory_gap_marker = "<MEMORY_GAP>"
     maximum_query_characters = 2000
     maximum_context_characters = 12000
     maximum_answer_characters = 1200
@@ -573,12 +775,15 @@ class DeepSeekEchoAnswerProxy:
             role_rule = (
                 f"你正在以{normalized_name or '该家人'}的 AI 记忆回响身份回答。"
                 "只允许依据下方已授权记忆回答有关这个人的事实；资料不足时必须明确说"
-                "“我还没有从已确认的记忆中找到这个答案”，不得用常识补写其经历。"
+                f"“{self.memory_gap_marker}我还没有从已确认的记忆中找到这个答案”，"
+                "不得用常识补写其经历。"
             )
         else:
             role_rule = (
                 "你是寻梦环游中的 AI 助手。可以回答一般问题；但凡涉及用户本人经历、"
                 "关系、观点或情感，只能依据下方已授权记忆，不得补写。"
+                f"若这类问题因记忆不足无法回答，必须在回答开头输出{self.memory_gap_marker}；"
+                "一般知识问题不要输出该标记。"
             )
 
         system_content = (
@@ -674,6 +879,8 @@ class DeepSeekEchoAnswerProxy:
             normalized_candidate = "".join(candidate.lower().split())
             character_score = len(query_characters.intersection(set(normalized_candidate)))
             bigram_score = sum(1 for value in query_bigrams if value in normalized_candidate)
+            if bigram_score == 0 and character_score < 2:
+                continue
             candidates.append((bigram_score * 4 + character_score, -position, candidate))
 
         if candidates:
@@ -684,8 +891,14 @@ class DeepSeekEchoAnswerProxy:
         normalized_scope = str(persona_scope or "personal").strip().lower()
         if normalized_scope == "family":
             subject = str(persona_name or "这位家人").strip() or "这位家人"
-            return f"我还没有从{subject}已确认的记忆中找到这个答案。"
-        return "我还没有从你已确认的记忆中找到这个答案，可以先在记忆档案中补充相关内容。"
+            return (
+                f"{cls.memory_gap_marker}"
+                f"我还没有从{subject}已确认的记忆中找到这个答案。"
+            )
+        return (
+            f"{cls.memory_gap_marker}"
+            "这段记忆我还不了解。那我们来聊一聊吧，你最先想到的是什么？"
+        )
 
     @staticmethod
     def _fallback_candidate_text(line: str) -> str:

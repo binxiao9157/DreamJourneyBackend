@@ -153,15 +153,19 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         command_id: str | None = None,
         thread_id: str | None = None,
         session_id: str | None = None,
+        entry_mode: str | None = None,
     ):
+        payload = {
+            "commandId": command_id or str(uuid4()),
+            "threadId": thread_id or str(uuid4()),
+            "sessionId": session_id or str(uuid4()),
+        }
+        if entry_mode is not None:
+            payload["entryMode"] = entry_mode
         return client.post(
             self._start_path(vault_id),
             headers=headers,
-            json={
-                "commandId": command_id or str(uuid4()),
-                "threadId": thread_id or str(uuid4()),
-                "sessionId": session_id or str(uuid4()),
-            },
+            json=payload,
         )
 
     def _set_boundary(
@@ -419,6 +423,87 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(current.status_code, 200, current.text)
         self.assertIsNone(current.json()["currentSession"])
 
+    def test_live_assistant_turn_is_context_only_and_batch_waits_for_explicit_end(self) -> None:
+        owner_id, headers, _ = self._login("13800139718")
+        vault_id = "vault-interview-live-context"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        started = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+            entry_mode="live",
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+        main_module.OWNER_TRUTH_INTERVIEW_REVIEW_BATCH_AUTOMATION_ENABLED = True
+
+        thread_version = 1
+        session_version = 1
+        turns = (
+            ("owner", "我小时候住在河边。"),
+            ("assistant", "那条河给你留下了什么印象？"),
+            ("owner", "河水很安静，我常和外公去散步。"),
+            ("assistant", "和外公散步时，你最记得什么声音？"),
+            ("owner", "我最记得风吹过芦苇的声音。"),
+            ("owner", "夏天河边还有很多萤火虫。"),
+            ("owner", "这些画面我到现在都记得。"),
+        )
+        for role, text in turns:
+            response = client.post(
+                self._append_path(vault_id, session_id),
+                headers=headers,
+                json={
+                    "commandId": str(uuid4()),
+                    "threadId": thread_id,
+                    "messageId": str(uuid4()),
+                    "expectedThreadVersion": thread_version,
+                    "expectedSessionVersion": session_version,
+                    "text": text,
+                    "role": role,
+                    "captureMode": "live",
+                },
+            )
+            self.assertEqual(response.status_code, 201, response.text)
+            self.assertNotIn("reviewBatchAutomation", response.json())
+            receipt = response.json()["receipt"]
+            thread_version = int(receipt["threadVersion"])
+            session_version = int(receipt["sessionVersion"])
+
+        context = OwnerTruthCommandContext(
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        conversation = OwnerTruthConversationService(
+            self.store.owner_truth_conversation_repository()
+        )
+        self.assertEqual(
+            conversation.list_review_batches(session_id=session_id, context=context),
+            (),
+        )
+        state = client.get(
+            f"{self._start_path(vault_id)}/{session_id}/state",
+            headers=headers,
+        )
+        self.assertEqual(state.status_code, 200, state.text)
+        self.assertEqual(state.json()["session"]["ownerTurnCount"], 5)
+
+        ended = self._end_session(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=thread_version,
+            expected_session_version=session_version,
+            headers=headers,
+            command_id=str(uuid4()),
+        )
+        self.assertEqual(ended.status_code, 201, ended.text)
+        self.assertEqual(ended.json()["reviewBatchAutomation"]["state"], "created")
+        batches = conversation.list_review_batches(session_id=session_id, context=context)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0].captured_candidate_batch_turn_count, 5)
+
     def test_end_requires_owner_current_versions_and_exact_payload(self) -> None:
         _, owner_headers, _ = self._login("13800139619")
         vault_id = "vault-interview-explicit-end-controls"
@@ -666,6 +751,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
                     "sessionVersion": 2,
                     "state": "active",
                     "boundary": "open",
+                    "entryMode": "naturalInput",
                 },
             },
         )
@@ -682,6 +768,35 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             "messageSequence",
         ):
             self.assertNotIn(forbidden, rendered)
+
+    def test_live_session_mode_is_explicit_and_invalid_modes_fail_closed(self) -> None:
+        _, headers, _ = self._login("13800139721")
+        vault_id = "vault-interview-live-entry-mode"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        started = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+            entry_mode="live",
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+
+        current = client.get(self._current_path(vault_id), headers=headers)
+        self.assertEqual(current.status_code, 200, current.text)
+        self.assertEqual(current.json()["currentSession"]["entryMode"], "live")
+
+        invalid = self._start_session(
+            vault_id="vault-interview-invalid-entry-mode",
+            headers=headers,
+            entry_mode="providerRealtime",
+        )
+        self.assertEqual(invalid.status_code, 400, invalid.text)
+        self.assertEqual(
+            invalid.json()["detail"]["code"],
+            "ownerTruthInterviewSessionInvalid",
+        )
 
     def test_current_session_is_owner_bound_and_ignores_paused_history(self) -> None:
         _, owner_headers, _ = self._login("13800139616")

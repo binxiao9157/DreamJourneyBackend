@@ -765,10 +765,10 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"]["code"], "release_policy_version_downgrade")
 
-    def test_default_closed_voice_effect_is_enforced_while_global_mode_observes(self):
+    def test_default_closed_voice_clone_effect_is_enforced_while_global_mode_observes(self):
         response = self.client.post(
-            "/voice/realtime-token",
-            json={"userId": "default-closed-user"},
+            "/voice/profiles",
+            json={"userId": "default-closed-user", "name": "test voice"},
         )
 
         self.assertEqual(response.status_code, 403)

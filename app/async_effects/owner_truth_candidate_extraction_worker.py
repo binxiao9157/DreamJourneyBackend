@@ -1,10 +1,11 @@
-"""Default-disabled deterministic worker for private Owner Truth Candidates.
+"""Default-disabled worker for private Owner Truth Candidates.
 
 The worker consumes only the value-free ``ownerTruth.source.created`` effect
-for a live text-bearing Source.  It reads Source text inside the current
-database Unit of Work, emits one conservative pending Candidate for explicit
-Owner review, and never invokes a model or a Provider.  Source text never
-leaves the transaction through worker output, logs, or a public API.
+for a live text-bearing Source. Ordinary owner-authored Sources remain
+deterministic. An explicitly marked closed Live conversation may invoke the
+server-owned DeepSeek organizer after user consent; assistant turns are
+context-only and every draft remains pending explicit Owner review. Source
+text never appears in worker output, logs, or a public API.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import argparse
 from hashlib import sha256
 import json
+import re
 import socket
 from time import perf_counter, sleep
 from typing import Any, Optional, Protocol
@@ -46,6 +48,7 @@ from app.domain.owner_truth.contracts import (
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
 from app.observability.operation_metrics import OperationMetricRecorder
+from app.services.deepseek import DeepSeekLiveMemoryOrganizationProxy
 from app.services.owner_truth_candidate_extraction import (
     OwnerTruthCandidateExtractionInput,
     OwnerTruthCandidateExtractionResult,
@@ -98,6 +101,10 @@ class DeterministicOwnerTruthCandidateExtractor:
     _EXTRACTOR_ID = "deterministicSourceEcho"
     _MODEL_ID = "deterministic-owner-source-v2"
     _PROMPT_VERSION = "owner-truth-candidate-extraction-owner-source-v2"
+    _LIVE_EXTRACTOR_ID = "deterministicLiveConversationDigest"
+    _LIVE_MODEL_ID = "deterministic-live-conversation-digest-v1"
+    _LIVE_PROMPT_VERSION = "owner-truth-live-conversation-digest-v1"
+    _MAXIMUM_LIVE_SUMMARY_CHARACTERS = 800
 
     def extract(
         self,
@@ -119,26 +126,302 @@ class DeterministicOwnerTruthCandidateExtractor:
                 failure_code="sourceTextInvalid",
             )
 
+        live_summary = self._live_conversation_digest(source)
+        summary = live_summary or normalized_text
+        is_live_digest = live_summary is not None
         proposal = CandidateProposal(
             memory_kind=MemoryKind.EXPERIENCE,
             perspective_type=PerspectiveType.FIRST_PERSON,
             epistemic_status=EpistemicStatus.RECALLED,
             sensitivity=SensitivityLevel.STANDARD,
-            content={"summary": normalized_text},
+            content={"summary": summary},
             evidence_span=CandidateEvidenceSpan(start=0, end=len(source.source_text)),
             confidence=0.0,
             review_mode=CandidateReviewMode.SINGLE,
         )
         return SyntheticCandidateExtractionCommand(
             intent=intent,
-            extractor_id=self._EXTRACTOR_ID,
-            model_id=self._MODEL_ID,
-            prompt_version=self._PROMPT_VERSION,
+            extractor_id=self._LIVE_EXTRACTOR_ID if is_live_digest else self._EXTRACTOR_ID,
+            model_id=self._LIVE_MODEL_ID if is_live_digest else self._MODEL_ID,
+            prompt_version=(
+                self._LIVE_PROMPT_VERSION if is_live_digest else self._PROMPT_VERSION
+            ),
             policy_version=OWNER_TRUTH_SCHEMA_VERSION,
             source_content_hash=source.source_content_hash,
             status=ExtractionResultStatus.SUCCEEDED,
             proposals=(proposal,),
         )
+
+    @classmethod
+    def _live_conversation_digest(
+        cls,
+        source: OwnerTruthCandidateExtractionInput,
+    ) -> str | None:
+        metadata = source.source_metadata or {}
+        if metadata.get("sourcePolicy") != "userEvidenceOnly":
+            return None
+        raw_turns = metadata.get("conversationTurns")
+        if not isinstance(raw_turns, list):
+            return None
+        owner_texts = [
+            str(turn.get("text") or "").strip()
+            for turn in raw_turns
+            if isinstance(turn, dict) and turn.get("role") == "user"
+        ]
+        owner_texts = [text for text in owner_texts if text]
+        if not owner_texts:
+            return None
+
+        fragments: list[str] = []
+        seen: set[str] = set()
+        for text in owner_texts:
+            for fragment in re.split(r"(?<=[。！？!?])\s*|[，,；;\r\n]+", text):
+                normalized = re.sub(r"\s+", "", fragment).strip("，,；;。！？!? ")
+                if not normalized:
+                    continue
+                dedupe_key = re.sub(r"[，,；;。！？!?]", "", normalized)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                fragments.append(normalized)
+
+        summary = "；".join(fragments).strip("；")
+        if not summary:
+            return None
+        if len(summary) > cls._MAXIMUM_LIVE_SUMMARY_CHARACTERS:
+            bounded = summary[: cls._MAXIMUM_LIVE_SUMMARY_CHARACTERS]
+            boundary = max(bounded.rfind("；"), bounded.rfind("。"))
+            summary = bounded[:boundary] if boundary >= 40 else bounded
+            summary = summary.rstrip("；。") + "……"
+        elif not summary.endswith(("。", "！", "？", "……")):
+            summary += "。"
+        return summary
+
+
+class LiveMemoryOrganizationProvider(Protocol):
+    model: str
+    prompt_version: str
+
+    def request_organization(self, *, turns: list[dict[str, Any]]) -> dict[str, Any]:
+        ...
+
+
+class ModelAssistedOwnerTruthLiveConversationExtractor:
+    """Use semantic organization only for explicitly marked closed Live text."""
+
+    _EXTRACTOR_ID = "deepSeekLiveMemoryOrganizer"
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        organizer: LiveMemoryOrganizationProvider | None = None,
+        fallback: OwnerTruthCandidateExtractor | None = None,
+    ) -> None:
+        self._organizer = organizer or DeepSeekLiveMemoryOrganizationProxy(settings)
+        self._fallback = fallback or DeterministicOwnerTruthCandidateExtractor()
+        self._live_organization_enabled = (
+            settings.owner_truth_live_memory_organization_enabled
+        )
+
+    def extract(
+        self,
+        *,
+        intent: AsyncEffectIntent,
+        source: OwnerTruthCandidateExtractionInput,
+    ) -> SyntheticCandidateExtractionCommand:
+        turns = self._live_turns(source)
+        if turns is None:
+            return self._fallback.extract(intent=intent, source=source)
+        if not self._live_organization_enabled:
+            raise RuntimeError("Live transcript organization is disabled")
+
+        memories: list[dict[str, Any]] = []
+        seen_memories: set[tuple[str, str]] = set()
+        for chunk in self._organization_chunks(turns):
+            organization = self._organizer.request_organization(turns=chunk)
+            chunk_memories = organization.get("memories")
+            if not isinstance(chunk_memories, list):
+                raise ValueError("live memory organizer returned an invalid memories contract")
+            for memory in chunk_memories:
+                if not isinstance(memory, dict):
+                    raise ValueError("live memory organizer returned an invalid memory")
+                memory_kind = str(memory.get("memoryKind") or "")
+                primary_field = {
+                    "experience": "summary",
+                    "knowledge": "claim",
+                    "emotion": "label",
+                }.get(memory_kind)
+                primary_value = str(memory.get(primary_field or "") or "").strip()
+                dedupe_key = (memory_kind, primary_value)
+                if dedupe_key in seen_memories:
+                    continue
+                seen_memories.add(dedupe_key)
+                memories.append(memory)
+        spans = self._owner_evidence_spans(source=source, turns=turns)
+        proposals: list[CandidateProposal] = []
+        for memory in memories:
+            if not isinstance(memory, dict):
+                raise ValueError("live memory organizer returned an invalid memory")
+            memory_kind = MemoryKind(str(memory.get("memoryKind") or ""))
+            primary_field = {
+                MemoryKind.EXPERIENCE: "summary",
+                MemoryKind.KNOWLEDGE: "claim",
+                MemoryKind.EMOTION: "label",
+            }[memory_kind]
+            primary_value = str(memory.get(primary_field) or "").strip()
+            source_indices = memory.get("sourceTurnIndices")
+            if not primary_value or not isinstance(source_indices, list) or not source_indices:
+                raise ValueError("live memory organizer returned incomplete evidence")
+            try:
+                selected_spans = [spans[index] for index in source_indices]
+            except (KeyError, TypeError) as error:
+                raise ValueError("live memory organizer referenced unavailable evidence") from error
+            proposals.append(
+                CandidateProposal(
+                    memory_kind=memory_kind,
+                    perspective_type=PerspectiveType.FIRST_PERSON,
+                    epistemic_status=EpistemicStatus.RECALLED,
+                    sensitivity=SensitivityLevel.STANDARD,
+                    content={
+                        primary_field: primary_value,
+                        "sourceTurnIndices": list(source_indices),
+                    },
+                    evidence_span=CandidateEvidenceSpan(
+                        start=min(span.start for span in selected_spans),
+                        end=max(span.end for span in selected_spans),
+                    ),
+                    confidence=0.0,
+                    review_mode=CandidateReviewMode.SINGLE,
+                )
+            )
+        return SyntheticCandidateExtractionCommand(
+            intent=intent,
+            extractor_id=self._EXTRACTOR_ID,
+            model_id=self._organizer.model,
+            prompt_version=self._organizer.prompt_version,
+            policy_version=OWNER_TRUTH_SCHEMA_VERSION,
+            source_content_hash=source.source_content_hash,
+            status=ExtractionResultStatus.SUCCEEDED,
+            proposals=tuple(proposals),
+        )
+
+    def _organization_chunks(
+        self,
+        turns: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], ...]:
+        """Send every transcript turn without holding one oversized model request."""
+
+        maximum_turn_count = max(
+            2,
+            int(getattr(self._organizer, "maximum_turn_count", 200)),
+        )
+        maximum_turn_characters = max(
+            1,
+            int(getattr(self._organizer, "maximum_turn_characters", 4_000)),
+        )
+        maximum_total_characters = max(
+            maximum_turn_characters * 2,
+            int(getattr(self._organizer, "maximum_total_characters", 30_000)),
+        )
+        chunks: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        current_characters = 0
+        latest_user_turn: dict[str, Any] | None = None
+
+        segmented_turns: list[dict[str, Any]] = []
+        for turn in turns:
+            text = str(turn.get("text") or "").strip()
+            segmented_turns.extend(
+                {**turn, "text": text[offset : offset + maximum_turn_characters].strip()}
+                for offset in range(0, len(text), maximum_turn_characters)
+                if text[offset : offset + maximum_turn_characters].strip()
+            )
+
+        current_indices: set[int] = set()
+        for turn in segmented_turns:
+            text = str(turn.get("text") or "").strip()
+            turn_index = turn.get("index")
+            would_overflow = current and (
+                len(current) >= maximum_turn_count
+                or current_characters + len(text) > maximum_total_characters
+                or turn_index in current_indices
+            )
+            if would_overflow:
+                chunks.append(current)
+                current = []
+                current_characters = 0
+                current_indices = set()
+
+            if not current and turn.get("role") == "assistant":
+                if latest_user_turn is None:
+                    raise ValueError("Live transcript must begin with user evidence")
+                current.append(latest_user_turn)
+                current_characters = len(str(latest_user_turn.get("text") or ""))
+                current_indices.add(latest_user_turn["index"])
+            current.append(turn)
+            current_characters += len(text)
+            current_indices.add(turn_index)
+            if turn.get("role") == "user":
+                latest_user_turn = turn
+
+        if current:
+            chunks.append(current)
+        if not chunks:
+            raise ValueError("Live transcript has no organization input")
+        return tuple(chunks)
+
+    @staticmethod
+    def _live_turns(
+        source: OwnerTruthCandidateExtractionInput,
+    ) -> list[dict[str, Any]] | None:
+        metadata = source.source_metadata or {}
+        if (
+            metadata.get("captureMode") != "live"
+            or metadata.get("sourcePolicy") != "userEvidenceOnly"
+        ):
+            return None
+        raw_turns = metadata.get("conversationTurns")
+        if not isinstance(raw_turns, list) or not raw_turns:
+            raise ValueError("Live Source is missing its structured conversation turns")
+        if any(
+            not isinstance(turn, dict) or turn.get("captureMode") != "live"
+            for turn in raw_turns
+        ):
+            raise ValueError("Live Source contains a turn outside the Live consent boundary")
+        return [
+            {
+                "index": turn.get("index"),
+                "role": turn.get("role"),
+                "text": turn.get("text"),
+            }
+            for turn in raw_turns
+        ]
+
+    @staticmethod
+    def _owner_evidence_spans(
+        *,
+        source: OwnerTruthCandidateExtractionInput,
+        turns: list[dict[str, Any]],
+    ) -> dict[int, CandidateEvidenceSpan]:
+        spans: dict[int, CandidateEvidenceSpan] = {}
+        search_start = 0
+        for turn in turns:
+            if turn.get("role") != "user":
+                continue
+            index = turn.get("index")
+            text = str(turn.get("text") or "").strip()
+            if isinstance(index, bool) or not isinstance(index, int) or not text:
+                raise ValueError("Live Source contains invalid user evidence")
+            start = source.source_text.find(text, search_start)
+            if start < 0:
+                raise ValueError("Live Source text does not match its user evidence turns")
+            end = start + len(text)
+            spans[index] = CandidateEvidenceSpan(start=start, end=end)
+            search_start = end
+        if not spans:
+            raise ValueError("Live Source contains no user evidence")
+        return spans
 
 
 class OwnerTruthCandidateExtractionWorkerRuntime:
@@ -167,7 +450,9 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
             lease_seconds=self._lease_seconds,
             configured=heartbeat_interval_seconds,
         )
-        self._extractor = extractor or DeterministicOwnerTruthCandidateExtractor()
+        self._extractor = extractor or ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=settings
+        )
         self._operation_metric_recorder = operation_metric_recorder or self._make_metric_recorder()
 
     def run_once(self) -> dict[str, Any]:
@@ -184,11 +469,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
             return self._payload(status="idle", reason="noEligibleCandidateExtractionJob")
 
         try:
-            with self._unit_of_work(
-                correlation_id=f"owner-truth-candidate-extraction-worker-{lease.job_id}",
-                command_id=f"ownerTruthCandidateExtractionWorker:{lease.operation_id}",
-            ):
-                result = self._consume_current_lease(lease)
+            result = self._consume_current_lease(lease)
         except AsyncEffectLeaseCancelled:
             result = self._payload(
                 status="cancelled",
@@ -250,84 +531,105 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
             return
 
     def _consume_current_lease(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
-        lease_repository = self._store.async_effect_lease_repository()
-        intent = lease_repository.load_intent(lease)
-        self._assert_typed_intent(intent)
-        admission = (
-            self._store.owner_truth_source_target_admission_repository()
-            .admit_owner_truth_source(intent)
-        )
-        consumer_repository = self._store.async_effect_consumer_repository()
-        if not admission.allowed:
-            receipt = consumer_repository.consume(
-                OwnerTruthSourceBlockedConsumerCommand(
-                    intent=intent,
-                    consumer_name="ownerTruth.source.blocked",
-                    business_target_key=intent.business_target_key,
-                    outcome="blocked",
-                    reason_code=admission.reason_code,
-                    result_ref_hash=_result_hash(intent.stable_key, admission.reason_code),
-                    admission=admission,
+        # Read the immutable Source in a short transaction, then release the
+        # database connection before any model/provider network wait begins.
+        with self._unit_of_work(
+            correlation_id=f"owner-truth-candidate-extraction-worker-read-{lease.job_id}",
+            command_id=f"ownerTruthCandidateExtractionWorkerRead:{lease.operation_id}",
+        ):
+            lease_repository = self._store.async_effect_lease_repository()
+            intent = lease_repository.load_intent(lease)
+            self._assert_typed_intent(intent)
+            admission = (
+                self._store.owner_truth_source_target_admission_repository()
+                .admit_owner_truth_source(intent)
+            )
+            consumer_repository = self._store.async_effect_consumer_repository()
+            if not admission.allowed:
+                receipt = consumer_repository.consume(
+                    OwnerTruthSourceBlockedConsumerCommand(
+                        intent=intent,
+                        consumer_name="ownerTruth.source.blocked",
+                        business_target_key=intent.business_target_key,
+                        outcome="blocked",
+                        reason_code=admission.reason_code,
+                        result_ref_hash=_result_hash(intent.stable_key, admission.reason_code),
+                        admission=admission,
+                    )
                 )
-            )
-            completion = lease_repository.complete(
-                lease,
-                outcome="blocked",
-                error_code=admission.reason_code,
-            )
-            return self._payload(
-                status="blocked",
-                reason=admission.reason_code,
-                lease=lease,
-                intent=intent,
-                completion=completion,
-                receipt=receipt,
+                completion = lease_repository.complete(
+                    lease,
+                    outcome="blocked",
+                    error_code=admission.reason_code,
+                )
+                return self._payload(
+                    status="blocked",
+                    reason=admission.reason_code,
+                    lease=lease,
+                    intent=intent,
+                    completion=completion,
+                    receipt=receipt,
+                )
+
+            source = (
+                self._store.owner_truth_candidate_extraction_input_repository()
+                .read_for_candidate_extraction(intent)
             )
 
-        source = (
-            self._store.owner_truth_candidate_extraction_input_repository()
-            .read_for_candidate_extraction(intent)
-        )
+        # DeepSeek is used only here, outside the database transaction. Lease
+        # heartbeat remains active so another worker cannot persist a duplicate.
         command = self._extract_with_lease_heartbeat(
             lease=lease,
             intent=intent,
             source=source,
         )
-        result = OwnerTruthCandidateExtractionService(self._store).record_in_unit_of_work(command)
-        if result.outcome == "blocked":
-            completion = lease_repository.complete(
-                lease,
-                outcome="blocked",
-                error_code=result.reason_code,
-            )
+
+        # Revalidate authority and the current lease immediately before the
+        # Candidate result, consumer receipt, and lease completion commit.
+        with self._unit_of_work(
+            correlation_id=f"owner-truth-candidate-extraction-worker-write-{lease.job_id}",
+            command_id=f"ownerTruthCandidateExtractionWorkerWrite:{lease.operation_id}",
+        ):
+            lease_repository = self._store.async_effect_lease_repository()
+            current_intent = lease_repository.load_intent(lease)
+            self._assert_typed_intent(current_intent)
+            if current_intent.stable_key != intent.stable_key:
+                raise AsyncEffectLeaseLost("candidate extraction intent changed during organization")
+            result = OwnerTruthCandidateExtractionService(self._store).record_in_unit_of_work(command)
+            if result.outcome == "blocked":
+                completion = lease_repository.complete(
+                    lease,
+                    outcome="blocked",
+                    error_code=result.reason_code,
+                )
+                return self._payload(
+                    status="blocked",
+                    reason=result.reason_code,
+                    lease=lease,
+                    intent=intent,
+                    completion=completion,
+                    receipt=result.consumer,
+                )
+            if result.status is None or result.extraction_id is None:
+                raise OwnerTruthCandidateExtractionWorkerError(
+                    "candidate extraction completed without a terminal result"
+                )
+
+            completion = lease_repository.complete(lease, outcome="succeeded")
+            reason = {
+                ExtractionResultStatus.SUCCEEDED: "candidateExtractionProposalsPersisted",
+                ExtractionResultStatus.QUARANTINED: "candidateExtractionQuarantined",
+                ExtractionResultStatus.FAILED: "candidateExtractionFailed",
+            }[result.status]
             return self._payload(
-                status="blocked",
-                reason=result.reason_code,
+                status="completed",
+                reason=reason,
                 lease=lease,
                 intent=intent,
                 completion=completion,
                 receipt=result.consumer,
+                extraction_result=result,
             )
-        if result.status is None or result.extraction_id is None:
-            raise OwnerTruthCandidateExtractionWorkerError(
-                "candidate extraction completed without a terminal result"
-            )
-
-        completion = lease_repository.complete(lease, outcome="succeeded")
-        reason = {
-            ExtractionResultStatus.SUCCEEDED: "candidateExtractionProposalsPersisted",
-            ExtractionResultStatus.QUARANTINED: "candidateExtractionQuarantined",
-            ExtractionResultStatus.FAILED: "candidateExtractionFailed",
-        }[result.status]
-        return self._payload(
-            status="completed",
-            reason=reason,
-            lease=lease,
-            intent=intent,
-            completion=completion,
-            receipt=result.consumer,
-            extraction_result=result,
-        )
 
     @staticmethod
     def _assert_typed_intent(intent: AsyncEffectIntent) -> None:
@@ -362,11 +664,10 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
     ) -> SyntheticCandidateExtractionCommand:
         """Renew a claimed lease while an extractor performs external work.
 
-        Admission, source reads, persistence, consumer receipts and lease
-        completion remain in the primary Unit of Work. Only the potentially
-        slow extractor adapter is wrapped. Renewal uses an independent Unit
-        of Work; if it fails, the extraction result is discarded rather than
-        committing a success after ownership becomes uncertain.
+        Source read and result persistence use separate short transactions.
+        The potentially slow extractor runs without holding either one.
+        Renewal uses an independent Unit of Work; if it fails, the extraction
+        result is discarded rather than committing after ownership is unclear.
         """
 
         heartbeat = self._start_lease_heartbeat(lease)

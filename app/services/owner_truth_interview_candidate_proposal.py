@@ -305,6 +305,18 @@ class _InMemoryReviewBatch:
     owner_turn_end_count: int
     through_message_sequence: int
     owner_messages: tuple[tuple[int, str], ...]
+    conversation_turns: tuple[Mapping[str, Any], ...] = ()
+
+
+def _conversation_capture_mode(turns: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]]) -> str:
+    """Return Live only when every recovered turn carries explicit Live consent."""
+
+    modes = {
+        str(turn.get("captureMode") or "naturalInput")
+        for turn in turns
+        if isinstance(turn, Mapping)
+    }
+    return "live" if modes == {"live"} else "naturalInput"
 
 
 @dataclass(frozen=True)
@@ -380,6 +392,10 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
             owner_turn_end_count=len(ordered_messages),
             through_message_sequence=ordered_messages[-1][0],
             owner_messages=ordered_messages,
+            conversation_turns=tuple(
+                {"index": sequence, "role": "user", "text": text}
+                for sequence, text in ordered_messages
+            ),
         )
 
     def prepare_admission(
@@ -668,6 +684,16 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                     key=lambda item: item[0],
                 )
             )
+            raw_turns = snapshot.get("conversationTurns") or ()
+            conversation_turns = tuple(
+                {
+                    "index": int(turn["index"]),
+                    "role": str(turn["role"]),
+                    "text": str(turn["text"]),
+                    "captureMode": str(turn.get("captureMode") or "naturalInput"),
+                }
+                for turn in raw_turns
+            )
             batch = _InMemoryReviewBatch(
                 review_batch_id=str(snapshot["reviewBatchId"]),
                 vault_id=str(snapshot["vaultId"]),
@@ -681,6 +707,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 owner_turn_end_count=int(snapshot["ownerTurnEndCount"]),
                 through_message_sequence=int(snapshot["throughMessageSequence"]),
                 owner_messages=owner_messages,
+                conversation_turns=conversation_turns,
             )
         except (KeyError, TypeError, ValueError) as error:
             raise OwnerTruthInterviewCandidateProposalConflict(
@@ -693,6 +720,12 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
             or batch.owner_turn_start_count < 1
             or batch.owner_turn_end_count < batch.owner_turn_start_count
             or batch.through_message_sequence < batch.owner_messages[-1][0]
+            or any(
+                turn.get("role") not in {"user", "assistant"}
+                or int(turn.get("index") or 0) < 1
+                or not str(turn.get("text") or "").strip()
+                for turn in batch.conversation_turns
+            )
         ):
             raise OwnerTruthInterviewCandidateProposalConflict(
                 "review batch owner message window is not recoverable"
@@ -721,6 +754,9 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 "ownerTurnEndCount": batch.owner_turn_end_count,
                 "throughMessageSequence": batch.through_message_sequence,
                 "ownerMessageCount": len(batch.owner_messages),
+                "conversationTurns": list(batch.conversation_turns),
+                "captureMode": _conversation_capture_mode(list(batch.conversation_turns)),
+                "sourcePolicy": "userEvidenceOnly",
             },
             owner_message_count=len(batch.owner_messages),
             first_message_sequence=batch.owner_messages[0][0],
@@ -823,6 +859,13 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                     "review batch owner message window is no longer recoverable"
                 )
             source_text = "\n\n".join(message["text"] for message in messages)
+            conversation_turns = self._conversation_turns_for_window(
+                cursor,
+                batch=batch,
+                record=record,
+                first_message_sequence=int(messages[0]["sequence_number"]),
+                last_message_sequence=int(messages[-1]["sequence_number"]),
+            )
             return OwnerTruthInterviewCandidateProposalPreparation(
                 review_batch_id=record.review_batch_id,
                 thread_id=str(batch["thread_id"]),
@@ -838,6 +881,9 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                     "ownerTurnEndCount": int(batch["owner_turn_end_count"]),
                     "throughMessageSequence": int(batch["through_message_sequence"]),
                     "ownerMessageCount": len(messages),
+                    "conversationTurns": conversation_turns,
+                    "captureMode": _conversation_capture_mode(conversation_turns),
+                    "sourcePolicy": "userEvidenceOnly",
                 },
                 owner_message_count=len(messages),
                 first_message_sequence=int(messages[0]["sequence_number"]),
@@ -1201,6 +1247,63 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                 }
             )
         return messages
+
+    @staticmethod
+    def _conversation_turns_for_window(
+        cursor: Any,
+        *,
+        batch: Mapping[str, Any],
+        record: OwnerTruthInterviewCandidateProposalWriteRecord,
+        first_message_sequence: int,
+        last_message_sequence: int,
+    ) -> list[dict[str, Any]]:
+        cursor.execute(
+            """
+            SELECT sequence_number, author, content_payload
+            FROM owner_truth.conversation_messages
+            WHERE vault_id = %s
+              AND owner_subject_id = %s
+              AND thread_id = %s
+              AND session_id = %s
+              AND sequence_number BETWEEN %s AND %s
+              AND authority_epoch = %s
+            ORDER BY sequence_number ASC
+            """,
+            (
+                record.vault_id,
+                record.owner_subject_id,
+                str(batch["thread_id"]),
+                str(batch["session_id"]),
+                first_message_sequence,
+                last_message_sequence,
+                int(batch["authority_epoch"]),
+            ),
+        )
+        turns: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            payload = row["content_payload"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError as exc:
+                    raise OwnerTruthInterviewCandidateProposalConflict(
+                        "review batch conversation context is not recoverable"
+                    ) from exc
+            text = str(payload.get("text") or "").strip() if isinstance(payload, Mapping) else ""
+            author = str(row["author"] or "").strip()
+            if not text or author not in {"owner", "assistant"}:
+                raise OwnerTruthInterviewCandidateProposalConflict(
+                    "review batch conversation context is not recoverable"
+                )
+            turns.append(
+                {
+                    "index": int(row["sequence_number"]),
+                    "role": "user" if author == "owner" else "assistant",
+                    "text": text,
+                    "captureMode": str(payload.get("captureMode") or "naturalInput"),
+                }
+            )
+        return turns
 
     @staticmethod
     def _existing_by_command(

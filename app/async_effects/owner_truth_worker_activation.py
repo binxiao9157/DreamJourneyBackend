@@ -107,6 +107,17 @@ def evaluate_owner_truth_worker_activation(
         return _blocked(worker, disabled_reason, "workerKillSwitch")
 
     if (
+        worker is OwnerTruthWorkerKind.CANDIDATE_EXTRACTION
+        and settings.owner_truth_live_memory_organization_enabled
+        and not settings.deepseek_api_key
+    ):
+        return _blocked(
+            worker,
+            "ownerTruthLiveMemoryOrganizerNotConfigured",
+            "deepSeek",
+        )
+
+    if (
         worker is OwnerTruthWorkerKind.MEMORY_PROJECTION
         and not settings.owner_truth_candidate_extraction_worker_enabled
     ):

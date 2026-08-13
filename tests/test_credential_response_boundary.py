@@ -38,6 +38,8 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
             "volcengine_app_key",
             "volcengine_app_token",
             "volcengine_api_key",
+            "public_base_url",
+            "realtime_voice_proxy_enabled",
         )
         self.previous_settings = {
             name: getattr(settings, name, None) for name in self.setting_names
@@ -185,6 +187,26 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
 
         service_payload = TokenService(settings).realtime_config(user_id=user_id)
         self.assertEqual(service_payload, body)
+
+    def test_realtime_voice_ready_contract_returns_only_one_time_proxy_ticket(self):
+        object.__setattr__(settings, "public_base_url", "https://api.example.test/dreamjourney-api")
+        object.__setattr__(settings, "realtime_voice_proxy_enabled", True)
+        headers, user_id = self.user_headers("13800139906")
+
+        response = client.post(
+            "/voice/realtime-token",
+            headers=headers,
+            json={"userId": user_id},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assert_no_store(response)
+        body = response.json()
+        self.assertEqual(body["status"], "ready")
+        self.assertEqual(body["accessPath"], "backendRealtimeProxy")
+        self.assertFalse(body["mobileDirectAllowed"])
+        self.assertTrue(body["proxy"]["sessionToken"].startswith("djv_"))
+        self.assert_value_free(body)
 
     def test_legacy_tts_response_is_no_store_and_redacts_provider_references(self):
         headers, user_id = self.user_headers("13800139905")

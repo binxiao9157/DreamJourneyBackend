@@ -15,7 +15,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from pydantic import ValidationError
 
 try:
-    from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
+    from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, WebSocket
     from fastapi.responses import FileResponse, JSONResponse, Response
     from starlette.background import BackgroundTask
 except ImportError as exc:  # pragma: no cover - exercised only without runtime deps
@@ -595,6 +595,13 @@ from app.services.context_packet import ContextPacketBuilder
 from app.db.pool import ConnectionPoolExhausted
 from app.services.store_factory import close_store, init_store, make_store
 from app.services.tokens import TokenService
+from app.services.realtime_voice_proxy import (
+    RealtimeVoiceAuthorizationRevoked,
+    RealtimeVoiceProxyError,
+    RealtimeVoiceSessionBroker,
+    RealtimeVoiceTrafficLimitExceeded,
+    RealtimeVoiceUpstreamUnavailable,
+)
 from app.services.tts import TencentAudioDrivePCMAdapter, VolcTTSProxy, VoiceCloneTTSProviderFactory
 from app.services.time_letters import (
     TimeLetterAccessError,
@@ -4713,6 +4720,7 @@ def _owner_truth_interview_current_session_response(
             "sessionVersion": snapshot.row_version,
             "state": snapshot.state.value,
             "boundary": snapshot.boundary.value,
+            "entryMode": snapshot.entry_mode,
         }
     return {
         "schemaVersion": "owner-truth-interview-current-session-v1",
@@ -9144,12 +9152,15 @@ def start_owner_truth_interview_session(
 
     try:
         context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
+        entry_mode = str(payload.get("entryMode") or "naturalInput").strip()
+        if entry_mode not in {"naturalInput", "live"}:
+            raise OwnerTruthConversationError("entryMode is not supported")
         command = StartInterviewSessionCommand(
             command_id=str(payload.get("commandId") or ""),
             thread_id=str(payload.get("threadId") or ""),
             session_id=str(payload.get("sessionId") or ""),
             expected_thread_version=0,
-            entry_mode="naturalInput",
+            entry_mode=entry_mode,
         )
         with store.request_unit_of_work(
             correlation_id=(
@@ -9186,18 +9197,26 @@ def append_owner_truth_interview_narrative(
     session_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """Append an owner narrative unless safety must override the interview."""
+    """Append one private owner/assistant turn to a natural-input session."""
 
     try:
         context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
         narrative_text = str(payload.get("text") or "")
-        safety_decision = SAFETY_POLICY.evaluate(narrative_text)
-        if not safety_decision.effects.providerEffectsAllowed:
-            return _owner_truth_interview_safety_override_response(
-                vault_id=context.vault_id,
-                decision=safety_decision,
-            )
-        if OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED:
+        role = str(payload.get("role") or "owner").strip()
+        capture_mode = str(payload.get("captureMode") or "naturalInput").strip()
+        if role not in {"owner", "assistant"}:
+            raise ValueError("unsupported natural-input message role")
+        if capture_mode not in {"naturalInput", "live"}:
+            raise ValueError("unsupported natural-input capture mode")
+        is_owner_turn = role == "owner"
+        if is_owner_turn:
+            safety_decision = SAFETY_POLICY.evaluate(narrative_text)
+            if not safety_decision.effects.providerEffectsAllowed:
+                return _owner_truth_interview_safety_override_response(
+                    vault_id=context.vault_id,
+                    decision=safety_decision,
+                )
+        if is_owner_turn and OWNER_TRUTH_DO_NOT_ASK_REACTIVATION_PREFLIGHT_ENABLED:
             preflight = OwnerTruthDoNotAskReactivationPreflightService(
                 conversation_service=OwnerTruthConversationService(
                     store.owner_truth_conversation_repository()
@@ -9213,7 +9232,8 @@ def append_owner_truth_interview_narrative(
                     preflight=preflight,
                 )
         if (
-            OWNER_TRUTH_TOPIC_SHIFT_PREFLIGHT_QA_ENABLED
+            is_owner_turn
+            and OWNER_TRUTH_TOPIC_SHIFT_PREFLIGHT_QA_ENABLED
             and str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip()
             == "1"
         ):
@@ -9238,11 +9258,21 @@ def append_owner_truth_interview_narrative(
             message_id=str(payload.get("messageId") or ""),
             expected_thread_version=int(payload.get("expectedThreadVersion") or 0),
             expected_session_version=int(payload.get("expectedSessionVersion") or 0),
-            author=ConversationMessageAuthor.OWNER,
-            kind=ConversationMessageKind.NARRATIVE,
+            author=(
+                ConversationMessageAuthor.OWNER
+                if is_owner_turn
+                else ConversationMessageAuthor.ASSISTANT
+            ),
+            kind=(
+                ConversationMessageKind.NARRATIVE
+                if is_owner_turn
+                else ConversationMessageKind.QUESTION
+            ),
             text=narrative_text,
+            capture_mode=capture_mode,
         )
         formal_review_batch_session_version: Optional[int] = None
+        automation = None
         with store.request_unit_of_work(
             correlation_id=(
                 "owner-truth-interview-input-append:"
@@ -9256,24 +9286,27 @@ def append_owner_truth_interview_narrative(
                 command=command,
                 context=context,
             )
-            _record_owner_truth_interview_append_decision_audit(
-                command=command,
-                result=result,
-                context=context,
-            )
-            formal_review_batch_session_version = (
-                _owner_truth_formal_review_batch_automation_in_active_unit_of_work(
-                    session_id=command.session_id,
-                    transition_command_id=command.command_id,
+            if is_owner_turn:
+                _record_owner_truth_interview_append_decision_audit(
+                    command=command,
+                    result=result,
                     context=context,
                 )
+            if is_owner_turn and capture_mode != "live":
+                formal_review_batch_session_version = (
+                    _owner_truth_formal_review_batch_automation_in_active_unit_of_work(
+                        session_id=command.session_id,
+                        transition_command_id=command.command_id,
+                        context=context,
+                    )
+                )
+        if is_owner_turn and capture_mode != "live":
+            automation = _owner_truth_review_batch_automation_after_qa_transition(
+                request=request,
+                session_id=command.session_id,
+                transition_command_id=command.command_id,
+                context=context,
             )
-        automation = _owner_truth_review_batch_automation_after_qa_transition(
-            request=request,
-            session_id=command.session_id,
-            transition_command_id=command.command_id,
-            context=context,
-        )
     except OwnerTruthContractError as error:
         raise _owner_truth_interview_session_state_http_error(error) from error
     except (TypeError, ValueError) as error:
@@ -14923,6 +14956,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
     provider = "safety-policy"
     model = "none"
     fallback_reason = ""
+    memory_gap = False
 
     if provider_effects_allowed:
         generation = packet.get("generationContext") or {}
@@ -14975,6 +15009,20 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
             else "我注意到你可能正处在危险中。请立即联系身边可信任的人；如有紧迫危险，请联系当地紧急服务。"
         ).strip()
 
+    answer_text = str(answer_text or "").strip()
+    if answer_text.startswith(DeepSeekEchoAnswerProxy.memory_gap_marker):
+        memory_gap = True
+        answer_text = answer_text[len(DeepSeekEchoAnswerProxy.memory_gap_marker) :].strip()
+    if provider_effects_allowed and not memory_gap:
+        memory_gap = (
+            "没有在记忆库里面寻找到" in answer_text
+            or "未在记忆库中找到" in answer_text
+            or (
+                "还没有从" in answer_text
+                and "已确认的记忆中找到这个答案" in answer_text
+            )
+        )
+
     generation = packet.get("generationContext") or {}
     raw_source_refs = generation.get("sourceRefs") or []
     citations = [
@@ -14986,6 +15034,37 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         for item in raw_source_refs
         if isinstance(item, dict) and str(item.get("refId") or "").strip()
     ]
+    has_memory_citations = any(
+        citation["source"] in {"archive", "kbFact", "care"}
+        for citation in citations
+    )
+    persona = packet.get("persona") if isinstance(packet, dict) else None
+    raw_persona_scope = (
+        persona.get("personaScope")
+        if isinstance(persona, dict)
+        else payload.get("personaScope")
+    )
+    persona_scope = str(raw_persona_scope or "personal").strip().lower()
+    if memory_gap and provider_effects_allowed:
+        if persona_scope == "family":
+            subject = str(payload.get("personaName") or "这位家人").strip() or "这位家人"
+            answer_text = (
+                f"我还没有从{subject}已确认的记忆中找到这个答案。"
+                "如果你愿意，可以分享一段相关的故事，交给档案所有者确认。"
+            )
+            memory_handoff = "familyContribution"
+        else:
+            answer_text = "这段记忆我还不了解。那我们来聊一聊吧，你最先想到的是什么？"
+            memory_handoff = "ownerInterview"
+    else:
+        memory_handoff = "none"
+    if memory_gap:
+        citations = []
+        memory_outcome = "gap"
+    elif has_memory_citations:
+        memory_outcome = "grounded"
+    else:
+        memory_outcome = "notApplicable"
     return JSONResponse(
         content={
             "status": "answered",
@@ -15001,6 +15080,11 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                 "citations": citations,
                 "aiDisclosure": packet.get("aiDisclosure") or {},
                 "fallbackReason": fallback_reason,
+                "memoryGrounding": {
+                    "schemaVersion": "echo-memory-grounding-v1",
+                    "outcome": memory_outcome,
+                    "handoff": memory_handoff,
+                },
             },
         },
         headers={"Cache-Control": "no-store"},
@@ -15010,10 +15094,71 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
 @app.post("/voice/realtime-token")
 def realtime_token(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id, payload = _principal_owned_payload(request, payload)
+    principal = getattr(request.state, "auth_principal", None)
+    auth_session_id = (
+        str(principal.session_id or "").strip()
+        if isinstance(principal, RequestPrincipal) and principal.kind == PrincipalKind.USER
+        else ""
+    )
+    if not auth_session_id:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "authenticatedVoiceSessionRequired"},
+        )
     try:
-        return TokenService(settings).realtime_config(user_id=user_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        return TokenService(settings).issue_realtime_config(
+            user_id=user_id,
+            auth_session_id=auth_session_id,
+            store=store,
+        )
+    except RealtimeVoiceProxyError as exc:
+        raise HTTPException(
+            status_code=409 if exc.retryable else 503,
+            detail={"code": exc.code, "retryable": exc.retryable},
+        ) from exc
+
+
+@app.websocket("/voice/realtime-stream")
+async def realtime_voice_stream(websocket: WebSocket) -> None:
+    """Relay opaque SpeechEngine frames without persisting audio or text."""
+
+    broker = RealtimeVoiceSessionBroker(settings, store)
+    raw_ticket = str(
+        websocket.headers.get(RealtimeVoiceSessionBroker.TICKET_HEADER) or ""
+    ).strip()
+    lease = await asyncio.to_thread(broker.consume, raw_ticket)
+    if lease is None:
+        await websocket.close(code=4401, reason="voice session ticket rejected")
+        return
+
+    await websocket.accept()
+    release_reason = "clientDisconnected"
+    try:
+        await broker.relay(websocket, lease)
+    except RealtimeVoiceAuthorizationRevoked:
+        release_reason = "authorizationRevoked"
+        try:
+            await websocket.close(code=4403, reason="voice session authorization revoked")
+        except RuntimeError:
+            pass
+    except RealtimeVoiceTrafficLimitExceeded:
+        release_reason = "trafficLimitExceeded"
+        try:
+            await websocket.close(code=1009, reason="voice session traffic limit exceeded")
+        except RuntimeError:
+            pass
+    except RealtimeVoiceUpstreamUnavailable:
+        release_reason = "upstreamUnavailable"
+        try:
+            await websocket.close(code=1013, reason="voice service temporarily unavailable")
+        except RuntimeError:
+            pass
+    finally:
+        await asyncio.to_thread(
+            broker.release,
+            lease,
+            reason=release_reason,
+        )
 
 
 @app.post("/voice/profiles")

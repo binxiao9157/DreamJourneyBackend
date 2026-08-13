@@ -29,7 +29,7 @@ OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION = "owner-truth-conversation-v1"
 _RECEIPT_NAMESPACE = UUID("10c87c90-f96f-4da5-98d2-f1925d472c26")
 _REVIEW_BATCH_NAMESPACE = UUID("66e875da-e2ca-40b1-8a68-a9074b8fac27")
 _MAX_MESSAGE_CHARACTERS = 20_000
-_ENTRY_MODES = frozenset({"naturalInput", "recommendation", "resume"})
+_ENTRY_MODES = frozenset({"naturalInput", "recommendation", "resume", "live"})
 
 
 class OwnerTruthConversationError(OwnerTruthContractError):
@@ -322,6 +322,7 @@ class AppendInterviewMessageCommand:
     author: ConversationMessageAuthor
     kind: ConversationMessageKind
     text: str
+    capture_mode: str = "naturalInput"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
@@ -344,6 +345,10 @@ class AppendInterviewMessageCommand:
         if len(text) > _MAX_MESSAGE_CHARACTERS:
             raise OwnerTruthConversationError("text exceeds maximum conversation message length")
         object.__setattr__(self, "text", text)
+        capture_mode = str(self.capture_mode or "").strip()
+        if capture_mode not in {"naturalInput", "live"}:
+            raise OwnerTruthConversationError("capture_mode is not supported")
+        object.__setattr__(self, "capture_mode", capture_mode)
 
     def write_record(self, *, context: OwnerTruthCommandContext) -> "AppendInterviewMessageWriteRecord":
         command_id_hash = _sha256(self.command_id)
@@ -351,6 +356,10 @@ class AppendInterviewMessageCommand:
             "schemaVersion": OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION,
             "text": self.text,
         }
+        # Keep the legacy natural-input command fingerprint stable while
+        # persisting the explicit Live consent boundary on Live turns.
+        if self.capture_mode == "live":
+            content_payload["captureMode"] = self.capture_mode
         payload = {
             "schemaVersion": OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION,
             "commandType": "appendInterviewMessage",
@@ -932,6 +941,7 @@ class OwnerTruthInterviewSessionSnapshot:
     pending_review_batch_id: Optional[str]
     fatigue: InterviewFatigue
     authority_epoch: int
+    entry_mode: str = "naturalInput"
 
 
 @dataclass(frozen=True)

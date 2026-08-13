@@ -1,6 +1,7 @@
 from typing import Any, Dict
 
 from app.core.config import Settings
+from app.services.realtime_voice_proxy import RealtimeVoiceSessionBroker
 
 
 class TokenService:
@@ -11,29 +12,16 @@ class TokenService:
 
     def realtime_config(self, user_id: str) -> Dict[str, Any]:
         del user_id
-        required_properties = list(self._SCOPED_SESSION_REQUIREMENTS)
-        return {
-            "status": "blocked",
-            "capability": "realtimeVoice",
-            "provider": "volcengine",
-            "credentialMode": "blockedStaticCredential",
-            "accessPath": "backendProxyOrText",
-            "mobileDirectAllowed": False,
-            "brokerStatus": "providerContractNotVerified",
-            "providerReady": False,
-            "releaseVisible": False,
-            "retryable": False,
-            "decisionReceipt": {
-                "decision": "keepDirectMobileClosed",
-                "reasonCode": "scopedSessionCredentialContractNotVerified",
-                "requiredProperties": required_properties,
-                "verifiedProperties": [],
-                "missingProperties": required_properties,
-                "evidenceVersion": "volcengine-dialog-ios-sdk-1597646@2026-07-15",
-            },
-            "fallback": {
-                "enabled": True,
-                "mode": "backendProxyOrText",
-            },
-            "contractVersion": 3,
-        }
+        return RealtimeVoiceSessionBroker(self.settings, store=None).capability_descriptor()
+
+    def issue_realtime_config(
+        self,
+        *,
+        user_id: str,
+        auth_session_id: str,
+        store: Any,
+    ) -> Dict[str, Any]:
+        return RealtimeVoiceSessionBroker(self.settings, store).issue_runtime_config(
+            user_id=user_id,
+            auth_session_id=auth_session_id,
+        )

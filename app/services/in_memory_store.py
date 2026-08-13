@@ -360,6 +360,8 @@ class InMemoryStore:
         self._auth_token_families: Dict[str, Dict[str, Any]] = {}
         self._auth_session_events: Dict[str, Dict[str, Any]] = {}
         self._auth_lock = RLock()
+        self._realtime_voice_session_tickets: Dict[str, Dict[str, Any]] = {}
+        self._realtime_voice_lock = RLock()
         self._auth_challenges: Dict[str, Dict[str, Any]] = {}
         self._identity_hash_key_versions: Dict[str, str] = {}
         self._subjects: Dict[str, Dict[str, Any]] = {}
@@ -1102,6 +1104,160 @@ class InMemoryStore:
             ]
         events.sort(key=lambda event: (str(event.get("occurredAt") or ""), str(event.get("eventId") or "")))
         return events
+
+    def issue_realtime_voice_session_ticket(
+        self,
+        record: Dict[str, Any],
+        *,
+        max_concurrent_sessions: int,
+        now_iso: str,
+    ) -> Dict[str, Any]:
+        item = deepcopy(record)
+        user_id = str(item.get("userId") or "")
+        now = self._parse_iso_datetime(now_iso)
+        with self._realtime_voice_lock:
+            for ticket_id, existing in list(self._realtime_voice_session_tickets.items()):
+                if str(existing.get("userId") or "") != user_id:
+                    continue
+                status = str(existing.get("status") or "")
+                expires_at = self._parse_iso_datetime(str(existing.get("expiresAt") or ""))
+                updated = deepcopy(existing)
+                if status in {"issued", "active"} and expires_at <= now:
+                    updated["status"] = "expired"
+                    updated["updatedAt"] = now_iso
+                    self._realtime_voice_session_tickets[ticket_id] = updated
+                elif status == "issued":
+                    updated["status"] = "revoked"
+                    updated["revokeReason"] = "supersededBeforeConnect"
+                    updated["updatedAt"] = now_iso
+                    self._realtime_voice_session_tickets[ticket_id] = updated
+
+            active_count = sum(
+                1
+                for existing in self._realtime_voice_session_tickets.values()
+                if str(existing.get("userId") or "") == user_id
+                and str(existing.get("status") or "") == "active"
+                and self._parse_iso_datetime(str(existing.get("expiresAt") or "")) > now
+            )
+            if active_count >= max(1, int(max_concurrent_sessions)):
+                raise ValueError("realtime voice concurrent session limit reached")
+            self._realtime_voice_session_tickets[str(item["ticketId"])] = item
+        return deepcopy(item)
+
+    def consume_realtime_voice_session_ticket(
+        self,
+        ticket_hash: str,
+        *,
+        now_iso: str,
+        session_expires_at_iso: str,
+    ) -> Optional[Dict[str, Any]]:
+        now = self._parse_iso_datetime(now_iso)
+        with self._realtime_voice_lock, self._auth_lock:
+            ticket_id, item = next(
+                (
+                    (candidate_id, candidate)
+                    for candidate_id, candidate in self._realtime_voice_session_tickets.items()
+                    if candidate.get("ticketHash") == ticket_hash
+                ),
+                (None, None),
+            )
+            if ticket_id is None or item is None:
+                return None
+            if str(item.get("status") or "") != "issued":
+                return None
+            if self._parse_iso_datetime(str(item.get("expiresAt") or "")) <= now:
+                expired = deepcopy(item)
+                expired["status"] = "expired"
+                expired["updatedAt"] = now_iso
+                self._realtime_voice_session_tickets[ticket_id] = expired
+                return None
+            if not self._realtime_voice_auth_session_active_locked(
+                auth_session_id=str(item.get("authSessionId") or ""),
+                user_id=str(item.get("userId") or ""),
+            ):
+                revoked = deepcopy(item)
+                revoked["status"] = "revoked"
+                revoked["revokeReason"] = "authSessionUnavailable"
+                revoked["updatedAt"] = now_iso
+                self._realtime_voice_session_tickets[ticket_id] = revoked
+                return None
+            active = deepcopy(item)
+            active["status"] = "active"
+            active["consumedAt"] = now_iso
+            active["expiresAt"] = session_expires_at_iso
+            active["updatedAt"] = now_iso
+            self._realtime_voice_session_tickets[ticket_id] = active
+            return deepcopy(active)
+
+    def is_realtime_voice_auth_session_active(
+        self,
+        auth_session_id: str,
+        user_id: str,
+    ) -> bool:
+        with self._auth_lock:
+            return self._realtime_voice_auth_session_active_locked(
+                auth_session_id=auth_session_id,
+                user_id=user_id,
+            )
+
+    def _realtime_voice_auth_session_active_locked(
+        self,
+        *,
+        auth_session_id: str,
+        user_id: str,
+    ) -> bool:
+        session = self._auth_sessions.get(auth_session_id)
+        if session is None or str(session.get("userId") or "") != user_id:
+            return False
+        session_status = str(session.get("status") or "")
+        if session_status not in {"active", "rotated"}:
+            return False
+        family_id = str(session.get("tokenFamilyId") or "")
+        if family_id:
+            family = self._auth_token_families.get(family_id)
+            if family is None or str(family.get("status") or "") != "active":
+                return False
+            if session_status == "rotated":
+                current_version = int(family.get("currentSessionVersion") or 0)
+                if not any(
+                    str(candidate.get("tokenFamilyId") or "") == family_id
+                    and str(candidate.get("userId") or "") == user_id
+                    and str(candidate.get("status") or "") == "active"
+                    and int(candidate.get("sessionVersion") or 0) == current_version
+                    for candidate in self._auth_sessions.values()
+                ):
+                    return False
+        elif session_status != "active":
+            return False
+        user = self._users.get(user_id)
+        if user is None:
+            return False
+        return (
+            str(user.get("deletionState") or "active") == "active"
+            and str(user.get("accessState") or "active") == "active"
+            and str(user.get("providerCapabilityState") or "enabled") == "enabled"
+        )
+
+    def release_realtime_voice_session_ticket(
+        self,
+        ticket_id: str,
+        *,
+        released_at_iso: str,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._realtime_voice_lock:
+            item = self._realtime_voice_session_tickets.get(ticket_id)
+            if item is None:
+                return None
+            if str(item.get("status") or "") not in {"issued", "active"}:
+                return deepcopy(item)
+            released = deepcopy(item)
+            released["status"] = "released"
+            released["releasedAt"] = released_at_iso
+            released["releaseReason"] = str(reason or "clientDisconnected")[:80]
+            released["updatedAt"] = released_at_iso
+            self._realtime_voice_session_tickets[ticket_id] = released
+            return deepcopy(released)
 
     def _auth_session_by_refresh_hash(
         self,
@@ -2489,6 +2645,11 @@ class InMemoryStore:
                 for event in self._auth_session_events.values()
                 if event.get("userId") == user_id
             ),
+            "realtimeVoiceSessionTicket": sum(
+                1
+                for ticket in self._realtime_voice_session_tickets.values()
+                if ticket.get("userId") == user_id
+            ),
         }
         counts.update(self.owner_truth_data_rights_counts(user_id))
         return counts
@@ -2585,6 +2746,11 @@ class InMemoryStore:
                 event_id: event
                 for event_id, event in self._auth_session_events.items()
                 if event.get("userId") != user_id
+            }
+            self._realtime_voice_session_tickets = {
+                ticket_id: ticket
+                for ticket_id, ticket in self._realtime_voice_session_tickets.items()
+                if ticket.get("userId") != user_id
             }
             for slot in self._voice_clone_slots.values():
                 if slot.get("userId") != user_id:

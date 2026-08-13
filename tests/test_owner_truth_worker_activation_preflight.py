@@ -68,6 +68,26 @@ class OwnerTruthWorkerActivationPreflightTests(unittest.TestCase):
         self.assertEqual(decision.reason, "ownerTruthCandidateExtractionWorkerDisabled")
         self.assertEqual(decision.blocking_dependency, "candidateExtraction")
 
+    def test_live_memory_organization_requires_deepseek_before_worker_start(self):
+        missing = evaluate_owner_truth_worker_activation(
+            worker=OwnerTruthWorkerKind.CANDIDATE_EXTRACTION,
+            settings=self.settings(owner_truth_live_memory_organization_enabled=True),
+            schema_ready=True,
+        )
+        ready = evaluate_owner_truth_worker_activation(
+            worker=OwnerTruthWorkerKind.CANDIDATE_EXTRACTION,
+            settings=self.settings(
+                owner_truth_live_memory_organization_enabled=True,
+                deepseek_api_key="deepseek-server-secret",
+            ),
+            schema_ready=True,
+        )
+
+        self.assertFalse(missing.ready)
+        self.assertEqual(missing.reason, "ownerTruthLiveMemoryOrganizerNotConfigured")
+        self.assertEqual(missing.blocking_dependency, "deepSeek")
+        self.assertTrue(ready.ready)
+
     def test_media_worker_fails_closed_when_storage_is_incomplete(self):
         settings = self.settings(
             owner_truth_media_capture_enabled=True,

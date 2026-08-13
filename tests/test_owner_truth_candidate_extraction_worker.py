@@ -15,6 +15,7 @@ from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
 from app.async_effects.lease_repository import InMemoryAsyncEffectLeaseRepository
 from app.async_effects.owner_truth_candidate_extraction_worker import (
     DeterministicOwnerTruthCandidateExtractor,
+    ModelAssistedOwnerTruthLiveConversationExtractor,
     OwnerTruthCandidateExtractionWorkerRuntime,
 )
 from app.async_effects.target_admission import InMemoryOwnerTruthSourceTargetAdmissionRepository
@@ -31,9 +32,16 @@ def _digest(value: str) -> str:
 
 
 class _SourceInputRepository:
-    def __init__(self, *, source_content_hash: str, source_text: str) -> None:
+    def __init__(
+        self,
+        *,
+        source_content_hash: str,
+        source_text: str,
+        source_metadata: dict[str, object] | None = None,
+    ) -> None:
         self.source_content_hash = source_content_hash
         self.source_text = source_text
+        self.source_metadata = source_metadata or {}
         self.fail = False
         self.intents: list[AsyncEffectIntent] = []
 
@@ -47,6 +55,7 @@ class _SourceInputRepository:
         return OwnerTruthCandidateExtractionInput(
             source_content_hash=self.source_content_hash,
             source_text=self.source_text,
+            source_metadata=self.source_metadata,
         )
 
 
@@ -59,6 +68,7 @@ class _Store:
         source_id: str,
         source_content_hash: str,
         source_text: str,
+        source_metadata: dict[str, object] | None = None,
         candidate_repository: InMemoryOwnerTruthCandidateExtractionRepository | None = None,
         candidate_extraction_allowed: bool = True,
     ) -> None:
@@ -69,6 +79,7 @@ class _Store:
         self.input_repository = _SourceInputRepository(
             source_content_hash=source_content_hash,
             source_text=source_text,
+            source_metadata=source_metadata,
         )
         self.candidate_repository = (
             candidate_repository or InMemoryOwnerTruthCandidateExtractionRepository()
@@ -120,6 +131,21 @@ class _Store:
 class _FailingExtractor:
     def extract(self, **_kwargs):
         raise RuntimeError("deterministic extractor fixture failure")
+
+
+class _RecordingLiveMemoryOrganizer:
+    model = "deepseek-live-memory-test"
+    prompt_version = "owner-truth-live-memory-organization-test-v1"
+
+    def __init__(self, memories: list[dict[str, object]]) -> None:
+        self.memories = memories
+        self.turns: list[dict[str, object]] | None = None
+        self.calls: list[list[dict[str, object]]] = []
+
+    def request_organization(self, *, turns):
+        self.turns = list(turns)
+        self.calls.append(list(turns))
+        return {"memories": self.memories}
 
 
 class _BlockingExtractor:
@@ -203,6 +229,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         *,
         candidate_repository: InMemoryOwnerTruthCandidateExtractionRepository | None = None,
         candidate_extraction_allowed: bool = True,
+        source_metadata: dict[str, object] | None = None,
     ) -> _Store:
         return _Store(
             vault_id=self.vault_id,
@@ -210,6 +237,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
             source_id=self.source_id,
             source_content_hash=self.source_content_hash,
             source_text=self.source_text,
+            source_metadata=source_metadata,
             candidate_repository=candidate_repository,
             candidate_extraction_allowed=candidate_extraction_allowed,
         )
@@ -275,6 +303,268 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(candidate["payload"]["sensitivity"], "standard")
         self.assertEqual(candidate["payload"]["reviewMode"], "single")
         self.assertEqual(candidate["payload"]["evidenceRefs"][0]["span"], {"start": 0, "end": len(self.source_text)})
+
+    def test_live_digest_uses_only_user_evidence_and_excludes_assistant_suggestions(self) -> None:
+        first_user_turn = "我小时候住在河边。河水很安静。"
+        repeated_user_turn = "河水很安静，我常和外公去散步。"
+        assistant_turn = "所以你在上海长大，对吗？"
+        source_text = f"{first_user_turn}\n\n{repeated_user_turn}"
+        source_hash = _digest(source_text)
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=source_hash,
+            source_text=source_text,
+            source_metadata={
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {"index": 1, "role": "user", "text": first_user_turn},
+                    {"index": 2, "role": "assistant", "text": assistant_turn},
+                    {"index": 3, "role": "user", "text": repeated_user_turn},
+                ],
+            },
+        )
+        store.lease_repository.seed(self.intent)
+
+        result = self._worker(store=store).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        candidate = next(iter(store.candidate_repository.snapshot()["candidates"].values()))
+        summary = candidate["payload"]["content"]["summary"]
+        self.assertIn("我小时候住在河边", summary)
+        self.assertIn("我常和外公去散步", summary)
+        self.assertNotIn("上海", summary)
+        self.assertNotIn("对吗", summary)
+        self.assertNotIn("\n", summary)
+
+    def test_closed_live_conversation_uses_semantic_organization_for_pending_memories(self) -> None:
+        first_user_turn = "我小时候住在河边，常和外公去散步。"
+        assistant_turn = "那段经历让你学到了什么？"
+        second_user_turn = "我觉得陪伴比讲道理更重要，也一直很怀念外公。"
+        source_text = f"{first_user_turn}\n\n{second_user_turn}"
+        organizer = _RecordingLiveMemoryOrganizer(
+            [
+                {
+                    "memoryKind": "experience",
+                    "summary": "我小时候常和外公在河边散步。",
+                    "sourceTurnIndices": [1],
+                },
+                {
+                    "memoryKind": "knowledge",
+                    "claim": "我认为陪伴比讲道理更重要。",
+                    "sourceTurnIndices": [3],
+                },
+                {
+                    "memoryKind": "emotion",
+                    "label": "我一直很怀念外公。",
+                    "sourceTurnIndices": [3],
+                },
+            ]
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(source_text),
+            source_text=source_text,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {
+                        "index": 1,
+                        "role": "user",
+                        "text": first_user_turn,
+                        "captureMode": "live",
+                    },
+                    {
+                        "index": 2,
+                        "role": "assistant",
+                        "text": assistant_turn,
+                        "captureMode": "live",
+                    },
+                    {
+                        "index": 3,
+                        "role": "user",
+                        "text": second_user_turn,
+                        "captureMode": "live",
+                    },
+                ],
+            },
+        )
+        store.lease_repository.seed(self.intent)
+
+        result = self._worker(store=store, extractor=extractor).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["candidateCount"], 3)
+        self.assertEqual(
+            organizer.turns,
+            [
+                {"index": 1, "role": "user", "text": first_user_turn},
+                {"index": 2, "role": "assistant", "text": assistant_turn},
+                {"index": 3, "role": "user", "text": second_user_turn},
+            ],
+        )
+        candidates = list(store.candidate_repository.snapshot()["candidates"].values())
+        payloads = {candidate["payload"]["candidateKind"]: candidate["payload"] for candidate in candidates}
+        self.assertEqual(payloads["experience"]["content"]["summary"], "我小时候常和外公在河边散步。")
+        self.assertEqual(payloads["knowledge"]["content"]["claim"], "我认为陪伴比讲道理更重要。")
+        self.assertEqual(payloads["emotion"]["content"]["label"], "我一直很怀念外公。")
+        self.assertTrue(all(payload["reviewMode"] == "single" for payload in payloads.values()))
+        self.assertTrue(all(payload["confidence"] == 0.0 for payload in payloads.values()))
+
+    def test_live_organization_cannot_use_an_assistant_turn_as_evidence(self) -> None:
+        owner_turn = "我小时候住在河边。"
+        assistant_turn = "所以你是在上海长大，对吗？"
+        organizer = _RecordingLiveMemoryOrganizer(
+            [
+                {
+                    "memoryKind": "experience",
+                    "summary": "我在上海长大。",
+                    "sourceTurnIndices": [2],
+                }
+            ]
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(owner_turn),
+            source_text=owner_turn,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {"index": 1, "role": "user", "text": owner_turn, "captureMode": "live"},
+                    {"index": 2, "role": "assistant", "text": assistant_turn, "captureMode": "live"},
+                ],
+            },
+        )
+        store.lease_repository.seed(self.intent)
+
+        result = self._worker(store=store, extractor=extractor).run_once()
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
+
+    def test_long_live_transcript_sends_every_turn_across_bounded_requests(self) -> None:
+        turns = [
+            {"index": 1, "role": "user", "text": "第一段经历。", "captureMode": "live"},
+            {"index": 2, "role": "assistant", "text": "后来呢？", "captureMode": "live"},
+            {"index": 3, "role": "user", "text": "第二段经历。", "captureMode": "live"},
+            {"index": 4, "role": "assistant", "text": "当时什么感受？", "captureMode": "live"},
+            {"index": 5, "role": "user", "text": "我觉得很安心。", "captureMode": "live"},
+        ]
+        organizer = _RecordingLiveMemoryOrganizer([])
+        organizer.maximum_turn_count = 2
+        organizer.maximum_turn_characters = 100
+        organizer.maximum_total_characters = 100
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+        source_text = "\n\n".join(
+            str(turn["text"]) for turn in turns if turn["role"] == "user"
+        )
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(source_text),
+                source_text=source_text,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": turns,
+                },
+            ),
+        )
+
+        sent_texts = {str(turn["text"]) for call in organizer.calls for turn in call}
+        self.assertEqual(sent_texts, {str(turn["text"]) for turn in turns})
+        self.assertGreater(len(organizer.calls), 1)
+        self.assertTrue(all(any(turn["role"] == "user" for turn in call) for call in organizer.calls))
+        self.assertEqual(command.proposals, ())
+
+    def test_one_oversized_live_turn_is_split_without_dropping_text(self) -> None:
+        owner_turn = "甲乙丙丁" * 80
+        organizer = _RecordingLiveMemoryOrganizer([])
+        organizer.maximum_turn_count = 4
+        organizer.maximum_turn_characters = 100
+        organizer.maximum_total_characters = 200
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(owner_turn),
+                source_text=owner_turn,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": [
+                        {
+                            "index": 1,
+                            "role": "user",
+                            "text": owner_turn,
+                            "captureMode": "live",
+                        }
+                    ],
+                },
+            ),
+        )
+
+        sent_owner_text = "".join(
+            str(turn["text"])
+            for call in organizer.calls
+            for turn in call
+            if turn["role"] == "user"
+        )
+        self.assertEqual(sent_owner_text, owner_turn)
+        self.assertGreater(len(organizer.calls), 1)
+        self.assertTrue(all(len(call) == 1 for call in organizer.calls))
+        self.assertEqual(command.proposals, ())
+
+    def test_live_transcript_is_not_sent_when_organization_switch_is_off(self) -> None:
+        owner_turn = "我记得外公总会在河边等我。"
+        organizer = _RecordingLiveMemoryOrganizer([])
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=False),
+            organizer=organizer,
+        )
+        source = OwnerTruthCandidateExtractionInput(
+            source_content_hash=_digest(owner_turn),
+            source_text=owner_turn,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {
+                        "index": 1,
+                        "role": "user",
+                        "text": owner_turn,
+                        "captureMode": "live",
+                    }
+                ],
+            },
+        )
+
+        with self.assertRaises(RuntimeError):
+            extractor.extract(intent=self.intent, source=source)
+
+        self.assertIsNone(organizer.turns)
 
     def test_replay_deduplicates_the_immutable_extraction_and_candidate(self) -> None:
         first = self._worker().run_once()

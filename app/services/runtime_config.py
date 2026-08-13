@@ -173,7 +173,7 @@ class RuntimeConfigService:
                 "deepseekProxy": bool(self.settings.deepseek_api_key),
                 "archiveImageAnalysis": archive_image_analysis.enabled,
                 "ttsProxy": bool(self.settings.volcengine_api_key and self.settings.volcengine_voice_type),
-                "realtimeToken": False,
+                "realtimeToken": bool(realtime_voice.get("providerReady")),
                 "amapDistrictProxy": bool(self.settings.amap_web_service_key),
                 "kbSync": True,
                 "familyCircle": True,
