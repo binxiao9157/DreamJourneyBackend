@@ -130,6 +130,46 @@ class RealtimeVoiceSessionBrokerTests(unittest.TestCase):
         self.auth_service.revoke_access_token(refreshed["accessToken"])
         self.assertFalse(self.broker.is_lease_authorized(lease))
 
+    def test_typed_subject_does_not_require_a_legacy_user_projection(self):
+        subject_id = "sub_typed_realtime_voice_owner"
+        self.store._subjects[subject_id] = {
+            "subjectId": subject_id,
+            "status": "active",
+        }
+        auth = self.auth_service.issue(subject_id)
+
+        config = self.broker.issue_runtime_config(
+            user_id=subject_id,
+            auth_session_id=auth["sessionId"],
+        )
+        lease = self.broker.consume(config["proxy"]["sessionToken"])
+
+        self.assertIsNotNone(lease)
+        self.assertTrue(self.broker.is_lease_authorized(lease))
+        self.assertNotIn(subject_id, self.store._users)
+
+    def test_suspended_typed_subject_is_denied_and_revokes_active_lease(self):
+        subject_id = "sub_suspended_realtime_voice_owner"
+        self.store._subjects[subject_id] = {
+            "subjectId": subject_id,
+            "status": "active",
+        }
+        auth = self.auth_service.issue(subject_id)
+        config = self.broker.issue_runtime_config(
+            user_id=subject_id,
+            auth_session_id=auth["sessionId"],
+        )
+        lease = self.broker.consume(config["proxy"]["sessionToken"])
+        self.store._subjects[subject_id]["status"] = "suspended"
+
+        self.assertFalse(self.broker.is_lease_authorized(lease))
+        with self.assertRaises(RealtimeVoiceProxyError) as raised:
+            self.broker.issue_runtime_config(
+                user_id=subject_id,
+                auth_session_id=auth["sessionId"],
+            )
+        self.assertEqual(raised.exception.code, "realtimeVoiceSubjectUnavailable")
+
     def test_client_frames_are_forwarded_opaquely_with_a_shared_budget(self):
         client = _ClientFrames(
             [

@@ -19,6 +19,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.db.migrator import PostgresMigrator, default_migrations_dir
+from app.core.config import Settings
 from app.services.auth_sessions import AuthSessionService
 from app.services.identity_bindings import (
     IdentityBindingService,
@@ -26,6 +27,7 @@ from app.services.identity_bindings import (
     UnavailableIdentityChallengeAdapter,
 )
 from app.services.postgres_store import PostgresStore
+from app.services.realtime_voice_proxy import RealtimeVoiceSessionBroker
 from app.services.test_account_allowlist import (
     TEST_ACCOUNT_PROVIDER_MODE,
     TestAccountAllowlistService,
@@ -96,6 +98,7 @@ def main() -> None:
         require(verified["status"] == "ready", "migration head must verify")
         require("0089" in applied["appliedVersions"], "migration 0089 must apply")
         require("0090" in applied["appliedVersions"], "migration 0090 must apply")
+        require("0093" in applied["appliedVersions"], "migration 0093 must apply")
 
         store = PostgresStore(
             test_dsn,
@@ -177,6 +180,54 @@ def main() -> None:
             "issued access token must resolve",
         )
 
+        realtime = RealtimeVoiceSessionBroker(
+            Settings(
+                store_backend="postgres",
+                database_url=test_dsn,
+                public_base_url="https://api.example.test/dreamjourney-api",
+                volcengine_app_id="postgres-smoke-app-id",
+                volcengine_app_key="postgres-smoke-app-key",
+                volcengine_app_token="postgres-smoke-access-token",
+                volcengine_realtime_resource_id="volc.speech.dialog",
+                realtime_voice_proxy_enabled=True,
+            ),
+            store,
+        )
+        realtime_config = realtime.issue_runtime_config(
+            user_id=subject_id,
+            auth_session_id=first_login["auth"]["sessionId"],
+        )
+        require(
+            realtime_config["status"] == "ready",
+            "typed Subject login must issue a realtime voice ticket",
+        )
+        with psycopg.connect(test_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT ticket.user_id, subject.status
+                    FROM realtime_voice_session_tickets AS ticket
+                    JOIN subjects AS subject ON subject.id = ticket.user_id
+                    WHERE ticket.ticket_hash = %s
+                    """,
+                    (realtime.ticket_hash(realtime_config["proxy"]["sessionToken"]),),
+                )
+                persisted_ticket = cursor.fetchone()
+        require(
+            persisted_ticket == (subject_id, "active"),
+            "realtime ticket must be owned by the verified Subject",
+        )
+        realtime_lease = realtime.consume(realtime_config["proxy"]["sessionToken"])
+        require(
+            realtime_lease is not None,
+            "typed Subject realtime ticket must be consumable",
+        )
+        require(
+            realtime.is_lease_authorized(realtime_lease),
+            "typed Subject realtime lease must remain authorized",
+        )
+        realtime.release(realtime_lease, reason="postgresSmokeComplete")
+
         second_challenge = identity.create_challenge(
             identity_type="phone",
             target=TARGET,
@@ -226,6 +277,7 @@ def main() -> None:
                     "migrationHead": verified["expectedHead"],
                     "subjectReused": True,
                     "sessionRevoked": True,
+                    "realtimeVoiceSubjectAuthority": True,
                     "rawCredentialsPersisted": False,
                 },
                 sort_keys=True,

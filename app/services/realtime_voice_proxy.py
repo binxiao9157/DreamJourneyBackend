@@ -120,6 +120,10 @@ class RealtimeVoiceSessionBroker:
                     "realtimeVoiceConcurrentSessionLimit",
                     retryable=True,
                 ) from exc
+            if "subject is not active" in str(exc):
+                raise RealtimeVoiceProxyError(
+                    "realtimeVoiceSubjectUnavailable",
+                ) from exc
             raise
 
         address, uri = self._public_proxy_endpoint()

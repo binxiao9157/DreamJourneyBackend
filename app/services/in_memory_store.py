@@ -1115,6 +1115,17 @@ class InMemoryStore:
         item = deepcopy(record)
         user_id = str(item.get("userId") or "")
         now = self._parse_iso_datetime(now_iso)
+        with self._identity_lock, self._auth_lock:
+            subject = self._subjects.get(user_id)
+            if subject is not None:
+                principal_active = str(subject.get("status") or "") == "active"
+            else:
+                user = self._users.get(user_id)
+                principal_active = bool(user) and self._legacy_realtime_voice_user_is_active(
+                    user
+                )
+        if not principal_active:
+            raise ValueError("realtime voice subject is not active")
         with self._realtime_voice_lock:
             for ticket_id, existing in list(self._realtime_voice_session_tickets.items()):
                 if str(existing.get("userId") or "") != user_id:
@@ -1229,9 +1240,16 @@ class InMemoryStore:
                     return False
         elif session_status != "active":
             return False
+        subject = self._subjects.get(user_id)
+        if subject is not None:
+            return str(subject.get("status") or "") == "active"
         user = self._users.get(user_id)
         if user is None:
             return False
+        return self._legacy_realtime_voice_user_is_active(user)
+
+    @staticmethod
+    def _legacy_realtime_voice_user_is_active(user: Dict[str, Any]) -> bool:
         return (
             str(user.get("deletionState") or "active") == "active"
             and str(user.get("accessState") or "active") == "active"

@@ -1758,6 +1758,13 @@ class PostgresStore:
             )
             cursor.fetchone()
             cursor.execute(
+                "SELECT status FROM subjects WHERE id = %s FOR SHARE",
+                (user_id,),
+            )
+            subject = cursor.fetchone()
+            if subject is None or str(subject.get("status") or "") != "active":
+                raise ValueError("realtime voice subject is not active")
+            cursor.execute(
                 """
                 SELECT id, payload
                 FROM realtime_voice_session_tickets
@@ -1862,11 +1869,13 @@ class PostgresStore:
                              AND current_session.session_version = f.current_session_version
                              AND current_session.status = 'active'
                        ) AS family_current_session_active,
-                       u.payload AS user_payload
+                       s.status AS subject_status,
+                       u.payload AS legacy_user_payload
                 FROM realtime_voice_session_tickets AS t
                 JOIN auth_sessions AS a ON a.id = t.auth_session_id
                 LEFT JOIN token_families AS f ON f.id = a.family_id
-                JOIN users AS u ON u.id = t.user_id
+                LEFT JOIN subjects AS s ON s.id = t.user_id
+                LEFT JOIN users AS u ON u.id = t.user_id
                 WHERE t.ticket_hash = %s
                 FOR UPDATE OF t
                 """,
@@ -1937,10 +1946,12 @@ class PostgresStore:
                          AND current_session.session_version = f.current_session_version
                          AND current_session.status = 'active'
                    ) AS family_current_session_active,
-                   u.payload AS user_payload
+                   s.status AS subject_status,
+                   u.payload AS legacy_user_payload
             FROM auth_sessions AS a
             LEFT JOIN token_families AS f ON f.id = a.family_id
-            JOIN users AS u ON u.id = a.user_id
+            LEFT JOIN subjects AS s ON s.id = a.user_id
+            LEFT JOIN users AS u ON u.id = a.user_id
             WHERE a.id = %s AND a.user_id = %s
             """,
             (auth_session_id, user_id),
@@ -1960,8 +1971,15 @@ class PostgresStore:
             or not bool(row.get("family_current_session_active"))
         ):
             return False
-        user = row.get("user_payload") if isinstance(row.get("user_payload"), dict) else {}
-        return (
+        subject_status = str(row.get("subject_status") or "")
+        if subject_status:
+            return subject_status == "active"
+        user = (
+            row.get("legacy_user_payload")
+            if isinstance(row.get("legacy_user_payload"), dict)
+            else {}
+        )
+        return bool(user) and (
             str(user.get("deletionState") or "active") == "active"
             and str(user.get("accessState") or "active") == "active"
             and str(user.get("providerCapabilityState") or "enabled") == "enabled"

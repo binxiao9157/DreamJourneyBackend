@@ -1,0 +1,11 @@
+{
+  "version": "0093",
+  "name": "realtime_voice_subject_authority",
+  "phase": "contract",
+  "compatibility": "contract",
+  "runtimeCompatibility": "typedV4RealtimeVoiceSubjectAuthority",
+  "requiresOldWorkerDrain": true,
+  "releaseFlags": {
+    "realtimeVoiceProxy": true
+  }
+}
