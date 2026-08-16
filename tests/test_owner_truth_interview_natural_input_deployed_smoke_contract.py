@@ -12,6 +12,8 @@ class OwnerTruthInterviewNaturalInputDeployedSmokeContractTests(unittest.TestCas
 
         self.assertIn('"schemaVersion": "owner-truth-interview-current-session-v1"', source)
         self.assertIn('"entryMode": "naturalInput"', source)
+        self.assertIn('"formalBoundaryReviewPendingPresentationVerified": True', source)
+        self.assertNotIn('"formalBoundaryPausedPresentationVerified": True', source)
         self.assertIn('"formalSessionExitCreatedHiddenReviewBatch": True', source)
 
 

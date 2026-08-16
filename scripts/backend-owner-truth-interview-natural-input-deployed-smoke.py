@@ -634,7 +634,7 @@ def exercise_formal_natural_input(
                 "threadId": thread_id,
                 "sessionId": session_id,
                 "threadVersion": 3,
-                "sessionVersion": 5,
+                "sessionVersion": 6,
                 "state": "paused",
                 "boundary": "cooldown",
             },
@@ -658,7 +658,7 @@ def exercise_formal_natural_input(
         require(
             isinstance(replay_receipt, dict)
             and replay_receipt.get("status") == "deduplicated"
-            and replay_receipt.get("sessionVersion") == 5,
+            and replay_receipt.get("sessionVersion") == 6,
             "deduplicated boundary must retain the committed session version",
         )
 
@@ -705,7 +705,7 @@ def exercise_formal_natural_input(
                 "schemaVersion": "owner-truth-interview-session-presentation-v1",
                 "vaultId": vault_id,
                 "presentation": {
-                    "state": "paused",
+                    "state": "reviewPending",
                     "canContinue": False,
                     "canContinueLater": True,
                 },
@@ -721,7 +721,7 @@ def exercise_formal_natural_input(
             payload={
                 "commandId": str(uuid.uuid4()),
                 "threadId": thread_id,
-                "expectedSessionVersion": 5,
+                "expectedSessionVersion": 6,
                 "confirmed": True,
             },
             policy_headers=policy_headers,
@@ -1058,7 +1058,7 @@ def exercise_formal_natural_input(
             "formalBoundaryPersisted": True,
             "formalBoundaryDeduplicated": True,
             "formalBoundaryPausedStateVerified": True,
-            "formalBoundaryPausedPresentationVerified": True,
+            "formalBoundaryReviewPendingPresentationVerified": True,
             "formalCooldownRestoreRejected": True,
             "formalDoNotAskRestoreRequiresConfirmation": True,
             "formalDoNotAskRestoreConfirmed": True,
