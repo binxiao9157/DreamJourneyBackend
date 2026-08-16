@@ -38,6 +38,7 @@ from app.services.user_identity import stable_user_id
 from app.services.voice_clone import VolcEngineVoiceCloneV3Provider, VoiceCloneProviderFactory
 from app.services.amap import AMapDistrictProxy
 from app.services.deepseek import (
+    DeepSeekEchoAnswerProxy,
     DeepSeekImageAnalysisProxy,
     DeepSeekKnowledgeExtractionProxy,
     DeepSeekLiveMemoryOrganizationProxy,
@@ -484,6 +485,17 @@ class RuntimeConfigTests(unittest.TestCase):
 
 
 class TokenAndProxyTests(HiddenStageContractTestCase):
+    def test_deepseek_provider_model_identifiers_match_api_contract(self):
+        self.assertEqual(
+            {
+                DeepSeekImageAnalysisProxy.model,
+                DeepSeekKnowledgeExtractionProxy.model,
+                DeepSeekLiveMemoryOrganizationProxy.model,
+                DeepSeekEchoAnswerProxy.model,
+            },
+            {"deepseek-v4-flash"},
+        )
+
     def test_realtime_token_blocks_static_credentials_without_fake_expiry(self):
         settings = Settings(
             volcengine_app_id="test-app-id",

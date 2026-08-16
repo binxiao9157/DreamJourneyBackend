@@ -9,6 +9,8 @@ from time import sleep
 import unittest
 from uuid import uuid4
 
+import httpx
+
 from app.async_effects.consumer_repository import InMemoryAsyncEffectConsumerRepository
 from app.async_effects.dead_letter_repository import InMemoryAsyncEffectDeadLetterRepository
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
@@ -146,6 +148,15 @@ class _RecordingLiveMemoryOrganizer:
         self.turns = list(turns)
         self.calls.append(list(turns))
         return {"memories": self.memories}
+
+
+class _UnavailableLiveMemoryOrganizer:
+    model = "deepseek-live-memory-test"
+    prompt_version = "owner-truth-live-memory-organization-test-v1"
+
+    def request_organization(self, *, turns):
+        request = httpx.Request("POST", "https://provider.invalid/chat/completions")
+        raise httpx.ConnectError("provider unavailable", request=request)
 
 
 class _BlockingExtractor:
@@ -418,6 +429,38 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(payloads["emotion"]["content"]["label"], "我一直很怀念外公。")
         self.assertTrue(all(payload["reviewMode"] == "single" for payload in payloads.values()))
         self.assertTrue(all(payload["confidence"] == 0.0 for payload in payloads.values()))
+
+    def test_live_organization_transport_failure_falls_back_to_owner_evidence(self) -> None:
+        owner_turn = "我记得外公总会在河边等我。"
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=_UnavailableLiveMemoryOrganizer(),
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(owner_turn),
+                source_text=owner_turn,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": [
+                        {
+                            "index": 1,
+                            "role": "user",
+                            "text": owner_turn,
+                            "captureMode": "live",
+                        }
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(command.extractor_id, "deterministicLiveConversationDigest")
+        self.assertEqual(command.model_id, "deterministic-live-conversation-digest-v1")
+        self.assertEqual(len(command.proposals), 1)
+        self.assertEqual(command.proposals[0].content["summary"], owner_turn)
 
     def test_live_organization_cannot_use_an_assistant_turn_as_evidence(self) -> None:
         owner_turn = "我小时候住在河边。"

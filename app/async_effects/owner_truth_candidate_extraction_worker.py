@@ -18,6 +18,8 @@ import socket
 from time import perf_counter, sleep
 from typing import Any, Optional, Protocol
 
+import httpx
+
 from app.async_effects.consumer_repository import OwnerTruthSourceBlockedConsumerCommand
 from app.async_effects.contracts import (
     AsyncEffectIntent,
@@ -239,7 +241,13 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
         memories: list[dict[str, Any]] = []
         seen_memories: set[tuple[str, str]] = set()
         for chunk in self._organization_chunks(turns):
-            organization = self._organizer.request_organization(turns=chunk)
+            try:
+                organization = self._organizer.request_organization(turns=chunk)
+            except httpx.HTTPError:
+                # Keep a closed Live session reviewable when the semantic
+                # organizer is temporarily unavailable. This fallback uses
+                # owner evidence only and still requires explicit review.
+                return self._fallback.extract(intent=intent, source=source)
             chunk_memories = organization.get("memories")
             if not isinstance(chunk_memories, list):
                 raise ValueError("live memory organizer returned an invalid memories contract")
