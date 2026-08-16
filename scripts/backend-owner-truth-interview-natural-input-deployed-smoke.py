@@ -461,6 +461,7 @@ def exercise_formal_natural_input(
                     "sessionVersion": 2,
                     "state": "active",
                     "boundary": "open",
+                    "entryMode": "naturalInput",
                 },
             },
             "current session must expose only the active resume handle",
