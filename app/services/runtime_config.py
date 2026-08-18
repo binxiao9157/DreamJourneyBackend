@@ -91,8 +91,12 @@ class RuntimeConfigService:
                 self.settings.password_authentication_enabled
                 and self.settings.identity_binding_hmac_key
             ),
-            identity_challenge_ready=bool(
+            production_recovery_ready=bool(
+                identity_challenge.get("productionReady") is True
+            ),
+            test_recovery_ready=bool(
                 identity_challenge.get("clientFlowEnabled") is True
+                and identity_challenge.get("testAccountFlowEnabled") is True
             ),
         )
         media_storage = self.provider_inventory.status_for("ownerTruthMediaStorage")

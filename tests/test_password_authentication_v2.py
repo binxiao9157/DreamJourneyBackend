@@ -389,6 +389,8 @@ class PasswordAuthenticationV2EndpointTests(unittest.TestCase):
         self.assertFalse(ready["setupReady"])
         self.assertFalse(ready["resetReady"])
         self.assertFalse(ready["reauthReady"])
+        self.assertFalse(ready["testRecoveryReady"])
+        self.assertEqual(ready["recoveryMode"], "unavailable")
         self.assertEqual(
             ready["recoveryReason"],
             "identityChallengeUnavailable",
@@ -397,6 +399,44 @@ class PasswordAuthenticationV2EndpointTests(unittest.TestCase):
         self.assertEqual(ready["resetChallengePurpose"], "passwordReset")
         self.assertFalse(disabled["enabled"])
         self.assertNotEqual(disabled["reason"], "ready")
+
+    def test_test_allowlist_does_not_open_public_password_recovery(self):
+        capability = RuntimeConfigService(
+            Settings(
+                environment="production",
+                identity_binding_hmac_key=HMAC_KEY,
+                test_account_allowlist_enabled=True,
+                test_account_allowed_phone_prefixes="13800138000",
+            )
+        ).public_config()["auth"]["passwordAuthentication"]
+
+        self.assertTrue(capability["loginReady"])
+        self.assertFalse(capability["setupReady"])
+        self.assertFalse(capability["resetReady"])
+        self.assertFalse(capability["reauthReady"])
+        self.assertTrue(capability["testRecoveryReady"])
+        self.assertEqual(capability["recoveryMode"], "testAllowlist")
+        self.assertEqual(capability["recoveryReason"], "testAllowlistOnly")
+
+    def test_production_challenge_opens_public_password_recovery(self):
+        capability = RuntimeConfigService(
+            Settings(
+                environment="production",
+                identity_binding_hmac_key=HMAC_KEY,
+                identity_challenge_adapter="httpJson",
+                identity_challenge_http_json_url=(
+                    "https://sms.example.test/v1/challenges"
+                ),
+                identity_challenge_http_json_api_key="server-only-api-key",
+            )
+        ).public_config()["auth"]["passwordAuthentication"]
+
+        self.assertTrue(capability["setupReady"])
+        self.assertTrue(capability["resetReady"])
+        self.assertTrue(capability["reauthReady"])
+        self.assertFalse(capability["testRecoveryReady"])
+        self.assertEqual(capability["recoveryMode"], "production")
+        self.assertEqual(capability["recoveryReason"], "ready")
 
 
 if __name__ == "__main__":

@@ -63,7 +63,9 @@ def main():
     require(ready.get("status") == "ready", "backend readiness is not ready")
 
     runtime = request_json("GET", "/config/runtime")
-    password = (runtime.get("auth") or {}).get("passwordAuthentication") or {}
+    auth = runtime.get("auth") or {}
+    identity = auth.get("identityChallenge") or {}
+    password = auth.get("passwordAuthentication") or {}
     require(password.get("contractVersion") == 2, "password contract must be v2")
     require(password.get("implemented") is True, "password contract is missing")
     require(
@@ -90,9 +92,40 @@ def main():
         "setupReady",
         "resetReady",
         "reauthReady",
+        "testRecoveryReady",
     ):
         require(type(password.get(field)) is bool, f"{field} must be boolean")
     require(password.get("sessionContractVersion") == 2, "session contract drift")
+    if identity.get("productionReady") is True:
+        require(password.get("setupReady") is True, "production setup must be ready")
+        require(password.get("resetReady") is True, "production reset must be ready")
+        require(password.get("reauthReady") is True, "production reauth must be ready")
+        require(
+            password.get("recoveryMode") == "production",
+            "production recovery mode drift",
+        )
+    else:
+        require(
+            password.get("setupReady") is False,
+            "test OTP must not expose public password setup",
+        )
+        require(
+            password.get("resetReady") is False,
+            "test OTP must not expose public password reset",
+        )
+        require(
+            password.get("reauthReady") is False,
+            "test OTP must not expose public sensitive reauth",
+        )
+        if identity.get("testAccountFlowEnabled") is True:
+            require(
+                password.get("testRecoveryReady") is True,
+                "test allowlist recovery must remain diagnosable",
+            )
+            require(
+                password.get("recoveryMode") == "testAllowlist",
+                "test allowlist recovery mode drift",
+            )
 
     target = f"+1555{secrets.randbelow(10**7):07d}"
     candidate_password = f"deployed-negative-{secrets.token_hex(10)}"
@@ -125,6 +158,8 @@ def main():
                 "contractVersion": password["contractVersion"],
                 "loginReady": password["loginReady"],
                 "resetReady": password["resetReady"],
+                "testRecoveryReady": password["testRecoveryReady"],
+                "recoveryMode": password.get("recoveryMode"),
                 "recoveryReason": password.get("recoveryReason"),
                 "negativeLoginCode": detail["code"],
             },

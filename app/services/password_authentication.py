@@ -658,9 +658,13 @@ class PasswordAuthenticationService:
 def password_authentication_runtime_descriptor(
     *,
     configured: bool,
-    identity_challenge_ready: bool,
+    production_recovery_ready: bool,
+    test_recovery_ready: bool,
 ) -> Dict[str, Any]:
-    recovery_ready = bool(configured and identity_challenge_ready)
+    recovery_ready = bool(configured and production_recovery_ready)
+    test_only_recovery_ready = bool(
+        configured and not recovery_ready and test_recovery_ready
+    )
     return {
         "implemented": True,
         "enabled": bool(configured),
@@ -671,13 +675,23 @@ def password_authentication_runtime_descriptor(
         "setupReady": recovery_ready,
         "resetReady": recovery_ready,
         "reauthReady": recovery_ready,
+        "testRecoveryReady": test_only_recovery_ready,
+        "recoveryMode": (
+            "production"
+            if recovery_ready
+            else ("testAllowlist" if test_only_recovery_ready else "unavailable")
+        ),
         "recoveryReason": (
             "ready"
             if recovery_ready
             else (
-                "identityChallengeUnavailable"
-                if configured
-                else "passwordAuthenticationUnavailable"
+                "testAllowlistOnly"
+                if test_only_recovery_ready
+                else (
+                    "identityChallengeUnavailable"
+                    if configured
+                    else "passwordAuthenticationUnavailable"
+                )
             )
         ),
         "loginEndpoint": "/v2/auth/password/login",
