@@ -529,6 +529,13 @@ class TestAccountAuthorizationEndpointTests(unittest.TestCase):
         self.assertIn("entitlement_revision", sql)
         self.assertIn("updated_by_hash", sql)
         self.assertNotIn("administrator_username", sql)
+        self.assertLess(
+            sql.index(
+                "DROP CONSTRAINT IF EXISTS "
+                "test_account_allowlist_contract_version_check"
+            ),
+            sql.index("SET entitlement_snapshot_id"),
+        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,12 @@ ALTER TABLE test_account_allowlist
     ADD COLUMN updated_by_hash TEXT,
     ADD COLUMN entitlement_updated_at TIMESTAMPTZ;
 
+-- The previous contract constraint only admitted version 1. Remove it before
+-- backfilling version 2; the replacement constraint is installed below in the
+-- same transaction.
+ALTER TABLE test_account_allowlist
+    DROP CONSTRAINT IF EXISTS test_account_allowlist_contract_version_check;
+
 UPDATE test_account_allowlist
 SET entitlement_snapshot_id = 'tae_' || SUBSTRING(MD5(id || ':1') FROM 1 FOR 32),
     updated_by_hash = created_by_hash,
@@ -23,7 +29,6 @@ ALTER TABLE test_account_allowlist
     ALTER COLUMN updated_by_hash SET NOT NULL,
     ALTER COLUMN entitlement_updated_at SET NOT NULL,
     ALTER COLUMN contract_version SET DEFAULT 2,
-    DROP CONSTRAINT IF EXISTS test_account_allowlist_contract_version_check,
     ADD CONSTRAINT test_account_allowlist_test_role_check
         CHECK (
             test_role IS NULL OR test_role IN (
