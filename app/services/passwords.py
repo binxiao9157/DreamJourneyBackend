@@ -7,7 +7,9 @@ from typing import Any, Dict
 
 
 ALGORITHM = "pbkdf2_sha256"
-ITERATIONS = 210_000
+ITERATIONS = 600_000
+MIN_SUPPORTED_ITERATIONS = 100_000
+MAX_SUPPORTED_ITERATIONS = 2_000_000
 SALT_BYTES = 16
 
 
@@ -29,8 +31,22 @@ def verify_password(password: str, credential: Dict[str, Any]) -> bool:
     expected = str(credential.get("hash") or "")
     if not salt or not expected:
         return False
-    actual = _derive(password, salt, int(credential.get("iterations") or ITERATIONS))
+    try:
+        iterations = int(credential.get("iterations") or ITERATIONS)
+    except (TypeError, ValueError):
+        return False
+    if iterations < MIN_SUPPORTED_ITERATIONS or iterations > MAX_SUPPORTED_ITERATIONS:
+        return False
+    actual = _derive(password, salt, iterations)
     return hmac.compare_digest(actual, expected)
+
+
+def password_credential_needs_rehash(credential: Dict[str, Any]) -> bool:
+    try:
+        iterations = int(credential.get("iterations") or 0)
+    except (TypeError, ValueError):
+        return True
+    return credential.get("algorithm") != ALGORITHM or iterations < ITERATIONS
 
 
 def _derive(password: str, salt: str, iterations: int = ITERATIONS) -> str:

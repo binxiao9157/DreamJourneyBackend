@@ -66,6 +66,7 @@ class Settings:
     identity_challenge_ttl_seconds: int = 300
     identity_challenge_max_attempts: int = 5
     identity_challenge_retry_after_seconds: int = 30
+    password_authentication_enabled: bool = True
     # A machine-managed, target-restricted login lane for synthetic QA
     # accounts. It is disabled by default and accepts only explicitly
     # configured phone prefixes so it cannot become an arbitrary OTP bypass.
@@ -415,6 +416,10 @@ class Settings:
             identity_challenge_retry_after_seconds=_env_int(
                 "IDENTITY_CHALLENGE_RETRY_AFTER_SECONDS",
                 cls.identity_challenge_retry_after_seconds,
+            ),
+            password_authentication_enabled=_env_bool(
+                "PASSWORD_AUTHENTICATION_ENABLED",
+                cls.password_authentication_enabled,
             ),
             test_account_allowlist_enabled=_env_bool(
                 "TEST_ACCOUNT_ALLOWLIST_ENABLED",

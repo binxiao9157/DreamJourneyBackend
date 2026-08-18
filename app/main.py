@@ -527,6 +527,10 @@ from app.services.knowledge_governance import (
     summarize_knowledge_governance_mutation,
 )
 from app.services.passwords import make_password_credential, verify_password
+from app.services.password_authentication import (
+    PasswordAuthenticationError,
+    PasswordAuthenticationService,
+)
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
     ArchiveItemNotFound,
@@ -5698,6 +5702,18 @@ def _identity_binding_service():
     )
 
 
+def _password_authentication_service() -> PasswordAuthenticationService:
+    identity_service = _identity_binding_service()
+    return PasswordAuthenticationService(
+        store,
+        identity_binding_service=identity_service,
+        auth_session_service=_auth_session_service(),
+        token_hmac_key=str(settings.identity_binding_hmac_key or ""),
+        event_sink=getattr(store, "append_evidence_event", None),
+        environment=settings.environment,
+    )
+
+
 def _test_account_allowlist_service():
     return make_test_account_allowlist_service(store, settings)
 
@@ -6325,6 +6341,8 @@ ANONYMOUS_AUTH_PATHS = {
     "/auth/login",
     "/auth/refresh",
     "/v2/auth/challenges",
+    "/v2/auth/password/login",
+    "/v2/auth/password/reset",
     "/config/runtime",
     "/v2/release-policy",
 }
@@ -12543,11 +12561,18 @@ def verify_identity_challenge(
 ) -> Dict[str, Any]:
     try:
         service = _identity_binding_service()
-        return service.verify_challenge(
+        result = service.verify_challenge(
             challenge_id,
             str(payload.get("code") or ""),
             nickname=str(payload.get("nickname") or ""),
         )
+        purpose = str(result.get("purpose") or "")
+        if purpose in {"passwordreset", "sensitiveoperation"}:
+            return _password_authentication_service().issue_action_grant(
+                verification=result,
+                purpose=purpose,
+            )
+        return result
     except IdentityChallengeVerificationFailed as exc:
         request.state.commit_security_attempt = True
         raise HTTPException(
@@ -12571,6 +12596,16 @@ def verify_identity_challenge(
                 "message": "identity challenge is unavailable",
             },
         ) from exc
+    except (PasswordAuthenticationError, ValueError) as exc:
+        if isinstance(exc, PasswordAuthenticationError):
+            raise _password_authentication_http_error(request, exc) from exc
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "password_authentication_unavailable",
+                "message": "password authentication is unavailable",
+            },
+        ) from exc
 
 
 @app.get("/v2/auth/challenges/{challenge_id}")
@@ -12591,6 +12626,104 @@ def get_identity_challenge_state(
                 "message": "identity challenge state is unavailable",
             },
         ) from exc
+
+
+def _password_authentication_http_error(
+    request: Request,
+    error: PasswordAuthenticationError,
+) -> HTTPException:
+    if error.commit_security_attempt:
+        request.state.commit_security_attempt = True
+    detail: Dict[str, Any] = {
+        "code": error.code,
+        "message": error.code,
+        "contractVersion": 2,
+    }
+    headers: Optional[Dict[str, str]] = None
+    if error.retry_after_seconds is not None:
+        detail["retryAfterSeconds"] = error.retry_after_seconds
+        headers = {"Retry-After": str(error.retry_after_seconds)}
+    return HTTPException(
+        status_code=error.status_code,
+        detail=detail,
+        headers=headers,
+    )
+
+
+def _password_authentication_or_unavailable() -> PasswordAuthenticationService:
+    if not settings.password_authentication_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "password_authentication_disabled",
+                "message": "password authentication is disabled",
+                "contractVersion": 2,
+            },
+        )
+    try:
+        return _password_authentication_service()
+    except (ValueError, IdentityChallengeConfigurationError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "password_authentication_unavailable",
+                "message": "password authentication is unavailable",
+                "contractVersion": 2,
+            },
+        ) from exc
+
+
+@app.post("/v2/auth/password/login")
+def login_with_password(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return _password_authentication_or_unavailable().login(
+            identity_type=str(payload.get("identityType") or "phone"),
+            target=str(payload.get("target") or ""),
+            password=str(payload.get("password") or ""),
+        )
+    except PasswordAuthenticationError as exc:
+        raise _password_authentication_http_error(request, exc) from exc
+
+
+@app.post("/v2/auth/password/setup")
+def setup_password(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="user access token is required")
+    try:
+        return _password_authentication_or_unavailable().setup_password(
+            principal_user_id=user_id,
+            new_password=str(payload.get("newPassword") or ""),
+            reauth_token=str(payload.get("reauthToken") or ""),
+        )
+    except PasswordAuthenticationError as exc:
+        raise _password_authentication_http_error(request, exc) from exc
+
+
+@app.post("/v2/auth/password/change")
+def change_modern_password(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = _request_user_principal_id(request)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="user access token is required")
+    try:
+        return _password_authentication_or_unavailable().change_password(
+            principal_user_id=user_id,
+            current_password=str(payload.get("currentPassword") or ""),
+            new_password=str(payload.get("newPassword") or ""),
+        )
+    except PasswordAuthenticationError as exc:
+        raise _password_authentication_http_error(request, exc) from exc
+
+
+@app.post("/v2/auth/password/reset", status_code=202)
+def reset_password(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return _password_authentication_or_unavailable().reset_password(
+            reset_token=str(payload.get("resetToken") or ""),
+            new_password=str(payload.get("newPassword") or ""),
+        )
+    except PasswordAuthenticationError as exc:
+        raise _password_authentication_http_error(request, exc) from exc
 
 
 @app.post("/auth/login")

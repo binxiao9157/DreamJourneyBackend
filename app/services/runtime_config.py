@@ -5,6 +5,9 @@ from app.async_effects.contracts import resolve_async_effect_runtime_status
 from app.services.deepseek import ArchiveImageAnalysisProviderFactory
 from app.services.digital_human_access import DigitalHumanAccessPolicy
 from app.services.identity_bindings import identity_challenge_runtime_descriptor
+from app.services.password_authentication import (
+    password_authentication_runtime_descriptor,
+)
 from app.services.route_authentication import resolve_route_authentication_mode
 from app.services.route_ownership import RouteOwnershipRegistry
 from app.services.release_policy import ReleasePolicyService, parse_release_policy_feature_set
@@ -83,6 +86,15 @@ class RuntimeConfigService:
         )
         realtime_voice = TokenService(self.settings).realtime_config(user_id="runtime-capability")
         identity_challenge = identity_challenge_runtime_descriptor(self.settings)
+        password_authentication = password_authentication_runtime_descriptor(
+            configured=bool(
+                self.settings.password_authentication_enabled
+                and self.settings.identity_binding_hmac_key
+            ),
+            identity_challenge_ready=bool(
+                identity_challenge.get("clientFlowEnabled") is True
+            ),
+        )
         media_storage = self.provider_inventory.status_for("ownerTruthMediaStorage")
         media_processing = self.provider_inventory.status_for("ownerTruthMediaProcessing")
         identity_provider = self.provider_inventory.status_for("identityChallenge")
@@ -194,6 +206,7 @@ class RuntimeConfigService:
                 "digitalHumanSessionLease": False,
                 "authSession": True,
                 "identityChallenge": identity_provider.enabled,
+                "passwordAuthentication": password_authentication["enabled"],
                 "releasePolicy": True,
                 "asyncEffect": async_effect_runtime.enabled,
                 "apnsDelivery": bool(apns_delivery["enabled"]),
@@ -208,6 +221,7 @@ class RuntimeConfigService:
                 "refreshEndpoint": "/auth/refresh",
                 "logoutEndpoint": "/auth/logout",
                 "identityChallenge": identity_challenge,
+                "passwordAuthentication": password_authentication,
                 "tokenType": "Bearer",
                 "accessTTLSeconds": max(60, self.settings.auth_access_ttl_seconds),
                 "refreshTTLSeconds": max(

@@ -22,7 +22,15 @@ from app.services.test_account_allowlist import (
 
 IDENTITY_BINDING_CONTRACT_VERSION = 1
 IDENTITY_CHALLENGE_STATE_CONTRACT_VERSION = 1
-IDENTITY_CHALLENGE_PURPOSES = {"login", "register", "restore", "invitation"}
+IDENTITY_CHALLENGE_PURPOSES = {
+    "login",
+    "register",
+    "restore",
+    "invitation",
+    "passwordreset",
+    "sensitiveoperation",
+}
+IDENTITY_CHALLENGE_ACTION_PURPOSES = {"passwordreset", "sensitiveoperation"}
 INTERNAL_ADAPTER_ENVIRONMENTS = {"development", "local", "test", "testing"}
 IDENTITY_CHALLENGE_DELIVERY_STATES = {
     "accepted",
@@ -870,6 +878,8 @@ class IdentityBindingService:
             code_hash = self._keyed_hash(
                 f"code:v1:{normalized_challenge_id}:{candidate_code}"
             )
+        challenge_purpose = str(persisted_challenge.get("purpose") or "login")
+        action_verification = challenge_purpose in IDENTITY_CHALLENGE_ACTION_PURPOSES
         result = self.store.verify_auth_challenge(
             normalized_challenge_id,
             code_hash=code_hash,
@@ -877,8 +887,9 @@ class IdentityBindingService:
             subject_id=self._opaque_id("sub"),
             binding_id=self._opaque_id("idb"),
             proof_id=self._opaque_id("idp"),
+            create_binding=not action_verification,
         )
-        if result.get("outcome") != "verified":
+        if result.get("outcome") not in {"verified", "verifiedUnbound"}:
             self._record_event(
                 operation_id=normalized_challenge_id or self._opaque_id("op"),
                 resource_id=normalized_challenge_id or "missingChallenge",
@@ -889,28 +900,40 @@ class IdentityBindingService:
             )
             raise IdentityChallengeVerificationFailed()
 
-        subject_id = str(result["subjectId"])
-        if test_account is not None and not self.test_account_allowlist_service.record_successful_login(
+        subject_id = str(result.get("subjectId") or "")
+        if (
+            test_account is not None
+            and not action_verification
+            and not self.test_account_allowlist_service.record_successful_login(
             str(test_account.get("accountId") or ""),
             subject_id=subject_id,
             now=attempted_at,
+            )
         ):
             raise IdentityChallengeVerificationFailed()
-        response = {
+        response: Dict[str, Any] = {
             "status": "verified",
-            "subject": {
+            "contractVersion": IDENTITY_BINDING_CONTRACT_VERSION,
+        }
+        if action_verification:
+            response["purpose"] = challenge_purpose
+        if result.get("outcome") == "verified":
+            response["subject"] = {
                 "subjectId": subject_id,
                 "bindingId": str(result["bindingId"]),
                 "proofReceiptId": str(result["proofReceiptId"]),
                 "contractVersion": IDENTITY_BINDING_CONTRACT_VERSION,
-            },
-            "user": {
+            }
+        if not action_verification:
+            response["user"] = {
                 "id": subject_id,
                 "nickname": str(nickname or "").strip()[:80],
-            },
-            "contractVersion": IDENTITY_BINDING_CONTRACT_VERSION,
-        }
-        if self.auth_session_service is not None:
+            }
+        if (
+            not action_verification
+            and self.auth_session_service is not None
+            and subject_id
+        ):
             response["auth"] = self.auth_session_service.issue(
                 subject_id,
                 now=attempted_at,
@@ -924,6 +947,44 @@ class IdentityBindingService:
             occurred_at=attempted_at,
         )
         return response
+
+    def target_reference(
+        self,
+        *,
+        identity_type: str,
+        target: str,
+    ) -> Dict[str, str]:
+        """Return the opaque lookup key used by OTP and password login."""
+
+        normalized_type = self._identity_type(identity_type)
+        normalized_target = self._target(normalized_type, target)
+        return {
+            "identityType": normalized_type,
+            "targetHashKeyVersion": self.hmac_key_version,
+            "targetHash": self._keyed_hash(
+                f"target:{self.hmac_key_version}:{normalized_type}:{normalized_target}"
+            ),
+        }
+
+    def subject_for_target(
+        self,
+        *,
+        identity_type: str,
+        target: str,
+    ) -> Optional[str]:
+        reference = self.target_reference(
+            identity_type=identity_type,
+            target=target,
+        )
+        binding = self.store.get_identity_binding_by_target(
+            identity_type=reference["identityType"],
+            target_hash_key_version=reference["targetHashKeyVersion"],
+            target_hash=reference["targetHash"],
+        )
+        if binding is None or str(binding.get("status") or "") != "active":
+            return None
+        subject_id = str(binding.get("subjectId") or "").strip()
+        return subject_id or None
 
     def _public_challenge_state(
         self,

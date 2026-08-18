@@ -1164,6 +1164,35 @@ class PostgresStore:
             cursor.fetchone()
         yield
 
+    @contextmanager
+    def password_target_operation(
+        self,
+        target_hash_key_version: str,
+        target_hash: str,
+    ):
+        version = str(target_hash_key_version or "").strip()
+        digest = str(target_hash or "").strip()
+        if not version or not digest:
+            raise ValueError("password target reference is required")
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"password-target-operation-{uuid.uuid4().hex}",
+                command_id="passwordTargetOperation",
+            ):
+                with self.password_target_operation(version, digest):
+                    yield
+            return
+        active = self._current_uow.get()
+        if active is None:  # pragma: no cover - guarded above
+            raise RuntimeError("password target operation requires a unit of work")
+        with active.connection.cursor(row_factory=self._dict_row_factory()) as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s)) AS locked",
+                (f"password-target:{version}:{digest}",),
+            )
+            cursor.fetchone()
+        yield
+
     def create_auth_token_family(
         self,
         family: Dict[str, Any],
@@ -2645,6 +2674,7 @@ class PostgresStore:
         subject_id: str,
         binding_id: str,
         proof_id: str,
+        create_binding: bool = True,
     ) -> Dict[str, Any]:
         if self._current_uow.get() is None:
             with self.request_unit_of_work(
@@ -2658,6 +2688,7 @@ class PostgresStore:
                     subject_id=subject_id,
                     binding_id=binding_id,
                     proof_id=proof_id,
+                    create_binding=create_binding,
                 )
 
         attempted_at = self._parse_iso_datetime(attempted_at_iso)
@@ -2745,6 +2776,20 @@ class PostgresStore:
             )
             binding = cursor.fetchone()
             if binding is None:
+                if not create_binding:
+                    cursor.execute(
+                        """
+                        UPDATE auth_challenges
+                        SET attempts = %s, status = 'consumed', consumed_at = %s,
+                            updated_at = %s
+                        WHERE id = %s
+                        """,
+                        (attempts, attempted_at_iso, attempted_at_iso, challenge_id),
+                    )
+                    return {
+                        "outcome": "verifiedUnbound",
+                        "verifiedAt": attempted_at_iso,
+                    }
                 cursor.execute(
                     """
                     INSERT INTO subjects (id, status, created_at, updated_at)
@@ -2823,6 +2868,42 @@ class PostgresStore:
             "bindingId": binding_id,
             "proofReceiptId": proof_id,
             "verifiedAt": attempted_at_iso,
+        }
+
+    def get_identity_binding_by_target(
+        self,
+        *,
+        identity_type: str,
+        target_hash_key_version: str,
+        target_hash: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT id, subject_id, identity_type, target_hash_key_version,
+                   target_hash, provider_mode, status, verified_at,
+                   created_at, updated_at
+            FROM identity_bindings
+            WHERE identity_type = %s
+              AND target_hash_key_version = %s
+              AND target_hash = %s
+            """,
+            (identity_type, target_hash_key_version, target_hash),
+        )
+        if row is None:
+            return None
+        return {
+            "bindingId": str(row.get("id") or ""),
+            "subjectId": str(row.get("subject_id") or ""),
+            "identityType": str(row.get("identity_type") or ""),
+            "targetHashKeyVersion": str(
+                row.get("target_hash_key_version") or ""
+            ),
+            "targetHash": str(row.get("target_hash") or ""),
+            "providerMode": str(row.get("provider_mode") or ""),
+            "status": str(row.get("status") or ""),
+            "verifiedAt": self._iso_value(row.get("verified_at")),
+            "createdAt": self._iso_value(row.get("created_at")),
+            "updatedAt": self._iso_value(row.get("updated_at")),
         }
 
     @staticmethod
@@ -4464,6 +4545,201 @@ class PostgresStore:
             (user_id,),
         )
         return None if row is None else deepcopy(row["payload"])
+
+    def get_password_login_state(
+        self,
+        *,
+        target_hash_key_version: str,
+        target_hash: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT target_hash_key_version, target_hash, failed_attempts,
+                   locked_until, last_failed_at, updated_at
+            FROM password_login_states
+            WHERE target_hash_key_version = %s AND target_hash = %s
+            """,
+            (target_hash_key_version, target_hash),
+        )
+        if row is None:
+            return None
+        return {
+            "targetHashKeyVersion": str(row.get("target_hash_key_version") or ""),
+            "targetHash": str(row.get("target_hash") or ""),
+            "failedAttempts": int(row.get("failed_attempts") or 0),
+            "lockedUntil": (
+                None
+                if row.get("locked_until") is None
+                else self._iso_value(row.get("locked_until"))
+            ),
+            "lastFailedAt": (
+                None
+                if row.get("last_failed_at") is None
+                else self._iso_value(row.get("last_failed_at"))
+            ),
+            "updatedAt": self._iso_value(row.get("updated_at")),
+        }
+
+    def record_password_login_failure(
+        self,
+        *,
+        target_hash_key_version: str,
+        target_hash: str,
+        attempted_at_iso: str,
+        max_attempts: int,
+        locked_until_iso: str,
+    ) -> Dict[str, Any]:
+        current = self.get_password_login_state(
+            target_hash_key_version=target_hash_key_version,
+            target_hash=target_hash,
+        )
+        failed_attempts = int((current or {}).get("failedAttempts") or 0) + 1
+        row = self._fetchone(
+            """
+            INSERT INTO password_login_states (
+                target_hash_key_version, target_hash, failed_attempts,
+                locked_until, last_failed_at, created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (target_hash_key_version, target_hash) DO UPDATE SET
+                failed_attempts = EXCLUDED.failed_attempts,
+                locked_until = EXCLUDED.locked_until,
+                last_failed_at = EXCLUDED.last_failed_at,
+                updated_at = EXCLUDED.updated_at
+            RETURNING target_hash_key_version, target_hash, failed_attempts,
+                      locked_until, last_failed_at, updated_at
+            """,
+            (
+                target_hash_key_version,
+                target_hash,
+                failed_attempts,
+                locked_until_iso if failed_attempts >= max_attempts else None,
+                attempted_at_iso,
+                attempted_at_iso,
+                attempted_at_iso,
+            ),
+            commit=True,
+        )
+        return {
+            "targetHashKeyVersion": str(row.get("target_hash_key_version") or ""),
+            "targetHash": str(row.get("target_hash") or ""),
+            "failedAttempts": int(row.get("failed_attempts") or 0),
+            "lockedUntil": (
+                None
+                if row.get("locked_until") is None
+                else self._iso_value(row.get("locked_until"))
+            ),
+            "lastFailedAt": self._iso_value(row.get("last_failed_at")),
+            "updatedAt": self._iso_value(row.get("updated_at")),
+        }
+
+    def clear_password_login_state(
+        self,
+        *,
+        target_hash_key_version: str,
+        target_hash: str,
+    ) -> None:
+        self._fetchone(
+            """
+            DELETE FROM password_login_states
+            WHERE target_hash_key_version = %s AND target_hash = %s
+            RETURNING target_hash
+            """,
+            (target_hash_key_version, target_hash),
+        )
+
+    def save_password_action_grant(self, grant: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(grant)
+        row = self._fetchone(
+            """
+            INSERT INTO password_action_grants (
+                id, subject_id, purpose, token_hash, proof_receipt_id,
+                status, expires_at, consumed_at, created_at, updated_at,
+                contract_version
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, %s, %s, %s)
+            RETURNING id, subject_id, purpose, token_hash, proof_receipt_id,
+                      status, expires_at, consumed_at, created_at, updated_at,
+                      contract_version
+            """,
+            (
+                item["grantId"],
+                item.get("subjectId") or None,
+                item["purpose"],
+                item["tokenHash"],
+                item.get("proofReceiptId") or None,
+                item["status"],
+                item["expiresAt"],
+                item["createdAt"],
+                item["updatedAt"],
+                item["contractVersion"],
+            ),
+            commit=True,
+        )
+        return self._password_action_grant_payload(row)
+
+    def consume_password_action_grant(
+        self,
+        *,
+        token_hash: str,
+        purpose: str,
+        consumed_at_iso: str,
+    ) -> Dict[str, Any]:
+        row = self._fetchone(
+            """
+            UPDATE password_action_grants
+            SET status = 'consumed', consumed_at = %s, updated_at = %s
+            WHERE token_hash = %s
+              AND purpose = %s
+              AND status = 'active'
+              AND expires_at > %s
+            RETURNING id, subject_id, purpose, token_hash, proof_receipt_id,
+                      status, expires_at, consumed_at, created_at, updated_at,
+                      contract_version
+            """,
+            (consumed_at_iso, consumed_at_iso, token_hash, purpose, consumed_at_iso),
+            commit=True,
+        )
+        if row is not None:
+            return {
+                "outcome": "consumedNow",
+                "grant": self._password_action_grant_payload(row),
+            }
+        existing = self._fetchone(
+            """
+            SELECT id, subject_id, purpose, token_hash, proof_receipt_id,
+                   status, expires_at, consumed_at, created_at, updated_at,
+                   contract_version
+            FROM password_action_grants
+            WHERE token_hash = %s
+            """,
+            (token_hash,),
+        )
+        if existing is None or str(existing.get("purpose") or "") != purpose:
+            return {"outcome": "invalid"}
+        if str(existing.get("status") or "") != "active":
+            return {"outcome": "consumed"}
+        return {"outcome": "expired"}
+
+    @staticmethod
+    def _password_action_grant_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "grantId": str(row.get("id") or ""),
+            "subjectId": str(row.get("subject_id") or ""),
+            "purpose": str(row.get("purpose") or ""),
+            "tokenHash": str(row.get("token_hash") or ""),
+            "proofReceiptId": str(row.get("proof_receipt_id") or ""),
+            "status": str(row.get("status") or ""),
+            "expiresAt": PostgresStore._iso_value(row.get("expires_at")),
+            "consumedAt": (
+                None
+                if row.get("consumed_at") is None
+                else PostgresStore._iso_value(row.get("consumed_at"))
+            ),
+            "createdAt": PostgresStore._iso_value(row.get("created_at")),
+            "updatedAt": PostgresStore._iso_value(row.get("updated_at")),
+            "contractVersion": int(row.get("contract_version") or 1),
+        }
 
     def save_kb_snapshot(self, user_id: str, graph: Dict[str, Any]) -> Dict[str, Any]:
         return self.apply_kb_mutation(

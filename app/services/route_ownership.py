@@ -205,6 +205,18 @@ class RouteOwnershipRegistry:
                 "publicIdentityChallengeState",
             ),
             _rule("POST", "/auth/login", public, "publicLogin"),
+            _rule(
+                "POST",
+                "/v2/auth/password/login",
+                public,
+                "publicPasswordLogin",
+            ),
+            _rule(
+                "POST",
+                "/v2/auth/password/reset",
+                public,
+                "publicPasswordReset",
+            ),
             _rule("POST", "/auth/refresh", public, "publicRefresh"),
             _rule("POST", "/auth/logout", session, "userSession"),
             _rule("POST", "/auth/data-export", session, "userDataExport"),
@@ -243,6 +255,18 @@ class RouteOwnershipRegistry:
                 required_scopes=("account:purge",),
             ),
             _owner_body("POST", "/auth/password", "accountOwner"),
+            _rule(
+                "POST",
+                "/v2/auth/password/setup",
+                session,
+                "passwordCredentialSetup",
+            ),
+            _rule(
+                "POST",
+                "/v2/auth/password/change",
+                session,
+                "passwordCredentialChange",
+            ),
             _owner_body("POST", "/profile", "profileOwner"),
             _owner_path("GET", "/profile/{user_id}", "profileOwner"),
             _rule(

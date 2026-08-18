@@ -340,6 +340,8 @@ class InMemoryStore:
         self._mailbox_letters: Dict[str, List[Dict[str, Any]]] = {}
         self._profiles: Dict[str, Dict[str, Any]] = {}
         self._password_credentials: Dict[str, Dict[str, Any]] = {}
+        self._password_login_states: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._password_action_grants: Dict[str, Dict[str, Any]] = {}
         self._family_members: Dict[str, List[Dict[str, Any]]] = {}
         self._family_relationships: Dict[str, Dict[str, Any]] = {}
         self._access_grants: Dict[str, Dict[str, Any]] = {}
@@ -388,6 +390,17 @@ class InMemoryStore:
     def auth_user_operation(self, user_id: str):
         if not str(user_id or "").strip():
             raise ValueError("auth user id is required")
+        with self._auth_lock:
+            yield
+
+    @contextmanager
+    def password_target_operation(
+        self,
+        target_hash_key_version: str,
+        target_hash: str,
+    ):
+        if not str(target_hash_key_version or "").strip() or not str(target_hash or "").strip():
+            raise ValueError("password target reference is required")
         with self._auth_lock:
             yield
 
@@ -1677,6 +1690,7 @@ class InMemoryStore:
         subject_id: str,
         binding_id: str,
         proof_id: str,
+        create_binding: bool = True,
     ) -> Dict[str, Any]:
         attempted_at = self._parse_iso_datetime(attempted_at_iso)
         with self._identity_lock:
@@ -1712,6 +1726,13 @@ class InMemoryStore:
             )
             existing_binding_id = self._identity_binding_ids_by_target.get(target_key)
             if existing_binding_id is None:
+                if not create_binding:
+                    challenge["status"] = "consumed"
+                    challenge["consumedAt"] = attempted_at.isoformat()
+                    return {
+                        "outcome": "verifiedUnbound",
+                        "verifiedAt": attempted_at.isoformat(),
+                    }
                 subject = {
                     "subjectId": subject_id,
                     "status": "active",
@@ -1764,6 +1785,21 @@ class InMemoryStore:
                 "proofReceiptId": proof_id,
                 "verifiedAt": attempted_at.isoformat(),
             }
+
+    def get_identity_binding_by_target(
+        self,
+        *,
+        identity_type: str,
+        target_hash_key_version: str,
+        target_hash: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._identity_lock:
+            binding_id = self._identity_binding_ids_by_target.get(
+                (identity_type, target_hash_key_version, target_hash)
+            )
+            if binding_id is None:
+                return None
+            return deepcopy(self._identity_bindings.get(binding_id))
 
     def acquire_digital_human_session_lease(
         self,
@@ -2812,6 +2848,85 @@ class InMemoryStore:
     def get_password_credential(self, user_id: str) -> Optional[Dict[str, Any]]:
         credential = self._password_credentials.get(user_id)
         return None if credential is None else deepcopy(credential)
+
+    def get_password_login_state(
+        self,
+        *,
+        target_hash_key_version: str,
+        target_hash: str,
+    ) -> Optional[Dict[str, Any]]:
+        item = self._password_login_states.get(
+            (target_hash_key_version, target_hash)
+        )
+        return None if item is None else deepcopy(item)
+
+    def record_password_login_failure(
+        self,
+        *,
+        target_hash_key_version: str,
+        target_hash: str,
+        attempted_at_iso: str,
+        max_attempts: int,
+        locked_until_iso: str,
+    ) -> Dict[str, Any]:
+        key = (target_hash_key_version, target_hash)
+        current = deepcopy(self._password_login_states.get(key) or {})
+        failed_attempts = int(current.get("failedAttempts") or 0) + 1
+        current.update(
+            {
+                "targetHashKeyVersion": target_hash_key_version,
+                "targetHash": target_hash,
+                "failedAttempts": failed_attempts,
+                "lastFailedAt": attempted_at_iso,
+                "lockedUntil": (
+                    locked_until_iso if failed_attempts >= max_attempts else None
+                ),
+                "updatedAt": attempted_at_iso,
+            }
+        )
+        self._password_login_states[key] = current
+        return deepcopy(current)
+
+    def clear_password_login_state(
+        self,
+        *,
+        target_hash_key_version: str,
+        target_hash: str,
+    ) -> None:
+        self._password_login_states.pop(
+            (target_hash_key_version, target_hash),
+            None,
+        )
+
+    def save_password_action_grant(self, grant: Dict[str, Any]) -> Dict[str, Any]:
+        item = deepcopy(grant)
+        token_hash = str(item.get("tokenHash") or "").strip()
+        if not token_hash:
+            raise ValueError("password action token hash is required")
+        self._password_action_grants[token_hash] = item
+        return deepcopy(item)
+
+    def consume_password_action_grant(
+        self,
+        *,
+        token_hash: str,
+        purpose: str,
+        consumed_at_iso: str,
+    ) -> Dict[str, Any]:
+        item = self._password_action_grants.get(token_hash)
+        if item is None or str(item.get("purpose") or "") != purpose:
+            return {"outcome": "invalid"}
+        if str(item.get("status") or "") != "active":
+            return {"outcome": "consumed"}
+        consumed_at = self._parse_iso_datetime(consumed_at_iso)
+        if self._parse_iso_datetime(str(item.get("expiresAt") or "")) <= consumed_at:
+            item["status"] = "expired"
+            item["updatedAt"] = consumed_at_iso
+            return {"outcome": "expired"}
+        item["status"] = "consumed"
+        item["consumedAt"] = consumed_at_iso
+        item["updatedAt"] = consumed_at_iso
+        return {"outcome": "consumedNow", "grant": deepcopy(item)}
 
     def save_kb_snapshot(self, user_id: str, graph: Dict[str, Any]) -> Dict[str, Any]:
         return self.apply_kb_mutation(
