@@ -6173,6 +6173,7 @@ def _evaluate_release_policy_command(
     system_default_closed_bypass = (
         principal.kind == PrincipalKind.MACHINE
         and release_stage in {"M1", "M2", "M3", "M4"}
+        and not RELEASE_POLICY_SERVICE.is_product_closed(feature)
     )
     mode = (
         "observe"

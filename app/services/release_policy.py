@@ -524,7 +524,6 @@ class ReleasePolicyService:
         "ownerTruthFamilyContribution",
         "personaSettings",
         "voiceCloneShell",
-        "digitalHumanLivePanel",
         "profileSettings",
         "legalCenter",
         "accountDeletion",
@@ -547,6 +546,11 @@ class ReleasePolicyService:
         "ownerMediaProcessingV1": "ownerTruthMediaProcessing",
         "voiceCloneShell": "voiceCloneShell",
         "digitalHumanLivePanel": "digitalHumanLivePanel",
+    }
+    # Product-confirmed exclusions override provider readiness, rollout
+    # cohorts, client claims, and default-stage shadow behavior.
+    _PRODUCT_CLOSED_FEATURES = {
+        "digitalHumanLivePanel",
     }
 
     def __init__(
@@ -597,6 +601,8 @@ class ReleasePolicyService:
         self.enforce_default_closed_stages = enforce_default_closed_stages
 
     def command_mode_for(self, feature: str) -> ReleasePolicyCommandMode:
+        if self.is_product_closed(feature):
+            return "enforce"
         if feature in self.emergency_disabled_features:
             return "enforce"
         if (
@@ -613,11 +619,17 @@ class ReleasePolicyService:
         return cls._FEATURE_STAGES.get(feature, "unknown")
 
     def minimum_client_access_mode(self, feature: str) -> str:
+        if self.is_product_closed(feature):
+            return "deny"
         owner_visible = (
             self._closed_pilot_owner_visible_features
             | self._authenticated_owner_visible_features
         )
         return "readOnly" if feature in owner_visible else "deny"
+
+    @classmethod
+    def is_product_closed(cls, feature: str) -> bool:
+        return feature in cls._PRODUCT_CLOSED_FEATURES
 
     @property
     def _closed_pilot_owner_visible_features(self) -> Set[str]:
@@ -662,6 +674,7 @@ class ReleasePolicyService:
             "authenticatedOwnerFeatures": sorted(
                 self._authenticated_owner_visible_features
             ),
+            "productClosedFeatures": sorted(self._PRODUCT_CLOSED_FEATURES),
             "killSwitchFeatures": sorted(self.emergency_disabled_features),
             "defaultClosedStages": ["M1", "M2", "M3", "M4"],
             "defaultClosedStageEffectsEnforced": self.enforce_default_closed_stages,
@@ -766,7 +779,10 @@ class ReleasePolicyService:
                 requiredCapability=None,
                 capabilityReady=False,
             )
-        if feature in self.emergency_disabled_features:
+        if self.is_product_closed(feature):
+            reason = "productClosed"
+            allowed = False
+        elif feature in self.emergency_disabled_features:
             reason = "emergencyRevoked"
             allowed = False
         elif client_below_minimum:
@@ -967,6 +983,14 @@ class ReleasePolicyCommandGate:
         payload: Optional[Mapping[str, Any]],
     ) -> Optional[str]:
         normalized_path = (path or "").split("?", 1)[0]
+        if (
+            method.upper() == "POST"
+            and normalized_path.startswith("/digital-human/sessions/")
+            and normalized_path.endswith("/release")
+        ):
+            # Preserve a cleanup path for leases created before the product
+            # closure. No new session or heartbeat is allowed.
+            return None
         publication_feature = self._publication_formal_feature(normalized_path)
         if publication_feature is not None:
             return publication_feature

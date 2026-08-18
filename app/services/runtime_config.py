@@ -388,6 +388,8 @@ class RuntimeConfigService:
             "digitalHuman": {
                 **digital_human_access,
                 "enabled": False,
+                "reason": "productClosed",
+                "productState": "closed",
                 "providerMode": "blocked",
                 "realProviderReady": False,
                 "sdkProvider": "tencent-cloud-digital-human",

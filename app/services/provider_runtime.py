@@ -362,7 +362,7 @@ class ProviderRuntimeInventory:
             region="providerManaged",
             retention_policy_version="digitalHumanSessionRetention-v1",
             fallback_mode="text",
-            reason="scopedSessionCredentialContractNotVerified",
+            reason="productClosed",
             configuration_status=(
                 "configuredButBrokerBlocked" if provider_configured else "incomplete"
             ),

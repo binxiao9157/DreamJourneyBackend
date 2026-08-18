@@ -329,6 +329,7 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
         digital_human = snapshots["digitalHumanLivePanel"]
         self.assertFalse(digital_human["enabled"])
         self.assertFalse(digital_human["providerReady"])
+        self.assertEqual(digital_human["reason"], "productClosed")
         self.assertEqual(
             digital_human["configurationStatus"],
             "configuredButBrokerBlocked",

@@ -45,7 +45,14 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
         main_module.RELEASE_POLICY_SERVICE = self.previous_release_policy_service
         main_module.RELEASE_POLICY_COMMAND_GATE = self.previous_release_policy_gate
 
-    def test_create_digital_human_session_is_blocked_without_scoped_broker(self):
+    def assert_product_closed(self, response):
+        self.assertEqual(response.status_code, 403, response.text)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["code"], "release_policy_denied")
+        self.assertEqual(detail["feature"], "digitalHumanLivePanel")
+        self.assertEqual(detail["reason"], "productClosed")
+
+    def test_create_digital_human_session_is_blocked_by_confirmed_product_scope(self):
         response = client.post(
             "/digital-human/sessions",
             json={
@@ -58,27 +65,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 503)
-        detail = response.json()["detail"]
-        self.assertEqual(detail["code"], "digital_human_credential_broker_unavailable")
-        self.assertEqual(detail["credentialMode"], "blockedStaticCredential")
-        self.assertEqual(detail["accessPath"], "textFallback")
-        self.assertFalse(detail["mobileDirectAllowed"])
-        self.assertEqual(detail["brokerStatus"], "providerContractNotVerified")
-        self.assertFalse(detail["providerReady"])
-        self.assertFalse(detail["releaseVisible"])
-        self.assertFalse(detail["retryable"])
-        self.assertEqual(detail["fallbackMode"], "text")
-        receipt = detail["decisionReceipt"]
-        required = ["scope", "ttl", "audience", "revocation"]
-        self.assertEqual(receipt["decision"], "keepDirectMobileClosed")
-        self.assertEqual(receipt["reasonCode"], "scopedSessionCredentialContractNotVerified")
-        self.assertEqual(receipt["requiredProperties"], required)
-        self.assertEqual(receipt["verifiedProperties"], [])
-        self.assertEqual(receipt["missingProperties"], required)
-        self.assertNotIn("expiresAt", detail)
-        self.assertNotIn("expiresInSeconds", detail)
-        self.assertEqual(detail["contractVersion"], 4)
+        self.assert_product_closed(response)
         self.assertEqual(main_module.store._digital_human_sessions, {})
 
     def test_blocked_session_requests_never_allocate_or_reuse_a_lease(self):
@@ -97,16 +84,22 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
             json={**payload, "userId": "user_other", "deviceId": "ios-device-2"},
         )
 
-        self.assertEqual(first.status_code, 503)
-        self.assertEqual(repeated.status_code, 503)
-        self.assertEqual(conflict.status_code, 503)
+        self.assert_product_closed(first)
+        self.assert_product_closed(repeated)
+        self.assert_product_closed(conflict)
         self.assertEqual(main_module.store._digital_human_sessions, {})
 
-    def test_session_lease_heartbeat_and_release_are_owner_scoped_and_idempotent(self):
-        session_id = "dh_session_legacy_001"
+    def test_confirmed_product_scope_denies_create_and_heartbeat_but_allows_release(self):
+        service = ReleasePolicyService(
+            authenticated_owner_v4_enabled=True,
+            capability_resolver=lambda capability: capability == "digitalHumanLivePanel",
+            enforce_default_closed_stages=False,
+        )
+        main_module.RELEASE_POLICY_SERVICE = service
+        main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(service)
+        session_id = "dh_session_product_closed_001"
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
-        original_expiry = (now + timedelta(seconds=120)).isoformat()
         main_module.store.acquire_digital_human_session_lease(
             {
                 "sessionId": session_id,
@@ -120,7 +113,56 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
                 "status": "active",
                 "createdAt": now_iso,
                 "heartbeatAt": now_iso,
-                "expiresAt": original_expiry,
+                "expiresAt": (now + timedelta(seconds=120)).isoformat(),
+            },
+            max_concurrent_sessions=1,
+            now_iso=now_iso,
+        )
+
+        created = client.post(
+            "/digital-human/sessions",
+            json={
+                "userId": "user_qa",
+                "personaId": "persona_mother_001",
+                "scene": "echo",
+                "deviceId": "ios-device-2",
+                "lifecycleMode": "star",
+                "subjectEligibility": verified_digital_human_eligibility(),
+            },
+        )
+        heartbeat = client.post(
+            f"/digital-human/sessions/{session_id}/heartbeat",
+            json={"userId": "user_qa", "deviceId": "ios-device-1"},
+        )
+        released = client.post(
+            f"/digital-human/sessions/{session_id}/release",
+            json={"userId": "user_qa", "deviceId": "ios-device-1", "reason": "productClosed"},
+        )
+
+        for response in (created, heartbeat):
+            self.assert_product_closed(response)
+        self.assertEqual(released.status_code, 200, released.text)
+        self.assertEqual(released.json()["status"], "released")
+        self.assertEqual(released.json()["lease"]["releaseReason"], "productClosed")
+
+    def test_legacy_session_release_is_owner_scoped_and_idempotent(self):
+        session_id = "dh_session_legacy_001"
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        main_module.store.acquire_digital_human_session_lease(
+            {
+                "sessionId": session_id,
+                "resourceKey": "legacy_resource",
+                "userId": "user_qa",
+                "deviceId": "ios-device-1",
+                "personaId": "persona_mother_001",
+                "scene": "echo",
+                "lifecycleMode": "star",
+                "providerMode": "legacyCloudRender",
+                "status": "active",
+                "createdAt": now_iso,
+                "heartbeatAt": now_iso,
+                "expiresAt": (now + timedelta(seconds=120)).isoformat(),
             },
             max_concurrent_sessions=1,
             now_iso=now_iso,
@@ -131,7 +173,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
             json={"userId": "user_qa", "deviceId": "ios-device-1"},
         )
         wrong_owner = client.post(
-            f"/digital-human/sessions/{session_id}/heartbeat",
+            f"/digital-human/sessions/{session_id}/release",
             json={"userId": "user_other", "deviceId": "ios-device-2"},
         )
         released = client.post(
@@ -143,9 +185,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
             json={"userId": "user_qa", "deviceId": "ios-device-1", "reason": "pageExit"},
         )
 
-        self.assertEqual(heartbeat.status_code, 200)
-        self.assertEqual(heartbeat.json()["status"], "active")
-        self.assertGreaterEqual(heartbeat.json()["lease"]["expiresAt"], original_expiry)
+        self.assert_product_closed(heartbeat)
         self.assertEqual(wrong_owner.status_code, 404)
         self.assertEqual(released.status_code, 200)
         self.assertEqual(released.json()["status"], "released")
@@ -164,9 +204,9 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
                 "subjectEligibility": verified_digital_human_eligibility(),
             },
         )
-        self.assertEqual(next_device.status_code, 503)
+        self.assert_product_closed(next_device)
 
-    def test_create_digital_human_session_rejects_silent_mode(self):
+    def test_product_closure_precedes_silent_mode_validation(self):
         response = client.post(
             "/digital-human/sessions",
             json={
@@ -179,10 +219,9 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("silent mode", response.json()["detail"])
+        self.assert_product_closed(response)
 
-    def test_create_digital_human_session_requires_persona_id(self):
+    def test_product_closure_precedes_persona_validation(self):
         response = client.post(
             "/digital-human/sessions",
             json={
@@ -193,8 +232,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()["detail"], "personaId is required")
+        self.assert_product_closed(response)
 
     def test_runtime_config_blocks_digital_human_without_scoped_broker(self):
         response = client.get("/config/runtime")
@@ -203,6 +241,8 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
         body = response.json()
         self.assertFalse(body["capabilities"]["digitalHumanSession"])
         digital_human = body["digitalHuman"]
+        self.assertEqual(digital_human["reason"], "productClosed")
+        self.assertEqual(digital_human["productState"], "closed")
         self.assertEqual(digital_human["provider"], "tencent")
         self.assertEqual(digital_human["providerMode"], "blocked")
         self.assertFalse(digital_human["realProviderReady"])
@@ -270,9 +310,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(response.status_code, 503)
-            detail = response.json()["detail"]
-            self.assertEqual(detail["code"], "digital_human_credential_broker_unavailable")
+            self.assert_product_closed(response)
             self.assertNotIn("qa_appkey", response.text)
             self.assertNotIn("qa_accesstoken", response.text)
             self.assertEqual(main_module.store._digital_human_sessions, {})
@@ -306,6 +344,7 @@ class DigitalHumanSessionAPITests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             digital_human = response.json()["digitalHuman"]
             self.assertEqual(digital_human["providerMode"], "blocked")
+            self.assertEqual(digital_human["reason"], "productClosed")
             self.assertFalse(digital_human["realProviderReady"])
             self.assertFalse(digital_human["sdkAdapterLinked"])
             self.assertEqual(digital_human["assetMode"], "project")

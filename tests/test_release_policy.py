@@ -124,12 +124,13 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             "ownerTruthInterviewOutcome",
             "timeLetters",
             "voiceCloneShell",
-            "digitalHumanLivePanel",
             "archiveAudioUpload",
             "archiveVideoUpload",
         ]:
             self.assertFalse(decisions[feature].releaseVisible, feature)
             self.assertEqual(decisions[feature].reason, "notApprovedForClosedPilot")
+        self.assertFalse(decisions["digitalHumanLivePanel"].releaseVisible)
+        self.assertEqual(decisions["digitalHumanLivePanel"].reason, "productClosed")
 
         self.assertEqual(decisions["voiceCloneShell"].releaseStage, "M1")
         self.assertEqual(decisions["digitalHumanLivePanel"].releaseStage, "M2")
@@ -399,8 +400,31 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             requested_feature="digitalHumanLivePanel",
         ).features[0]
         self.assertFalse(digital_human.enabled)
-        self.assertEqual(digital_human.reason, "capabilityUnavailable")
+        self.assertEqual(digital_human.reason, "productClosed")
         self.assertEqual(digital_human.requiredCapability, "digitalHumanLivePanel")
+
+    def test_confirmed_product_scope_keeps_digital_human_closed_when_provider_is_ready(self):
+        service = ReleasePolicyService(
+            authenticated_owner_v4_enabled=True,
+            capability_resolver=lambda capability: capability == "digitalHumanLivePanel",
+            enforce_default_closed_stages=False,
+        )
+
+        decision = service.build_snapshot(
+            audience="owner",
+            cohort="authenticatedOwner",
+            client_build=1,
+            requested_feature="digitalHumanLivePanel",
+        ).features[0]
+
+        self.assertFalse(decision.enabled)
+        self.assertFalse(decision.releaseVisible)
+        self.assertEqual(decision.reason, "productClosed")
+        self.assertEqual(service.command_mode_for("digitalHumanLivePanel"), "enforce")
+        self.assertEqual(
+            service.public_descriptor()["productClosedFeatures"],
+            ["digitalHumanLivePanel"],
+        )
 
     def test_regular_signed_in_account_receives_authenticated_owner_cohort(self):
         principal = main_module.RequestPrincipal.user(
@@ -538,7 +562,15 @@ class ReleasePolicyServiceTests(unittest.TestCase):
 
         self.assertEqual(snapshot.snapshotDecision, "clientBelowMinimum")
         self.assertTrue(all(not item.releaseVisible for item in snapshot.features))
-        self.assertTrue(all(item.reason == "clientBelowMinimum" for item in snapshot.features))
+        reasons = {item.feature: item.reason for item in snapshot.features}
+        self.assertEqual(reasons["digitalHumanLivePanel"], "productClosed")
+        self.assertTrue(
+            all(
+                reason == "clientBelowMinimum"
+                for feature, reason in reasons.items()
+                if feature != "digitalHumanLivePanel"
+            )
+        )
 
     def test_known_newer_policy_revision_rejects_server_downgrade(self):
         with self.assertRaises(ReleasePolicyVersionDowngrade):
@@ -1117,6 +1149,21 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
 
         self.assertEqual(gate.feature_for_request("POST", "/voice/synthesis", {}), "voiceCloneShell")
         self.assertEqual(gate.feature_for_request("POST", "/digital-human/sessions", {}), "digitalHumanLivePanel")
+        self.assertEqual(
+            gate.feature_for_request(
+                "POST",
+                "/digital-human/sessions/session-001/heartbeat",
+                {},
+            ),
+            "digitalHumanLivePanel",
+        )
+        self.assertIsNone(
+            gate.feature_for_request(
+                "POST",
+                "/digital-human/sessions/session-001/release",
+                {},
+            )
+        )
         self.assertEqual(gate.feature_for_request("POST", "/family/invite", {}), "familyManagement")
         self.assertEqual(
             gate.feature_for_request(
