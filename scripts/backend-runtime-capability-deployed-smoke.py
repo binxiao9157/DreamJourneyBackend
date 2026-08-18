@@ -48,6 +48,8 @@ def main():
         "archiveImageAnalysis",
         "archiveAudioUpload",
         "archiveVideoUpload",
+        "kbliteUserSurface",
+        "accountDataExport",
         "ownerTruthMediaStorage",
         "ownerTruthMediaProcessing",
         "identityChallenge",
@@ -97,9 +99,27 @@ def main():
 
     for capability in ("archiveAudioUpload", "archiveVideoUpload"):
         media = snapshots[capability]
-        require(media["provider"] == "mockObjectStorage", f"{capability} provider changed unexpectedly")
-        require(media["providerReady"] is False, f"{capability} mock provider must not be ready")
+        require(media["provider"] == "internalOnly", f"{capability} must not advertise a mock provider")
+        require(media["enabled"] is False, f"{capability} must remain disabled")
+        require(media["providerReady"] is False, f"{capability} must not be provider ready")
         require(media["releaseVisible"] is False, f"{capability} must remain release hidden")
+        require(media["reason"] == "productClosed", f"{capability} reason changed")
+        require(media["fallbackMode"] == "disabled", f"{capability} fallback must remain disabled")
+        require(
+            media["configurationStatus"] == "productClosed",
+            f"{capability} configuration status changed",
+        )
+
+    for capability in ("kbliteUserSurface", "accountDataExport"):
+        closed_surface = snapshots[capability]
+        require(closed_surface["enabled"] is False, f"{capability} must remain disabled")
+        require(closed_surface["providerReady"] is False, f"{capability} must not be provider ready")
+        require(closed_surface["releaseVisible"] is False, f"{capability} must remain hidden")
+        require(closed_surface["reason"] == "productClosed", f"{capability} reason changed")
+        require(
+            closed_surface["configurationStatus"] == "productClosed",
+            f"{capability} configuration status changed",
+        )
 
     for capability in ("timeLetters", "echoDelayedReplies"):
         closed = snapshots[capability]
@@ -114,6 +134,14 @@ def main():
         capabilities.get("echoDelayedReplies") is False,
         "echoDelayedReplies alias must be closed",
     )
+    for capability in (
+        "archiveAudioUpload",
+        "archiveVideoUpload",
+        "kbliteUserSurface",
+        "accountDataExport",
+    ):
+        require(capabilities.get(capability) is False, f"{capability} alias must be closed")
+    require(capabilities.get("kbSync") is True, "internal KBLite read/write compatibility must remain enabled")
 
     inventory = runtime.get("providerInventory") or {}
     require(inventory.get("contractVersion") == 1, "provider inventory contract must be v1")
@@ -188,6 +216,10 @@ def main():
         owner_truth_media.get("contractVersion") == 1,
         "owner truth media contract must be v1",
     )
+    require(
+        owner_truth_media.get("supportedMediaKinds") == ["document", "image"],
+        "ordinary Owner media must expose only document and image",
+    )
     storage = snapshots["ownerTruthMediaStorage"]
     processing = snapshots["ownerTruthMediaProcessing"]
     require(
@@ -203,10 +235,18 @@ def main():
         "identity alias must follow the startup provider decision",
     )
 
-    for capability in ("voiceCloneShell", "digitalHumanLivePanel"):
-        snapshot = snapshots[capability]
-        require(snapshot["releaseVisible"] is False, f"{capability} must remain release hidden")
-        require(snapshot["externalVerified"] is False, f"{capability} cannot self-sign G3/G4")
+    voice_clone = snapshots["voiceCloneShell"]
+    require(voice_clone["externalVerified"] is False, "voiceCloneShell cannot self-sign G3/G4")
+    if voice_clone["releaseVisible"]:
+        require(voice_clone["enabled"] is True, "visible voice clone must be enabled")
+        require(voice_clone["providerReady"] is True, "visible voice clone must have a ready provider")
+
+    digital_human = snapshots["digitalHumanLivePanel"]
+    require(digital_human["enabled"] is False, "digitalHumanLivePanel must remain disabled")
+    require(digital_human["providerReady"] is False, "digitalHumanLivePanel provider must remain blocked")
+    require(digital_human["releaseVisible"] is False, "digitalHumanLivePanel must remain release hidden")
+    require(digital_human["reason"] == "productClosed", "digitalHumanLivePanel reason changed")
+    require(digital_human["externalVerified"] is False, "digitalHumanLivePanel cannot self-sign G3/G4")
 
     serialized = json.dumps(runtime, ensure_ascii=False).lower()
     for forbidden in ("secretkey", "accesskey", "accesstoken", "x-api-key"):
@@ -227,7 +267,10 @@ def main():
             f"provider inventory exposed sensitive configuration name: {forbidden}",
         )
 
-    print("Backend runtime capability deployed smoke passed: automatic shutdown and readiness epochs are value-free")
+    print(
+        "Backend runtime capability deployed smoke passed: confirmed first-release "
+        "scope and readiness epochs are value-free"
+    )
 
 
 if __name__ == "__main__":
