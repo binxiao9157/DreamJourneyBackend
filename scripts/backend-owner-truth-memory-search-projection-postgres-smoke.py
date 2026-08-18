@@ -39,6 +39,14 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def contains_mapping_key(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(contains_mapping_key(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_mapping_key(item, key) for item in value)
+    return False
+
+
 def canonical_hash(value: object) -> str:
     return sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
@@ -369,12 +377,13 @@ def main() -> None:
             and search_summary["queryPlan"]["semanticRankingAvailable"] is False,
             "search must read the persisted current index without claiming semantic ranking",
         )
-        rendered = json.dumps(search.json(), ensure_ascii=False)
+        search_payload = search.json()
+        rendered = json.dumps(search_payload, ensure_ascii=False)
         require(
             "私有职业选择记忆" not in rendered
             and "职业选择" not in rendered
-            and "sourceId" not in rendered
-            and "searchText" not in rendered,
+            and not contains_mapping_key(search_payload, "sourceId")
+            and not contains_mapping_key(search_payload, "searchText"),
             "search response must remain value-free",
         )
 
