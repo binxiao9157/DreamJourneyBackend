@@ -13,7 +13,8 @@ from hashlib import sha256
 import json
 from typing import Any, Iterable, Mapping
 
-from .contracts import OwnerTruthContractError, require_nonblank, require_uuid
+from .contracts import MemoryKind, OwnerTruthContractError, require_nonblank, require_uuid
+from .ontology import validate_memory_payload
 from .projection_rights import (
     OwnerTruthProjectionRightsSnapshot,
     implicit_projection_rights_snapshot,
@@ -117,6 +118,19 @@ class OwnerTruthMemoryProjectionInput:
             "evidence_refs",
             _copy_object_list(self.evidence_refs, field="evidence_refs"),
         )
+        try:
+            memory_kind = MemoryKind(self.memory_kind)
+        except ValueError as exc:
+            raise OwnerTruthMemoryProjectionError("memory_kind is unsupported") from exc
+        validation = validate_memory_payload(
+            kind=memory_kind,
+            payload=self.content,
+            schema_version=self.content_schema_version,
+        )
+        if not validation.accepted:
+            raise OwnerTruthMemoryProjectionError(
+                f"projection content is not admitted: {validation.code}"
+            )
 
     def entry(self) -> dict[str, Any]:
         """Build the only payload persisted in the compatibility projection."""

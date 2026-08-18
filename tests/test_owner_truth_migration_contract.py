@@ -145,6 +145,29 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("version_schema_version,", migration.sql)
         self.assertIn("NEW.content_schema_version IS DISTINCT FROM version_schema_version", migration.sql)
 
+    def test_v2_facets_search_migration_keeps_v1_rows_and_indexes_private_terms(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0096"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_v2_facets_search")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(migration.compatibility, "backwardCompatible")
+        self.assertEqual(
+            metadata["runtimeCompatibility"],
+            "ownerTruthV2FacetsSearchV1",
+        )
+        self.assertIn("DEFAULT 'owner-truth-v1'", migration.sql)
+        self.assertIn("USING GIN (structured_terms)", migration.sql)
+        self.assertIn(
+            "NEW.content_schema_version IS DISTINCT FROM entry_content_schema_version",
+            migration.sql,
+        )
+        self.assertNotIn("UPDATE owner_truth.memory_versions", migration.sql)
+
     def test_answer_citation_migration_is_hash_only_and_default_off(self):
         migration = next(
             item

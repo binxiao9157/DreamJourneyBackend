@@ -15,6 +15,10 @@ from app.domain.owner_truth.search_documents import (
     OwnerTruthSearchDocumentProjectionError,
     OwnerTruthSearchDocumentProjectionRebuildResult,
 )
+from app.domain.owner_truth.ontology import (
+    OWNER_TRUTH_SCHEMA_VERSION_V2,
+    empty_memory_facets,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_memory_search_projection import (
     InMemoryOwnerTruthMemorySearchDocumentProjectionRepository,
@@ -157,6 +161,64 @@ class OwnerTruthMemorySearchProjectionTests(unittest.TestCase):
                 outcome="ready",
                 projection=None,
             )
+
+    def test_v2_facets_become_private_structured_terms_without_authority_metadata(self) -> None:
+        facets = empty_memory_facets(confidence=0.8)
+        facets["people"] = [
+            {
+                "value": "GrandPa",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0,
+                "subjectId": "not-an-authority-input",
+            }
+        ]
+        facets["relationships"] = [
+            {
+                "value": "祖孙",
+                "evidenceMode": "inferred",
+                "confidence": 0.6,
+                "grantId": "not-an-authority-input",
+            }
+        ]
+        content = {
+            "summary": "小时候常和外公在河边散步。",
+            "facets": facets,
+        }
+        memory = OwnerTruthMemoryProjectionInput(
+            memory_id=str(uuid4()),
+            memory_version_id=str(uuid4()),
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_id,
+            authority_epoch=3,
+            version_number=1,
+            source_id=str(uuid4()),
+            source_version=1,
+            memory_kind="experience",
+            perspective_type="firstPerson",
+            epistemic_status="recalled",
+            sensitivity="standard",
+            content_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V2,
+            content_hash=_hash(content),
+            content=content,
+            evidence_refs=({"sourceId": str(uuid4()), "sourceVersion": 1},),
+        )
+        projection = build_ready_memory_projection(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_id,
+            authority_epoch=3,
+            inputs=(memory,),
+        )
+
+        self.source.snapshot = projection
+        result = self.service.rebuild(context=self.context)
+        assert result.projection is not None
+        document = result.projection.documents[0]
+        self.assertEqual(document.content_schema_version, OWNER_TRUTH_SCHEMA_VERSION_V2)
+        self.assertIn("people:grandpa", document.structured_terms)
+        self.assertIn("relationships:祖孙", document.structured_terms)
+        serialized_terms = " ".join(document.structured_terms)
+        self.assertNotIn("not-an-authority-input", serialized_terms)
+        self.assertNotIn("ownerstated", serialized_terms)
 
 
 if __name__ == "__main__":  # pragma: no cover

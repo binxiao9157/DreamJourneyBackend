@@ -10,7 +10,11 @@ from app.domain.owner_truth.contracts import (
 )
 from app.domain.owner_truth.ontology import (
     MEMORY_ONTOLOGY_V1,
+    OWNER_TRUTH_CURRENT_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION,
+    OWNER_TRUTH_SCHEMA_VERSION_V2,
+    empty_memory_facets,
+    flatten_memory_facets,
     validate_memory_payload,
 )
 
@@ -44,6 +48,70 @@ class OwnerTruthDomainTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertTrue(result.quarantined)
         self.assertEqual(result.code, "unknownSchemaVersion")
+
+    def test_owner_truth_v2_accepts_typed_facets_and_flattens_only_values(self):
+        facets = empty_memory_facets(confidence=0.82)
+        facets["people"] = [
+            {
+                "value": "外公",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0,
+                "subjectId": "must-not-be-authority",
+            }
+        ]
+        facets["relationships"] = [
+            {
+                "value": "祖孙",
+                "evidenceMode": "inferred",
+                "confidence": 0.61,
+                "grantId": "must-not-be-authority",
+            }
+        ]
+        result = validate_memory_payload(
+            kind=MemoryKind.EXPERIENCE,
+            payload={"summary": "小时候常和外公散步。", "facets": facets},
+            schema_version=OWNER_TRUTH_SCHEMA_VERSION_V2,
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertFalse(result.quarantined)
+        self.assertEqual(OWNER_TRUTH_CURRENT_SCHEMA_VERSION, OWNER_TRUTH_SCHEMA_VERSION_V2)
+        terms = flatten_memory_facets(facets)
+        self.assertIn("people:外公", terms)
+        self.assertIn("relationships:祖孙", terms)
+        self.assertNotIn("must-not-be-authority", " ".join(terms))
+        self.assertNotIn("ownerstated", " ".join(terms))
+
+    def test_owner_truth_v2_rejects_unlabelled_inference_and_invalid_confidence(self):
+        facets = empty_memory_facets(confidence=0.7)
+        facets["places"] = [{"value": "河边", "confidence": 0.7}]
+        missing_mode = validate_memory_payload(
+            kind=MemoryKind.EXPERIENCE,
+            payload={"summary": "小时候常去河边。", "facets": facets},
+            schema_version=OWNER_TRUTH_SCHEMA_VERSION_V2,
+        )
+        self.assertFalse(missing_mode.accepted)
+        self.assertEqual(missing_mode.code, "invalidFacetEvidenceMode")
+
+        facets = empty_memory_facets(confidence=1.5)
+        invalid_confidence = validate_memory_payload(
+            kind=MemoryKind.KNOWLEDGE,
+            payload={"claim": "陪伴很重要。", "facets": facets},
+            schema_version=OWNER_TRUTH_SCHEMA_VERSION_V2,
+        )
+        self.assertFalse(invalid_confidence.accepted)
+        self.assertEqual(invalid_confidence.code, "invalidFacetConfidence")
+
+    def test_v1_remains_readable_without_synthetic_facets(self):
+        payload = {"label": "怀念"}
+        result = validate_memory_payload(
+            kind=MemoryKind.EMOTION,
+            payload=payload,
+            schema_version=OWNER_TRUTH_SCHEMA_VERSION,
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertNotIn("facets", payload)
 
     def test_known_schema_missing_required_field_is_denied_not_quarantined(self):
         result = validate_memory_payload(

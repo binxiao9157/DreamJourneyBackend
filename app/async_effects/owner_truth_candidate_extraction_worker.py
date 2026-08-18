@@ -48,7 +48,11 @@ from app.domain.owner_truth.contracts import (
     PerspectiveType,
     SensitivityLevel,
 )
-from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.ontology import (
+    OWNER_TRUTH_SCHEMA_VERSION,
+    OWNER_TRUTH_SCHEMA_VERSION_V2,
+    empty_memory_facets,
+)
 from app.observability.operation_metrics import OperationMetricRecorder
 from app.services.deepseek import DeepSeekLiveMemoryOrganizationProxy
 from app.services.owner_truth_candidate_extraction import (
@@ -136,10 +140,14 @@ class DeterministicOwnerTruthCandidateExtractor:
             perspective_type=PerspectiveType.FIRST_PERSON,
             epistemic_status=EpistemicStatus.RECALLED,
             sensitivity=SensitivityLevel.STANDARD,
-            content={"summary": summary},
+            content={
+                "summary": summary,
+                "facets": empty_memory_facets(confidence=0.0),
+            },
             evidence_span=CandidateEvidenceSpan(start=0, end=len(source.source_text)),
             confidence=0.0,
             review_mode=CandidateReviewMode.SINGLE,
+            payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V2,
         )
         return SyntheticCandidateExtractionCommand(
             intent=intent,
@@ -294,6 +302,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                     content={
                         primary_field: primary_value,
                         "sourceTurnIndices": list(source_indices),
+                        "facets": memory.get("facets"),
                     },
                     evidence_span=CandidateEvidenceSpan(
                         start=min(span.start for span in selected_spans),
@@ -301,6 +310,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                     ),
                     confidence=0.0,
                     review_mode=CandidateReviewMode.SINGLE,
+                    payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V2,
                 )
             )
         return SyntheticCandidateExtractionCommand(

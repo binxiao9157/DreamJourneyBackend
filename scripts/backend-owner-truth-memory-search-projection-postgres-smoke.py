@@ -104,26 +104,26 @@ def seed_current_memory(
     *,
     vault_id: str,
     owner_subject_id: str,
+    content: dict[str, Any],
+    content_schema_version: str,
+    create_vault: bool,
 ) -> tuple[str, str, str]:
     source_id = str(uuid.uuid4())
     memory_id = str(uuid.uuid4())
     memory_version_id = str(uuid.uuid4())
-    content = {
-        "claim": "这是一条仅用于隔离 SearchDocument 投影验证的私有职业选择记忆。",
-        "tags": ["职业", "选择"],
-    }
     content_hash = canonical_hash(content)
     payload = {
         "content": content,
-        "contentSchemaVersion": "owner-truth-v1",
+        "contentSchemaVersion": content_schema_version,
         "evidenceRefs": [{"sourceId": source_id, "sourceVersion": 1}],
     }
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO owner_truth.vaults (vault_id, owner_subject_id) VALUES (%s, %s)",
-                (vault_id, owner_subject_id),
-            )
+            if create_vault:
+                cursor.execute(
+                    "INSERT INTO owner_truth.vaults (vault_id, owner_subject_id) VALUES (%s, %s)",
+                    (vault_id, owner_subject_id),
+                )
             cursor.execute(
                 """
                 INSERT INTO owner_truth.sources (
@@ -178,7 +178,7 @@ def seed_current_memory(
                     memory_id,
                     1,
                     True,
-                    "owner-truth-v1",
+                    content_schema_version,
                     content_hash,
                     Jsonb(payload),
                     source_id,
@@ -241,6 +241,46 @@ def main() -> None:
             test_dsn,
             vault_id=vault_id,
             owner_subject_id=owner_id,
+            content={
+                "claim": "这是一条仅用于隔离 SearchDocument 投影验证的私有职业选择记忆。",
+                "tags": ["职业", "选择"],
+            },
+            content_schema_version="owner-truth-v1",
+            create_vault=True,
+        )
+        v2_memory_id, v2_memory_version_id, _v2_content_hash = seed_current_memory(
+            test_dsn,
+            vault_id=vault_id,
+            owner_subject_id=owner_id,
+            content={
+                "summary": "小时候和外公去杭州散步。",
+                "facets": {
+                    "people": [
+                        {
+                            "value": "GrandPa",
+                            "evidenceMode": "ownerStated",
+                            "confidence": 1.0,
+                            "subjectId": "must-not-be-indexed",
+                        }
+                    ],
+                    "time": [],
+                    "places": [
+                        {
+                            "value": "杭州",
+                            "evidenceMode": "inferred",
+                            "confidence": 0.75,
+                            "grantId": "must-not-be-indexed",
+                        }
+                    ],
+                    "relationships": [],
+                    "emotions": [],
+                    "values": [],
+                    "personality": [],
+                    "confidence": 0.88,
+                },
+            },
+            content_schema_version="owner-truth-v2",
+            create_vault=False,
         )
         context = OwnerTruthCommandContext(
             vault_id=vault_id,
@@ -268,12 +308,48 @@ def main() -> None:
         rebuild_summary = rebuilt.json()["searchProjection"]
         require(
             rebuild_summary["state"] == "ready"
-            and rebuild_summary["projection"]["documentCount"] == 1,
-            "projection rebuild must persist exactly one current document",
+            and rebuild_summary["projection"]["documentCount"] == 2,
+            "projection rebuild must persist both V1 and V2 current documents",
         )
         require(
             "私有职业选择记忆" not in json.dumps(rebuilt.json(), ensure_ascii=False),
             "rebuild response must not expose memory content",
+        )
+
+        facet_search = client.post(
+            f"/v2/vaults/{vault_id}/memory-search/read",
+            headers=owner_headers,
+            json={"query": "杭州"},
+        )
+        require(facet_search.status_code == 200, f"V2 facet search failed: {facet_search.text}")
+        facet_hits = facet_search.json()["search"]["hits"]
+        require(
+            facet_hits
+            and facet_hits[0]["citation"]["memoryVersionId"] == v2_memory_version_id,
+            "a confirmed V2 facet must be searchable through the private index",
+        )
+        with psycopg.connect(test_dsn) as connection:
+            with connection.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+                cursor.execute(
+                    """
+                    SELECT content_schema_version, structured_terms
+                    FROM owner_truth.search_documents
+                    WHERE vault_id = %s AND memory_id = %s
+                    """,
+                    (vault_id, v2_memory_id),
+                )
+                v2_document = cursor.fetchone()
+        require(v2_document is not None, "V2 SearchDocument must be persisted")
+        structured_terms = tuple(v2_document["structured_terms"])
+        require(
+            v2_document["content_schema_version"] == "owner-truth-v2"
+            and "people:grandpa" in structured_terms
+            and "places:杭州" in structured_terms,
+            "V2 facet terms must be normalized and bound to their schema",
+        )
+        require(
+            all("must-not-be-indexed" not in term for term in structured_terms),
+            "facet extension metadata must never enter the private search index",
         )
 
         search = client.post(
@@ -378,7 +454,8 @@ def main() -> None:
         print(
             "owner truth memory search projection postgres smoke passed "
             f"schemaHead={verified['expectedHead']} defaultHidden=true "
-            "checkpointBound=true digestFailClosed=true crossOwnerDenied=true"
+            "checkpointBound=true digestFailClosed=true crossOwnerDenied=true "
+            "v1Readable=true v2FacetsIndexed=true facetAuthorityMetadataExcluded=true"
         )
     finally:
         main_module.store = previous_store

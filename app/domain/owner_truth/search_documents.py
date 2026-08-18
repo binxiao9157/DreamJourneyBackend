@@ -18,6 +18,10 @@ import unicodedata
 
 from .contracts import OwnerTruthContractError, require_nonblank, require_uuid
 from .memory_projection import OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION
+from .ontology import (
+    OWNER_TRUTH_SCHEMA_VERSION_V2,
+    flatten_memory_facets,
+)
 
 
 OWNER_TRUTH_SEARCH_DOCUMENT_PROJECTION_SCHEMA_VERSION = (
@@ -65,12 +69,24 @@ def _text_leaves(value: Any) -> Iterable[str]:
             yield from _text_leaves(item)
 
 
-def _private_search_text(content: Mapping[str, Any]) -> tuple[str, tuple[str, ...], bool]:
+def _private_search_text(
+    content: Mapping[str, Any],
+    *,
+    content_schema_version: str,
+) -> tuple[str, tuple[str, ...], bool]:
     if not isinstance(content, Mapping):
         raise OwnerTruthSearchDocumentProjectionError("search document content must be an object")
     pieces: list[str] = []
     structured_terms: list[str] = []
-    for raw_value in _text_leaves(content):
+    searchable_content = dict(content)
+    facet_terms: tuple[str, ...] = ()
+    if content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V2:
+        facets = searchable_content.pop("facets", None)
+        facet_terms = tuple(
+            _normalized_text(term, field="search document facet")
+            for term in flatten_memory_facets(facets)
+        )
+    for raw_value in _text_leaves(searchable_content):
         try:
             normalized = _normalized_text(raw_value, field="search document content")
         except OwnerTruthSearchDocumentProjectionError:
@@ -78,8 +94,10 @@ def _private_search_text(content: Mapping[str, Any]) -> tuple[str, tuple[str, ..
         pieces.append(normalized)
         if len(normalized) <= 256:
             structured_terms.append(normalized)
+    structured_terms.extend(facet_terms)
     unique_terms = tuple(sorted(set(structured_terms)))
-    text = " ".join(pieces)
+    facet_text = [term.partition(":")[2] for term in facet_terms]
+    text = " ".join([*pieces, *facet_text])
     was_truncated = len(text) > OWNER_TRUTH_MEMORY_SEARCH_MAX_DOCUMENT_CHARACTERS
     return text[:OWNER_TRUTH_MEMORY_SEARCH_MAX_DOCUMENT_CHARACTERS], unique_terms, was_truncated
 
@@ -98,6 +116,7 @@ class OwnerTruthSearchDocument:
     owner_subject_id: str
     authority_epoch: int
     content_hash: str
+    content_schema_version: str
     memory_kind: str
     perspective_type: str
     sensitivity: str
@@ -119,7 +138,12 @@ class OwnerTruthSearchDocument:
             require_nonblank(self.owner_subject_id, field="owner_subject_id"),
         )
         object.__setattr__(self, "content_hash", require_nonblank(self.content_hash, field="content_hash"))
-        for field_name in ("memory_kind", "perspective_type", "sensitivity"):
+        for field_name in (
+            "content_schema_version",
+            "memory_kind",
+            "perspective_type",
+            "sensitivity",
+        ):
             object.__setattr__(
                 self,
                 field_name,
@@ -480,6 +504,7 @@ def search_document_projection_digest(
                 "memoryId": document.memory_id,
                 "memoryVersionId": document.memory_version_id,
                 "contentHash": document.content_hash,
+                "contentSchemaVersion": document.content_schema_version,
                 "memoryKind": document.memory_kind,
                 "perspectiveType": document.perspective_type,
                 "sensitivity": document.sensitivity,
@@ -556,7 +581,11 @@ def _search_document_from_projection_entry(
     if not isinstance(citation, Mapping):
         raise OwnerTruthSearchDocumentProjectionError("memory projection entry citation is missing")
     content = entry.get("content")
-    search_text, structured_terms, was_truncated = _private_search_text(content)
+    content_schema_version = str(entry.get("contentSchemaVersion") or "")
+    search_text, structured_terms, was_truncated = _private_search_text(
+        content,
+        content_schema_version=content_schema_version,
+    )
     return OwnerTruthSearchDocument(
         memory_id=str(citation.get("memoryId") or ""),
         memory_version_id=str(citation.get("memoryVersionId") or ""),
@@ -564,6 +593,7 @@ def _search_document_from_projection_entry(
         owner_subject_id=owner_subject_id,
         authority_epoch=authority_epoch,
         content_hash=str(citation.get("contentHash") or ""),
+        content_schema_version=content_schema_version,
         memory_kind=str(entry.get("memoryKind") or ""),
         perspective_type=str(entry.get("perspectiveType") or ""),
         sensitivity=str(entry.get("sensitivity") or ""),

@@ -5,6 +5,10 @@ from typing import Any, Dict, List, Mapping, Optional
 import httpx
 
 from app.core.config import Settings
+from app.domain.owner_truth.ontology import (
+    OWNER_TRUTH_FACET_NAMES,
+    validate_memory_facets,
+)
 from app.observability.redaction import provider_dry_run_report
 from app.services.knowledge_extraction import LEGACY_TRANSCRIPT, USER_EVIDENCE_ONLY
 
@@ -546,7 +550,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
     """
 
     model = "deepseek-v4-flash"
-    prompt_version = "owner-truth-live-memory-organization-v1"
+    prompt_version = "owner-truth-live-memory-organization-v2"
     maximum_turn_count = 200
     maximum_turn_characters = 4_000
     maximum_total_characters = 30_000
@@ -656,9 +660,9 @@ class DeepSeekLiveMemoryOrganizationProxy:
 只输出以下严格 JSON：
 {{
   "memories": [
-    {{"memoryKind":"experience","summary":"第一人称经历摘要","sourceTurnIndices":[{first_user_index}]}},
-    {{"memoryKind":"knowledge","claim":"用户明确表达的经验、知识或观点","sourceTurnIndices":[{first_user_index}]}},
-    {{"memoryKind":"emotion","label":"用户明确表达的感受及其对象或原因","sourceTurnIndices":[{first_user_index}]}}
+    {{"memoryKind":"experience","summary":"第一人称经历摘要","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[{{"value":"人物称呼","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"confidence":0.9}}}},
+    {{"memoryKind":"knowledge","claim":"用户明确表达的经验、知识或观点","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"confidence":0.9}}}},
+    {{"memoryKind":"emotion","label":"用户明确表达的感受及其对象或原因","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[{{"value":"怀念","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"values":[],"personality":[],"confidence":0.9}}}}
   ]
 }}
 
@@ -669,7 +673,10 @@ class DeepSeekLiveMemoryOrganizationProxy:
 4. role=assistant 只用于理解问题和上下文，不得成为证据，不得把助手的猜测、建议或诱导写成用户记忆。
 5. 不得补写用户没说过的人名、地点、时间、关系、因果、知识、情绪或态度。
 6. 合并重复表达，但不要把不同主题混成一条；保留第一人称语义，语言自然、简洁。
-7. 不要输出诊断、评价、行动建议、模型解释或 JSON 之外的文字。"""
+7. facets 必须包含 people/time/places/relationships/emotions/values/personality 七个数组和 0 到 1 的 confidence；没有可靠值时数组为空。
+8. 每个 facet 值必须包含 value、confidence、sourceTurnIndices 和 evidenceMode。用户原话直接表达用 ownerStated；只有确属推断时才用 inferred，禁止把推断伪装成用户陈述。
+9. facet 的 sourceTurnIndices 也只能引用 role=user；关系 facet 只是记忆内容，不代表账号、家庭或分享权限。
+10. 不要输出诊断、评价、行动建议、模型解释或 JSON 之外的文字。"""
 
     @classmethod
     def parse_organization(
@@ -723,6 +730,42 @@ class DeepSeekLiveMemoryOrganizationProxy:
             ):
                 raise ValueError(f"organized memory {position} has invalid user evidence")
             source_indices = list(dict.fromkeys(source_indices))
+            raw_facets = raw_memory.get("facets")
+            facet_validation = validate_memory_facets(raw_facets)
+            if not facet_validation.accepted:
+                raise ValueError(
+                    f"organized memory {position} has invalid facets: "
+                    f"{facet_validation.code}"
+                )
+            normalized_facets: Dict[str, Any] = {
+                "confidence": float(raw_facets["confidence"]),
+            }
+            for facet_name in OWNER_TRUTH_FACET_NAMES:
+                normalized_entries: List[Dict[str, Any]] = []
+                for facet_position, raw_entry in enumerate(raw_facets[facet_name]):
+                    facet_source_indices = raw_entry.get("sourceTurnIndices")
+                    if (
+                        not isinstance(facet_source_indices, list)
+                        or not facet_source_indices
+                        or any(
+                            isinstance(index, bool) or not isinstance(index, int)
+                            for index in facet_source_indices
+                        )
+                        or any(index not in user_indices for index in facet_source_indices)
+                    ):
+                        raise ValueError(
+                            f"organized memory {position} facet "
+                            f"{facet_name}[{facet_position}] has invalid user evidence"
+                        )
+                    normalized_entries.append(
+                        {
+                            "value": str(raw_entry["value"]).strip(),
+                            "evidenceMode": str(raw_entry["evidenceMode"]),
+                            "confidence": float(raw_entry["confidence"]),
+                            "sourceTurnIndices": list(dict.fromkeys(facet_source_indices)),
+                        }
+                    )
+                normalized_facets[facet_name] = normalized_entries
             dedupe_key = (memory_kind, primary_value)
             if dedupe_key in seen:
                 continue
@@ -732,6 +775,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
                     "memoryKind": memory_kind,
                     primary_field: primary_value,
                     "sourceTurnIndices": source_indices,
+                    "facets": normalized_facets,
                 }
             )
         return {"memories": memories}

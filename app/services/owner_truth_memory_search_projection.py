@@ -209,9 +209,10 @@ class PostgresOwnerTruthMemorySearchDocumentProjectionRepository:
                     """
                     INSERT INTO owner_truth.search_documents (
                         vault_id, authority_epoch, memory_id, memory_version_id,
-                        content_hash, memory_kind, perspective_type, sensitivity,
-                        search_text, structured_terms, text_was_truncated
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        content_hash, content_schema_version, memory_kind,
+                        perspective_type, sensitivity, search_text,
+                        structured_terms, text_was_truncated
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     self._adapt_params(
                         (
@@ -220,6 +221,7 @@ class PostgresOwnerTruthMemorySearchDocumentProjectionRepository:
                             document.memory_id,
                             document.memory_version_id,
                             document.content_hash,
+                            document.content_schema_version,
                             document.memory_kind,
                             document.perspective_type,
                             document.sensitivity,
@@ -302,9 +304,9 @@ class PostgresOwnerTruthMemorySearchDocumentProjectionRepository:
     ) -> OwnerTruthSearchDocumentProjection | None:
         cursor.execute(
             """
-            SELECT memory_id, memory_version_id, content_hash, memory_kind,
-                perspective_type, sensitivity, search_text, structured_terms,
-                text_was_truncated
+            SELECT memory_id, memory_version_id, content_hash,
+                content_schema_version, memory_kind, perspective_type,
+                sensitivity, search_text, structured_terms, text_was_truncated
             FROM owner_truth.search_documents
             WHERE vault_id = %s AND authority_epoch = %s
             ORDER BY memory_version_id ASC
@@ -356,6 +358,7 @@ class PostgresOwnerTruthMemorySearchDocumentProjectionRepository:
             owner_subject_id=owner_subject_id,
             authority_epoch=authority_epoch,
             content_hash=str(row["content_hash"]),
+            content_schema_version=str(row["content_schema_version"]),
             memory_kind=str(row["memory_kind"]),
             perspective_type=str(row["perspective_type"]),
             sensitivity=str(row["sensitivity"]),

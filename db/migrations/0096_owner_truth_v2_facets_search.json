@@ -1,0 +1,12 @@
+{
+  "version": "0096",
+  "name": "owner_truth_v2_facets_search",
+  "phase": "expand",
+  "compatibility": "backwardCompatible",
+  "runtimeCompatibility": "ownerTruthV2FacetsSearchV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthV1Read": true,
+    "ownerTruthV2Facets": true
+  }
+}

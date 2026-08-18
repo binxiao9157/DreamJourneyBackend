@@ -1,14 +1,34 @@
-"""Owner Truth V1 memory ontology and schema quarantine policy."""
+"""Owner Truth memory ontology and schema quarantine policy.
+
+V2 extends the confirmed memory payload with reviewable facets. Facets are
+descriptive evidence only: authorization code must continue to use the Vault,
+principal and Grant contracts rather than relationship-shaped memory data.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Mapping, Optional
 
 from .contracts import MemoryKind
 
 
 OWNER_TRUTH_SCHEMA_VERSION = "owner-truth-v1"
+OWNER_TRUTH_SCHEMA_VERSION_V2 = "owner-truth-v2"
+OWNER_TRUTH_CURRENT_SCHEMA_VERSION = OWNER_TRUTH_SCHEMA_VERSION_V2
+OWNER_TRUTH_FACET_NAMES = (
+    "people",
+    "time",
+    "places",
+    "relationships",
+    "emotions",
+    "values",
+    "personality",
+)
+OWNER_TRUTH_FACET_EVIDENCE_MODES = ("ownerStated", "inferred")
+_MAX_FACET_VALUES_PER_KIND = 32
+_MAX_FACET_VALUE_CHARACTERS = 256
 
 
 @dataclass(frozen=True)
@@ -41,19 +61,114 @@ MEMORY_ONTOLOGY_V1: Mapping[MemoryKind, MemoryOntologyDefinition] = {
 }
 
 
+def empty_memory_facets(*, confidence: float = 0.0) -> dict[str, Any]:
+    """Return an explicit, value-free V2 facet set for a new Candidate.
+
+    This is used only by new V2 writers. Historical V1 payloads are never
+    backfilled with empty arrays, which keeps "not extracted" distinguishable
+    from a newly reviewed V2 Candidate with no facet values.
+    """
+
+    return {
+        **{name: [] for name in OWNER_TRUTH_FACET_NAMES},
+        "confidence": confidence,
+    }
+
+
+def _confidence(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(normalized) or not 0.0 <= normalized <= 1.0:
+        return None
+    return normalized
+
+
+def validate_memory_facets(value: Any) -> OntologyValidation:
+    if not isinstance(value, Mapping):
+        return OntologyValidation(False, False, "invalidFacets", "facets")
+    if _confidence(value.get("confidence")) is None:
+        return OntologyValidation(False, False, "invalidFacetConfidence", "confidence")
+    for facet_name in OWNER_TRUTH_FACET_NAMES:
+        entries = value.get(facet_name)
+        if not isinstance(entries, list) or len(entries) > _MAX_FACET_VALUES_PER_KIND:
+            return OntologyValidation(False, False, "invalidFacetList", facet_name)
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, Mapping):
+                return OntologyValidation(
+                    False,
+                    False,
+                    "invalidFacetEntry",
+                    f"{facet_name}[{index}]",
+                )
+            facet_value = entry.get("value")
+            if (
+                not isinstance(facet_value, str)
+                or not facet_value.strip()
+                or len(facet_value.strip()) > _MAX_FACET_VALUE_CHARACTERS
+            ):
+                return OntologyValidation(
+                    False,
+                    False,
+                    "invalidFacetValue",
+                    f"{facet_name}[{index}]",
+                )
+            if entry.get("evidenceMode") not in OWNER_TRUTH_FACET_EVIDENCE_MODES:
+                return OntologyValidation(
+                    False,
+                    False,
+                    "invalidFacetEvidenceMode",
+                    f"{facet_name}[{index}]",
+                )
+            if _confidence(entry.get("confidence")) is None:
+                return OntologyValidation(
+                    False,
+                    False,
+                    "invalidFacetConfidence",
+                    f"{facet_name}[{index}]",
+                )
+    return OntologyValidation(True, False, "accepted")
+
+
+def flatten_memory_facets(value: Any) -> tuple[str, ...]:
+    """Flatten known facet values for a private derived index.
+
+    Only the allowlisted ``value`` field crosses this boundary. Provider
+    metadata, confidence, relationship IDs and authority-looking extension
+    fields remain payload data and cannot become identity or Grant inputs.
+    """
+
+    validation = validate_memory_facets(value)
+    if not validation.accepted:
+        return ()
+    terms = {
+        f"{facet_name}:{str(entry['value']).strip()}"
+        for facet_name in OWNER_TRUTH_FACET_NAMES
+        for entry in value.get(facet_name, [])
+    }
+    return tuple(sorted(terms))
+
+
 def validate_memory_payload(
     *,
     kind: MemoryKind,
     payload: Mapping[str, Any],
     schema_version: str,
 ) -> OntologyValidation:
-    """Validate known V1 payloads and quarantine all unknown schema versions.
+    """Validate known payloads and quarantine all unknown schema versions.
 
     Quarantine is deliberate: a future writer must not silently coerce a
     payload produced under an unknown ontology into an authoritative memory.
     """
 
-    if str(schema_version or "").strip() != OWNER_TRUTH_SCHEMA_VERSION:
+    normalized_schema = str(schema_version or "").strip()
+    if normalized_schema not in {
+        OWNER_TRUTH_SCHEMA_VERSION,
+        OWNER_TRUTH_SCHEMA_VERSION_V2,
+    }:
         return OntologyValidation(
             accepted=False,
             quarantined=True,
@@ -72,4 +187,22 @@ def validate_memory_payload(
             code="missingRequiredField",
             detail=",".join(missing),
         )
+    if normalized_schema == OWNER_TRUTH_SCHEMA_VERSION_V2:
+        return validate_memory_facets(payload.get("facets"))
     return OntologyValidation(accepted=True, quarantined=False, code="accepted")
+
+
+__all__ = [
+    "MEMORY_ONTOLOGY_V1",
+    "OWNER_TRUTH_CURRENT_SCHEMA_VERSION",
+    "OWNER_TRUTH_FACET_EVIDENCE_MODES",
+    "OWNER_TRUTH_FACET_NAMES",
+    "OWNER_TRUTH_SCHEMA_VERSION",
+    "OWNER_TRUTH_SCHEMA_VERSION_V2",
+    "MemoryOntologyDefinition",
+    "OntologyValidation",
+    "empty_memory_facets",
+    "flatten_memory_facets",
+    "validate_memory_facets",
+    "validate_memory_payload",
+]

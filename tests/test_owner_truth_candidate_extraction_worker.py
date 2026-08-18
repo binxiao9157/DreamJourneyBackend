@@ -33,6 +33,19 @@ def _digest(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
 
 
+def _facets(**values: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "people": values.get("people", []),
+        "time": values.get("time", []),
+        "places": values.get("places", []),
+        "relationships": values.get("relationships", []),
+        "emotions": values.get("emotions", []),
+        "values": values.get("values", []),
+        "personality": values.get("personality", []),
+        "confidence": 0.9,
+    }
+
+
 class _SourceInputRepository:
     def __init__(
         self,
@@ -360,16 +373,46 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
                     "memoryKind": "experience",
                     "summary": "我小时候常和外公在河边散步。",
                     "sourceTurnIndices": [1],
+                    "facets": _facets(
+                        people=[
+                            {
+                                "value": "外公",
+                                "evidenceMode": "ownerStated",
+                                "confidence": 1.0,
+                                "sourceTurnIndices": [1],
+                            }
+                        ]
+                    ),
                 },
                 {
                     "memoryKind": "knowledge",
                     "claim": "我认为陪伴比讲道理更重要。",
                     "sourceTurnIndices": [3],
+                    "facets": _facets(
+                        values=[
+                            {
+                                "value": "陪伴",
+                                "evidenceMode": "ownerStated",
+                                "confidence": 1.0,
+                                "sourceTurnIndices": [3],
+                            }
+                        ]
+                    ),
                 },
                 {
                     "memoryKind": "emotion",
                     "label": "我一直很怀念外公。",
                     "sourceTurnIndices": [3],
+                    "facets": _facets(
+                        emotions=[
+                            {
+                                "value": "怀念",
+                                "evidenceMode": "ownerStated",
+                                "confidence": 1.0,
+                                "sourceTurnIndices": [3],
+                            }
+                        ]
+                    ),
                 },
             ]
         )
@@ -427,6 +470,13 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(payloads["experience"]["content"]["summary"], "我小时候常和外公在河边散步。")
         self.assertEqual(payloads["knowledge"]["content"]["claim"], "我认为陪伴比讲道理更重要。")
         self.assertEqual(payloads["emotion"]["content"]["label"], "我一直很怀念外公。")
+        self.assertTrue(
+            all(payload["contentSchemaVersion"] == "owner-truth-v2" for payload in payloads.values())
+        )
+        self.assertEqual(
+            payloads["experience"]["content"]["facets"]["people"][0]["value"],
+            "外公",
+        )
         self.assertTrue(all(payload["reviewMode"] == "single" for payload in payloads.values()))
         self.assertTrue(all(payload["confidence"] == 0.0 for payload in payloads.values()))
 
@@ -471,6 +521,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
                     "memoryKind": "experience",
                     "summary": "我在上海长大。",
                     "sourceTurnIndices": [2],
+                    "facets": _facets(),
                 }
             ]
         )

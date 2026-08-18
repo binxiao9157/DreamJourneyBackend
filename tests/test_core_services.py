@@ -989,6 +989,30 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
                             "memoryKind": "experience",
                             "summary": "我小时候常和外公去河边散步。",
                             "sourceTurnIndices": [4],
+                            "facets": {
+                                "people": [
+                                    {
+                                        "value": "外公",
+                                        "evidenceMode": "ownerStated",
+                                        "confidence": 1.0,
+                                        "sourceTurnIndices": [4],
+                                    }
+                                ],
+                                "time": [],
+                                "places": [],
+                                "relationships": [
+                                    {
+                                        "value": "祖孙",
+                                        "evidenceMode": "inferred",
+                                        "confidence": 0.7,
+                                        "sourceTurnIndices": [4],
+                                    }
+                                ],
+                                "emotions": [],
+                                "values": [],
+                                "personality": [],
+                                "confidence": 0.9,
+                            },
                         }
                     ]
                 },
@@ -997,6 +1021,10 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
             turns=turns,
         )
         self.assertEqual(valid["memories"][0]["sourceTurnIndices"], [4])
+        self.assertEqual(
+            valid["memories"][0]["facets"]["relationships"][0]["evidenceMode"],
+            "inferred",
+        )
 
         with self.assertRaises(ValueError):
             DeepSeekLiveMemoryOrganizationProxy.parse_organization(
@@ -1007,6 +1035,16 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
                                 "memoryKind": "experience",
                                 "summary": "我在上海长大。",
                                 "sourceTurnIndices": [5],
+                                "facets": {
+                                    "people": [],
+                                    "time": [],
+                                    "places": [],
+                                    "relationships": [],
+                                    "emotions": [],
+                                    "values": [],
+                                    "personality": [],
+                                    "confidence": 0.5,
+                                },
                             }
                         ]
                     },
