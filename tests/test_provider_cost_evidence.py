@@ -152,7 +152,7 @@ class ProviderCostEvidenceTests(unittest.TestCase):
             units=1,
             state="succeeded",
             reason="providerUsageObserved",
-            occurred_at=self.occurred_at,
+            occurred_at=datetime.now(timezone.utc),
         )
         summary = recorder.summary()
 
