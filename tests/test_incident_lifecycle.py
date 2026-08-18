@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -11,6 +12,7 @@ from app.services.incident_lifecycle import (
     IncidentLifecycleError,
     IncidentLifecycleService,
 )
+from app.services.release_policy import ReleasePolicyService
 
 
 BASE_TIME = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
@@ -219,6 +221,15 @@ class IncidentLifecycleAPITests(unittest.TestCase):
         return {"Authorization": "Bearer incident-machine-token"}
 
     def test_machine_only_api_drives_readiness_without_exposing_raw_evidence_ids(self):
+        product_closed_patch = patch.object(
+            ReleasePolicyService,
+            "_PRODUCT_CLOSED_FEATURES",
+            ReleasePolicyService._PRODUCT_CLOSED_FEATURES.difference(
+                {"echoDelayedReplies"}
+            ),
+        )
+        product_closed_patch.start()
+        self.addCleanup(product_closed_patch.stop)
         payload = {
             "incidentId": "inc-api-001",
             "category": "providerAvailability",
@@ -227,7 +238,7 @@ class IncidentLifecycleAPITests(unittest.TestCase):
             "runbookId": "runbook.providerAvailability",
             "reason": "providerUnavailable",
             "requiredFenceActions": [
-                "releasePolicy.echoTextInput",
+                "releasePolicy.echoDelayedReplies",
                 "readiness.degrade",
             ],
             "commandId": "cmd-api-open-001",
@@ -275,7 +286,7 @@ class IncidentLifecycleAPITests(unittest.TestCase):
             headers=self.machine_headers(),
             json={
                 "reason": "affectedLanesFenced",
-                "fenceActions": ["releasePolicy.echoTextInput", "readiness.degrade"],
+                "fenceActions": ["releasePolicy.echoDelayedReplies", "readiness.degrade"],
                 "commandId": "cmd-api-fence-001",
             },
         )

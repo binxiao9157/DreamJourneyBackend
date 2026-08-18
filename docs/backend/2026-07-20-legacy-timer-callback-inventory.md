@@ -18,9 +18,9 @@ list, start a scheduler, call a Provider, or dispatch a TimeLetter.
 | Surface | Current execution boundary | Current state |
 | --- | --- | --- |
 | API startup/shutdown | Route-policy validation and store open/close only | Source inventoried; no business dispatch |
-| TimeLetter API due route | Direct request invokes the legacy store dispatch path | Legacy direct business effect; cutover not authorized |
-| TimeLetter CLI | Operator or host timer can invoke the same legacy dispatch path | Legacy direct business effect; cutover not authorized |
-| Documented TimeLetter systemd timer | Example exists only in operations documentation, not in `deploy/systemd` | Host state unverified; G2 host evidence required |
+| TimeLetter API due route | Release Policy rejects the request before the legacy store path | Product closed; zero dispatch |
+| TimeLetter CLI | Returns a redacted zero-delivery summary before opening storage | Product-closed no-op |
+| Documented TimeLetter systemd timer | If installed, it invokes the product-closed CLI no-op | Host state unverified; no business dispatch |
 | Async-effect scheduler foundation | Default-disabled shadow/lease foundation with no typed product handler | No business dispatch; cutover not authorized |
 | Digital-human heartbeat route | Authenticated client lease renewal | Runtime lease renewal, not a worker-owned business effect |
 | Provider query/callback boundary | Read-only reconciliation evidence only | Provider query, reconciliation, replay, and inbound callback are not enabled; G3 required |
@@ -28,9 +28,11 @@ list, start a scheduler, call a Provider, or dispatch a TimeLetter.
 
 ## Guardrails
 
-1. `time-letter-api-direct-dispatch` and `time-letter-cli-direct-dispatch`
-   remain `NOT_AUTHORIZED` for cutover or retirement. The inventory must never
-   self-promote either one to retired.
+1. `time-letter-api-direct-dispatch`, `time-letter-cli-direct-dispatch`, and
+   `time-letter-host-scheduler-documentation` are `PRODUCT_CLOSED`. The API
+   fails closed and the CLI/timer path returns a zero-delivery no-op. None may
+   self-promote back to an active dispatch surface without a new product
+   decision and migration plan.
 2. A documented host timer is not proof that the timer is installed, enabled,
    single-active, or healthy. Runtime `systemctl` and process evidence belong
    to G2.

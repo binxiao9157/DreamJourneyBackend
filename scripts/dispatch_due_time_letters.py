@@ -1,33 +1,20 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
-from app.core.config import settings
-from app.services.store_factory import close_store, make_store, open_store
-from app.services.time_letters import dispatch_due_time_letters_for_store
-
-
-def _summary(result: Dict[str, Any]) -> Dict[str, Any]:
+def product_closed_summary(now_iso: str) -> Dict[str, Any]:
     return {
-        "status": result.get("status"),
-        "cutoff": result.get("cutoff"),
-        "itemCount": result.get("itemCount", 0),
-        "reminderCount": result.get("reminderCount", 0),
-        "providerDeliveryAttempted": result.get("providerDeliveryAttempted", False),
-        "itemIds": [str(item.get("id") or "") for item in result.get("items", []) if isinstance(item, dict)],
-        "reminderIds": [
-            str(item.get("id") or "")
-            for item in result.get("reminders", [])
-            if isinstance(item, dict)
-        ],
+        "status": "productClosed",
+        "reason": "productClosed",
+        "cutoff": now_iso,
+        "itemCount": 0,
+        "reminderCount": 0,
+        "providerDeliveryAttempted": False,
+        "itemIds": [],
+        "reminderIds": [],
     }
 
 
@@ -45,16 +32,19 @@ def main() -> None:
         help="Print full dispatched item/reminder payloads. Defaults to a redacted summary.",
     )
     args = parser.parse_args()
-    limit = max(1, min(args.limit, 200))
+    _ = (max(1, min(args.limit, 200)), args.full)
 
-    backend_store = make_store(settings)
-    open_store(backend_store)
-    try:
-        result = dispatch_due_time_letters_for_store(backend_store, now_iso=args.now, limit=limit)
-    finally:
-        close_store(backend_store)
-    payload = result if args.full else _summary(result)
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    # Time letters are outside the confirmed product scope. Exit before
+    # opening storage so an installed timer cannot mutate retained test rows
+    # or enqueue APNs work while the feature is closed.
+    print(
+        json.dumps(
+            product_closed_summary(args.now),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":

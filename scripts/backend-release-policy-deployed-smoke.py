@@ -70,11 +70,18 @@ def main():
     for feature in (
         "familyManagement",
         "timeLetters",
+        "echoDelayedReplies",
         "voiceCloneShell",
         "digitalHumanLivePanel",
         "careDashboard",
     ):
         require(features.get(feature, {}).get("releaseVisible") is False, f"{feature} must remain hidden")
+
+    for feature in ("timeLetters", "echoDelayedReplies", "digitalHumanLivePanel"):
+        require(
+            features.get(feature, {}).get("reason") == "productClosed",
+            f"{feature} must remain product closed",
+        )
 
     capture = features.get("ownerMediaCaptureV1", {})
     processing = features.get("ownerMediaProcessingV1", {})

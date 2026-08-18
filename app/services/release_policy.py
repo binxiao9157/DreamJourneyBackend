@@ -450,6 +450,7 @@ class ReleasePolicyService:
         "ownerTruthInterviewOutcome": ("G0", "G1", "G2"),
         "echoImageInput": ("G0", "G1", "G2"),
         "timeLetters": ("G0", "G1", "G2", "G4"),
+        "echoDelayedReplies": ("G0", "G1", "G2", "G4"),
         "profileSettings": ("G0", "G1"),
         "personaSettings": ("G0", "G1", "G4"),
         "archiveAudioUpload": ("G0", "G1", "G2", "G3", "G4"),
@@ -551,6 +552,8 @@ class ReleasePolicyService:
     # cohorts, client claims, and default-stage shadow behavior.
     _PRODUCT_CLOSED_FEATURES = {
         "digitalHumanLivePanel",
+        "echoDelayedReplies",
+        "timeLetters",
     }
 
     def __init__(
@@ -850,14 +853,13 @@ class ReleasePolicyCommandGate:
         ("/tts", "voiceCloneShell"),
         ("/family/", "familyManagement"),
         ("/care/", "careDashboard"),
-        ("/mailbox/letters", "timeLetters"),
         ("/archive/time-letters/", "timeLetters"),
         ("/archive/image-analysis", "archiveLocalAnalysis"),
         ("/archive/photos", "archiveRemoteFetch"),
         ("/profile", "profileSettings"),
         ("/context/build", "echoTextInput"),
         ("/echo/answers", "echoTextInput"),
-        ("/echo/delayed-replies", "echoTextInput"),
+        ("/echo/delayed-replies", "echoDelayedReplies"),
         ("/auth/delete", "accountDeletion"),
         ("/auth/data-export", "accountDataExport"),
         ("/auth/restore", "accountDeletion"),
@@ -983,13 +985,31 @@ class ReleasePolicyCommandGate:
         payload: Optional[Mapping[str, Any]],
     ) -> Optional[str]:
         normalized_path = (path or "").split("?", 1)[0]
+        normalized_method = method.upper()
         if (
-            method.upper() == "POST"
+            normalized_method == "POST"
             and normalized_path.startswith("/digital-human/sessions/")
             and normalized_path.endswith("/release")
         ):
             # Preserve a cleanup path for leases created before the product
             # closure. No new session or heartbeat is allowed.
+            return None
+        if normalized_method == "GET" and (
+            normalized_path.startswith("/archive/time-letters/")
+            or normalized_path.startswith("/mailbox/letters/")
+            or normalized_path.startswith("/echo/delayed-replies/")
+        ):
+            # Product closure stops new creation and delivery. Existing
+            # metadata remains readable so a closure never strands a user or
+            # turns a retained record into an authorization regression.
+            return None
+        if (
+            normalized_method == "POST"
+            and normalized_path.startswith("/mailbox/letters/")
+            and normalized_path.endswith(("/read", "/archive"))
+        ):
+            # Read/archive are cleanup operations over retained mailbox rows;
+            # neither creates nor delivers a new message.
             return None
         publication_feature = self._publication_formal_feature(normalized_path)
         if publication_feature is not None:

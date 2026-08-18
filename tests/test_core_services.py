@@ -3207,6 +3207,21 @@ class BackendUserIdentityTests(unittest.TestCase):
 
 
 class EchoDelayedReplyAPITests(unittest.TestCase):
+    def setUp(self):
+        # These legacy endpoint tests pin the dormant storage contract only.
+        # Product-facing closure is asserted separately by the PC-00-02 gate.
+        self._product_closed_patch = patch.object(
+            ReleasePolicyService,
+            "_PRODUCT_CLOSED_FEATURES",
+            ReleasePolicyService._PRODUCT_CLOSED_FEATURES.difference(
+                {"echoDelayedReplies"}
+            ),
+        )
+        self._product_closed_patch.start()
+
+    def tearDown(self):
+        self._product_closed_patch.stop()
+
     @staticmethod
     def _seed_v4_completed_reply(
         store: InMemoryStore,
@@ -4577,6 +4592,16 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
 
 class ArchiveAPITests(unittest.TestCase):
     def setUp(self):
+        # Keep the retained time-letter data contract testable without making
+        # it reachable to ordinary product traffic.
+        self._product_closed_patch = patch.object(
+            ReleasePolicyService,
+            "_PRODUCT_CLOSED_FEATURES",
+            ReleasePolicyService._PRODUCT_CLOSED_FEATURES.difference(
+                {"timeLetters"}
+            ),
+        )
+        self._product_closed_patch.start()
         self.previous_store = main_module.store
         self.previous_settings = main_module.settings
         main_module.store = InMemoryStore()
@@ -4591,6 +4616,7 @@ class ArchiveAPITests(unittest.TestCase):
     def tearDown(self):
         main_module.store = self.previous_store
         main_module.settings = self.previous_settings
+        self._product_closed_patch.stop()
 
     def test_archive_items_api_saves_sanitized_metadata_and_lists_by_user(self):
         client = TestClient(app)

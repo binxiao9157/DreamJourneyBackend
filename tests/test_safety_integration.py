@@ -1,6 +1,7 @@
 import hashlib
 import json
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -12,6 +13,14 @@ from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyS
 
 class SafetyIntegrationTests(unittest.TestCase):
     def setUp(self):
+        self.product_closed_patch = patch.object(
+            ReleasePolicyService,
+            "_PRODUCT_CLOSED_FEATURES",
+            ReleasePolicyService._PRODUCT_CLOSED_FEATURES.difference(
+                {"digitalHumanLivePanel", "echoDelayedReplies"}
+            ),
+        )
+        self.product_closed_patch.start()
         self.previous_store = main_module.store
         self.previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
         self.previous_release_policy_gate = main_module.RELEASE_POLICY_COMMAND_GATE
@@ -28,6 +37,7 @@ class SafetyIntegrationTests(unittest.TestCase):
         main_module.store = self.previous_store
         main_module.RELEASE_POLICY_SERVICE = self.previous_release_policy_service
         main_module.RELEASE_POLICY_COMMAND_GATE = self.previous_release_policy_gate
+        self.product_closed_patch.stop()
 
     @staticmethod
     def _eligibility(*, capability: str, age_status: str = "adult") -> dict:

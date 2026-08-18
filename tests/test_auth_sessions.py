@@ -2,6 +2,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from threading import Event
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -918,11 +919,16 @@ class AuthSessionAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["x-dreamjourney-auth-principal"], "machine")
 
-        dispatch = client.post(
-            "/archive/time-letters/dispatch-due",
-            headers={"Authorization": "Bearer legacy-test-token"},
-            json={"now": "2026-07-10T00:00:00Z", "limit": 1},
-        )
+        with patch.object(
+            ReleasePolicyService,
+            "_PRODUCT_CLOSED_FEATURES",
+            ReleasePolicyService._PRODUCT_CLOSED_FEATURES.difference({"timeLetters"}),
+        ):
+            dispatch = client.post(
+                "/archive/time-letters/dispatch-due",
+                headers={"Authorization": "Bearer legacy-test-token"},
+                json={"now": "2026-07-10T00:00:00Z", "limit": 1},
+            )
         self.assertEqual(dispatch.status_code, 200)
         self.assertEqual(dispatch.headers["x-dreamjourney-auth-principal"], "machine")
 

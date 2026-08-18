@@ -93,6 +93,20 @@ class RuntimeCapabilityComposerTests(unittest.TestCase):
 
 
 class RuntimeCapabilityConfigTests(unittest.TestCase):
+    def test_product_closed_time_letter_and_delayed_reply_capabilities(self):
+        config = RuntimeConfigService(Settings()).public_config()
+        snapshots = config["capabilitySnapshots"]
+
+        for capability in ("timeLetters", "echoDelayedReplies"):
+            snapshot = snapshots[capability]
+            self.assertTrue(snapshot["implemented"], capability)
+            self.assertFalse(snapshot["enabled"], capability)
+            self.assertFalse(snapshot["providerReady"], capability)
+            self.assertFalse(snapshot["releaseVisible"], capability)
+            self.assertEqual(snapshot["reason"], "productClosed", capability)
+            self.assertEqual(snapshot["fallbackMode"], "disabled", capability)
+            self.assertFalse(config["capabilities"][capability], capability)
+
     def test_runtime_config_exposes_complete_route_authentication_inventory(self):
         development = RuntimeConfigService(Settings()).public_config()["auth"]["routeAuthentication"]
         production = RuntimeConfigService(
@@ -128,6 +142,7 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             "ownerTruthMediaProcessing",
             "identityChallenge",
             "timeLetters",
+            "echoDelayedReplies",
             "familyManagement",
             "familySpace",
             "voiceCloneShell",

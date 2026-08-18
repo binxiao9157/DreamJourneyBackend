@@ -120,28 +120,35 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
 
     def test_digital_human_session_is_blocked_without_true_broker(self):
         headers, user_id = self.user_headers("13800139903")
-        response = client.post(
-            "/digital-human/sessions",
-            headers=headers,
-            json={
-                "userId": user_id,
-                "personaId": "persona_boundary",
-                "scene": "echo",
-                "deviceId": "ios-boundary",
-                "lifecycleMode": "sunlight",
-                "subjectEligibility": {
-                    "capability": "digitalHuman",
-                    "subjectKind": "self",
-                    "ageStatus": "adult",
-                    "livingStatus": "living",
-                    "ageVerified": True,
-                    "livenessVerified": True,
-                    "subjectMatchesActor": True,
-                    "consentVerified": True,
-                    "consentPurpose": "digitalHuman",
+        with patch.object(
+            ReleasePolicyService,
+            "_PRODUCT_CLOSED_FEATURES",
+            ReleasePolicyService._PRODUCT_CLOSED_FEATURES.difference(
+                {"digitalHumanLivePanel"}
+            ),
+        ):
+            response = client.post(
+                "/digital-human/sessions",
+                headers=headers,
+                json={
+                    "userId": user_id,
+                    "personaId": "persona_boundary",
+                    "scene": "echo",
+                    "deviceId": "ios-boundary",
+                    "lifecycleMode": "sunlight",
+                    "subjectEligibility": {
+                        "capability": "digitalHuman",
+                        "subjectKind": "self",
+                        "ageStatus": "adult",
+                        "livingStatus": "living",
+                        "ageVerified": True,
+                        "livenessVerified": True,
+                        "subjectMatchesActor": True,
+                        "consentVerified": True,
+                        "consentPurpose": "digitalHuman",
+                    },
                 },
-            },
-        )
+            )
 
         self.assertEqual(response.status_code, 503)
         self.assert_no_store(response)

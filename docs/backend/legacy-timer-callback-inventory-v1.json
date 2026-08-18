@@ -27,11 +27,11 @@
     {
       "id": "time-letter-api-direct-dispatch",
       "surface": "apiDueRoute",
-      "executionMode": "DIRECT_API_REQUEST",
-      "directEffectStatus": "LEGACY_DIRECT_BUSINESS_EFFECT",
+      "executionMode": "PRODUCT_CLOSED_API_REQUEST",
+      "directEffectStatus": "PRODUCT_CLOSED_FAIL_CLOSED",
       "ownerBoundary": "authenticated-route-and-store-idempotency",
       "generationFence": "route-authentication-and-time-letter-state",
-      "cutoverState": "NOT_AUTHORIZED",
+      "cutoverState": "PRODUCT_CLOSED",
       "evidenceState": "SOURCE_INVENTORIED",
       "sources": [
         {
@@ -47,18 +47,18 @@
     {
       "id": "time-letter-cli-direct-dispatch",
       "surface": "hostCliDispatch",
-      "executionMode": "DIRECT_CLI_INVOCATION",
-      "directEffectStatus": "LEGACY_DIRECT_BUSINESS_EFFECT",
+      "executionMode": "PRODUCT_CLOSED_NOOP_CLI",
+      "directEffectStatus": "PRODUCT_CLOSED_NOOP",
       "ownerBoundary": "host-operator-and-store-idempotency",
       "generationFence": "time-letter-state-only",
-      "cutoverState": "NOT_AUTHORIZED",
+      "cutoverState": "PRODUCT_CLOSED",
       "evidenceState": "SOURCE_INVENTORIED",
       "sources": [
         {
           "path": "scripts/dispatch_due_time_letters.py",
           "markers": [
-            "Dispatch due DreamJourney time letters.",
-            "dispatch_due_time_letters_for_store(backend_store"
+            "Time letters are outside the confirmed product scope.",
+            "product_closed_summary(args.now)"
           ]
         }
       ]
@@ -67,10 +67,10 @@
       "id": "time-letter-host-scheduler-documentation",
       "surface": "hostTimerCandidate",
       "executionMode": "DOCUMENTED_HOST_TIMER_CANDIDATE",
-      "directEffectStatus": "LEGACY_DIRECT_BUSINESS_EFFECT",
+      "directEffectStatus": "PRODUCT_CLOSED_NOOP",
       "ownerBoundary": "host-operator-required",
       "generationFence": "time-letter-state-only",
-      "cutoverState": "NOT_AUTHORIZED",
+      "cutoverState": "PRODUCT_CLOSED",
       "evidenceState": "HOST_UNVERIFIED_G2_REQUIRED",
       "sources": [
         {

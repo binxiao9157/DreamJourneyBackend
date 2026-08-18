@@ -33,7 +33,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             emergency_disabled_features={"profileSettings"},
         )
 
-        self.assertEqual(service.command_mode_for("timeLetters"), "observe")
+        self.assertEqual(service.command_mode_for("timeLetters"), "enforce")
         self.assertEqual(service.command_mode_for("familyManagement"), "enforce")
         self.assertEqual(service.command_mode_for("profileSettings"), "enforce")
         descriptor = service.public_descriptor()
@@ -122,7 +122,6 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             "ownerTruthLifeMap",
             "ownerTruthMemorySearch",
             "ownerTruthInterviewOutcome",
-            "timeLetters",
             "voiceCloneShell",
             "archiveAudioUpload",
             "archiveVideoUpload",
@@ -131,6 +130,9 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             self.assertEqual(decisions[feature].reason, "notApprovedForClosedPilot")
         self.assertFalse(decisions["digitalHumanLivePanel"].releaseVisible)
         self.assertEqual(decisions["digitalHumanLivePanel"].reason, "productClosed")
+        for feature in ["timeLetters", "echoDelayedReplies"]:
+            self.assertFalse(decisions[feature].releaseVisible)
+            self.assertEqual(decisions[feature].reason, "productClosed")
 
         self.assertEqual(decisions["voiceCloneShell"].releaseStage, "M1")
         self.assertEqual(decisions["digitalHumanLivePanel"].releaseStage, "M2")
@@ -423,7 +425,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertEqual(service.command_mode_for("digitalHumanLivePanel"), "enforce")
         self.assertEqual(
             service.public_descriptor()["productClosedFeatures"],
-            ["digitalHumanLivePanel"],
+            ["digitalHumanLivePanel", "echoDelayedReplies", "timeLetters"],
         )
 
     def test_regular_signed_in_account_receives_authenticated_owner_cohort(self):
@@ -563,12 +565,18 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertEqual(snapshot.snapshotDecision, "clientBelowMinimum")
         self.assertTrue(all(not item.releaseVisible for item in snapshot.features))
         reasons = {item.feature: item.reason for item in snapshot.features}
-        self.assertEqual(reasons["digitalHumanLivePanel"], "productClosed")
+        product_closed = {
+            "digitalHumanLivePanel",
+            "echoDelayedReplies",
+            "timeLetters",
+        }
+        for feature in product_closed:
+            self.assertEqual(reasons[feature], "productClosed")
         self.assertTrue(
             all(
                 reason == "clientBelowMinimum"
                 for feature, reason in reasons.items()
-                if feature != "digitalHumanLivePanel"
+                if feature not in product_closed
             )
         )
 
@@ -983,19 +991,19 @@ class ReleasePolicyEndpointTests(unittest.TestCase):
             family.headers["X-DreamJourney-Release-Policy-Mode"],
             "enforce",
         )
+        self.assertEqual(time_letter.status_code, 403)
         self.assertEqual(
             time_letter.headers["X-DreamJourney-Release-Policy-Decision"],
-            "observeDeny",
+            "deny",
         )
         self.assertEqual(
             time_letter.headers["X-DreamJourney-Release-Policy-Mode"],
-            "observe",
+            "enforce",
         )
         time_letter_detail = time_letter.json().get("detail")
-        self.assertFalse(
-            isinstance(time_letter_detail, dict)
-            and time_letter_detail.get("code") == "release_policy_denied"
-        )
+        self.assertEqual(time_letter_detail["code"], "release_policy_denied")
+        self.assertEqual(time_letter_detail["feature"], "timeLetters")
+        self.assertEqual(time_letter_detail["reason"], "productClosed")
 
     def test_kill_switch_enforces_owner_core_while_global_rollout_observes(self):
         previous_service = main_module.RELEASE_POLICY_SERVICE
@@ -1290,7 +1298,7 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
         )
         self.assertEqual(
             gate.feature_for_request("POST", "/echo/delayed-replies/dispatch-due", {}),
-            "echoTextInput",
+            "echoDelayedReplies",
         )
         self.assertEqual(gate.feature_for_request("POST", "/auth/delete", {}), "accountDeletion")
         self.assertEqual(

@@ -94,11 +94,16 @@ class RouteAuthenticationAPITests(unittest.TestCase):
         self.assertEqual(dispatch.headers["x-dreamjourney-route-auth-reason"], "machinePrincipalRequired")
 
     def test_machine_scope_allows_system_route_but_not_user_business_route(self):
-        dispatch = client.post(
-            "/archive/time-letters/dispatch-due",
-            headers=self.machine_headers(),
-            json={"now": "2026-07-17T10:00:00Z", "limit": 1},
-        )
+        with patch.object(
+            ReleasePolicyService,
+            "_PRODUCT_CLOSED_FEATURES",
+            ReleasePolicyService._PRODUCT_CLOSED_FEATURES.difference({"timeLetters"}),
+        ):
+            dispatch = client.post(
+                "/archive/time-letters/dispatch-due",
+                headers=self.machine_headers(),
+                json={"now": "2026-07-17T10:00:00Z", "limit": 1},
+            )
         business = client.post(
             "/profile",
             headers=self.machine_headers(),

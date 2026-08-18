@@ -52,6 +52,7 @@ def main():
         "ownerTruthMediaProcessing",
         "identityChallenge",
         "timeLetters",
+        "echoDelayedReplies",
         "familyManagement",
         "familySpace",
         "voiceCloneShell",
@@ -99,6 +100,20 @@ def main():
         require(media["provider"] == "mockObjectStorage", f"{capability} provider changed unexpectedly")
         require(media["providerReady"] is False, f"{capability} mock provider must not be ready")
         require(media["releaseVisible"] is False, f"{capability} must remain release hidden")
+
+    for capability in ("timeLetters", "echoDelayedReplies"):
+        closed = snapshots[capability]
+        require(closed["enabled"] is False, f"{capability} must remain disabled")
+        require(closed["providerReady"] is False, f"{capability} must not dispatch")
+        require(closed["releaseVisible"] is False, f"{capability} must remain hidden")
+        require(closed["reason"] == "productClosed", f"{capability} reason changed")
+
+    capabilities = runtime.get("capabilities") or {}
+    require(capabilities.get("timeLetters") is False, "timeLetters alias must be closed")
+    require(
+        capabilities.get("echoDelayedReplies") is False,
+        "echoDelayedReplies alias must be closed",
+    )
 
     inventory = runtime.get("providerInventory") or {}
     require(inventory.get("contractVersion") == 1, "provider inventory contract must be v1")
@@ -173,7 +188,6 @@ def main():
         owner_truth_media.get("contractVersion") == 1,
         "owner truth media contract must be v1",
     )
-    capabilities = runtime.get("capabilities") or {}
     storage = snapshots["ownerTruthMediaStorage"]
     processing = snapshots["ownerTruthMediaProcessing"]
     require(

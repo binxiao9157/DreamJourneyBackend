@@ -102,6 +102,7 @@ def validate_inventory(payload: Mapping[str, Any]) -> dict[str, int]:
     host_unverified_count = 0
     external_blocked_count = 0
     legacy_direct_effect_count = 0
+    product_closed_effect_count = 0
     for index, entry in enumerate(entries):
         _require(isinstance(entry, Mapping), f"entry {index} must be an object")
         missing = REQUIRED_ENTRY_FIELDS - set(entry)
@@ -135,6 +136,12 @@ def validate_inventory(payload: Mapping[str, Any]) -> dict[str, int]:
                 entry["cutoverState"] == "NOT_AUTHORIZED",
                 f"{entry_id} must remain NOT_AUTHORIZED until an approved cutover",
             )
+        if str(entry["directEffectStatus"]).startswith("PRODUCT_CLOSED_"):
+            product_closed_effect_count += 1
+            _require(
+                entry["cutoverState"] == "PRODUCT_CLOSED",
+                f"{entry_id} must remain PRODUCT_CLOSED",
+            )
         if entry["evidenceState"] == "HOST_UNVERIFIED_G2_REQUIRED":
             host_unverified_count += 1
         if entry["evidenceState"] == "EXTERNAL_G3_REQUIRED":
@@ -143,13 +150,17 @@ def validate_inventory(payload: Mapping[str, Any]) -> dict[str, int]:
     _require(actual_ids == EXPECTED_ENTRY_IDS, "legacy timer/callback inventory entry set drifted")
     _require(host_unverified_count >= 1, "host timer state must remain explicitly unverified")
     _require(external_blocked_count >= 1, "external Provider callback boundary must remain explicit")
-    _require(legacy_direct_effect_count >= 2, "legacy direct TimeLetter dispatch surfaces are missing")
+    _require(
+        product_closed_effect_count >= 3,
+        "product-closed TimeLetter dispatch surfaces are missing",
+    )
     return {
         "entryCount": len(actual_ids),
         "sourceCount": source_count,
         "hostUnverifiedCount": host_unverified_count,
         "externalBlockedCount": external_blocked_count,
         "legacyDirectEffectCount": legacy_direct_effect_count,
+        "productClosedEffectCount": product_closed_effect_count,
     }
 
 
