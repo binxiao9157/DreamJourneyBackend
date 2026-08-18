@@ -1261,6 +1261,29 @@ class PostgresStore:
             item["familyStatus"] = str(row.get("family_status") or "missing")
         return item
 
+    def get_auth_session_by_refresh_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT a.payload, a.status, a.refresh_expires_at,
+                   a.family_id, a.session_version,
+                   COALESCE(f.status, 'legacy') AS family_status
+            FROM auth_sessions AS a
+            LEFT JOIN token_families AS f ON f.id = a.family_id
+            WHERE a.refresh_token_hash = %s
+            """,
+            (token_hash,),
+        )
+        if row is None:
+            return None
+        item = deepcopy(row["payload"])
+        item["status"] = str(row.get("status") or item.get("status") or "invalid")
+        item["refreshExpiresAt"] = self._iso_value(row.get("refresh_expires_at"))
+        if row.get("family_id") is not None:
+            item["tokenFamilyId"] = str(row["family_id"])
+            item["sessionVersion"] = int(row.get("session_version") or 0)
+            item["familyStatus"] = str(row.get("family_status") or "missing")
+        return item
+
     def rotate_auth_session_refresh(
         self,
         refresh_token_hash: str,
@@ -2186,11 +2209,14 @@ class PostgresStore:
                 id, identity_type, target_hash_key_version, target_hash,
                 target_hint, code_hash_key_version, code_hash, code_version,
                 label, status, subject_id, expires_at, created_by_hash,
-                use_count, last_used_at, contract_version, created_at, updated_at
+                use_count, last_used_at, test_role, feature_entitlements,
+                scenario_bindings, entitlement_revision,
+                entitlement_snapshot_id, updated_by_hash,
+                entitlement_updated_at, contract_version, created_at, updated_at
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (identity_type, target_hash_key_version, target_hash)
             DO NOTHING
@@ -2212,6 +2238,13 @@ class PostgresStore:
                 record["createdByHash"],
                 int(record.get("useCount") or 0),
                 record.get("lastUsedAt"),
+                record.get("testRole"),
+                Jsonb(record.get("featureEntitlements") or []),
+                Jsonb(record.get("scenarioBindings") or {}),
+                int(record.get("entitlementRevision") or 1),
+                record.get("entitlementSnapshotId"),
+                record.get("updatedByHash"),
+                record.get("entitlementUpdatedAt"),
                 int(record.get("contractVersion") or 1),
                 record["createdAt"],
                 record["updatedAt"],
@@ -2261,6 +2294,65 @@ class PostgresStore:
             (account_id,),
         )
         return None if row is None else self._test_account_record(row)
+
+    def update_test_account_allowlist_authorization(
+        self,
+        account_id: str,
+        *,
+        test_role: Optional[str],
+        feature_entitlements: List[str],
+        scenario_bindings: Dict[str, Any],
+        entitlement_revision: int,
+        entitlement_snapshot_id: str,
+        updated_by_hash: str,
+        updated_at_iso: str,
+        expected_entitlement_revision: int,
+    ) -> Dict[str, Any]:
+        row = self._fetchone(
+            """
+            UPDATE test_account_allowlist
+            SET test_role = %s,
+                feature_entitlements = %s,
+                scenario_bindings = %s,
+                entitlement_revision = %s,
+                entitlement_snapshot_id = %s,
+                updated_by_hash = %s,
+                entitlement_updated_at = %s,
+                contract_version = 2,
+                updated_at = %s
+            WHERE id = %s
+              AND entitlement_revision = %s
+            RETURNING *
+            """,
+            self._adapt_params(
+                (
+                    test_role,
+                    Jsonb(feature_entitlements),
+                    Jsonb(scenario_bindings),
+                    int(entitlement_revision),
+                    entitlement_snapshot_id,
+                    updated_by_hash,
+                    updated_at_iso,
+                    updated_at_iso,
+                    account_id,
+                    int(expected_entitlement_revision),
+                )
+            ),
+        )
+        if row is not None:
+            return {"outcome": "updated", "account": self._test_account_record(row)}
+        existing = self._fetchone(
+            "SELECT entitlement_revision FROM test_account_allowlist WHERE id = %s",
+            (account_id,),
+        )
+        if existing is None:
+            return {"outcome": "notFound"}
+        return {
+            "outcome": "revisionConflict",
+            "currentEntitlementRevision": int(
+                existing.get("entitlement_revision") or 1
+            ),
+        }
 
     def get_active_test_account_allowlist_by_target_hash(
         self,
@@ -2420,6 +2512,23 @@ class PostgresStore:
                 else cls._iso_value(row.get("expires_at"))
             ),
             "createdByHash": str(row.get("created_by_hash") or ""),
+            "testRole": (
+                str(row.get("test_role"))
+                if row.get("test_role") is not None
+                else None
+            ),
+            "featureEntitlements": list(row.get("feature_entitlements") or []),
+            "scenarioBindings": deepcopy(row.get("scenario_bindings") or {}),
+            "entitlementRevision": int(row.get("entitlement_revision") or 1),
+            "entitlementSnapshotId": str(
+                row.get("entitlement_snapshot_id") or ""
+            ),
+            "updatedByHash": str(row.get("updated_by_hash") or ""),
+            "entitlementUpdatedAt": (
+                None
+                if row.get("entitlement_updated_at") is None
+                else cls._iso_value(row.get("entitlement_updated_at"))
+            ),
             "createdAt": cls._iso_value(row.get("created_at")),
             "updatedAt": cls._iso_value(row.get("updated_at")),
             "lastUsedAt": (

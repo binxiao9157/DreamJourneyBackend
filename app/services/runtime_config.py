@@ -9,6 +9,11 @@ from app.services.password_authentication import (
     password_authentication_runtime_descriptor,
 )
 from app.services.route_authentication import resolve_route_authentication_mode
+from app.services.test_account_allowlist import (
+    TEST_ACCOUNT_AUTHORIZATION_CONTRACT_VERSION,
+    TEST_ACCOUNT_FEATURE_ENTITLEMENTS,
+    TEST_ACCOUNT_ROLES,
+)
 from app.services.route_ownership import RouteOwnershipRegistry
 from app.services.release_policy import ReleasePolicyService, parse_release_policy_feature_set
 from app.services.recovery_access import RecoveryAccessPolicy
@@ -226,6 +231,20 @@ class RuntimeConfigService:
                 "logoutEndpoint": "/auth/logout",
                 "identityChallenge": identity_challenge,
                 "passwordAuthentication": password_authentication,
+                "testAccountAuthorization": {
+                    "implemented": True,
+                    "serverAuthoritative": True,
+                    "defaultFeatureEntitlements": [],
+                    "roles": list(TEST_ACCOUNT_ROLES),
+                    "featureCount": len(TEST_ACCOUNT_FEATURE_ENTITLEMENTS),
+                    "sessionRevisionValidation": True,
+                    "scenarioBindingsAreAuthority": False,
+                    "normalAppManagementVisible": False,
+                    "managementRoute": "/ops/test-accounts/admin",
+                    "contractVersion": (
+                        TEST_ACCOUNT_AUTHORIZATION_CONTRACT_VERSION
+                    ),
+                },
                 "tokenType": "Bearer",
                 "accessTTLSeconds": max(60, self.settings.auth_access_ttl_seconds),
                 "refreshTTLSeconds": max(

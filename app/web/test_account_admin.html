@@ -36,7 +36,7 @@
       letter-spacing: 0;
     }
 
-    button, input { font: inherit; letter-spacing: 0; }
+    button, input, select, textarea { font: inherit; letter-spacing: 0; }
     button { cursor: pointer; }
     button:disabled { cursor: not-allowed; opacity: 0.55; }
 
@@ -101,7 +101,7 @@
 
     label { font-weight: 610; }
 
-    input {
+    input, select, textarea {
       width: 100%;
       min-height: 42px;
       padding: 9px 11px;
@@ -112,6 +112,7 @@
     }
 
     input::placeholder { color: #929c96; }
+    textarea { min-height: 82px; resize: vertical; }
 
     .button {
       min-height: 40px;
@@ -158,7 +159,7 @@
 
     .create-band {
       display: grid;
-      grid-template-columns: minmax(210px, 0.9fr) minmax(240px, 1.4fr) auto;
+      grid-template-columns: minmax(190px, 0.9fr) minmax(220px, 1.2fr) minmax(180px, 0.8fr) auto;
       align-items: end;
       gap: 14px;
       padding: 18px;
@@ -169,6 +170,47 @@
     }
 
     .create-band .field { margin: 0; }
+
+    .authorization-options {
+      grid-column: 1 / -1;
+      padding-top: 4px;
+      border-top: 1px solid #e7ebe8;
+    }
+
+    .authorization-options summary {
+      color: var(--accent);
+      cursor: pointer;
+      font-weight: 630;
+    }
+
+    .authorization-options[open] summary { margin-bottom: 14px; }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px 14px;
+    }
+
+    .feature-option {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      min-width: 0;
+      font-size: 13px;
+      font-weight: 500;
+      overflow-wrap: anywhere;
+    }
+
+    .feature-option input {
+      width: 16px;
+      min-height: 16px;
+      margin: 2px 0 0;
+      flex: 0 0 auto;
+    }
+
+    .authorization-editor { display: grid; gap: 16px; }
+    .authorization-editor .field { margin: 0; }
+    .authorization-summary { color: var(--muted); font-size: 13px; }
 
     .table-toolbar {
       display: flex;
@@ -240,7 +282,7 @@
     }
 
     dialog {
-      width: min(450px, calc(100% - 32px));
+      width: min(720px, calc(100% - 32px));
       padding: 0;
       color: var(--ink);
       background: var(--surface);
@@ -288,6 +330,8 @@
       .workspace-header { display: block; }
       .session-actions { margin-top: 12px; justify-content: space-between; }
       .create-band { grid-template-columns: 1fr; align-items: stretch; }
+      .authorization-options { grid-column: auto; }
+      .feature-grid { grid-template-columns: 1fr; }
       .create-band .button { width: 100%; }
       .login-shell { margin-top: 4vh; padding: 22px; }
     }
@@ -342,7 +386,25 @@
           <label for="label">备注</label>
           <input id="label" name="label" placeholder="测试设备或使用人" required maxlength="80">
         </div>
+        <div class="field">
+          <label for="createTestRole">测试角色</label>
+          <select id="createTestRole" name="testRole">
+            <option value="">仅登录白名单</option>
+          </select>
+        </div>
         <button class="button button-primary" type="submit">新增白名单</button>
+        <details class="authorization-options">
+          <summary>产品功能与场景绑定</summary>
+          <div class="field">
+            <label>Feature 权限</label>
+            <div id="createFeatureOptions" class="feature-grid"></div>
+          </div>
+          <div class="field">
+            <label for="createScenarioBindings">场景绑定 JSON</label>
+            <textarea id="createScenarioBindings" spellcheck="false" placeholder='{"relationshipId":"rel_test_001"}'></textarea>
+          </div>
+          <p class="authorization-summary">场景引用只用于准备测试数据，不授予 Vault、Relationship 或 ShareGrant 权限。</p>
+        </details>
       </form>
 
       <div class="table-toolbar">
@@ -359,6 +421,7 @@
             <tr>
               <th>账号</th>
               <th>状态</th>
+              <th>产品权限</th>
               <th>有效期</th>
               <th>绑定用户</th>
               <th>登录次数</th>
@@ -391,6 +454,35 @@
     </div>
   </dialog>
 
+  <dialog id="authorizationDialog" aria-labelledby="authorizationTitle">
+    <div class="dialog-body authorization-editor">
+      <div>
+        <h2 id="authorizationTitle">测试账号产品权限</h2>
+        <p id="authorizationAccountLabel" class="authorization-summary"></p>
+      </div>
+      <div class="field">
+        <label for="authorizationRole">测试角色</label>
+        <select id="authorizationRole">
+          <option value="">仅登录白名单</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Feature 权限</label>
+        <div id="authorizationFeatureOptions" class="feature-grid"></div>
+      </div>
+      <div class="field">
+        <label for="authorizationScenarioBindings">场景绑定 JSON</label>
+        <textarea id="authorizationScenarioBindings" spellcheck="false"></textarea>
+      </div>
+      <p class="authorization-summary">保存后立即提升权限修订号并撤销该账号现有会话，需要重新登录。</p>
+      <p id="authorizationMessage" class="message" role="alert" aria-live="polite"></p>
+      <div class="dialog-actions">
+        <button id="cancelAuthorizationButton" class="button button-secondary" type="button">取消</button>
+        <button id="saveAuthorizationButton" class="button button-primary" type="button">保存并撤销会话</button>
+      </div>
+    </div>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
   <script nonce="__CSP_NONCE__">
@@ -411,8 +503,16 @@
       const credentialTarget = document.getElementById("credentialTarget");
       const credentialCode = document.getElementById("credentialCode");
       const loginTargetLine = document.getElementById("loginTargetLine");
+      const authorizationDialog = document.getElementById("authorizationDialog");
+      const authorizationRole = document.getElementById("authorizationRole");
+      const authorizationFeatureOptions = document.getElementById("authorizationFeatureOptions");
+      const authorizationScenarioBindings = document.getElementById("authorizationScenarioBindings");
+      const authorizationMessage = document.getElementById("authorizationMessage");
       const toast = document.getElementById("toast");
       let toastTimer = null;
+      let authorizationContract = { roles: [], features: [] };
+      let accountsById = new Map();
+      let editingAuthorization = null;
 
       async function api(path, options = {}, redirectOnAuthFailure = true) {
         const response = await fetch(`${apiBase}${path}`, {
@@ -495,7 +595,92 @@
         return button;
       }
 
+      function roleLabel(role) {
+        return ({
+          superTest: "超级测试",
+          ownerTest: "Owner 测试",
+          familyTest: "Family 测试",
+          operatorTest: "平台运维测试"
+        })[role] || "仅登录";
+      }
+
+      function populateRoleSelect(select) {
+        const current = select.value;
+        select.replaceChildren();
+        const empty = document.createElement("option");
+        empty.value = "";
+        empty.textContent = "仅登录白名单";
+        select.append(empty);
+        for (const role of authorizationContract.roles || []) {
+          const option = document.createElement("option");
+          option.value = role;
+          option.textContent = roleLabel(role);
+          select.append(option);
+        }
+        select.value = current;
+      }
+
+      function renderFeatureOptions(container, selected = []) {
+        const selectedSet = new Set(selected);
+        container.replaceChildren();
+        for (const feature of authorizationContract.features || []) {
+          const option = document.createElement("label");
+          option.className = "feature-option";
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.value = feature;
+          checkbox.checked = selectedSet.has(feature);
+          const text = document.createElement("span");
+          text.textContent = feature;
+          option.append(checkbox, text);
+          container.append(option);
+        }
+      }
+
+      function selectedFeatures(container) {
+        return Array.from(container.querySelectorAll("input[type=checkbox]:checked"))
+          .map((item) => item.value)
+          .sort();
+      }
+
+      function parseScenarioBindings(value) {
+        const text = value.trim();
+        if (!text) return {};
+        const parsed = JSON.parse(text);
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+          throw new Error("场景绑定必须是 JSON 对象");
+        }
+        return parsed;
+      }
+
+      function configureAuthorizationControls(contract) {
+        authorizationContract = contract || { roles: [], features: [] };
+        populateRoleSelect(document.getElementById("createTestRole"));
+        populateRoleSelect(authorizationRole);
+        renderFeatureOptions(document.getElementById("createFeatureOptions"));
+        renderFeatureOptions(authorizationFeatureOptions);
+      }
+
+      function openAuthorizationEditor(account) {
+        editingAuthorization = account;
+        authorizationMessage.textContent = "";
+        document.getElementById("authorizationAccountLabel").textContent =
+          `${account.label} · 权限修订 ${account.entitlementRevision}`;
+        authorizationRole.value = account.testRole || "";
+        renderFeatureOptions(
+          authorizationFeatureOptions,
+          account.featureEntitlements || []
+        );
+        authorizationScenarioBindings.value = JSON.stringify(
+          account.scenarioBindings || {},
+          null,
+          2
+        );
+        authorizationDialog.showModal();
+      }
+
       function renderAccounts(accounts) {
+        accountsById = new Map(accounts.map((account) => [account.accountId, account]));
         accountRows.replaceChildren();
         emptyState.hidden = accounts.length !== 0;
         accountCount.textContent = `${accounts.length} 个账号`;
@@ -517,11 +702,24 @@
           status.textContent = account.status === "active" ? "已启用" : "已停用";
           statusCell.append(status);
 
+          const authorizationCell = document.createElement("td");
+          const authorizationRoleLabel = document.createElement("div");
+          authorizationRoleLabel.className = "account-label";
+          authorizationRoleLabel.textContent = roleLabel(account.testRole);
+          const authorizationFeatures = document.createElement("div");
+          authorizationFeatures.className = "secondary";
+          const featureCount = (account.featureEntitlements || []).length;
+          authorizationFeatures.textContent = featureCount
+            ? `${featureCount} 个 Feature · r${account.entitlementRevision}`
+            : `无产品权限 · r${account.entitlementRevision}`;
+          authorizationCell.append(authorizationRoleLabel, authorizationFeatures);
+
           const subject = cell(shortSubject(account.subjectId), "mono secondary");
           subject.title = account.subjectId || "";
           const actions = document.createElement("td");
           const actionGroup = document.createElement("div");
           actionGroup.className = "row-actions";
+          actionGroup.append(actionButton("权限", "authorization", account.accountId));
           actionGroup.append(actionButton("重置验证码", "rotate", account.accountId));
           if (account.status === "active") {
             actionGroup.append(actionButton("停用", "disable", account.accountId, true));
@@ -533,6 +731,7 @@
           row.append(
             identity,
             statusCell,
+            authorizationCell,
             cell("永久"),
             subject,
             cell(String(account.useCount || 0)),
@@ -545,6 +744,7 @@
 
       async function loadAccounts() {
         const result = await api("?include_disabled=true");
+        configureAuthorizationControls(result.authorizationContract);
         renderAccounts(result.testAccounts || []);
       }
 
@@ -589,10 +789,18 @@
             method: "POST",
             body: JSON.stringify({
               target: document.getElementById("target").value,
-              label: document.getElementById("label").value
+              label: document.getElementById("label").value,
+              testRole: document.getElementById("createTestRole").value || null,
+              featureEntitlements: selectedFeatures(
+                document.getElementById("createFeatureOptions")
+              ),
+              scenarioBindings: parseScenarioBindings(
+                document.getElementById("createScenarioBindings").value
+              )
             })
           });
           createForm.reset();
+          renderFeatureOptions(document.getElementById("createFeatureOptions"));
           showCredentials(result.testAccount);
           await loadAccounts();
         } catch (error) {
@@ -607,6 +815,11 @@
         if (!button) return;
         const action = button.dataset.action;
         const accountId = button.dataset.accountId;
+        if (action === "authorization") {
+          const account = accountsById.get(accountId);
+          if (account) openAuthorizationEditor(account);
+          return;
+        }
         if (action === "disable" && !window.confirm("停用后将立即撤销该账号的登录会话。确认停用？")) return;
         if (action === "enable" && !window.confirm("确认重新启用该测试账号？")) return;
         if (action === "rotate" && !window.confirm("旧验证码将立即失效。确认重置？")) return;
@@ -634,6 +847,38 @@
       });
 
       document.getElementById("closeCredentialButton").addEventListener("click", () => credentialDialog.close());
+
+      document.getElementById("cancelAuthorizationButton").addEventListener("click", () => authorizationDialog.close());
+
+      document.getElementById("saveAuthorizationButton").addEventListener("click", async () => {
+        if (!editingAuthorization) return;
+        const button = document.getElementById("saveAuthorizationButton");
+        authorizationMessage.textContent = "";
+        button.disabled = true;
+        try {
+          const role = authorizationRole.value || null;
+          const features = selectedFeatures(authorizationFeatureOptions);
+          if (!role && features.length) throw new Error("分配 Feature 前必须选择测试角色");
+          await api(`/${encodeURIComponent(editingAuthorization.accountId)}/authorization`, {
+            method: "PUT",
+            body: JSON.stringify({
+              testRole: role,
+              featureEntitlements: features,
+              scenarioBindings: parseScenarioBindings(authorizationScenarioBindings.value),
+              expectedEntitlementRevision: editingAuthorization.entitlementRevision
+            })
+          });
+          authorizationDialog.close();
+          notify("产品权限已更新，旧会话已撤销");
+          await loadAccounts();
+        } catch (error) {
+          authorizationMessage.textContent = error.status === 409
+            ? "权限已被其他管理员更新，请刷新后重试"
+            : error.message;
+        } finally {
+          button.disabled = false;
+        }
+      });
 
       document.getElementById("copyCredentialButton").addEventListener("click", async () => {
         const lines = [];

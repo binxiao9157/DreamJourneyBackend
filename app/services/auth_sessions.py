@@ -1,7 +1,7 @@
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 AUTH_SESSION_CONTRACT_VERSION = 2
@@ -32,10 +32,14 @@ class AuthSessionService:
         *,
         access_ttl_seconds: int,
         refresh_ttl_seconds: int,
+        authorization_snapshot_resolver: Optional[
+            Callable[[str], Optional[Dict[str, Any]]]
+        ] = None,
     ):
         self.store = store
         self.access_ttl_seconds = max(1, int(access_ttl_seconds))
         self.refresh_ttl_seconds = max(self.access_ttl_seconds + 1, int(refresh_ttl_seconds))
+        self.authorization_snapshot_resolver = authorization_snapshot_resolver
 
     def issue(self, user_id: str, *, now: Optional[datetime] = None) -> Dict[str, Any]:
         normalized_user_id = str(user_id or "").strip()
@@ -50,6 +54,9 @@ class AuthSessionService:
                     code="account_session_issuance_blocked",
                 )
             auth_epoch = self._account_auth_epoch(account)
+            authorization_snapshot = self._authorization_snapshot(
+                normalized_user_id
+            )
 
             issued_at = self._utc(now)
             token_family_id = self._opaque_id("tf", 18)
@@ -60,6 +67,7 @@ class AuthSessionService:
                 parent_session_id=None,
                 issued_at=issued_at,
                 auth_epoch=auth_epoch,
+                authorization_snapshot=authorization_snapshot,
             )
             family = {
                 "tokenFamilyId": token_family_id,
@@ -107,13 +115,24 @@ class AuthSessionService:
             return None
         if int(record.get("authEpoch") or 0) != self._account_auth_epoch(account):
             return None
+        authorization_snapshot = self._authorization_snapshot(
+            str(record.get("userId") or "")
+        )
+        if not self._authorization_snapshot_matches(
+            record,
+            authorization_snapshot,
+        ):
+            return None
         try:
             expires_at = self._parse_datetime(record.get("accessExpiresAt"))
         except (TypeError, ValueError):
             return None
         if expires_at <= self._utc(now):
             return None
-        return record
+        resolved = dict(record)
+        if authorization_snapshot is not None:
+            resolved["currentTestAccountAuthorization"] = authorization_snapshot
+        return resolved
 
     def refresh(self, refresh_token: str, *, now: Optional[datetime] = None) -> Dict[str, Any]:
         token = str(refresh_token or "").strip()
@@ -127,6 +146,29 @@ class AuthSessionService:
                 "invalid or expired refresh token",
                 code="invalid_or_expired_refresh_token",
             )
+        source_reader = getattr(
+            self.store,
+            "get_auth_session_by_refresh_token_hash",
+            None,
+        )
+        source = (
+            source_reader(auth_token_hash(token))
+            if callable(source_reader)
+            else None
+        )
+        authorization_snapshot = None
+        if source is not None:
+            authorization_snapshot = self._authorization_snapshot(
+                str(source.get("userId") or "")
+            )
+            if not self._authorization_snapshot_matches(
+                source,
+                authorization_snapshot,
+            ):
+                raise AuthSessionError(
+                    "test account authorization changed; reauthentication is required",
+                    code="test_account_authorization_reauthentication_required",
+                )
         refreshed_at = self._utc(now)
         successor_access = "dja_" + secrets.token_urlsafe(32)
         successor_refresh = "djr_" + secrets.token_urlsafe(40)
@@ -144,6 +186,7 @@ class AuthSessionService:
             ).isoformat(),
             "contractVersion": AUTH_SESSION_CONTRACT_VERSION,
         }
+        self._apply_authorization_snapshot(successor, authorization_snapshot)
         rotation_receipt_id = self._opaque_id("ase", 18)
         reuse_receipt_id = self._opaque_id("ase", 18)
         result = self.store.rotate_auth_session_refresh(
@@ -273,6 +316,7 @@ class AuthSessionService:
         parent_session_id: Optional[str],
         issued_at: datetime,
         auth_epoch: int,
+        authorization_snapshot: Optional[Dict[str, Any]],
     ):
         if not user_id:
             raise AuthSessionError("user id is required", code="user_id_required")
@@ -297,6 +341,7 @@ class AuthSessionService:
             ).isoformat(),
             "contractVersion": AUTH_SESSION_CONTRACT_VERSION,
         }
+        self._apply_authorization_snapshot(record, authorization_snapshot)
         return (
             {
                 **self._public_session(record),
@@ -323,7 +368,73 @@ class AuthSessionService:
         parent_session_id = str(record.get("parentSessionId") or "").strip()
         if parent_session_id:
             public["parentSessionId"] = parent_session_id
+        snapshot_id = str(
+            record.get("testAccountEntitlementSnapshotId") or ""
+        ).strip()
+        snapshot_revision = int(
+            record.get("testAccountEntitlementRevision") or 0
+        )
+        if snapshot_id and snapshot_revision >= 1:
+            public["authorizationSnapshot"] = {
+                "kind": "testAccount",
+                "revision": snapshot_revision,
+                "snapshotId": snapshot_id,
+                "contractVersion": 1,
+            }
         return public
+
+    def _authorization_snapshot(
+        self,
+        user_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        if not callable(self.authorization_snapshot_resolver):
+            return None
+        snapshot = self.authorization_snapshot_resolver(str(user_id or "").strip())
+        if snapshot is None:
+            return None
+        revision = int(snapshot.get("revision") or 0)
+        snapshot_id = str(snapshot.get("snapshotId") or "").strip()
+        if revision < 1 or not snapshot_id:
+            raise AuthSessionError(
+                "test account authorization snapshot is invalid",
+                code="test_account_authorization_unavailable",
+            )
+        return dict(snapshot)
+
+    @staticmethod
+    def _authorization_snapshot_matches(
+        record: Dict[str, Any],
+        current: Optional[Dict[str, Any]],
+    ) -> bool:
+        record_revision = int(
+            record.get("testAccountEntitlementRevision") or 0
+        )
+        record_snapshot_id = str(
+            record.get("testAccountEntitlementSnapshotId") or ""
+        ).strip()
+        record_has_marker = bool(record_revision or record_snapshot_id)
+        if current is None:
+            return not record_has_marker
+        if not record_has_marker:
+            return False
+        return (
+            record_revision == int(current.get("revision") or 0)
+            and record_snapshot_id == str(current.get("snapshotId") or "").strip()
+        )
+
+    @staticmethod
+    def _apply_authorization_snapshot(
+        record: Dict[str, Any],
+        snapshot: Optional[Dict[str, Any]],
+    ) -> None:
+        if snapshot is None:
+            return
+        record["testAccountEntitlementRevision"] = int(
+            snapshot.get("revision") or 0
+        )
+        record["testAccountEntitlementSnapshotId"] = str(
+            snapshot.get("snapshotId") or ""
+        )
 
     @staticmethod
     def _session_event(

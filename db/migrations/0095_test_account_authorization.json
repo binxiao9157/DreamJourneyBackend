@@ -1,0 +1,12 @@
+{
+  "version": "0095",
+  "name": "test_account_authorization",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "testAccountAuthorizationRevisionV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "testAccountAllowlist": true,
+    "testAccountAuthorization": true
+  }
+}

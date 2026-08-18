@@ -1080,6 +1080,13 @@ class RouteOwnershipRegistry:
                 required_scopes=("testAccount:manage",),
             ),
             _rule(
+                "PUT",
+                "/ops/test-accounts/{account_id}/authorization",
+                system,
+                "systemTestAccountManage",
+                required_scopes=("testAccount:manage",),
+            ),
+            _rule(
                 "POST",
                 "/ops/test-accounts/{account_id}/rotate-code",
                 system,

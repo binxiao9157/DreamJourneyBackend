@@ -99,6 +99,7 @@ def main() -> None:
         require("0089" in applied["appliedVersions"], "migration 0089 must apply")
         require("0090" in applied["appliedVersions"], "migration 0090 must apply")
         require("0093" in applied["appliedVersions"], "migration 0093 must apply")
+        require("0095" in applied["appliedVersions"], "migration 0095 must apply")
 
         store = PostgresStore(
             test_dsn,
@@ -140,6 +141,9 @@ def main() -> None:
             store,
             access_ttl_seconds=900,
             refresh_ttl_seconds=86400,
+            authorization_snapshot_resolver=(
+                allowlist.authorization_snapshot_for_subject
+            ),
         )
         identity = IdentityBindingService(
             store,
@@ -178,6 +182,10 @@ def main() -> None:
         require(
             sessions.resolve_access_token(access_token) is not None,
             "issued access token must resolve",
+        )
+        require(
+            first_login["auth"]["authorizationSnapshot"]["revision"] == 1,
+            "initial test account session must carry the empty authorization revision",
         )
 
         realtime = RealtimeVoiceSessionBroker(
@@ -228,6 +236,27 @@ def main() -> None:
         )
         realtime.release(realtime_lease, reason="postgresSmokeComplete")
 
+        updated_authorization = allowlist.update_authorization(
+            account_id,
+            test_role="ownerTest",
+            feature_entitlements=["profileSettings", "familyManagement"],
+            scenario_bindings={"relationshipId": "rel_smoke_001"},
+            expected_entitlement_revision=1,
+            actor_id="backend-service-v1",
+        )["testAccount"]
+        require(
+            updated_authorization["entitlementRevision"] == 2,
+            "authorization update must advance the revision",
+        )
+        require(
+            sessions.resolve_access_token(access_token) is None,
+            "authorization revision change must invalidate the old access token",
+        )
+        sessions.revoke_all_for_user(
+            subject_id,
+            reason="testAccountAuthorizationChanged",
+        )
+
         second_challenge = identity.create_challenge(
             identity_type="phone",
             target=TARGET,
@@ -245,6 +274,10 @@ def main() -> None:
             "repeat login must resolve the same subject",
         )
         require(
+            second_login["auth"]["authorizationSnapshot"]["revision"] == 2,
+            "reauthenticated session must carry the current authorization revision",
+        )
+        require(
             store.get_test_account_allowlist(account_id)["useCount"] == 2,
             "successful logins must be counted",
         )
@@ -256,7 +289,7 @@ def main() -> None:
         require(disabled["testAccount"]["status"] == "disabled", "disable must persist")
         sessions.revoke_all_for_user(subject_id, reason="testAccountDisabled")
         require(
-            sessions.resolve_access_token(access_token) is None,
+            sessions.resolve_access_token(second_login["auth"]["accessToken"]) is None,
             "disabling a bound account must support immediate session revocation",
         )
         try:
@@ -277,6 +310,8 @@ def main() -> None:
                     "migrationHead": verified["expectedHead"],
                     "subjectReused": True,
                     "sessionRevoked": True,
+                    "authorizationRevision": 2,
+                    "defaultEntitlementsEmpty": True,
                     "realtimeVoiceSubjectAuthority": True,
                     "rawCredentialsPersisted": False,
                 },

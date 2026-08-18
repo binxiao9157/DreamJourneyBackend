@@ -2,17 +2,30 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 from app.observability.events import hash_evidence_identifier
+from app.services.release_policy import ReleasePolicyService
 
 
-TEST_ACCOUNT_ALLOWLIST_CONTRACT_VERSION = 1
+TEST_ACCOUNT_ALLOWLIST_CONTRACT_VERSION = 2
+TEST_ACCOUNT_AUTHORIZATION_CONTRACT_VERSION = 1
 TEST_ACCOUNT_PROVIDER_MODE = "testAllowlist"
 SYNTHETIC_TEST_PHONE_PATTERN = re.compile(r"^86100[0-9]{8}$")
+TEST_ACCOUNT_ROLES = (
+    "superTest",
+    "ownerTest",
+    "familyTest",
+    "operatorTest",
+)
+TEST_ACCOUNT_FEATURE_ENTITLEMENTS = ReleasePolicyService.feature_names()
+TEST_ACCOUNT_SCENARIO_CODE_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,159}$"
+)
 
 
 class TestAccountAllowlistError(RuntimeError):
@@ -28,6 +41,10 @@ class TestAccountAllowlistValidationError(TestAccountAllowlistError):
 
 
 class TestAccountAllowlistConflict(TestAccountAllowlistError):
+    pass
+
+
+class TestAccountAuthorizationConflict(TestAccountAllowlistConflict):
     pass
 
 
@@ -110,6 +127,9 @@ class TestAccountAllowlistService:
         target: str,
         label: str,
         actor_id: str,
+        test_role: Optional[str] = None,
+        feature_entitlements: Iterable[str] = (),
+        scenario_bindings: Optional[Mapping[str, Any]] = None,
         now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         self._require_configured()
@@ -117,9 +137,15 @@ class TestAccountAllowlistService:
         normalized_target = normalize_test_phone_target(target)
         self._require_allowed_target(normalized_target)
         normalized_label = self._label(label)
+        role, features, scenarios = self._authorization_values(
+            test_role=test_role,
+            feature_entitlements=feature_entitlements,
+            scenario_bindings=scenario_bindings or {},
+        )
         account_id = secrets.token_hex(16)
         code = self._new_code()
         code_version = 1
+        entitlement_revision = 1
         record = {
             "accountId": account_id,
             "identityType": "phone",
@@ -134,6 +160,19 @@ class TestAccountAllowlistService:
             "subjectId": None,
             "expiresAt": None,
             "createdByHash": hash_evidence_identifier(actor_id),
+            "testRole": role,
+            "featureEntitlements": features,
+            "scenarioBindings": scenarios,
+            "entitlementRevision": entitlement_revision,
+            "entitlementSnapshotId": self._entitlement_snapshot_id(
+                account_id=account_id,
+                revision=entitlement_revision,
+                test_role=role,
+                feature_entitlements=features,
+                scenario_bindings=scenarios,
+            ),
+            "updatedByHash": hash_evidence_identifier(actor_id),
+            "entitlementUpdatedAt": created_at.isoformat(),
             "createdAt": created_at.isoformat(),
             "updatedAt": created_at.isoformat(),
             "lastUsedAt": None,
@@ -160,6 +199,67 @@ class TestAccountAllowlistService:
             },
         }
 
+    def update_authorization(
+        self,
+        account_id: str,
+        *,
+        test_role: Optional[str],
+        feature_entitlements: Iterable[str],
+        scenario_bindings: Mapping[str, Any],
+        expected_entitlement_revision: int,
+        actor_id: str,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        self._require_configured()
+        changed_at = self._utc(now)
+        account = self._account(account_id)
+        expected_revision = int(expected_entitlement_revision or 0)
+        current_revision = int(account.get("entitlementRevision") or 1)
+        if expected_revision != current_revision:
+            raise TestAccountAuthorizationConflict(
+                "test account authorization revision changed"
+            )
+        role, features, scenarios = self._authorization_values(
+            test_role=test_role,
+            feature_entitlements=feature_entitlements,
+            scenario_bindings=scenario_bindings,
+        )
+        revision = current_revision + 1
+        result = self.store.update_test_account_allowlist_authorization(
+            str(account["accountId"]),
+            test_role=role,
+            feature_entitlements=features,
+            scenario_bindings=scenarios,
+            entitlement_revision=revision,
+            entitlement_snapshot_id=self._entitlement_snapshot_id(
+                account_id=str(account["accountId"]),
+                revision=revision,
+                test_role=role,
+                feature_entitlements=features,
+                scenario_bindings=scenarios,
+            ),
+            updated_by_hash=hash_evidence_identifier(actor_id),
+            updated_at_iso=changed_at.isoformat(),
+            expected_entitlement_revision=expected_revision,
+        )
+        if result.get("outcome") == "notFound":
+            raise TestAccountAllowlistNotFound("test account not found")
+        if result.get("outcome") != "updated":
+            raise TestAccountAuthorizationConflict(
+                "test account authorization revision changed"
+            )
+        self._record_event(
+            account_id=str(account["accountId"]),
+            actor_id=actor_id,
+            action="authorizationUpdated",
+            route="PUT /ops/test-accounts/{account_id}/authorization",
+            occurred_at=changed_at,
+        )
+        return {
+            "status": "authorizationUpdated",
+            "testAccount": self._public_record(result["account"]),
+        }
+
     def list(self, *, include_disabled: bool = True) -> Dict[str, Any]:
         self._require_configured()
         records = self.store.list_test_account_allowlist(
@@ -168,6 +268,7 @@ class TestAccountAllowlistService:
         return {
             "status": "available",
             "testAccounts": [self._public_record(item) for item in records],
+            "authorizationContract": self.authorization_contract(),
             "contractVersion": TEST_ACCOUNT_ALLOWLIST_CONTRACT_VERSION,
         }
 
@@ -302,6 +403,45 @@ class TestAccountAllowlistService:
             subject_id=normalized_subject_id,
             observed_at_iso=self._utc(now).isoformat(),
         ) is not None
+
+    def authorization_snapshot_for_subject(
+        self,
+        subject_id: str,
+        *,
+        now: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not self.configured:
+            return None
+        normalized_subject_id = str(subject_id or "").strip()
+        if not normalized_subject_id:
+            return None
+        record = self.store.get_active_test_account_allowlist_by_subject_id(
+            subject_id=normalized_subject_id,
+            observed_at_iso=self._utc(now).isoformat(),
+        )
+        if record is None:
+            return None
+        public = self._public_record(record)
+        return {
+            "kind": "testAccount",
+            "testRole": public["testRole"],
+            "featureEntitlements": list(public["featureEntitlements"]),
+            "scenarioBindings": dict(public["scenarioBindings"]),
+            "revision": int(public["entitlementRevision"]),
+            "snapshotId": str(public["entitlementSnapshotId"]),
+            "contractVersion": TEST_ACCOUNT_AUTHORIZATION_CONTRACT_VERSION,
+        }
+
+    @staticmethod
+    def authorization_contract() -> Dict[str, Any]:
+        return {
+            "roles": list(TEST_ACCOUNT_ROLES),
+            "features": list(TEST_ACCOUNT_FEATURE_ENTITLEMENTS),
+            "defaultFeatureEntitlements": [],
+            "scenarioBindingsAreAuthority": False,
+            "sessionRevisionValidation": True,
+            "contractVersion": TEST_ACCOUNT_AUTHORIZATION_CONTRACT_VERSION,
+        }
 
     def verify_code(self, account: Dict[str, Any], code: str) -> bool:
         if not self.configured:
@@ -462,6 +602,22 @@ class TestAccountAllowlistService:
 
     @staticmethod
     def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
+        role = str(record.get("testRole") or "").strip() or None
+        features = sorted(
+            {
+                str(item).strip()
+                for item in (record.get("featureEntitlements") or [])
+                if str(item).strip()
+            }
+        )
+        scenarios = dict(record.get("scenarioBindings") or {})
+        revision = max(1, int(record.get("entitlementRevision") or 1))
+        snapshot_id = str(record.get("entitlementSnapshotId") or "").strip()
+        if not snapshot_id:
+            fallback = hashlib.sha256(
+                f"{record.get('accountId')}:{revision}".encode("utf-8")
+            ).hexdigest()[:32]
+            snapshot_id = f"tae_{fallback}"
         return {
             "accountId": str(record.get("accountId") or ""),
             "identityType": str(record.get("identityType") or "phone"),
@@ -476,8 +632,111 @@ class TestAccountAllowlistService:
             "updatedAt": str(record.get("updatedAt") or ""),
             "lastUsedAt": record.get("lastUsedAt"),
             "useCount": int(record.get("useCount") or 0),
+            "testRole": role,
+            "featureEntitlements": features,
+            "scenarioBindings": scenarios,
+            "entitlementRevision": revision,
+            "entitlementSnapshotId": snapshot_id,
+            "updatedByHash": str(record.get("updatedByHash") or ""),
+            "entitlementUpdatedAt": record.get("entitlementUpdatedAt"),
+            "authorizationConfigured": bool(role and features),
             "contractVersion": TEST_ACCOUNT_ALLOWLIST_CONTRACT_VERSION,
         }
+
+    def _authorization_values(
+        self,
+        *,
+        test_role: Optional[str],
+        feature_entitlements: Iterable[str],
+        scenario_bindings: Mapping[str, Any],
+    ) -> tuple[Optional[str], list[str], Dict[str, Any]]:
+        role = str(test_role or "").strip() or None
+        if role is not None and role not in TEST_ACCOUNT_ROLES:
+            raise TestAccountAllowlistValidationError(
+                "unsupported test account role"
+            )
+        if not isinstance(feature_entitlements, (list, tuple, set, frozenset)):
+            raise TestAccountAllowlistValidationError(
+                "feature entitlements must be a list"
+            )
+        features = sorted(
+            {
+                str(item or "").strip()
+                for item in feature_entitlements
+                if str(item or "").strip()
+            }
+        )
+        unknown = set(features).difference(TEST_ACCOUNT_FEATURE_ENTITLEMENTS)
+        if unknown:
+            raise TestAccountAllowlistValidationError(
+                "unsupported test account feature entitlement"
+            )
+        if len(features) > len(TEST_ACCOUNT_FEATURE_ENTITLEMENTS):
+            raise TestAccountAllowlistValidationError(
+                "too many feature entitlements"
+            )
+        scenarios = self._scenario_bindings(scenario_bindings)
+        if role is None and (features or scenarios):
+            raise TestAccountAllowlistValidationError(
+                "test role is required for product authorization"
+            )
+        return role, features, scenarios
+
+    @staticmethod
+    def _scenario_bindings(value: Mapping[str, Any]) -> Dict[str, Any]:
+        if not isinstance(value, Mapping) or len(value) > 20:
+            raise TestAccountAllowlistValidationError(
+                "scenario bindings must be a bounded object"
+            )
+        normalized: Dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip()
+            if not key or len(key) > 60 or re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", key) is None:
+                raise TestAccountAllowlistValidationError(
+                    "invalid scenario binding key"
+                )
+            values = raw_value if isinstance(raw_value, list) else [raw_value]
+            if not values or len(values) > 20:
+                raise TestAccountAllowlistValidationError(
+                    "invalid scenario binding value"
+                )
+            canonical_values = []
+            for item in values:
+                candidate = str(item or "").strip()
+                if TEST_ACCOUNT_SCENARIO_CODE_PATTERN.fullmatch(candidate) is None:
+                    raise TestAccountAllowlistValidationError(
+                        "invalid scenario binding value"
+                    )
+                canonical_values.append(candidate)
+            normalized[key] = (
+                sorted(set(canonical_values))
+                if isinstance(raw_value, list)
+                else canonical_values[0]
+            )
+        return dict(sorted(normalized.items()))
+
+    def _entitlement_snapshot_id(
+        self,
+        *,
+        account_id: str,
+        revision: int,
+        test_role: Optional[str],
+        feature_entitlements: Iterable[str],
+        scenario_bindings: Mapping[str, Any],
+    ) -> str:
+        payload = json.dumps(
+            {
+                "accountId": account_id,
+                "revision": int(revision),
+                "testRole": test_role,
+                "featureEntitlements": sorted(feature_entitlements),
+                "scenarioBindings": scenario_bindings,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return f"tae_{self._keyed_hash('authorization:v1:' + payload)[:32]}"
 
     def _record_event(
         self,

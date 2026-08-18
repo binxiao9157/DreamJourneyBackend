@@ -326,12 +326,22 @@ class TestAccountEndpointAndContractTests(unittest.TestCase):
         self.assertTrue(descriptor["testAccountTargetRestricted"])
         self.assertFalse(descriptor["productionReady"])
         self.assertEqual(descriptor["providerMode"], TEST_ACCOUNT_PROVIDER_MODE)
+        authorization = RuntimeConfigService(settings).public_config()["auth"][
+            "testAccountAuthorization"
+        ]
+        self.assertTrue(authorization["implemented"])
+        self.assertTrue(authorization["serverAuthoritative"])
+        self.assertEqual(authorization["defaultFeatureEntitlements"], [])
+        self.assertFalse(authorization["scenarioBindingsAreAuthority"])
+        self.assertFalse(authorization["normalAppManagementVisible"])
+        self.assertEqual(authorization["contractVersion"], 1)
 
     def test_management_routes_require_dedicated_machine_scope(self):
         registry = RouteOwnershipRegistry()
         paths = (
             ("POST", "/ops/test-accounts"),
             ("GET", "/ops/test-accounts"),
+            ("PUT", "/ops/test-accounts/abc/authorization"),
             ("POST", "/ops/test-accounts/abc/rotate-code"),
             ("POST", "/ops/test-accounts/abc/disable"),
             ("POST", "/ops/test-accounts/abc/enable"),

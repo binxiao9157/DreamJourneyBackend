@@ -152,6 +152,7 @@ from app.services.identity_bindings import (
     make_identity_binding_service,
 )
 from app.services.test_account_allowlist import (
+    TestAccountAuthorizationConflict,
     TestAccountAllowlistConflict,
     TestAccountAllowlistDisabled,
     TestAccountAllowlistNotFound,
@@ -5691,6 +5692,9 @@ def _auth_session_service() -> AuthSessionService:
         store,
         access_ttl_seconds=AUTH_ACCESS_TTL_SECONDS,
         refresh_ttl_seconds=AUTH_REFRESH_TTL_SECONDS,
+        authorization_snapshot_resolver=(
+            _test_account_allowlist_service().authorization_snapshot_for_subject
+        ),
     )
 
 
@@ -6014,6 +6018,65 @@ def _release_policy_server_cohort(principal: RequestPrincipal) -> str:
     return "unassigned"
 
 
+def _request_test_account_authorization(
+    request: Request,
+) -> Optional[Dict[str, Any]]:
+    snapshot = getattr(
+        request.state,
+        "test_account_authorization",
+        None,
+    )
+    return dict(snapshot) if isinstance(snapshot, dict) else None
+
+
+def _test_account_feature_entitled(
+    request: Request,
+    feature: str,
+) -> Optional[bool]:
+    snapshot = _request_test_account_authorization(request)
+    if snapshot is None:
+        return None
+    return feature in {
+        str(item).strip()
+        for item in snapshot.get("featureEntitlements") or []
+        if str(item).strip()
+    }
+
+
+def _apply_test_account_release_policy(
+    request: Request,
+    snapshot: ReleasePolicySnapshot,
+) -> ReleasePolicySnapshot:
+    authorization = _request_test_account_authorization(request)
+    if authorization is None:
+        return snapshot
+    entitled = {
+        str(item).strip()
+        for item in authorization.get("featureEntitlements") or []
+        if str(item).strip()
+    }
+    decisions = tuple(
+        decision
+        if decision.feature in entitled
+        else decision.model_copy(
+            update={
+                "enabled": False,
+                "releaseVisible": False,
+                "cohort": "testAccountRestricted",
+                "reason": "testAccountEntitlementMissing",
+            }
+        )
+        for decision in snapshot.features
+    )
+    return snapshot.model_copy(
+        update={
+            "cohort": "testAccountRestricted",
+            "snapshotDecision": "testAccountEntitlements",
+            "features": decisions,
+        }
+    )
+
+
 _LEGACY_ARCHIVE_NON_AUTHORITY_KINDS = frozenset({"timeLetter"})
 
 
@@ -6169,6 +6232,43 @@ def _evaluate_release_policy_command(
     )
     if feature is None:
         return None, {}
+    feature_entitled = _test_account_feature_entitled(request, feature)
+    if feature_entitled is False:
+        revision = int(
+            (_request_test_account_authorization(request) or {}).get("revision")
+            or 0
+        )
+        RELEASE_POLICY_DECISION_RECORDER.record(
+            feature=feature,
+            policy_version=RELEASE_POLICY_SERVICE.POLICY_VERSION,
+            client_build=_release_policy_int_header(
+                request,
+                "x-dreamjourney-client-build",
+            ) or 0,
+            decision="deny",
+            reason="testAccountEntitlementMissing",
+            route=RELEASE_POLICY_COMMAND_GATE.route_label_for_request(
+                request.method,
+                request.url.path,
+                payload,
+            ),
+        )
+        return (
+            _set_no_store_headers(
+                JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": {
+                            "code": "test_account_entitlement_denied",
+                            "feature": feature,
+                            "entitlementRevision": revision,
+                            "retryable": False,
+                        }
+                    },
+                )
+            ),
+            {},
+        )
     incident_block = _incident_lifecycle_service().release_policy_block(feature)
     if incident_block is not None:
         route_label = RELEASE_POLICY_COMMAND_GATE.route_label_for_request(
@@ -6536,6 +6636,7 @@ async def require_backend_api_token(request: Request, call_next):
     configured_backend_token = _configured_backend_api_token()
     test_account_admin_principal = _test_account_admin_session_principal(request)
     principal = RequestPrincipal.anonymous()
+    request.state.test_account_authorization = None
 
     if bearer_token and _tokens_match(bearer_token, configured_backend_token):
         principal = _configured_machine_principal()
@@ -6543,6 +6644,13 @@ async def require_backend_api_token(request: Request, call_next):
         session = _auth_session_service().resolve_access_token(bearer_token)
         if session is None:
             return JSONResponse(status_code=401, content={"detail": "invalid or expired access token"})
+        current_test_authorization = session.get(
+            "currentTestAccountAuthorization"
+        )
+        if isinstance(current_test_authorization, dict):
+            request.state.test_account_authorization = dict(
+                current_test_authorization
+            )
         try:
             principal = RequestPrincipal.user(
                 principal_id=str(session.get("userId") or ""),
@@ -7022,13 +7130,14 @@ def release_policy(
         else "owner"
     )
     try:
-        return RELEASE_POLICY_SERVICE.build_snapshot(
+        snapshot = RELEASE_POLICY_SERVICE.build_snapshot(
             audience=resolved_audience,  # type: ignore[arg-type]
             cohort=_release_policy_server_cohort(principal),
             client_build=clientBuild,
             known_policy_revision=knownPolicyRevision,
             requested_feature=feature,
         )
+        return _apply_test_account_release_policy(request, snapshot)
     except ReleasePolicyVersionDowngrade as error:
         raise HTTPException(
             status_code=409,
@@ -12231,6 +12340,9 @@ def _test_account_error_response(error: Exception) -> HTTPException:
     if isinstance(error, TestAccountAllowlistDisabled):
         status_code = 503
         code = "test_account_allowlist_unavailable"
+    elif isinstance(error, TestAccountAuthorizationConflict):
+        status_code = 409
+        code = "test_account_authorization_revision_conflict"
     elif isinstance(error, TestAccountAllowlistConflict):
         status_code = 409
         code = "test_account_target_conflict"
@@ -12397,6 +12509,9 @@ def create_test_account(request: Request, payload: Dict[str, Any]) -> Dict[str, 
             target=str(payload.get("target") or ""),
             label=str(payload.get("label") or ""),
             actor_id=_test_account_actor_id(request),
+            test_role=payload.get("testRole"),
+            feature_entitlements=payload.get("featureEntitlements") or [],
+            scenario_bindings=payload.get("scenarioBindings") or {},
         )
     except (
         TestAccountAllowlistDisabled,
@@ -12418,6 +12533,47 @@ def list_test_accounts(
             include_disabled=include_disabled
         )
     except TestAccountAllowlistDisabled as exc:
+        raise _test_account_error_response(exc) from exc
+
+
+@app.put("/ops/test-accounts/{account_id}/authorization")
+def update_test_account_authorization(
+    request: Request,
+    account_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        result = _test_account_allowlist_service().update_authorization(
+            account_id,
+            test_role=payload.get("testRole"),
+            feature_entitlements=payload.get("featureEntitlements") or [],
+            scenario_bindings=payload.get("scenarioBindings") or {},
+            expected_entitlement_revision=int(
+                payload.get("expectedEntitlementRevision") or 0
+            ),
+            actor_id=_test_account_actor_id(request),
+        )
+        subject_id = str(result["testAccount"].get("subjectId") or "").strip()
+        if subject_id:
+            result["sessionRevocation"] = _auth_session_service().revoke_all_for_user(
+                subject_id,
+                reason="testAccountAuthorizationChanged",
+            )
+        else:
+            result["sessionRevocation"] = {"status": "notRequired"}
+        return result
+    except (
+        TestAccountAllowlistDisabled,
+        TestAccountAllowlistValidationError,
+        TestAccountAllowlistConflict,
+        TestAccountAllowlistNotFound,
+        TypeError,
+        ValueError,
+    ) as exc:
+        if isinstance(exc, (TypeError, ValueError)):
+            exc = TestAccountAllowlistValidationError(
+                "expected entitlement revision must be an integer"
+            )
         raise _test_account_error_response(exc) from exc
 
 

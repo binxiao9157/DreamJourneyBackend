@@ -880,6 +880,29 @@ class InMemoryStore:
                 )
             return result
 
+    def get_auth_session_by_refresh_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        with self._auth_lock:
+            session = next(
+                (
+                    item
+                    for item in self._auth_sessions.values()
+                    if item.get("refreshTokenHash") == token_hash
+                ),
+                None,
+            )
+            if session is None:
+                return None
+            result = deepcopy(session)
+            family_id = str(result.get("tokenFamilyId") or "")
+            if family_id:
+                family = self._auth_token_families.get(family_id)
+                result["familyStatus"] = (
+                    str(family.get("status") or "missing")
+                    if family is not None
+                    else "missing"
+                )
+            return result
+
     def rotate_auth_session_refresh(
         self,
         refresh_token_hash: str,
@@ -1466,6 +1489,42 @@ class InMemoryStore:
         with self._identity_lock:
             item = self._test_account_allowlist.get(account_id)
             return None if item is None else deepcopy(item)
+
+    def update_test_account_allowlist_authorization(
+        self,
+        account_id: str,
+        *,
+        test_role: Optional[str],
+        feature_entitlements: List[str],
+        scenario_bindings: Dict[str, Any],
+        entitlement_revision: int,
+        entitlement_snapshot_id: str,
+        updated_by_hash: str,
+        updated_at_iso: str,
+        expected_entitlement_revision: int,
+    ) -> Dict[str, Any]:
+        with self._identity_lock:
+            item = self._test_account_allowlist.get(account_id)
+            if item is None:
+                return {"outcome": "notFound"}
+            current_revision = int(item.get("entitlementRevision") or 1)
+            if current_revision != int(expected_entitlement_revision):
+                return {
+                    "outcome": "revisionConflict",
+                    "currentEntitlementRevision": current_revision,
+                }
+            item.update(
+                testRole=test_role,
+                featureEntitlements=deepcopy(feature_entitlements),
+                scenarioBindings=deepcopy(scenario_bindings),
+                entitlementRevision=int(entitlement_revision),
+                entitlementSnapshotId=entitlement_snapshot_id,
+                updatedByHash=updated_by_hash,
+                entitlementUpdatedAt=updated_at_iso,
+                updatedAt=updated_at_iso,
+                contractVersion=2,
+            )
+            return {"outcome": "updated", "account": deepcopy(item)}
 
     def get_active_test_account_allowlist_by_target_hash(
         self,

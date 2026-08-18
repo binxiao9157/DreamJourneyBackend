@@ -559,6 +559,12 @@ class ReleasePolicyService:
         "timeLetters",
     }
 
+    @classmethod
+    def feature_names(cls) -> tuple[str, ...]:
+        """Return the stable server-owned feature vocabulary."""
+
+        return tuple(sorted(cls._FEATURE_GATES))
+
     def __init__(
         self,
         *,
