@@ -104,6 +104,7 @@ def seed_current_memory(
     *,
     vault_id: str,
     owner_subject_id: str,
+    memory_kind: str,
     content: dict[str, Any],
     content_schema_version: str,
     create_vault: bool,
@@ -155,7 +156,7 @@ def seed_current_memory(
                     owner_subject_id,
                     source_id,
                     1,
-                    "knowledge",
+                    memory_kind,
                     "firstPerson",
                     "recalled",
                     "standard",
@@ -241,6 +242,7 @@ def main() -> None:
             test_dsn,
             vault_id=vault_id,
             owner_subject_id=owner_id,
+            memory_kind="knowledge",
             content={
                 "claim": "这是一条仅用于隔离 SearchDocument 投影验证的私有职业选择记忆。",
                 "tags": ["职业", "选择"],
@@ -252,6 +254,7 @@ def main() -> None:
             test_dsn,
             vault_id=vault_id,
             owner_subject_id=owner_id,
+            memory_kind="experience",
             content={
                 "summary": "小时候和外公去杭州散步。",
                 "facets": {
