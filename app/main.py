@@ -185,6 +185,7 @@ from app.services.owner_truth_media_source_object import (
     OwnerTruthMediaCaptureUnavailable,
     OwnerTruthMediaIngestionError,
     OwnerTruthMediaIngestionService,
+    OwnerTruthMediaKindProductClosed,
     OwnerTruthMediaUploadConflict,
     OwnerTruthMediaUploadExpired,
     OwnerTruthMediaUploadInvalid,
@@ -699,6 +700,9 @@ def _request_owner_truth_media_processing_retry(
         or str(source_object.get("state") or "") == "deleted"
     ):
         raise OwnerTruthMediaAccessRevoked("media source object access was revoked")
+    OWNER_TRUTH_MEDIA_INGESTION_SERVICE.require_media_kind_allowed(
+        source_object.get("mediaKind")
+    )
     if str(source_object.get("processingStatus") or "") not in {"failed", "notQueued"}:
         raise OwnerTruthMediaUploadConflict("media processing retry is not eligible")
     return _queue_verified_owner_truth_media_processing(context, source_object)
@@ -732,6 +736,7 @@ def _make_owner_truth_media_ingestion_service(
         enabled=settings.owner_truth_media_capture_enabled,
         max_upload_bytes=settings.owner_truth_media_max_upload_bytes,
         upload_intent_ttl_seconds=settings.owner_truth_media_upload_intent_ttl_seconds,
+        allowed_media_kinds={"image", "document"},
         on_verified=(
             _queue_verified_owner_truth_media_processing
             if queue_processing_on_verified
@@ -3708,6 +3713,20 @@ def _owner_truth_media_capture_http_error(
         return HTTPException(
             status_code=503,
             detail={"code": error.code, "retryable": True},
+        )
+    if isinstance(error, OwnerTruthMediaKindProductClosed):
+        feature = {
+            "audio": "archiveAudioUpload",
+            "video": "archiveVideoUpload",
+        }.get(error.media_kind, "ownerMediaCaptureV1")
+        return HTTPException(
+            status_code=403,
+            detail={
+                "code": "release_policy_denied",
+                "feature": feature,
+                "reason": "productClosed",
+                "retryable": False,
+            },
         )
     if isinstance(error, OwnerTruthMediaAccessRevoked):
         return HTTPException(status_code=409, detail={"code": error.code, "retryable": False})

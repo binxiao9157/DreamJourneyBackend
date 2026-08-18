@@ -20,6 +20,14 @@ class DataExportJobRouteTests(unittest.TestCase):
         self.previous_legacy_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
         self.previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
         self.previous_release_policy_gate = main_module.RELEASE_POLICY_COMMAND_GATE
+        self.product_closed_patch = patch.object(
+            ReleasePolicyService,
+            "_PRODUCT_CLOSED_FEATURES",
+            ReleasePolicyService._PRODUCT_CLOSED_FEATURES.difference(
+                {"accountDataExport"}
+            ),
+        )
+        self.product_closed_patch.start()
 
         self.store = InMemoryStore()
         main_module.store = self.store
@@ -41,6 +49,7 @@ class DataExportJobRouteTests(unittest.TestCase):
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = self.previous_legacy_login
         main_module.RELEASE_POLICY_SERVICE = self.previous_release_policy_service
         main_module.RELEASE_POLICY_COMMAND_GATE = self.previous_release_policy_gate
+        self.product_closed_patch.stop()
 
     def _login(self, phone: str) -> dict:
         response = self.client.post(

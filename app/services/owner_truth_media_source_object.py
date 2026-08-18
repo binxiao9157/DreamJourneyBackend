@@ -72,6 +72,14 @@ class OwnerTruthMediaCaptureUnavailable(OwnerTruthMediaIngestionError):
     code = "ownerTruthMediaCaptureUnavailable"
 
 
+class OwnerTruthMediaKindProductClosed(OwnerTruthMediaIngestionError):
+    code = "ownerTruthMediaKindProductClosed"
+
+    def __init__(self, media_kind: str) -> None:
+        super().__init__(f"{media_kind} media capture is product closed")
+        self.media_kind = media_kind
+
+
 class OwnerTruthMediaObjectNotFound(OwnerTruthMediaIngestionError):
     """The authoritative private object no longer exists in its configured store."""
 
@@ -3460,6 +3468,7 @@ class OwnerTruthMediaIngestionService:
         enabled: bool,
         max_upload_bytes: int,
         upload_intent_ttl_seconds: int,
+        allowed_media_kinds: Optional[set[str] | frozenset[str]] = None,
         on_verified: Optional[Callable[[OwnerTruthCommandContext, Mapping[str, Any]], Mapping[str, Any]]] = None,
         now: Optional[callable] = None,
     ) -> None:
@@ -3469,6 +3478,10 @@ class OwnerTruthMediaIngestionService:
         self._enabled = bool(enabled)
         self._max_upload_bytes = max(1, int(max_upload_bytes))
         self._upload_intent_ttl_seconds = max(60, int(upload_intent_ttl_seconds))
+        self._allowed_media_kinds = frozenset(
+            _normalize_media_kind(value)
+            for value in (allowed_media_kinds if allowed_media_kinds is not None else _MEDIA_KINDS)
+        )
         # The storage transaction remains authoritative.  The optional callback
         # only queues a value-free processing effect after a clean upload, and
         # must run inside the caller's existing Unit of Work.
@@ -3482,6 +3495,7 @@ class OwnerTruthMediaIngestionService:
         command: MediaUploadIntentCommand,
     ) -> MediaUploadIntentCreateResult:
         self._require_available()
+        self.require_media_kind_allowed(command.media_kind)
         if command.file_size_bytes > self._max_upload_bytes:
             raise OwnerTruthMediaUploadInvalid("media file exceeds upload limit")
         upload_token = secrets.token_urlsafe(32)
@@ -3526,6 +3540,7 @@ class OwnerTruthMediaIngestionService:
         )
         intent = loaded["intent"]
         source_object = loaded["sourceObject"]
+        self.require_media_kind_allowed(str(source_object["mediaKind"]))
         stored_token_hash = str(loaded.get("uploadTokenHash") or "")
         token_hash = _sha256(token)
         if stored_token_hash and not secrets.compare_digest(stored_token_hash, token_hash):
@@ -3670,6 +3685,11 @@ class OwnerTruthMediaIngestionService:
             owner_subject_id=context.owner_subject_id,
         )
 
+    def require_media_kind_allowed(self, media_kind: object) -> None:
+        normalized = _normalize_media_kind(media_kind)
+        if normalized not in self._allowed_media_kinds:
+            raise OwnerTruthMediaKindProductClosed(normalized)
+
     def request_deletion(
         self,
         *,
@@ -3773,6 +3793,7 @@ __all__ = [
     "OwnerTruthMediaCaptureUnavailable",
     "OwnerTruthMediaIngestionError",
     "OwnerTruthMediaIngestionService",
+    "OwnerTruthMediaKindProductClosed",
     "OwnerTruthMediaObjectNotFound",
     "OwnerTruthMediaSourceObjectRepository",
     "OwnerTruthMediaUploadConflict",

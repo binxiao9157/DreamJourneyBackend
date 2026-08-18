@@ -466,6 +466,7 @@ class ReleasePolicyService:
         "legalCenter": ("G0", "G1"),
         "accountDeletion": ("G0", "G1", "G2"),
         "accountDataExport": ("G0", "G1", "G2"),
+        "kbliteUserSurface": ("G0", "G1", "G2"),
         "accountPasswordChange": ("G0", "G1", "G2"),
         "careDashboard": ("G0", "G1", "G2", "G4"),
         "careDoctorContact": ("G0", "G1", "G2", "G4"),
@@ -498,7 +499,6 @@ class ReleasePolicyService:
         "profileSettings",
         "legalCenter",
         "accountDeletion",
-        "accountDataExport",
     }
     # Family management is a normal signed-in product capability. It remains
     # server-policy controlled for emergency revocation and minimum-client
@@ -528,7 +528,6 @@ class ReleasePolicyService:
         "profileSettings",
         "legalCenter",
         "accountDeletion",
-        "accountDataExport",
     }
     _CLOSED_PILOT_OPT_IN_FEATURES = {
         "ownerTextCaptureV1",
@@ -551,8 +550,12 @@ class ReleasePolicyService:
     # Product-confirmed exclusions override provider readiness, rollout
     # cohorts, client claims, and default-stage shadow behavior.
     _PRODUCT_CLOSED_FEATURES = {
+        "accountDataExport",
+        "archiveAudioUpload",
+        "archiveVideoUpload",
         "digitalHumanLivePanel",
         "echoDelayedReplies",
+        "kbliteUserSurface",
         "timeLetters",
     }
 
@@ -1028,6 +1031,12 @@ class ReleasePolicyCommandGate:
         if normalized_path == "/archive/items" and method.upper() == "POST":
             return self._archive_item_feature(body)
         if (
+            normalized_method == "POST"
+            and normalized_path.startswith("/v2/vaults/")
+            and normalized_path.endswith("/source-objects/upload-intents")
+        ):
+            return self._owner_truth_media_feature(body) or "ownerMediaCaptureV1"
+        if (
             method.upper() == "POST"
             and normalized_path.startswith("/v2/vaults/")
             and normalized_path.endswith("/processing-retries")
@@ -1243,6 +1252,15 @@ class ReleasePolicyCommandGate:
         if kind in {"audio", "voice", "recording"}:
             return "archiveAudioUpload"
         if kind in {"video", "movie"}:
+            return "archiveVideoUpload"
+        return None
+
+    @staticmethod
+    def _owner_truth_media_feature(payload: Mapping[str, Any]) -> Optional[str]:
+        kind = str(payload.get("mediaKind") or "").strip().lower()
+        if kind == "audio":
+            return "archiveAudioUpload"
+        if kind == "video":
             return "archiveVideoUpload"
         return None
 

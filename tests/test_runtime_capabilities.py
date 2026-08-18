@@ -138,6 +138,8 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             "archiveImageAnalysis",
             "archiveAudioUpload",
             "archiveVideoUpload",
+            "kbliteUserSurface",
+            "accountDataExport",
             "ownerTruthMediaStorage",
             "ownerTruthMediaProcessing",
             "identityChallenge",
@@ -200,9 +202,10 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
         for capability in ("archiveAudioUpload", "archiveVideoUpload"):
             media = snapshots[capability]
             self.assertTrue(media["implemented"])
-            self.assertTrue(media["enabled"])
+            self.assertFalse(media["enabled"])
             self.assertFalse(media["providerReady"])
-            self.assertEqual(media["reason"], "mockProviderOnly")
+            self.assertFalse(media["releaseVisible"])
+            self.assertEqual(media["reason"], "productClosed")
 
     def test_configured_voice_provider_does_not_imply_release_or_external_verification(self):
         config = RuntimeConfigService(
@@ -286,10 +289,10 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
         self.assertEqual(identity["configurationStatus"], "incomplete")
         self.assertFalse(config["capabilities"]["identityChallenge"])
 
-        # Existing metadata-only archive behavior remains explicitly separate
-        # from the new M0 source-object capture route.
-        self.assertTrue(config["capabilities"]["archiveMediaUploadIntent"])
-        self.assertEqual(config["archive"]["providerMode"], "mock")
+        # The legacy metadata-only audio/video path is product closed; the
+        # first-release source-object route remains independently described.
+        self.assertFalse(config["capabilities"]["archiveMediaUploadIntent"])
+        self.assertEqual(config["archive"]["providerMode"], "disabled")
         self.assertEqual(
             config["ownerTruthMedia"]["captureCapability"],
             "ownerTruthMediaStorage",

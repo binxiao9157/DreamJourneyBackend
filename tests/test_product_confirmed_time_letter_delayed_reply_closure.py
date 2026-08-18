@@ -71,9 +71,10 @@ class ProductConfirmedTimeLetterDelayedReplyClosureTests(unittest.TestCase):
                 self.assertEqual(decision.reason, "productClosed")
             self.assertEqual(service.command_mode_for(feature), "enforce")
 
-        self.assertEqual(
-            service.public_descriptor()["productClosedFeatures"],
-            ["digitalHumanLivePanel", "echoDelayedReplies", "timeLetters"],
+        self.assertTrue(
+            {"timeLetters", "echoDelayedReplies"}.issubset(
+                service.public_descriptor()["productClosedFeatures"]
+            )
         )
 
     def test_route_gate_blocks_new_writes_and_dispatch_but_preserves_old_reads(self):

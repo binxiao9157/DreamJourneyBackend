@@ -402,14 +402,14 @@ class RuntimeConfigTests(unittest.TestCase):
             },
         )
         archive = config["archive"]
-        self.assertEqual(archive["storageProvider"], "mockObjectStorage")
-        self.assertEqual(archive["providerDisplayName"], "Mock Object Storage")
-        self.assertEqual(archive["providerMode"], "mock")
+        self.assertEqual(archive["storageProvider"], "disabled")
+        self.assertEqual(archive["providerDisplayName"], "Unavailable")
+        self.assertEqual(archive["providerMode"], "disabled")
         self.assertFalse(archive["requiresClientUpload"])
-        self.assertEqual(archive["uploadURLScheme"], "mock")
+        self.assertEqual(archive["uploadURLScheme"], "none")
         self.assertFalse(archive["realProviderReady"])
         self.assertEqual(archive["providerSwitchContractVersion"], 1)
-        self.assertEqual(archive["clientUploadAction"], "metadataOnly")
+        self.assertEqual(archive["clientUploadAction"], "disabled")
         release_policy = config["releasePolicy"]
         self.assertTrue(release_policy["shadowMode"])
         self.assertEqual(release_policy["commandMode"], "observe")
@@ -4592,13 +4592,14 @@ class VoiceCloneProfileAPITests(HiddenStageContractTestCase):
 
 class ArchiveAPITests(unittest.TestCase):
     def setUp(self):
-        # Keep the retained time-letter data contract testable without making
-        # it reachable to ordinary product traffic.
+        # Keep retained product-closed contracts testable without making them
+        # reachable to ordinary product traffic. PC-00-03 asserts the public
+        # release boundary separately.
         self._product_closed_patch = patch.object(
             ReleasePolicyService,
             "_PRODUCT_CLOSED_FEATURES",
             ReleasePolicyService._PRODUCT_CLOSED_FEATURES.difference(
-                {"timeLetters"}
+                {"archiveAudioUpload", "archiveVideoUpload", "timeLetters"}
             ),
         )
         self._product_closed_patch.start()

@@ -195,6 +195,12 @@ class OwnerTruthTextCaptureAPITests(unittest.TestCase):
                         "note": "不得形成第二套权威数据",
                     },
                 )
+                if kind in {"audio", "video"}:
+                    self.assertEqual(response.status_code, 403, response.text)
+                    detail = response.json()["detail"]
+                    self.assertEqual(detail["code"], "release_policy_denied")
+                    self.assertEqual(detail["reason"], "productClosed")
+                    continue
                 self.assertEqual(response.status_code, 409, response.text)
                 detail = response.json()["detail"]
                 self.assertEqual(detail["code"], "legacyArchiveAuthorityRetired")
