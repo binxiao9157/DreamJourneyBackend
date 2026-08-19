@@ -1030,7 +1030,7 @@ def main() -> None:
                 and compatibility_read_envelope_result["cacheDisposition"] == "replace"
                 and compatibility_read_envelope_result["contentHash"]
                 and compatibility_read_envelope_result["projectionCheckpoint"]
-                == projection_ready["checkpoint"]
+                == projection_rights_ready["checkpoint"]
                 and len(compatibility_read_envelope_result["graph"]["facts"]) == 1,
                 "KBLite read envelope must carry only a checkpointed compatibility graph",
             )
