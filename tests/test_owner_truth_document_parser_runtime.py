@@ -28,6 +28,34 @@ class OwnerTruthDocumentParserRuntimeTests(unittest.TestCase):
         self.assertEqual(len(extraction.fragment_evidence[0]["textSha256"]), 64)
         self.assertNotIn("First private line", str(extraction.fragment_evidence))
 
+    def test_markdown_is_parsed_in_subprocess_with_line_source_evidence(self) -> None:
+        processor = IsolatedDocumentTextProcessor(timeout_seconds=5)
+
+        extraction = processor.extract(
+            source_object={"contentType": "text/markdown"},
+            payload="# Family trip\n\nWe visited Suzhou together.".encode("utf-8"),
+        )
+
+        self.assertEqual(extraction.processor_id, "isolatedDocumentText")
+        self.assertEqual(
+            extraction.extracted_text,
+            "# Family trip\nWe visited Suzhou together.",
+        )
+        self.assertEqual(len(extraction.fragment_evidence), 2)
+        self.assertTrue(
+            all(item["locatorType"] == "line" for item in extraction.fragment_evidence)
+        )
+        self.assertNotIn("Family trip", str(extraction.fragment_evidence))
+
+    def test_invalid_utf8_markdown_is_rejected_without_parser_output(self) -> None:
+        with self.assertRaises(OwnerTruthMediaProcessingTerminalError) as raised:
+            IsolatedDocumentTextProcessor(timeout_seconds=5).extract(
+                source_object={"contentType": "text/markdown"},
+                payload=b"# private\n\xff\xfe",
+            )
+
+        self.assertEqual(raised.exception.reason_code, "documentTextEncodingUnsupported")
+
     def test_timeout_is_retryable_and_does_not_copy_parser_output(self) -> None:
         private_marker = "private-parser-timeout-marker"
 

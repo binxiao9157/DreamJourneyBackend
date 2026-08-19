@@ -568,6 +568,31 @@ class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
         self.assertEqual(completed["processingStatus"], "succeeded")
         self.assertIsNotNone(completed["derivedSourceId"])
 
+    def test_markdown_is_parsed_inside_the_private_worker_before_candidate_review(self) -> None:
+        source_object, _intent = self._upload_and_queue(
+            payload=b"# Summer memory\n\nWe watched the sunset together.",
+            media_kind="document",
+            content_type="text/markdown",
+            file_name="summer-memory.md",
+        )
+
+        result = self._worker().run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["reason"], "mediaTextExtracted")
+        self.assertEqual(result["candidateExtractionRequested"], "accepted")
+        completed = self.store.owner_truth_media_source_object_repository().get_source_object(
+            vault_id=self.context.vault_id,
+            source_object_id=str(source_object["sourceObjectId"]),
+            owner_subject_id=self.context.owner_subject_id,
+        )
+        self.assertEqual(completed["processingStatus"], "succeeded")
+        self.assertIsNotNone(completed["derivedSourceId"])
+        source = self.store._owner_truth_sources[
+            (self.context.vault_id, str(completed["derivedSourceId"]))
+        ]
+        self.assertEqual(source["metadata"]["fragmentEvidence"][0]["locatorType"], "line")
+
     def test_pdf_is_parsed_inside_the_private_worker_before_candidate_review(self) -> None:
         source_object, _intent = self._upload_and_queue(
             payload=_minimal_pdf("A PDF memory stays private until review."),

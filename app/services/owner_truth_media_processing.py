@@ -43,6 +43,7 @@ _MAX_EXTRACTED_TEXT_CHARACTERS = 20_000
 _DOCUMENT_CONTENT_TYPES = frozenset(
     {
         "text/plain",
+        "text/markdown",
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }
@@ -197,7 +198,7 @@ class LocalDocumentTextProcessor:
 
     def extract(self, *, source_object: Mapping[str, Any], payload: bytes) -> MediaTextExtraction:
         content_type = str(source_object.get("contentType") or "")
-        if content_type == "text/plain":
+        if content_type in {"text/plain", "text/markdown"}:
             try:
                 text = payload.decode("utf-8-sig")
             except UnicodeDecodeError as exc:
@@ -264,7 +265,7 @@ class LocalDocumentTextProcessor:
 
 
 class IsolatedDocumentTextProcessor:
-    """Runs untrusted TXT/PDF/DOCX parsing in a bounded child process."""
+    """Runs untrusted TXT/Markdown/PDF/DOCX parsing in a bounded child process."""
 
     processor_id = "isolatedDocumentText"
     processor_version = "v1"

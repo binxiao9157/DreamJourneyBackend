@@ -384,8 +384,8 @@ def main() -> None:
                 "commandId": str(uuid.uuid4()),
                 "expectedAuthorityEpoch": 0,
                 "mediaKind": "document",
-                "fileName": "private-memory.txt",
-                "contentType": "text/plain",
+                "fileName": "private-memory.md",
+                "contentType": "text/markdown",
                 "fileSizeBytes": len(body),
                 "contentSha256": sha256(body).hexdigest(),
                 "purpose": "memoryCapture",
@@ -452,7 +452,7 @@ def main() -> None:
                 headers={
                     **owner_policy_headers,
                     "X-DreamJourney-Upload-Token": upload_token,
-                    "Content-Type": "text/plain",
+                    "Content-Type": "text/markdown",
                 },
                 content=body,
             )

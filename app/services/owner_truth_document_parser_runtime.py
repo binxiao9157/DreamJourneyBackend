@@ -1,4 +1,4 @@
-"""Value-bounded child process for private TXT/PDF/DOCX extraction."""
+"""Value-bounded child process for private TXT/Markdown/PDF/DOCX extraction."""
 
 from __future__ import annotations
 

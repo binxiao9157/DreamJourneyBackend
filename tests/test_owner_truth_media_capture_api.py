@@ -206,6 +206,62 @@ class OwnerTruthMediaCaptureAPITests(unittest.TestCase):
         self.assertEqual(fetched.json()["sourceObject"]["sourceObjectId"], object_id)
         self.assertEqual(len(list(Path(self.media_root.name).rglob("*.bin"))), 1)
 
+    def test_markdown_upload_accepts_utf8_magic_alias_and_rejects_disguised_pdf(self) -> None:
+        owner_id, auth_headers, session_id = self._login("13800139712")
+        self._allow_owner(owner_id)
+        headers = self._capture_headers(auth_headers, session_id=session_id)
+        vault_id = "vault-markdown-upload"
+        markdown = b"# Family memory\n\nA sourced paragraph."
+        payload = {
+            **self._intent_payload(body=markdown),
+            "fileName": "family-memory.md",
+            "contentType": "text/markdown",
+        }
+
+        created = self.client.post(self._intent_path(vault_id), headers=headers, json=payload)
+
+        self.assertEqual(created.status_code, 201, created.text)
+        upload_intent = created.json()["uploadIntent"]
+        uploaded = self.client.put(
+            f"{self._intent_path(vault_id)}/{upload_intent['uploadIntentId']}/content",
+            headers={
+                **headers,
+                "X-DreamJourney-Upload-Token": upload_intent["uploadToken"],
+                "Content-Type": "text/markdown",
+            },
+            content=markdown,
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        source_object = uploaded.json()["sourceObject"]
+        self.assertEqual(source_object["contentType"], "text/markdown")
+        self.assertEqual(source_object["magicMime"], "text/plain")
+        self.assertFalse(source_object["externalProcessingAllowed"])
+
+        disguised_pdf = b"%PDF-1.4\n%%EOF\n"
+        disguised_payload = {
+            **self._intent_payload(body=disguised_pdf),
+            "fileName": "disguised.md",
+            "contentType": "text/markdown",
+        }
+        disguised_created = self.client.post(
+            self._intent_path(vault_id),
+            headers=headers,
+            json=disguised_payload,
+        )
+        self.assertEqual(disguised_created.status_code, 201, disguised_created.text)
+        disguised_intent = disguised_created.json()["uploadIntent"]
+        rejected = self.client.put(
+            f"{self._intent_path(vault_id)}/{disguised_intent['uploadIntentId']}/content",
+            headers={
+                **headers,
+                "X-DreamJourney-Upload-Token": disguised_intent["uploadToken"],
+                "Content-Type": "text/markdown",
+            },
+            content=disguised_pdf,
+        )
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertEqual(rejected.json()["detail"]["code"], "ownerTruthMediaUploadInvalid")
+
     def test_image_upload_intent_persists_explicit_external_processing_permission(self) -> None:
         owner_id, auth_headers, session_id = self._login("13800139711")
         self._allow_owner(owner_id)

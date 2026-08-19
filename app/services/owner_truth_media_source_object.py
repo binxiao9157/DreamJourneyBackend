@@ -55,6 +55,7 @@ _MIME_TYPES_BY_KIND: dict[str, frozenset[str]] = {
     "document": frozenset(
         {
             "text/plain",
+            "text/markdown",
             "application/pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         }
@@ -1212,6 +1213,8 @@ def inspect_magic_mime(*, media_kind: str, payload: bytes) -> str:
 
 def _content_type_matches(*, expected: str, observed: str, media_kind: str) -> bool:
     if expected == observed:
+        return True
+    if media_kind == "document" and expected == "text/markdown" and observed == "text/plain":
         return True
     aliases = {
         ("audio/m4a", "audio/mp4"),
