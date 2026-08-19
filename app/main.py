@@ -119,6 +119,7 @@ from app.services.publication_authority import (
     PublicationConfirmCommand,
     PublicationConfirmResult,
     PublicationDraftCommand,
+    PublicationDraftItemCommand,
     PublicationDraftResult,
 )
 from app.services.publication_visitor_access import (
@@ -3323,6 +3324,35 @@ def _publication_authority_payload(
 def _publication_authority_draft_command(
     payload: Mapping[str, Any],
 ) -> PublicationDraftCommand:
+    if "items" in payload:
+        value = _publication_authority_payload(
+            payload,
+            allowed_fields={"commandId", "items"},
+            required_fields={"commandId", "items"},
+        )
+        raw_items = value.get("items")
+        if not isinstance(raw_items, list):
+            raise PublicationAuthorityError("publication items must be an array")
+        items: list[PublicationDraftItemCommand] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, Mapping):
+                raise PublicationAuthorityError("publication item must be an object")
+            item = _publication_authority_payload(
+                raw_item,
+                allowed_fields={"memoryVersionId", "publicTitle", "publicBody"},
+                required_fields={"memoryVersionId", "publicTitle", "publicBody"},
+            )
+            items.append(
+                PublicationDraftItemCommand(
+                    memory_version_id=str(item.get("memoryVersionId") or ""),
+                    public_title=str(item.get("publicTitle") or ""),
+                    public_body=str(item.get("publicBody") or ""),
+                )
+            )
+        return PublicationDraftCommand(
+            command_id=str(value.get("commandId") or ""),
+            items=tuple(items),
+        )
     value = _publication_authority_payload(
         payload,
         allowed_fields={"commandId", "memoryVersionId", "publicTitle", "publicBody"},
@@ -3372,8 +3402,10 @@ def _publication_authority_draft_response(
     vault_id: str,
     result: PublicationDraftResult,
 ) -> Dict[str, Any]:
-    return {
-        "schemaVersion": "publication-authority-v1",
+    payload: Dict[str, Any] = {
+        "schemaVersion": (
+            "publication-authority-v2" if result.item_count > 1 else "publication-authority-v1"
+        ),
         "vaultId": vault_id,
         "publicationId": result.publication_id,
         "draftId": result.draft_id,
@@ -3389,6 +3421,22 @@ def _publication_authority_draft_response(
         "thirdPartyReviewRequired": result.third_party_review_required,
         "aiDisclosureRequired": True,
     }
+    if result.items:
+        payload["itemCount"] = result.item_count
+        payload["items"] = [
+            {
+                "itemIndex": item.item_index,
+                "memoryVersionId": item.memory_version_id,
+                "itemSnapshotHash": item.item_snapshot_hash,
+                "preview": {
+                    "title": item.preview_title,
+                    "body": item.preview_body,
+                },
+                "thirdPartyReviewRequired": item.third_party_review_required,
+            }
+            for item in result.items
+        ]
+    return payload
 
 
 def _publication_authority_confirm_response(
@@ -3396,8 +3444,10 @@ def _publication_authority_confirm_response(
     vault_id: str,
     result: PublicationConfirmResult,
 ) -> Dict[str, Any]:
-    return {
-        "schemaVersion": "publication-authority-v1",
+    payload: Dict[str, Any] = {
+        "schemaVersion": (
+            "publication-authority-v2" if result.item_count > 1 else "publication-authority-v1"
+        ),
         "vaultId": vault_id,
         "publicationId": result.publication_id,
         "draftId": result.draft_id,
@@ -3409,6 +3459,10 @@ def _publication_authority_confirm_response(
         "publicProjectionHash": result.public_projection_hash,
         "aiDisclosureRequired": result.ai_disclosure_required,
     }
+    if result.item_count > 1:
+        payload["itemCount"] = result.item_count
+        payload["publicProjectionItemHashes"] = list(result.public_projection_item_hashes)
+    return payload
 
 
 def _publication_owner_management_response(

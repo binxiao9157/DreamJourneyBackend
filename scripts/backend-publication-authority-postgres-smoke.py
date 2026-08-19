@@ -36,6 +36,7 @@ from app.services.publication_authority import (
     PublicationAuthorityService,
     PublicationConfirmCommand,
     PublicationDraftCommand,
+    PublicationDraftItemCommand,
 )
 
 
@@ -89,11 +90,18 @@ class Seed:
     memory_version_id: str
 
 
-def seed_publishable_memory(dsn: str, *, label: str) -> Seed:
+def seed_publishable_memory(
+    dsn: str,
+    *,
+    label: str,
+    context: OwnerTruthCommandContext | None = None,
+) -> Seed:
     """Insert one complete Owner Truth admission chain into the disposable DB."""
 
-    vault_id = f"publication-smoke-{label}"
-    owner_subject_id = f"publication-owner-{label}"
+    vault_id = context.vault_id if context is not None else f"publication-smoke-{label}"
+    owner_subject_id = (
+        context.owner_subject_id if context is not None else f"publication-owner-{label}"
+    )
     source_id = str(uuid.uuid4())
     candidate_id = str(uuid.uuid4())
     decision_receipt_id = str(uuid.uuid4())
@@ -105,10 +113,11 @@ def seed_publishable_memory(dsn: str, *, label: str) -> Seed:
 
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO owner_truth.vaults (vault_id, owner_subject_id) VALUES (%s, %s)",
-                (vault_id, owner_subject_id),
-            )
+            if context is None:
+                cursor.execute(
+                    "INSERT INTO owner_truth.vaults (vault_id, owner_subject_id) VALUES (%s, %s)",
+                    (vault_id, owner_subject_id),
+                )
             cursor.execute(
                 """
                 INSERT INTO owner_truth.sources (
@@ -340,6 +349,68 @@ def exercise(dsn: str) -> None:
 
         confirmed = confirm_draft(store, source_case, draft, command_id=confirm_command_id)
         require(confirmed.outcome == "deduplicated", "explicit replay must remain idempotent")
+
+        multi_first = seed_publishable_memory(dsn, label="multi")
+        multi_second = seed_publishable_memory(
+            dsn,
+            label="multi-second",
+            context=multi_first.context,
+        )
+        with store.request_unit_of_work(
+            correlation_id="publication-authority-smoke:multi-draft",
+            command_id=str(uuid.uuid4()),
+        ):
+            multi_draft = authority_service(store).create_draft(
+                context=multi_first.context,
+                command=PublicationDraftCommand(
+                    command_id=str(uuid.uuid4()),
+                    items=(
+                        PublicationDraftItemCommand(
+                            memory_version_id=multi_first.memory_version_id,
+                            public_title="第一章",
+                            public_body="第一段公开正文。",
+                        ),
+                        PublicationDraftItemCommand(
+                            memory_version_id=multi_second.memory_version_id,
+                            public_title="第二章",
+                            public_body="第二段公开正文。",
+                        ),
+                    ),
+                ),
+            )
+        require(multi_draft.item_count == 2, "ordered draft must preserve both items")
+        multi_confirmed = confirm_draft(
+            store,
+            multi_first,
+            multi_draft,
+            command_id=str(uuid.uuid4()),
+        )
+        require(multi_confirmed.item_count == 2, "confirmation must preserve both items")
+        with psycopg.connect(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT item_index, display_title
+                    FROM publication.public_projection_items
+                    WHERE publication_version_id = %s
+                    ORDER BY item_index ASC
+                    """,
+                    (multi_confirmed.publication_version_id,),
+                )
+                require(
+                    cursor.fetchall() == [(0, "第一章"), (1, "第二章")],
+                    "public projection items must preserve Owner-selected order",
+                )
+                cursor.execute(
+                    "UPDATE owner_truth.sources SET state = 'redacted' WHERE id = %s",
+                    (multi_second.source_id,),
+                )
+            connection.commit()
+        require(
+            projection_state(dsn, multi_confirmed.publication_version_id)
+            == ("blocked", "sourceAuthorityChanged"),
+            "authority change in any ordered item must block the whole projection",
+        )
 
         expect_rejected(
             lambda: PublicationDraftCommand(

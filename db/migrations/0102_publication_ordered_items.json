@@ -1,0 +1,12 @@
+{
+  "version": "0102",
+  "name": "publication_ordered_items",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationAuthorityV2",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publication": true,
+    "visitorAccess": false
+  }
+}

@@ -22,6 +22,7 @@ from app.services.publication_authority import (
     PublicationAuthorityService,
     PublicationConfirmCommand,
     PublicationDraftCommand,
+    PublicationDraftItemCommand,
 )
 
 
@@ -249,6 +250,137 @@ class PublicationAuthorityTests(unittest.TestCase):
                     draft_id=draft.draft_id,
                     expected_draft_revision=draft.expected_draft_revision,
                     expected_draft_snapshot_hash="f" * 64,
+                    second_confirmation=True,
+                ),
+            )
+
+    def test_ordered_items_are_bound_into_one_draft_and_projection(self) -> None:
+        second_memory = PublicationAuthorityMemoryVersion(
+            memory_version_id=str(uuid4()),
+            memory_id=str(uuid4()),
+            vault_id=self.context.vault_id,
+            owner_subject_id=self.context.owner_subject_id,
+            authority_epoch=4,
+            content_hash="b" * 64,
+            is_current=True,
+            memory_state="active",
+            source_state="active",
+            decision="accepted",
+            decision_receipt_id=str(uuid4()),
+        )
+        self.repository.seed_memory_version(second_memory)
+        items = (
+            PublicationDraftItemCommand(
+                memory_version_id=self.memory.memory_version_id,
+                public_title="第一章",
+                public_body="第一段公开正文。",
+            ),
+            PublicationDraftItemCommand(
+                memory_version_id=second_memory.memory_version_id,
+                public_title="第二章",
+                public_body="第二段公开正文。",
+            ),
+        )
+        draft = self.service.create_draft(
+            context=self.context,
+            command=PublicationDraftCommand(command_id=str(uuid4()), items=items),
+        )
+
+        self.assertEqual(draft.item_count, 2)
+        self.assertEqual([item.item_index for item in draft.items], [0, 1])
+        self.assertEqual([item.preview_title for item in draft.items], ["第一章", "第二章"])
+
+        reversed_draft = self.service.create_draft(
+            context=self.context,
+            command=PublicationDraftCommand(
+                command_id=str(uuid4()),
+                items=tuple(reversed(items)),
+            ),
+        )
+        self.assertNotEqual(draft.draft_snapshot_hash, reversed_draft.draft_snapshot_hash)
+
+        confirmed = self.service.confirm_draft(
+            context=self.context,
+            command=PublicationConfirmCommand(
+                command_id=str(uuid4()),
+                publication_id=draft.publication_id,
+                draft_id=draft.draft_id,
+                expected_draft_revision=draft.expected_draft_revision,
+                expected_draft_snapshot_hash=draft.draft_snapshot_hash,
+                second_confirmation=True,
+            ),
+        )
+        self.assertEqual(confirmed.item_count, 2)
+        projection = self.repository.public_projection_content_snapshot(
+            confirmed.publication_id,
+            confirmed.publication_version_id,
+        )
+        self.assertIsNotNone(projection)
+        self.assertEqual(
+            [item["displayTitle"] for item in projection["items"]],  # type: ignore[index]
+            ["第一章", "第二章"],
+        )
+
+    def test_duplicate_memory_version_cannot_appear_twice_in_one_draft(self) -> None:
+        item = PublicationDraftItemCommand(
+            memory_version_id=self.memory.memory_version_id,
+            public_title="重复条目",
+            public_body="同一正式记忆不能重复发布。",
+        )
+        with self.assertRaises(PublicationAuthorityConflict):
+            PublicationDraftCommand(
+                command_id=str(uuid4()),
+                items=(item, item),
+            )
+
+    def test_confirmation_rechecks_every_memory_version_in_an_ordered_draft(self) -> None:
+        second_memory = PublicationAuthorityMemoryVersion(
+            memory_version_id=str(uuid4()),
+            memory_id=str(uuid4()),
+            vault_id=self.context.vault_id,
+            owner_subject_id=self.context.owner_subject_id,
+            authority_epoch=4,
+            content_hash="c" * 64,
+            is_current=True,
+            memory_state="active",
+            source_state="active",
+            decision="accepted",
+            decision_receipt_id=str(uuid4()),
+        )
+        self.repository.seed_memory_version(second_memory)
+        draft = self.service.create_draft(
+            context=self.context,
+            command=PublicationDraftCommand(
+                command_id=str(uuid4()),
+                items=(
+                    PublicationDraftItemCommand(
+                        memory_version_id=self.memory.memory_version_id,
+                        public_title="仍有效",
+                        public_body="第一条仍然有效。",
+                    ),
+                    PublicationDraftItemCommand(
+                        memory_version_id=second_memory.memory_version_id,
+                        public_title="即将过期",
+                        public_body="第二条稍后被新版本替代。",
+                    ),
+                ),
+            ),
+        )
+        self.repository.seed_memory_version(
+            PublicationAuthorityMemoryVersion(
+                **{**second_memory.__dict__, "is_current": False}
+            )
+        )
+
+        with self.assertRaises(PublicationAuthorityNotPublishable):
+            self.service.confirm_draft(
+                context=self.context,
+                command=PublicationConfirmCommand(
+                    command_id=str(uuid4()),
+                    publication_id=draft.publication_id,
+                    draft_id=draft.draft_id,
+                    expected_draft_revision=draft.expected_draft_revision,
+                    expected_draft_snapshot_hash=draft.draft_snapshot_hash,
                     second_confirmation=True,
                 ),
             )

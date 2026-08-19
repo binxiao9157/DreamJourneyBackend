@@ -157,6 +157,41 @@ class PublicationAuthorityAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()["detail"]["code"], "publicationNotPublishable")
 
+    def test_owner_can_create_an_ordered_multi_item_draft(self) -> None:
+        owner_id, headers = self._login("13800139176")
+        vault_id = "publication-multi-item"
+        first_id = self._seed_memory(vault_id=vault_id, owner_id=owner_id)
+        second_id = self._seed_memory(vault_id=vault_id, owner_id=owner_id)
+
+        response = client.post(
+            f"/v2/internal/owner-authority/vaults/{vault_id}/drafts",
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "items": [
+                    {
+                        "memoryVersionId": first_id,
+                        "publicTitle": "第一章",
+                        "publicBody": "第一段公开正文。",
+                    },
+                    {
+                        "memoryVersionId": second_id,
+                        "publicTitle": "第二章",
+                        "publicBody": "第二段公开正文。",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 201, response.text)
+        payload = response.json()
+        self.assertEqual(payload["schemaVersion"], "publication-authority-v2")
+        self.assertEqual(payload["itemCount"], 2)
+        self.assertEqual(
+            [item["preview"]["title"] for item in payload["items"]],
+            ["第一章", "第二章"],
+        )
+
     def test_cross_owner_and_unexpected_payload_fail_closed(self) -> None:
         owner_id, headers = self._login("13800139173")
         _, other_headers = self._login("13800139174")

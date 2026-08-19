@@ -24,6 +24,8 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 
 
 PUBLICATION_AUTHORITY_SCHEMA_VERSION = "publication-authority-v1"
+PUBLICATION_AUTHORITY_MULTI_ITEM_SCHEMA_VERSION = "publication-authority-v2"
+PUBLICATION_AUTHORITY_MAX_ITEMS = 20
 PUBLICATION_AI_DISCLOSURE = "该内容由人工智能协助整理，已由发布者确认。"
 _NAMESPACE = UUID("cde4f1a3-13f4-47ee-bc01-3cfbdf1e1ac5")
 _HASH_PATTERN = re.compile(r"^[a-f0-9]{64}$")
@@ -156,14 +158,12 @@ class PublicationAuthorityMemoryVersion:
 
 
 @dataclass(frozen=True)
-class PublicationDraftCommand:
-    command_id: str
+class PublicationDraftItemCommand:
     memory_version_id: str
     public_title: str
     public_body: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "command_id", require_uuid(self.command_id, field="command_id"))
         object.__setattr__(
             self,
             "memory_version_id",
@@ -184,18 +184,86 @@ class PublicationDraftCommand:
             body=self.public_body,
         )
 
+    def payload(self) -> Mapping[str, Any]:
+        return {
+            "memoryVersionId": self.memory_version_id,
+            "publicTitle": self.public_title,
+            "publicBody": self.public_body,
+        }
+
+
+@dataclass(frozen=True)
+class PublicationDraftCommand:
+    command_id: str
+    memory_version_id: str | None = None
+    public_title: str | None = None
+    public_body: str | None = None
+    items: tuple[PublicationDraftItemCommand, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_id", require_uuid(self.command_id, field="command_id"))
+        normalized_items = tuple(self.items)
+        legacy_values = (self.memory_version_id, self.public_title, self.public_body)
+        has_any_legacy_value = any(value is not None for value in legacy_values)
+        if normalized_items and has_any_legacy_value:
+            raise PublicationAuthorityConflict(
+                "publication draft must use either legacy fields or ordered items"
+            )
+        if not normalized_items:
+            if not all(value is not None for value in legacy_values):
+                raise PublicationAuthorityError("publication draft items are required")
+            normalized_items = (
+                PublicationDraftItemCommand(
+                    memory_version_id=str(self.memory_version_id),
+                    public_title=str(self.public_title),
+                    public_body=str(self.public_body),
+                ),
+            )
+        if not 1 <= len(normalized_items) <= PUBLICATION_AUTHORITY_MAX_ITEMS:
+            raise PublicationAuthorityError(
+                f"publication draft must contain between 1 and {PUBLICATION_AUTHORITY_MAX_ITEMS} items"
+            )
+        if not all(isinstance(item, PublicationDraftItemCommand) for item in normalized_items):
+            raise PublicationAuthorityError("publication draft items are invalid")
+        memory_version_ids = [item.memory_version_id for item in normalized_items]
+        if len(set(memory_version_ids)) != len(memory_version_ids):
+            raise PublicationAuthorityConflict(
+                "a MemoryVersion cannot appear more than once in a publication draft"
+            )
+        object.__setattr__(self, "items", normalized_items)
+        first = normalized_items[0]
+        object.__setattr__(self, "memory_version_id", first.memory_version_id)
+        object.__setattr__(self, "public_title", first.public_title)
+        object.__setattr__(self, "public_body", first.public_body)
+
+    @property
+    def schema_version(self) -> str:
+        return (
+            PUBLICATION_AUTHORITY_SCHEMA_VERSION
+            if len(self.items) == 1
+            else PUBLICATION_AUTHORITY_MULTI_ITEM_SCHEMA_VERSION
+        )
+
     @property
     def command_id_hash(self) -> str:
         return _sha256(self.command_id)
 
     @property
     def payload_hash(self) -> str:
+        if self.schema_version == PUBLICATION_AUTHORITY_SCHEMA_VERSION:
+            first = self.items[0]
+            return _digest(
+                {
+                    "schemaVersion": PUBLICATION_AUTHORITY_SCHEMA_VERSION,
+                    "memoryVersionId": first.memory_version_id,
+                    "publicTitle": first.public_title,
+                    "publicBody": first.public_body,
+                }
+            )
         return _digest(
             {
-                "schemaVersion": PUBLICATION_AUTHORITY_SCHEMA_VERSION,
-                "memoryVersionId": self.memory_version_id,
-                "publicTitle": self.public_title,
-                "publicBody": self.public_body,
+                "schemaVersion": PUBLICATION_AUTHORITY_MULTI_ITEM_SCHEMA_VERSION,
+                "items": [item.payload() for item in self.items],
             }
         )
 
@@ -244,6 +312,16 @@ class PublicationConfirmCommand:
 
 
 @dataclass(frozen=True)
+class PublicationDraftItemResult:
+    item_index: int
+    memory_version_id: str
+    item_snapshot_hash: str
+    preview_title: str
+    preview_body: str
+    third_party_review_required: bool
+
+
+@dataclass(frozen=True)
 class PublicationDraftResult:
     outcome: str
     publication_id: str
@@ -255,6 +333,11 @@ class PublicationDraftResult:
     state: str
     second_confirmation_required: bool
     third_party_review_required: bool
+    items: tuple[PublicationDraftItemResult, ...] = ()
+
+    @property
+    def item_count(self) -> int:
+        return len(self.items) if self.items else 1
 
 
 @dataclass(frozen=True)
@@ -268,6 +351,119 @@ class PublicationConfirmResult:
     projection_state: str
     public_projection_hash: str
     ai_disclosure_required: bool
+    item_count: int = 1
+    public_projection_item_hashes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _PreparedPublicationDraftItem:
+    item_index: int
+    command: PublicationDraftItemCommand
+    memory: PublicationAuthorityMemoryVersion
+    public_content_hash: str
+    preview_title: str
+    preview_body: str
+    preview_hash: str
+    redaction_diff_hash: str | None
+    item_snapshot_hash: str
+
+    def result(self) -> PublicationDraftItemResult:
+        return PublicationDraftItemResult(
+            item_index=self.item_index,
+            memory_version_id=self.memory.memory_version_id,
+            item_snapshot_hash=self.item_snapshot_hash,
+            preview_title=self.preview_title,
+            preview_body=self.preview_body,
+            third_party_review_required=self.memory.third_party_review_required,
+        )
+
+
+def _prepare_publication_draft_item(
+    *,
+    item_index: int,
+    command: PublicationDraftItemCommand,
+    memory: PublicationAuthorityMemoryVersion,
+) -> _PreparedPublicationDraftItem:
+    public_content_hash = _digest(
+        {
+            "title": command.public_title,
+            "body": command.public_body,
+            "aiDisclosure": PUBLICATION_AI_DISCLOSURE,
+        }
+    )
+    preview_title = _redact_preview(command.public_title)
+    preview_body = _redact_preview(command.public_body)
+    preview_hash = _digest(
+        {
+            "title": preview_title,
+            "body": preview_body,
+            "aiDisclosure": PUBLICATION_AI_DISCLOSURE,
+        }
+    )
+    redaction_diff_hash = (
+        None
+        if preview_title == command.public_title and preview_body == command.public_body
+        else _digest(
+            {
+                "contentHash": public_content_hash,
+                "previewHash": preview_hash,
+            }
+        )
+    )
+    item_snapshot_hash = _digest(
+        {
+            "schemaVersion": PUBLICATION_AUTHORITY_MULTI_ITEM_SCHEMA_VERSION,
+            "itemIndex": item_index,
+            "memoryVersionId": memory.memory_version_id,
+            "memoryContentHash": memory.content_hash,
+            "publicContentHash": public_content_hash,
+            "thirdPartyReviewRequired": memory.third_party_review_required,
+        }
+    )
+    return _PreparedPublicationDraftItem(
+        item_index=item_index,
+        command=command,
+        memory=memory,
+        public_content_hash=public_content_hash,
+        preview_title=preview_title,
+        preview_body=preview_body,
+        preview_hash=preview_hash,
+        redaction_diff_hash=redaction_diff_hash,
+        item_snapshot_hash=item_snapshot_hash,
+    )
+
+
+def _publication_draft_snapshot_hash(
+    *,
+    vault_id: str,
+    schema_version: str,
+    items: tuple[_PreparedPublicationDraftItem, ...],
+) -> str:
+    if schema_version == PUBLICATION_AUTHORITY_SCHEMA_VERSION and len(items) == 1:
+        item = items[0]
+        return _digest(
+            {
+                "schemaVersion": PUBLICATION_AUTHORITY_SCHEMA_VERSION,
+                "vaultId": vault_id,
+                "memoryVersionId": item.memory.memory_version_id,
+                "memoryContentHash": item.memory.content_hash,
+                "publicContentHash": item.public_content_hash,
+                "thirdPartyReviewRequired": item.memory.third_party_review_required,
+            }
+        )
+    return _digest(
+        {
+            "schemaVersion": PUBLICATION_AUTHORITY_MULTI_ITEM_SCHEMA_VERSION,
+            "vaultId": vault_id,
+            "items": [
+                {
+                    "itemIndex": item.item_index,
+                    "itemSnapshotHash": item.item_snapshot_hash,
+                }
+                for item in items
+            ],
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -448,6 +644,7 @@ class InMemoryPublicationAuthorityRepository:
                             "aiDisclosure": projection["aiDisclosure"],
                             "projectionHash": projection["projectionHash"],
                             "publicCitationHash": projection["publicCitationHash"],
+                            "items": deepcopy(projection.get("items") or []),
                         }
                     )
         return None
@@ -532,27 +729,24 @@ class InMemoryPublicationAuthorityRepository:
                 if payload_hash != command.payload_hash:
                     raise PublicationAuthorityConflict("commandId cannot be reused with a different draft")
                 return PublicationDraftResult(**{**result.__dict__, "outcome": "deduplicated"})
-            memory = self._publishable_memory(context=context, memory_version_id=command.memory_version_id)
+            items = tuple(
+                _prepare_publication_draft_item(
+                    item_index=item_index,
+                    command=item_command,
+                    memory=self._publishable_memory(
+                        context=context,
+                        memory_version_id=item_command.memory_version_id,
+                    ),
+                )
+                for item_index, item_command in enumerate(command.items)
+            )
+            first_item = items[0]
             publication_id = str(uuid5(_NAMESPACE, f"publication:{context.vault_id}:{command.command_id_hash}"))
             draft_id = str(uuid5(_NAMESPACE, f"publication-draft:{context.vault_id}:{command.command_id_hash}"))
-            preview_title = _redact_preview(command.public_title)
-            preview_body = _redact_preview(command.public_body)
-            public_content_hash = _digest(
-                {
-                    "title": command.public_title,
-                    "body": command.public_body,
-                    "aiDisclosure": PUBLICATION_AI_DISCLOSURE,
-                }
-            )
-            draft_snapshot_hash = _digest(
-                {
-                    "schemaVersion": PUBLICATION_AUTHORITY_SCHEMA_VERSION,
-                    "vaultId": context.vault_id,
-                    "memoryVersionId": memory.memory_version_id,
-                    "memoryContentHash": memory.content_hash,
-                    "publicContentHash": public_content_hash,
-                    "thirdPartyReviewRequired": memory.third_party_review_required,
-                }
+            draft_snapshot_hash = _publication_draft_snapshot_hash(
+                vault_id=context.vault_id,
+                schema_version=command.schema_version,
+                items=items,
             )
             result = PublicationDraftResult(
                 outcome="created",
@@ -560,20 +754,42 @@ class InMemoryPublicationAuthorityRepository:
                 draft_id=draft_id,
                 expected_draft_revision=1,
                 draft_snapshot_hash=draft_snapshot_hash,
-                preview_title=preview_title,
-                preview_body=preview_body,
+                preview_title=first_item.preview_title,
+                preview_body=first_item.preview_body,
                 state="draft",
                 second_confirmation_required=True,
-                third_party_review_required=memory.third_party_review_required,
+                third_party_review_required=any(
+                    item.memory.third_party_review_required for item in items
+                ),
+                items=tuple(item.result() for item in items),
             )
             self._drafts[draft_id] = {
                 "publicationId": publication_id,
                 "draftResult": result,
-                "memoryVersionId": memory.memory_version_id,
-                "publicTitle": command.public_title,
-                "publicBody": command.public_body,
-                "publicContentHash": public_content_hash,
-                "thirdPartyReviewRequired": memory.third_party_review_required,
+                "memoryVersionId": first_item.memory.memory_version_id,
+                "publicTitle": first_item.command.public_title,
+                "publicBody": first_item.command.public_body,
+                "publicContentHash": first_item.public_content_hash,
+                "thirdPartyReviewRequired": any(
+                    item.memory.third_party_review_required for item in items
+                ),
+                "items": [
+                    {
+                        "itemIndex": item.item_index,
+                        "memoryVersionId": item.memory.memory_version_id,
+                        "memoryContentHash": item.memory.content_hash,
+                        "publicTitle": item.command.public_title,
+                        "publicBody": item.command.public_body,
+                        "publicContentHash": item.public_content_hash,
+                        "previewTitle": item.preview_title,
+                        "previewBody": item.preview_body,
+                        "previewHash": item.preview_hash,
+                        "redactionDiffHash": item.redaction_diff_hash,
+                        "itemSnapshotHash": item.item_snapshot_hash,
+                        "thirdPartyReviewRequired": item.memory.third_party_review_required,
+                    }
+                    for item in items
+                ],
                 "ownerSubjectId": context.owner_subject_id,
                 "vaultId": context.vault_id,
                 "state": "draft",
@@ -614,29 +830,69 @@ class InMemoryPublicationAuthorityRepository:
                 or command.expected_draft_snapshot_hash != draft_result.draft_snapshot_hash
             ):
                 raise PublicationAuthorityConflict("publication draft snapshot has changed")
-            memory = self._publishable_memory(
-                context=context,
-                memory_version_id=str(draft["memoryVersionId"]),
+            draft_items = tuple(draft.get("items") or ())
+            memories = tuple(
+                self._publishable_memory(
+                    context=context,
+                    memory_version_id=str(item["memoryVersionId"]),
+                )
+                for item in draft_items
             )
-            if bool(draft["thirdPartyReviewRequired"]) or memory.third_party_review_required:
+            if bool(draft["thirdPartyReviewRequired"]) or any(
+                memory.third_party_review_required for memory in memories
+            ):
                 raise PublicationAuthorityNotPublishable(
                     "third-party material requires a separate verified redaction or consent workflow"
                 )
             version_id = str(uuid5(_NAMESPACE, f"publication-version:{command.draft_id}:1"))
             projection_id = str(uuid5(_NAMESPACE, f"publication-projection:{version_id}"))
+            public_items = tuple(
+                {
+                    "itemIndex": int(item["itemIndex"]),
+                    "displayTitle": str(item["publicTitle"]),
+                    "displayBody": str(item["publicBody"]),
+                    "aiDisclosure": PUBLICATION_AI_DISCLOSURE,
+                    "publicCitationHash": _digest(
+                        {
+                            "publicationVersionId": version_id,
+                            "itemIndex": int(item["itemIndex"]),
+                            "memoryVersionId": memory.memory_version_id,
+                            "memoryContentHash": memory.content_hash,
+                            "itemSnapshotHash": str(item["itemSnapshotHash"]),
+                            "draftSnapshotHash": draft_result.draft_snapshot_hash,
+                        }
+                    ),
+                    "redactionDiffHash": item.get("redactionDiffHash"),
+                }
+                for item, memory in zip(draft_items, memories)
+            )
+            public_items = tuple(
+                {
+                    **item,
+                    "projectionHash": _digest(
+                        {
+                            "title": item["displayTitle"],
+                            "body": item["displayBody"],
+                            "aiDisclosure": item["aiDisclosure"],
+                            "draftSnapshotHash": draft_result.draft_snapshot_hash,
+                            "publicCitationHash": item["publicCitationHash"],
+                        }
+                    ),
+                }
+                for item in public_items
+            )
             public_citation_hash = _digest(
                 {
                     "publicationVersionId": version_id,
-                    "memoryVersionId": memory.memory_version_id,
-                    "memoryContentHash": memory.content_hash,
+                    "itemCitationHashes": [
+                        item["publicCitationHash"] for item in public_items
+                    ],
                     "draftSnapshotHash": draft_result.draft_snapshot_hash,
                 }
             )
             public_projection_hash = _digest(
                 {
-                    "title": draft["publicTitle"],
-                    "body": draft["publicBody"],
-                    "aiDisclosure": PUBLICATION_AI_DISCLOSURE,
+                    "itemProjectionHashes": [item["projectionHash"] for item in public_items],
                     "draftSnapshotHash": draft_result.draft_snapshot_hash,
                     "publicCitationHash": public_citation_hash,
                 }
@@ -651,13 +907,17 @@ class InMemoryPublicationAuthorityRepository:
                 projection_state="active",
                 public_projection_hash=public_projection_hash,
                 ai_disclosure_required=True,
+                item_count=len(public_items),
+                public_projection_item_hashes=tuple(
+                    str(item["projectionHash"]) for item in public_items
+                ),
             )
             draft["state"] = "confirmed"
             draft["publicationVersionId"] = version_id
             self._public_projections[projection_id] = {
                 "vaultId": context.vault_id,
                 "ownerSubjectId": context.owner_subject_id,
-                "authorityEpoch": memory.authority_epoch,
+                "authorityEpoch": memories[0].authority_epoch,
                 "publicationId": command.publication_id,
                 "publicationVersionId": version_id,
                 "displayTitle": draft["publicTitle"],
@@ -665,6 +925,7 @@ class InMemoryPublicationAuthorityRepository:
                 "aiDisclosure": PUBLICATION_AI_DISCLOSURE,
                 "projectionHash": public_projection_hash,
                 "publicCitationHash": public_citation_hash,
+                "items": [deepcopy(item) for item in public_items],
                 "projectionState": "active",
                 "vaultState": "active",
                 "publicationState": "confirmed",
@@ -796,52 +1057,31 @@ class PostgresPublicationAuthorityRepository:
             )
             if replay is not None:
                 return replay
-            memory = self._publishable_memory(
-                cursor,
-                context=context,
-                vault_authority_epoch=int(vault["authority_epoch"]),
-                memory_version_id=command.memory_version_id,
+            items = tuple(
+                _prepare_publication_draft_item(
+                    item_index=item_index,
+                    command=item_command,
+                    memory=self._publishable_memory(
+                        cursor,
+                        context=context,
+                        vault_authority_epoch=int(vault["authority_epoch"]),
+                        memory_version_id=item_command.memory_version_id,
+                    ),
+                )
+                for item_index, item_command in enumerate(command.items)
             )
+            first_item = items[0]
             publication_id = str(uuid5(_NAMESPACE, f"publication:{context.vault_id}:{command.command_id_hash}"))
             draft_id = str(uuid5(_NAMESPACE, f"publication-draft:{context.vault_id}:{command.command_id_hash}"))
-            content_hash = _digest(
-                {
-                    "title": command.public_title,
-                    "body": command.public_body,
-                    "aiDisclosure": PUBLICATION_AI_DISCLOSURE,
-                }
-            )
-            preview_title = _redact_preview(command.public_title)
-            preview_body = _redact_preview(command.public_body)
-            preview_hash = _digest(
-                {
-                    "title": preview_title,
-                    "body": preview_body,
-                    "aiDisclosure": PUBLICATION_AI_DISCLOSURE,
-                }
-            )
-            redaction_diff_hash = (
-                None
-                if preview_title == command.public_title and preview_body == command.public_body
-                else _digest(
-                    {
-                        "contentHash": content_hash,
-                        "previewHash": preview_hash,
-                    }
-                )
-            )
-            draft_snapshot_hash = _digest(
-                {
-                    "schemaVersion": PUBLICATION_AUTHORITY_SCHEMA_VERSION,
-                    "vaultId": context.vault_id,
-                    "memoryVersionId": memory.memory_version_id,
-                    "memoryContentHash": memory.content_hash,
-                    "publicContentHash": content_hash,
-                    "thirdPartyReviewRequired": memory.third_party_review_required,
-                }
+            draft_snapshot_hash = _publication_draft_snapshot_hash(
+                vault_id=context.vault_id,
+                schema_version=command.schema_version,
+                items=items,
             )
             third_party_state = (
-                "reviewRequired" if memory.third_party_review_required else "noneDetected"
+                "reviewRequired"
+                if any(item.memory.third_party_review_required for item in items)
+                else "noneDetected"
             )
             cursor.execute(
                 """
@@ -849,7 +1089,12 @@ class PostgresPublicationAuthorityRepository:
                     id, vault_id, owner_subject_id, authority_epoch, state
                 ) VALUES (%s, %s, %s, %s, 'draft')
                 """,
-                (publication_id, context.vault_id, context.owner_subject_id, memory.authority_epoch),
+                (
+                    publication_id,
+                    context.vault_id,
+                    context.owner_subject_id,
+                    first_item.memory.authority_epoch,
+                ),
             )
             cursor.execute(
                 """
@@ -864,37 +1109,70 @@ class PostgresPublicationAuthorityRepository:
                     publication_id,
                     context.vault_id,
                     context.owner_subject_id,
-                    memory.authority_epoch,
+                    first_item.memory.authority_epoch,
                     draft_snapshot_hash,
-                    preview_hash,
-                    redaction_diff_hash,
-                    PUBLICATION_AUTHORITY_SCHEMA_VERSION,
+                    first_item.preview_hash,
+                    first_item.redaction_diff_hash,
+                    command.schema_version,
                 ),
             )
-            cursor.execute(
-                """
-                INSERT INTO publication.publication_draft_memory_versions (
-                    draft_id, vault_id, memory_version_id, source_citation_hash,
-                    content_hash, source_state, consent_state, requires_redaction,
-                    redaction_diff_hash
-                ) VALUES (%s, %s, %s, %s, %s, 'active', %s, %s, %s)
-                """,
-                (
-                    draft_id,
-                    context.vault_id,
-                    memory.memory_version_id,
-                    _digest(
-                        {
-                            "memoryVersionId": memory.memory_version_id,
-                            "memoryContentHash": memory.content_hash,
-                        }
+            for item in items:
+                cursor.execute(
+                    """
+                    INSERT INTO publication.publication_draft_memory_versions (
+                        draft_id, vault_id, memory_version_id, source_citation_hash,
+                        content_hash, source_state, consent_state, requires_redaction,
+                        redaction_diff_hash
+                    ) VALUES (%s, %s, %s, %s, %s, 'active', %s, %s, %s)
+                    """,
+                    (
+                        draft_id,
+                        context.vault_id,
+                        item.memory.memory_version_id,
+                        _digest(
+                            {
+                                "memoryVersionId": item.memory.memory_version_id,
+                                "memoryContentHash": item.memory.content_hash,
+                            }
+                        ),
+                        item.memory.content_hash,
+                        (
+                            "thirdPartyRestricted"
+                            if item.memory.third_party_review_required
+                            else "granted"
+                        ),
+                        item.memory.third_party_review_required,
+                        item.redaction_diff_hash,
                     ),
-                    memory.content_hash,
-                    "thirdPartyRestricted" if memory.third_party_review_required else "granted",
-                    memory.third_party_review_required,
-                    redaction_diff_hash,
-                ),
-            )
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO publication.publication_draft_items (
+                        draft_id, vault_id, item_index, memory_version_id,
+                        memory_content_hash, item_snapshot_hash, display_title,
+                        display_body, content_hash, preview_title, preview_body,
+                        preview_hash, redaction_diff_hash,
+                        third_party_review_required, ai_disclosure
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        draft_id,
+                        context.vault_id,
+                        item.item_index,
+                        item.memory.memory_version_id,
+                        item.memory.content_hash,
+                        item.item_snapshot_hash,
+                        item.command.public_title,
+                        item.command.public_body,
+                        item.public_content_hash,
+                        item.preview_title,
+                        item.preview_body,
+                        item.preview_hash,
+                        item.redaction_diff_hash,
+                        item.memory.third_party_review_required,
+                        PUBLICATION_AI_DISCLOSURE,
+                    ),
+                )
             cursor.execute(
                 """
                 INSERT INTO publication.publication_draft_public_contents (
@@ -906,14 +1184,14 @@ class PostgresPublicationAuthorityRepository:
                 (
                     draft_id,
                     context.vault_id,
-                    command.public_title,
-                    command.public_body,
-                    content_hash,
-                    preview_title,
-                    preview_body,
-                    preview_hash,
-                    redaction_diff_hash,
-                    memory.third_party_review_required,
+                    first_item.command.public_title,
+                    first_item.command.public_body,
+                    first_item.public_content_hash,
+                    first_item.preview_title,
+                    first_item.preview_body,
+                    first_item.preview_hash,
+                    first_item.redaction_diff_hash,
+                    first_item.memory.third_party_review_required,
                     PUBLICATION_AI_DISCLOSURE,
                 ),
             )
@@ -932,15 +1210,15 @@ class PostgresPublicationAuthorityRepository:
                     publication_id,
                     draft_id,
                     context.owner_subject_id,
-                    memory.authority_epoch,
+                    first_item.memory.authority_epoch,
                     command.command_id_hash,
                     command.payload_hash,
-                    memory.memory_version_id,
+                    first_item.memory.memory_version_id,
                     draft_snapshot_hash,
-                    preview_hash,
-                    redaction_diff_hash,
+                    first_item.preview_hash,
+                    first_item.redaction_diff_hash,
                     third_party_state,
-                    PUBLICATION_AUTHORITY_SCHEMA_VERSION,
+                    command.schema_version,
                 ),
             )
         return PublicationDraftResult(
@@ -949,11 +1227,14 @@ class PostgresPublicationAuthorityRepository:
             draft_id=draft_id,
             expected_draft_revision=1,
             draft_snapshot_hash=draft_snapshot_hash,
-            preview_title=preview_title,
-            preview_body=preview_body,
+            preview_title=first_item.preview_title,
+            preview_body=first_item.preview_body,
             state="draft",
             second_confirmation_required=True,
-            third_party_review_required=memory.third_party_review_required,
+            third_party_review_required=any(
+                item.memory.third_party_review_required for item in items
+            ),
+            items=tuple(item.result() for item in items),
         )
 
     def confirm_draft(
@@ -985,35 +1266,103 @@ class PostgresPublicationAuthorityRepository:
                 command=command,
                 vault_authority_epoch=int(vault["authority_epoch"]),
             )
-            memory = self._publishable_memory(
-                cursor,
-                context=context,
-                vault_authority_epoch=int(vault["authority_epoch"]),
-                memory_version_id=str(draft["memory_version_id"]),
+            draft_items = tuple(draft["items"])
+            memories = tuple(
+                self._publishable_memory(
+                    cursor,
+                    context=context,
+                    vault_authority_epoch=int(vault["authority_epoch"]),
+                    memory_version_id=str(item["memory_version_id"]),
+                )
+                for item in draft_items
             )
-            if bool(draft["third_party_review_required"]) or memory.third_party_review_required:
+            if any(
+                str(item["memory_content_hash"]) != memory.content_hash
+                for item, memory in zip(draft_items, memories)
+            ):
+                raise PublicationAuthorityConflict(
+                    "publication draft item authority snapshot has changed"
+                )
+            if any(
+                bool(item["third_party_review_required"])
+                or memory.third_party_review_required
+                for item, memory in zip(draft_items, memories)
+            ):
                 raise PublicationAuthorityNotPublishable(
                     "third-party material requires a separate verified redaction or consent workflow"
                 )
             version_id = str(uuid5(_NAMESPACE, f"publication-version:{command.draft_id}:1"))
             projection_id = str(uuid5(_NAMESPACE, f"publication-projection:{version_id}"))
-            public_citation_hash = _digest(
+            projected_items = tuple(
                 {
-                    "publicationVersionId": version_id,
-                    "memoryVersionId": memory.memory_version_id,
-                    "memoryContentHash": memory.content_hash,
-                    "draftSnapshotHash": str(draft["draft_snapshot_hash"]),
+                    **item,
+                    "public_citation_hash": _digest(
+                        {
+                            "publicationVersionId": version_id,
+                            "itemIndex": int(item["item_index"]),
+                            "memoryVersionId": memory.memory_version_id,
+                            "memoryContentHash": memory.content_hash,
+                            "itemSnapshotHash": str(item["item_snapshot_hash"]),
+                            "draftSnapshotHash": str(draft["draft_snapshot_hash"]),
+                        }
+                    ),
                 }
+                for item, memory in zip(draft_items, memories)
             )
-            projection_hash = _digest(
+            projected_items = tuple(
                 {
-                    "title": str(draft["display_title"]),
-                    "body": str(draft["display_body"]),
-                    "aiDisclosure": str(draft["ai_disclosure"]),
-                    "draftSnapshotHash": str(draft["draft_snapshot_hash"]),
-                    "publicCitationHash": public_citation_hash,
+                    **item,
+                    "projection_hash": _digest(
+                        {
+                            "title": str(item["display_title"]),
+                            "body": str(item["display_body"]),
+                            "aiDisclosure": str(item["ai_disclosure"]),
+                            "draftSnapshotHash": str(draft["draft_snapshot_hash"]),
+                            "publicCitationHash": str(item["public_citation_hash"]),
+                        }
+                    ),
                 }
+                for item in projected_items
             )
+            first_item = projected_items[0]
+            first_memory = memories[0]
+            if len(projected_items) == 1:
+                public_citation_hash = _digest(
+                    {
+                        "publicationVersionId": version_id,
+                        "memoryVersionId": first_memory.memory_version_id,
+                        "memoryContentHash": first_memory.content_hash,
+                        "draftSnapshotHash": str(draft["draft_snapshot_hash"]),
+                    }
+                )
+                projection_hash = _digest(
+                    {
+                        "title": str(first_item["display_title"]),
+                        "body": str(first_item["display_body"]),
+                        "aiDisclosure": str(first_item["ai_disclosure"]),
+                        "draftSnapshotHash": str(draft["draft_snapshot_hash"]),
+                        "publicCitationHash": public_citation_hash,
+                    }
+                )
+            else:
+                public_citation_hash = _digest(
+                    {
+                        "publicationVersionId": version_id,
+                        "itemCitationHashes": [
+                            item["public_citation_hash"] for item in projected_items
+                        ],
+                        "draftSnapshotHash": str(draft["draft_snapshot_hash"]),
+                    }
+                )
+                projection_hash = _digest(
+                    {
+                        "itemProjectionHashes": [
+                            item["projection_hash"] for item in projected_items
+                        ],
+                        "draftSnapshotHash": str(draft["draft_snapshot_hash"]),
+                        "publicCitationHash": public_citation_hash,
+                    }
+                )
             now = datetime.now(timezone.utc)
             cursor.execute(
                 """
@@ -1026,9 +1375,9 @@ class PostgresPublicationAuthorityRepository:
                     version_id,
                     command.publication_id,
                     context.vault_id,
-                    memory.memory_version_id,
+                    first_memory.memory_version_id,
                     projection_hash,
-                    PUBLICATION_AUTHORITY_SCHEMA_VERSION,
+                    str(draft["policy_version"]),
                     now,
                 ),
             )
@@ -1045,14 +1394,64 @@ class PostgresPublicationAuthorityRepository:
                     context.vault_id,
                     command.publication_id,
                     version_id,
-                    str(draft["display_title"]),
-                    str(draft["display_body"]),
-                    str(draft["ai_disclosure"]),
+                    str(first_item["display_title"]),
+                    str(first_item["display_body"]),
+                    str(first_item["ai_disclosure"]),
                     projection_hash,
                     public_citation_hash,
-                    draft.get("redaction_diff_hash"),
+                    first_item.get("redaction_diff_hash"),
                 ),
             )
+            for item, memory in zip(projected_items, memories):
+                cursor.execute(
+                    """
+                    INSERT INTO publication.publication_version_items (
+                        publication_version_id, publication_id, vault_id,
+                        item_index, memory_version_id, memory_content_hash,
+                        item_snapshot_hash, display_title, display_body,
+                        ai_disclosure, projection_hash, public_citation_hash,
+                        redaction_diff_hash
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        version_id,
+                        command.publication_id,
+                        context.vault_id,
+                        int(item["item_index"]),
+                        memory.memory_version_id,
+                        memory.content_hash,
+                        str(item["item_snapshot_hash"]),
+                        str(item["display_title"]),
+                        str(item["display_body"]),
+                        str(item["ai_disclosure"]),
+                        str(item["projection_hash"]),
+                        str(item["public_citation_hash"]),
+                        item.get("redaction_diff_hash"),
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO publication.public_projection_items (
+                        public_projection_id, publication_version_id,
+                        publication_id, vault_id, item_index, display_title,
+                        display_body, ai_disclosure, projection_hash,
+                        public_citation_hash, redaction_diff_hash
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        projection_id,
+                        version_id,
+                        command.publication_id,
+                        context.vault_id,
+                        int(item["item_index"]),
+                        str(item["display_title"]),
+                        str(item["display_body"]),
+                        str(item["ai_disclosure"]),
+                        str(item["projection_hash"]),
+                        str(item["public_citation_hash"]),
+                        item.get("redaction_diff_hash"),
+                    ),
+                )
             cursor.execute(
                 """
                 UPDATE publication.publications
@@ -1090,14 +1489,14 @@ class PostgresPublicationAuthorityRepository:
                     command.draft_id,
                     version_id,
                     context.owner_subject_id,
-                    memory.authority_epoch,
+                    first_memory.authority_epoch,
                     command.command_id_hash,
                     command.payload_hash,
-                    memory.memory_version_id,
+                    first_memory.memory_version_id,
                     str(draft["draft_snapshot_hash"]),
                     str(draft["preview_hash"]),
                     draft.get("redaction_diff_hash"),
-                    PUBLICATION_AUTHORITY_SCHEMA_VERSION,
+                    str(draft["policy_version"]),
                 ),
             )
         return PublicationConfirmResult(
@@ -1110,6 +1509,10 @@ class PostgresPublicationAuthorityRepository:
             projection_state="active",
             public_projection_hash=projection_hash,
             ai_disclosure_required=True,
+            item_count=len(projected_items),
+            public_projection_item_hashes=tuple(
+                str(item["projection_hash"]) for item in projected_items
+            ),
         )
 
     def list_owner_publications(
@@ -1374,6 +1777,27 @@ class PostgresPublicationAuthorityRepository:
             )
         if str(row["command_kind"]) != "draftCreated" or str(row["command_payload_hash"]) != command.payload_hash:
             raise PublicationAuthorityConflict("commandId cannot be reused with a different publication action")
+        cursor.execute(
+            """
+            SELECT item_index, memory_version_id, item_snapshot_hash,
+                preview_title, preview_body, third_party_review_required
+            FROM publication.publication_draft_items
+            WHERE draft_id = %s AND vault_id = %s
+            ORDER BY item_index ASC
+            """,
+            (row["draft_id"], vault_id),
+        )
+        items = tuple(
+            PublicationDraftItemResult(
+                item_index=int(item["item_index"]),
+                memory_version_id=str(item["memory_version_id"]),
+                item_snapshot_hash=str(item["item_snapshot_hash"]),
+                preview_title=str(item["preview_title"]),
+                preview_body=str(item["preview_body"]),
+                third_party_review_required=bool(item["third_party_review_required"]),
+            )
+            for item in cursor.fetchall()
+        )
         return PublicationDraftResult(
             outcome="deduplicated",
             publication_id=str(row["publication_id"]),
@@ -1385,6 +1809,7 @@ class PostgresPublicationAuthorityRepository:
             state="draft",
             second_confirmation_required=True,
             third_party_review_required=bool(row["third_party_review_required"]),
+            items=items,
         )
 
     def _confirm_replay(
@@ -1433,6 +1858,16 @@ class PostgresPublicationAuthorityRepository:
             raise PublicationAuthorityNotPublishable(
                 "publication projection is no longer available after an authority change"
             )
+        cursor.execute(
+            """
+            SELECT projection_hash
+            FROM publication.public_projection_items
+            WHERE publication_version_id = %s
+            ORDER BY item_index ASC
+            """,
+            (row["publication_version_id"],),
+        )
+        item_hashes = tuple(str(item["projection_hash"]) for item in cursor.fetchall())
         return PublicationConfirmResult(
             outcome="deduplicated",
             publication_id=str(row["publication_id"]),
@@ -1443,6 +1878,8 @@ class PostgresPublicationAuthorityRepository:
             projection_state=str(row["projection_state"]),
             public_projection_hash=str(row["projection_hash"]),
             ai_disclosure_required=True,
+            item_count=len(item_hashes) if item_hashes else 1,
+            public_projection_item_hashes=item_hashes,
         )
 
     def _draft_for_confirmation(
@@ -1459,28 +1896,16 @@ class PostgresPublicationAuthorityRepository:
                 draft.id, draft.publication_id, draft.vault_id, draft.owner_subject_id,
                 draft.authority_epoch, draft.draft_revision, draft.state,
                 draft.draft_snapshot_hash, draft.preview_hash,
-                draft.redaction_diff_hash,
-                content.display_title, content.display_body, content.ai_disclosure,
-                content.third_party_review_required,
-                draft_version.memory_version_id
+                draft.redaction_diff_hash, draft.policy_version
             FROM publication.publication_drafts AS draft
-            JOIN publication.publication_draft_public_contents AS content
-              ON content.draft_id = draft.id AND content.vault_id = draft.vault_id
-            JOIN publication.publication_draft_memory_versions AS draft_version
-              ON draft_version.draft_id = draft.id AND draft_version.vault_id = draft.vault_id
             WHERE draft.id = %s AND draft.vault_id = %s
             FOR UPDATE OF draft
             """,
             (command.draft_id, context.vault_id),
         )
-        drafts = cursor.fetchall()
-        if not drafts:
+        draft = cursor.fetchone()
+        if draft is None:
             raise PublicationAuthorityAccessDenied("publication draft is not available in this Owner Vault")
-        if len(drafts) != 1:
-            raise PublicationAuthorityConflict(
-                "publication draft must bind exactly one current MemoryVersion"
-            )
-        draft = drafts[0]
         if (
             str(draft["publication_id"]) != command.publication_id
             or str(draft["owner_subject_id"]) != context.owner_subject_id
@@ -1494,7 +1919,23 @@ class PostgresPublicationAuthorityRepository:
             or str(draft["draft_snapshot_hash"]) != command.expected_draft_snapshot_hash
         ):
             raise PublicationAuthorityConflict("publication draft snapshot has changed")
-        return draft
+        cursor.execute(
+            """
+            SELECT item_index, memory_version_id, memory_content_hash,
+                item_snapshot_hash, display_title, display_body, ai_disclosure,
+                redaction_diff_hash, third_party_review_required
+            FROM publication.publication_draft_items
+            WHERE draft_id = %s AND vault_id = %s
+            ORDER BY item_index ASC
+            """,
+            (command.draft_id, context.vault_id),
+        )
+        items = tuple(cursor.fetchall())
+        if not items or [int(item["item_index"]) for item in items] != list(range(len(items))):
+            raise PublicationAuthorityConflict(
+                "publication draft must bind a contiguous ordered item snapshot"
+            )
+        return {**draft, "items": items}
 
     @staticmethod
     def _lock_command(cursor: Any, *, vault_id: str, command_id_hash: str) -> None:
@@ -1527,7 +1968,11 @@ __all__ = [
     "PublicationConfirmCommand",
     "PublicationConfirmResult",
     "PublicationDraftCommand",
+    "PublicationDraftItemCommand",
+    "PublicationDraftItemResult",
     "PublicationDraftResult",
     "PUBLICATION_AI_DISCLOSURE",
+    "PUBLICATION_AUTHORITY_MAX_ITEMS",
+    "PUBLICATION_AUTHORITY_MULTI_ITEM_SCHEMA_VERSION",
     "PUBLICATION_AUTHORITY_SCHEMA_VERSION",
 ]
