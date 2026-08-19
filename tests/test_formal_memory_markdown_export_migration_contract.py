@@ -27,10 +27,9 @@ class FormalMemoryMarkdownExportMigrationContractTests(unittest.TestCase):
         smoke = POSTGRES_SMOKE_PATH.read_text(encoding="utf-8")
 
         self.assertIn("supersedes_version_id", smoke)
-        self.assertIn(
-            "(current_version_id, 2, True, current_content, old_version_id)",
-            smoke,
-        )
+        self.assertIn("version_receipt_id", smoke)
+        self.assertIn("decision_receipt_id", smoke)
+        self.assertIn("formal export Candidate must be accepted", smoke)
 
 
 if __name__ == "__main__":

@@ -81,6 +81,8 @@ def seed_formal_memory(
     owner_subject_id: str,
 ) -> None:
     source_id = str(uuid.uuid4())
+    candidate_id = str(uuid.uuid4())
+    decision_receipt_id = str(uuid.uuid4())
     memory_id = str(uuid.uuid4())
     old_version_id = str(uuid.uuid4())
     current_version_id = str(uuid.uuid4())
@@ -123,6 +125,74 @@ def seed_formal_memory(
             )
             cursor.execute(
                 """
+                INSERT INTO owner_truth.memory_candidates (
+                    id, vault_id, owner_subject_id, source_id, candidate_kind,
+                    perspective_type, epistemic_status, sensitivity, decision_status,
+                    policy_version, authority_epoch, content_hash,
+                    payload_schema_version, payload
+                ) VALUES (%s, %s, %s, %s, 'experience', 'firstPerson', 'recalled',
+                    'standard', 'pending', 'owner-truth-v1', 0, %s,
+                    'owner-truth-v2', %s)
+                """,
+                (
+                    candidate_id,
+                    vault_id,
+                    owner_subject_id,
+                    source_id,
+                    current_hash,
+                    Jsonb(
+                        {
+                            "content": current_content,
+                            "contentSchemaVersion": "owner-truth-v2",
+                            "evidenceRefs": [
+                                {"sourceId": source_id, "sourceVersion": 1}
+                            ],
+                        }
+                    ),
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE owner_truth.memory_candidates
+                SET decision_status = 'accepted'
+                WHERE vault_id = %s AND id = %s AND decision_status = 'pending'
+                """,
+                (vault_id, candidate_id),
+            )
+            require(cursor.rowcount == 1, "formal export Candidate must be accepted")
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.decision_receipts (
+                    id, vault_id, candidate_id, decision, actor_subject_id,
+                    authority_epoch, policy_version, rationale_hash, command_id_hash,
+                    payload_hash, expected_candidate_version, candidate_before_hash,
+                    candidate_after_hash, decision_basis
+                ) VALUES (%s, %s, %s, 'accepted', %s, 0, 'owner-truth-v1',
+                    %s, %s, %s, 1, %s, %s, %s)
+                """,
+                (
+                    decision_receipt_id,
+                    vault_id,
+                    candidate_id,
+                    owner_subject_id,
+                    canonical_hash({"reason": "ownerConfirmed"}),
+                    canonical_hash({"command": "formalMemoryMarkdownExportSmoke"}),
+                    canonical_hash({"candidate": candidate_id, "decision": "accepted"}),
+                    current_hash,
+                    current_hash,
+                    Jsonb(
+                        {
+                            "schemaVersion": "owner-truth-decision-basis-v1",
+                            "reasonCode": "ownerConfirmed",
+                            "sourceRefs": [
+                                {"sourceId": source_id, "sourceVersion": 1}
+                            ],
+                        }
+                    ),
+                ),
+            )
+            cursor.execute(
+                """
                 INSERT INTO owner_truth.memories (
                     id, vault_id, owner_subject_id, source_id, source_version,
                     memory_kind, perspective_type, epistemic_status, sensitivity,
@@ -143,17 +213,31 @@ def seed_formal_memory(
                     current_hash,
                 ),
             )
-            for version_id, version_number, is_current, content, supersedes_version_id in (
-                (old_version_id, 1, False, old_content, None),
-                (current_version_id, 2, True, current_content, old_version_id),
+            for (
+                version_id,
+                version_number,
+                is_current,
+                content,
+                supersedes_version_id,
+                version_receipt_id,
+            ) in (
+                (old_version_id, 1, False, old_content, None, None),
+                (
+                    current_version_id,
+                    2,
+                    True,
+                    current_content,
+                    old_version_id,
+                    decision_receipt_id,
+                ),
             ):
                 cursor.execute(
                     """
                     INSERT INTO owner_truth.memory_versions (
                         id, vault_id, memory_id, version_number, is_current,
                         schema_version, content_hash, payload, source_id, source_version,
-                        supersedes_version_id
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s)
+                        supersedes_version_id, decision_receipt_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s)
                     """,
                     (
                         version_id,
@@ -174,6 +258,7 @@ def seed_formal_memory(
                         ),
                         source_id,
                         supersedes_version_id,
+                        version_receipt_id,
                     ),
                 )
         connection.commit()
