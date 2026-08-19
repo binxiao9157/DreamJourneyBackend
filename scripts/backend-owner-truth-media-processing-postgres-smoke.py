@@ -31,6 +31,7 @@ if str(ROOT_DIR) not in sys.path:
 
 import app.main as main_module
 from app.async_effects.owner_truth_candidate_extraction_worker import (
+    DeterministicOwnerTruthCandidateExtractor,
     OwnerTruthCandidateExtractionWorkerRuntime,
 )
 from app.async_effects.owner_truth_media_processing_worker import (
@@ -502,6 +503,10 @@ def main() -> None:
                 store=store,
                 worker_id="media-candidate-postgres-smoke",
                 retry_seconds=1,
+                # This Gate proves the media -> Candidate -> Memory -> Context
+                # contract. Keep it deterministic even when the deployed API
+                # container has a real organization provider configured.
+                extractor=DeterministicOwnerTruthCandidateExtractor(),
             ).run_once()
             require(
                 candidate_result.get("status") == "completed"
