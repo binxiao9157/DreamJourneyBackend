@@ -550,6 +550,12 @@ class RouteOwnershipRegistry:
                 "publicationClosedBetaShareGrantRevoke",
             ),
             _rule(
+                "GET",
+                "/v2/publication-invitations",
+                session,
+                "publicationVisitorInvitationList",
+            ),
+            _rule(
                 "POST",
                 "/v2/publication-grants/{grant_id}/sessions",
                 session,

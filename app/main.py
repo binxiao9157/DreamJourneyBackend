@@ -141,6 +141,7 @@ from app.services.publication_visitor_access import (
     PublicationVisitorAccessUnavailable,
     PublicationVisitorAdultVerificationRequired,
     PublicationVisitorAdmissionResult,
+    PublicationVisitorInvitationSummary,
     PublicationVisitorSessionCommand,
 )
 from app.services.publication_lifecycle_execution import (
@@ -1525,6 +1526,7 @@ FORMAL_PUBLICATION_CLOSED_BETA_ROUTE_TEMPLATES = frozenset(
         "/v2/vaults/{vault_id}/publications/{publication_id}/suspend",
         "/v2/vaults/{vault_id}/publication-grants",
         "/v2/vaults/{vault_id}/publication-grants/{grant_id}/revoke",
+        "/v2/publication-invitations",
         "/v2/publication-grants/{grant_id}/sessions",
         "/v2/publication-sessions/{session_id}/projection",
         "/v2/publication-sessions/{session_id}/answers",
@@ -3819,7 +3821,21 @@ def _publication_visitor_session_command(
     )
     return PublicationVisitorSessionCommand(
         command_id=str(value.get("commandId") or ""),
+        session_credential=str(value.get("sessionCredential") or ""),
         grant_credential=str(value.get("grantCredential") or ""),
+    )
+
+
+def _publication_registered_visitor_session_command(
+    payload: Mapping[str, Any],
+) -> PublicationVisitorSessionCommand:
+    value = _publication_visitor_access_payload(
+        payload,
+        allowed_fields={"commandId", "sessionCredential"},
+        required_fields={"commandId", "sessionCredential"},
+    )
+    return PublicationVisitorSessionCommand(
+        command_id=str(value.get("commandId") or ""),
         session_credential=str(value.get("sessionCredential") or ""),
     )
 
@@ -3858,12 +3874,12 @@ def _publication_grant_issue_response(
         "recipientDisplayLabel": result.grantee_display_label,
         "outcome": result.outcome,
         "expiresAt": result.expires_at.isoformat(),
-        "credentialIssued": result.grant_credential is not None,
+        "credentialIssued": result.grant_credential is not None and not product_contract,
     }
     if not product_contract:
         response["useRemaining"] = result.use_remaining
     # This raw credential is intentionally returned once at issuance only.
-    if result.grant_credential is not None:
+    if result.grant_credential is not None and not product_contract:
         response["grantCredential"] = result.grant_credential
     return response
 
@@ -3884,17 +3900,44 @@ def _publication_grant_revoke_response(
 
 def _publication_visitor_admission_response(
     result: PublicationVisitorAdmissionResult,
+    *,
+    product_contract: bool = False,
 ) -> Dict[str, Any]:
-    return {
-        "schemaVersion": "publication-visitor-access-v1",
+    response: Dict[str, Any] = {
+        "schemaVersion": (
+            "publication-visitor-admission-v2"
+            if product_contract
+            else "publication-visitor-access-v1"
+        ),
         "grantId": result.grant_id,
         "visitorSessionId": result.session_id,
-        "ownerSubjectId": result.owner_subject_id,
         "publicationId": result.publication_id,
         "publicationVersionId": result.publication_version_id,
         "outcome": result.outcome,
         "expiresAt": result.expires_at.isoformat(),
-        "useRemaining": result.use_remaining,
+    }
+    if not product_contract:
+        response["ownerSubjectId"] = result.owner_subject_id
+        response["useRemaining"] = result.use_remaining
+    return response
+
+
+def _publication_visitor_invitation_list_response(
+    summaries: tuple[PublicationVisitorInvitationSummary, ...],
+) -> Dict[str, Any]:
+    return {
+        "schemaVersion": "publication-visitor-invitation-list-v1",
+        "invitations": [
+            {
+                "grantId": summary.grant_id,
+                "publicationId": summary.publication_id,
+                "publicationVersionId": summary.publication_version_id,
+                "title": summary.title,
+                "state": summary.state,
+                "expiresAt": summary.expires_at.isoformat(),
+            }
+            for summary in summaries
+        ],
     }
 
 
@@ -6754,6 +6797,7 @@ NO_STORE_PATH_PREFIXES = (
     "/auth/",
     "/v2/auth/",
     "/v2/vaults/",
+    "/v2/publication-invitations",
     "/v2/publication-grants/",
     "/v2/publication-sessions/",
     "/voice/",
@@ -8609,9 +8653,14 @@ def _publication_admit_visitor_for_subject(
     *,
     grant_id: str,
     payload: Dict[str, Any],
+    product_contract: bool = False,
 ) -> JSONResponse:
     try:
-        command = _publication_visitor_session_command(payload)
+        command = (
+            _publication_registered_visitor_session_command(payload)
+            if product_contract
+            else _publication_visitor_session_command(payload)
+        )
         with store.request_unit_of_work(
             correlation_id=f"publication-visitor-session:{grant_id}",
             command_id=command.command_id,
@@ -8624,12 +8673,37 @@ def _publication_admit_visitor_for_subject(
                 visitor_subject_id=visitor_subject_id,
                 grant_id=grant_id,
                 command=command,
+                product_contract=product_contract,
             )
     except PublicationVisitorAccessError as error:
         raise _publication_visitor_access_http_error(error) from error
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
-        content=_publication_visitor_admission_response(result),
+        content=_publication_visitor_admission_response(
+            result,
+            product_contract=product_contract,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _publication_list_invitations_for_subject(
+    visitor_subject_id: str,
+) -> JSONResponse:
+    try:
+        with store.request_unit_of_work(
+            correlation_id="publication-visitor-invitation-list",
+            command_id=None,
+        ):
+            summaries = PublicationVisitorAccessService(
+                store.publication_visitor_access_repository(),
+                eligibility_resolver=PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER,
+                enabled=True,
+            ).list_recipient_invitations(visitor_subject_id=visitor_subject_id)
+    except PublicationVisitorAccessError as error:
+        raise _publication_visitor_access_http_error(error) from error
+    return JSONResponse(
+        content=_publication_visitor_invitation_list_response(summaries),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -8901,6 +8975,17 @@ def admit_closed_beta_publication_visitor(
         _publication_formal_visitor_subject(request),
         grant_id=grant_id,
         payload=payload,
+        product_contract=True,
+    )
+
+
+@app.get(
+    "/v2/publication-invitations",
+    include_in_schema=False,
+)
+def list_publication_visitor_invitations(request: Request) -> JSONResponse:
+    return _publication_list_invitations_for_subject(
+        _publication_formal_visitor_subject(request)
     )
 
 

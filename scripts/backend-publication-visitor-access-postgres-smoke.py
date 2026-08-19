@@ -147,8 +147,9 @@ def admit(
     *,
     visitor_subject_id: str,
     grant_id: str,
-    grant_credential: str,
+    grant_credential: str | None,
     suffix: str,
+    product_contract: bool = False,
 ):
     command = PublicationVisitorSessionCommand(
         command_id=str(uuid.uuid4()),
@@ -163,6 +164,7 @@ def admit(
             visitor_subject_id=visitor_subject_id,
             grant_id=grant_id,
             command=command,
+            product_contract=product_contract,
         )
 
 
@@ -208,6 +210,17 @@ def owner_grants(store: PostgresStore, *, seed, visitor_subject_id: str):
         return visitor_service(store, visitor_subject_id=visitor_subject_id).list_owner_grants(
             context=seed.context
         )
+
+
+def recipient_invitations(store: PostgresStore, *, visitor_subject_id: str):
+    with store.request_unit_of_work(
+        correlation_id=f"publication-visitor-access-smoke:invitations:{visitor_subject_id}",
+        command_id=None,
+    ):
+        return visitor_service(
+            store,
+            visitor_subject_id=visitor_subject_id,
+        ).list_recipient_invitations(visitor_subject_id=visitor_subject_id)
 
 
 def read_projection(
@@ -340,6 +353,63 @@ def exercise(dsn: str) -> None:
                 ).list_owner_grants(context=other_owner_context),
                 "cross-owner ShareGrant management read must fail closed",
             )
+
+        invitations = recipient_invitations(
+            store,
+            visitor_subject_id=visitor_subject_id,
+        )
+        require(
+            len(invitations) == 1
+            and invitations[0].grant_id == issued.grant_id
+            and invitations[0].publication_id == publication.publication_id
+            and invitations[0].publication_version_id == publication.publication_version_id
+            and invitations[0].state == "active"
+            and invitations[0].title == "确认的公开回忆",
+            "registered recipient must list only its active public invitation metadata",
+        )
+        require(
+            recipient_invitations(store, visitor_subject_id="unrelated-recipient") == (),
+            "unrelated registered accounts must not discover ShareGrants",
+        )
+
+        product_visitor_subject_id = "publication-product-visitor-smoke"
+        product_grant = issue(
+            store,
+            seed=seed,
+            publication_id=publication.publication_id,
+            publication_version_id=publication.publication_version_id,
+            visitor_subject_id=product_visitor_subject_id,
+            use_limit=8,
+        )
+        product_invitations = recipient_invitations(
+            store,
+            visitor_subject_id=product_visitor_subject_id,
+        )
+        require(
+            len(product_invitations) == 1
+            and product_invitations[0].grant_id == product_grant.grant_id,
+            "product recipient must discover its in-app invitation without a raw credential",
+        )
+        product_session_credential = "visitor-session-product-" + "s" * 32
+        product_admission = admit(
+            store,
+            visitor_subject_id=product_visitor_subject_id,
+            grant_id=product_grant.grant_id,
+            grant_credential=None,
+            suffix="product",
+            product_contract=True,
+        )
+        product_projection = read_projection(
+            store,
+            visitor_subject_id=product_visitor_subject_id,
+            session_id=product_admission.session_id,
+            session_credential=product_session_credential,
+        )
+        require(
+            product_projection.publication_id == publication.publication_id
+            and product_projection.publication_version_id == publication.publication_version_id,
+            "credentialless product admission must remain bound to the registered recipient and public projection",
+        )
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [
@@ -518,7 +588,7 @@ def exercise(dsn: str) -> None:
                 require(session == ("revoked", 1), "revoked session must retain bound use count")
         print(
             "Publication visitor access Postgres smoke passed "
-            "(owner management and version summaries, projection-only read, "
+            "(registered invitation list, product admission, owner management and version summaries, projection-only read, "
             "adult/direct admission, CAS, revoke and projection block verified)."
         )
     finally:

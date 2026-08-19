@@ -134,6 +134,7 @@ class PublicationClosedBetaFormalAPITests(unittest.TestCase):
                 "POST",
                 f"/v2/vaults/vault-closed-beta/publication-grants/{uuid4()}/revoke",
             ),
+            ("GET", "/v2/publication-invitations"),
             ("POST", f"/v2/publication-grants/{uuid4()}/sessions"),
             ("POST", f"/v2/publication-sessions/{uuid4()}/projection"),
             ("POST", f"/v2/publication-sessions/{uuid4()}/answers"),
@@ -160,6 +161,7 @@ class PublicationClosedBetaFormalAPITests(unittest.TestCase):
             "/v2/vaults/{vault_id}/publications/{publication_id}/suspend",
             "/v2/vaults/{vault_id}/publication-grants",
             "/v2/vaults/{vault_id}/publication-grants/{grant_id}/revoke",
+            "/v2/publication-invitations",
             "/v2/publication-grants/{grant_id}/sessions",
             "/v2/publication-sessions/{session_id}/projection",
             "/v2/publication-sessions/{session_id}/answers",
@@ -184,6 +186,10 @@ class PublicationClosedBetaFormalAPITests(unittest.TestCase):
             "GET /v2/vaults/*/publications/*/versions",
         )
         cases = {
+            "/v2/publication-invitations": (
+                "visitorAccess",
+                "GET /v2/publication-invitations",
+            ),
             "/v2/vaults/owner-secret/publication-drafts/draft-secret/confirm/publication-secret": (
                 "publication",
                 "POST /v2/vaults/*/publication-drafts/*/confirm/*",
@@ -203,8 +209,9 @@ class PublicationClosedBetaFormalAPITests(unittest.TestCase):
         }
         for path, (feature, label) in cases.items():
             with self.subTest(path=path):
-                self.assertEqual(gate.feature_for_request("POST", path, {}), feature)
-                self.assertEqual(gate.route_label_for_request("POST", path, {}), label)
+                method = "GET" if path == "/v2/publication-invitations" else "POST"
+                self.assertEqual(gate.feature_for_request(method, path, {}), feature)
+                self.assertEqual(gate.route_label_for_request(method, path, {}), label)
                 self.assertNotIn("secret", label)
 
     def test_qa_routes_remain_separate_and_hidden_when_their_qa_gate_is_off(self) -> None:

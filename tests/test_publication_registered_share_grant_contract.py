@@ -13,6 +13,12 @@ from app.services.in_memory_store import InMemoryStore
 from app.services.publication_visitor_access import (
     InMemoryPublicationVisitorAccessRepository,
     PublicationGrantScope,
+    PublicationVisitorEligibility,
+    StaticPublicationVisitorEligibilityResolver,
+)
+from app.domain.publication.share_grant_session import (
+    PublicationAdultVerificationState,
+    PublicationVisitorRelationshipOrigin,
 )
 from app.services.user_identity import stable_user_id
 
@@ -46,6 +52,14 @@ class PublicationRegisteredShareGrantContractTests(unittest.TestCase):
                 projection_state="active",
             )
         )
+        self.repository._projection_content_reader = lambda publication_id, version_id: {
+            "projectionState": "active",
+            "displayTitle": "一起散步的下午",
+            "displayBody": "这是本人确认后公开的内容。",
+            "aiDisclosure": "内容经过 AI 辅助整理。",
+            "projectionHash": "a" * 64,
+            "publicCitationHash": "b" * 64,
+        }
 
     def tearDown(self) -> None:
         main_module.store = self.previous_store
@@ -88,7 +102,8 @@ class PublicationRegisteredShareGrantContractTests(unittest.TestCase):
 
         self.assertEqual(issued["schemaVersion"], "publication-owner-grant-issue-v1")
         self.assertEqual(issued["recipientDisplayLabel"], "手机号尾号 9941")
-        self.assertTrue(issued["credentialIssued"])
+        self.assertFalse(issued["credentialIssued"])
+        self.assertNotIn("grantCredential", issued)
         self.assertNotIn("useRemaining", issued)
         self.assertEqual(listed["schemaVersion"], "publication-owner-grant-list-v2")
         self.assertEqual(listed["grants"][0]["recipientDisplayLabel"], "手机号尾号 9941")
@@ -167,6 +182,85 @@ class PublicationRegisteredShareGrantContractTests(unittest.TestCase):
                         product_contract=True,
                     )
                 self.assertEqual(raised.exception.status_code, 400)
+
+    def test_registered_recipient_lists_only_own_active_invitations_without_credentials(self) -> None:
+        recipient_phone = "13800139945"
+        other_phone = "13800139946"
+        recipient = self.store.upsert_user(phone=recipient_phone, nickname="受邀账户")
+        other = self.store.upsert_user(phone=other_phone, nickname="其他账户")
+        issued = self._json(
+            main_module._publication_issue_grant_for_context(
+                self.context,
+                self._payload(recipient_type="phone", recipient_value=recipient_phone),
+                product_contract=True,
+            )
+        )
+
+        invited = self._json(
+            main_module._publication_list_invitations_for_subject(str(recipient["id"]))
+        )
+        unrelated = self._json(
+            main_module._publication_list_invitations_for_subject(str(other["id"]))
+        )
+
+        self.assertEqual(invited["schemaVersion"], "publication-visitor-invitation-list-v1")
+        self.assertEqual(len(invited["invitations"]), 1)
+        summary = invited["invitations"][0]
+        self.assertEqual(summary["grantId"], issued["grantId"])
+        self.assertEqual(summary["title"], "一起散步的下午")
+        self.assertEqual(summary["state"], "active")
+        serialized = json.dumps(invited, ensure_ascii=False)
+        for private_value in (
+            recipient_phone,
+            str(recipient["id"]),
+            self.context.owner_subject_id,
+            "grantCredential",
+            "useRemaining",
+            "vaultId",
+        ):
+            self.assertNotIn(private_value, serialized)
+        self.assertEqual(unrelated["invitations"], [])
+
+    def test_registered_recipient_admits_without_share_link_credential(self) -> None:
+        recipient_phone = "13800139947"
+        recipient = self.store.upsert_user(phone=recipient_phone, nickname="受邀账户")
+        recipient_id = str(recipient["id"])
+        issued = self._json(
+            main_module._publication_issue_grant_for_context(
+                self.context,
+                self._payload(recipient_type="phone", recipient_value=recipient_phone),
+                product_contract=True,
+            )
+        )
+        previous_resolver = main_module.PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER
+        main_module.PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER = StaticPublicationVisitorEligibilityResolver(
+            {
+                recipient_id: PublicationVisitorEligibility(
+                    adult_verification=PublicationAdultVerificationState.VERIFIED,
+                    relationship_origin=PublicationVisitorRelationshipOrigin.DIRECT,
+                )
+            }
+        )
+        try:
+            admitted = self._json(
+                main_module._publication_admit_visitor_for_subject(
+                    recipient_id,
+                    grant_id=str(issued["grantId"]),
+                    payload={
+                        "commandId": str(uuid4()),
+                        "sessionCredential": "registered-session-" + "s" * 32,
+                    },
+                    product_contract=True,
+                )
+            )
+        finally:
+            main_module.PUBLICATION_VISITOR_ELIGIBILITY_RESOLVER = previous_resolver
+
+        self.assertEqual(admitted["schemaVersion"], "publication-visitor-admission-v2")
+        self.assertEqual(admitted["grantId"], issued["grantId"])
+        self.assertNotIn("ownerSubjectId", admitted)
+        self.assertNotIn("useRemaining", admitted)
+        self.assertNotIn("grantCredential", admitted)
 
 
 if __name__ == "__main__":  # pragma: no cover

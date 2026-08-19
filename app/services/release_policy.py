@@ -1234,6 +1234,8 @@ class ReleasePolicyCommandGate:
     @staticmethod
     def _publication_formal_feature(path: str) -> Optional[str]:
         segments = tuple(segment for segment in path.split("/") if segment)
+        if segments == ("v2", "publication-invitations"):
+            return "visitorAccess"
         if len(segments) == 4 and segments[:2] == ("v2", "publication-grants") and segments[3] == "sessions":
             return "visitorAccess"
         if (
@@ -1273,6 +1275,8 @@ class ReleasePolicyCommandGate:
         if feature is None:
             return None
         segments = tuple(segment for segment in path.split("/") if segment)
+        if segments == ("v2", "publication-invitations"):
+            return f"{method} /v2/publication-invitations"
         if segments[:2] == ("v2", "publication-grants"):
             return f"{method} /v2/publication-grants/*/sessions"
         if segments[:2] == ("v2", "publication-sessions"):

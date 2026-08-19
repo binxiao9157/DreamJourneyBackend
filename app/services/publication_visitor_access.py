@@ -239,16 +239,17 @@ class PublicationGrantRevokeCommand:
 @dataclass(frozen=True)
 class PublicationVisitorSessionCommand:
     command_id: str
-    grant_credential: str = field(repr=False)
     session_credential: str = field(repr=False)
+    grant_credential: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", _uuid(self.command_id, field_name="command_id"))
-        object.__setattr__(
-            self,
-            "grant_credential",
-            _credential(self.grant_credential, field_name="grant_credential"),
-        )
+        if self.grant_credential is not None:
+            object.__setattr__(
+                self,
+                "grant_credential",
+                _credential(self.grant_credential, field_name="grant_credential"),
+            )
         object.__setattr__(
             self,
             "session_credential",
@@ -439,6 +440,25 @@ class PublicationOwnerGrantSummary:
 
 
 @dataclass(frozen=True)
+class PublicationVisitorInvitationSummary:
+    """Recipient-visible metadata for one active registered-account grant."""
+
+    grant_id: str
+    publication_id: str
+    publication_version_id: str
+    title: str
+    state: str
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        for field_name in ("grant_id", "publication_id", "publication_version_id"):
+            object.__setattr__(self, field_name, _uuid(getattr(self, field_name), field_name=field_name))
+        object.__setattr__(self, "title", _display_label(self.title, field_name="title"))
+        object.__setattr__(self, "state", _identifier(self.state, field_name="state"))
+        object.__setattr__(self, "expires_at", _utc(self.expires_at, field_name="expires_at"))
+
+
+@dataclass(frozen=True)
 class PublicationVisitorAdmissionResult:
     outcome: str
     grant_id: str
@@ -494,6 +514,14 @@ class PublicationVisitorAccessRepository(Protocol):
     ) -> tuple[PublicationOwnerGrantSummary, ...]:
         ...
 
+    def list_recipient_invitations(
+        self,
+        *,
+        visitor_subject_hash: str,
+        now: datetime,
+    ) -> tuple[PublicationVisitorInvitationSummary, ...]:
+        ...
+
     def admit_visitor(
         self,
         *,
@@ -501,7 +529,7 @@ class PublicationVisitorAccessRepository(Protocol):
         eligibility: PublicationVisitorEligibility,
         grant_id: str,
         command: PublicationVisitorSessionCommand,
-        grant_credential_hash: str,
+        grant_credential_hash: str | None,
         session_credential_hash: str,
         now: datetime,
     ) -> PublicationVisitorAdmissionResult:
@@ -598,12 +626,27 @@ class PublicationVisitorAccessService:
             now=_utc(now or datetime.now(timezone.utc), field_name="now"),
         )
 
+    def list_recipient_invitations(
+        self,
+        *,
+        visitor_subject_id: str,
+        now: datetime | None = None,
+    ) -> tuple[PublicationVisitorInvitationSummary, ...]:
+        if not self._enabled:
+            raise PublicationVisitorAccessDisabled("publication visitor access is default-off")
+        visitor_subject_id = _identifier(visitor_subject_id, field_name="visitor_subject_id")
+        return self._repository.list_recipient_invitations(
+            visitor_subject_hash=_hash_text(visitor_subject_id),
+            now=_utc(now or datetime.now(timezone.utc), field_name="now"),
+        )
+
     def admit_visitor(
         self,
         *,
         visitor_subject_id: str,
         grant_id: str,
         command: PublicationVisitorSessionCommand,
+        product_contract: bool = False,
         now: datetime | None = None,
     ) -> PublicationVisitorAdmissionResult:
         if not self._enabled:
@@ -615,12 +658,18 @@ class PublicationVisitorAccessService:
                 "Visitor requires a server-verified adult, direct relationship admission"
             )
         instant = _utc(now or datetime.now(timezone.utc), field_name="now")
+        if not product_contract and command.grant_credential is None:
+            raise PublicationVisitorAccessDenied("ShareGrant credential is not accepted")
         return self._repository.admit_visitor(
             visitor_subject_hash=_hash_text(visitor_subject_id),
             eligibility=eligibility,
             grant_id=_uuid(grant_id, field_name="grant_id"),
             command=command,
-            grant_credential_hash=_hash_text(command.grant_credential),
+            grant_credential_hash=(
+                None
+                if product_contract
+                else _hash_text(command.grant_credential or "")
+            ),
             session_credential_hash=_hash_text(command.session_credential),
             now=instant,
         )
@@ -872,6 +921,47 @@ class InMemoryPublicationVisitorAccessRepository:
                 )
             return tuple(sorted(summaries, key=lambda item: item.grant_id))
 
+    def list_recipient_invitations(
+        self,
+        *,
+        visitor_subject_hash: str,
+        now: datetime,
+    ) -> tuple[PublicationVisitorInvitationSummary, ...]:
+        with self._lock:
+            summaries: list[PublicationVisitorInvitationSummary] = []
+            for grant in self._grants.values():
+                if (
+                    str(grant.get("granteeSubjectHash") or "") != visitor_subject_hash
+                    or str(grant.get("state") or "") != "active"
+                    or _utc(grant["expiresAt"], field_name="expires_at") <= now
+                ):
+                    continue
+                try:
+                    scope = self._scope(
+                        publication_id=str(grant["publicationId"]),
+                        publication_version_id=str(grant["publicationVersionId"]),
+                    )
+                except PublicationVisitorAccessUnavailable:
+                    continue
+                projection = (
+                    self._projection_content_reader(scope.publication_id, scope.publication_version_id)
+                    if self._projection_content_reader is not None
+                    else None
+                )
+                if projection is None or str(projection.get("projectionState") or "") != "active":
+                    continue
+                summaries.append(
+                    PublicationVisitorInvitationSummary(
+                        grant_id=str(grant["grantId"]),
+                        publication_id=scope.publication_id,
+                        publication_version_id=scope.publication_version_id,
+                        title=str(projection.get("displayTitle") or "受邀回忆"),
+                        state="active",
+                        expires_at=_utc(grant["expiresAt"], field_name="expires_at"),
+                    )
+                )
+            return tuple(sorted(summaries, key=lambda item: (item.expires_at, item.grant_id)))
+
     def _assert_owner_vault(self, context: OwnerTruthCommandContext) -> None:
         if self._owner_vault_scope_reader is None:
             return
@@ -892,7 +982,7 @@ class InMemoryPublicationVisitorAccessRepository:
         eligibility: PublicationVisitorEligibility,
         grant_id: str,
         command: PublicationVisitorSessionCommand,
-        grant_credential_hash: str,
+        grant_credential_hash: str | None,
         session_credential_hash: str,
         now: datetime,
     ) -> PublicationVisitorAdmissionResult:
@@ -900,7 +990,10 @@ class InMemoryPublicationVisitorAccessRepository:
             grant = self._grants.get(grant_id)
             if grant is None:
                 raise PublicationVisitorAccessDenied("ShareGrant credential is not accepted")
-            if grant["grantCredentialHash"] != grant_credential_hash:
+            if (
+                grant_credential_hash is not None
+                and grant["grantCredentialHash"] != grant_credential_hash
+            ):
                 raise PublicationVisitorAccessDenied("ShareGrant credential is not accepted")
             if grant["granteeSubjectHash"] != visitor_subject_hash:
                 raise PublicationVisitorAccessDenied("ShareGrant credential is not accepted")
@@ -1258,6 +1351,56 @@ class PostgresPublicationVisitorAccessRepository:
                 )
             return tuple(summaries)
 
+    def list_recipient_invitations(
+        self,
+        *,
+        visitor_subject_hash: str,
+        now: datetime,
+    ) -> tuple[PublicationVisitorInvitationSummary, ...]:
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT share_grant.id, share_grant.publication_id,
+                    share_grant.publication_version_id, share_grant.expires_at,
+                    projection.display_title
+                FROM publication.share_grants AS share_grant
+                JOIN owner_truth.vaults AS vault
+                  ON vault.vault_id = share_grant.vault_id
+                JOIN publication.publications AS publication
+                  ON publication.id = share_grant.publication_id
+                 AND publication.vault_id = share_grant.vault_id
+                JOIN publication.publication_versions AS version
+                  ON version.id = share_grant.publication_version_id
+                 AND version.publication_id = share_grant.publication_id
+                 AND version.vault_id = share_grant.vault_id
+                JOIN publication.public_projections AS projection
+                  ON projection.publication_version_id = version.id
+                 AND projection.publication_id = version.publication_id
+                 AND projection.vault_id = version.vault_id
+                WHERE share_grant.grantee_subject_hash = %s
+                  AND share_grant.state = 'active'
+                  AND share_grant.expires_at > %s
+                  AND vault.status = 'active'
+                  AND publication.state = 'confirmed'
+                  AND projection.state = 'active'
+                  AND share_grant.authority_epoch = vault.authority_epoch
+                  AND share_grant.authority_epoch = publication.authority_epoch
+                ORDER BY share_grant.expires_at ASC, share_grant.id ASC
+                """,
+                (visitor_subject_hash, now),
+            )
+            return tuple(
+                PublicationVisitorInvitationSummary(
+                    grant_id=str(row["id"]),
+                    publication_id=str(row["publication_id"]),
+                    publication_version_id=str(row["publication_version_id"]),
+                    title=str(row["display_title"]),
+                    state="active",
+                    expires_at=_utc(row["expires_at"], field_name="expires_at"),
+                )
+                for row in cursor.fetchall()
+            )
+
     def admit_visitor(
         self,
         *,
@@ -1265,15 +1408,15 @@ class PostgresPublicationVisitorAccessRepository:
         eligibility: PublicationVisitorEligibility,
         grant_id: str,
         command: PublicationVisitorSessionCommand,
-        grant_credential_hash: str,
+        grant_credential_hash: str | None,
         session_credential_hash: str,
         now: datetime,
     ) -> PublicationVisitorAdmissionResult:
         with self._cursor() as cursor:
             grant = self._grant_with_active_projection(cursor, grant_id=grant_id)
-            if str(grant["token_hash"]) != grant_credential_hash or str(
-                grant["grantee_subject_hash"]
-            ) != visitor_subject_hash:
+            if str(grant["grantee_subject_hash"]) != visitor_subject_hash:
+                raise PublicationVisitorAccessDenied("ShareGrant credential is not accepted")
+            if grant_credential_hash is not None and str(grant["token_hash"]) != grant_credential_hash:
                 raise PublicationVisitorAccessDenied("ShareGrant credential is not accepted")
             if str(grant["state"]) != "active":
                 raise PublicationVisitorAccessUnavailable("ShareGrant is not active")
@@ -1700,6 +1843,7 @@ __all__ = [
     "PublicationVisitorAdmissionResult",
     "PublicationVisitorEligibility",
     "PublicationVisitorEligibilityResolver",
+    "PublicationVisitorInvitationSummary",
     "PUBLICATION_VISITOR_ACCESS_SCHEMA_VERSION",
     "StaticPublicationVisitorEligibilityResolver",
 ]
