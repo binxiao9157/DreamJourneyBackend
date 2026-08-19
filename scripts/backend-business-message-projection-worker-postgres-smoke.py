@@ -41,6 +41,9 @@ from app.async_effects.message_notification_effects import (
     BusinessCompletionMessageSource,
     InAppMessageKind,
 )
+from app.async_effects.owner_business_message_projection import (
+    enqueue_owner_business_message,
+)
 from app.core.config import Settings, settings
 from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.services.postgres_store import PostgresStore
@@ -52,6 +55,8 @@ VAULT_ID = "vault-message-worker-smoke"
 IDENTITY_BINDING_ID = "binding-message-worker-smoke"
 IDENTITY_CHALLENGE_ID = "challenge-message-worker-smoke"
 IDENTITY_PROOF_ID = "proof-message-worker-smoke"
+CANONICAL_OWNER_ID = "owner-canonical-message-worker-smoke"
+CANONICAL_VAULT_ID = "vault-canonical-message-worker-smoke"
 
 
 def require(condition: bool, message: str) -> None:
@@ -178,6 +183,36 @@ def seed_verified_owner_inbox_bridge(dsn: str) -> None:
             )
 
 
+def seed_canonical_owner_inbox(dsn: str) -> None:
+    """Seed an active V4 Owner account without any legacy alias row."""
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO users (id, phone, nickname, payload)
+                VALUES (%s, %s, %s, %s::jsonb)
+                """,
+                (
+                    CANONICAL_OWNER_ID,
+                    "+8613800138112",
+                    "canonical worker smoke",
+                    account_payload(auth_epoch=2),
+                ),
+            )
+            cursor.execute(
+                "INSERT INTO subjects (id, status) VALUES (%s, 'active')",
+                (CANONICAL_OWNER_ID,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.vaults (vault_id, owner_subject_id, authority_epoch, status)
+                VALUES (%s, %s, 4, 'active')
+                """,
+                (CANONICAL_VAULT_ID, CANONICAL_OWNER_ID),
+            )
+
+
 def completed_source(store: PostgresStore, *, label: str) -> BusinessCompletionMessageSource:
     intent = AsyncEffectIntent(
         operation_type="asyncEffect.synthetic.businessMessageProjectionWorker.smoke",
@@ -243,6 +278,46 @@ def enqueue(
     return request
 
 
+def enqueue_canonical_owner_candidate(store: PostgresStore) -> None:
+    intent = AsyncEffectIntent(
+        operation_type="asyncEffect.synthetic.ownerTruth.source.created",
+        target=AsyncEffectTarget(
+            owner_subject_id=CANONICAL_OWNER_ID,
+            vault_id=CANONICAL_VAULT_ID,
+            resource_type="source",
+            resource_id="31735a38-d953-4d7a-b0e4-e5939476aa01",
+            resource_version=1,
+            purpose="candidateExtraction",
+            authority_epoch=4,
+        ),
+        payload_hash=digest("canonical-owner-candidate-message-worker"),
+    )
+    with store.request_unit_of_work(
+        correlation_id=f"canonical-owner-message-source:{intent.operation_id}",
+        command_id="canonicalOwnerMessageSource",
+    ):
+        store.effect_kernel_repository().accept(intent)
+        completion = store.async_effect_consumer_repository().consume(
+            AsyncEffectSyntheticConsumerCommand(
+                intent=intent,
+                consumer_name="ownerTruth.source.extraction",
+                business_target_key=intent.business_target_key,
+                outcome="completed",
+                reason_code="candidateExtractionProposalsPersisted",
+                result_ref_hash=digest("canonical-owner-candidate-result"),
+            )
+        )
+        accepted = enqueue_owner_business_message(
+            store,
+            intent=intent,
+            completion=completion,
+            kind=InAppMessageKind.CANDIDATE_READY,
+        )
+    require(accepted is not None, "canonical Owner message must expose the durable seam")
+    require(accepted.outcome == "accepted", "canonical Owner message effect must accept")
+    require(accepted.input_outcome == "recorded", "canonical Owner message input must persist")
+
+
 def worker(*, store: PostgresStore, enabled: bool) -> BusinessMessageProjectionWorkerRuntime:
     return BusinessMessageProjectionWorkerRuntime(
         settings=Settings(
@@ -289,6 +364,7 @@ class _FailingProjectionRepository:
 
 def exercise(dsn: str) -> None:
     seed_verified_owner_inbox_bridge(dsn)
+    seed_canonical_owner_inbox(dsn)
     store = PostgresStore(dsn=dsn, pool_min_size=1, pool_max_size=4)
     store.open_pool(wait=True)
     try:
@@ -392,6 +468,29 @@ def exercise(dsn: str) -> None:
             "a rejected live inbox must not add another private projection",
         )
         require(table_count(dsn, "mailbox_letters") == 0, "failure must not write the public mailbox")
+
+        enqueue_canonical_owner_candidate(store)
+        canonical = worker(store=store, enabled=True).run_once()
+        require(
+            canonical["status"] == "completed",
+            "canonical Owner message worker must complete without a legacy alias",
+        )
+        with store.request_unit_of_work(
+            correlation_id="canonical-owner-message-list",
+            command_id="canonicalOwnerMessageList",
+        ):
+            messages, has_more, unread_count = store.in_app_message_center_repository().list_messages(
+                CANONICAL_OWNER_ID,
+                limit=20,
+                cursor=None,
+            )
+        require(not has_more, "canonical Owner fixture must fit one message page")
+        require(unread_count == 1, "canonical Owner message must be unread")
+        require(len(messages) == 1, "canonical Owner message center must contain one item")
+        require(
+            messages[0].kind is InAppMessageKind.CANDIDATE_READY,
+            "canonical Owner message kind must remain candidateReady",
+        )
     finally:
         store.close_pool()
 
