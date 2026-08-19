@@ -359,6 +359,24 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/memories",
+                session,
+                "ownerTruthFormalMemoryList",
+            ),
+            _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/memories/{memory_id}",
+                session,
+                "ownerTruthFormalMemoryDetail",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/memories/{memory_id}/revisions",
+                session,
+                "ownerTruthFormalMemoryRevision",
+            ),
+            _rule(
+                "GET",
                 "/v2/internal/owner-authority/vaults/{vault_id}/publications",
                 session,
                 "publicationOwnerManagementRead",

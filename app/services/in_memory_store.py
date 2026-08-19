@@ -66,6 +66,9 @@ from app.domain.owner_truth.source_commands import (
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
 )
+from app.services.owner_truth_formal_memory import (
+    InMemoryOwnerTruthFormalMemoryRepository,
+)
 from app.services.publication_authority import (
     InMemoryPublicationAuthorityRepository,
 )
@@ -211,6 +214,11 @@ class InMemoryStore:
                 memory_projection_rebuild_runnable_reader=(
                     self._effect_kernel_repository.is_runnable
                 )
+            )
+        )
+        self._owner_truth_formal_memory_repository = (
+            InMemoryOwnerTruthFormalMemoryRepository(
+                self._owner_truth_candidate_review_repository
             )
         )
         # This is an explicit semantic double for the hidden M2 owner writer.
@@ -420,6 +428,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthCandidateReviewRepository:
         return self._owner_truth_candidate_review_repository
+
+    def owner_truth_formal_memory_repository(
+        self,
+    ) -> InMemoryOwnerTruthFormalMemoryRepository:
+        return self._owner_truth_formal_memory_repository
 
     def publication_authority_repository(
         self,

@@ -136,6 +136,9 @@ from app.services.owner_truth_media_source_object import (
 from app.services.owner_truth_candidate_review import (
     PostgresOwnerTruthCandidateReviewRepository,
 )
+from app.services.owner_truth_formal_memory import (
+    PostgresOwnerTruthFormalMemoryRepository,
+)
 from app.services.publication_authority import (
     PostgresPublicationAuthorityRepository,
 )
@@ -499,6 +502,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth candidate review requires an active unit of work")
         return PostgresOwnerTruthCandidateReviewRepository(active.connection)
+
+    def owner_truth_formal_memory_repository(
+        self,
+    ) -> PostgresOwnerTruthFormalMemoryRepository:
+        """Return the Owner-only formal-memory reader/writer in this UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth formal memory requires an active unit of work")
+        return PostgresOwnerTruthFormalMemoryRepository(active.connection)
 
     def publication_authority_repository(
         self,

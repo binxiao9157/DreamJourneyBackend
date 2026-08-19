@@ -487,6 +487,18 @@ from app.services.owner_truth_correction_request import (
     correction_resolution_summary,
     correction_request_summary,
 )
+from app.services.owner_truth_formal_memory import (
+    FORMAL_MEMORY_DETAIL_SCHEMA_VERSION,
+    FORMAL_MEMORY_LIST_SCHEMA_VERSION,
+    OwnerTruthFormalMemoryAccessDenied,
+    OwnerTruthFormalMemoryConflict,
+    OwnerTruthFormalMemoryCorrectionCommand,
+    OwnerTruthFormalMemoryCursor,
+    OwnerTruthFormalMemoryError,
+    OwnerTruthFormalMemoryFacetFilter,
+    OwnerTruthFormalMemoryQuery,
+    OwnerTruthFormalMemoryService,
+)
 from app.services.owner_truth_legacy_migration import (
     OwnerTruthLegacyMigrationAccessDenied,
     OwnerTruthLegacyMigrationConflict,
@@ -3172,6 +3184,31 @@ def _owner_truth_correction_request_context(
     )
 
 
+def _owner_truth_formal_memory_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the Owner-only formal-memory library and correction surface."""
+
+    if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
+        return _owner_truth_candidate_review_context(request, vault_id=vault_id)
+    normalized_method = request.method.upper()
+    if normalized_method == "GET" and request.url.path.endswith("/memories"):
+        route = "GET /v2/vaults/*/memories"
+    elif normalized_method == "GET":
+        route = "GET /v2/vaults/*/memories/*"
+    else:
+        route = "POST /v2/vaults/*/memories/*/revisions"
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=route,
+        user_session_required_code="ownerTruthFormalMemoryUserSessionRequired",
+    )
+
+
 def _owner_truth_legacy_migration_context(
     request: Request,
     *,
@@ -3213,6 +3250,16 @@ def _owner_truth_candidate_review_http_error(
         status_code=400,
         detail={"code": "ownerTruthCandidateReviewInvalid"},
     )
+
+
+def _owner_truth_formal_memory_http_error(
+    error: OwnerTruthFormalMemoryError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthFormalMemoryAccessDenied):
+        return HTTPException(status_code=403, detail={"code": "ownerTruthFormalMemoryDenied"})
+    if isinstance(error, OwnerTruthFormalMemoryConflict):
+        return HTTPException(status_code=409, detail={"code": "ownerTruthFormalMemoryConflict"})
+    return HTTPException(status_code=400, detail={"code": "ownerTruthFormalMemoryInvalid"})
 
 
 def _publication_authority_http_error(error: PublicationAuthorityError) -> HTTPException:
@@ -7582,6 +7629,145 @@ def owner_truth_memory_version_history(
     body = _owner_truth_memory_version_history_response(history)
     body["vaultId"] = context.vault_id
     return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
+
+
+def _owner_truth_formal_memory_facets(
+    raw_facets: list[str],
+) -> tuple[OwnerTruthFormalMemoryFacetFilter, ...]:
+    filters: list[OwnerTruthFormalMemoryFacetFilter] = []
+    for raw_facet in raw_facets:
+        name, separator, value = str(raw_facet or "").partition(":")
+        if not separator:
+            raise OwnerTruthFormalMemoryError("facet must use name:value format")
+        filters.append(OwnerTruthFormalMemoryFacetFilter(name=name, value=value))
+    return tuple(filters)
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/memories",
+    include_in_schema=False,
+)
+def list_owner_truth_formal_memories(
+    request: Request,
+    vault_id: str,
+    kind: Optional[str] = None,
+    query: Optional[str] = None,
+    facet: list[str] = Query(default=[]),
+    cursor: Optional[str] = None,
+    limit: int = 20,
+) -> JSONResponse:
+    """List only current formal MemoryVersions for the active Vault Owner."""
+
+    try:
+        context = _owner_truth_formal_memory_context(request, vault_id=vault_id)
+        page = OwnerTruthFormalMemoryService(store).list(
+            context=context,
+            query=OwnerTruthFormalMemoryQuery(
+                kind=kind,
+                query=query,
+                facets=_owner_truth_formal_memory_facets(facet),
+                cursor=OwnerTruthFormalMemoryCursor.decode(cursor),
+                limit=limit,
+            ),
+        )
+    except OwnerTruthFormalMemoryError as error:
+        raise _owner_truth_formal_memory_http_error(error) from error
+    return JSONResponse(
+        content={
+            "schemaVersion": FORMAL_MEMORY_LIST_SCHEMA_VERSION,
+            "vaultId": context.vault_id,
+            "memories": [item.list_contract() for item in page.items],
+            "nextCursor": page.next_cursor,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/memories/{memory_id}",
+    include_in_schema=False,
+)
+def get_owner_truth_formal_memory(
+    request: Request,
+    vault_id: str,
+    memory_id: str,
+) -> JSONResponse:
+    """Read one current formal memory and its three most recent snapshots."""
+
+    try:
+        context = _owner_truth_formal_memory_context(request, vault_id=vault_id)
+        memory = OwnerTruthFormalMemoryService(store).detail(
+            context=context,
+            memory_id=memory_id,
+        )
+    except OwnerTruthFormalMemoryError as error:
+        raise _owner_truth_formal_memory_http_error(error) from error
+    return JSONResponse(
+        content={
+            "schemaVersion": FORMAL_MEMORY_DETAIL_SCHEMA_VERSION,
+            "vaultId": context.vault_id,
+            "memory": memory.detail_contract(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+_OWNER_TRUTH_FORMAL_MEMORY_REVISION_FIELDS = frozenset(
+    {
+        "commandId",
+        "expectedVersion",
+        "expectedContentHash",
+        "expectedContentSchemaVersion",
+        "contentSchemaVersion",
+        "correctedContent",
+        "secondConfirmation",
+        "reasonCode",
+    }
+)
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memories/{memory_id}/revisions",
+    include_in_schema=False,
+)
+def revise_owner_truth_formal_memory(
+    request: Request,
+    vault_id: str,
+    memory_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Create an immutable successor only after an explicit second confirmation."""
+
+    try:
+        unsupported = sorted(set(payload).difference(_OWNER_TRUTH_FORMAL_MEMORY_REVISION_FIELDS))
+        if unsupported:
+            raise OwnerTruthFormalMemoryError("formal memory revision contains unsupported fields")
+        context = _owner_truth_formal_memory_context(request, vault_id=vault_id)
+        result = OwnerTruthFormalMemoryService(store).correct(
+            context=context,
+            memory_id=memory_id,
+            command=OwnerTruthFormalMemoryCorrectionCommand(
+                command_id=payload.get("commandId"),
+                expected_version=payload.get("expectedVersion"),
+                expected_content_hash=payload.get("expectedContentHash"),
+                expected_content_schema_version=payload.get("expectedContentSchemaVersion"),
+                content_schema_version=payload.get("contentSchemaVersion"),
+                corrected_content=payload.get("correctedContent"),
+                second_confirmation=payload.get("secondConfirmation"),
+                reason_code=payload.get("reasonCode") or "ownerConfirmedFormalMemoryCorrection",
+            ),
+        )
+    except OwnerTruthFormalMemoryError as error:
+        raise _owner_truth_formal_memory_http_error(error) from error
+    except (TypeError, ValueError) as error:
+        raise _owner_truth_formal_memory_http_error(
+            OwnerTruthFormalMemoryError("formal memory revision payload is invalid")
+        ) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content={"vaultId": context.vault_id, "revision": result.public_contract()},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _publication_owner_management_for_context(

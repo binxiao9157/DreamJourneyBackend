@@ -1220,6 +1220,26 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
         self.assertEqual(gate.feature_for_request("POST", "/profile", {}), "profileSettings")
         self.assertEqual(gate.feature_for_request("POST", "/context/build", {}), "echoTextInput")
         self.assertEqual(
+            gate.feature_for_request("GET", "/v2/vaults/vault-a/memories", {}),
+            "ownerTruthCandidateReview",
+        )
+        self.assertEqual(
+            gate.feature_for_request(
+                "GET",
+                "/v2/vaults/vault-a/memories/00000000-0000-0000-0000-000000000001",
+                {},
+            ),
+            "ownerTruthCandidateReview",
+        )
+        self.assertEqual(
+            gate.feature_for_request(
+                "POST",
+                "/v2/vaults/vault-a/memories/00000000-0000-0000-0000-000000000001/revisions",
+                {},
+            ),
+            "ownerTruthCandidateReview",
+        )
+        self.assertEqual(
             gate.feature_for_request(
                 "GET",
                 "/v2/vaults/vault-a/guided-recommendations",

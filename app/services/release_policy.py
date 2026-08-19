@@ -1060,6 +1060,25 @@ class ReleasePolicyCommandGate:
             and normalized_path.endswith("/sources")
         ):
             return "ownerTextCaptureV1"
+        memory_segments = tuple(segment for segment in normalized_path.split("/") if segment)
+        if (
+            len(memory_segments) == 4
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3] == "memories"
+            and normalized_method == "GET"
+        ) or (
+            len(memory_segments) == 5
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3] == "memories"
+            and normalized_method == "GET"
+        ) or (
+            len(memory_segments) == 6
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3] == "memories"
+            and memory_segments[5] == "revisions"
+            and normalized_method == "POST"
+        ):
+            return "ownerTruthCandidateReview"
         if (
             method.upper() in {"GET", "POST"}
             and normalized_path.startswith("/v2/vaults/")
@@ -1139,6 +1158,29 @@ class ReleasePolicyCommandGate:
             and normalized_path.endswith("/sources")
         ):
             return "POST /v2/vaults/*/sources"
+        memory_segments = tuple(segment for segment in normalized_path.split("/") if segment)
+        if (
+            normalized_method == "GET"
+            and len(memory_segments) == 4
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3] == "memories"
+        ):
+            return "GET /v2/vaults/*/memories"
+        if (
+            normalized_method == "GET"
+            and len(memory_segments) == 5
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3] == "memories"
+        ):
+            return "GET /v2/vaults/*/memories/*"
+        if (
+            normalized_method == "POST"
+            and len(memory_segments) == 6
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3] == "memories"
+            and memory_segments[5] == "revisions"
+        ):
+            return "POST /v2/vaults/*/memories/*/revisions"
         if (
             normalized_method in {"GET", "POST"}
             and normalized_path.startswith("/v2/vaults/")
