@@ -5228,14 +5228,9 @@ class ArchiveAPITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 200)
-        packet = response.json()["contextPacket"]
-        self.assertEqual(packet["memory"]["archiveItems"], [])
-        filtered_by_ref = {item["refId"]: item["reason"] for item in packet["filteredContext"]}
-        self.assertEqual(filtered_by_ref["archive_time_letter_future"], "time_letter_not_open_for_recipient")
-        generation_refs = {item["refId"] for item in packet["generationContext"]["sourceRefs"]}
-        self.assertNotIn("archive_time_letter_future", generation_refs)
-        self.assertNotIn("还没到打开时间。", packet["generationContext"]["text"])
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["code"], "familyPrivateContextDenied")
+        self.assertFalse(response.json()["detail"]["legacyFallbackAllowed"])
 
         mismatch_response = client.post(
             "/context/build",
@@ -5248,16 +5243,11 @@ class ArchiveAPITests(unittest.TestCase):
                 "viewerFamilyMemberID": "family_time_other_viewer",
             },
         )
-        self.assertEqual(mismatch_response.status_code, 200)
-        mismatch_packet = mismatch_response.json()["contextPacket"]
-        mismatch_reasons = {
-            item["refId"]: item["reason"] for item in mismatch_packet["filteredContext"]
-        }
+        self.assertEqual(mismatch_response.status_code, 409)
         self.assertEqual(
-            mismatch_reasons["archive_time_letter_future"],
-            "time_letter_recipient_mismatch",
+            mismatch_response.json()["detail"]["code"],
+            "familyPrivateContextDenied",
         )
-        self.assertNotIn("还没到打开时间。", mismatch_packet["generationContext"]["text"])
 
         owner_response = client.post(
             "/context/build",
@@ -5400,25 +5390,9 @@ class ArchiveAPITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(pending_response.status_code, 200)
-        pending_packet = pending_response.json()["contextPacket"]
-        self.assertEqual(pending_packet["memory"]["archiveItems"], [])
-        self.assertIsNone(pending_packet["care"]["latest"])
-        self.assertFalse(pending_packet["policy"]["canUseFamilyData"])
-        self.assertFalse(pending_packet["policy"]["familyViewerActive"])
-        self.assertIn("family_viewer_not_active", pending_packet["fallbacks"])
-        filtered_by_ref = {item["refId"]: item["reason"] for item in pending_packet["filteredContext"]}
-        self.assertEqual(filtered_by_ref["archive_family_pending_blocked"], "family_viewer_not_active")
-        self.assertEqual(
-            filtered_by_ref["fact_family_viewer_private"],
-            "kb_fact_family_metadata_missing",
-        )
-        pending_generation_refs = {
-            item["refId"] for item in pending_packet["generationContext"]["sourceRefs"]
-        }
-        self.assertNotIn("archive_family_pending_blocked", pending_generation_refs)
-        self.assertNotIn("家庭成员未接受前不应可用。", pending_packet["generationContext"]["text"])
-        self.assertNotIn("当前查看者的个人事实不可注入家庭角色。", pending_packet["generationContext"]["text"])
+        self.assertEqual(pending_response.status_code, 409)
+        self.assertEqual(pending_response.json()["detail"]["code"], "familyPrivateContextDenied")
+        self.assertFalse(pending_response.json()["detail"]["legacyFallbackAllowed"])
 
         accepted = client.post(
             f"/family/members/{user_id}/family_pending_context/accept",
@@ -5435,11 +5409,11 @@ class ArchiveAPITests(unittest.TestCase):
                 "viewerFamilyMemberID": "family_pending_context",
             },
         )
-        self.assertEqual(accepted_without_grant.status_code, 200)
-        accepted_without_grant_packet = accepted_without_grant.json()["contextPacket"]
-        self.assertEqual(accepted_without_grant_packet["memory"]["archiveItems"], [])
-        self.assertIsNone(accepted_without_grant_packet["care"]["latest"])
-        self.assertIn("family_persona_grant_required", accepted_without_grant_packet["fallbacks"])
+        self.assertEqual(accepted_without_grant.status_code, 409)
+        self.assertEqual(
+            accepted_without_grant.json()["detail"]["code"],
+            "familyPrivateContextDenied",
+        )
         grant_family_read_access(
             owner_user_id=user_id,
             family_member_id="family_pending_context",
@@ -5464,23 +5438,11 @@ class ArchiveAPITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(active_response.status_code, 200)
-        active_packet = active_response.json()["contextPacket"]
-        self.assertEqual(active_packet["memory"]["archiveItems"][0]["id"], "archive_family_pending_blocked")
-        self.assertTrue(active_packet["policy"]["canUseFamilyData"])
-        self.assertTrue(active_packet["policy"]["familyViewerActive"])
-        self.assertEqual(active_packet["care"]["latest"]["snapshot"]["summary"], "家庭关怀摘要")
-        self.assertEqual(active_packet["care"]["latest"]["snapshot"]["suggestions"], ["轻声询问近况"])
-        self.assertNotIn("dailyTrend", active_packet["care"]["latest"]["snapshot"])
-        self.assertNotIn("internalDebug", str(active_packet["care"]["latest"]))
-        active_generation_refs = {
-            item["refId"] for item in active_packet["generationContext"]["sourceRefs"]
-        }
-        self.assertIn("archive_family_pending_blocked", active_generation_refs)
-        self.assertIn("care:latest", active_generation_refs)
-        self.assertIn("家庭成员未接受前不应可用。", active_packet["generationContext"]["text"])
-        self.assertIn("家庭关怀摘要", active_packet["generationContext"]["text"])
-        self.assertNotIn("当前查看者的个人事实不可注入家庭角色。", active_packet["generationContext"]["text"])
+        self.assertEqual(active_response.status_code, 409)
+        active_detail = active_response.json()["detail"]
+        self.assertEqual(active_detail["code"], "familyPrivateContextDenied")
+        self.assertFalse(active_detail["privateContextAllowed"])
+        self.assertFalse(active_detail["legacyFallbackAllowed"])
 
     def test_context_build_requires_resource_grant_for_open_time_letter_recipient(self):
         client = TestClient(app)
@@ -5537,13 +5499,8 @@ class ArchiveAPITests(unittest.TestCase):
                 "viewerFamilyMemberID": member_id,
             },
         )
-        self.assertEqual(denied.status_code, 200)
-        denied_packet = denied.json()["contextPacket"]
-        denied_reasons = {item["refId"]: item["reason"] for item in denied_packet["filteredContext"]}
-        self.assertEqual(
-            denied_reasons["archive_time_letter_open_grant"],
-            "time_letter_grant_required",
-        )
+        self.assertEqual(denied.status_code, 409)
+        self.assertEqual(denied.json()["detail"]["code"], "familyPrivateContextDenied")
 
         grant_family_read_access(
             owner_user_id=user_id,
@@ -5562,16 +5519,9 @@ class ArchiveAPITests(unittest.TestCase):
                 "viewerFamilyMemberID": member_id,
             },
         )
-        self.assertEqual(allowed.status_code, 200)
-        allowed_packet = allowed.json()["contextPacket"]
-        self.assertEqual(
-            [item["id"] for item in allowed_packet["memory"]["archiveItems"]],
-            ["archive_time_letter_open_grant"],
-        )
-        self.assertIn(
-            "只有明确授权的收件人可以进入回响上下文。",
-            allowed_packet["generationContext"]["text"],
-        )
+        self.assertEqual(allowed.status_code, 409)
+        self.assertEqual(allowed.json()["detail"]["code"], "familyPrivateContextDenied")
+        self.assertFalse(allowed.json()["detail"]["legacyFallbackAllowed"])
 
     def test_context_build_does_not_substitute_owner_care_for_family_viewer(self):
         client = TestClient(app)
@@ -5613,11 +5563,9 @@ class ArchiveAPITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 200)
-        packet = response.json()["contextPacket"]
-        self.assertIsNone(packet["care"]["latest"])
-        self.assertNotIn("care:latest", {item["refId"] for item in packet["selectedContext"]})
-        self.assertNotIn("仅本人可见的关怀摘要", packet["generationContext"]["text"])
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["code"], "familyPrivateContextDenied")
+        self.assertFalse(response.json()["detail"]["legacyFallbackAllowed"])
 
     def test_context_build_reports_fallbacks_when_voice_and_digital_human_are_unavailable(self):
         client = TestClient(app)

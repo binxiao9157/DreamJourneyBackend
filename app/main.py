@@ -141,6 +141,7 @@ from app.services.publication_external_cleanup import (
     PublicationExternalCleanupError,
 )
 from app.services.publication_visitor_reader import PublicationVisitorReaderService
+from app.services.family_visitor_v4_routing import FamilyVisitorV4RoutingPolicy
 from app.services.identity_bindings import (
     IdentityChallengeConfigurationError,
     IdentityChallengeDeliveryError,
@@ -3554,6 +3555,7 @@ def _publication_visitor_admission_response(
         "schemaVersion": "publication-visitor-access-v1",
         "grantId": result.grant_id,
         "visitorSessionId": result.session_id,
+        "ownerSubjectId": result.owner_subject_id,
         "publicationId": result.publication_id,
         "publicationVersionId": result.publication_version_id,
         "outcome": result.outcome,
@@ -15224,6 +15226,30 @@ def _build_authorized_echo_context_packet(
     owner_subject_id: str,
     payload: Dict[str, Any],
 ) -> Dict[str, Any]:
+    persona_scope = str(payload.get("personaScope") or "personal").strip().lower()
+    digital_human_id = str(payload.get("digitalHumanId") or owner_subject_id).strip()
+    viewer_family_member_id = str(payload.get("viewerFamilyMemberID") or "").strip()
+    is_cross_identity = (
+        persona_scope == "family"
+        or digital_human_id != owner_subject_id
+        or bool(viewer_family_member_id)
+    )
+    if is_cross_identity:
+        routing_principal = viewer_family_member_id or owner_subject_id
+        routing_target = (
+            digital_human_id
+            if persona_scope == "family" and digital_human_id
+            else owner_subject_id
+        )
+        decision = FamilyVisitorV4RoutingPolicy.evaluate(
+            principal_subject_id=routing_principal,
+            target_owner_subject_id=routing_target,
+            persona_scope=persona_scope,
+            relationship_accepted=bool(viewer_family_member_id),
+            visitor_session_owner_subject_id=None,
+            visitor_session_active=False,
+        )
+        raise HTTPException(status_code=409, detail=decision.denial_payload())
     authority_context = _owner_truth_context_authority_context(
         request,
         owner_subject_id=owner_subject_id,

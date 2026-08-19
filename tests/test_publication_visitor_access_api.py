@@ -165,6 +165,7 @@ class PublicationVisitorAccessAPITests(unittest.TestCase):
         )
         self.assertEqual(admitted.status_code, 201, admitted.text)
         return {
+            "ownerId": owner_id,
             "ownerHeaders": owner_headers,
             "visitorHeaders": visitor_headers,
             "vaultId": vault_id,
@@ -210,6 +211,7 @@ class PublicationVisitorAccessAPITests(unittest.TestCase):
         vault_id = str(state["vaultId"])
         grant = state["grant"]
         session = state["session"]
+        self.assertEqual(session["ownerSubjectId"], state["ownerId"])
         session_id = str(session["visitorSessionId"])
         session_credential = str(state["sessionCredential"])
 

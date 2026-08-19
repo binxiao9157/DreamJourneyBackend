@@ -401,6 +401,7 @@ class PublicationVisitorAdmissionResult:
     outcome: str
     grant_id: str
     session_id: str
+    owner_subject_id: str = field(repr=False)
     publication_id: str
     publication_version_id: str
     expires_at: datetime
@@ -411,6 +412,11 @@ class PublicationVisitorAdmissionResult:
             raise PublicationVisitorAccessError("visitor admission outcome is invalid")
         for field_name in ("grant_id", "session_id", "publication_id", "publication_version_id"):
             object.__setattr__(self, field_name, _uuid(getattr(self, field_name), field_name=field_name))
+        object.__setattr__(
+            self,
+            "owner_subject_id",
+            _identifier(self.owner_subject_id, field_name="owner_subject_id"),
+        )
         object.__setattr__(self, "expires_at", _utc(self.expires_at, field_name="expires_at"))
         if isinstance(self.use_remaining, bool) or not isinstance(self.use_remaining, int) or self.use_remaining < 0:
             raise PublicationVisitorAccessError("use_remaining must be non-negative")
@@ -875,6 +881,7 @@ class InMemoryPublicationVisitorAccessRepository:
                     outcome="deduplicated",
                     grant_id=grant_id,
                     session_id=session_id,
+                    owner_subject_id=str(grant["ownerSubjectId"]),
                     publication_id=str(existing["publicationId"]),
                     publication_version_id=str(existing["publicationVersionId"]),
                     expires_at=existing["expiresAt"],
@@ -888,6 +895,7 @@ class InMemoryPublicationVisitorAccessRepository:
                 "sessionId": session_id,
                 "grantId": grant_id,
                 "vaultId": grant["vaultId"],
+                "ownerSubjectId": grant["ownerSubjectId"],
                 "publicationId": grant["publicationId"],
                 "publicationVersionId": grant["publicationVersionId"],
                 "visitorSubjectHash": visitor_subject_hash,
@@ -902,6 +910,7 @@ class InMemoryPublicationVisitorAccessRepository:
                 outcome="created",
                 grant_id=grant_id,
                 session_id=session_id,
+                owner_subject_id=str(grant["ownerSubjectId"]),
                 publication_id=str(grant["publicationId"]),
                 publication_version_id=str(grant["publicationVersionId"]),
                 expires_at=grant["expiresAt"],
@@ -1245,6 +1254,7 @@ class PostgresPublicationVisitorAccessRepository:
                     outcome="deduplicated",
                     grant_id=grant_id,
                     session_id=session_id,
+                    owner_subject_id=str(grant["owner_subject_id"]),
                     publication_id=str(existing["publication_id"]),
                     publication_version_id=str(existing["publication_version_id"]),
                     expires_at=_utc(existing["expires_at"], field_name="expires_at"),
@@ -1318,6 +1328,7 @@ class PostgresPublicationVisitorAccessRepository:
                 outcome="created",
                 grant_id=grant_id,
                 session_id=session_id,
+                owner_subject_id=scope.owner_subject_id,
                 publication_id=scope.publication_id,
                 publication_version_id=scope.publication_version_id,
                 expires_at=expires_at,

@@ -271,11 +271,7 @@ class EchoAnswerAPITests(unittest.TestCase):
         with patch.object(
             main_module.DeepSeekEchoAnswerProxy,
             "request_answer",
-            return_value=(
-                DeepSeekEchoAnswerProxy.memory_gap_marker
-                + "我还没有从已确认的记忆中找到这个答案。"
-            ),
-        ):
+        ) as request_answer:
             response = self.client.post(
                 "/echo/answers",
                 json={
@@ -283,19 +279,23 @@ class EchoAnswerAPITests(unittest.TestCase):
                     "query": "父亲小时候住在哪里？",
                     "personaScope": "family",
                     "digitalHumanId": "family_persona_001",
+                    "viewerFamilyMemberID": "accepted-family-relationship",
                     "personaName": "父亲",
                     "lifecycleMode": "sunlight",
                 },
             )
 
-        self.assertEqual(response.status_code, 200)
-        answer = response.json()["answer"]
-        self.assertIn("档案所有者确认", answer["text"])
-        self.assertEqual(answer["memoryGrounding"]["outcome"], "gap")
+        self.assertEqual(response.status_code, 409)
+        request_answer.assert_not_called()
+        detail = response.json()["detail"]
+        self.assertEqual(detail["code"], "familyPrivateContextDenied")
+        self.assertEqual(detail["route"], "familyContribution")
         self.assertEqual(
-            answer["memoryGrounding"]["handoff"],
-            "familyContribution",
+            detail["requiredAuthority"],
+            "shareGrantOrContributionGrant",
         )
+        self.assertFalse(detail["privateContextAllowed"])
+        self.assertFalse(detail["legacyFallbackAllowed"])
 
 
 if __name__ == "__main__":
