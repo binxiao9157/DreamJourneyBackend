@@ -311,6 +311,8 @@ def main() -> None:
     previous_release_policy_capability_resolver = (
         main_module.RELEASE_POLICY_SERVICE.capability_resolver
     )
+    release_policy_type = type(main_module.RELEASE_POLICY_SERVICE)
+    previous_product_closed_features = set(release_policy_type._PRODUCT_CLOSED_FEATURES)
 
     try:
         create_database(admin_dsn, database_name)
@@ -415,6 +417,13 @@ def main() -> None:
             main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
                 "accountDataExport"
             )
+            # Full account export remains product-closed for every real client.
+            # This disposable backend-only E2E temporarily exercises the
+            # underlying export implementation, then restores the class-level
+            # product decision in ``finally`` before the process exits.
+            release_policy_type._PRODUCT_CLOSED_FEATURES = (
+                previous_product_closed_features.difference({"accountDataExport"})
+            )
             owner_policy_headers = captured_policy_headers(
                 client,
                 owner_headers,
@@ -477,6 +486,7 @@ def main() -> None:
                 async_effect_worker_enabled=True,
                 owner_truth_candidate_extraction_worker_enabled=True,
                 owner_truth_memory_projection_worker_enabled=True,
+                owner_truth_memory_search_projection_worker_enabled=True,
                 owner_truth_media_capture_enabled=True,
                 owner_truth_media_processing_worker_enabled=True,
                 # This disposable smoke explicitly invokes the default-off
@@ -797,12 +807,33 @@ def main() -> None:
                 "formal media Context must use confirmed Projection authority",
             )
             selected_context = context_packet.get("selectedContext") or []
+            context_diagnostic = {
+                "selected": [
+                    {
+                        "memoryVersionId": item.get("memoryVersionId"),
+                        "sourceId": (item.get("citation") or {}).get("sourceId"),
+                        "reason": item.get("reason"),
+                    }
+                    for item in selected_context
+                ],
+                "filtered": [
+                    {
+                        "memoryVersionId": item.get("memoryVersionId"),
+                        "sourceId": (item.get("citation") or {}).get("sourceId"),
+                        "reason": item.get("reason"),
+                    }
+                    for item in (context_packet.get("filteredContext") or [])
+                ],
+                "fallbacks": context_packet.get("fallbacks") or [],
+                "trace": context_packet.get("trace") or {},
+            }
             require(
                 any(
                     ((item.get("citation") or {}).get("sourceId") == candidate_source_id)
                     for item in selected_context
                 ),
-                "formal media Context must cite the confirmed media-derived Source",
+                "formal media Context must cite the confirmed media-derived Source: "
+                + json.dumps(context_diagnostic, sort_keys=True),
             )
 
             # Export the same synthetic Owner before revoking the SourceObject.
@@ -1373,6 +1404,7 @@ def main() -> None:
         main_module.RELEASE_POLICY_SERVICE.capability_resolver = (
             previous_release_policy_capability_resolver
         )
+        release_policy_type._PRODUCT_CLOSED_FEATURES = previous_product_closed_features
         if store is not None:
             store.close_pool()
         drop_database(admin_dsn, database_name)
