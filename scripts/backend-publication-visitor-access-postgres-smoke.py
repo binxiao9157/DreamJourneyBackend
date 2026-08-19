@@ -212,6 +212,19 @@ def owner_grants(store: PostgresStore, *, seed, visitor_subject_id: str):
         )
 
 
+def owner_grant(store: PostgresStore, *, seed, visitor_subject_id: str, grant_id: str):
+    summaries = {
+        summary.grant_id: summary
+        for summary in owner_grants(
+            store,
+            seed=seed,
+            visitor_subject_id=visitor_subject_id,
+        )
+    }
+    require(grant_id in summaries, f"Owner ShareGrant summary is missing {grant_id}")
+    return summaries[grant_id]
+
+
 def recipient_invitations(store: PostgresStore, *, visitor_subject_id: str):
     with store.request_unit_of_work(
         correlation_id=f"publication-visitor-access-smoke:invitations:{visitor_subject_id}",
@@ -441,16 +454,14 @@ def exercise(dsn: str) -> None:
                     rejected += 1
         require(admitted == 1 and rejected == 1, "usage CAS must admit exactly one Visitor")
         require(bool(admitted_session_id), "one Visitor session must be available for projection read")
-        consumed_owner_grants = {
-            summary.grant_id: summary
-            for summary in owner_grants(
+        require(
+            owner_grant(
                 store,
                 seed=seed,
                 visitor_subject_id=visitor_subject_id,
-            )
-        }
-        require(
-            consumed_owner_grants[issued.grant_id].use_remaining == 0,
+                grant_id=issued.grant_id,
+            ).use_remaining
+            == 0,
             "Owner ShareGrant summary must reflect the atomically consumed use",
         )
 
@@ -512,7 +523,13 @@ def exercise(dsn: str) -> None:
         )
         require(revoke_result.revoked_session_count == 1, "revoke must close the active session")
         require(
-            owner_grants(store, seed=seed, visitor_subject_id=visitor_subject_id)[0].state == "revoked",
+            owner_grant(
+                store,
+                seed=seed,
+                visitor_subject_id=visitor_subject_id,
+                grant_id=issued.grant_id,
+            ).state
+            == "revoked",
             "Owner ShareGrant summary must reflect revocation without exposing a credential",
         )
         expect_rejected(
