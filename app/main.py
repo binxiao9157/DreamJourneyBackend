@@ -129,6 +129,7 @@ from app.services.publication_visitor_access import (
     DenyPublicationVisitorEligibilityResolver,
     PublicationGrantIssueCommand,
     PublicationGrantIssueResult,
+    PublicationGrantRecipientUnavailable,
     PublicationGrantRevokeCommand,
     PublicationGrantRevokeResult,
     PublicationOwnerGrantSummary,
@@ -693,7 +694,7 @@ from app.services.voice_sample_authorization import (
     issue_voice_sample_authorization_challenge,
     verify_voice_sample_authorization_receipt,
 )
-from app.services.user_identity import stable_user_id
+from app.services.user_identity import normalized_phone_digits, stable_user_id
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
@@ -3597,20 +3598,30 @@ def _publication_owner_grant_list_response(
     *,
     vault_id: str,
     summaries: tuple[PublicationOwnerGrantSummary, ...],
+    product_contract: bool = False,
 ) -> Dict[str, Any]:
-    """Return grant lifecycle state without raw credentials or visitor identity."""
+    """Return lifecycle state with only a masked recipient label."""
 
     return {
-        "schemaVersion": "publication-owner-grant-list-v1",
+        "schemaVersion": (
+            "publication-owner-grant-list-v2"
+            if product_contract
+            else "publication-owner-grant-list-v1"
+        ),
         "vaultId": vault_id,
         "grants": [
             {
                 "grantId": item.grant_id,
                 "publicationId": item.publication_id,
                 "publicationVersionId": item.publication_version_id,
+                "recipientDisplayLabel": item.grantee_display_label,
                 "state": item.state,
                 "expiresAt": item.expires_at.isoformat(),
-                "useRemaining": item.use_remaining,
+                **(
+                    {}
+                    if product_contract
+                    else {"useRemaining": item.use_remaining}
+                ),
             }
             for item in summaries
         ],
@@ -3629,6 +3640,11 @@ def _publication_visitor_access_http_error(
         return HTTPException(
             status_code=409,
             detail={"code": "publicationVisitorAdultVerificationRequired"},
+        )
+    if isinstance(error, PublicationGrantRecipientUnavailable):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "publicationGrantRecipientUnavailable"},
         )
     if isinstance(error, PublicationVisitorAccessDenied):
         return HTTPException(
@@ -3684,6 +3700,7 @@ def _publication_grant_issue_command(
             "publicationId",
             "publicationVersionId",
             "granteeUserId",
+            "granteeDisplayLabel",
             "expiresAt",
             "useLimit",
         },
@@ -3703,6 +3720,76 @@ def _publication_grant_issue_command(
         grantee_subject_id=str(value.get("granteeUserId") or ""),
         expires_at=_publication_visitor_access_expiry(value.get("expiresAt")),
         use_limit=value.get("useLimit"),
+        grantee_display_label=str(value.get("granteeDisplayLabel") or "已注册账户"),
+    )
+
+
+_PUBLICATION_PRODUCT_GRANT_SAFETY_USE_LIMIT = 100
+
+
+def _publication_registered_grant_issue_command(
+    context: OwnerTruthCommandContext,
+    payload: Mapping[str, Any],
+) -> PublicationGrantIssueCommand:
+    value = _publication_visitor_access_payload(
+        payload,
+        allowed_fields={
+            "commandId",
+            "publicationId",
+            "publicationVersionId",
+            "recipient",
+            "expiresAt",
+        },
+        required_fields={
+            "commandId",
+            "publicationId",
+            "publicationVersionId",
+            "recipient",
+            "expiresAt",
+        },
+    )
+    recipient = value.get("recipient")
+    if not isinstance(recipient, Mapping):
+        raise PublicationVisitorAccessError("recipient must be an object")
+    normalized_recipient = _publication_visitor_access_payload(
+        recipient,
+        allowed_fields={"type", "value"},
+        required_fields={"type", "value"},
+    )
+    recipient_type = str(normalized_recipient.get("type") or "").strip()
+    recipient_value = str(normalized_recipient.get("value") or "").strip()
+    if recipient_type == "phone":
+        phone_digits = normalized_phone_digits(recipient_value)
+        if not 8 <= len(phone_digits) <= 20:
+            raise PublicationVisitorAccessError("recipient phone is invalid")
+        recipient_user_id = stable_user_id(phone_digits)
+        display_label = f"手机号尾号 {phone_digits[-4:]}"
+    elif recipient_type == "accountId":
+        if not recipient_value.startswith("user_") or len(recipient_value) > 128:
+            raise PublicationVisitorAccessError("recipient account ID is invalid")
+        recipient_user_id = recipient_value
+        display_label = f"账户 · {recipient_user_id[-6:]}"
+    else:
+        raise PublicationVisitorAccessError("recipient type is invalid")
+
+    recipient_user = _store_get_user(recipient_user_id)
+    if (
+        recipient_user is None
+        or recipient_user_id == context.owner_subject_id
+        or str(recipient_user.get("deletionState") or "active") != "active"
+        or str(recipient_user.get("accessState") or "active") != "active"
+    ):
+        raise PublicationGrantRecipientUnavailable(
+            "registered recipient is unavailable"
+        )
+    return PublicationGrantIssueCommand(
+        command_id=str(value.get("commandId") or ""),
+        publication_id=str(value.get("publicationId") or ""),
+        publication_version_id=str(value.get("publicationVersionId") or ""),
+        grantee_subject_id=recipient_user_id,
+        grantee_display_label=display_label,
+        expires_at=_publication_visitor_access_expiry(value.get("expiresAt")),
+        use_limit=_PUBLICATION_PRODUCT_GRANT_SAFETY_USE_LIMIT,
     )
 
 
@@ -3756,18 +3843,25 @@ def _publication_grant_issue_response(
     *,
     vault_id: str,
     result: PublicationGrantIssueResult,
+    product_contract: bool = False,
 ) -> Dict[str, Any]:
     response: Dict[str, Any] = {
-        "schemaVersion": "publication-visitor-access-v1",
+        "schemaVersion": (
+            "publication-owner-grant-issue-v1"
+            if product_contract
+            else "publication-visitor-access-v1"
+        ),
         "vaultId": vault_id,
         "grantId": result.grant_id,
         "publicationId": result.publication_id,
         "publicationVersionId": result.publication_version_id,
+        "recipientDisplayLabel": result.grantee_display_label,
         "outcome": result.outcome,
         "expiresAt": result.expires_at.isoformat(),
-        "useRemaining": result.use_remaining,
         "credentialIssued": result.grant_credential is not None,
     }
+    if not product_contract:
+        response["useRemaining"] = result.use_remaining
     # This raw credential is intentionally returned once at issuance only.
     if result.grant_credential is not None:
         response["grantCredential"] = result.grant_credential
@@ -8418,9 +8512,15 @@ def _publication_lifecycle_for_context(
 def _publication_issue_grant_for_context(
     context: OwnerTruthCommandContext,
     payload: Dict[str, Any],
+    *,
+    product_contract: bool = False,
 ) -> JSONResponse:
     try:
-        command = _publication_grant_issue_command(payload)
+        command = (
+            _publication_registered_grant_issue_command(context, payload)
+            if product_contract
+            else _publication_grant_issue_command(payload)
+        )
         with store.request_unit_of_work(
             correlation_id=(
                 "publication-share-grant-issue:"
@@ -8440,6 +8540,7 @@ def _publication_issue_grant_for_context(
         content=_publication_grant_issue_response(
             vault_id=context.vault_id,
             result=result,
+            product_contract=product_contract,
         ),
         headers={"Cache-Control": "no-store"},
     )
@@ -8447,6 +8548,8 @@ def _publication_issue_grant_for_context(
 
 def _publication_list_grants_for_context(
     context: OwnerTruthCommandContext,
+    *,
+    product_contract: bool = False,
 ) -> JSONResponse:
     try:
         with store.request_unit_of_work(
@@ -8464,6 +8567,7 @@ def _publication_list_grants_for_context(
         content=_publication_owner_grant_list_response(
             vault_id=context.vault_id,
             summaries=summaries,
+            product_contract=product_contract,
         ),
         headers={"Cache-Control": "no-store"},
     )
@@ -8738,7 +8842,7 @@ def list_closed_beta_publication_grants(
         vault_id=vault_id,
         feature="visitorAccess",
     )
-    return _publication_list_grants_for_context(context)
+    return _publication_list_grants_for_context(context, product_contract=True)
 
 
 @app.post(
@@ -8755,7 +8859,11 @@ def issue_closed_beta_publication_grant(
         vault_id=vault_id,
         feature="visitorAccess",
     )
-    return _publication_issue_grant_for_context(context, payload)
+    return _publication_issue_grant_for_context(
+        context,
+        payload,
+        product_contract=True,
+    )
 
 
 @app.post(

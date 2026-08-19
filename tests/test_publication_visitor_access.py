@@ -133,7 +133,10 @@ class PublicationVisitorAccessTests(unittest.TestCase):
         )
 
     def test_owner_issue_returns_raw_credential_once_and_replay_omits_it(self) -> None:
-        command = self._issue_command()
+        command = replace(
+            self._issue_command(),
+            grantee_display_label="手机号尾号 9512",
+        )
 
         first = self.service.issue_grant(context=self.context, command=command, now=NOW)
 
@@ -146,12 +149,14 @@ class PublicationVisitorAccessTests(unittest.TestCase):
         assert snapshot is not None
         self.assertIn("grantCredentialHash", snapshot)
         self.assertNotIn(first.grant_credential, json.dumps(snapshot, default=str))
+        self.assertEqual(snapshot["granteeDisplayLabel"], "手机号尾号 9512")
 
         replay = self.service.issue_grant(context=self.context, command=command, now=NOW)
 
         self.assertEqual(replay.outcome, "deduplicated")
         self.assertEqual(replay.grant_id, first.grant_id)
         self.assertIsNone(replay.grant_credential)
+        self.assertEqual(replay.grantee_display_label, "手机号尾号 9512")
 
     def test_verified_visitor_admission_obeys_use_limit_and_replay(self) -> None:
         issued = self._issue(use_limit=2)

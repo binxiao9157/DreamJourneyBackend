@@ -1,0 +1,12 @@
+{
+  "version": "0104",
+  "name": "publication_share_grant_recipient_label",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "publicationVisitorAccessV2",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "publication": false,
+    "visitorAccess": false
+  }
+}

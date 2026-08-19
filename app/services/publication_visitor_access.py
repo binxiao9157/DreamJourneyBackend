@@ -53,6 +53,10 @@ class PublicationVisitorAccessUnavailable(PublicationVisitorAccessError):
     """The publication, projection, grant, or session is not usable now."""
 
 
+class PublicationGrantRecipientUnavailable(PublicationVisitorAccessUnavailable):
+    """The requested registered recipient cannot safely receive a grant."""
+
+
 class PublicationVisitorAccessConflict(PublicationVisitorAccessError):
     """A replay command conflicts with its immutable original command."""
 
@@ -78,6 +82,15 @@ def _identifier(value: object, *, field_name: str) -> str:
     normalized = str(value or "").strip()
     if not normalized or len(normalized) > 256:
         raise PublicationVisitorAccessError(f"{field_name} must be a non-empty opaque identifier")
+    return normalized
+
+
+def _display_label(value: object, *, field_name: str) -> str:
+    normalized = " ".join(str(value or "").strip().split())
+    if not normalized or len(normalized) > 80:
+        raise PublicationVisitorAccessError(
+            f"{field_name} must be a non-empty display-safe label"
+        )
     return normalized
 
 
@@ -124,6 +137,7 @@ def _grant_policy_hash(
     publication_id: str,
     publication_version_id: str,
     grantee_subject_hash: str,
+    grantee_display_label: str,
     expires_at: datetime,
     use_limit: int,
 ) -> str:
@@ -132,6 +146,7 @@ def _grant_policy_hash(
             "expiresAt": expires_at.isoformat(),
             "grantScope": "publicationVersionRead",
             "granteeSubjectHash": grantee_subject_hash,
+            "granteeDisplayLabel": grantee_display_label,
             "publicationId": publication_id,
             "publicationVersionId": publication_version_id,
             "schemaVersion": PUBLICATION_VISITOR_ACCESS_SCHEMA_VERSION,
@@ -176,6 +191,7 @@ class PublicationGrantIssueCommand:
     grantee_subject_id: str = field(repr=False)
     expires_at: datetime
     use_limit: int
+    grantee_display_label: str = "已注册账户"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", _uuid(self.command_id, field_name="command_id"))
@@ -192,6 +208,14 @@ class PublicationGrantIssueCommand:
         )
         object.__setattr__(self, "expires_at", _utc(self.expires_at, field_name="expires_at"))
         object.__setattr__(self, "use_limit", _positive_int(self.use_limit, field_name="use_limit"))
+        object.__setattr__(
+            self,
+            "grantee_display_label",
+            _display_label(
+                self.grantee_display_label,
+                field_name="grantee_display_label",
+            ),
+        )
 
     @property
     def command_id_hash(self) -> str:
@@ -340,6 +364,7 @@ class PublicationGrantIssueResult:
     publication_version_id: str
     expires_at: datetime
     use_remaining: int
+    grantee_display_label: str = "已注册账户"
     grant_credential: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -350,6 +375,14 @@ class PublicationGrantIssueResult:
         object.__setattr__(self, "expires_at", _utc(self.expires_at, field_name="expires_at"))
         if isinstance(self.use_remaining, bool) or not isinstance(self.use_remaining, int) or self.use_remaining < 0:
             raise PublicationVisitorAccessError("use_remaining must be non-negative")
+        object.__setattr__(
+            self,
+            "grantee_display_label",
+            _display_label(
+                self.grantee_display_label,
+                field_name="grantee_display_label",
+            ),
+        )
         if self.grant_credential is not None:
             object.__setattr__(
                 self,
@@ -378,7 +411,7 @@ class PublicationGrantRevokeResult:
 
 @dataclass(frozen=True)
 class PublicationOwnerGrantSummary:
-    """Owner-visible ShareGrant state without a credential or visitor identity."""
+    """Owner-visible state with only a server-derived, masked recipient label."""
 
     grant_id: str
     publication_id: str
@@ -386,6 +419,7 @@ class PublicationOwnerGrantSummary:
     state: str
     expires_at: datetime
     use_remaining: int
+    grantee_display_label: str = "已注册账户"
 
     def __post_init__(self) -> None:
         for field_name in ("grant_id", "publication_id", "publication_version_id"):
@@ -394,6 +428,14 @@ class PublicationOwnerGrantSummary:
         object.__setattr__(self, "state", _identifier(self.state, field_name="state"))
         if isinstance(self.use_remaining, bool) or not isinstance(self.use_remaining, int) or self.use_remaining < 0:
             raise PublicationVisitorAccessError("use_remaining must be non-negative")
+        object.__setattr__(
+            self,
+            "grantee_display_label",
+            _display_label(
+                self.grantee_display_label,
+                field_name="grantee_display_label",
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -516,6 +558,7 @@ class PublicationVisitorAccessService:
                 publication_id=command.publication_id,
                 publication_version_id=command.publication_version_id,
                 grantee_subject_hash=grantee_subject_hash,
+                grantee_display_label=command.grantee_display_label,
                 expires_at=command.expires_at,
                 use_limit=command.use_limit,
             ),
@@ -722,6 +765,9 @@ class InMemoryPublicationVisitorAccessRepository:
                     publication_version_id=str(existing["publicationVersionId"]),
                     expires_at=existing["expiresAt"],
                     use_remaining=max(0, int(existing["useLimit"]) - int(existing["useCount"])),
+                    grantee_display_label=str(
+                        existing.get("granteeDisplayLabel") or "已注册账户"
+                    ),
                 )
             self._grants[grant_id] = {
                 "grantId": grant_id,
@@ -731,6 +777,7 @@ class InMemoryPublicationVisitorAccessRepository:
                 "publicationId": command.publication_id,
                 "publicationVersionId": command.publication_version_id,
                 "granteeSubjectHash": grantee_subject_hash,
+                "granteeDisplayLabel": command.grantee_display_label,
                 "grantCredentialHash": grant_credential_hash,
                 "policyHash": policy_hash,
                 "state": "active",
@@ -748,6 +795,7 @@ class InMemoryPublicationVisitorAccessRepository:
                 publication_version_id=command.publication_version_id,
                 expires_at=command.expires_at,
                 use_remaining=command.use_limit,
+                grantee_display_label=command.grantee_display_label,
             )
 
     def revoke_grant(
@@ -817,6 +865,9 @@ class InMemoryPublicationVisitorAccessRepository:
                         state=state,
                         expires_at=expires_at,
                         use_remaining=max(0, int(grant["useLimit"]) - int(grant["useCount"])),
+                        grantee_display_label=str(
+                            grant.get("granteeDisplayLabel") or "已注册账户"
+                        ),
                     )
                 )
             return tuple(sorted(summaries, key=lambda item: item.grant_id))
@@ -1018,7 +1069,8 @@ class PostgresPublicationVisitorAccessRepository:
             cursor.execute(
                 """
                 SELECT publication_id, publication_version_id, grantee_subject_hash,
-                    expires_at, use_limit, use_count, issuance_command_hash, grant_policy_hash
+                    grantee_display_label, expires_at, use_limit, use_count,
+                    issuance_command_hash, grant_policy_hash
                 FROM publication.share_grants
                 WHERE id = %s
                 FOR UPDATE
@@ -1040,14 +1092,16 @@ class PostgresPublicationVisitorAccessRepository:
                     publication_version_id=str(existing["publication_version_id"]),
                     expires_at=_utc(existing["expires_at"], field_name="expires_at"),
                     use_remaining=max(0, int(existing["use_limit"]) - int(existing["use_count"])),
+                    grantee_display_label=str(existing["grantee_display_label"]),
                 )
             cursor.execute(
                 """
                 INSERT INTO publication.share_grants (
                     id, vault_id, publication_id, publication_version_id, owner_subject_id,
                     authority_epoch, grantee_subject_hash, token_hash, purpose, state,
-                    use_limit, use_count, expires_at, issuance_command_hash, grant_policy_hash
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'read', 'active', %s, 0, %s, %s, %s)
+                    grantee_display_label, use_limit, use_count, expires_at,
+                    issuance_command_hash, grant_policy_hash
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'read', 'active', %s, %s, 0, %s, %s, %s)
                 """,
                 (
                     grant_id,
@@ -1058,6 +1112,7 @@ class PostgresPublicationVisitorAccessRepository:
                     scope.authority_epoch,
                     grantee_subject_hash,
                     grant_credential_hash,
+                    command.grantee_display_label,
                     command.use_limit,
                     command.expires_at,
                     command.command_id_hash,
@@ -1081,6 +1136,7 @@ class PostgresPublicationVisitorAccessRepository:
                 publication_version_id=scope.publication_version_id,
                 expires_at=command.expires_at,
                 use_remaining=command.use_limit,
+                grantee_display_label=command.grantee_display_label,
             )
 
     def revoke_grant(
@@ -1170,7 +1226,7 @@ class PostgresPublicationVisitorAccessRepository:
             cursor.execute(
                 """
                 SELECT id, publication_id, publication_version_id, state, expires_at,
-                    use_limit, use_count
+                    use_limit, use_count, grantee_display_label
                 FROM publication.share_grants
                 WHERE vault_id = %s
                   AND owner_subject_id = %s
@@ -1197,6 +1253,7 @@ class PostgresPublicationVisitorAccessRepository:
                         state=state,
                         expires_at=expires_at,
                         use_remaining=max(0, int(row["use_limit"]) - int(row["use_count"])),
+                        grantee_display_label=str(row["grantee_display_label"]),
                     )
                 )
             return tuple(summaries)
@@ -1627,6 +1684,7 @@ __all__ = [
     "PostgresPublicationVisitorAccessRepository",
     "PublicationGrantIssueCommand",
     "PublicationGrantIssueResult",
+    "PublicationGrantRecipientUnavailable",
     "PublicationGrantRevokeCommand",
     "PublicationGrantRevokeResult",
     "PublicationGrantScope",

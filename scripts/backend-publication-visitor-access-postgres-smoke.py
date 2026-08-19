@@ -128,6 +128,7 @@ def issue(
         publication_id=publication_id,
         publication_version_id=publication_version_id,
         grantee_subject_id=visitor_subject_id,
+        grantee_display_label="手机号尾号 9949",
         expires_at=datetime.now(timezone.utc) + timedelta(days=1),
         use_limit=use_limit,
     )
@@ -322,7 +323,11 @@ def exercise(dsn: str) -> None:
             and grant_summary.publication_version_id == publication.publication_version_id
             and grant_summary.state == "active"
             and grant_summary.use_remaining == 1,
-            "Owner ShareGrant summary must include only lifecycle state and remaining use count",
+            "Owner ShareGrant summary must include lifecycle state and the safety counter",
+        )
+        require(
+            grant_summary.grantee_display_label == "手机号尾号 9949",
+            "Owner ShareGrant summary must persist only the masked recipient label",
         )
         with store.request_unit_of_work(
             correlation_id=f"publication-owner-management-smoke:grant-cross-owner:{seed.context.vault_id}",
@@ -489,7 +494,8 @@ def exercise(dsn: str) -> None:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT authority_epoch, token_hash, grantee_subject_hash, use_count
+                    SELECT authority_epoch, token_hash, grantee_subject_hash, use_count,
+                        grantee_display_label
                     FROM publication.share_grants
                     WHERE id = %s
                     """,
@@ -500,6 +506,10 @@ def exercise(dsn: str) -> None:
                 require(int(grant[0]) == 0, "ShareGrant must bind the authority epoch")
                 require(str(grant[1]) != issued.grant_credential, "raw grant credential must not persist")
                 require(int(grant[3]) == 1, "usage count must be atomically persisted")
+                require(
+                    str(grant[4]) == "手机号尾号 9949",
+                    "only the masked recipient label may persist",
+                )
                 cursor.execute(
                     "SELECT state, expected_grant_use_count FROM publication.visitor_sessions WHERE share_grant_id = %s",
                     (issued.grant_id,),
@@ -536,6 +546,7 @@ def main() -> None:
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         require("0081" in applied["appliedVersions"], "ShareGrant authority migration must apply")
+        require("0104" in applied["appliedVersions"], "ShareGrant recipient label migration must apply")
         exercise(test_dsn)
     finally:
         drop_database(admin_dsn, database_name)
