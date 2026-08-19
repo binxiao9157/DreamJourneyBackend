@@ -489,6 +489,24 @@ class PublicationOwnerPublicationSummary:
     ai_disclosure_required: bool
 
 
+@dataclass(frozen=True)
+class PublicationOwnerVersionItemSummary:
+    item_index: int
+    public_title: str
+    public_body: str
+    ai_disclosure_required: bool
+
+
+@dataclass(frozen=True)
+class PublicationOwnerVersionSummary:
+    publication_version_id: str
+    version_number: int
+    confirmed_at: datetime
+    projection_state: str | None
+    public_snapshot_hash: str
+    items: tuple[PublicationOwnerVersionItemSummary, ...]
+
+
 class PublicationAuthorityRepository(Protocol):
     def create_draft(
         self,
@@ -509,6 +527,13 @@ class PublicationAuthorityRepository(Protocol):
         *,
         context: OwnerTruthCommandContext,
     ) -> tuple[PublicationOwnerPublicationSummary, ...]: ...
+
+    def list_owner_publication_versions(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        publication_id: str,
+    ) -> tuple[PublicationOwnerVersionSummary, ...]: ...
 
 
 class PublicationAuthorityService:
@@ -553,6 +578,20 @@ class PublicationAuthorityService:
         if not self._enabled:
             raise PublicationAuthorityDisabled("publication authority is default-off")
         return self._repository.list_owner_publications(context=context)
+
+    def list_owner_publication_versions(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        publication_id: str,
+    ) -> tuple[PublicationOwnerVersionSummary, ...]:
+        _assert_owner_context(context)
+        if not self._enabled:
+            raise PublicationAuthorityDisabled("publication authority is default-off")
+        return self._repository.list_owner_publication_versions(
+            context=context,
+            publication_id=require_uuid(publication_id, field="publication_id"),
+        )
 
 
 class InMemoryPublicationAuthorityRepository:
@@ -920,6 +959,8 @@ class InMemoryPublicationAuthorityRepository:
                 "authorityEpoch": memories[0].authority_epoch,
                 "publicationId": command.publication_id,
                 "publicationVersionId": version_id,
+                "versionNumber": 1,
+                "confirmedAt": datetime.now(timezone.utc),
                 "displayTitle": draft["publicTitle"],
                 "displayBody": draft["publicBody"],
                 "aiDisclosure": PUBLICATION_AI_DISCLOSURE,
@@ -994,6 +1035,59 @@ class InMemoryPublicationAuthorityRepository:
                     )
                 )
             return tuple(sorted(summaries, key=lambda item: item.publication_id))
+
+    def list_owner_publication_versions(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        publication_id: str,
+    ) -> tuple[PublicationOwnerVersionSummary, ...]:
+        _assert_owner_context(context)
+        normalized_publication_id = require_uuid(publication_id, field="publication_id")
+        with self._lock:
+            self._assert_active_vault(context)
+            owns_publication = any(
+                str(draft.get("publicationId") or "") == normalized_publication_id
+                and str(draft.get("vaultId") or "") == context.vault_id
+                and str(draft.get("ownerSubjectId") or "") == context.owner_subject_id
+                for draft in self._drafts.values()
+            )
+            if not owns_publication:
+                raise PublicationAuthorityAccessDenied(
+                    "publication is not available in this Owner Vault"
+                )
+            versions = [
+                projection
+                for projection in self._public_projections.values()
+                if str(projection.get("publicationId") or "") == normalized_publication_id
+                and str(projection.get("vaultId") or "") == context.vault_id
+                and str(projection.get("ownerSubjectId") or "") == context.owner_subject_id
+            ]
+            return tuple(
+                PublicationOwnerVersionSummary(
+                    publication_version_id=str(projection["publicationVersionId"]),
+                    version_number=int(projection.get("versionNumber") or 1),
+                    confirmed_at=projection.get("confirmedAt")
+                    if isinstance(projection.get("confirmedAt"), datetime)
+                    else datetime.now(timezone.utc),
+                    projection_state=str(projection.get("projectionState") or "unknown"),
+                    public_snapshot_hash=str(projection["projectionHash"]),
+                    items=tuple(
+                        PublicationOwnerVersionItemSummary(
+                            item_index=int(item["itemIndex"]),
+                            public_title=str(item["displayTitle"]),
+                            public_body=str(item["displayBody"]),
+                            ai_disclosure_required=bool(item.get("aiDisclosure")),
+                        )
+                        for item in projection.get("items") or ()
+                    ),
+                )
+                for projection in sorted(
+                    versions,
+                    key=lambda value: int(value.get("versionNumber") or 1),
+                    reverse=True,
+                )
+            )
 
     def _assert_active_vault(self, context: OwnerTruthCommandContext) -> None:
         owner_subject_id = self._vault_owners.get(context.vault_id)
@@ -1592,6 +1686,101 @@ class PostgresPublicationAuthorityRepository:
                 for row in cursor.fetchall()
             )
 
+    def list_owner_publication_versions(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        publication_id: str,
+    ) -> tuple[PublicationOwnerVersionSummary, ...]:
+        _assert_owner_context(context)
+        normalized_publication_id = require_uuid(publication_id, field="publication_id")
+        with self._cursor() as cursor:
+            vault = self._active_vault(cursor, context=context)
+            cursor.execute(
+                """
+                SELECT id
+                FROM publication.publications
+                WHERE id = %s
+                  AND vault_id = %s
+                  AND owner_subject_id = %s
+                  AND authority_epoch = %s
+                """,
+                (
+                    normalized_publication_id,
+                    context.vault_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            if cursor.fetchone() is None:
+                raise PublicationAuthorityAccessDenied(
+                    "publication is not available in this Owner Vault"
+                )
+            cursor.execute(
+                """
+                SELECT version.id AS publication_version_id,
+                    version.version_number,
+                    version.confirmed_at,
+                    version.content_hash AS public_snapshot_hash,
+                    projection.state AS projection_state
+                FROM publication.publication_versions AS version
+                LEFT JOIN publication.public_projections AS projection
+                  ON projection.publication_version_id = version.id
+                 AND projection.publication_id = version.publication_id
+                 AND projection.vault_id = version.vault_id
+                WHERE version.publication_id = %s
+                  AND version.vault_id = %s
+                ORDER BY version.version_number DESC, version.confirmed_at DESC
+                """,
+                (normalized_publication_id, context.vault_id),
+            )
+            version_rows = tuple(cursor.fetchall())
+            summaries: list[PublicationOwnerVersionSummary] = []
+            for version in version_rows:
+                cursor.execute(
+                    """
+                    SELECT item_index, display_title, display_body, ai_disclosure
+                    FROM publication.publication_version_items
+                    WHERE publication_version_id = %s
+                      AND publication_id = %s
+                      AND vault_id = %s
+                    ORDER BY item_index ASC
+                    """,
+                    (
+                        version["publication_version_id"],
+                        normalized_publication_id,
+                        context.vault_id,
+                    ),
+                )
+                items = tuple(
+                    PublicationOwnerVersionItemSummary(
+                        item_index=int(item["item_index"]),
+                        public_title=str(item["display_title"]),
+                        public_body=str(item["display_body"]),
+                        ai_disclosure_required=bool(item.get("ai_disclosure")),
+                    )
+                    for item in cursor.fetchall()
+                )
+                if not items:
+                    raise PublicationAuthorityConflict(
+                        "publication version has no immutable public items"
+                    )
+                summaries.append(
+                    PublicationOwnerVersionSummary(
+                        publication_version_id=str(version["publication_version_id"]),
+                        version_number=int(version["version_number"]),
+                        confirmed_at=version["confirmed_at"],
+                        projection_state=(
+                            str(version["projection_state"])
+                            if version.get("projection_state") is not None
+                            else None
+                        ),
+                        public_snapshot_hash=str(version["public_snapshot_hash"]),
+                        items=items,
+                    )
+                )
+            return tuple(summaries)
+
     @staticmethod
     def _third_party_review_required(payload: Any, *, sensitivity: str) -> bool:
         if str(sensitivity) != "standard":
@@ -1963,6 +2152,8 @@ __all__ = [
     "PublicationAuthorityMemoryVersion",
     "PublicationAuthorityNotPublishable",
     "PublicationOwnerPublicationSummary",
+    "PublicationOwnerVersionItemSummary",
+    "PublicationOwnerVersionSummary",
     "PublicationAuthorityRepository",
     "PublicationAuthorityService",
     "PublicationConfirmCommand",

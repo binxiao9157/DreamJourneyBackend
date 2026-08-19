@@ -418,6 +418,12 @@ class RouteOwnershipRegistry:
                 "publicationOwnerManagementRead",
             ),
             _rule(
+                "GET",
+                "/v2/internal/owner-authority/vaults/{vault_id}/publications/{publication_id}/versions",
+                session,
+                "publicationOwnerVersionAuditRead",
+            ),
+            _rule(
                 "POST",
                 "/v2/internal/owner-authority/vaults/{vault_id}/drafts",
                 session,
@@ -482,6 +488,12 @@ class RouteOwnershipRegistry:
                 "/v2/vaults/{vault_id}/publications",
                 session,
                 "publicationClosedBetaOwnerManagementRead",
+            ),
+            _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/publications/{publication_id}/versions",
+                session,
+                "publicationClosedBetaOwnerVersionAuditRead",
             ),
             _rule(
                 "POST",

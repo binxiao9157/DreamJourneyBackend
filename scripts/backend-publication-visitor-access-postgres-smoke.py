@@ -185,6 +185,20 @@ def owner_publications(store: PostgresStore, *, seed):
         return authority_service(store).list_owner_publications(context=seed.context)
 
 
+def owner_publication_versions(store: PostgresStore, *, seed, publication_id: str):
+    with store.request_unit_of_work(
+        correlation_id=(
+            "publication-owner-management-smoke:versions:"
+            f"{seed.context.vault_id}:{publication_id}"
+        ),
+        command_id=None,
+    ):
+        return authority_service(store).list_owner_publication_versions(
+            context=seed.context,
+            publication_id=publication_id,
+        )
+
+
 def owner_grants(store: PostgresStore, *, seed, visitor_subject_id: str):
     with store.request_unit_of_work(
         correlation_id=f"publication-owner-management-smoke:grants:{seed.context.vault_id}",
@@ -246,6 +260,26 @@ def exercise(dsn: str) -> None:
             and "kblite" not in str(publication_summary).lower(),
             "Owner management read must not expose private source or memory identifiers",
         )
+        versions = owner_publication_versions(
+            store,
+            seed=seed,
+            publication_id=publication.publication_id,
+        )
+        require(len(versions) == 1, "Owner version audit must return the confirmed version")
+        version_summary = versions[0]
+        require(
+            version_summary.publication_version_id == publication.publication_version_id
+            and version_summary.version_number == 1
+            and version_summary.projection_state == "active",
+            "Owner version audit must remain bound to the immutable public projection",
+        )
+        require(
+            len(version_summary.items) == 1
+            and version_summary.items[0].public_title == "确认的公开回忆"
+            and version_summary.items[0].public_body
+            == "这是由发布者重新整理并确认的公开说明。",
+            "Owner version audit must expose only the confirmed public snapshot",
+        )
         other_owner_context = type(seed.context)(
             vault_id=seed.context.vault_id,
             owner_subject_id="publication-management-other-owner",
@@ -258,6 +292,13 @@ def exercise(dsn: str) -> None:
             expect_owner_access_denied(
                 lambda: authority_service(store).list_owner_publications(context=other_owner_context),
                 "cross-owner publication management read must fail closed",
+            )
+            expect_owner_access_denied(
+                lambda: authority_service(store).list_owner_publication_versions(
+                    context=other_owner_context,
+                    publication_id=publication.publication_id,
+                ),
+                "cross-owner publication version audit must fail closed",
             )
 
         issued = issue(
@@ -467,7 +508,8 @@ def exercise(dsn: str) -> None:
                 require(session == ("revoked", 1), "revoked session must retain bound use count")
         print(
             "Publication visitor access Postgres smoke passed "
-            "(owner management summaries, projection-only read, adult/direct admission, CAS, revoke and projection block verified)."
+            "(owner management and version summaries, projection-only read, "
+            "adult/direct admission, CAS, revoke and projection block verified)."
         )
     finally:
         store.close_pool()

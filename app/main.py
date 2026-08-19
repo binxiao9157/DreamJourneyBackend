@@ -115,6 +115,7 @@ from app.services.publication_authority import (
     PublicationAuthorityError,
     PublicationAuthorityNotPublishable,
     PublicationOwnerPublicationSummary,
+    PublicationOwnerVersionSummary,
     PublicationAuthorityService,
     PublicationConfirmCommand,
     PublicationConfirmResult,
@@ -1513,6 +1514,7 @@ def _publication_lifecycle_context(
 FORMAL_PUBLICATION_CLOSED_BETA_ROUTE_TEMPLATES = frozenset(
     {
         "/v2/vaults/{vault_id}/publications",
+        "/v2/vaults/{vault_id}/publications/{publication_id}/versions",
         "/v2/vaults/{vault_id}/publication-drafts",
         "/v2/vaults/{vault_id}/publication-drafts/{draft_id}/confirm/{publication_id}",
         "/v2/vaults/{vault_id}/publications/{publication_id}/withdraw",
@@ -3496,6 +3498,43 @@ def _publication_owner_management_response(
                 "aiDisclosureRequired": item.ai_disclosure_required,
             }
             for item in summaries
+        ],
+    }
+
+
+def _publication_owner_version_audit_response(
+    *,
+    vault_id: str,
+    publication_id: str,
+    summaries: tuple[PublicationOwnerVersionSummary, ...],
+) -> Dict[str, Any]:
+    """Expose immutable public snapshots without private authority identifiers."""
+
+    highest_version = max((item.version_number for item in summaries), default=0)
+    return {
+        "schemaVersion": "publication-owner-version-audit-v1",
+        "vaultId": vault_id,
+        "publicationId": publication_id,
+        "versions": [
+            {
+                "publicationVersionId": version.publication_version_id,
+                "versionNumber": version.version_number,
+                "confirmedAt": version.confirmed_at.isoformat(),
+                "projectionState": version.projection_state,
+                "publicSnapshotHash": version.public_snapshot_hash,
+                "isCurrent": version.version_number == highest_version,
+                "itemCount": len(version.items),
+                "items": [
+                    {
+                        "itemIndex": item.item_index,
+                        "publicTitle": item.public_title,
+                        "publicBody": item.public_body,
+                        "aiDisclosureRequired": item.ai_disclosure_required,
+                    }
+                    for item in version.items
+                ],
+            }
+            for version in summaries
         ],
     }
 
@@ -8157,6 +8196,38 @@ def _publication_owner_management_for_context(
     )
 
 
+def _publication_owner_version_audit_for_context(
+    context: OwnerTruthCommandContext,
+    *,
+    publication_id: str,
+) -> JSONResponse:
+    try:
+        with store.request_unit_of_work(
+            correlation_id=(
+                "publication-owner-version-audit:"
+                f"{context.vault_id}:{publication_id}"
+            ),
+            command_id=None,
+        ):
+            summaries = PublicationAuthorityService(
+                store.publication_authority_repository(),
+                enabled=True,
+            ).list_owner_publication_versions(
+                context=context,
+                publication_id=publication_id,
+            )
+    except PublicationAuthorityError as error:
+        raise _publication_authority_http_error(error) from error
+    return JSONResponse(
+        content=_publication_owner_version_audit_response(
+            vault_id=context.vault_id,
+            publication_id=publication_id,
+            summaries=summaries,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _publication_create_draft_for_context(
     context: OwnerTruthCommandContext,
     payload: Dict[str, Any],
@@ -8436,6 +8507,26 @@ def list_closed_beta_publications(request: Request, vault_id: str) -> JSONRespon
     return _publication_owner_management_for_context(context)
 
 
+@app.get(
+    "/v2/vaults/{vault_id}/publications/{publication_id}/versions",
+    include_in_schema=False,
+)
+def list_closed_beta_publication_versions(
+    request: Request,
+    vault_id: str,
+    publication_id: str,
+) -> JSONResponse:
+    context = _publication_formal_owner_context(
+        request,
+        vault_id=vault_id,
+        feature="publication",
+    )
+    return _publication_owner_version_audit_for_context(
+        context,
+        publication_id=publication_id,
+    )
+
+
 @app.post(
     "/v2/vaults/{vault_id}/publication-drafts",
     include_in_schema=False,
@@ -8653,6 +8744,22 @@ def list_publication_owner_management(
     return JSONResponse(
         content=_publication_owner_management_response(vault_id=vault_id, summaries=summaries),
         headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/internal/owner-authority/vaults/{vault_id}/publications/{publication_id}/versions",
+    include_in_schema=False,
+)
+def list_publication_owner_version_audit(
+    request: Request,
+    vault_id: str,
+    publication_id: str,
+) -> JSONResponse:
+    context = _publication_authority_context(request, vault_id=vault_id)
+    return _publication_owner_version_audit_for_context(
+        context,
+        publication_id=publication_id,
     )
 
 

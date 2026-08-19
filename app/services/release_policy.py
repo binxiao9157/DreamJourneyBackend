@@ -1252,6 +1252,10 @@ class ReleasePolicyCommandGate:
         ):
             return "visitorAccess"
         if suffix == ("publications",) or (
+            len(suffix) == 3
+            and suffix[0] == "publications"
+            and suffix[2] == "versions"
+        ) or (
             len(suffix) == 4
             and suffix[0] == "publication-drafts"
             and suffix[2] == "confirm"
@@ -1276,6 +1280,8 @@ class ReleasePolicyCommandGate:
         suffix = segments[3:]
         if suffix == ("publications",):
             return f"{method} /v2/vaults/*/publications"
+        if suffix[0] == "publications" and suffix[-1] == "versions":
+            return f"{method} /v2/vaults/*/publications/*/versions"
         if suffix == ("publication-drafts",):
             return f"{method} /v2/vaults/*/publication-drafts"
         if suffix[0] == "publication-drafts":

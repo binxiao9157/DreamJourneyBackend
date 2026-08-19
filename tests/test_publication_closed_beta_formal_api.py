@@ -111,6 +111,10 @@ class PublicationClosedBetaFormalAPITests(unittest.TestCase):
     def test_formal_routes_are_user_authenticated_hidden_schema_contracts(self) -> None:
         route_cases = (
             ("GET", "/v2/vaults/vault-closed-beta/publications"),
+            (
+                "GET",
+                f"/v2/vaults/vault-closed-beta/publications/{uuid4()}/versions",
+            ),
             ("POST", "/v2/vaults/vault-closed-beta/publication-drafts"),
             (
                 "POST",
@@ -149,6 +153,7 @@ class PublicationClosedBetaFormalAPITests(unittest.TestCase):
 
         formal_templates = {
             "/v2/vaults/{vault_id}/publications",
+            "/v2/vaults/{vault_id}/publications/{publication_id}/versions",
             "/v2/vaults/{vault_id}/publication-drafts",
             "/v2/vaults/{vault_id}/publication-drafts/{draft_id}/confirm/{publication_id}",
             "/v2/vaults/{vault_id}/publications/{publication_id}/withdraw",
@@ -172,6 +177,12 @@ class PublicationClosedBetaFormalAPITests(unittest.TestCase):
 
     def test_formal_route_labels_redact_resource_identifiers(self) -> None:
         gate = main_module.RELEASE_POLICY_COMMAND_GATE
+        version_path = "/v2/vaults/owner-secret/publications/publication-secret/versions"
+        self.assertEqual(gate.feature_for_request("GET", version_path, {}), "publication")
+        self.assertEqual(
+            gate.route_label_for_request("GET", version_path, {}),
+            "GET /v2/vaults/*/publications/*/versions",
+        )
         cases = {
             "/v2/vaults/owner-secret/publication-drafts/draft-secret/confirm/publication-secret": (
                 "publication",

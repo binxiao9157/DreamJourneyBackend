@@ -156,16 +156,23 @@ class PublicationManagementReadAPITests(unittest.TestCase):
             f"/v2/internal/owner-authority/vaults/{vault_id}/publications",
             headers=authority_headers,
         )
+        versions = client.get(
+            f"/v2/internal/owner-authority/vaults/{vault_id}/publications/{confirmed['publicationId']}/versions",
+            headers=authority_headers,
+        )
         grants = client.get(
             f"/v2/internal/publication-access/vaults/{vault_id}/grants",
             headers=visitor_headers,
         )
 
         self.assertEqual(publications.status_code, 200, publications.text)
+        self.assertEqual(versions.status_code, 200, versions.text)
         self.assertEqual(grants.status_code, 200, grants.text)
         publication_payload = publications.json()
+        version_payload = versions.json()
         grant_payload = grants.json()
         self.assertEqual(publication_payload["schemaVersion"], "publication-owner-management-v1")
+        self.assertEqual(version_payload["schemaVersion"], "publication-owner-version-audit-v1")
         self.assertEqual(grant_payload["schemaVersion"], "publication-owner-grant-list-v1")
         self.assertEqual(len(publication_payload["publications"]), 1)
         self.assertEqual(len(grant_payload["grants"]), 1)
@@ -185,8 +192,21 @@ class PublicationManagementReadAPITests(unittest.TestCase):
         self.assertEqual(grant_summary["publicationVersionId"], confirmed["publicationVersionId"])
         self.assertEqual(grant_summary["state"], "active")
         self.assertEqual(grant_summary["useRemaining"], 3)
+        self.assertEqual(version_payload["publicationId"], confirmed["publicationId"])
+        self.assertEqual(len(version_payload["versions"]), 1)
+        version = version_payload["versions"][0]
+        self.assertEqual(version["publicationVersionId"], confirmed["publicationVersionId"])
+        self.assertEqual(version["versionNumber"], 1)
+        self.assertTrue(version["isCurrent"])
+        self.assertEqual(version["projectionState"], "active")
+        self.assertEqual(version["itemCount"], 1)
+        self.assertEqual(version["items"][0]["publicTitle"], "院子里的雨声")
+        self.assertEqual(
+            version["items"][0]["publicBody"],
+            "我愿意分享这段已经确认的回忆。",
+        )
 
-        serialized = f"{publication_payload}|{grant_payload}"
+        serialized = f"{publication_payload}|{version_payload}|{grant_payload}"
         for forbidden in (
             "grantCredential",
             "granteeUserId",
@@ -213,12 +233,17 @@ class PublicationManagementReadAPITests(unittest.TestCase):
             f"/v2/internal/owner-authority/vaults/{vault_id}/publications",
             headers=other_authority_headers,
         )
+        version_response = client.get(
+            f"/v2/internal/owner-authority/vaults/{vault_id}/publications/{uuid4()}/versions",
+            headers=other_authority_headers,
+        )
         grant_response = client.get(
             f"/v2/internal/publication-access/vaults/{vault_id}/grants",
             headers=other_visitor_headers,
         )
 
         self.assertEqual(publication_response.status_code, 403, publication_response.text)
+        self.assertEqual(version_response.status_code, 403, version_response.text)
         self.assertEqual(grant_response.status_code, 403, grant_response.text)
 
 
