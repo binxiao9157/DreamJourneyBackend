@@ -431,6 +431,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/internal/owner-authority/vaults/{vault_id}/publications/{publication_id}/drafts",
+                session,
+                "publicationAuthorityRevisionDraft",
+            ),
+            _rule(
+                "POST",
                 "/v2/internal/owner-authority/vaults/{vault_id}/drafts/{draft_id}/confirm/{record_id}",
                 session,
                 "publicationAuthorityConfirm",
@@ -500,6 +506,12 @@ class RouteOwnershipRegistry:
                 "/v2/vaults/{vault_id}/publication-drafts",
                 session,
                 "publicationClosedBetaDraft",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/publications/{publication_id}/drafts",
+                session,
+                "publicationClosedBetaRevisionDraft",
             ),
             _rule(
                 "POST",

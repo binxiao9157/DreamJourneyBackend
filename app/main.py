@@ -122,6 +122,8 @@ from app.services.publication_authority import (
     PublicationDraftCommand,
     PublicationDraftItemCommand,
     PublicationDraftResult,
+    PublicationRevisionDraftCommand,
+    PublicationRevisionDraftItemCommand,
 )
 from app.services.publication_visitor_access import (
     DenyPublicationVisitorEligibilityResolver,
@@ -1515,6 +1517,7 @@ FORMAL_PUBLICATION_CLOSED_BETA_ROUTE_TEMPLATES = frozenset(
     {
         "/v2/vaults/{vault_id}/publications",
         "/v2/vaults/{vault_id}/publications/{publication_id}/versions",
+        "/v2/vaults/{vault_id}/publications/{publication_id}/drafts",
         "/v2/vaults/{vault_id}/publication-drafts",
         "/v2/vaults/{vault_id}/publication-drafts/{draft_id}/confirm/{publication_id}",
         "/v2/vaults/{vault_id}/publications/{publication_id}/withdraw",
@@ -3368,6 +3371,56 @@ def _publication_authority_draft_command(
     )
 
 
+def _publication_authority_revision_draft_command(
+    payload: Mapping[str, Any],
+    *,
+    publication_id: str,
+) -> PublicationRevisionDraftCommand:
+    value = _publication_authority_payload(
+        payload,
+        allowed_fields={
+            "commandId",
+            "expectedPublicationVersionId",
+            "expectedPublicationVersion",
+            "items",
+        },
+        required_fields={
+            "commandId",
+            "expectedPublicationVersionId",
+            "expectedPublicationVersion",
+            "items",
+        },
+    )
+    raw_items = value.get("items")
+    if not isinstance(raw_items, list):
+        raise PublicationAuthorityError("publication revision items must be an array")
+    items: list[PublicationRevisionDraftItemCommand] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, Mapping):
+            raise PublicationAuthorityError("publication revision item must be an object")
+        item = _publication_authority_payload(
+            raw_item,
+            allowed_fields={"itemIndex", "publicTitle", "publicBody"},
+            required_fields={"itemIndex", "publicTitle", "publicBody"},
+        )
+        items.append(
+            PublicationRevisionDraftItemCommand(
+                item_index=item.get("itemIndex"),
+                public_title=str(item.get("publicTitle") or ""),
+                public_body=str(item.get("publicBody") or ""),
+            )
+        )
+    return PublicationRevisionDraftCommand(
+        command_id=str(value.get("commandId") or ""),
+        publication_id=publication_id,
+        expected_publication_version_id=str(
+            value.get("expectedPublicationVersionId") or ""
+        ),
+        expected_publication_version=value.get("expectedPublicationVersion"),
+        items=tuple(items),
+    )
+
+
 def _publication_authority_confirm_command(
     payload: Mapping[str, Any],
     *,
@@ -3405,9 +3458,7 @@ def _publication_authority_draft_response(
     result: PublicationDraftResult,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
-        "schemaVersion": (
-            "publication-authority-v2" if result.item_count > 1 else "publication-authority-v1"
-        ),
+        "schemaVersion": result.schema_version,
         "vaultId": vault_id,
         "publicationId": result.publication_id,
         "draftId": result.draft_id,
@@ -3422,13 +3473,15 @@ def _publication_authority_draft_response(
         "requiresSecondConfirmation": result.second_confirmation_required,
         "thirdPartyReviewRequired": result.third_party_review_required,
         "aiDisclosureRequired": True,
+        "targetPublicationVersion": result.target_publication_version,
     }
+    if result.base_publication_version_id is not None:
+        payload["basePublicationVersionId"] = result.base_publication_version_id
     if result.items:
         payload["itemCount"] = result.item_count
         payload["items"] = [
             {
                 "itemIndex": item.item_index,
-                "memoryVersionId": item.memory_version_id,
                 "itemSnapshotHash": item.item_snapshot_hash,
                 "preview": {
                     "title": item.preview_title,
@@ -3438,6 +3491,9 @@ def _publication_authority_draft_response(
             }
             for item in result.items
         ]
+        if result.schema_version != "publication-authority-v3":
+            for payload_item, result_item in zip(payload["items"], result.items):
+                payload_item["memoryVersionId"] = result_item.memory_version_id
     return payload
 
 
@@ -3447,9 +3503,7 @@ def _publication_authority_confirm_response(
     result: PublicationConfirmResult,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
-        "schemaVersion": (
-            "publication-authority-v2" if result.item_count > 1 else "publication-authority-v1"
-        ),
+        "schemaVersion": result.schema_version,
         "vaultId": vault_id,
         "publicationId": result.publication_id,
         "draftId": result.draft_id,
@@ -3461,7 +3515,7 @@ def _publication_authority_confirm_response(
         "publicProjectionHash": result.public_projection_hash,
         "aiDisclosureRequired": result.ai_disclosure_required,
     }
-    if result.item_count > 1:
+    if result.item_count > 1 or result.schema_version == "publication-authority-v3":
         payload["itemCount"] = result.item_count
         payload["publicProjectionItemHashes"] = list(result.public_projection_item_hashes)
     return payload
@@ -8257,6 +8311,41 @@ def _publication_create_draft_for_context(
     )
 
 
+def _publication_create_revision_draft_for_context(
+    context: OwnerTruthCommandContext,
+    *,
+    publication_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    try:
+        command = _publication_authority_revision_draft_command(
+            payload,
+            publication_id=publication_id,
+        )
+        with store.request_unit_of_work(
+            correlation_id=(
+                "publication-authority-revision-draft:"
+                f"{context.vault_id}:{publication_id}:"
+                f"{command.expected_publication_version}"
+            ),
+            command_id=command.command_id,
+        ):
+            result = PublicationAuthorityService(
+                store.publication_authority_repository(),
+                enabled=True,
+            ).create_revision_draft(context=context, command=command)
+    except PublicationAuthorityError as error:
+        raise _publication_authority_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=_publication_authority_draft_response(
+            vault_id=context.vault_id,
+            result=result,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _publication_confirm_draft_for_context(
     context: OwnerTruthCommandContext,
     *,
@@ -8545,6 +8634,28 @@ def create_closed_beta_publication_draft(
 
 
 @app.post(
+    "/v2/vaults/{vault_id}/publications/{publication_id}/drafts",
+    include_in_schema=False,
+)
+def create_closed_beta_publication_revision_draft(
+    request: Request,
+    vault_id: str,
+    publication_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    context = _publication_formal_owner_context(
+        request,
+        vault_id=vault_id,
+        feature="publication",
+    )
+    return _publication_create_revision_draft_for_context(
+        context,
+        publication_id=publication_id,
+        payload=payload,
+    )
+
+
+@app.post(
     "/v2/vaults/{vault_id}/publication-drafts/{draft_id}/confirm/{publication_id}",
     include_in_schema=False,
 )
@@ -8796,6 +8907,24 @@ def create_publication_authority_draft(
         status_code=201 if result.outcome == "created" else 200,
         content=_publication_authority_draft_response(vault_id=vault_id, result=result),
         headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/internal/owner-authority/vaults/{vault_id}/publications/{publication_id}/drafts",
+    include_in_schema=False,
+)
+def create_publication_authority_revision_draft(
+    request: Request,
+    vault_id: str,
+    publication_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    context = _publication_authority_context(request, vault_id=vault_id)
+    return _publication_create_revision_draft_for_context(
+        context,
+        publication_id=publication_id,
+        payload=payload,
     )
 
 

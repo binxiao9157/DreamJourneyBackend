@@ -29,7 +29,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 232)
+        self.assertEqual(len(app_routes), 236)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
 
@@ -82,6 +82,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
             ("POST", "/v2/vaults/{vault_id}/memories/{memory_id}/revisions"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/internal/owner-authority/vaults/{vault_id}/publications"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/internal/owner-authority/vaults/{vault_id}/drafts"): RouteOwnershipCategory.USER_SESSION,
+            ("POST", "/v2/internal/owner-authority/vaults/{vault_id}/publications/{publication_id}/drafts"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/internal/owner-authority/vaults/{vault_id}/drafts/{draft_id}/confirm/{record_id}"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/internal/publication-lifecycle/vaults/{vault_id}/publications/{publication_id}/withdraw"): RouteOwnershipCategory.USER_SESSION,
             ("POST", "/v2/internal/publication-lifecycle/vaults/{vault_id}/publications/{publication_id}/suspend"): RouteOwnershipCategory.USER_SESSION,
@@ -183,8 +184,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 232)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 232)
+        self.assertEqual(summary["routeCount"], 236)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 236)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)

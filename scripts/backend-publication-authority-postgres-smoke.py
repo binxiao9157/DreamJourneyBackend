@@ -37,6 +37,8 @@ from app.services.publication_authority import (
     PublicationConfirmCommand,
     PublicationDraftCommand,
     PublicationDraftItemCommand,
+    PublicationRevisionDraftCommand,
+    PublicationRevisionDraftItemCommand,
 )
 
 
@@ -271,6 +273,40 @@ def confirm_draft(store: PostgresStore, seed: Seed, draft, *, command_id: str):
         return authority_service(store).confirm_draft(context=seed.context, command=command)
 
 
+def create_revision_draft(
+    store: PostgresStore,
+    seed: Seed,
+    confirmed,
+    *,
+    public_title: str,
+    public_body: str,
+):
+    command_id = str(uuid.uuid4())
+    with store.request_unit_of_work(
+        correlation_id=(
+            "publication-authority-smoke:revision:"
+            f"{seed.context.vault_id}:{confirmed.publication_version}"
+        ),
+        command_id=command_id,
+    ):
+        return authority_service(store).create_revision_draft(
+            context=seed.context,
+            command=PublicationRevisionDraftCommand(
+                command_id=command_id,
+                publication_id=confirmed.publication_id,
+                expected_publication_version_id=confirmed.publication_version_id,
+                expected_publication_version=confirmed.publication_version,
+                items=(
+                    PublicationRevisionDraftItemCommand(
+                        item_index=0,
+                        public_title=public_title,
+                        public_body=public_body,
+                    ),
+                ),
+            ),
+        )
+
+
 def projection_state(dsn: str, publication_version_id: str) -> tuple[str, str | None]:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
@@ -349,6 +385,125 @@ def exercise(dsn: str) -> None:
 
         confirmed = confirm_draft(store, source_case, draft, command_id=confirm_command_id)
         require(confirmed.outcome == "deduplicated", "explicit replay must remain idempotent")
+
+        revision_case = seed_publishable_memory(dsn, label="revision")
+        revision_base_draft = create_draft(store, revision_case)
+        revision_base_confirm_command_id = str(uuid.uuid4())
+        revision_base = confirm_draft(
+            store,
+            revision_case,
+            revision_base_draft,
+            command_id=revision_base_confirm_command_id,
+        )
+        revision_draft = create_revision_draft(
+            store,
+            revision_case,
+            revision_base,
+            public_title="第二版公开回忆",
+            public_body="这是基于第一版公开快照创建的第二版。",
+        )
+        stale_revision_draft = create_revision_draft(
+            store,
+            revision_case,
+            revision_base,
+            public_title="过期的第二版公开回忆",
+            public_body="该草稿应在另一版本确认后被拒绝。",
+        )
+        revision_confirmed = confirm_draft(
+            store,
+            revision_case,
+            revision_draft,
+            command_id=str(uuid.uuid4()),
+        )
+        require(
+            revision_confirmed.publication_version == 2,
+            "revision confirmation must create publication version 2",
+        )
+        require(
+            projection_state(dsn, revision_base.publication_version_id)
+            == ("superseded", "newVersionConfirmed"),
+            "revision confirmation must supersede the previous active projection",
+        )
+        require(
+            projection_state(dsn, revision_confirmed.publication_version_id)
+            == ("active", None),
+            "revision confirmation must activate the new immutable projection",
+        )
+        revision_base_replay = confirm_draft(
+            store,
+            revision_case,
+            revision_base_draft,
+            command_id=revision_base_confirm_command_id,
+        )
+        require(
+            revision_base_replay.outcome == "deduplicated"
+            and revision_base_replay.publication_version == 1
+            and revision_base_replay.projection_state == "superseded",
+            "a superseded immutable version confirmation must remain idempotently replayable",
+        )
+        expect_rejected(
+            lambda: confirm_draft(
+                store,
+                revision_case,
+                stale_revision_draft,
+                command_id=str(uuid.uuid4()),
+            ),
+            "a revision draft based on a superseded version must fail closed",
+        )
+        with psycopg.connect(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT version.version_number, projection.state, projection.display_body
+                    FROM publication.publication_versions AS version
+                    JOIN publication.public_projections AS projection
+                      ON projection.publication_version_id = version.id
+                    WHERE version.publication_id = %s
+                    ORDER BY version.version_number DESC
+                    """,
+                    (revision_base.publication_id,),
+                )
+                require(
+                    cursor.fetchall()
+                    == [
+                        (2, "active", "这是基于第一版公开快照创建的第二版。"),
+                        (1, "superseded", "这是由发布者重新整理并确认的公开说明。"),
+                    ],
+                    "revision must preserve immutable version 1 and expose only version 2 as active",
+                )
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM publication.public_projections
+                    WHERE publication_id = %s AND state = 'active'
+                    """,
+                    (revision_base.publication_id,),
+                )
+                require(
+                    int(cursor.fetchone()[0]) == 1,
+                    "one publication must have exactly one active projection",
+                )
+        with store.request_unit_of_work(
+            correlation_id="publication-authority-smoke:revision-owner-read-model",
+            command_id=None,
+        ):
+            summaries = authority_service(store).list_owner_publications(
+                context=revision_case.context
+            )
+            versions = authority_service(store).list_owner_publication_versions(
+                context=revision_case.context,
+                publication_id=revision_base.publication_id,
+            )
+        require(
+            len(summaries) == 1
+            and summaries[0].publication_version_id
+            == revision_confirmed.publication_version_id,
+            "owner management must expose one publication summary for the latest version",
+        )
+        require(
+            [version.version_number for version in versions] == [2, 1],
+            "owner version audit must retain version 2 and immutable version 1",
+        )
 
         multi_first = seed_publishable_memory(dsn, label="multi")
         multi_second = seed_publishable_memory(
@@ -536,6 +691,7 @@ def main() -> None:
         require(verified["status"] == "ready", "migration head must verify")
         require("0079" in applied["appliedVersions"], "publication authority migration must apply")
         require("0080" in applied["appliedVersions"], "publication authority trigger fix must apply")
+        require("0103" in applied["appliedVersions"], "publication revision migration must apply")
         exercise(test_dsn)
     finally:
         drop_database(admin_dsn, database_name)

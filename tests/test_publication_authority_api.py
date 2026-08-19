@@ -192,6 +192,78 @@ class PublicationAuthorityAPITests(unittest.TestCase):
             ["第一章", "第二章"],
         )
 
+    def test_owner_can_revise_current_version_without_private_source_ids(self) -> None:
+        owner_id, headers = self._login("13800139177")
+        vault_id = "publication-revision"
+        memory_version_id = self._seed_memory(vault_id=vault_id, owner_id=owner_id)
+        created = client.post(
+            f"/v2/internal/owner-authority/vaults/{vault_id}/drafts",
+            headers=headers,
+            json=self._draft_payload(memory_version_id),
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        draft = created.json()
+        confirmed = client.post(
+            f"/v2/internal/owner-authority/vaults/{vault_id}/drafts/{draft['draftId']}/confirm/{draft['publicationId']}",
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "expectedDraftRevision": draft["expectedDraftRevision"],
+                "expectedDraftSnapshotHash": draft["expectedDraftSnapshotHash"],
+                "secondConfirmation": True,
+            },
+        )
+        self.assertEqual(confirmed.status_code, 201, confirmed.text)
+        version = confirmed.json()
+
+        revision_response = client.post(
+            f"/v2/internal/owner-authority/vaults/{vault_id}/publications/{draft['publicationId']}/drafts",
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "expectedPublicationVersionId": version["publicationVersionId"],
+                "expectedPublicationVersion": version["publicationVersion"],
+                "items": [
+                    {
+                        "itemIndex": 0,
+                        "publicTitle": "院子里的雨声（修订）",
+                        "publicBody": "我愿意分享修订后的公开副本。",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(revision_response.status_code, 201, revision_response.text)
+        revision = revision_response.json()
+        self.assertEqual(revision["schemaVersion"], "publication-authority-v3")
+        self.assertEqual(revision["basePublicationVersionId"], version["publicationVersionId"])
+        self.assertEqual(revision["targetPublicationVersion"], 2)
+        self.assertNotIn("memoryVersionId", str(revision))
+
+        revised_response = client.post(
+            f"/v2/internal/owner-authority/vaults/{vault_id}/drafts/{revision['draftId']}/confirm/{draft['publicationId']}",
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "expectedDraftRevision": revision["expectedDraftRevision"],
+                "expectedDraftSnapshotHash": revision["expectedDraftSnapshotHash"],
+                "secondConfirmation": True,
+            },
+        )
+        self.assertEqual(revised_response.status_code, 201, revised_response.text)
+        self.assertEqual(revised_response.json()["publicationVersion"], 2)
+
+        audit = client.get(
+            f"/v2/internal/owner-authority/vaults/{vault_id}/publications/{draft['publicationId']}/versions",
+            headers=headers,
+        )
+        self.assertEqual(audit.status_code, 200, audit.text)
+        versions = audit.json()["versions"]
+        self.assertEqual([item["versionNumber"] for item in versions], [2, 1])
+        self.assertEqual(
+            [item["projectionState"] for item in versions],
+            ["active", "superseded"],
+        )
+
     def test_cross_owner_and_unexpected_payload_fail_closed(self) -> None:
         owner_id, headers = self._login("13800139173")
         _, other_headers = self._login("13800139174")

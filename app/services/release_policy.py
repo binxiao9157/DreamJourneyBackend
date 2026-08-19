@@ -1254,7 +1254,7 @@ class ReleasePolicyCommandGate:
         if suffix == ("publications",) or (
             len(suffix) == 3
             and suffix[0] == "publications"
-            and suffix[2] == "versions"
+            and suffix[2] in {"versions", "drafts"}
         ) or (
             len(suffix) == 4
             and suffix[0] == "publication-drafts"

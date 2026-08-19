@@ -25,6 +25,7 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 
 PUBLICATION_AUTHORITY_SCHEMA_VERSION = "publication-authority-v1"
 PUBLICATION_AUTHORITY_MULTI_ITEM_SCHEMA_VERSION = "publication-authority-v2"
+PUBLICATION_AUTHORITY_REVISION_SCHEMA_VERSION = "publication-authority-v3"
 PUBLICATION_AUTHORITY_MAX_ITEMS = 20
 PUBLICATION_AI_DISCLOSURE = "该内容由人工智能协助整理，已由发布者确认。"
 _NAMESPACE = UUID("cde4f1a3-13f4-47ee-bc01-3cfbdf1e1ac5")
@@ -269,6 +270,87 @@ class PublicationDraftCommand:
 
 
 @dataclass(frozen=True)
+class PublicationRevisionDraftItemCommand:
+    item_index: int
+    public_title: str
+    public_body: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item_index, int) or isinstance(self.item_index, bool) or self.item_index < 0:
+            raise PublicationAuthorityError("item_index must be a non-negative integer")
+        object.__setattr__(
+            self,
+            "public_title",
+            _bounded_text(self.public_title, field="public_title", maximum=120),
+        )
+        object.__setattr__(
+            self,
+            "public_body",
+            _bounded_text(self.public_body, field="public_body", maximum=12_000),
+        )
+        _assert_public_copy_has_no_direct_identifiers(
+            title=self.public_title,
+            body=self.public_body,
+        )
+
+    def payload(self) -> Mapping[str, Any]:
+        return {
+            "itemIndex": self.item_index,
+            "publicTitle": self.public_title,
+            "publicBody": self.public_body,
+        }
+
+
+@dataclass(frozen=True)
+class PublicationRevisionDraftCommand:
+    command_id: str
+    publication_id: str
+    expected_publication_version_id: str
+    expected_publication_version: int
+    items: tuple[PublicationRevisionDraftItemCommand, ...]
+
+    def __post_init__(self) -> None:
+        for field in ("command_id", "publication_id", "expected_publication_version_id"):
+            object.__setattr__(self, field, require_uuid(getattr(self, field), field=field))
+        if (
+            not isinstance(self.expected_publication_version, int)
+            or isinstance(self.expected_publication_version, bool)
+            or self.expected_publication_version < 1
+        ):
+            raise PublicationAuthorityError(
+                "expected_publication_version must be a positive integer"
+            )
+        normalized_items = tuple(self.items)
+        if not 1 <= len(normalized_items) <= PUBLICATION_AUTHORITY_MAX_ITEMS:
+            raise PublicationAuthorityError(
+                f"publication revision must contain between 1 and {PUBLICATION_AUTHORITY_MAX_ITEMS} items"
+            )
+        if not all(isinstance(item, PublicationRevisionDraftItemCommand) for item in normalized_items):
+            raise PublicationAuthorityError("publication revision items are invalid")
+        if [item.item_index for item in normalized_items] != list(range(len(normalized_items))):
+            raise PublicationAuthorityConflict(
+                "publication revision items must preserve the current contiguous order"
+            )
+        object.__setattr__(self, "items", normalized_items)
+
+    @property
+    def command_id_hash(self) -> str:
+        return _sha256(self.command_id)
+
+    @property
+    def payload_hash(self) -> str:
+        return _digest(
+            {
+                "schemaVersion": PUBLICATION_AUTHORITY_REVISION_SCHEMA_VERSION,
+                "publicationId": self.publication_id,
+                "expectedPublicationVersionId": self.expected_publication_version_id,
+                "expectedPublicationVersion": self.expected_publication_version,
+                "items": [item.payload() for item in self.items],
+            }
+        )
+
+
+@dataclass(frozen=True)
 class PublicationConfirmCommand:
     command_id: str
     publication_id: str
@@ -334,6 +416,9 @@ class PublicationDraftResult:
     second_confirmation_required: bool
     third_party_review_required: bool
     items: tuple[PublicationDraftItemResult, ...] = ()
+    schema_version: str = PUBLICATION_AUTHORITY_SCHEMA_VERSION
+    base_publication_version_id: str | None = None
+    target_publication_version: int = 1
 
     @property
     def item_count(self) -> int:
@@ -353,6 +438,7 @@ class PublicationConfirmResult:
     ai_disclosure_required: bool
     item_count: int = 1
     public_projection_item_hashes: tuple[str, ...] = ()
+    schema_version: str = PUBLICATION_AUTHORITY_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -453,8 +539,34 @@ def _publication_draft_snapshot_hash(
         )
     return _digest(
         {
-            "schemaVersion": PUBLICATION_AUTHORITY_MULTI_ITEM_SCHEMA_VERSION,
+            "schemaVersion": schema_version,
             "vaultId": vault_id,
+            "items": [
+                {
+                    "itemIndex": item.item_index,
+                    "itemSnapshotHash": item.item_snapshot_hash,
+                }
+                for item in items
+            ],
+        }
+    )
+
+
+def _publication_revision_draft_snapshot_hash(
+    *,
+    vault_id: str,
+    publication_id: str,
+    base_publication_version_id: str,
+    base_publication_version: int,
+    items: tuple[_PreparedPublicationDraftItem, ...],
+) -> str:
+    return _digest(
+        {
+            "schemaVersion": PUBLICATION_AUTHORITY_REVISION_SCHEMA_VERSION,
+            "vaultId": vault_id,
+            "publicationId": publication_id,
+            "basePublicationVersionId": base_publication_version_id,
+            "basePublicationVersion": base_publication_version,
             "items": [
                 {
                     "itemIndex": item.item_index,
@@ -515,6 +627,13 @@ class PublicationAuthorityRepository(Protocol):
         command: PublicationDraftCommand,
     ) -> PublicationDraftResult: ...
 
+    def create_revision_draft(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command: PublicationRevisionDraftCommand,
+    ) -> PublicationDraftResult: ...
+
     def confirm_draft(
         self,
         *,
@@ -555,6 +674,19 @@ class PublicationAuthorityService:
         if not isinstance(command, PublicationDraftCommand):
             raise PublicationAuthorityError("publication draft command is required")
         return self._repository.create_draft(context=context, command=command)
+
+    def create_revision_draft(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command: PublicationRevisionDraftCommand,
+    ) -> PublicationDraftResult:
+        _assert_owner_context(context)
+        if not self._enabled:
+            raise PublicationAuthorityDisabled("publication authority is default-off")
+        if not isinstance(command, PublicationRevisionDraftCommand):
+            raise PublicationAuthorityError("publication revision command is required")
+        return self._repository.create_revision_draft(context=context, command=command)
 
     def confirm_draft(
         self,
@@ -801,6 +933,7 @@ class InMemoryPublicationAuthorityRepository:
                     item.memory.third_party_review_required for item in items
                 ),
                 items=tuple(item.result() for item in items),
+                schema_version=command.schema_version,
             )
             self._drafts[draft_id] = {
                 "publicationId": publication_id,
@@ -832,6 +965,154 @@ class InMemoryPublicationAuthorityRepository:
                 "ownerSubjectId": context.owner_subject_id,
                 "vaultId": context.vault_id,
                 "state": "draft",
+            }
+            self._command_results[replay_key] = (command.payload_hash, result)
+            return result
+
+    def create_revision_draft(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command: PublicationRevisionDraftCommand,
+    ) -> PublicationDraftResult:
+        _assert_owner_context(context)
+        with self._lock:
+            self._assert_active_vault(context)
+            replay_key = ("draftCreate", context.vault_id, command.command_id_hash)
+            replay = self._command_results.get(replay_key)
+            if replay is not None:
+                payload_hash, result = replay
+                if payload_hash != command.payload_hash:
+                    raise PublicationAuthorityConflict(
+                        "commandId cannot be reused with a different draft"
+                    )
+                return PublicationDraftResult(**{**result.__dict__, "outcome": "deduplicated"})
+            active_versions = [
+                projection
+                for projection in self._public_projections.values()
+                if projection.get("publicationId") == command.publication_id
+                and projection.get("vaultId") == context.vault_id
+                and projection.get("ownerSubjectId") == context.owner_subject_id
+                and projection.get("publicationState") == "confirmed"
+                and projection.get("projectionState") == "active"
+            ]
+            if len(active_versions) != 1:
+                raise PublicationAuthorityNotPublishable(
+                    "publication has no unique active version to revise"
+                )
+            active_version = active_versions[0]
+            if (
+                str(active_version["publicationVersionId"])
+                != command.expected_publication_version_id
+                or int(active_version.get("versionNumber") or 0)
+                != command.expected_publication_version
+            ):
+                raise PublicationAuthorityConflict("publication version has changed")
+            source_draft = next(
+                (
+                    draft
+                    for draft in self._drafts.values()
+                    if draft.get("publicationId") == command.publication_id
+                    and draft.get("publicationVersionId")
+                    == command.expected_publication_version_id
+                    and draft.get("state") == "confirmed"
+                ),
+                None,
+            )
+            if source_draft is None:
+                raise PublicationAuthorityConflict(
+                    "current publication version has no immutable source snapshot"
+                )
+            source_items = tuple(source_draft.get("items") or ())
+            if len(source_items) != len(command.items):
+                raise PublicationAuthorityConflict(
+                    "publication revision must preserve the current item set"
+                )
+            items = tuple(
+                _prepare_publication_draft_item(
+                    item_index=item_command.item_index,
+                    command=PublicationDraftItemCommand(
+                        memory_version_id=str(source_item["memoryVersionId"]),
+                        public_title=item_command.public_title,
+                        public_body=item_command.public_body,
+                    ),
+                    memory=self._publishable_memory(
+                        context=context,
+                        memory_version_id=str(source_item["memoryVersionId"]),
+                    ),
+                )
+                for source_item, item_command in zip(source_items, command.items)
+            )
+            if any(
+                str(source_item["memoryContentHash"]) != item.memory.content_hash
+                for source_item, item in zip(source_items, items)
+            ):
+                raise PublicationAuthorityConflict(
+                    "publication source authority changed before revision"
+                )
+            first_item = items[0]
+            draft_id = str(
+                uuid5(
+                    _NAMESPACE,
+                    f"publication-revision-draft:{context.vault_id}:{command.command_id_hash}",
+                )
+            )
+            target_version = command.expected_publication_version + 1
+            draft_snapshot_hash = _publication_revision_draft_snapshot_hash(
+                vault_id=context.vault_id,
+                publication_id=command.publication_id,
+                base_publication_version_id=command.expected_publication_version_id,
+                base_publication_version=command.expected_publication_version,
+                items=items,
+            )
+            result = PublicationDraftResult(
+                outcome="created",
+                publication_id=command.publication_id,
+                draft_id=draft_id,
+                expected_draft_revision=1,
+                draft_snapshot_hash=draft_snapshot_hash,
+                preview_title=first_item.preview_title,
+                preview_body=first_item.preview_body,
+                state="draft",
+                second_confirmation_required=True,
+                third_party_review_required=any(
+                    item.memory.third_party_review_required for item in items
+                ),
+                items=tuple(item.result() for item in items),
+                schema_version=PUBLICATION_AUTHORITY_REVISION_SCHEMA_VERSION,
+                base_publication_version_id=command.expected_publication_version_id,
+                target_publication_version=target_version,
+            )
+            self._drafts[draft_id] = {
+                "publicationId": command.publication_id,
+                "draftResult": result,
+                "memoryVersionId": first_item.memory.memory_version_id,
+                "publicTitle": first_item.command.public_title,
+                "publicBody": first_item.command.public_body,
+                "publicContentHash": first_item.public_content_hash,
+                "thirdPartyReviewRequired": result.third_party_review_required,
+                "items": [
+                    {
+                        "itemIndex": item.item_index,
+                        "memoryVersionId": item.memory.memory_version_id,
+                        "memoryContentHash": item.memory.content_hash,
+                        "publicTitle": item.command.public_title,
+                        "publicBody": item.command.public_body,
+                        "publicContentHash": item.public_content_hash,
+                        "previewTitle": item.preview_title,
+                        "previewBody": item.preview_body,
+                        "previewHash": item.preview_hash,
+                        "redactionDiffHash": item.redaction_diff_hash,
+                        "itemSnapshotHash": item.item_snapshot_hash,
+                        "thirdPartyReviewRequired": item.memory.third_party_review_required,
+                    }
+                    for item in items
+                ],
+                "ownerSubjectId": context.owner_subject_id,
+                "vaultId": context.vault_id,
+                "state": "draft",
+                "basePublicationVersionId": command.expected_publication_version_id,
+                "targetPublicationVersion": target_version,
             }
             self._command_results[replay_key] = (command.payload_hash, result)
             return result
@@ -883,7 +1164,32 @@ class InMemoryPublicationAuthorityRepository:
                 raise PublicationAuthorityNotPublishable(
                     "third-party material requires a separate verified redaction or consent workflow"
                 )
-            version_id = str(uuid5(_NAMESPACE, f"publication-version:{command.draft_id}:1"))
+            target_version = int(draft.get("targetPublicationVersion") or 1)
+            base_version_id = draft.get("basePublicationVersionId")
+            if base_version_id is not None:
+                active_versions = [
+                    projection
+                    for projection in self._public_projections.values()
+                    if projection.get("publicationId") == command.publication_id
+                    and projection.get("vaultId") == context.vault_id
+                    and projection.get("ownerSubjectId") == context.owner_subject_id
+                    and projection.get("publicationState") == "confirmed"
+                    and projection.get("projectionState") == "active"
+                ]
+                if (
+                    len(active_versions) != 1
+                    or str(active_versions[0].get("publicationVersionId")) != base_version_id
+                    or int(active_versions[0].get("versionNumber") or 0) + 1 != target_version
+                ):
+                    raise PublicationAuthorityConflict(
+                        "publication version changed before revision confirmation"
+                    )
+            version_id = str(
+                uuid5(
+                    _NAMESPACE,
+                    f"publication-version:{command.draft_id}:{target_version}",
+                )
+            )
             projection_id = str(uuid5(_NAMESPACE, f"publication-projection:{version_id}"))
             public_items = tuple(
                 {
@@ -941,7 +1247,7 @@ class InMemoryPublicationAuthorityRepository:
                 publication_id=command.publication_id,
                 draft_id=command.draft_id,
                 publication_version_id=version_id,
-                publication_version=1,
+                publication_version=target_version,
                 publication_state="confirmed",
                 projection_state="active",
                 public_projection_hash=public_projection_hash,
@@ -950,7 +1256,11 @@ class InMemoryPublicationAuthorityRepository:
                 public_projection_item_hashes=tuple(
                     str(item["projectionHash"]) for item in public_items
                 ),
+                schema_version=draft_result.schema_version,
             )
+            if base_version_id is not None:
+                active_versions[0]["projectionState"] = "superseded"
+                active_versions[0]["blockReasonCode"] = "newVersionConfirmed"
             draft["state"] = "confirmed"
             draft["publicationVersionId"] = version_id
             self._public_projections[projection_id] = {
@@ -959,7 +1269,7 @@ class InMemoryPublicationAuthorityRepository:
                 "authorityEpoch": memories[0].authority_epoch,
                 "publicationId": command.publication_id,
                 "publicationVersionId": version_id,
-                "versionNumber": 1,
+                "versionNumber": target_version,
                 "confirmedAt": datetime.now(timezone.utc),
                 "displayTitle": draft["publicTitle"],
                 "displayBody": draft["publicBody"],
@@ -983,26 +1293,46 @@ class InMemoryPublicationAuthorityRepository:
         with self._lock:
             self._assert_active_vault(context)
             summaries: list[PublicationOwnerPublicationSummary] = []
-            for draft in self._drafts.values():
-                if (
-                    str(draft.get("vaultId") or "") != context.vault_id
-                    or str(draft.get("ownerSubjectId") or "") != context.owner_subject_id
-                ):
-                    continue
+            scoped_drafts = [
+                draft
+                for draft in self._drafts.values()
+                if str(draft.get("vaultId") or "") == context.vault_id
+                and str(draft.get("ownerSubjectId") or "") == context.owner_subject_id
+            ]
+            for publication_id in sorted(
+                {str(draft["publicationId"]) for draft in scoped_drafts}
+            ):
+                publication_drafts = [
+                    draft
+                    for draft in scoped_drafts
+                    if str(draft["publicationId"]) == publication_id
+                ]
+                projections = [
+                    item
+                    for item in self._public_projections.values()
+                    if item.get("publicationId") == publication_id
+                    and item.get("vaultId") == context.vault_id
+                    and item.get("ownerSubjectId") == context.owner_subject_id
+                ]
+                projection = max(
+                    projections,
+                    key=lambda item: int(item.get("versionNumber") or 0),
+                    default=None,
+                )
+                publication_version_id = (
+                    projection.get("publicationVersionId") if projection is not None else None
+                )
+                draft = next(
+                    (
+                        item
+                        for item in publication_drafts
+                        if item.get("publicationVersionId") == publication_version_id
+                    ),
+                    publication_drafts[-1],
+                )
                 draft_result = draft["draftResult"]
                 if not isinstance(draft_result, PublicationDraftResult):
                     raise PublicationAuthorityConflict("publication draft summary is malformed")
-                publication_id = str(draft["publicationId"])
-                publication_version_id = draft.get("publicationVersionId")
-                projection = next(
-                    (
-                        item
-                        for item in self._public_projections.values()
-                        if item.get("publicationId") == publication_id
-                        and item.get("publicationVersionId") == publication_version_id
-                    ),
-                    None,
-                )
                 draft_state = str(draft.get("state") or "draft")
                 summaries.append(
                     PublicationOwnerPublicationSummary(
@@ -1027,14 +1357,22 @@ class InMemoryPublicationAuthorityRepository:
                             if projection is not None
                             else None
                         ),
-                        preview_title=draft_result.preview_title,
-                        preview_body=draft_result.preview_body,
+                        preview_title=(
+                            str(projection["displayTitle"])
+                            if projection is not None
+                            else draft_result.preview_title
+                        ),
+                        preview_body=(
+                            str(projection["displayBody"])
+                            if projection is not None
+                            else draft_result.preview_body
+                        ),
                         requires_second_confirmation=draft_state == "draft",
                         third_party_review_required=draft_result.third_party_review_required,
                         ai_disclosure_required=True,
                     )
                 )
-            return tuple(sorted(summaries, key=lambda item: item.publication_id))
+            return tuple(summaries)
 
     def list_owner_publication_versions(
         self,
@@ -1329,6 +1667,298 @@ class PostgresPublicationAuthorityRepository:
                 item.memory.third_party_review_required for item in items
             ),
             items=tuple(item.result() for item in items),
+            schema_version=command.schema_version,
+        )
+
+    def create_revision_draft(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command: PublicationRevisionDraftCommand,
+    ) -> PublicationDraftResult:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            self._lock_command(
+                cursor,
+                vault_id=context.vault_id,
+                command_id_hash=command.command_id_hash,
+            )
+            vault = self._active_vault(cursor, context=context)
+            replay = self._draft_replay(
+                cursor,
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                authority_epoch=int(vault["authority_epoch"]),
+                command=command,
+            )
+            if replay is not None:
+                return replay
+            cursor.execute(
+                """
+                SELECT publication_row.state AS publication_state,
+                    version.id AS publication_version_id,
+                    version.version_number,
+                    projection.state AS projection_state
+                FROM publication.publications AS publication_row
+                JOIN publication.publication_versions AS version
+                  ON version.publication_id = publication_row.id
+                 AND version.vault_id = publication_row.vault_id
+                JOIN publication.public_projections AS projection
+                  ON projection.publication_version_id = version.id
+                 AND projection.publication_id = version.publication_id
+                 AND projection.vault_id = version.vault_id
+                WHERE publication_row.id = %s
+                  AND publication_row.vault_id = %s
+                  AND publication_row.owner_subject_id = %s
+                  AND publication_row.authority_epoch = %s
+                ORDER BY version.version_number DESC
+                LIMIT 1
+                FOR UPDATE OF publication_row, version, projection
+                """,
+                (
+                    command.publication_id,
+                    context.vault_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                ),
+            )
+            current = cursor.fetchone()
+            if current is None:
+                raise PublicationAuthorityAccessDenied(
+                    "publication is not available in this Owner Vault"
+                )
+            if (
+                str(current["publication_state"]) != "confirmed"
+                or str(current["projection_state"]) != "active"
+            ):
+                raise PublicationAuthorityNotPublishable(
+                    "publication has no active version to revise"
+                )
+            if (
+                str(current["publication_version_id"])
+                != command.expected_publication_version_id
+                or int(current["version_number"])
+                != command.expected_publication_version
+            ):
+                raise PublicationAuthorityConflict("publication version has changed")
+            cursor.execute(
+                """
+                SELECT item_index, memory_version_id, memory_content_hash
+                FROM publication.publication_version_items
+                WHERE publication_version_id = %s
+                  AND publication_id = %s
+                  AND vault_id = %s
+                ORDER BY item_index ASC
+                """,
+                (
+                    command.expected_publication_version_id,
+                    command.publication_id,
+                    context.vault_id,
+                ),
+            )
+            source_items = tuple(cursor.fetchall())
+            if (
+                len(source_items) != len(command.items)
+                or [int(item["item_index"]) for item in source_items]
+                != [item.item_index for item in command.items]
+            ):
+                raise PublicationAuthorityConflict(
+                    "publication revision must preserve the current item set"
+                )
+            items = tuple(
+                _prepare_publication_draft_item(
+                    item_index=item_command.item_index,
+                    command=PublicationDraftItemCommand(
+                        memory_version_id=str(source_item["memory_version_id"]),
+                        public_title=item_command.public_title,
+                        public_body=item_command.public_body,
+                    ),
+                    memory=self._publishable_memory(
+                        cursor,
+                        context=context,
+                        vault_authority_epoch=int(vault["authority_epoch"]),
+                        memory_version_id=str(source_item["memory_version_id"]),
+                    ),
+                )
+                for source_item, item_command in zip(source_items, command.items)
+            )
+            if any(
+                str(source_item["memory_content_hash"]) != item.memory.content_hash
+                for source_item, item in zip(source_items, items)
+            ):
+                raise PublicationAuthorityConflict(
+                    "publication source authority changed before revision"
+                )
+            first_item = items[0]
+            target_version = command.expected_publication_version + 1
+            draft_id = str(
+                uuid5(
+                    _NAMESPACE,
+                    f"publication-revision-draft:{context.vault_id}:{command.command_id_hash}",
+                )
+            )
+            draft_snapshot_hash = _publication_revision_draft_snapshot_hash(
+                vault_id=context.vault_id,
+                publication_id=command.publication_id,
+                base_publication_version_id=command.expected_publication_version_id,
+                base_publication_version=command.expected_publication_version,
+                items=items,
+            )
+            third_party_state = (
+                "reviewRequired"
+                if any(item.memory.third_party_review_required for item in items)
+                else "noneDetected"
+            )
+            cursor.execute(
+                """
+                INSERT INTO publication.publication_drafts (
+                    id, publication_id, vault_id, owner_subject_id, authority_epoch,
+                    draft_revision, state, draft_snapshot_hash, preview_hash,
+                    redaction_diff_hash, policy_version, ai_transformation_present,
+                    base_publication_version_id, target_version_number
+                ) VALUES (%s, %s, %s, %s, %s, 1, 'draft', %s, %s, %s, %s, FALSE, %s, %s)
+                """,
+                (
+                    draft_id,
+                    command.publication_id,
+                    context.vault_id,
+                    context.owner_subject_id,
+                    first_item.memory.authority_epoch,
+                    draft_snapshot_hash,
+                    first_item.preview_hash,
+                    first_item.redaction_diff_hash,
+                    PUBLICATION_AUTHORITY_REVISION_SCHEMA_VERSION,
+                    command.expected_publication_version_id,
+                    target_version,
+                ),
+            )
+            for item in items:
+                cursor.execute(
+                    """
+                    INSERT INTO publication.publication_draft_memory_versions (
+                        draft_id, vault_id, memory_version_id, source_citation_hash,
+                        content_hash, source_state, consent_state, requires_redaction,
+                        redaction_diff_hash
+                    ) VALUES (%s, %s, %s, %s, %s, 'active', %s, %s, %s)
+                    """,
+                    (
+                        draft_id,
+                        context.vault_id,
+                        item.memory.memory_version_id,
+                        _digest(
+                            {
+                                "memoryVersionId": item.memory.memory_version_id,
+                                "memoryContentHash": item.memory.content_hash,
+                            }
+                        ),
+                        item.memory.content_hash,
+                        (
+                            "thirdPartyRestricted"
+                            if item.memory.third_party_review_required
+                            else "granted"
+                        ),
+                        item.memory.third_party_review_required,
+                        item.redaction_diff_hash,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO publication.publication_draft_items (
+                        draft_id, vault_id, item_index, memory_version_id,
+                        memory_content_hash, item_snapshot_hash, display_title,
+                        display_body, content_hash, preview_title, preview_body,
+                        preview_hash, redaction_diff_hash,
+                        third_party_review_required, ai_disclosure
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        draft_id,
+                        context.vault_id,
+                        item.item_index,
+                        item.memory.memory_version_id,
+                        item.memory.content_hash,
+                        item.item_snapshot_hash,
+                        item.command.public_title,
+                        item.command.public_body,
+                        item.public_content_hash,
+                        item.preview_title,
+                        item.preview_body,
+                        item.preview_hash,
+                        item.redaction_diff_hash,
+                        item.memory.third_party_review_required,
+                        PUBLICATION_AI_DISCLOSURE,
+                    ),
+                )
+            cursor.execute(
+                """
+                INSERT INTO publication.publication_draft_public_contents (
+                    draft_id, vault_id, display_title, display_body, content_hash,
+                    preview_title, preview_body, preview_hash, redaction_diff_hash,
+                    third_party_review_required, ai_disclosure
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    draft_id,
+                    context.vault_id,
+                    first_item.command.public_title,
+                    first_item.command.public_body,
+                    first_item.public_content_hash,
+                    first_item.preview_title,
+                    first_item.preview_body,
+                    first_item.preview_hash,
+                    first_item.redaction_diff_hash,
+                    first_item.memory.third_party_review_required,
+                    PUBLICATION_AI_DISCLOSURE,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO publication.publication_authority_receipts (
+                    id, vault_id, publication_id, draft_id, owner_subject_id,
+                    authority_epoch, command_kind, command_id_hash, command_payload_hash,
+                    memory_version_id, draft_snapshot_hash, preview_hash,
+                    redaction_diff_hash, third_party_review_state, policy_version
+                ) VALUES (%s, %s, %s, %s, %s, %s, 'draftCreated', %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    str(
+                        uuid5(
+                            _NAMESPACE,
+                            f"publication-receipt:revision-draft:{context.vault_id}:{command.command_id_hash}",
+                        )
+                    ),
+                    context.vault_id,
+                    command.publication_id,
+                    draft_id,
+                    context.owner_subject_id,
+                    first_item.memory.authority_epoch,
+                    command.command_id_hash,
+                    command.payload_hash,
+                    first_item.memory.memory_version_id,
+                    draft_snapshot_hash,
+                    first_item.preview_hash,
+                    first_item.redaction_diff_hash,
+                    third_party_state,
+                    PUBLICATION_AUTHORITY_REVISION_SCHEMA_VERSION,
+                ),
+            )
+        return PublicationDraftResult(
+            outcome="created",
+            publication_id=command.publication_id,
+            draft_id=draft_id,
+            expected_draft_revision=1,
+            draft_snapshot_hash=draft_snapshot_hash,
+            preview_title=first_item.preview_title,
+            preview_body=first_item.preview_body,
+            state="draft",
+            second_confirmation_required=True,
+            third_party_review_required=any(
+                item.memory.third_party_review_required for item in items
+            ),
+            items=tuple(item.result() for item in items),
+            schema_version=PUBLICATION_AUTHORITY_REVISION_SCHEMA_VERSION,
+            base_publication_version_id=command.expected_publication_version_id,
+            target_publication_version=target_version,
         )
 
     def confirm_draft(
@@ -1385,7 +2015,47 @@ class PostgresPublicationAuthorityRepository:
                 raise PublicationAuthorityNotPublishable(
                     "third-party material requires a separate verified redaction or consent workflow"
                 )
-            version_id = str(uuid5(_NAMESPACE, f"publication-version:{command.draft_id}:1"))
+            target_version = int(draft.get("target_version_number") or 1)
+            base_version_id = (
+                str(draft["base_publication_version_id"])
+                if draft.get("base_publication_version_id") is not None
+                else None
+            )
+            if base_version_id is not None:
+                cursor.execute(
+                    """
+                    SELECT version.id AS publication_version_id,
+                        version.version_number,
+                        projection.state AS projection_state
+                    FROM publication.publication_versions AS version
+                    JOIN publication.public_projections AS projection
+                      ON projection.publication_version_id = version.id
+                     AND projection.publication_id = version.publication_id
+                     AND projection.vault_id = version.vault_id
+                    WHERE version.publication_id = %s
+                      AND version.vault_id = %s
+                    ORDER BY version.version_number DESC
+                    LIMIT 1
+                    FOR UPDATE OF version, projection
+                    """,
+                    (command.publication_id, context.vault_id),
+                )
+                current = cursor.fetchone()
+                if (
+                    current is None
+                    or str(current["publication_version_id"]) != base_version_id
+                    or int(current["version_number"]) + 1 != target_version
+                    or str(current["projection_state"]) != "active"
+                ):
+                    raise PublicationAuthorityConflict(
+                        "publication version changed before revision confirmation"
+                    )
+            version_id = str(
+                uuid5(
+                    _NAMESPACE,
+                    f"publication-version:{command.draft_id}:{target_version}",
+                )
+            )
             projection_id = str(uuid5(_NAMESPACE, f"publication-projection:{version_id}"))
             projected_items = tuple(
                 {
@@ -1463,18 +2133,44 @@ class PostgresPublicationAuthorityRepository:
                 INSERT INTO publication.publication_versions (
                     id, publication_id, vault_id, pinned_memory_version_id,
                     version_number, content_hash, policy_version, confirmed_at
-                ) VALUES (%s, %s, %s, %s, 1, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     version_id,
                     command.publication_id,
                     context.vault_id,
                     first_memory.memory_version_id,
+                    target_version,
                     projection_hash,
                     str(draft["policy_version"]),
                     now,
                 ),
             )
+            if base_version_id is not None:
+                cursor.execute(
+                    """
+                    UPDATE publication.public_projections
+                    SET state = 'superseded',
+                        blocked_at = %s,
+                        block_reason_code = 'newVersionConfirmed',
+                        updated_at = %s
+                    WHERE publication_version_id = %s
+                      AND publication_id = %s
+                      AND vault_id = %s
+                      AND state = 'active'
+                    """,
+                    (
+                        now,
+                        now,
+                        base_version_id,
+                        command.publication_id,
+                        context.vault_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise PublicationAuthorityConflict(
+                        "publication active projection changed before revision confirmation"
+                    )
             cursor.execute(
                 """
                 INSERT INTO publication.public_projections (
@@ -1550,9 +2246,19 @@ class PostgresPublicationAuthorityRepository:
                 """
                 UPDATE publication.publications
                 SET state = 'confirmed', updated_at = %s
-                WHERE id = %s AND vault_id = %s AND state = 'draft'
+                WHERE id = %s AND vault_id = %s
+                  AND (
+                    (%s IS NULL AND state = 'draft')
+                    OR (%s IS NOT NULL AND state = 'confirmed')
+                  )
                 """,
-                (now, command.publication_id, context.vault_id),
+                (
+                    now,
+                    command.publication_id,
+                    context.vault_id,
+                    base_version_id,
+                    base_version_id,
+                ),
             )
             if cursor.rowcount != 1:
                 raise PublicationAuthorityConflict("publication state changed before confirmation")
@@ -1598,7 +2304,7 @@ class PostgresPublicationAuthorityRepository:
             publication_id=command.publication_id,
             draft_id=command.draft_id,
             publication_version_id=version_id,
-            publication_version=1,
+            publication_version=target_version,
             publication_state="confirmed",
             projection_state="active",
             public_projection_hash=projection_hash,
@@ -1607,6 +2313,7 @@ class PostgresPublicationAuthorityRepository:
             public_projection_item_hashes=tuple(
                 str(item["projection_hash"]) for item in projected_items
             ),
+            schema_version=str(draft["policy_version"]),
         )
 
     def list_owner_publications(
@@ -1631,12 +2338,6 @@ class PostgresPublicationAuthorityRepository:
                     version.id AS publication_version_id,
                     projection.state AS projection_state
                 FROM publication.publications AS publication_row
-                JOIN publication.publication_drafts AS draft
-                  ON draft.publication_id = publication_row.id
-                 AND draft.vault_id = publication_row.vault_id
-                JOIN publication.publication_draft_public_contents AS content
-                  ON content.draft_id = draft.id
-                 AND content.vault_id = draft.vault_id
                 LEFT JOIN LATERAL (
                     SELECT id, version_number
                     FROM publication.publication_versions
@@ -1645,6 +2346,28 @@ class PostgresPublicationAuthorityRepository:
                     ORDER BY version_number DESC
                     LIMIT 1
                 ) AS version ON TRUE
+                JOIN LATERAL (
+                    SELECT draft_row.id, draft_row.draft_revision,
+                        draft_row.state, draft_row.created_at,
+                        content_row.preview_title, content_row.preview_body,
+                        content_row.third_party_review_required
+                    FROM publication.publication_drafts AS draft_row
+                    JOIN publication.publication_draft_public_contents AS content_row
+                      ON content_row.draft_id = draft_row.id
+                     AND content_row.vault_id = draft_row.vault_id
+                    LEFT JOIN publication.publication_authority_receipts AS receipt
+                      ON receipt.draft_id = draft_row.id
+                     AND receipt.vault_id = draft_row.vault_id
+                     AND receipt.publication_version_id = version.id
+                    WHERE draft_row.publication_id = publication_row.id
+                      AND draft_row.vault_id = publication_row.vault_id
+                    ORDER BY (receipt.publication_version_id IS NOT NULL) DESC,
+                        draft_row.created_at DESC
+                    LIMIT 1
+                ) AS draft ON TRUE
+                JOIN publication.publication_draft_public_contents AS content
+                  ON content.draft_id = draft.id
+                 AND content.vault_id = publication_row.vault_id
                 LEFT JOIN publication.public_projections AS projection
                   ON projection.publication_version_id = version.id
                  AND projection.publication_id = publication_row.id
@@ -1935,14 +2658,16 @@ class PostgresPublicationAuthorityRepository:
         vault_id: str,
         owner_subject_id: str,
         authority_epoch: int,
-        command: PublicationDraftCommand,
+        command: PublicationDraftCommand | PublicationRevisionDraftCommand,
     ) -> PublicationDraftResult | None:
         cursor.execute(
             """
             SELECT receipt.command_kind, receipt.command_payload_hash,
                 receipt.owner_subject_id, receipt.authority_epoch,
                 draft.id AS draft_id, draft.publication_id, draft.draft_revision,
-                draft.draft_snapshot_hash, content.preview_title, content.preview_body,
+                draft.draft_snapshot_hash, draft.policy_version,
+                draft.base_publication_version_id, draft.target_version_number,
+                content.preview_title, content.preview_body,
                 content.third_party_review_required
             FROM publication.publication_authority_receipts AS receipt
             JOIN publication.publication_drafts AS draft
@@ -1999,6 +2724,13 @@ class PostgresPublicationAuthorityRepository:
             second_confirmation_required=True,
             third_party_review_required=bool(row["third_party_review_required"]),
             items=items,
+            schema_version=str(row["policy_version"]),
+            base_publication_version_id=(
+                str(row["base_publication_version_id"])
+                if row.get("base_publication_version_id") is not None
+                else None
+            ),
+            target_publication_version=int(row["target_version_number"]),
         )
 
     def _confirm_replay(
@@ -2015,7 +2747,8 @@ class PostgresPublicationAuthorityRepository:
             SELECT receipt.command_kind, receipt.command_payload_hash,
                 receipt.owner_subject_id, receipt.authority_epoch,
                 receipt.publication_id, receipt.draft_id, receipt.publication_version_id,
-                version.version_number, publication.state AS publication_state,
+                version.version_number, version.policy_version,
+                publication.state AS publication_state,
                 projection.state AS projection_state, projection.projection_hash
             FROM publication.publication_authority_receipts AS receipt
             JOIN publication.publication_versions AS version
@@ -2043,7 +2776,7 @@ class PostgresPublicationAuthorityRepository:
             )
         if str(row["command_kind"]) != "publicationConfirmed" or str(row["command_payload_hash"]) != command.payload_hash:
             raise PublicationAuthorityConflict("commandId cannot be reused with a different publication action")
-        if str(row["projection_state"]) != "active":
+        if str(row["projection_state"]) not in {"active", "superseded"}:
             raise PublicationAuthorityNotPublishable(
                 "publication projection is no longer available after an authority change"
             )
@@ -2069,6 +2802,7 @@ class PostgresPublicationAuthorityRepository:
             ai_disclosure_required=True,
             item_count=len(item_hashes) if item_hashes else 1,
             public_projection_item_hashes=item_hashes,
+            schema_version=str(row.get("policy_version") or PUBLICATION_AUTHORITY_SCHEMA_VERSION),
         )
 
     def _draft_for_confirmation(
@@ -2085,7 +2819,8 @@ class PostgresPublicationAuthorityRepository:
                 draft.id, draft.publication_id, draft.vault_id, draft.owner_subject_id,
                 draft.authority_epoch, draft.draft_revision, draft.state,
                 draft.draft_snapshot_hash, draft.preview_hash,
-                draft.redaction_diff_hash, draft.policy_version
+                draft.redaction_diff_hash, draft.policy_version,
+                draft.base_publication_version_id, draft.target_version_number
             FROM publication.publication_drafts AS draft
             WHERE draft.id = %s AND draft.vault_id = %s
             FOR UPDATE OF draft
@@ -2162,8 +2897,11 @@ __all__ = [
     "PublicationDraftItemCommand",
     "PublicationDraftItemResult",
     "PublicationDraftResult",
+    "PublicationRevisionDraftCommand",
+    "PublicationRevisionDraftItemCommand",
     "PUBLICATION_AI_DISCLOSURE",
     "PUBLICATION_AUTHORITY_MAX_ITEMS",
     "PUBLICATION_AUTHORITY_MULTI_ITEM_SCHEMA_VERSION",
+    "PUBLICATION_AUTHORITY_REVISION_SCHEMA_VERSION",
     "PUBLICATION_AUTHORITY_SCHEMA_VERSION",
 ]

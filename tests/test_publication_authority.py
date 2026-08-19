@@ -23,6 +23,8 @@ from app.services.publication_authority import (
     PublicationConfirmCommand,
     PublicationDraftCommand,
     PublicationDraftItemCommand,
+    PublicationRevisionDraftCommand,
+    PublicationRevisionDraftItemCommand,
 )
 
 
@@ -382,6 +384,121 @@ class PublicationAuthorityTests(unittest.TestCase):
                     expected_draft_revision=draft.expected_draft_revision,
                     expected_draft_snapshot_hash=draft.draft_snapshot_hash,
                     second_confirmation=True,
+                ),
+            )
+
+    def test_revision_creates_new_immutable_version_and_rejects_stale_draft(self) -> None:
+        initial_draft = self.service.create_draft(
+            context=self.context,
+            command=self._draft_command(),
+        )
+        initial_confirm_command = PublicationConfirmCommand(
+            command_id=str(uuid4()),
+            publication_id=initial_draft.publication_id,
+            draft_id=initial_draft.draft_id,
+            expected_draft_revision=initial_draft.expected_draft_revision,
+            expected_draft_snapshot_hash=initial_draft.draft_snapshot_hash,
+            second_confirmation=True,
+        )
+        initial = self.service.confirm_draft(
+            context=self.context,
+            command=initial_confirm_command,
+        )
+        revision_command = PublicationRevisionDraftCommand(
+            command_id=str(uuid4()),
+            publication_id=initial.publication_id,
+            expected_publication_version_id=initial.publication_version_id,
+            expected_publication_version=initial.publication_version,
+            items=(
+                PublicationRevisionDraftItemCommand(
+                    item_index=0,
+                    public_title="河边散步（修订）",
+                    public_body="那年傍晚，我们沿着河边慢慢走，也看见了晚霞。",
+                ),
+            ),
+        )
+        revision = self.service.create_revision_draft(
+            context=self.context,
+            command=revision_command,
+        )
+        stale_revision = self.service.create_revision_draft(
+            context=self.context,
+            command=PublicationRevisionDraftCommand(
+                command_id=str(uuid4()),
+                publication_id=initial.publication_id,
+                expected_publication_version_id=initial.publication_version_id,
+                expected_publication_version=1,
+                items=(
+                    PublicationRevisionDraftItemCommand(
+                        item_index=0,
+                        public_title="另一份草稿",
+                        public_body="这份草稿稍后会因为基线陈旧而被拒绝。",
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(revision.schema_version, "publication-authority-v3")
+        self.assertEqual(revision.base_publication_version_id, initial.publication_version_id)
+        self.assertEqual(revision.target_publication_version, 2)
+        revised = self.service.confirm_draft(
+            context=self.context,
+            command=PublicationConfirmCommand(
+                command_id=str(uuid4()),
+                publication_id=revision.publication_id,
+                draft_id=revision.draft_id,
+                expected_draft_revision=revision.expected_draft_revision,
+                expected_draft_snapshot_hash=revision.draft_snapshot_hash,
+                second_confirmation=True,
+            ),
+        )
+
+        self.assertEqual(revised.publication_version, 2)
+        self.assertEqual(revised.schema_version, "publication-authority-v3")
+        versions = self.service.list_owner_publication_versions(
+            context=self.context,
+            publication_id=initial.publication_id,
+        )
+        self.assertEqual([version.version_number for version in versions], [2, 1])
+        self.assertEqual([version.projection_state for version in versions], ["active", "superseded"])
+        initial_replay = self.service.confirm_draft(
+            context=self.context,
+            command=initial_confirm_command,
+        )
+        self.assertEqual(initial_replay.outcome, "deduplicated")
+        self.assertEqual(initial_replay.publication_version, 1)
+        summaries = self.service.list_owner_publications(context=self.context)
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0].publication_version_id, revised.publication_version_id)
+        self.assertEqual(summaries[0].preview_title, "河边散步（修订）")
+
+        with self.assertRaises(PublicationAuthorityConflict):
+            self.service.confirm_draft(
+                context=self.context,
+                command=PublicationConfirmCommand(
+                    command_id=str(uuid4()),
+                    publication_id=stale_revision.publication_id,
+                    draft_id=stale_revision.draft_id,
+                    expected_draft_revision=stale_revision.expected_draft_revision,
+                    expected_draft_snapshot_hash=stale_revision.draft_snapshot_hash,
+                    second_confirmation=True,
+                ),
+            )
+        with self.assertRaises(PublicationAuthorityConflict):
+            self.service.create_revision_draft(
+                context=self.context,
+                command=PublicationRevisionDraftCommand(
+                    command_id=str(uuid4()),
+                    publication_id=initial.publication_id,
+                    expected_publication_version_id=initial.publication_version_id,
+                    expected_publication_version=1,
+                    items=(
+                        PublicationRevisionDraftItemCommand(
+                            item_index=0,
+                            public_title="陈旧版本",
+                            public_body="不能从已经被替代的版本继续创建新草稿。",
+                        ),
+                    ),
                 ),
             )
 
