@@ -985,7 +985,7 @@ def main() -> None:
                 )
             require(
                 search_projection_ready is not None
-                and search_projection_ready.checkpoint == projection_ready["checkpoint"]
+                and search_projection_ready.checkpoint == projection_rights_ready["checkpoint"]
                 and len(search_projection_ready.documents)
                 == first_projection_worker_result["searchProjectionDocumentCount"],
                 "worker-chained SearchDocument projection must bind the current source checkpoint",
