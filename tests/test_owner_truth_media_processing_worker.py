@@ -404,7 +404,19 @@ class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
 
         def handler(request: httpx.Request) -> httpx.Response:
             observed_requests.append(request)
-            return httpx.Response(200, json={"text": "照片里有一张家人的生日卡片"})
+            return httpx.Response(
+                200,
+                json={
+                    "schemaVersion": "owner-truth-image-understanding-v1",
+                    "description": "照片里有一张家人的生日卡片。",
+                    "ocrText": "生日快乐",
+                    "facets": {
+                        "people": [{"value": "家人", "confidence": 0.7}],
+                        "time": [],
+                        "places": [],
+                    },
+                },
+            )
 
         processor_router = OwnerTruthMediaProcessorRouter.from_settings(
             Settings(
@@ -439,6 +451,16 @@ class OwnerTruthMediaProcessingWorkerTests(unittest.TestCase):
         self.assertEqual(completed["processingStatus"], "succeeded")
         self.assertIsNotNone(completed["derivedSourceId"])
         self.assertIsNotNone(completed["lastProcessingResultId"])
+        source = self.store._owner_truth_sources[
+            (self.context.vault_id, str(completed["derivedSourceId"]))
+        ]
+        metadata = source["metadata"]
+        self.assertEqual(metadata["mediaKind"], "image")
+        self.assertEqual(metadata["processorVersion"], "v2")
+        self.assertEqual(metadata["candidateFacets"]["people"][0]["value"], "家人")
+        self.assertEqual(len(metadata["candidateFacetsHash"]), 64)
+        self.assertEqual(metadata["fragmentEvidence"][0]["locatorType"], "image")
+        self.assertNotIn("生日快乐", json.dumps(metadata, ensure_ascii=False, sort_keys=True))
 
     def test_slow_processor_heartbeats_lease_and_blocks_second_worker(self) -> None:
         source_object, intent = self._upload_and_queue(

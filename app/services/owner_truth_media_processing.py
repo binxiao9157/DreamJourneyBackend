@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import subprocess
@@ -28,6 +29,7 @@ import httpx
 from app.async_effects.consumer_repository import AsyncEffectConsumerCompletionCommand
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget, EffectReceiptSummary
 from app.domain.owner_truth.contracts import SourceKind
+from app.domain.owner_truth.ontology import empty_memory_facets, validate_memory_facets
 from app.domain.owner_truth.source_commands import CreateTextSourceCommand, OwnerTruthCommandContext
 from app.services.owner_truth_media_source_object import OwnerTruthMediaUploadInvalid
 from app.services.owner_truth_source import build_source_created_effect_intent
@@ -56,6 +58,11 @@ _DEFAULT_PDF_MAX_PAGES = 100
 _DEFAULT_DOCX_MAX_ENTRIES = 2_048
 _DEFAULT_DOCX_MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
 _DEFAULT_DOCX_MAX_COMPRESSION_RATIO = 200
+_IMAGE_UNDERSTANDING_SCHEMA_VERSION = "owner-truth-image-understanding-v1"
+_IMAGE_UNDERSTANDING_FACET_NAMES = ("people", "time", "places")
+_MAX_IMAGE_UNDERSTANDING_TEXT_CHARACTERS = 10_000
+_MAX_IMAGE_UNDERSTANDING_FACET_VALUES = 32
+_MAX_IMAGE_UNDERSTANDING_FACET_CHARACTERS = 256
 
 
 class OwnerTruthMediaProcessingError(RuntimeError):
@@ -120,6 +127,7 @@ class MediaTextExtraction:
     extracted_text: str
     truncated: bool = False
     fragment_evidence: tuple[Mapping[str, Any], ...] = ()
+    candidate_facets: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "processor_id", _opaque_identifier(self.processor_id, field="processor_id"))
@@ -140,6 +148,14 @@ class MediaTextExtraction:
             "fragment_evidence",
             _normalize_fragment_evidence(self.fragment_evidence),
         )
+        if self.candidate_facets is not None:
+            try:
+                normalized_facets = json.loads(_canonical_json(dict(self.candidate_facets)))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise OwnerTruthMediaProcessingError("candidate facets are invalid") from exc
+            if not validate_memory_facets(normalized_facets).accepted:
+                raise OwnerTruthMediaProcessingError("candidate facets are invalid")
+            object.__setattr__(self, "candidate_facets", normalized_facets)
 
     @property
     def extracted_text_sha256(self) -> str:
@@ -149,21 +165,26 @@ class MediaTextExtraction:
     def fragment_evidence_hash(self) -> str:
         return _hash(_canonical_json({"fragments": list(self.fragment_evidence)}))
 
+    @property
+    def candidate_facets_hash(self) -> str | None:
+        if self.candidate_facets is None:
+            return None
+        return _hash(_canonical_json({"facets": dict(self.candidate_facets)}))
+
     def result_hash(self, *, source_object: Mapping[str, Any]) -> str:
-        return _hash(
-            _canonical_json(
-                {
-                    "contentSha256": str(source_object["contentSha256"]),
-                    "extractedTextSha256": self.extracted_text_sha256,
-                    "processorId": self.processor_id,
-                    "processorVersion": self.processor_version,
-                    "schemaVersion": OWNER_TRUTH_MEDIA_PROCESSING_SCHEMA_VERSION,
-                    "sourceObjectId": str(source_object["sourceObjectId"]),
-                    "truncated": self.truncated,
-                    "fragmentEvidenceHash": self.fragment_evidence_hash,
-                }
-            )
-        )
+        result = {
+            "contentSha256": str(source_object["contentSha256"]),
+            "extractedTextSha256": self.extracted_text_sha256,
+            "processorId": self.processor_id,
+            "processorVersion": self.processor_version,
+            "schemaVersion": OWNER_TRUTH_MEDIA_PROCESSING_SCHEMA_VERSION,
+            "sourceObjectId": str(source_object["sourceObjectId"]),
+            "truncated": self.truncated,
+            "fragmentEvidenceHash": self.fragment_evidence_hash,
+        }
+        if self.candidate_facets_hash is not None:
+            result["candidateFacetsHash"] = self.candidate_facets_hash
+        return _hash(_canonical_json(result))
 
 
 class OwnerTruthMediaProcessor(Protocol):
@@ -407,14 +428,15 @@ class UnavailableExternalMediaProcessor:
 
 
 class HTTPPrivateMediaTextProcessor:
-    """Minimal private binary-to-text provider contract for OCR and ASR.
+    """Private provider adapter for OCR/image understanding and ASR.
 
     The adapter deliberately sends no object URL, filename, owner, vault, or
     client identifier.  A provider receives only the explicitly-consented
-    bytes, MIME type and media kind.  It must return JSON with either a
-    non-empty ``text`` or ``transcript`` string.  This keeps concrete third
-    party choice behind a server-side adapter contract rather than coupling the
-    mobile client to one provider's credentials or response shape.
+    bytes, MIME type and media kind. Legacy providers may return a non-empty
+    ``text`` or ``transcript``. The image V2 contract may instead return a
+    bounded description, OCR text and inferred review facets. This keeps
+    concrete third-party choice behind a server-side adapter contract rather
+    than coupling the mobile client to provider credentials or response shape.
     """
 
     _RESPONSE_TEXT_FIELDS = ("text", "transcript")
@@ -427,10 +449,19 @@ class HTTPPrivateMediaTextProcessor:
         api_key: str,
         timeout_seconds: float,
         max_payload_bytes: int,
+        processor_version: str = "v1",
+        response_contract: str = "owner-truth-media-text-v1",
         client_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.processor_id = _opaque_identifier(processor_id, field="processor_id")
-        self.processor_version = "v1"
+        self.processor_version = _opaque_identifier(
+            processor_version,
+            field="processor_version",
+        )
+        self._response_contract = _opaque_identifier(
+            response_contract,
+            field="response_contract",
+        )
         self._endpoint = _external_processor_endpoint(endpoint)
         self._api_key = _external_processor_api_key(api_key)
         self._timeout_seconds = _external_processor_timeout(timeout_seconds)
@@ -451,7 +482,7 @@ class HTTPPrivateMediaTextProcessor:
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": content_type,
             "X-DreamJourney-Media-Kind": media_kind,
-            "X-DreamJourney-Processor-Contract": "owner-truth-media-text-v1",
+            "X-DreamJourney-Processor-Contract": self._response_contract,
         }
         try:
             with self._client_factory(
@@ -479,6 +510,14 @@ class HTTPPrivateMediaTextProcessor:
             raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid") from exc
         if not isinstance(body, Mapping):
             raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+        if self._response_contract == _IMAGE_UNDERSTANDING_SCHEMA_VERSION and any(
+            field in body for field in ("schemaVersion", "description", "ocrText", "facets")
+        ):
+            return _image_understanding_extraction(
+                body,
+                processor_id=self.processor_id,
+                processor_version=self.processor_version,
+            )
         for field in self._RESPONSE_TEXT_FIELDS:
             value = body.get(field)
             if isinstance(value, str) and value.strip():
@@ -488,6 +527,90 @@ class HTTPPrivateMediaTextProcessor:
                     extracted_text=_normalize_extracted_text(value),
                 )
         raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+
+
+def _image_understanding_extraction(
+    body: Mapping[str, Any],
+    *,
+    processor_id: str,
+    processor_version: str,
+) -> MediaTextExtraction:
+    if set(body) != {"schemaVersion", "description", "ocrText", "facets"}:
+        raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+    if body.get("schemaVersion") != _IMAGE_UNDERSTANDING_SCHEMA_VERSION:
+        raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+    description = _bounded_image_understanding_text(body.get("description"))
+    ocr_text = _bounded_image_understanding_text(body.get("ocrText"))
+    if not description and not ocr_text:
+        raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+    facets = _normalize_image_understanding_facets(body.get("facets"))
+    fragments = [value for value in (description, ocr_text) if value]
+    return MediaTextExtraction(
+        processor_id=processor_id,
+        processor_version=processor_version,
+        extracted_text="\n".join(fragments),
+        fragment_evidence=_fragment_evidence(fragments, locator_type="image"),
+        candidate_facets=facets,
+    )
+
+
+def _bounded_image_understanding_text(value: object) -> str:
+    if not isinstance(value, str):
+        raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+    normalized = _normalize_extracted_text(value)
+    if len(normalized) > _MAX_IMAGE_UNDERSTANDING_TEXT_CHARACTERS:
+        raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+    return normalized
+
+
+def _normalize_image_understanding_facets(value: object) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != set(_IMAGE_UNDERSTANDING_FACET_NAMES):
+        raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+    normalized = empty_memory_facets(confidence=0.0)
+    confidences: list[float] = []
+    for facet_name in _IMAGE_UNDERSTANDING_FACET_NAMES:
+        entries = value.get(facet_name)
+        if not isinstance(entries, list) or len(entries) > _MAX_IMAGE_UNDERSTANDING_FACET_VALUES:
+            raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+        seen_values: set[str] = set()
+        normalized_entries: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping) or set(entry) != {"value", "confidence"}:
+                raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+            raw_facet_value = entry.get("value")
+            facet_value = raw_facet_value.strip() if isinstance(raw_facet_value, str) else ""
+            confidence_value = entry.get("confidence")
+            if (
+                not facet_value
+                or len(facet_value) > _MAX_IMAGE_UNDERSTANDING_FACET_CHARACTERS
+                or isinstance(confidence_value, bool)
+            ):
+                raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+            try:
+                confidence = float(confidence_value)
+            except (TypeError, ValueError) as exc:
+                raise OwnerTruthMediaProcessingTerminalError(
+                    "externalMediaProcessorResponseInvalid"
+                ) from exc
+            if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+                raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+            dedupe_key = facet_value.casefold()
+            if dedupe_key in seen_values:
+                continue
+            seen_values.add(dedupe_key)
+            confidences.append(confidence)
+            normalized_entries.append(
+                {
+                    "value": facet_value,
+                    "evidenceMode": "inferred",
+                    "confidence": confidence,
+                }
+            )
+        normalized[facet_name] = normalized_entries
+    normalized["confidence"] = max(confidences, default=0.0)
+    if not validate_memory_facets(normalized).accepted:
+        raise OwnerTruthMediaProcessingTerminalError("externalMediaProcessorResponseInvalid")
+    return normalized
 
 
 def _external_processor_endpoint(value: object) -> str:
@@ -607,6 +730,8 @@ class OwnerTruthMediaProcessorRouter:
                     10 * 1024 * 1024,
                 ),
                 processor_id="httpImageOCR",
+                processor_version="v2",
+                response_contract=_IMAGE_UNDERSTANDING_SCHEMA_VERSION,
                 unavailable_processor_id="disabledImageOCR",
                 unavailable_reason="imageOcrProviderUnavailable",
                 configuration_reason="imageOcrProviderConfigurationInvalid",
@@ -627,6 +752,8 @@ class OwnerTruthMediaProcessorRouter:
                     10 * 1024 * 1024,
                 ),
                 processor_id="httpAudioASR",
+                processor_version="v1",
+                response_contract="owner-truth-media-text-v1",
                 unavailable_processor_id="disabledAudioASR",
                 unavailable_reason="audioAsrProviderUnavailable",
                 configuration_reason="audioAsrProviderConfigurationInvalid",
@@ -671,6 +798,8 @@ def _processor_from_settings(
     timeout_seconds: object,
     max_payload_bytes: object,
     processor_id: str,
+    processor_version: str,
+    response_contract: str,
     unavailable_processor_id: str,
     unavailable_reason: str,
     configuration_reason: str,
@@ -690,6 +819,8 @@ def _processor_from_settings(
     try:
         return HTTPPrivateMediaTextProcessor(
             processor_id=processor_id,
+            processor_version=processor_version,
+            response_contract=response_contract,
             endpoint=str(endpoint or ""),
             api_key=str(api_key or ""),
             timeout_seconds=float(timeout_seconds),
@@ -855,6 +986,23 @@ def build_import_source_command(
             f"{source_object_id}:{source_object['contentSha256']}:{extraction.extracted_text_sha256}",
         )
     )
+    metadata = {
+        "contentSha256": str(source_object["contentSha256"]),
+        "extractedTextSha256": extraction.extracted_text_sha256,
+        "fragmentEvidence": list(extraction.fragment_evidence),
+        "fragmentEvidenceHash": extraction.fragment_evidence_hash,
+        "mediaKind": str(source_object["mediaKind"]),
+        "origin": "mediaSourceObjectProcessing",
+        "processingGeneration": int(source_object["processingGeneration"]),
+        "processorId": extraction.processor_id,
+        "processorVersion": extraction.processor_version,
+        "sourceObjectId": source_object_id,
+        "storageVersion": int(source_object["storageVersion"]),
+        "textTruncated": extraction.truncated,
+    }
+    if extraction.candidate_facets is not None:
+        metadata["candidateFacets"] = dict(extraction.candidate_facets)
+        metadata["candidateFacetsHash"] = extraction.candidate_facets_hash
     return CreateTextSourceCommand(
         command_id=(
             "media-processing:"
@@ -863,20 +1011,7 @@ def build_import_source_command(
         source_id=derived_source_id,
         expected_version=0,
         text=extraction.extracted_text,
-        metadata={
-            "contentSha256": str(source_object["contentSha256"]),
-            "extractedTextSha256": extraction.extracted_text_sha256,
-            "fragmentEvidence": list(extraction.fragment_evidence),
-            "fragmentEvidenceHash": extraction.fragment_evidence_hash,
-            "mediaKind": str(source_object["mediaKind"]),
-            "origin": "mediaSourceObjectProcessing",
-            "processingGeneration": int(source_object["processingGeneration"]),
-            "processorId": extraction.processor_id,
-            "processorVersion": extraction.processor_version,
-            "sourceObjectId": source_object_id,
-            "storageVersion": int(source_object["storageVersion"]),
-            "textTruncated": extraction.truncated,
-        },
+        metadata=metadata,
         source_kind=SourceKind.IMPORT,
         expected_authority_epoch=int(source_object["authorityEpoch"]),
     )
@@ -946,7 +1081,7 @@ def _normalize_fragment_evidence(
         }:
             raise OwnerTruthMediaProcessingError("fragment evidence is invalid")
         locator_type = str(value.get("locatorType") or "")
-        if locator_type not in {"line", "page", "paragraph"}:
+        if locator_type not in {"line", "page", "paragraph", "image"}:
             raise OwnerTruthMediaProcessingError("fragment evidence is invalid")
         ordinal = value.get("ordinal")
         locator_value = value.get("locatorValue")

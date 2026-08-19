@@ -42,6 +42,10 @@ def _digest(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
 
 
+def _canonical_digest(value: dict[str, object]) -> str:
+    return _digest(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+
+
 def _facets(**values: list[dict[str, object]]) -> dict[str, object]:
     return {
         "people": values.get("people", []),
@@ -373,6 +377,88 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(candidate["payload"]["sensitivity"], "standard")
         self.assertEqual(candidate["payload"]["reviewMode"], "single")
         self.assertEqual(candidate["payload"]["evidenceRefs"][0]["span"], {"start": 0, "end": len(self.source_text)})
+
+    def test_trusted_image_understanding_source_creates_inferred_review_candidate(self) -> None:
+        facets = _facets(
+            people=[
+                {
+                    "value": "母亲",
+                    "evidenceMode": "inferred",
+                    "confidence": 0.92,
+                }
+            ],
+            time=[
+                {
+                    "value": "2025 年春节",
+                    "evidenceMode": "inferred",
+                    "confidence": 0.8,
+                }
+            ],
+            places=[
+                {
+                    "value": "杭州西湖",
+                    "evidenceMode": "inferred",
+                    "confidence": 0.86,
+                }
+            ],
+        )
+        source_text = "一家人在杭州西湖合影。\n2025 年春节"
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(source_text),
+            source_text=source_text,
+            source_metadata={
+                "origin": "mediaSourceObjectProcessing",
+                "mediaKind": "image",
+                "processorId": "httpImageOCR",
+                "processorVersion": "v2",
+                "candidateFacets": facets,
+                "candidateFacetsHash": _canonical_digest({"facets": facets}),
+            },
+        )
+        store.lease_repository.seed(self.intent)
+
+        result = self._worker(store=store).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        candidate = next(iter(store.candidate_repository.snapshot()["candidates"].values()))
+        payload = candidate["payload"]
+        self.assertEqual(candidate["decisionStatus"], "pending")
+        self.assertEqual(payload["perspectiveType"], "inferred")
+        self.assertEqual(payload["epistemicStatus"], "inferred")
+        self.assertEqual(payload["reviewMode"], "single")
+        self.assertEqual(payload["content"]["facets"]["people"][0]["value"], "母亲")
+        self.assertEqual(payload["content"]["facets"]["places"][0]["value"], "杭州西湖")
+
+    def test_tampered_image_understanding_facets_fail_closed(self) -> None:
+        facets = _facets(
+            people=[
+                {
+                    "value": "母亲",
+                    "evidenceMode": "inferred",
+                    "confidence": 0.92,
+                }
+            ]
+        )
+        store = self._new_store(
+            source_metadata={
+                "origin": "mediaSourceObjectProcessing",
+                "mediaKind": "image",
+                "processorId": "httpImageOCR",
+                "processorVersion": "v2",
+                "candidateFacets": facets,
+                "candidateFacetsHash": "0" * 64,
+            }
+        )
+        store.lease_repository.seed(self.intent)
+
+        result = self._worker(store=store).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["reason"], "candidateExtractionQuarantined")
+        self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
 
     def test_live_digest_uses_only_user_evidence_and_excludes_assistant_suggestions(self) -> None:
         first_user_turn = "我小时候住在河边。河水很安静。"

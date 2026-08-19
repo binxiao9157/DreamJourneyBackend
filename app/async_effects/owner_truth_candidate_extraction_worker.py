@@ -16,7 +16,7 @@ import json
 import re
 import socket
 from time import perf_counter, sleep
-from typing import Any, Optional, Protocol
+from typing import Any, Mapping, Optional, Protocol
 
 import httpx
 
@@ -56,6 +56,7 @@ from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION_V2,
     empty_memory_facets,
+    validate_memory_facets,
 )
 from app.observability.operation_metrics import OperationMetricRecorder
 from app.services.deepseek import DeepSeekLiveMemoryOrganizationProxy
@@ -114,6 +115,10 @@ class DeterministicOwnerTruthCandidateExtractor:
     _LIVE_EXTRACTOR_ID = "deterministicLiveConversationDigest"
     _LIVE_MODEL_ID = "deterministic-live-conversation-digest-v1"
     _LIVE_PROMPT_VERSION = "owner-truth-live-conversation-digest-v1"
+    _IMAGE_EXTRACTOR_ID = "deterministicImageUnderstandingReview"
+    _IMAGE_MODEL_ID = "provider-image-understanding-v1"
+    _IMAGE_PROMPT_VERSION = "owner-truth-image-understanding-review-v1"
+    _IMAGE_INVALID_REASON = "imageInferenceMetadataInvalid"
     _MAXIMUM_LIVE_SUMMARY_CHARACTERS = 800
 
     def extract(
@@ -136,17 +141,37 @@ class DeterministicOwnerTruthCandidateExtractor:
                 failure_code="sourceTextInvalid",
             )
 
+        try:
+            image_facets = self._trusted_image_facets(source)
+        except ValueError:
+            return SyntheticCandidateExtractionCommand(
+                intent=intent,
+                extractor_id=self._IMAGE_EXTRACTOR_ID,
+                model_id=self._IMAGE_MODEL_ID,
+                prompt_version=self._IMAGE_PROMPT_VERSION,
+                policy_version=OWNER_TRUTH_SCHEMA_VERSION,
+                source_content_hash=source.source_content_hash,
+                status=ExtractionResultStatus.QUARANTINED,
+                proposals=(),
+                failure_code=self._IMAGE_INVALID_REASON,
+            )
+
         live_summary = self._live_conversation_digest(source)
         summary = live_summary or normalized_text
         is_live_digest = live_summary is not None
+        is_image_inference = image_facets is not None
         proposal = CandidateProposal(
             memory_kind=MemoryKind.EXPERIENCE,
-            perspective_type=PerspectiveType.FIRST_PERSON,
-            epistemic_status=EpistemicStatus.RECALLED,
+            perspective_type=(
+                PerspectiveType.INFERRED if is_image_inference else PerspectiveType.FIRST_PERSON
+            ),
+            epistemic_status=(
+                EpistemicStatus.INFERRED if is_image_inference else EpistemicStatus.RECALLED
+            ),
             sensitivity=SensitivityLevel.STANDARD,
             content={
                 "summary": summary,
-                "facets": empty_memory_facets(confidence=0.0),
+                "facets": image_facets or empty_memory_facets(confidence=0.0),
             },
             evidence_span=CandidateEvidenceSpan(start=0, end=len(source.source_text)),
             confidence=0.0,
@@ -155,16 +180,74 @@ class DeterministicOwnerTruthCandidateExtractor:
         )
         return SyntheticCandidateExtractionCommand(
             intent=intent,
-            extractor_id=self._LIVE_EXTRACTOR_ID if is_live_digest else self._EXTRACTOR_ID,
-            model_id=self._LIVE_MODEL_ID if is_live_digest else self._MODEL_ID,
+            extractor_id=(
+                self._IMAGE_EXTRACTOR_ID
+                if is_image_inference
+                else self._LIVE_EXTRACTOR_ID
+                if is_live_digest
+                else self._EXTRACTOR_ID
+            ),
+            model_id=(
+                self._IMAGE_MODEL_ID
+                if is_image_inference
+                else self._LIVE_MODEL_ID
+                if is_live_digest
+                else self._MODEL_ID
+            ),
             prompt_version=(
-                self._LIVE_PROMPT_VERSION if is_live_digest else self._PROMPT_VERSION
+                self._IMAGE_PROMPT_VERSION
+                if is_image_inference
+                else self._LIVE_PROMPT_VERSION
+                if is_live_digest
+                else self._PROMPT_VERSION
             ),
             policy_version=OWNER_TRUTH_SCHEMA_VERSION,
             source_content_hash=source.source_content_hash,
             status=ExtractionResultStatus.SUCCEEDED,
             proposals=(proposal,),
         )
+
+    @staticmethod
+    def _trusted_image_facets(
+        source: OwnerTruthCandidateExtractionInput,
+    ) -> Mapping[str, Any] | None:
+        metadata = source.source_metadata or {}
+        has_facets = "candidateFacets" in metadata
+        has_hash = "candidateFacetsHash" in metadata
+        if not has_facets and not has_hash:
+            return None
+        if (
+            not has_facets
+            or not has_hash
+            or metadata.get("origin") != "mediaSourceObjectProcessing"
+            or metadata.get("mediaKind") != "image"
+            or metadata.get("processorVersion") != "v2"
+        ):
+            raise ValueError("image inference metadata is not trusted")
+        facets = metadata.get("candidateFacets")
+        if not isinstance(facets, Mapping) or not validate_memory_facets(facets).accepted:
+            raise ValueError("image inference facets are invalid")
+        for facet_name, entries in facets.items():
+            if facet_name == "confidence":
+                continue
+            if facet_name not in {"people", "time", "places"} and entries:
+                raise ValueError("image inference facet scope is invalid")
+            if any(
+                not isinstance(entry, Mapping) or entry.get("evidenceMode") != "inferred"
+                for entry in entries
+            ):
+                raise ValueError("image inference evidence mode is invalid")
+        expected_hash = sha256(
+            json.dumps(
+                {"facets": dict(facets)},
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if metadata.get("candidateFacetsHash") != expected_hash:
+            raise ValueError("image inference facets hash is invalid")
+        return facets
 
     @classmethod
     def _live_conversation_digest(
