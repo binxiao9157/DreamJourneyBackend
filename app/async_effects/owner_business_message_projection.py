@@ -23,6 +23,10 @@ from app.async_effects.message_notification_effects import (
     BusinessCompletionMessageSource,
     InAppMessageKind,
 )
+from app.async_effects.owner_inbox_account_resolver import (
+    OwnerInboxAccountResolutionError,
+    resolve_owner_inbox_account,
+)
 
 
 class OwnerBusinessMessageProjectionError(RuntimeError):
@@ -62,7 +66,6 @@ def enqueue_owner_business_message(
     if getattr(store, "business_message_projection_enabled", True) is False:
         return None
 
-    resolver_factory = getattr(store, "async_effect_legacy_inbox_account_resolver", None)
     effect_repository = getattr(store, "effect_kernel_repository", None)
     input_repository = getattr(
         store,
@@ -70,14 +73,22 @@ def enqueue_owner_business_message(
         None,
     )
     if not all(callable(candidate) for candidate in (
-        resolver_factory,
         effect_repository,
         input_repository,
     )):
         return None
 
     target = intent.target
-    resolved = resolver_factory().resolve_active(target.owner_subject_id)
+    try:
+        resolved = resolve_owner_inbox_account(
+            store,
+            subject_id=target.owner_subject_id,
+            vault_id=target.vault_id,
+        )
+    except OwnerInboxAccountResolutionError as exc:
+        raise OwnerBusinessMessageProjectionError(
+            "active owner inbox does not match the completed business target"
+        ) from exc
     snapshot = resolved.snapshot
     if (
         snapshot.inbox_subject_id != target.owner_subject_id

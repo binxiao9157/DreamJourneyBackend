@@ -121,6 +121,9 @@ from app.async_effects.business_message_projection_request_repository import (
 from app.async_effects.legacy_identity_inbox_bridge import (
     PostgresLegacyInboxAccountResolver,
 )
+from app.async_effects.owner_inbox_account_resolver import (
+    PostgresOwnerInboxAccountResolver,
+)
 from app.async_effects.target_admission import (
     PostgresOwnerTruthMemoryProjectionTargetAdmissionRepository,
     PostgresOwnerTruthSourceTargetAdmissionRepository,
@@ -451,6 +454,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("legacy inbox account resolution requires an active unit of work")
         return PostgresLegacyInboxAccountResolver(active.connection)
+
+    def async_effect_owner_inbox_account_resolver(
+        self,
+    ) -> PostgresOwnerInboxAccountResolver:
+        """Resolve a canonical Owner inbox, with verified legacy fallback."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner inbox account resolution requires an active unit of work")
+        return PostgresOwnerInboxAccountResolver(active.connection)
 
     def owner_truth_source_target_admission_repository(
         self,

@@ -37,8 +37,9 @@ from app.async_effects.lease_repository import (
     AsyncEffectLeaseLost,
 )
 from app.async_effects.worker_lifecycle import WorkerDrainController, WorkerLeaseHeartbeat
-from app.async_effects.legacy_identity_inbox_bridge import (
-    LegacyInboxAccountResolutionError,
+from app.async_effects.owner_inbox_account_resolver import (
+    OwnerInboxAccountResolutionError,
+    resolve_owner_inbox_account,
 )
 from app.core.config import Settings
 from app.observability.operation_metrics import OperationMetricRecorder
@@ -456,12 +457,13 @@ class BusinessMessageProjectionWorkerRuntime:
             or inbox.inbox_vault_id != source_target.vault_id
         ):
             return _CROSS_ACCOUNT_UNSUPPORTED_REASON
-        resolver_factory = getattr(self._store, "async_effect_legacy_inbox_account_resolver", None)
-        if not callable(resolver_factory):
-            return _INBOX_UNAVAILABLE_REASON
         try:
-            resolved = resolver_factory().resolve_active(inbox.inbox_subject_id)
-        except (LegacyInboxAccountResolutionError, ValueError, RuntimeError, AttributeError):
+            resolved = resolve_owner_inbox_account(
+                self._store,
+                subject_id=inbox.inbox_subject_id,
+                vault_id=inbox.inbox_vault_id,
+            )
+        except (OwnerInboxAccountResolutionError, ValueError, RuntimeError, AttributeError):
             return _INBOX_UNAVAILABLE_REASON
         if getattr(resolved, "snapshot", None) != inbox:
             return _INBOX_SNAPSHOT_MISMATCH_REASON
@@ -501,11 +503,19 @@ class BusinessMessageProjectionWorkerRuntime:
             "async_effect_lease_repository",
             "async_effect_consumer_repository",
             "async_effect_dead_letter_repository",
-            "async_effect_legacy_inbox_account_resolver",
             "async_effect_business_message_projection_request_repository",
             "async_effect_business_message_projection_repository",
         )
-        if not all(callable(getattr(self._store, name, None)) for name in required):
+        has_inbox_resolver = any(
+            callable(getattr(self._store, name, None))
+            for name in (
+                "async_effect_owner_inbox_account_resolver",
+                "async_effect_legacy_inbox_account_resolver",
+            )
+        )
+        if not has_inbox_resolver or not all(
+            callable(getattr(self._store, name, None)) for name in required
+        ):
             return "businessMessageProjectionWorkerStoreUnsupported"
         return None
 
