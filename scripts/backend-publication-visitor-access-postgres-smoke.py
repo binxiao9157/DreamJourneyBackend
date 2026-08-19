@@ -441,8 +441,16 @@ def exercise(dsn: str) -> None:
                     rejected += 1
         require(admitted == 1 and rejected == 1, "usage CAS must admit exactly one Visitor")
         require(bool(admitted_session_id), "one Visitor session must be available for projection read")
+        consumed_owner_grants = {
+            summary.grant_id: summary
+            for summary in owner_grants(
+                store,
+                seed=seed,
+                visitor_subject_id=visitor_subject_id,
+            )
+        }
         require(
-            owner_grants(store, seed=seed, visitor_subject_id=visitor_subject_id)[0].use_remaining == 0,
+            consumed_owner_grants[issued.grant_id].use_remaining == 0,
             "Owner ShareGrant summary must reflect the atomically consumed use",
         )
 
