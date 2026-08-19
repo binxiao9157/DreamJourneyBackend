@@ -998,7 +998,7 @@ def _publication_internal_qa_route_is_hidden(request: Request) -> bool:
 
 
 def _require_publication_authority_qa(request: Request) -> str:
-    """Keep the unfinished M2 publication writer absent from normal product UI."""
+    """Keep the internal publication QA writer absent from normal product UI."""
 
     if not _publication_authority_qa_requested(request):
         raise HTTPException(
@@ -1540,7 +1540,7 @@ def _publication_formal_owner_context(
     vault_id: str,
     feature: str,
 ) -> OwnerTruthCommandContext:
-    """Authorize a formal M2 route without accepting an internal QA header."""
+    """Authorize a formal product route without accepting an internal QA header."""
 
     return _owner_truth_captured_release_policy_context(
         request,
@@ -1551,12 +1551,12 @@ def _publication_formal_owner_context(
             request.url.path,
             None,
         ),
-        user_session_required_code="publicationClosedBetaUserSessionRequired",
+        user_session_required_code="publicationUserSessionRequired",
     )
 
 
 def _publication_formal_visitor_subject(request: Request) -> str:
-    """Require an authenticated Visitor and the still-closed M2 release Gate."""
+    """Require an authenticated Visitor and the publication Visitor release Gate."""
 
     principal = getattr(request.state, "auth_principal", None)
     if not isinstance(principal, RequestPrincipal) or _request_user_principal_id(request) is None:
@@ -1572,7 +1572,7 @@ def _publication_formal_visitor_subject(request: Request) -> str:
     context = _owner_truth_captured_release_policy_context(
         request,
         vault_id="publication-visitor-session",
-        feature="visitorAccess",
+        feature="publicationVisitor",
         route=RELEASE_POLICY_COMMAND_GATE.route_label_for_request(
             request.method,
             request.url.path,
@@ -6684,10 +6684,9 @@ def _evaluate_release_policy_command(
             incident_block["reason"]
         )
         return response, {}
-    release_stage = RELEASE_POLICY_SERVICE.release_stage_for(feature)
     system_default_closed_bypass = (
         principal.kind == PrincipalKind.MACHINE
-        and release_stage in {"M1", "M2", "M3", "M4"}
+        and RELEASE_POLICY_SERVICE.requires_default_enforcement(feature)
         and not RELEASE_POLICY_SERVICE.is_product_closed(feature)
     )
     mode = (
@@ -8765,7 +8764,7 @@ def _publication_answer_for_subject(
     "/v2/vaults/{vault_id}/publications",
     include_in_schema=False,
 )
-def list_closed_beta_publications(request: Request, vault_id: str) -> JSONResponse:
+def list_publications(request: Request, vault_id: str) -> JSONResponse:
     context = _publication_formal_owner_context(
         request,
         vault_id=vault_id,
@@ -8778,7 +8777,7 @@ def list_closed_beta_publications(request: Request, vault_id: str) -> JSONRespon
     "/v2/vaults/{vault_id}/publications/{publication_id}/versions",
     include_in_schema=False,
 )
-def list_closed_beta_publication_versions(
+def list_publication_versions(
     request: Request,
     vault_id: str,
     publication_id: str,
@@ -8798,7 +8797,7 @@ def list_closed_beta_publication_versions(
     "/v2/vaults/{vault_id}/publication-drafts",
     include_in_schema=False,
 )
-def create_closed_beta_publication_draft(
+def create_publication_draft(
     request: Request,
     vault_id: str,
     payload: Dict[str, Any],
@@ -8815,7 +8814,7 @@ def create_closed_beta_publication_draft(
     "/v2/vaults/{vault_id}/publications/{publication_id}/drafts",
     include_in_schema=False,
 )
-def create_closed_beta_publication_revision_draft(
+def create_publication_revision_draft(
     request: Request,
     vault_id: str,
     publication_id: str,
@@ -8837,7 +8836,7 @@ def create_closed_beta_publication_revision_draft(
     "/v2/vaults/{vault_id}/publication-drafts/{draft_id}/confirm/{publication_id}",
     include_in_schema=False,
 )
-def confirm_closed_beta_publication_draft(
+def confirm_publication_draft(
     request: Request,
     vault_id: str,
     draft_id: str,
@@ -8861,7 +8860,7 @@ def confirm_closed_beta_publication_draft(
     "/v2/vaults/{vault_id}/publications/{publication_id}/withdraw",
     include_in_schema=False,
 )
-def withdraw_closed_beta_publication(
+def withdraw_publication(
     request: Request,
     vault_id: str,
     publication_id: str,
@@ -8884,7 +8883,7 @@ def withdraw_closed_beta_publication(
     "/v2/vaults/{vault_id}/publications/{publication_id}/suspend",
     include_in_schema=False,
 )
-def suspend_closed_beta_publication(
+def suspend_publication(
     request: Request,
     vault_id: str,
     publication_id: str,
@@ -8907,14 +8906,14 @@ def suspend_closed_beta_publication(
     "/v2/vaults/{vault_id}/publication-grants",
     include_in_schema=False,
 )
-def list_closed_beta_publication_grants(
+def list_publication_grants(
     request: Request,
     vault_id: str,
 ) -> JSONResponse:
     context = _publication_formal_owner_context(
         request,
         vault_id=vault_id,
-        feature="visitorAccess",
+        feature="publicationGrantManagement",
     )
     return _publication_list_grants_for_context(context, product_contract=True)
 
@@ -8923,7 +8922,7 @@ def list_closed_beta_publication_grants(
     "/v2/vaults/{vault_id}/publication-grants",
     include_in_schema=False,
 )
-def issue_closed_beta_publication_grant(
+def issue_publication_grant(
     request: Request,
     vault_id: str,
     payload: Dict[str, Any],
@@ -8931,7 +8930,7 @@ def issue_closed_beta_publication_grant(
     context = _publication_formal_owner_context(
         request,
         vault_id=vault_id,
-        feature="visitorAccess",
+        feature="publicationGrantManagement",
     )
     return _publication_issue_grant_for_context(
         context,
@@ -8944,7 +8943,7 @@ def issue_closed_beta_publication_grant(
     "/v2/vaults/{vault_id}/publication-grants/{grant_id}/revoke",
     include_in_schema=False,
 )
-def revoke_closed_beta_publication_grant(
+def revoke_publication_grant(
     request: Request,
     vault_id: str,
     grant_id: str,
@@ -8953,7 +8952,7 @@ def revoke_closed_beta_publication_grant(
     context = _publication_formal_owner_context(
         request,
         vault_id=vault_id,
-        feature="visitorAccess",
+        feature="publicationGrantManagement",
     )
     return _publication_revoke_grant_for_context(
         context,
@@ -8966,7 +8965,7 @@ def revoke_closed_beta_publication_grant(
     "/v2/publication-grants/{grant_id}/sessions",
     include_in_schema=False,
 )
-def admit_closed_beta_publication_visitor(
+def admit_publication_visitor(
     request: Request,
     grant_id: str,
     payload: Dict[str, Any],
@@ -8993,7 +8992,7 @@ def list_publication_visitor_invitations(request: Request) -> JSONResponse:
     "/v2/publication-sessions/{session_id}/projection",
     include_in_schema=False,
 )
-def read_closed_beta_publication_projection(
+def read_publication_projection(
     request: Request,
     session_id: str,
     payload: Dict[str, Any],
@@ -9009,7 +9008,7 @@ def read_closed_beta_publication_projection(
     "/v2/publication-sessions/{session_id}/answers",
     include_in_schema=False,
 )
-def answer_closed_beta_publication_question(
+def answer_publication_question(
     request: Request,
     session_id: str,
     payload: Dict[str, Any],
@@ -9076,7 +9075,7 @@ def create_publication_authority_draft(
     vault_id: str,
     payload: Dict[str, Any],
 ) -> JSONResponse:
-    """Create an M2 QA-only draft from one active, confirmed MemoryVersion."""
+    """Create a QA-only draft from one active, confirmed MemoryVersion."""
 
     try:
         context = _publication_authority_context(request, vault_id=vault_id)

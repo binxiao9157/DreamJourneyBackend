@@ -312,7 +312,7 @@ class ReleasePolicyFeatureDecision(BaseModel):
 
 
 class PublicationDefaultClosedPolicy(BaseModel):
-    """The non-promotable publication half of the M2 policy contract."""
+    """The non-promotable publication half of the release policy contract."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -337,7 +337,7 @@ class PublicationDefaultClosedPolicy(BaseModel):
 
 
 class VisitorDefaultClosedPolicy(BaseModel):
-    """The non-promotable visitor half of the M2 policy contract."""
+    """The non-promotable visitor half of the release policy contract."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -356,7 +356,7 @@ class VisitorDefaultClosedPolicy(BaseModel):
 
 
 class PublicationVisitorReleasePolicy(BaseModel):
-    """Versioned M2 policy metadata; it cannot enable publication or visitors."""
+    """Versioned policy metadata; it cannot enable publication or visitors."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -419,7 +419,20 @@ class ReleasePolicyService:
         23,
         tzinfo=timezone.utc,
     )
-    _PUBLICATION_VISITOR_FEATURES = {"publication", "visitorAccess"}
+    FEATURE_ALIAS_SUNSET_AT = datetime(2026, 11, 30, tzinfo=timezone.utc)
+    _PUBLICATION_FEATURES = {
+        "publication",
+        "publicationGrantManagement",
+        "publicationVisitor",
+    }
+    _FEATURE_ALIASES: dict[str, tuple[str, ...]] = {
+        "publicationManagementM2": ("publication",),
+        "publicationGrantManagementM2": ("publicationGrantManagement",),
+        "publicationVisitorM2": ("publicationVisitor",),
+        # The legacy name covered two different principals. Runtime requests
+        # disambiguate it by audience; server configuration expands it to both.
+        "visitorAccess": ("publicationGrantManagement", "publicationVisitor"),
+    }
 
     _FEATURE_GATES: dict[str, tuple[Gate, ...]] = {
         "echoTextInput": ("G0", "G1"),
@@ -474,7 +487,8 @@ class ReleasePolicyService:
         "voiceCloneShell": ("G0", "G1", "G2", "G3", "G4"),
         "digitalHumanLivePanel": ("G0", "G1", "G2", "G3", "G4"),
         "publication": ("G0", "G1", "G4"),
-        "visitorAccess": ("G0", "G1", "G4"),
+        "publicationGrantManagement": ("G0", "G1", "G4"),
+        "publicationVisitor": ("G0", "G1", "G4"),
         "digitalInheritance": ("G0", "G1", "G2", "G3", "G4"),
         "knowledgeLicensing": ("G0", "G1", "G2", "G3", "G4"),
         "beneficiarySettlement": ("G0", "G1", "G2", "G3", "G4"),
@@ -488,12 +502,31 @@ class ReleasePolicyService:
         "digitalHumanLivePanel": "M2",
         "familySpace": "M2",
         "publication": "M2",
-        "visitorAccess": "M2",
+        "publicationGrantManagement": "M2",
+        "publicationVisitor": "M2",
         "careDashboard": "M3",
         "careDoctorContact": "M3",
         "digitalInheritance": "M4",
         "knowledgeLicensing": "M4",
         "beneficiarySettlement": "M4",
+    }
+    # Compatibility-only stage metadata remains in responses for older
+    # clients. Authorization uses this explicit stable-feature set instead.
+    _DEFAULT_ENFORCED_FEATURES = {
+        "ownerMediaCaptureV1",
+        "ownerMediaProcessingV1",
+        "voiceCloneShell",
+        "personaSettings",
+        "digitalHumanLivePanel",
+        "familySpace",
+        "publication",
+        "publicationGrantManagement",
+        "publicationVisitor",
+        "careDashboard",
+        "careDoctorContact",
+        "digitalInheritance",
+        "knowledgeLicensing",
+        "beneficiarySettlement",
     }
     _CLOSED_PILOT_OWNER_VISIBLE = {
         "echoTextInput",
@@ -567,6 +600,34 @@ class ReleasePolicyService:
 
         return tuple(sorted(cls._FEATURE_GATES))
 
+    @classmethod
+    def canonical_feature_name(
+        cls,
+        feature: str,
+        *,
+        audience: Optional[ReleaseAudience] = None,
+    ) -> str:
+        normalized = feature.strip()
+        aliases = cls._FEATURE_ALIASES.get(normalized)
+        if aliases is None:
+            return normalized
+        if normalized == "visitorAccess":
+            return aliases[1] if audience == "visitor" else aliases[0]
+        return aliases[0]
+
+    @classmethod
+    def _normalize_configured_features(cls, features: Iterable[str]) -> Set[str]:
+        normalized: Set[str] = set()
+        for feature in features:
+            value = feature.strip()
+            aliases = cls._FEATURE_ALIASES.get(value)
+            if aliases is None:
+                if value:
+                    normalized.add(value)
+            else:
+                normalized.update(aliases)
+        return normalized
+
     def __init__(
         self,
         *,
@@ -586,9 +647,11 @@ class ReleasePolicyService:
         self.min_client_build = max(1, min_client_build)
         self.ttl_seconds = max(60, ttl_seconds)
         self.emergency_revision = max(0, emergency_revision)
-        self.emergency_disabled_features: Set[str] = set(emergency_disabled_features or ())
-        self.enforced_features: Set[str] = set(enforced_features or ())
-        self.closed_pilot_enabled_features: Set[str] = set(
+        self.emergency_disabled_features = self._normalize_configured_features(
+            emergency_disabled_features or ()
+        )
+        self.enforced_features = self._normalize_configured_features(enforced_features or ())
+        self.closed_pilot_enabled_features = self._normalize_configured_features(
             closed_pilot_enabled_features or ()
         )
         self.authenticated_owner_v4_enabled = bool(authenticated_owner_v4_enabled)
@@ -615,35 +678,40 @@ class ReleasePolicyService:
         self.enforce_default_closed_stages = enforce_default_closed_stages
 
     def command_mode_for(self, feature: str) -> ReleasePolicyCommandMode:
-        if self.is_product_closed(feature):
+        canonical_feature = self.canonical_feature_name(feature)
+        if self.is_product_closed(canonical_feature):
             return "enforce"
-        if feature in self.emergency_disabled_features:
+        if canonical_feature in self.emergency_disabled_features:
             return "enforce"
-        if (
-            self.enforce_default_closed_stages
-            and self.release_stage_for(feature) in {"M1", "M2", "M3", "M4"}
-        ):
+        if self.requires_default_enforcement(canonical_feature):
             return "enforce"
-        if not self.shadow_mode or feature in self.enforced_features:
+        if not self.shadow_mode or canonical_feature in self.enforced_features:
             return "enforce"
         return "observe"
 
     @classmethod
     def release_stage_for(cls, feature: str) -> ReleaseStage:
-        return cls._FEATURE_STAGES.get(feature, "unknown")
+        return cls._FEATURE_STAGES.get(cls.canonical_feature_name(feature), "unknown")
+
+    def requires_default_enforcement(self, feature: str) -> bool:
+        return bool(
+            self.enforce_default_closed_stages
+            and self.canonical_feature_name(feature) in self._DEFAULT_ENFORCED_FEATURES
+        )
 
     def minimum_client_access_mode(self, feature: str) -> str:
-        if self.is_product_closed(feature):
+        canonical_feature = self.canonical_feature_name(feature)
+        if self.is_product_closed(canonical_feature):
             return "deny"
         owner_visible = (
             self._closed_pilot_owner_visible_features
             | self._authenticated_owner_visible_features
         )
-        return "readOnly" if feature in owner_visible else "deny"
+        return "readOnly" if canonical_feature in owner_visible else "deny"
 
     @classmethod
     def is_product_closed(cls, feature: str) -> bool:
-        return feature in cls._PRODUCT_CLOSED_FEATURES
+        return cls.canonical_feature_name(feature) in cls._PRODUCT_CLOSED_FEATURES
 
     @property
     def _closed_pilot_owner_visible_features(self) -> Set[str]:
@@ -688,10 +756,17 @@ class ReleasePolicyService:
             "authenticatedOwnerFeatures": sorted(
                 self._authenticated_owner_visible_features
             ),
+            "featureAliases": {
+                alias: list(canonical)
+                for alias, canonical in sorted(self._FEATURE_ALIASES.items())
+            },
+            "featureAliasSunsetAt": self.FEATURE_ALIAS_SUNSET_AT.isoformat(),
             "productClosedFeatures": sorted(self._PRODUCT_CLOSED_FEATURES),
             "killSwitchFeatures": sorted(self.emergency_disabled_features),
+            "defaultClosedFeatures": sorted(self._DEFAULT_ENFORCED_FEATURES),
             "defaultClosedStages": ["M1", "M2", "M3", "M4"],
-            "defaultClosedStageEffectsEnforced": self.enforce_default_closed_stages,
+            "defaultClosedStageEffectsEnforced": False,
+            "defaultClosedFeatureEffectsEnforced": self.enforce_default_closed_stages,
             "capabilityBindings": dict(sorted(self._FEATURE_CAPABILITIES.items())),
             "publicationVisitorPolicy": self.publication_visitor_policy().model_dump(
                 mode="json"
@@ -699,7 +774,7 @@ class ReleasePolicyService:
         }
 
     def publication_visitor_policy(self) -> PublicationVisitorReleasePolicy:
-        """Return fixed M2 requirements without creating a publication authority."""
+        """Return fixed Visitor requirements without creating publication authority."""
 
         return PublicationVisitorReleasePolicy(
             policyRevision=self.policy_revision,
@@ -777,8 +852,9 @@ class ReleasePolicyService:
         cohort: str,
         client_below_minimum: bool,
     ) -> ReleasePolicyFeatureDecision:
-        required_gates = self._FEATURE_GATES.get(feature)
-        required_capability = self._FEATURE_CAPABILITIES.get(feature)
+        canonical_feature = self.canonical_feature_name(feature, audience=audience)
+        required_gates = self._FEATURE_GATES.get(canonical_feature)
+        required_capability = self._FEATURE_CAPABILITIES.get(canonical_feature)
         capability_ready = self._capability_ready(required_capability)
         if required_gates is None:
             return ReleasePolicyFeatureDecision(
@@ -793,10 +869,10 @@ class ReleasePolicyService:
                 requiredCapability=None,
                 capabilityReady=False,
             )
-        if self.is_product_closed(feature):
+        if self.is_product_closed(canonical_feature):
             reason = "productClosed"
             allowed = False
-        elif feature in self.emergency_disabled_features:
+        elif canonical_feature in self.emergency_disabled_features:
             reason = "emergencyRevoked"
             allowed = False
         elif client_below_minimum:
@@ -805,7 +881,7 @@ class ReleasePolicyService:
         elif (
             audience == "owner"
             and cohort in {"authenticatedOwner", "closedPilotAdultSelf"}
-            and feature in self._authenticated_owner_visible_features
+            and canonical_feature in self._authenticated_owner_visible_features
         ):
             if required_capability is not None and not capability_ready:
                 reason = "capabilityUnavailable"
@@ -816,7 +892,7 @@ class ReleasePolicyService:
         elif (
             audience == "owner"
             and cohort == "closedPilotAdultSelf"
-            and feature in self._closed_pilot_owner_visible_features
+            and canonical_feature in self._closed_pilot_owner_visible_features
         ):
             if required_capability is not None and not capability_ready:
                 reason = "capabilityUnavailable"
@@ -824,7 +900,7 @@ class ReleasePolicyService:
             else:
                 reason = "closedPilotOwnerCore"
                 allowed = True
-        elif feature in self._PUBLICATION_VISITOR_FEATURES:
+        elif canonical_feature in self._PUBLICATION_FEATURES:
             reason = "publicationVisitorNotApproved"
             allowed = False
         else:
@@ -837,7 +913,7 @@ class ReleasePolicyService:
             audience=audience,
             cohort=cohort,
             requiredGates=required_gates,
-            releaseStage=self.release_stage_for(feature),
+            releaseStage=self.release_stage_for(canonical_feature),
             reason=reason,
             requiredCapability=required_capability,
             capabilityReady=capability_ready,
@@ -898,11 +974,15 @@ class ReleasePolicyCommandGate:
         require_client_capture: bool = True,
         now: Optional[datetime] = None,
     ) -> ReleasePolicyCommandCapture:
+        canonical_feature = self.policy_service.canonical_feature_name(
+            feature,
+            audience=audience,
+        )
         snapshot = self.policy_service.build_snapshot(
             audience=audience,
             cohort=cohort,
             client_build=client_build,
-            requested_feature=feature,
+            requested_feature=canonical_feature,
             now=now,
         )
         decision = snapshot.features[0]
@@ -913,8 +993,11 @@ class ReleasePolicyCommandGate:
         normalized_generation = (client_account_generation or "").strip()
         normalized_decision_id = (client_decision_id or "").strip()
         normalized_client_feature = (client_feature or "").strip()
-        if normalized_client_feature and normalized_client_feature != feature:
-            self._deny(feature, "featureMetadataMismatch", snapshot.policyRevision)
+        if normalized_client_feature and self.policy_service.canonical_feature_name(
+            normalized_client_feature,
+            audience=audience,
+        ) != canonical_feature:
+            self._deny(canonical_feature, "featureMetadataMismatch", snapshot.policyRevision)
         if require_client_capture:
             if (
                 not normalized_version
@@ -923,20 +1006,20 @@ class ReleasePolicyCommandGate:
                 or not normalized_generation
                 or client_allowed is not True
             ):
-                self._deny(feature, "missingCapturedPolicy", snapshot.policyRevision)
+                self._deny(canonical_feature, "missingCapturedPolicy", snapshot.policyRevision)
             if normalized_version != snapshot.policyVersion:
-                self._deny(feature, "policyVersionMismatch", snapshot.policyRevision)
+                self._deny(canonical_feature, "policyVersionMismatch", snapshot.policyRevision)
             if client_policy_revision > snapshot.policyRevision:
-                self._deny(feature, "policyRevisionAheadOfServer", snapshot.policyRevision)
+                self._deny(canonical_feature, "policyRevisionAheadOfServer", snapshot.policyRevision)
             normalized_expected_generation = (expected_account_generation or "").strip()
             if (
                 normalized_expected_generation
                 and normalized_generation != normalized_expected_generation
             ):
-                self._deny(feature, "accountGenerationMismatch", snapshot.policyRevision)
+                self._deny(canonical_feature, "accountGenerationMismatch", snapshot.policyRevision)
         else:
             normalized_decision_id = (
-                f"server:{snapshot.policyVersion}:{snapshot.policyRevision}:{feature}"
+                f"server:{snapshot.policyVersion}:{snapshot.policyRevision}:{canonical_feature}"
             )
             normalized_version = snapshot.policyVersion
             normalized_generation = (expected_account_generation or "system").strip() or "system"
@@ -944,7 +1027,7 @@ class ReleasePolicyCommandGate:
 
         return ReleasePolicyCommandCapture(
             decision_id=normalized_decision_id,
-            feature=feature,
+            feature=canonical_feature,
             policy_version=snapshot.policyVersion,
             policy_revision=snapshot.policyRevision,
             emergency_revision=snapshot.emergencyRevision,
@@ -1235,15 +1318,15 @@ class ReleasePolicyCommandGate:
     def _publication_formal_feature(path: str) -> Optional[str]:
         segments = tuple(segment for segment in path.split("/") if segment)
         if segments == ("v2", "publication-invitations"):
-            return "visitorAccess"
+            return "publicationVisitor"
         if len(segments) == 4 and segments[:2] == ("v2", "publication-grants") and segments[3] == "sessions":
-            return "visitorAccess"
+            return "publicationVisitor"
         if (
             len(segments) == 4
             and segments[:2] == ("v2", "publication-sessions")
             and segments[3] in {"projection", "answers"}
         ):
-            return "visitorAccess"
+            return "publicationVisitor"
         if len(segments) < 4 or segments[:2] != ("v2", "vaults"):
             return None
         suffix = segments[3:]
@@ -1252,7 +1335,7 @@ class ReleasePolicyCommandGate:
             and suffix[0] == "publication-grants"
             and suffix[2] == "revoke"
         ):
-            return "visitorAccess"
+            return "publicationGrantManagement"
         if suffix == ("publications",) or (
             len(suffix) == 3
             and suffix[0] == "publications"

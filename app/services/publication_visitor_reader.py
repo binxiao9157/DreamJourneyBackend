@@ -1,6 +1,6 @@
 """Default-off Visitor reads and deterministic public-projection answers.
 
-This is deliberately a closed-beta service. It accepts an authenticated
+This service accepts an authenticated
 Visitor session credential only to re-check a previously admitted scope, reads
 only the immutable public projection, and never queries Owner Truth, KBLite,
 private Echo context, a voice profile, or an external model provider.

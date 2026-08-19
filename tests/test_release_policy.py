@@ -41,7 +41,17 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertEqual(descriptor["canaryFeatures"], ["familyManagement"])
         self.assertEqual(descriptor["killSwitchFeatures"], ["profileSettings"])
 
-    def test_rollout_feature_configuration_rejects_unknown_aliases(self):
+    def test_rollout_feature_configuration_normalizes_known_aliases_and_rejects_unknown_ones(self):
+        compatible = ReleasePolicyService(
+            enforced_features={"publicationManagementM2"},
+            emergency_disabled_features={"visitorAccess"},
+        )
+        self.assertEqual(compatible.enforced_features, {"publication"})
+        self.assertEqual(
+            compatible.emergency_disabled_features,
+            {"publicationGrantManagement", "publicationVisitor"},
+        )
+
         with self.assertRaises(ValueError):
             ReleasePolicyService(enforced_features={"familyManagementLegacy"})
 
@@ -290,7 +300,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             self.assertTrue(decision.releaseVisible, feature)
             self.assertEqual(decision.reason, "closedPilotOwnerCore")
 
-    def test_unapproved_m1_through_m4_stay_default_closed_during_shadow_rollout(self):
+    def test_unapproved_stable_features_stay_default_closed_during_shadow_rollout(self):
         service = ReleasePolicyService(shadow_mode=True)
 
         self.assertEqual(service.command_mode_for("echoTextInput"), "observe")
@@ -298,7 +308,8 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             "voiceCloneShell",
             "digitalHumanLivePanel",
             "publication",
-            "visitorAccess",
+            "publicationGrantManagement",
+            "publicationVisitor",
             "digitalInheritance",
         ]:
             decision = service.build_snapshot(
@@ -325,9 +336,26 @@ class ReleasePolicyServiceTests(unittest.TestCase):
             service.public_descriptor()["defaultClosedStages"],
             ["M1", "M2", "M3", "M4"],
         )
-        self.assertTrue(
+        self.assertFalse(
             service.public_descriptor()["defaultClosedStageEffectsEnforced"]
         )
+        self.assertTrue(
+            service.public_descriptor()["defaultClosedFeatureEffectsEnforced"]
+        )
+        self.assertIn(
+            "publicationVisitor",
+            service.public_descriptor()["defaultClosedFeatures"],
+        )
+
+    def test_compatibility_stage_metadata_cannot_grant_or_revoke_feature_authority(self):
+        service = ReleasePolicyService(shadow_mode=True)
+
+        with patch.dict(
+            ReleasePolicyService._FEATURE_STAGES,
+            {"echoTextInput": "M4", "publicationVisitor": "M0"},
+        ):
+            self.assertEqual(service.command_mode_for("echoTextInput"), "observe")
+            self.assertEqual(service.command_mode_for("publicationVisitor"), "enforce")
 
     def test_active_managed_test_account_keeps_authenticated_owner_cohort(self):
         principal = main_module.RequestPrincipal.user(
@@ -529,12 +557,16 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             PublicationVisitorReleasePolicy.model_validate(payload)
 
-    def test_publication_and_visitor_features_are_independently_enforced_off(self):
+    def test_publication_grant_and_visitor_features_are_independently_enforced_off(self):
         service = ReleasePolicyService()
-        for feature in ("publication", "visitorAccess"):
+        for feature in (
+            "publication",
+            "publicationGrantManagement",
+            "publicationVisitor",
+        ):
             with self.subTest(feature=feature):
                 decision = service.build_snapshot(
-                    audience="visitor" if feature == "visitorAccess" else "owner",
+                    audience="visitor" if feature == "publicationVisitor" else "owner",
                     cohort="closedPilotAdultSelf",
                     client_build=1,
                     requested_feature=feature,
@@ -549,7 +581,7 @@ class ReleasePolicyServiceTests(unittest.TestCase):
                 with self.assertRaises(ReleasePolicyFeatureAccessDenied) as raised:
                     ReleasePolicyCommandGate(service).capture(
                         feature=feature,
-                        audience="visitor" if feature == "visitorAccess" else "owner",
+                        audience="visitor" if feature == "publicationVisitor" else "owner",
                         cohort="closedPilotAdultSelf",
                         client_build=1,
                         client_policy_version=None,
@@ -559,6 +591,42 @@ class ReleasePolicyServiceTests(unittest.TestCase):
                         require_client_capture=False,
                     )
                 self.assertEqual(raised.exception.reason, "publicationVisitorNotApproved")
+
+    def test_legacy_publication_feature_names_preserve_old_client_contract(self):
+        service = ReleasePolicyService()
+
+        owner_alias = service.build_snapshot(
+            audience="owner",
+            cohort="authenticatedOwner",
+            client_build=1,
+            requested_feature="visitorAccess",
+        ).features[0]
+        visitor_alias = service.build_snapshot(
+            audience="visitor",
+            cohort="authenticatedOwner",
+            client_build=1,
+            requested_feature="visitorAccess",
+        ).features[0]
+
+        self.assertEqual(owner_alias.feature, "visitorAccess")
+        self.assertEqual(visitor_alias.feature, "visitorAccess")
+        self.assertEqual(
+            service.canonical_feature_name("visitorAccess", audience="owner"),
+            "publicationGrantManagement",
+        )
+        self.assertEqual(
+            service.canonical_feature_name("visitorAccess", audience="visitor"),
+            "publicationVisitor",
+        )
+        self.assertNotIn("visitorAccess", service.feature_names())
+        self.assertEqual(
+            service.public_descriptor()["featureAliases"]["visitorAccess"],
+            ["publicationGrantManagement", "publicationVisitor"],
+        )
+        self.assertEqual(
+            service.public_descriptor()["featureAliasSunsetAt"],
+            "2026-11-30T00:00:00+00:00",
+        )
 
     def test_unknown_feature_is_returned_as_explicit_fail_closed_decision(self):
         snapshot = ReleasePolicyService().build_snapshot(

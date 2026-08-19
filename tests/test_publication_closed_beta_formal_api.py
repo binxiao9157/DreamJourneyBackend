@@ -104,7 +104,7 @@ class PublicationClosedBetaFormalAPITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403, response.text)
         detail = response.json()["detail"]
-        self.assertEqual(detail["feature"], "visitorAccess")
+        self.assertEqual(detail["feature"], "publicationVisitor")
         self.assertEqual(detail["reason"], "publicationVisitorNotApproved")
         self.assertEqual(detail["accessMode"], "deny")
 
@@ -187,7 +187,7 @@ class PublicationClosedBetaFormalAPITests(unittest.TestCase):
         )
         cases = {
             "/v2/publication-invitations": (
-                "visitorAccess",
+                "publicationVisitor",
                 "GET /v2/publication-invitations",
             ),
             "/v2/vaults/owner-secret/publication-drafts/draft-secret/confirm/publication-secret": (
@@ -195,15 +195,15 @@ class PublicationClosedBetaFormalAPITests(unittest.TestCase):
                 "POST /v2/vaults/*/publication-drafts/*/confirm/*",
             ),
             "/v2/vaults/owner-secret/publication-grants/grant-secret/revoke": (
-                "visitorAccess",
+                "publicationGrantManagement",
                 "POST /v2/vaults/*/publication-grants/*/revoke",
             ),
             "/v2/publication-grants/grant-secret/sessions": (
-                "visitorAccess",
+                "publicationVisitor",
                 "POST /v2/publication-grants/*/sessions",
             ),
             "/v2/publication-sessions/session-secret/projection": (
-                "visitorAccess",
+                "publicationVisitor",
                 "POST /v2/publication-sessions/*/projection",
             ),
         }

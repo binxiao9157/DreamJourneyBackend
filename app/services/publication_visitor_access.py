@@ -1,4 +1,4 @@
-"""Default-off ShareGrant and Visitor admission for the M2 closed beta.
+"""Server-authorized ShareGrant and Visitor admission.
 
 This access service operates only on the independently stored publication
 projection created by the Owner-authority lane. A separate default-off reader
@@ -38,11 +38,11 @@ _CREDENTIAL_MAXIMUM_LENGTH = 256
 
 
 class PublicationVisitorAccessError(ValueError):
-    """A closed-beta ShareGrant or Visitor admission cannot proceed safely."""
+    """A ShareGrant or Visitor admission cannot proceed safely."""
 
 
 class PublicationVisitorAccessDisabled(PublicationVisitorAccessError):
-    """The internal M2 visitor-access lane is still default-off."""
+    """The server policy has not admitted Visitor access."""
 
 
 class PublicationVisitorAccessDenied(PublicationVisitorAccessError):
@@ -548,7 +548,7 @@ class PublicationVisitorAccessRepository(Protocol):
 
 
 class PublicationVisitorAccessService:
-    """Coordinates the server-only M2 ShareGrant and Visitor session boundary."""
+    """Coordinates the server-owned ShareGrant and Visitor session boundary."""
 
     def __init__(
         self,

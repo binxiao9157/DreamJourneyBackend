@@ -1,4 +1,4 @@
-"""Owner-only publication authority for the default-off M2 lane.
+"""Owner-only publication authority.
 
 The service deliberately treats an Owner Truth MemoryVersion as an authority
 anchor, not as a public payload source.  The Owner supplies a dedicated public
@@ -48,7 +48,7 @@ class PublicationAuthorityAccessDenied(PublicationAuthorityError):
 
 
 class PublicationAuthorityNotPublishable(PublicationAuthorityError):
-    """The selected version or draft does not meet the M2 publication policy."""
+    """The selected version or draft does not meet publication policy."""
 
 
 class PublicationAuthorityConflict(PublicationAuthorityError):
@@ -580,11 +580,11 @@ def _publication_revision_draft_snapshot_hash(
 
 @dataclass(frozen=True)
 class PublicationOwnerPublicationSummary:
-    """Owner-only, redacted management facts for one M2 publication.
+    """Owner-only, redacted management facts for one publication.
 
     This is intentionally a read-model summary rather than a MemoryVersion or
     Source projection. It contains only the independently supplied public
-    preview and lifecycle state needed by the closed-beta management surface.
+    preview and lifecycle state needed by the management surface.
     """
 
     publication_id: str
