@@ -1,11 +1,10 @@
-"""QA-only Context V4 shadow build over confirmed Owner Truth memory.
+"""Context V4 selection build over confirmed Owner Truth memory.
 
-This adapter deliberately does not change the public ``/context/build``
-contract.  It proves the first V4 Context invariant in isolation: when the
-Owner Truth projection is available, Context selection comes only from current
-confirmed MemoryVersions and every selected item has a typed citation.  When
-it is unavailable, the result explicitly falls back to a no-personal-memory
-plan instead of reading legacy KBLite or Archive data.
+The QA routes expose only value-free evidence from this service. The production
+Owner authority also reuses the same bounded selection contract before
+materialization. Selection comes only from current confirmed MemoryVersions;
+an unavailable projection or search index yields no personal-memory Context
+instead of reading legacy KBLite or Archive data.
 """
 
 from __future__ import annotations
@@ -13,10 +12,12 @@ from __future__ import annotations
 from copy import deepcopy
 from hashlib import sha256
 import json
+import time
 from typing import Any, Mapping
 
 from app.domain.owner_truth.memory_projection import OwnerTruthMemoryProjectionError
 from app.domain.owner_truth.search_documents import (
+    OWNER_TRUTH_MEMORY_SEARCH_MAX_LIMIT,
     OWNER_TRUTH_MEMORY_SEARCH_RETRIEVAL_MODE,
     OwnerTruthMemorySearchReadError,
 )
@@ -36,6 +37,9 @@ OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_CITATION_ORDER = "projectionCitationOr
 OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK = (
     OWNER_TRUTH_MEMORY_SEARCH_RETRIEVAL_MODE
 )
+OWNER_TRUTH_CONTEXT_QUERY_CANDIDATE_LIMIT = OWNER_TRUTH_MEMORY_SEARCH_MAX_LIMIT
+OWNER_TRUTH_CONTEXT_QUERY_SELECTED_LIMIT = 8
+OWNER_TRUTH_CONTEXT_QUERY_LATENCY_BUDGET_MS = 300
 
 _FALLBACK_PROJECTION_UNAVAILABLE = "owner_truth_context_unavailable_no_personal_memory"
 _FALLBACK_NO_ELIGIBLE_MEMORY = "owner_truth_context_no_eligible_personal_memory"
@@ -44,7 +48,7 @@ _FALLBACK_QUERY_NO_MATCH = "owner_truth_context_no_query_match_no_personal_memor
 
 
 class OwnerTruthContextShadowBuildError(OwnerTruthMemoryProjectionError):
-    """The QA-only Context shadow cannot build a safe selection plan."""
+    """The Context selector cannot build a safe selection plan."""
 
 
 def _optional_text(value: Any) -> str:
@@ -156,15 +160,29 @@ class OwnerTruthContextShadowBuildService:
         state = str(shadow.get("state") or "")
 
         fallbacks: list[str] = []
+        retrieval = {
+            "mode": selection_mode,
+            "outcome": "notApplied",
+            "candidateLimit": OWNER_TRUTH_CONTEXT_QUERY_CANDIDATE_LIMIT,
+            "selectedLimit": OWNER_TRUTH_CONTEXT_QUERY_SELECTED_LIMIT,
+            "candidateCount": 0,
+            "selectedCount": 0,
+            "latencyMs": 0,
+            "latencyBudgetMs": OWNER_TRUTH_CONTEXT_QUERY_LATENCY_BUDGET_MS,
+            "latencyBudgetMet": True,
+            "fallbackReason": None,
+        }
         if state != "ready":
             selected_context = []
             fallbacks.append(_FALLBACK_PROJECTION_UNAVAILABLE)
+            retrieval["outcome"] = "fallback"
+            retrieval["fallbackReason"] = _FALLBACK_PROJECTION_UNAVAILABLE
         elif selection_mode == OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK:
             if not raw_query:
                 raise OwnerTruthContextShadowBuildError(
                     "query retrieval selection requires a nonblank query"
                 )
-            selected_context, filtered_context, fallbacks = self._query_ranked_context(
+            selected_context, filtered_context, fallbacks, retrieval = self._query_ranked_context(
                 context=context,
                 query=raw_query,
                 authority_epoch=shadow.get("authorityEpoch"),
@@ -174,6 +192,12 @@ class OwnerTruthContextShadowBuildService:
             )
         elif not selected_context:
             fallbacks.append(_FALLBACK_NO_ELIGIBLE_MEMORY)
+            retrieval["outcome"] = "gap"
+            retrieval["fallbackReason"] = _FALLBACK_NO_ELIGIBLE_MEMORY
+        else:
+            retrieval["outcome"] = "citationOrder"
+            retrieval["candidateCount"] = len(selected_context)
+            retrieval["selectedCount"] = len(selected_context)
 
         ranking_trace = [
             {
@@ -221,6 +245,7 @@ class OwnerTruthContextShadowBuildService:
             "rankingTrace": ranking_trace,
             "citationProof": citation_proof,
             "selectedContextSourceCounts": source_counts,
+            "retrieval": retrieval,
             "fallbacks": fallbacks,
             "trace": {
                 "selectedContextCount": len(selected_context),
@@ -228,6 +253,12 @@ class OwnerTruthContextShadowBuildService:
                 "rankingTraceCount": len(ranking_trace),
                 "citationProofCount": len(citation_proof),
                 "fallbackCount": len(fallbacks),
+                "retrievalMode": retrieval["mode"],
+                "retrievalOutcome": retrieval["outcome"],
+                "retrievalCandidateCount": retrieval["candidateCount"],
+                "retrievalSelectedCount": retrieval["selectedCount"],
+                "retrievalLatencyMs": retrieval["latencyMs"],
+                "retrievalLatencyBudgetMet": retrieval["latencyBudgetMet"],
             },
         }
 
@@ -240,7 +271,7 @@ class OwnerTruthContextShadowBuildService:
         projection_checkpoint: Any,
         selected_context: list[dict[str, Any]],
         filtered_context: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], dict[str, Any]]:
         """Use the current private SearchDocument projection without widening Context.
 
         The SearchDocument reader is a derived, owner-scoped index.  It can
@@ -248,8 +279,39 @@ class OwnerTruthContextShadowBuildService:
         ineligible memory visible or revive a stale Projection checkpoint.
         """
 
+        started = time.perf_counter()
+
+        def retrieval_trace(
+            *,
+            outcome: str,
+            candidate_count: int = 0,
+            selected_count: int = 0,
+            fallback_reason: str | None = None,
+        ) -> dict[str, Any]:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return {
+                "mode": OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK,
+                "outcome": outcome,
+                "candidateLimit": OWNER_TRUTH_CONTEXT_QUERY_CANDIDATE_LIMIT,
+                "selectedLimit": OWNER_TRUTH_CONTEXT_QUERY_SELECTED_LIMIT,
+                "candidateCount": candidate_count,
+                "selectedCount": selected_count,
+                "latencyMs": latency_ms,
+                "latencyBudgetMs": OWNER_TRUTH_CONTEXT_QUERY_LATENCY_BUDGET_MS,
+                "latencyBudgetMet": latency_ms <= OWNER_TRUTH_CONTEXT_QUERY_LATENCY_BUDGET_MS,
+                "fallbackReason": fallback_reason,
+            }
+
         if not selected_context:
-            return selected_context, filtered_context, [_FALLBACK_NO_ELIGIBLE_MEMORY]
+            return (
+                selected_context,
+                filtered_context,
+                [_FALLBACK_NO_ELIGIBLE_MEMORY],
+                retrieval_trace(
+                    outcome="gap",
+                    fallback_reason=_FALLBACK_NO_ELIGIBLE_MEMORY,
+                ),
+            )
 
         repository_factory = getattr(
             self._store,
@@ -257,12 +319,20 @@ class OwnerTruthContextShadowBuildService:
             None,
         )
         if not callable(repository_factory):
-            return self._unavailable_query_context(selected_context, filtered_context)
+            selected, filtered, fallbacks = self._unavailable_query_context(
+                selected_context,
+                filtered_context,
+            )
+            return selected, filtered, fallbacks, retrieval_trace(
+                outcome="fallback",
+                fallback_reason=_FALLBACK_SEARCH_UNAVAILABLE,
+            )
 
         try:
             search = OwnerTruthMemorySearchReadService(self._store).read(
                 context=context,
                 query=query,
+                limit=OWNER_TRUTH_CONTEXT_QUERY_CANDIDATE_LIMIT,
             )
         except OwnerTruthMemorySearchReadError as error:
             raise OwnerTruthContextShadowBuildError(
@@ -276,7 +346,14 @@ class OwnerTruthContextShadowBuildService:
             or query_plan.authority_epoch != authority_epoch
             or query_plan.projection_checkpoint != projection_checkpoint
         ):
-            return self._unavailable_query_context(selected_context, filtered_context)
+            selected, filtered, fallbacks = self._unavailable_query_context(
+                selected_context,
+                filtered_context,
+            )
+            return selected, filtered, fallbacks, retrieval_trace(
+                outcome="fallback",
+                fallback_reason=_FALLBACK_SEARCH_UNAVAILABLE,
+            )
 
         selected_by_version = {
             str(item.get("memoryVersionId") or ""): item for item in selected_context
@@ -291,6 +368,7 @@ class OwnerTruthContextShadowBuildService:
 
         ranked_selected: list[dict[str, Any]] = []
         selected_versions: set[str] = set()
+        limited_versions: set[str] = set()
         for hit in search.hits:
             memory_version_id = hit.document.memory_version_id
             item = selected_by_version.get(memory_version_id)
@@ -307,6 +385,16 @@ class OwnerTruthContextShadowBuildService:
                 raise OwnerTruthContextShadowBuildError(
                     "SearchDocument hit does not match the current Context projection"
                 )
+            if (
+                hit.document.authority_epoch != authority_epoch
+                or hit.document.content_hash != str(citation.get("contentHash") or "")
+            ):
+                raise OwnerTruthContextShadowBuildError(
+                    "SearchDocument hit failed authority or content revalidation"
+                )
+            if len(ranked_selected) >= OWNER_TRUTH_CONTEXT_QUERY_SELECTED_LIMIT:
+                limited_versions.add(memory_version_id)
+                continue
             ranked = deepcopy(item)
             ranked["reason"] = "confirmed_current_memory_version_query_match"
             ranked["rank"] = {
@@ -322,11 +410,26 @@ class OwnerTruthContextShadowBuildService:
                 continue
             filtered = deepcopy(item)
             filtered.pop("rank", None)
-            filtered["reason"] = "query_not_matched"
+            filtered["reason"] = (
+                "query_context_limit_exceeded"
+                if memory_version_id in limited_versions
+                else "query_not_matched"
+            )
             query_filtered.append(filtered)
 
         fallbacks = [] if ranked_selected else [_FALLBACK_QUERY_NO_MATCH]
-        return ranked_selected, query_filtered, fallbacks
+        outcome = "grounded" if ranked_selected else "gap"
+        return (
+            ranked_selected,
+            query_filtered,
+            fallbacks,
+            retrieval_trace(
+                outcome=outcome,
+                candidate_count=len(search.hits),
+                selected_count=len(ranked_selected),
+                fallback_reason=None if ranked_selected else _FALLBACK_QUERY_NO_MATCH,
+            ),
+        )
 
     @staticmethod
     def _unavailable_query_context(
@@ -350,8 +453,9 @@ def context_shadow_build_summary(result: Mapping[str, Any]) -> dict[str, Any]:
             raise OwnerTruthMemoryProjectionError(f"context shadow build {field} must be a list")
     request = result.get("request")
     authority = result.get("authority")
+    retrieval = result.get("retrieval")
     trace = result.get("trace")
-    if not isinstance(request, Mapping) or not isinstance(authority, Mapping) or not isinstance(trace, Mapping):
+    if not all(isinstance(value, Mapping) for value in (request, authority, retrieval, trace)):
         raise OwnerTruthMemoryProjectionError("context shadow build has invalid metadata")
     return {
         "schemaVersion": str(result.get("schemaVersion") or ""),
@@ -368,6 +472,7 @@ def context_shadow_build_summary(result: Mapping[str, Any]) -> dict[str, Any]:
         "rankingTrace": deepcopy(list(result["rankingTrace"])),
         "citationProof": deepcopy(list(result["citationProof"])),
         "selectedContextSourceCounts": dict(result.get("selectedContextSourceCounts") or {}),
+        "retrieval": deepcopy(dict(retrieval)),
         "fallbacks": list(result.get("fallbacks") or []),
         "trace": deepcopy(dict(trace)),
     }
@@ -379,6 +484,9 @@ __all__ = [
     "OWNER_TRUTH_CONTEXT_SHADOW_BUILD_VERSION",
     "OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_CITATION_ORDER",
     "OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK",
+    "OWNER_TRUTH_CONTEXT_QUERY_CANDIDATE_LIMIT",
+    "OWNER_TRUTH_CONTEXT_QUERY_SELECTED_LIMIT",
+    "OWNER_TRUTH_CONTEXT_QUERY_LATENCY_BUDGET_MS",
     "OwnerTruthContextShadowBuildError",
     "OwnerTruthContextShadowBuildService",
     "context_shadow_build_summary",

@@ -1,10 +1,11 @@
-"""Default-off materialization of confirmed Owner Truth memory Context.
+"""Bounded materialization of confirmed Owner Truth memory Context.
 
 The existing Context V4 shadow intentionally proves selection and typed
 citations without retaining memory values.  This service is the next private
 boundary: it turns that selected, current Projection set into bounded model
-input while keeping the value-bearing text in-process.  Its QA summary is
-strictly value-free and the legacy ``/context/build`` route remains unchanged.
+input while keeping the value-bearing text in-process. Its QA summary remains
+strictly value-free; production use is restricted to the server-owned Owner
+Context authority.
 """
 
 from __future__ import annotations
@@ -15,7 +16,10 @@ import json
 from typing import Any, Mapping
 
 from app.domain.owner_truth.memory_projection import OwnerTruthMemoryProjectionError
-from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.ontology import (
+    OWNER_TRUTH_SCHEMA_VERSION,
+    OWNER_TRUTH_SCHEMA_VERSION_V2,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_context_shadow_build import OwnerTruthContextShadowBuildService
 from app.services.owner_truth_memory_projection import (
@@ -35,6 +39,9 @@ _CONTENT_FIELD_BY_KIND = {
     "knowledge": "claim",
     "emotion": "label",
 }
+_SUPPORTED_CONTENT_SCHEMA_VERSIONS = frozenset(
+    {OWNER_TRUTH_SCHEMA_VERSION, OWNER_TRUTH_SCHEMA_VERSION_V2}
+)
 
 
 class OwnerTruthContextMaterializationError(OwnerTruthMemoryProjectionError):
@@ -78,9 +85,8 @@ class OwnerTruthContextMaterializationService:
     """Build bounded, in-process Context only from current confirmed Projection.
 
     The resulting ``generationContext.text`` is deliberately not suitable for
-    logs, trace export or a public QA response.  A future server-side
-    conversation adapter may consume it directly.  Until then this service is
-    available only through a value-free QA summary and unit-contract tests.
+    logs, trace export or a public QA response. Only the server-side Context
+    authority consumes it; QA surfaces receive a value-free summary.
     """
 
     def __init__(self, store: OwnerTruthMemoryProjectionStore, *, enabled: bool = False) -> None:
@@ -98,8 +104,11 @@ class OwnerTruthContextMaterializationService:
             payload=payload,
         )
         authority = shadow.get("authority")
-        if not isinstance(authority, Mapping):
-            raise OwnerTruthContextMaterializationError("Context shadow authority is invalid")
+        retrieval = shadow.get("retrieval")
+        if not isinstance(authority, Mapping) or not isinstance(retrieval, Mapping):
+            raise OwnerTruthContextMaterializationError(
+                "Context shadow authority or retrieval evidence is invalid"
+            )
 
         state = str(authority.get("state") or "")
         selected_context = deepcopy(list(shadow.get("selectedContext") or []))
@@ -153,6 +162,7 @@ class OwnerTruthContextMaterializationService:
             "filteredContext": filtered_context,
             "typedCitations": typed_citations,
             "generationContext": generation_context,
+            "retrieval": deepcopy(dict(retrieval)),
             "fallbacks": fallbacks,
             "trace": {
                 "selectedContextCount": len(selected_context),
@@ -162,6 +172,21 @@ class OwnerTruthContextMaterializationService:
                 "generationContextLength": len(generation_context["text"]),
                 "generationContextTruncated": generation_context["truncated"],
                 "fallbackCount": len(fallbacks),
+                "retrievalMode": str(retrieval.get("mode") or ""),
+                "retrievalOutcome": str(retrieval.get("outcome") or ""),
+                "retrievalCandidateCount": _nonnegative_int(
+                    retrieval.get("candidateCount"),
+                    field="retrieval candidateCount",
+                ),
+                "retrievalSelectedCount": _nonnegative_int(
+                    retrieval.get("selectedCount"),
+                    field="retrieval selectedCount",
+                ),
+                "retrievalLatencyMs": _nonnegative_int(
+                    retrieval.get("latencyMs"),
+                    field="retrieval latencyMs",
+                ),
+                "retrievalLatencyBudgetMet": bool(retrieval.get("latencyBudgetMet")),
             },
         }
 
@@ -277,7 +302,7 @@ class OwnerTruthContextMaterializationService:
 
     @staticmethod
     def _render_entry(*, entry: Mapping[str, Any], citation: Mapping[str, Any]) -> str:
-        if str(entry.get("contentSchemaVersion") or "") != OWNER_TRUTH_SCHEMA_VERSION:
+        if str(entry.get("contentSchemaVersion") or "") not in _SUPPORTED_CONTENT_SCHEMA_VERSIONS:
             raise OwnerTruthContextMaterializationError("Projection content schema is not supported")
         memory_kind = _nonblank_text(entry.get("memoryKind"), field="Projection memoryKind")
         content_field = _CONTENT_FIELD_BY_KIND.get(memory_kind)
@@ -320,8 +345,12 @@ def context_materialization_summary(result: Mapping[str, Any]) -> dict[str, Any]
     request = result.get("request")
     authority = result.get("authority")
     generation_context = result.get("generationContext")
+    retrieval = result.get("retrieval")
     trace = result.get("trace")
-    if not all(isinstance(value, Mapping) for value in (request, authority, generation_context, trace)):
+    if not all(
+        isinstance(value, Mapping)
+        for value in (request, authority, generation_context, retrieval, trace)
+    ):
         raise OwnerTruthContextMaterializationError("materialization metadata is invalid")
     return {
         "schemaVersion": str(result.get("schemaVersion") or ""),
@@ -351,6 +380,7 @@ def context_materialization_summary(result: Mapping[str, Any]) -> dict[str, Any]
             ),
             "truncated": bool(generation_context.get("truncated")),
         },
+        "retrieval": deepcopy(dict(retrieval)),
         "fallbacks": list(result["fallbacks"]),
         "trace": deepcopy(dict(trace)),
     }

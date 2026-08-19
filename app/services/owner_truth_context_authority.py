@@ -15,7 +15,10 @@ import json
 from typing import Any, Mapping
 
 from app.core.config import Settings
-from app.domain.owner_truth.memory_projection import OwnerTruthMemoryProjectionAccessDenied
+from app.domain.owner_truth.memory_projection import (
+    OwnerTruthMemoryProjectionAccessDenied,
+    OwnerTruthMemoryProjectionError,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.context_packet import ContextPacketBuilder
 from app.services.owner_truth_context_materialization import (
@@ -27,7 +30,9 @@ from app.services.owner_truth_context_materialization import (
 )
 from app.services.owner_truth_context_shadow import OWNER_TRUTH_CONTEXT_SHADOW_SOURCE
 from app.services.owner_truth_context_shadow_build import (
-    OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_CITATION_ORDER,
+    OWNER_TRUTH_CONTEXT_QUERY_CANDIDATE_LIMIT,
+    OWNER_TRUTH_CONTEXT_QUERY_SELECTED_LIMIT,
+    OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK,
 )
 
 
@@ -50,7 +55,7 @@ def _request_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         "intent": _text(payload.get("intent"), "echo_chat"),
         "queryHash": sha256(query.encode("utf-8")).hexdigest() if query else None,
         "queryLength": len(query),
-        "selectionMode": OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_CITATION_ORDER,
+        "selectionMode": OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK,
     }
 
 
@@ -97,10 +102,11 @@ class OwnerTruthContextAuthorityService:
         if str(vault.get("status") or "active") != "active":
             return self._empty_materialization(context=context, payload=payload)
         # Context selection is server-defined. The client cannot switch this
-        # production path to a QA retrieval mode by submitting selectionMode.
+        # production path back to citation order by submitting selectionMode.
         materialization_payload = {
             "intent": _text(payload.get("intent"), "echo_chat"),
             "query": _text(payload.get("query")),
+            "selectionMode": OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK,
         }
         materialization = OwnerTruthContextMaterializationService(
             self._store,
@@ -119,6 +125,11 @@ class OwnerTruthContextAuthorityService:
     ) -> dict[str, Any]:
         bound = deepcopy(dict(materialization))
         authority = deepcopy(dict(bound.get("authority") or {}))
+        retrieval = bound.get("retrieval")
+        if not isinstance(retrieval, Mapping):
+            raise OwnerTruthMemoryProjectionError(
+                "Owner Truth Context retrieval evidence is missing"
+            )
         generation_material = {
             "authorityEpoch": authority.get("authorityEpoch"),
             "materializationHash": bound.get("materializationHash"),
@@ -133,6 +144,11 @@ class OwnerTruthContextAuthorityService:
                 "cohort": OWNER_TRUTH_CONTEXT_AUTHORITY_COHORT,
                 "fallbackPolicy": OWNER_TRUTH_CONTEXT_FALLBACK_POLICY,
                 "mixedAuthorityAllowed": False,
+                "retrievalMode": str(retrieval.get("mode") or ""),
+                "retrievalOutcome": str(retrieval.get("outcome") or "fallback"),
+                "candidateLimit": OWNER_TRUTH_CONTEXT_QUERY_CANDIDATE_LIMIT,
+                "selectedLimit": OWNER_TRUTH_CONTEXT_QUERY_SELECTED_LIMIT,
+                "retrievalFallbackReason": retrieval.get("fallbackReason"),
                 "authorityGeneration": sha256(
                     json.dumps(
                         generation_material,
@@ -170,6 +186,18 @@ class OwnerTruthContextAuthorityService:
             "truncated": False,
         }
         fallbacks = [_FALLBACK_PROJECTION_UNAVAILABLE]
+        retrieval = {
+            "mode": OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK,
+            "outcome": "fallback",
+            "candidateLimit": OWNER_TRUTH_CONTEXT_QUERY_CANDIDATE_LIMIT,
+            "selectedLimit": OWNER_TRUTH_CONTEXT_QUERY_SELECTED_LIMIT,
+            "candidateCount": 0,
+            "selectedCount": 0,
+            "latencyMs": 0,
+            "latencyBudgetMs": 300,
+            "latencyBudgetMet": True,
+            "fallbackReason": _FALLBACK_PROJECTION_UNAVAILABLE,
+        }
         materialization_hash = sha256(
             json.dumps(
                 {
@@ -203,6 +231,7 @@ class OwnerTruthContextAuthorityService:
             "filteredContext": [],
             "typedCitations": [],
             "generationContext": generation_context,
+            "retrieval": retrieval,
             "fallbacks": fallbacks,
             "trace": {
                 "selectedContextCount": 0,
@@ -212,6 +241,12 @@ class OwnerTruthContextAuthorityService:
                 "generationContextLength": 0,
                 "generationContextTruncated": False,
                 "fallbackCount": len(fallbacks),
+                "retrievalMode": retrieval["mode"],
+                "retrievalOutcome": retrieval["outcome"],
+                "retrievalCandidateCount": 0,
+                "retrievalSelectedCount": 0,
+                "retrievalLatencyMs": 0,
+                "retrievalLatencyBudgetMet": True,
             },
             },
             context=context,

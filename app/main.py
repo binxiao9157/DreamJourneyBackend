@@ -15598,8 +15598,21 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
     model = "none"
     fallback_reason = ""
     memory_gap = False
+    context_authority = packet.get("contextAuthority") if isinstance(packet, dict) else None
+    owner_truth_query_gap = bool(
+        isinstance(context_authority, dict)
+        and context_authority.get("mode") == "ownerTruthConfirmedProjection"
+        and context_authority.get("retrievalOutcome") == "gap"
+    )
 
-    if provider_effects_allowed:
+    if provider_effects_allowed and owner_truth_query_gap:
+        answer_text = (
+            DeepSeekEchoAnswerProxy.memory_gap_marker
+            + "我还没有从你当前已确认的正式记忆中找到这个答案。"
+        )
+        provider = "owner-truth-grounding-policy"
+        fallback_reason = "ownerTruthQueryNoMatch"
+    elif provider_effects_allowed:
         generation = packet.get("generationContext") or {}
         persona = packet.get("persona") or {}
         proxy = DeepSeekEchoAnswerProxy(settings)

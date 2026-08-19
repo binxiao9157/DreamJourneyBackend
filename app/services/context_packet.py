@@ -299,7 +299,11 @@ class ContextPacketBuilder:
         request = materialization.get("request")
         authority = materialization.get("authority")
         generation = materialization.get("generationContext")
-        if not all(isinstance(value, Mapping) for value in (request, authority, generation)):
+        retrieval = materialization.get("retrieval")
+        if not all(
+            isinstance(value, Mapping)
+            for value in (request, authority, generation, retrieval)
+        ):
             raise ValueError("owner truth context materialization metadata is invalid")
         expected_correlation = self._request_correlation(intent=intent, query=query)
         if (
@@ -338,6 +342,30 @@ class ContextPacketBuilder:
             raise ValueError("owner truth generation context contentHash is invalid")
         if isinstance(generation.get("maxChars"), bool) or not isinstance(generation.get("maxChars"), int):
             raise ValueError("owner truth generation context maxChars is invalid")
+        candidate_limit = retrieval.get("candidateLimit")
+        selected_limit = retrieval.get("selectedLimit")
+        candidate_count = retrieval.get("candidateCount")
+        selected_count = retrieval.get("selectedCount")
+        retrieval_latency_ms = retrieval.get("latencyMs")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (
+                candidate_limit,
+                selected_limit,
+                candidate_count,
+                selected_count,
+                retrieval_latency_ms,
+            )
+        ):
+            raise ValueError("owner truth retrieval limits or counts are invalid")
+        if candidate_count > candidate_limit or selected_count > selected_limit:
+            raise ValueError("owner truth retrieval exceeded its bounded limits")
+        if len(selected_context) != selected_count:
+            raise ValueError("owner truth retrieval selectedCount does not match Context")
+        if len(selected_context) > selected_limit:
+            raise ValueError("owner truth selected Context exceeds retrieval limit")
+        if len(generation_text) > int(generation["maxChars"]):
+            raise ValueError("owner truth generation context exceeds maxChars")
 
         selected_for_generation = selected_context[:source_count]
         source_refs = [
@@ -422,6 +450,16 @@ class ContextPacketBuilder:
             filtered_context=filtered_context,
             ranking_trace=ranking_trace,
         )
+        trace.update(
+            {
+                "retrievalMode": str(retrieval.get("mode") or ""),
+                "retrievalOutcome": str(retrieval.get("outcome") or ""),
+                "retrievalCandidateCount": candidate_count,
+                "retrievalSelectedCount": selected_count,
+                "retrievalLatencyMs": retrieval_latency_ms,
+                "retrievalLatencyBudgetMet": bool(retrieval.get("latencyBudgetMet")),
+            }
+        )
         context_authority = {
             "schemaVersion": str(authority.get("schemaVersion") or "owner-truth-context-authority-v1"),
             "mode": "ownerTruthConfirmedProjection",
@@ -437,6 +475,11 @@ class ContextPacketBuilder:
             "contextHash": materialization.get("contextHash"),
             "materializationHash": materialization.get("materializationHash"),
             "legacyContextRead": False,
+            "retrievalMode": str(retrieval.get("mode") or ""),
+            "retrievalOutcome": str(retrieval.get("outcome") or ""),
+            "candidateLimit": candidate_limit,
+            "selectedLimit": selected_limit,
+            "retrievalFallbackReason": retrieval.get("fallbackReason"),
         }
         trace["contextAuthority"] = deepcopy(context_authority)
         return {

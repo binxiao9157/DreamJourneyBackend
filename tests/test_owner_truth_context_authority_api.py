@@ -3,6 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -164,6 +165,9 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
             context=context,
         )
         OwnerTruthMemoryProjectionService(main_module.store).rebuild(context=context)
+        main_module.store.owner_truth_memory_search_document_projection_repository().rebuild(
+            context=context
+        )
         return candidate
 
     @staticmethod
@@ -235,3 +239,26 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         self.assertEqual(packet["selectedContext"], [])
         self.assertEqual(packet["memory"]["archiveItems"], [])
         self.assertIn("owner_truth_context_unavailable_no_personal_memory", packet["fallbacks"])
+
+    def test_owner_query_without_matching_formal_memory_returns_gap_without_provider_call(self) -> None:
+        owner_id, headers = self._login("13800139765")
+        self._seed_confirmed_memory(owner_id)
+        self._enable_authenticated_owner_v4(owner_id)
+        payload = self._payload(owner_id)
+        payload["query"] = "海边日落"
+
+        with patch.object(
+            main_module.DeepSeekEchoAnswerProxy,
+            "request_answer",
+            return_value="不应调用 Provider",
+        ) as request_answer:
+            response = client.post("/echo/answers", headers=headers, json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        request_answer.assert_not_called()
+        answer = response.json()["answer"]
+        self.assertEqual(answer["provider"], "owner-truth-grounding-policy")
+        self.assertEqual(answer["fallbackReason"], "ownerTruthQueryNoMatch")
+        self.assertEqual(answer["citations"], [])
+        self.assertEqual(answer["memoryGrounding"]["outcome"], "gap")
+        self.assertEqual(answer["memoryGrounding"]["handoff"], "ownerInterview")

@@ -75,6 +75,7 @@ from app.services.owner_truth_context_materialization import (
     OwnerTruthContextMaterializationService,
     context_materialization_summary,
 )
+from app.services.owner_truth_context_authority import OwnerTruthContextAuthorityService
 from app.services.owner_truth_interview_turn_context import (
     OwnerTruthInterviewTurnContextService,
     interview_turn_context_summary,
@@ -1257,6 +1258,60 @@ def main() -> None:
                 and review_content["summary"]
                 not in query_ranked_materialization["generationContext"]["text"],
                 "query-ranked materialization must not reintroduce unmatched confirmed memory",
+            )
+            production_context_authority = OwnerTruthContextAuthorityService(
+                store,
+                settings=Settings(store_backend="postgres", database_url=test_dsn),
+                enabled=True,
+            )
+            production_context_packet = production_context_authority.build_packet(
+                context=review_context,
+                payload={
+                    "userId": review_vault_id,
+                    "intent": "echo_chat",
+                    "query": "请陪我回忆父亲修自行车的那段时光",
+                    "personaScope": "personal",
+                    "digitalHumanId": review_vault_id,
+                },
+            )
+            require(
+                production_context_packet["contextAuthority"]["retrievalMode"]
+                == "deterministicTextFallback"
+                and production_context_packet["contextAuthority"]["retrievalOutcome"]
+                == "grounded"
+                and production_context_packet["contextAuthority"]["candidateLimit"] == 20
+                and production_context_packet["contextAuthority"]["selectedLimit"] == 8
+                and len(production_context_packet["selectedContext"]) == 1
+                and production_context_packet["selectedContext"][0]["citation"][
+                    "memoryVersionId"
+                ]
+                == corrected.memory_activation.memory_version_id
+                and review_knowledge_content["claim"]
+                in production_context_packet["generationContext"]["text"]
+                and review_content["summary"]
+                not in production_context_packet["generationContext"]["text"]
+                and production_context_packet["trace"]["retrievalLatencyBudgetMet"] is True,
+                "production Owner Context must use bounded query-ranked current SearchDocuments",
+            )
+            no_match_context_packet = production_context_authority.build_packet(
+                context=review_context,
+                payload={
+                    "userId": review_vault_id,
+                    "intent": "echo_chat",
+                    "query": "海边日落",
+                    "personaScope": "personal",
+                    "digitalHumanId": review_vault_id,
+                },
+            )
+            require(
+                no_match_context_packet["contextAuthority"]["retrievalOutcome"] == "gap"
+                and no_match_context_packet["selectedContext"] == []
+                and no_match_context_packet["generationContext"]["text"] == ""
+                and "owner_truth_context_no_query_match_no_personal_memory"
+                in no_match_context_packet["fallbacks"]
+                and no_match_context_packet["memory"]["archiveItems"] == []
+                and no_match_context_packet["memory"]["kbFacts"] == [],
+                "production Owner Context no-match must fail closed without Legacy/KBLite",
             )
 
             raw_answer = "我只根据当前确认的个人记忆回答。"

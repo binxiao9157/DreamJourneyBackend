@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import re
 from typing import Any, Iterable, Mapping
 import unicodedata
 
@@ -35,6 +36,25 @@ OWNER_TRUTH_MEMORY_SEARCH_RETRIEVAL_MODE = "deterministicTextFallback"
 OWNER_TRUTH_MEMORY_SEARCH_MAX_LIMIT = 20
 OWNER_TRUTH_MEMORY_SEARCH_MAX_QUERY_CHARACTERS = 256
 OWNER_TRUTH_MEMORY_SEARCH_MAX_DOCUMENT_CHARACTERS = 16_384
+
+_QUERY_TOKEN_PATTERN = re.compile(r"[a-z0-9]+|[\u3400-\u9fff]+")
+_QUERY_STOP_TERMS = frozenset(
+    {
+        "一下",
+        "为什么",
+        "什么",
+        "你还",
+        "告诉",
+        "哪里",
+        "回忆",
+        "是否",
+        "时光",
+        "时候",
+        "请问",
+        "这段",
+        "那段",
+    }
+)
 
 
 class OwnerTruthSearchDocumentProjectionError(OwnerTruthContractError):
@@ -540,18 +560,38 @@ def search_owner_truth_documents(
         raise OwnerTruthMemorySearchReadError("QueryPlan does not match the current projection")
     scored: list[tuple[int, int, OwnerTruthSearchDocument, str]] = []
     query = query_plan.normalized_query
+    query_terms = _deterministic_query_terms(query)
     for document in projection.documents:
         structured_match_count = sum(
             1 for term in document.structured_terms if query in term
         )
         text_match_count = document.search_text.count(query)
-        if structured_match_count == 0 and text_match_count == 0:
+        term_score = 0
+        term_match_count = 0
+        for term in query_terms:
+            structured_hits = sum(1 for value in document.structured_terms if term in value)
+            text_hits = document.search_text.count(term)
+            if structured_hits == 0 and text_hits == 0:
+                continue
+            weight = min(len(term), 8) ** 2
+            term_score += (structured_hits * 5 + text_hits) * weight
+            term_match_count += structured_hits + text_hits
+        if structured_match_count == 0 and text_match_count == 0 and term_match_count == 0:
             continue
-        match_count = structured_match_count + text_match_count
-        match_kind = "structuredTerm" if structured_match_count else "searchText"
-        score = structured_match_count * 10 + min(text_match_count, 9)
+        match_count = structured_match_count + text_match_count + term_match_count
+        if structured_match_count:
+            match_kind = "structuredTerm"
+        elif text_match_count:
+            match_kind = "searchText"
+        else:
+            match_kind = "queryTerm"
+        score = (
+            structured_match_count * 10_000
+            + min(text_match_count, 99) * 1_000
+            + term_score
+        )
         scored.append((score, match_count, document, match_kind))
-    scored.sort(key=lambda item: (-item[0], item[2].memory_version_id))
+    scored.sort(key=lambda item: (-item[0], -item[1], item[2].memory_version_id))
     return tuple(
         OwnerTruthMemorySearchHit(
             document=document,
@@ -564,6 +604,37 @@ def search_owner_truth_documents(
             start=1,
         )
     )
+
+
+def _deterministic_query_terms(query: str) -> tuple[str, ...]:
+    """Derive bounded lexical terms without provider or cross-scope reads.
+
+    Full-query matches remain authoritative. These terms only make natural
+    Chinese questions such as ``请陪我回忆父亲修自行车`` match a confirmed
+    memory containing ``父亲修好自行车``. The function is deterministic and
+    deliberately does not claim semantic/vector ranking.
+    """
+
+    terms: set[str] = set()
+    for token in _QUERY_TOKEN_PATTERN.findall(query):
+        if token.isascii():
+            if len(token) >= 2:
+                terms.add(token)
+            continue
+        if len(token) <= 4:
+            if len(token) >= 2 and token not in _QUERY_STOP_TERMS:
+                terms.add(token)
+            continue
+        for size in range(4, 1, -1):
+            for start in range(0, len(token) - size + 1):
+                term = token[start : start + size]
+                if term not in _QUERY_STOP_TERMS:
+                    terms.add(term)
+                if len(terms) >= 96:
+                    break
+            if len(terms) >= 96:
+                break
+    return tuple(sorted(terms, key=lambda item: (-len(item), item)))
 
 
 def _search_document_from_projection_entry(

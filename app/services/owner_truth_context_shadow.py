@@ -18,7 +18,10 @@ from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionAccessDenied,
     OwnerTruthMemoryProjectionError,
 )
-from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.ontology import (
+    OWNER_TRUTH_SCHEMA_VERSION,
+    OWNER_TRUTH_SCHEMA_VERSION_V2,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_memory_projection import (
     OwnerTruthMemoryProjectionService,
@@ -38,6 +41,9 @@ OWNER_TRUTH_CONTEXT_SHADOW_POLICY_VERSION = "owner-truth-context-shadow-policy-v
 _CONTEXT_ELIGIBLE_PERSPECTIVE_TYPES = frozenset({"firstPerson", "reported"})
 _CONTEXT_ELIGIBLE_EPISTEMIC_STATUSES = frozenset(
     {"observed", "recalled", "reported", "uncertain"}
+)
+_CONTEXT_SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {OWNER_TRUTH_SCHEMA_VERSION, OWNER_TRUTH_SCHEMA_VERSION_V2}
 )
 
 
@@ -215,7 +221,7 @@ class OwnerTruthContextShadowReadService:
                 reason = "memory_perspective_or_epistemic_status_missing"
             elif visibility != "owner":
                 reason = "visibility_not_owner"
-            elif content_schema_version != OWNER_TRUTH_SCHEMA_VERSION:
+            elif content_schema_version not in _CONTEXT_SUPPORTED_SCHEMA_VERSIONS:
                 reason = "content_schema_not_supported"
             elif sensitivity != "standard":
                 reason = "sensitivity_not_context_eligible"
