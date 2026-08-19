@@ -403,7 +403,7 @@ class InMemoryStore:
         self._rights_external_effect_receipts: Dict[str, Dict[str, Any]] = {}
         self._rights_access_revocation_outbox: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._data_export_jobs: Dict[str, Dict[str, Any]] = {}
-        self._data_export_job_ids_by_request: Dict[Tuple[str, str], str] = {}
+        self._data_export_job_ids_by_request: Dict[Tuple[str, str, str, str], str] = {}
         self._data_export_download_credentials: Dict[str, Dict[str, Any]] = {}
         self._account_purge_receipts: Dict[str, Dict[str, Any]] = {}
         self._rights_lock = RLock()
@@ -2062,10 +2062,18 @@ class InMemoryStore:
         record = deepcopy(dict(job))
         job_id = str(record.get("id") or "").strip()
         owner_user_id = str(record.get("ownerUserId") or "").strip()
+        export_type = str(record.get("exportType") or "").strip()
+        scope_id = str(record.get("scopeId") or "").strip()
         request_key_hash = str(record.get("requestKeyHash") or "").strip()
-        if not job_id or not owner_user_id or len(request_key_hash) != 64:
+        if (
+            not job_id
+            or not owner_user_id
+            or not export_type
+            or not scope_id
+            or len(request_key_hash) != 64
+        ):
             raise ValueError("data export job identity is invalid")
-        key = (owner_user_id, request_key_hash)
+        key = (owner_user_id, export_type, scope_id, request_key_hash)
         with self._rights_lock:
             existing_id = self._data_export_job_ids_by_request.get(key)
             if existing_id is not None:
@@ -2226,6 +2234,35 @@ class InMemoryStore:
             if credential is not None and credential.get("status") == "active":
                 credential["status"] = "revoked"
             return {"outcome": "expired", "job": deepcopy(record)}
+
+    def cancel_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        updated_at: str,
+    ) -> Dict[str, Any]:
+        with self._rights_lock:
+            record = self._data_export_jobs.get(str(job_id or ""))
+            if record is None or record.get("ownerUserId") != str(owner_user_id or ""):
+                return {"outcome": "notFound", "job": None}
+            if record["status"] in {"cancelled", "expired"}:
+                return {"outcome": "observed", "job": deepcopy(record)}
+            record.update(
+                {
+                    "status": "cancelled",
+                    "artifactHash": None,
+                    "artifact": None,
+                    "manifest": None,
+                    "failureCode": None,
+                    "readyAt": None,
+                    "updatedAt": str(updated_at),
+                }
+            )
+            credential = self._data_export_download_credentials.get(str(job_id or ""))
+            if credential is not None and credential.get("status") == "active":
+                credential["status"] = "revoked"
+            return {"outcome": "cancelled", "job": deepcopy(record)}
 
     def issue_data_export_download_credential(
         self,

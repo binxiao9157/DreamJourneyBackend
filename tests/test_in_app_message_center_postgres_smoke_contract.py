@@ -17,7 +17,7 @@ class InAppMessageCenterPostgresSmokeContractTests(unittest.TestCase):
         self.assertIn('["applied", "deduplicated"]', source)
         self.assertIn("message created after command must remain unread", source)
         self.assertIn("delete-read must not affect another account", source)
-        self.assertIn('verified["expectedHead"] == "0100"', source)
+        self.assertIn('int(str(verified["expectedHead"])) >= 100', source)
         self.assertIn("DATABASE_URL", wrapper)
 
 

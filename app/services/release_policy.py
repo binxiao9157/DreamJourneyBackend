@@ -466,6 +466,7 @@ class ReleasePolicyService:
         "legalCenter": ("G0", "G1"),
         "accountDeletion": ("G0", "G1", "G2"),
         "accountDataExport": ("G0", "G1", "G2"),
+        "formalMemoryMarkdownExport": ("G0", "G1", "G2"),
         "kbliteUserSurface": ("G0", "G1", "G2"),
         "accountPasswordChange": ("G0", "G1", "G2"),
         "careDashboard": ("G0", "G1", "G2", "G4"),
@@ -507,6 +508,7 @@ class ReleasePolicyService:
         "familyManagement",
         "familySpace",
         "careDashboard",
+        "formalMemoryMarkdownExport",
     }
     # The private V4 production chain is a normal authenticated-owner
     # capability. It is independent from login allowlists and from the
@@ -1062,6 +1064,12 @@ class ReleasePolicyCommandGate:
             return "ownerTextCaptureV1"
         memory_segments = tuple(segment for segment in normalized_path.split("/") if segment)
         if (
+            len(memory_segments) >= 5
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3:5] == ("memory-exports", "jobs")
+        ):
+            return "formalMemoryMarkdownExport"
+        if (
             len(memory_segments) == 4
             and memory_segments[:2] == ("v2", "vaults")
             and memory_segments[3] == "memories"
@@ -1159,6 +1167,15 @@ class ReleasePolicyCommandGate:
         ):
             return "POST /v2/vaults/*/sources"
         memory_segments = tuple(segment for segment in normalized_path.split("/") if segment)
+        if (
+            len(memory_segments) >= 5
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3:5] == ("memory-exports", "jobs")
+        ):
+            suffix = "/*" if len(memory_segments) > 5 else ""
+            if len(memory_segments) > 6:
+                suffix += f"/{memory_segments[-1]}"
+            return f"{normalized_method} /v2/vaults/*/memory-exports/jobs{suffix}"
         if (
             normalized_method == "GET"
             and len(memory_segments) == 4

@@ -376,6 +376,42 @@ class RouteOwnershipRegistry:
                 "ownerTruthFormalMemoryRevision",
             ),
             _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/memory-exports/jobs",
+                session,
+                "formalMemoryMarkdownExportCreate",
+            ),
+            _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/memory-exports/jobs/{job_id}",
+                session,
+                "formalMemoryMarkdownExportRead",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/memory-exports/jobs/{job_id}/retry",
+                session,
+                "formalMemoryMarkdownExportRetry",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/memory-exports/jobs/{job_id}/cancel",
+                session,
+                "formalMemoryMarkdownExportCancel",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/memory-exports/jobs/{job_id}/download-credential",
+                session,
+                "formalMemoryMarkdownExportDownloadCredential",
+            ),
+            _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/memory-exports/jobs/{job_id}/download",
+                session,
+                "formalMemoryMarkdownExportDownload",
+            ),
+            _rule(
                 "GET",
                 "/v2/internal/owner-authority/vaults/{vault_id}/publications",
                 session,

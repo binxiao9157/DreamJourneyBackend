@@ -276,7 +276,10 @@ def main() -> None:
         migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "temporary schema must verify")
-        require(verified["expectedHead"] == "0100", "message center requires migration 0100")
+        require(
+            int(str(verified["expectedHead"])) >= 100,
+            "message center requires migration 0100 or newer",
+        )
         exercise(test_dsn)
         print("In-app message center PostgreSQL smoke passed.")
     finally:

@@ -15,10 +15,15 @@ from typing import Any, Callable, Dict, Mapping, Optional
 from uuid import uuid4
 
 
-DATA_EXPORT_JOB_SCHEMA_VERSION = 1
+DATA_EXPORT_JOB_SCHEMA_VERSION = 2
 COPY_EXPORT_MANIFEST_SCHEMA_VERSION = 1
+FULL_ACCOUNT_ARCHIVE_EXPORT_TYPE = "fullAccountArchive"
+FORMAL_MEMORY_MARKDOWN_EXPORT_TYPE = "formalMemoryMarkdown"
+DATA_EXPORT_TYPES = frozenset(
+    {FULL_ACCOUNT_ARCHIVE_EXPORT_TYPE, FORMAL_MEMORY_MARKDOWN_EXPORT_TYPE}
+)
 DATA_EXPORT_JOB_STATES = frozenset(
-    {"queued", "running", "ready", "partial", "failed", "expired"}
+    {"queued", "running", "ready", "partial", "failed", "cancelled", "expired"}
 )
 DATA_EXPORT_DOWNLOADABLE_STATES = frozenset({"ready", "partial"})
 DEFAULT_DATA_EXPORT_TTL_SECONDS = 15 * 60
@@ -40,6 +45,8 @@ def create_data_export_job_record(
     now: Optional[Any] = None,
     expires_at: Optional[Any] = None,
     job_id: Optional[str] = None,
+    export_type: Any = FULL_ACCOUNT_ARCHIVE_EXPORT_TYPE,
+    scope_id: Any = "account",
 ) -> Dict[str, Any]:
     owner = _required_text(owner_user_id, field="owner_user_id", maximum=256)
     request = _required_text(request_key, field="request_key", maximum=128)
@@ -56,9 +63,19 @@ def create_data_export_job_record(
     normalized_job_id = job_id or f"dej_{uuid4().hex}"
     if not normalized_job_id.startswith("dej_") or len(normalized_job_id) > 80:
         raise DataExportJobError("job_id is invalid")
+    normalized_export_type = _required_text(
+        export_type,
+        field="export_type",
+        maximum=64,
+    )
+    if normalized_export_type not in DATA_EXPORT_TYPES:
+        raise DataExportJobError("export_type is unsupported")
+    normalized_scope_id = _required_text(scope_id, field="scope_id", maximum=256)
     return {
         "id": normalized_job_id,
         "ownerUserId": owner,
+        "exportType": normalized_export_type,
+        "scopeId": normalized_scope_id,
         "requestKeyHash": _sha256(request),
         "status": "queued",
         "attempt": 0,
@@ -211,6 +228,8 @@ def public_data_export_job(job: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "schemaVersion": DATA_EXPORT_JOB_SCHEMA_VERSION,
         "jobId": str(job.get("id") or ""),
+        "exportType": str(job.get("exportType") or FULL_ACCOUNT_ARCHIVE_EXPORT_TYPE),
+        "scopeId": str(job.get("scopeId") or "account"),
         "status": status,
         "attempt": max(0, int(job.get("attempt") or 0)),
         "failureCode": job.get("failureCode"),
@@ -317,10 +336,13 @@ __all__ = [
     "COPY_EXPORT_MANIFEST_SCHEMA_VERSION",
     "DEFAULT_DATA_EXPORT_DOWNLOAD_CREDENTIAL_TTL_SECONDS",
     "DATA_EXPORT_DOWNLOADABLE_STATES",
+    "DATA_EXPORT_TYPES",
     "DATA_EXPORT_JOB_SCHEMA_VERSION",
     "DATA_EXPORT_JOB_STATES",
     "DataExportJobError",
     "DataExportJobStateError",
+    "FORMAL_MEMORY_MARKDOWN_EXPORT_TYPE",
+    "FULL_ACCOUNT_ARCHIVE_EXPORT_TYPE",
     "build_copy_export_manifest",
     "create_data_export_download_credential",
     "create_data_export_job_record",

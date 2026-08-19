@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from threading import RLock
 from typing import Any, Dict, Mapping, Optional, Tuple
+from urllib.parse import quote
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import ValidationError
@@ -63,6 +64,7 @@ from app.services.data_rights_external_effect_receipts import (
 from app.services.data_rights_module_inventory import build_module_owned_data_export
 from app.services.data_export_jobs import (
     DATA_EXPORT_DOWNLOADABLE_STATES,
+    FORMAL_MEMORY_MARKDOWN_EXPORT_TYPE,
     DataExportJobError,
     DataExportJobStateError,
     create_data_export_download_credential,
@@ -71,6 +73,12 @@ from app.services.data_export_jobs import (
     materialize_data_export_job,
     public_data_export_download_credential,
     public_data_export_job,
+)
+from app.services.formal_memory_markdown_export import (
+    FORMAL_MEMORY_MARKDOWN_MIME_TYPE,
+    FormalMemoryMarkdownExportError,
+    formal_memory_markdown_download,
+    materialize_formal_memory_markdown_export_job,
 )
 from app.services.data_export_package import (
     DataExportPackageError,
@@ -3213,6 +3221,24 @@ def _owner_truth_formal_memory_context(
         feature="ownerTruthCandidateReview",
         route=route,
         user_session_required_code="ownerTruthFormalMemoryUserSessionRequired",
+    )
+
+
+def _formal_memory_markdown_export_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the public Owner-only formal-memory Markdown export surface."""
+
+    suffix = request.url.path.split("/memory-exports/jobs", 1)[-1]
+    route = f"{request.method.upper()} /v2/vaults/*/memory-exports/jobs{suffix}"
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="formalMemoryMarkdownExport",
+        route=route,
+        user_session_required_code="formalMemoryMarkdownExportUserSessionRequired",
     )
 
 
@@ -7775,6 +7801,282 @@ def revise_owner_truth_formal_memory(
         status_code=201 if result.outcome == "created" else 200,
         content={"vaultId": context.vault_id, "revision": result.public_contract()},
         headers={"Cache-Control": "no-store"},
+    )
+
+
+def _materialize_formal_memory_markdown_job(
+    job_id: str,
+    context: OwnerTruthCommandContext,
+) -> None:
+    try:
+        detached_context = getattr(store, "detached_background_context", None)
+        if callable(detached_context):
+            with detached_context():
+                materialize_formal_memory_markdown_export_job(
+                    store,
+                    job_id=job_id,
+                    context=context,
+                )
+        else:
+            materialize_formal_memory_markdown_export_job(
+                store,
+                job_id=job_id,
+                context=context,
+            )
+    except Exception as exc:  # pragma: no cover - route tests assert stored state
+        logger.error(
+            "formal memory Markdown export failed job_id=%s error_type=%s",
+            job_id,
+            type(exc).__name__,
+        )
+
+
+def _load_formal_memory_markdown_job_or_raise(
+    job_id: str,
+    *,
+    context: OwnerTruthCommandContext,
+    include_artifact: bool = False,
+) -> Dict[str, Any]:
+    job = store.get_data_export_job(
+        job_id,
+        owner_user_id=context.owner_subject_id,
+        include_artifact=include_artifact,
+    )
+    if (
+        job is None
+        or job.get("exportType") != FORMAL_MEMORY_MARKDOWN_EXPORT_TYPE
+        or job.get("scopeId") != context.vault_id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "formalMemoryExportJobNotFound"},
+        )
+    if job.get("status") != "expired" and is_data_export_job_expired(job):
+        expired = store.expire_data_export_job(
+            job_id,
+            owner_user_id=context.owner_subject_id,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        job = expired.get("job") or job
+    return job
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memory-exports/jobs",
+    status_code=202,
+    include_in_schema=False,
+)
+def create_formal_memory_markdown_export_job(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    unsupported = set(payload).difference({"requestKey", "exportType"})
+    if unsupported or payload.get("exportType", FORMAL_MEMORY_MARKDOWN_EXPORT_TYPE) != FORMAL_MEMORY_MARKDOWN_EXPORT_TYPE:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "formalMemoryExportJobInvalid"},
+        )
+    context = _formal_memory_markdown_export_context(request, vault_id=vault_id)
+    _active_data_export_user_or_raise(context.owner_subject_id)
+    try:
+        record = create_data_export_job_record(
+            owner_user_id=context.owner_subject_id,
+            request_key=payload.get("requestKey"),
+            export_type=FORMAL_MEMORY_MARKDOWN_EXPORT_TYPE,
+            scope_id=context.vault_id,
+        )
+    except DataExportJobError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "formalMemoryExportJobInvalid", "message": str(exc)},
+        ) from exc
+    result = store.create_data_export_job(record)
+    job = result["job"]
+    if job.get("status") == "queued":
+        background_tasks.add_task(
+            _materialize_formal_memory_markdown_job,
+            str(job["id"]),
+            context,
+        )
+    return public_data_export_job(job)
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/memory-exports/jobs/{job_id}",
+    include_in_schema=False,
+)
+def read_formal_memory_markdown_export_job(
+    request: Request,
+    vault_id: str,
+    job_id: str,
+) -> Dict[str, Any]:
+    context = _formal_memory_markdown_export_context(request, vault_id=vault_id)
+    job = _load_formal_memory_markdown_job_or_raise(job_id, context=context)
+    return public_data_export_job(job)
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memory-exports/jobs/{job_id}/retry",
+    status_code=202,
+    include_in_schema=False,
+)
+def retry_formal_memory_markdown_export_job(
+    request: Request,
+    vault_id: str,
+    job_id: str,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    context = _formal_memory_markdown_export_context(request, vault_id=vault_id)
+    _active_data_export_user_or_raise(context.owner_subject_id)
+    current = _load_formal_memory_markdown_job_or_raise(job_id, context=context)
+    if current.get("status") == "expired":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "formalMemoryExportJobExpired"},
+        )
+    result = store.retry_data_export_job(
+        job_id,
+        owner_user_id=context.owner_subject_id,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+    )
+    job = result.get("job")
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "formalMemoryExportJobNotFound"})
+    if result.get("outcome") == "queued":
+        background_tasks.add_task(_materialize_formal_memory_markdown_job, job_id, context)
+    elif job.get("status") != "failed":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "formalMemoryExportJobNotRetryable", "status": job.get("status")},
+        )
+    return public_data_export_job(job)
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memory-exports/jobs/{job_id}/cancel",
+    include_in_schema=False,
+)
+def cancel_formal_memory_markdown_export_job(
+    request: Request,
+    vault_id: str,
+    job_id: str,
+) -> Dict[str, Any]:
+    context = _formal_memory_markdown_export_context(request, vault_id=vault_id)
+    _load_formal_memory_markdown_job_or_raise(job_id, context=context)
+    result = store.cancel_data_export_job(
+        job_id,
+        owner_user_id=context.owner_subject_id,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+    )
+    job = result.get("job")
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "formalMemoryExportJobNotFound"})
+    return public_data_export_job(job)
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memory-exports/jobs/{job_id}/download-credential",
+    include_in_schema=False,
+)
+def issue_formal_memory_markdown_download_credential(
+    request: Request,
+    vault_id: str,
+    job_id: str,
+) -> JSONResponse:
+    context = _formal_memory_markdown_export_context(request, vault_id=vault_id)
+    _active_data_export_user_or_raise(context.owner_subject_id)
+    job = _load_formal_memory_markdown_job_or_raise(job_id, context=context)
+    if job.get("status") != "ready":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "formalMemoryExportJobNotReady", "status": job.get("status")},
+        )
+    try:
+        credential = create_data_export_download_credential(
+            job_id=job_id,
+            owner_user_id=context.owner_subject_id,
+            job_expires_at=job.get("expiresAt"),
+        )
+    except DataExportJobStateError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "formalMemoryExportJobExpired"},
+        ) from exc
+    issued = store.issue_data_export_download_credential(
+        job_id=job_id,
+        owner_user_id=context.owner_subject_id,
+        token_hash=str(credential["tokenHash"]),
+        issued_at=str(credential["issuedAt"]),
+        expires_at=str(credential["expiresAt"]),
+    )
+    if issued.get("outcome") != "issued":
+        raise HTTPException(status_code=404, detail={"code": "formalMemoryExportJobNotFound"})
+    return JSONResponse(
+        content=public_data_export_download_credential(credential),
+        headers={"Cache-Control": "no-store, private", "Pragma": "no-cache"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/memory-exports/jobs/{job_id}/download",
+    include_in_schema=False,
+)
+def download_formal_memory_markdown_export(
+    request: Request,
+    vault_id: str,
+    job_id: str,
+) -> Response:
+    context = _formal_memory_markdown_export_context(request, vault_id=vault_id)
+    _active_data_export_user_or_raise(context.owner_subject_id)
+    job = _load_formal_memory_markdown_job_or_raise(
+        job_id,
+        context=context,
+        include_artifact=True,
+    )
+    if job.get("status") != "ready":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "formalMemoryExportJobNotReady", "status": job.get("status")},
+        )
+    download_token = str(request.headers.get("x-dreamjourney-export-token") or "").strip()
+    if not download_token.startswith("dec_") or len(download_token) > 128:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "formalMemoryExportDownloadCredentialRequired"},
+        )
+    try:
+        data, filename, content_hash = formal_memory_markdown_download(job)
+    except FormalMemoryMarkdownExportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "formalMemoryExportArtifactUnavailable"},
+        ) from exc
+    consumed = store.consume_data_export_download_credential(
+        job_id=job_id,
+        owner_user_id=context.owner_subject_id,
+        token_hash=hashlib.sha256(download_token.encode("utf-8")).hexdigest(),
+        consumed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    if consumed.get("outcome") != "consumed":
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "formalMemoryExportDownloadCredentialInvalid"},
+        )
+    encoded_filename = quote(filename, safe="")
+    return Response(
+        content=data,
+        headers={
+            "Content-Type": FORMAL_MEMORY_MARKDOWN_MIME_TYPE,
+            "Content-Disposition": (
+                'attachment; filename="dreamjourney-formal-memory.md"; '
+                f"filename*=UTF-8''{encoded_filename}"
+            ),
+            "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+            "X-Content-SHA256": content_hash,
+        },
     )
 
 

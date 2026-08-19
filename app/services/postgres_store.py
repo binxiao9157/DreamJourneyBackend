@@ -3159,6 +3159,8 @@ class PostgresStore:
         payload = {
             "id": str(row.get("id") or ""),
             "ownerUserId": str(row.get("owner_user_id") or ""),
+            "exportType": str(row.get("export_type") or "fullAccountArchive"),
+            "scopeId": str(row.get("scope_id") or "account"),
             "requestKeyHash": str(row.get("request_key_hash") or ""),
             "status": str(row.get("status") or ""),
             "attempt": int(row.get("attempt") or 0),
@@ -3182,7 +3184,7 @@ class PostgresStore:
     @staticmethod
     def _data_export_job_select() -> str:
         return """
-            SELECT id, owner_user_id, request_key_hash, status, attempt,
+            SELECT id, owner_user_id, export_type, scope_id, request_key_hash, status, attempt,
                 artifact_hash, artifact_payload, manifest_payload, failure_code,
                 contract_version, created_at, updated_at, expires_at, ready_at
             FROM data_export_jobs
@@ -3199,19 +3201,19 @@ class PostgresStore:
         row = self._fetchone(
             """
             INSERT INTO data_export_jobs (
-                id, owner_user_id, request_key_hash, status, attempt,
+                id, owner_user_id, export_type, scope_id, request_key_hash, status, attempt,
                 artifact_hash, artifact_payload, manifest_payload, failure_code,
                 contract_version, created_at, updated_at, expires_at, ready_at
             )
-            VALUES (%s, %s, %s, %s, %s, NULL, NULL, NULL, NULL, %s, %s, %s, %s, NULL)
-            ON CONFLICT (owner_user_id, request_key_hash) DO NOTHING
-            RETURNING id, owner_user_id, request_key_hash, status, attempt,
-                artifact_hash, artifact_payload, manifest_payload, failure_code,
-                contract_version, created_at, updated_at, expires_at, ready_at
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, NULL, %s, %s, %s, %s, NULL)
+            ON CONFLICT (owner_user_id, export_type, scope_id, request_key_hash) DO NOTHING
+            RETURNING *
             """,
             (
                 str(record.get("id") or ""),
                 str(record.get("ownerUserId") or ""),
+                str(record.get("exportType") or "fullAccountArchive"),
+                str(record.get("scopeId") or "account"),
                 str(record.get("requestKeyHash") or ""),
                 str(record.get("status") or "queued"),
                 int(record.get("attempt") or 0),
@@ -3225,9 +3227,11 @@ class PostgresStore:
         if row is None:
             row = self._fetchone(
                 self._data_export_job_select()
-                + " WHERE owner_user_id = %s AND request_key_hash = %s FOR UPDATE",
+                + " WHERE owner_user_id = %s AND export_type = %s AND scope_id = %s AND request_key_hash = %s FOR UPDATE",
                 (
                     str(record.get("ownerUserId") or ""),
+                    str(record.get("exportType") or "fullAccountArchive"),
+                    str(record.get("scopeId") or "account"),
                     str(record.get("requestKeyHash") or ""),
                 ),
             )
@@ -3291,9 +3295,7 @@ class PostgresStore:
             UPDATE data_export_jobs
             SET status = 'running', attempt = attempt + 1, updated_at = %s
             WHERE id = %s AND owner_user_id = %s
-            RETURNING id, owner_user_id, request_key_hash, status, attempt,
-                artifact_hash, artifact_payload, manifest_payload, failure_code,
-                contract_version, created_at, updated_at, expires_at, ready_at
+            RETURNING *
             """,
             (str(updated_at), str(job_id), str(owner_user_id)),
         )
@@ -3352,9 +3354,7 @@ class PostgresStore:
                 manifest_payload = %s, failure_code = NULL,
                 ready_at = %s, updated_at = %s
             WHERE id = %s AND owner_user_id = %s
-            RETURNING id, owner_user_id, request_key_hash, status, attempt,
-                artifact_hash, artifact_payload, manifest_payload, failure_code,
-                contract_version, created_at, updated_at, expires_at, ready_at
+            RETURNING *
             """,
             (
                 status,
@@ -3410,9 +3410,7 @@ class PostgresStore:
                 manifest_payload = NULL, failure_code = %s, ready_at = NULL,
                 updated_at = %s
             WHERE id = %s AND owner_user_id = %s
-            RETURNING id, owner_user_id, request_key_hash, status, attempt,
-                artifact_hash, artifact_payload, manifest_payload, failure_code,
-                contract_version, created_at, updated_at, expires_at, ready_at
+            RETURNING *
             """,
             (str(failure_code), str(updated_at), str(job_id), str(owner_user_id)),
         )
@@ -3455,9 +3453,7 @@ class PostgresStore:
             UPDATE data_export_jobs
             SET status = 'queued', failure_code = NULL, updated_at = %s
             WHERE id = %s AND owner_user_id = %s
-            RETURNING id, owner_user_id, request_key_hash, status, attempt,
-                artifact_hash, artifact_payload, manifest_payload, failure_code,
-                contract_version, created_at, updated_at, expires_at, ready_at
+            RETURNING *
             """,
             (str(updated_at), str(job_id), str(owner_user_id)),
         )
@@ -3502,9 +3498,7 @@ class PostgresStore:
                 manifest_payload = NULL, failure_code = NULL, ready_at = NULL,
                 updated_at = %s
             WHERE id = %s AND owner_user_id = %s
-            RETURNING id, owner_user_id, request_key_hash, status, attempt,
-                artifact_hash, artifact_payload, manifest_payload, failure_code,
-                contract_version, created_at, updated_at, expires_at, ready_at
+            RETURNING *
             """,
             (str(updated_at), str(job_id), str(owner_user_id)),
         )
@@ -3519,6 +3513,60 @@ class PostgresStore:
         )
         return {
             "outcome": "expired",
+            "job": self._data_export_job_payload(row, include_artifact=True),
+        }
+
+    def cancel_data_export_job(
+        self,
+        job_id: str,
+        *,
+        owner_user_id: str,
+        updated_at: str,
+    ) -> Dict[str, Any]:
+        if self._current_uow.get() is None:
+            with self.request_unit_of_work(
+                correlation_id=f"data-export-cancel-{job_id}",
+                command_id=str(job_id),
+            ):
+                return self.cancel_data_export_job(
+                    job_id,
+                    owner_user_id=owner_user_id,
+                    updated_at=updated_at,
+                )
+        current = self._fetchone(
+            self._data_export_job_select()
+            + " WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+            (str(job_id), str(owner_user_id)),
+        )
+        if current is None:
+            return {"outcome": "notFound", "job": None}
+        if str(current.get("status") or "") in {"cancelled", "expired"}:
+            return {
+                "outcome": "observed",
+                "job": self._data_export_job_payload(current, include_artifact=True),
+            }
+        row = self._fetchone(
+            """
+            UPDATE data_export_jobs
+            SET status = 'cancelled', artifact_hash = NULL, artifact_payload = NULL,
+                manifest_payload = NULL, failure_code = NULL, ready_at = NULL,
+                updated_at = %s
+            WHERE id = %s AND owner_user_id = %s
+            RETURNING *
+            """,
+            (str(updated_at), str(job_id), str(owner_user_id)),
+        )
+        self._fetchone(
+            """
+            UPDATE data_export_download_credentials
+            SET status = 'revoked'
+            WHERE job_id = %s AND owner_user_id = %s AND status = 'active'
+            RETURNING job_id
+            """,
+            (str(job_id), str(owner_user_id)),
+        )
+        return {
+            "outcome": "cancelled",
             "job": self._data_export_job_payload(row, include_artifact=True),
         }
 

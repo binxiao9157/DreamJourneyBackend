@@ -112,6 +112,11 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertEqual(decisions["echoTextInput"].releaseStage, "M0")
         self.assertTrue(decisions["profileSettings"].releaseVisible)
         self.assertTrue(decisions["accountDeletion"].releaseVisible)
+        self.assertTrue(decisions["formalMemoryMarkdownExport"].releaseVisible)
+        self.assertEqual(
+            decisions["formalMemoryMarkdownExport"].reason,
+            "authenticatedOwnerCore",
+        )
         for feature in ["familyManagement", "familySpace", "careDashboard"]:
             self.assertTrue(decisions[feature].releaseVisible, feature)
             self.assertEqual(decisions[feature].reason, "authenticatedOwnerCore")
@@ -1347,6 +1352,22 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
         self.assertEqual(
             gate.feature_for_request("GET", "/auth/data-export/jobs/dej_123", {}),
             "accountDataExport",
+        )
+        self.assertEqual(
+            gate.feature_for_request(
+                "POST",
+                "/v2/vaults/vault-a/memory-exports/jobs",
+                {"exportType": "formalMemoryMarkdown"},
+            ),
+            "formalMemoryMarkdownExport",
+        )
+        self.assertEqual(
+            gate.feature_for_request(
+                "GET",
+                "/v2/vaults/vault-a/memory-exports/jobs/export-a/download",
+                {},
+            ),
+            "formalMemoryMarkdownExport",
         )
         self.assertEqual(
             gate.feature_for_request("GET", "/archive/items/user-a", {}),

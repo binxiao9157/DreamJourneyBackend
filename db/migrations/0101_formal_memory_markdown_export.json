@@ -1,0 +1,12 @@
+{
+  "version": "0101",
+  "name": "formal_memory_markdown_export",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "formalMemoryMarkdownExportV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "formalMemoryMarkdownExport": true,
+    "accountDataExport": false
+  }
+}
