@@ -6,6 +6,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SQL_PATH = ROOT / "db/migrations/0101_formal_memory_markdown_export.sql"
 MANIFEST_PATH = ROOT / "db/migrations/0101_formal_memory_markdown_export.json"
+POSTGRES_SMOKE_PATH = ROOT / "scripts/backend-data-export-jobs-postgres-smoke.py"
 
 
 class FormalMemoryMarkdownExportMigrationContractTests(unittest.TestCase):
@@ -21,6 +22,15 @@ class FormalMemoryMarkdownExportMigrationContractTests(unittest.TestCase):
         self.assertIn("data_export_jobs_owner_type_scope_request_key_unique", sql)
         self.assertIn("'cancelled'", sql)
         self.assertIn("data_export_jobs_cancelled_artifact_check", sql)
+
+    def test_postgres_smoke_seeds_a_valid_memory_version_chain(self) -> None:
+        smoke = POSTGRES_SMOKE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("supersedes_version_id", smoke)
+        self.assertIn(
+            "(current_version_id, 2, True, current_content, old_version_id)",
+            smoke,
+        )
 
 
 if __name__ == "__main__":

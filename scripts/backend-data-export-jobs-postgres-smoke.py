@@ -143,16 +143,17 @@ def seed_formal_memory(
                     current_hash,
                 ),
             )
-            for version_id, version_number, is_current, content in (
-                (old_version_id, 1, False, old_content),
-                (current_version_id, 2, True, current_content),
+            for version_id, version_number, is_current, content, supersedes_version_id in (
+                (old_version_id, 1, False, old_content, None),
+                (current_version_id, 2, True, current_content, old_version_id),
             ):
                 cursor.execute(
                     """
                     INSERT INTO owner_truth.memory_versions (
                         id, vault_id, memory_id, version_number, is_current,
-                        schema_version, content_hash, payload, source_id, source_version
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+                        schema_version, content_hash, payload, source_id, source_version,
+                        supersedes_version_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s)
                     """,
                     (
                         version_id,
@@ -172,6 +173,7 @@ def seed_formal_memory(
                             }
                         ),
                         source_id,
+                        supersedes_version_id,
                     ),
                 )
         connection.commit()
