@@ -262,3 +262,82 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         self.assertEqual(answer["citations"], [])
         self.assertEqual(answer["memoryGrounding"]["outcome"], "gap")
         self.assertEqual(answer["memoryGrounding"]["handoff"], "ownerInterview")
+        receipt = main_module.store.owner_truth_answer_citation_repository().snapshot()["records"]
+        self.assertEqual(len(receipt), 1)
+        self.assertEqual(receipt[0]["citations"], [])
+        self.assertEqual(
+            receipt[0]["contextTraceIdHash"],
+            sha256(answer["contextTraceId"].encode("utf-8")).hexdigest(),
+        )
+
+    def test_owner_answer_is_grounded_and_audits_exact_typed_citation(self) -> None:
+        owner_id, headers = self._login("13800139766")
+        candidate = self._seed_confirmed_memory(owner_id)
+        self._enable_authenticated_owner_v4(owner_id)
+        payload = self._payload(owner_id)
+        payload["query"] = "闭环试点回响"
+
+        with patch.object(
+            main_module.DeepSeekEchoAnswerProxy,
+            "request_answer",
+            return_value="根据你确认的正式记忆，这段回忆已经进入回响。",
+        ):
+            response = client.post("/echo/answers", headers=headers, json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        answer = response.json()["answer"]
+        self.assertEqual(answer["memoryGrounding"]["outcome"], "grounded")
+        self.assertEqual(answer["memoryGrounding"]["handoff"], "none")
+        self.assertEqual(len(answer["citations"]), 1)
+        citation = answer["citations"][0]
+        self.assertEqual(citation["source"], "ownerTruthMemoryProjection")
+        self.assertEqual(citation["contentHash"], candidate.content_hash)
+        self.assertTrue(answer["contextTraceId"].startswith("ctx_"))
+
+        records = main_module.store.owner_truth_answer_citation_repository().snapshot()["records"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["answerId"], answer["answerId"])
+        self.assertEqual(
+            records[0]["contextTraceIdHash"],
+            sha256(answer["contextTraceId"].encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(
+            records[0]["citations"][0]["citation"]["contentHash"],
+            candidate.content_hash,
+        )
+
+    def test_owner_search_unavailable_returns_explicit_fallback_without_provider_call(self) -> None:
+        owner_id, headers = self._login("13800139767")
+        self._seed_confirmed_memory(owner_id)
+        self._enable_authenticated_owner_v4(owner_id)
+        main_module.store.owner_truth_memory_search_document_projection_repository()._projections.clear()
+        payload = self._payload(owner_id)
+        payload["query"] = "闭环试点回响"
+
+        with patch.object(
+            main_module.DeepSeekEchoAnswerProxy,
+            "request_answer",
+            return_value="不应调用 Provider",
+        ) as request_answer:
+            response = client.post("/echo/answers", headers=headers, json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        request_answer.assert_not_called()
+        answer = response.json()["answer"]
+        self.assertEqual(answer["provider"], "owner-truth-grounding-policy")
+        self.assertEqual(
+            answer["fallbackReason"],
+            "owner_truth_context_search_unavailable_no_personal_memory",
+        )
+        self.assertEqual(answer["citations"], [])
+        self.assertEqual(answer["memoryGrounding"]["outcome"], "fallback")
+        self.assertEqual(answer["memoryGrounding"]["handoff"], "none")
+        self.assertIn("暂时无法检索", answer["text"])
+
+        records = main_module.store.owner_truth_answer_citation_repository().snapshot()["records"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["citations"], [])
+        self.assertIn(
+            "owner_truth_context_search_unavailable_no_personal_memory",
+            records[0]["fallbacks"],
+        )

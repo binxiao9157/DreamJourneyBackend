@@ -10945,6 +10945,7 @@ def record_owner_truth_answer_citation(
         command = OwnerTruthAnswerCitationCommand(
             command_id=payload.get("commandId"),
             answer_text=payload.get("answerText"),
+            context_trace_id=payload.get("contextTraceId"),
         )
         result = OwnerTruthAnswerCitationService(store, enabled=True).record(
             context=context,
@@ -15510,12 +15511,16 @@ def runtime_config() -> Dict[str, Any]:
     ).public_config()
 
 
-def _build_authorized_echo_context_packet(
+def _build_authorized_echo_context(
     request: Request,
     *,
     owner_subject_id: str,
     payload: Dict[str, Any],
-) -> Dict[str, Any]:
+) -> Tuple[
+    Dict[str, Any],
+    Optional[OwnerTruthCommandContext],
+    Optional[Dict[str, Any]],
+]:
     persona_scope = str(payload.get("personaScope") or "personal").strip().lower()
     digital_human_id = str(payload.get("digitalHumanId") or owner_subject_id).strip()
     viewer_family_member_id = str(payload.get("viewerFamilyMemberID") or "").strip()
@@ -15548,12 +15553,13 @@ def _build_authorized_echo_context_packet(
     try:
         if authority_context is None:
             packet = ContextPacketBuilder(store, settings).build(payload)
+            materialization = None
         else:
-            packet = OwnerTruthContextAuthorityService(
+            packet, materialization = OwnerTruthContextAuthorityService(
                 store,
                 settings=settings,
                 enabled=True,
-            ).build_packet(
+            ).build_packet_with_materialization(
                 context=authority_context,
                 payload=payload,
             )
@@ -15561,6 +15567,20 @@ def _build_authorized_echo_context_packet(
         raise _owner_truth_memory_projection_http_error(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return packet, authority_context, materialization
+
+
+def _build_authorized_echo_context_packet(
+    request: Request,
+    *,
+    owner_subject_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    packet, _authority_context, _materialization = _build_authorized_echo_context(
+        request,
+        owner_subject_id=owner_subject_id,
+        payload=payload,
+    )
     return packet
 
 
@@ -15584,10 +15604,12 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
     if len(query) > DeepSeekEchoAnswerProxy.maximum_query_characters:
         raise HTTPException(status_code=400, detail="query is too long")
 
-    packet = _build_authorized_echo_context_packet(
-        request,
-        owner_subject_id=owner_subject_id,
-        payload=payload,
+    packet, owner_truth_audit_context, owner_truth_materialization = (
+        _build_authorized_echo_context(
+            request,
+            owner_subject_id=owner_subject_id,
+            payload=payload,
+        )
     )
     safety = packet.get("safetyPolicy") if isinstance(packet, dict) else None
     effects = safety.get("effects") if isinstance(safety, dict) else None
@@ -15604,8 +15626,22 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         and context_authority.get("mode") == "ownerTruthConfirmedProjection"
         and context_authority.get("retrievalOutcome") == "gap"
     )
+    owner_truth_retrieval_fallback = bool(
+        isinstance(context_authority, dict)
+        and context_authority.get("mode") == "ownerTruthConfirmedProjection"
+        and context_authority.get("retrievalOutcome") == "fallback"
+    )
+    owner_truth_retrieval_fallback_reason = str(
+        context_authority.get("retrievalFallbackReason")
+        if isinstance(context_authority, dict)
+        else ""
+    ).strip() or "ownerTruthRetrievalUnavailable"
 
-    if provider_effects_allowed and owner_truth_query_gap:
+    if provider_effects_allowed and owner_truth_retrieval_fallback:
+        answer_text = "记忆检索服务暂时无法检索已确认的正式记忆，请稍后重试。"
+        provider = "owner-truth-grounding-policy"
+        fallback_reason = owner_truth_retrieval_fallback_reason
+    elif provider_effects_allowed and owner_truth_query_gap:
         answer_text = (
             DeepSeekEchoAnswerProxy.memory_gap_marker
             + "我还没有从你当前已确认的正式记忆中找到这个答案。"
@@ -15679,17 +15715,22 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
 
     generation = packet.get("generationContext") or {}
     raw_source_refs = generation.get("sourceRefs") or []
-    citations = [
-        {
+    citations = []
+    for item in raw_source_refs:
+        if not isinstance(item, dict) or not str(item.get("refId") or "").strip():
+            continue
+        citation = {
             "source": str(item.get("source") or "memory"),
             "refId": str(item.get("refId") or ""),
             "kind": str(item.get("kind") or "memory"),
         }
-        for item in raw_source_refs
-        if isinstance(item, dict) and str(item.get("refId") or "").strip()
-    ]
+        content_hash = str(item.get("contentHash") or "").strip()
+        if content_hash:
+            citation["contentHash"] = content_hash
+        citations.append(citation)
     has_memory_citations = any(
-        citation["source"] in {"archive", "kbFact", "care"}
+        citation["source"]
+        in {"archive", "kbFact", "care", "ownerTruthMemoryProjection"}
         for citation in citations
     )
     persona = packet.get("persona") if isinstance(packet, dict) else None
@@ -15712,19 +15753,43 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
             memory_handoff = "ownerInterview"
     else:
         memory_handoff = "none"
-    if memory_gap:
+    if owner_truth_retrieval_fallback:
+        citations = []
+        memory_outcome = "fallback"
+        memory_handoff = "none"
+    elif memory_gap:
         citations = []
         memory_outcome = "gap"
     elif has_memory_citations:
         memory_outcome = "grounded"
     else:
         memory_outcome = "notApplicable"
+    answer_id = "ans_" + secrets.token_hex(12)
+    if (
+        owner_truth_audit_context is not None
+        and isinstance(owner_truth_materialization, Mapping)
+        and str(owner_truth_materialization.get("contextHash") or "").strip()
+    ):
+        try:
+            audit = OwnerTruthAnswerCitationService(store, enabled=True).record_context_build(
+                context=owner_truth_audit_context,
+                command=OwnerTruthAnswerCitationCommand(
+                    command_id="echo-answer-" + secrets.token_hex(16),
+                    answer_text=answer_text,
+                    context_trace_id=str(packet.get("traceId") or ""),
+                ),
+                context_build=owner_truth_materialization,
+            )
+            answer_id = audit.answer_id
+        except OwnerTruthMemoryProjectionError as error:
+            raise _owner_truth_answer_citation_http_error(error) from error
+
     return JSONResponse(
         content={
             "status": "answered",
             "answer": {
                 "schemaVersion": "echo-answer-v1",
-                "answerId": "ans_" + secrets.token_hex(12),
+                "answerId": answer_id,
                 "text": answer_text,
                 "provider": provider,
                 "model": model,

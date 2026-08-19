@@ -166,6 +166,7 @@ class OwnerTruthAnswerCitationCommand:
 
     command_id: str
     answer_text: str
+    context_trace_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", _opaque_identifier(self.command_id, field="command_id"))
@@ -173,6 +174,13 @@ class OwnerTruthAnswerCitationCommand:
         if len(answer_text) > _MAX_ANSWER_CHARS:
             raise OwnerTruthAnswerCitationError("answer_text exceeds the QA evidence limit")
         object.__setattr__(self, "answer_text", answer_text)
+        context_trace_id = self.context_trace_id
+        if context_trace_id is not None:
+            context_trace_id = _opaque_identifier(
+                context_trace_id,
+                field="context_trace_id",
+            )
+        object.__setattr__(self, "context_trace_id", context_trace_id)
 
     @property
     def command_id_hash(self) -> str:
@@ -186,6 +194,12 @@ class OwnerTruthAnswerCitationCommand:
     def answer_length(self) -> int:
         return len(self.answer_text)
 
+    @property
+    def context_trace_id_hash(self) -> str | None:
+        if self.context_trace_id is None:
+            return None
+        return sha256(self.context_trace_id.encode("utf-8")).hexdigest()
+
 
 @dataclass(frozen=True)
 class OwnerTruthAnswerCitationResult:
@@ -194,6 +208,7 @@ class OwnerTruthAnswerCitationResult:
     command_id_hash: str
     context_hash: str
     context_version: str
+    context_trace_id_hash: str | None
     query_hash: str | None
     answer_hash: str
     answer_length: int
@@ -260,6 +275,7 @@ def _record_input(
         "commandIdHash": command.command_id_hash,
         "contextHash": context_hash,
         "contextVersion": context_version,
+        "contextTraceIdHash": command.context_trace_id_hash,
         "queryHash": query_hash,
         "queryLength": query_length,
         "answerHash": command.answer_hash,
@@ -276,6 +292,7 @@ def _payload_hash(record: Mapping[str, Any]) -> str:
         {
             "contextHash": record["contextHash"],
             "contextVersion": record["contextVersion"],
+            "contextTraceIdHash": record["contextTraceIdHash"],
             "queryHash": record["queryHash"],
             "queryLength": record["queryLength"],
             "answerHash": record["answerHash"],
@@ -299,6 +316,9 @@ def _result_from_record(record: Mapping[str, Any], *, outcome: str) -> OwnerTrut
         command_id_hash=_hash(record.get("commandIdHash"), field="commandIdHash"),
         context_hash=_hash(record.get("contextHash"), field="contextHash"),
         context_version=_nonblank_text(record.get("contextVersion"), field="contextVersion"),
+        context_trace_id_hash=None
+        if record.get("contextTraceIdHash") is None
+        else _hash(record.get("contextTraceIdHash"), field="contextTraceIdHash"),
         query_hash=None
         if record.get("queryHash") is None
         else _hash(record.get("queryHash"), field="queryHash"),
@@ -424,6 +444,7 @@ class PostgresOwnerTruthAnswerCitationRepository:
             cursor.execute(
                 """
                 SELECT id, command_id_hash, command_payload_hash, context_hash, context_version,
+                    context_trace_id_hash,
                     query_hash, query_length, answer_hash, answer_length,
                     authority_epoch, projection_checkpoint, fallbacks
                 FROM owner_truth.answers
@@ -446,10 +467,11 @@ class PostgresOwnerTruthAnswerCitationRepository:
                 INSERT INTO owner_truth.answers (
                     id, vault_id, owner_subject_id, command_id_hash,
                     command_payload_hash, context_hash, context_version,
+                    context_trace_id_hash,
                     query_hash, query_length, answer_hash, answer_length,
                     authority_epoch, projection_checkpoint, fallbacks
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 self._adapt_params(
@@ -461,6 +483,7 @@ class PostgresOwnerTruthAnswerCitationRepository:
                         payload_hash,
                         normalized["contextHash"],
                         normalized["contextVersion"],
+                        normalized["contextTraceIdHash"],
                         normalized["queryHash"],
                         normalized["queryLength"],
                         normalized["answerHash"],
@@ -544,6 +567,7 @@ class PostgresOwnerTruthAnswerCitationRepository:
             "commandIdHash": str(row.get("command_id_hash") or ""),
             "contextHash": str(row["context_hash"]),
             "contextVersion": str(row["context_version"]),
+            "contextTraceIdHash": row.get("context_trace_id_hash"),
             "queryHash": row["query_hash"],
             "answerHash": str(row["answer_hash"]),
             "answerLength": int(row["answer_length"]),
@@ -568,7 +592,8 @@ class PostgresOwnerTruthAnswerCitationRepository:
             cursor.execute(
                 """
                 SELECT id, vault_id, owner_subject_id, command_id_hash,
-                    context_hash, context_version, query_hash, query_length,
+                    context_hash, context_version, context_trace_id_hash,
+                    query_hash, query_length,
                     answer_hash, answer_length, authority_epoch,
                     projection_checkpoint, fallbacks
                 FROM owner_truth.answers
@@ -618,6 +643,7 @@ class PostgresOwnerTruthAnswerCitationRepository:
                 "commandIdHash": str(row["command_id_hash"]),
                 "contextHash": str(row["context_hash"]),
                 "contextVersion": str(row["context_version"]),
+                "contextTraceIdHash": row["context_trace_id_hash"],
                 "queryHash": row["query_hash"],
                 "queryLength": int(row["query_length"]),
                 "answerHash": str(row["answer_hash"]),
@@ -707,6 +733,36 @@ class OwnerTruthAnswerCitationService:
                 context=context,
                 context_payload=context_payload,
             )
+            self._assert_context_build_is_current(
+                context=context,
+                context_build=context_build,
+            )
+            record = _record_input(
+                context=context,
+                command=command,
+                context_build=context_build,
+            )
+            return self._store.owner_truth_answer_citation_repository().record(
+                context=context,
+                record=record,
+            )
+
+    def record_context_build(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        command: OwnerTruthAnswerCitationCommand,
+        context_build: Mapping[str, Any],
+    ) -> OwnerTruthAnswerCitationResult:
+        """Persist the exact Context materialization used by a public answer."""
+
+        _assert_owner_context(context)
+        if not self._enabled:
+            raise OwnerTruthAnswerCitationUnavailable("Answer/Citation persistence is disabled")
+        with self._request_unit_of_work(
+            correlation_id=f"owner-truth-answer-citation:{context.vault_id}:{command.command_id_hash}",
+            command_id=command.command_id_hash,
+        ):
             self._assert_context_build_is_current(
                 context=context,
                 context_build=context_build,
@@ -829,6 +885,7 @@ def answer_citation_summary(result: OwnerTruthAnswerCitationResult) -> dict[str,
         "answerId": result.answer_id,
         "contextHash": result.context_hash,
         "contextVersion": result.context_version,
+        "contextTraceIdHash": result.context_trace_id_hash,
         "queryHash": result.query_hash,
         "answerHash": result.answer_hash,
         "answerLength": result.answer_length,

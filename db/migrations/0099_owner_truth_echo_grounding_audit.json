@@ -1,0 +1,12 @@
+{
+  "version": "0099",
+  "name": "owner_truth_echo_grounding_audit",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthEchoGroundingAuditV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthContextAuthority": true,
+    "ownerTruthAnswerCitation": true
+  }
+}

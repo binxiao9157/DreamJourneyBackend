@@ -197,6 +197,7 @@ def read_owner_truth_data_rights_records(
                 'commandIdHash', answer.command_id_hash,
                 'contextHash', answer.context_hash,
                 'contextVersion', answer.context_version,
+                'contextTraceIdHash', answer.context_trace_id_hash,
                 'queryHash', answer.query_hash,
                 'queryLength', answer.query_length,
                 'answerHash', answer.answer_hash,
@@ -233,6 +234,7 @@ def read_owner_truth_data_rights_records(
               AND answer.owner_subject_id = vault.owner_subject_id
             GROUP BY answer.id, answer.vault_id, answer.owner_subject_id,
                 answer.command_id_hash, answer.context_hash, answer.context_version,
+                answer.context_trace_id_hash,
                 answer.query_hash, answer.query_length, answer.answer_hash,
                 answer.answer_length, answer.authority_epoch,
                 answer.projection_checkpoint, answer.fallbacks, answer.created_at

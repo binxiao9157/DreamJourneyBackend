@@ -73,7 +73,24 @@ class OwnerTruthContextAuthorityService:
         context: OwnerTruthCommandContext,
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Preserve the neutral safety boundary before reading projection data."""
+        packet, _materialization = self.build_packet_with_materialization(
+            context=context,
+            payload=payload,
+        )
+        return packet
+
+    def build_packet_with_materialization(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+        payload: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Return the exact materialization used by one production answer.
+
+        The materialization stays server-side. It is returned only so the
+        answer path can persist a hash-only Citation receipt without rebuilding
+        retrieval after the provider call.
+        """
 
         canonical_payload = dict(payload)
         builder = ContextPacketBuilder(self._store, self._settings)
@@ -81,11 +98,12 @@ class OwnerTruthContextAuthorityService:
         if not builder.safety_allows_persona(query):
             # ``build`` exits through its existing neutral packet before legacy
             # Archive/KBLite/Care or provider reads are attempted.
-            return builder.build(canonical_payload)
+            return builder.build(canonical_payload), None
+        materialization = self.materialize(context=context, payload=canonical_payload)
         return builder.build_from_owner_truth_materialization(
             canonical_payload,
-            materialization=self.materialize(context=context, payload=canonical_payload),
-        )
+            materialization=materialization,
+        ), materialization
 
     def materialize(
         self,

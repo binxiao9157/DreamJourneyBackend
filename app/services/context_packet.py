@@ -373,11 +373,12 @@ class ContextPacketBuilder:
                 "source": "ownerTruthMemoryProjection",
                 "refId": str(item.get("refId") or ""),
                 "kind": str(item.get("kind") or "memory"),
+                "contentHash": str((item.get("citation") or {}).get("contentHash") or ""),
             }
             for item in selected_for_generation
         ]
-        if any(not item["refId"] for item in source_refs):
-            raise ValueError("owner truth selected Context item lacks refId")
+        if any(not item["refId"] or not item["contentHash"] for item in source_refs):
+            raise ValueError("owner truth selected Context item lacks refId or contentHash")
         ranking_trace = [
             {
                 "refId": str(item.get("refId") or ""),

@@ -204,6 +204,25 @@ class OwnerTruthMigrationContractTests(unittest.TestCase):
         self.assertIn("memory_version.version_number", migration.sql)
         self.assertIn("version_number_value", migration.sql)
 
+    def test_answer_grounding_audit_adds_value_free_context_trace_hash(self):
+        migration = next(
+            item
+            for item in load_migrations(default_migrations_dir())
+            if item.version == "0099"
+        )
+        metadata = json.loads(migration.sql_path.with_suffix(".json").read_text())
+
+        self.assertEqual(migration.name, "owner_truth_echo_grounding_audit")
+        self.assertEqual(migration.phase, "expand")
+        self.assertEqual(migration.compatibility, "additive")
+        self.assertEqual(
+            metadata["runtimeCompatibility"],
+            "ownerTruthEchoGroundingAuditV1",
+        )
+        self.assertIn("context_trace_id_hash TEXT", migration.sql)
+        self.assertNotIn("context_trace_id TEXT", migration.sql)
+        self.assertNotIn("UPDATE owner_truth.answers", migration.sql)
+
     def test_correction_request_migration_is_pending_only_and_default_off(self):
         migration = next(
             item
