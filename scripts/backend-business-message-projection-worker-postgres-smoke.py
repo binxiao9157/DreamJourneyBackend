@@ -488,7 +488,7 @@ def exercise(dsn: str) -> None:
         require(unread_count == 1, "canonical Owner message must be unread")
         require(len(messages) == 1, "canonical Owner message center must contain one item")
         require(
-            messages[0].kind is InAppMessageKind.CANDIDATE_READY,
+            messages[0].kind.value == InAppMessageKind.CANDIDATE_READY.value,
             "canonical Owner message kind must remain candidateReady",
         )
     finally:
