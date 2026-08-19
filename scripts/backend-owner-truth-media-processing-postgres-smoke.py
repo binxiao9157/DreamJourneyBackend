@@ -721,7 +721,7 @@ def main() -> None:
                 json={
                     "userId": owner_id,
                     "intent": "echo_chat",
-                    "query": "请只依据已经确认的个人回忆回答。",
+                    "query": "Which private Stage 2 document remains pending until Owner review?",
                     "personaScope": "personal",
                     "digitalHumanId": owner_id,
                 },
@@ -777,7 +777,7 @@ def main() -> None:
                 json={
                     "userId": owner_id,
                     "intent": "echo_chat",
-                    "query": "请只依据已经确认的个人回忆回答。",
+                    "query": "Which private Stage 2 document remains pending until Owner review?",
                     "personaScope": "personal",
                     "digitalHumanId": owner_id,
                 },
