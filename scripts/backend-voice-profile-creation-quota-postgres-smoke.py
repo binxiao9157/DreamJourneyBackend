@@ -75,7 +75,7 @@ def main() -> None:
         applied = migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
-        require(applied["appliedHead"] == "0097", "PC-A4 migration must be current head")
+        require(applied["appliedHead"] >= "0097", "PC-A4 migration must be applied")
 
         store = PostgresStore(dsn=test_dsn, pool_min_size=1, pool_max_size=10)
         open_store(store)

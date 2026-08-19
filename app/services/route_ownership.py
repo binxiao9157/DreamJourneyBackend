@@ -1295,6 +1295,18 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/family/relationships/{relationship_id}/terminate",
+                session,
+                "familyRelationshipParticipantTermination",
+            ),
+            _rule(
+                "GET",
+                "/family/relationships",
+                session,
+                "familyRelationshipParticipantList",
+            ),
+            _rule(
+                "POST",
                 "/family/members/{user_id}/{member_id}/accept",
                 delegated,
                 "familyInvitationAcceptance",

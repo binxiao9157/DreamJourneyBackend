@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from math import ceil
 import secrets
@@ -8562,6 +8563,24 @@ class PostgresStore:
         )
         return None if row is None else self._family_relationship_payload(row)
 
+    def get_family_relationship_for_participant(
+        self,
+        relationship_id: str,
+        participant_subject_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT id, vault_id, owner_subject_id, family_member_id,
+                member_subject_id, status, relationship_epoch, grant_epoch,
+                created_at, updated_at
+            FROM family_relationships
+            WHERE id = %s
+              AND %s IN (owner_subject_id, member_subject_id)
+            """,
+            (relationship_id, participant_subject_id),
+        )
+        return None if row is None else self._family_relationship_payload(row)
+
     def get_family_relationship_by_member(
         self,
         owner_subject_id: str,
@@ -8592,6 +8611,319 @@ class PostgresStore:
             (owner_subject_id,),
         )
         return [self._family_relationship_payload(row) for row in rows]
+
+    def list_family_relationships_for_participant(
+        self,
+        participant_subject_id: str,
+    ) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT id, vault_id, owner_subject_id, family_member_id,
+                member_subject_id, status, relationship_epoch, grant_epoch,
+                created_at, updated_at
+            FROM family_relationships
+            WHERE %s IN (owner_subject_id, member_subject_id)
+            ORDER BY created_at ASC, id ASC
+            """,
+            (participant_subject_id,),
+        )
+        return [self._family_relationship_payload(row) for row in rows]
+
+    def terminate_family_relationship(
+        self,
+        *,
+        relationship_id: str,
+        actor_subject_id: str,
+        expected_epoch: int,
+        command_id_hash: str,
+        payload_hash: str,
+        receipt_id: str,
+        terminated_at_iso: str,
+    ) -> Dict[str, Any]:
+        existing = self._fetchone(
+            """
+            SELECT payload_hash, receipt
+            FROM family_relationship_termination_receipts
+            WHERE relationship_id = %s AND command_id_hash = %s
+            FOR UPDATE
+            """,
+            (relationship_id, command_id_hash),
+        )
+        if existing is not None:
+            if str(existing.get("payload_hash") or "") != payload_hash:
+                return {"errorCode": "relationshipTerminationCommandConflict"}
+            replay = dict(existing.get("receipt") or {})
+            replay["deduplicated"] = True
+            return replay
+        row = self._fetchone(
+            """
+            SELECT id, vault_id, owner_subject_id, family_member_id,
+                member_subject_id, status, relationship_epoch, grant_epoch,
+                created_at, updated_at
+            FROM family_relationships
+            WHERE id = %s
+              AND %s IN (owner_subject_id, member_subject_id)
+            FOR UPDATE
+            """,
+            (relationship_id, actor_subject_id),
+        )
+        if row is None:
+            return {"errorCode": "relationshipParticipantRequired"}
+        owner_subject_id = str(row.get("owner_subject_id") or "")
+        member_subject_id = str(row.get("member_subject_id") or "")
+        actor_role = "owner" if actor_subject_id == owner_subject_id else "member"
+        current_epoch = int(row.get("relationship_epoch") or 1)
+        already_terminated = str(row.get("status") or "") == "revoked"
+        if not already_terminated and current_epoch != expected_epoch:
+            return {"errorCode": "relationshipEpochMismatch"}
+
+        revoked_access_grant_count = 0
+        revoked_contribution_grant_count = 0
+        withdrawn_pending_count = 0
+        retained_accepted_source_count = int(
+            (
+                self._fetchone(
+                    """
+                    SELECT COUNT(DISTINCT source_id)::BIGINT AS source_count
+                    FROM owner_truth.family_contribution_submissions
+                    WHERE relationship_id = %s
+                      AND status = 'accepted'
+                      AND source_id IS NOT NULL
+                    """,
+                    (relationship_id,),
+                )
+                or {}
+            ).get("source_count")
+            or 0
+        )
+        if not already_terminated:
+            updated_relationship = self._fetchone(
+                """
+                UPDATE family_relationships
+                SET status = 'revoked',
+                    relationship_epoch = relationship_epoch + 1,
+                    grant_epoch = grant_epoch + 1,
+                    updated_at = %s
+                WHERE id = %s AND relationship_epoch = %s AND status <> 'revoked'
+                RETURNING id, vault_id, owner_subject_id, family_member_id,
+                    member_subject_id, status, relationship_epoch, grant_epoch,
+                    created_at, updated_at
+                """,
+                (terminated_at_iso, relationship_id, expected_epoch),
+            )
+            if updated_relationship is None:
+                return {"errorCode": "relationshipEpochMismatch"}
+            row = updated_relationship
+            self._fetchone(
+                """
+                UPDATE family_members
+                SET payload = payload || %s
+                WHERE user_id = %s AND id = %s
+                RETURNING id
+                """,
+                (
+                    {
+                        "accessStatus": "revoked",
+                        "invitationStatus": "revoked",
+                        "isOnline": False,
+                        "revokedAt": terminated_at_iso,
+                        "lastUpdated": "家庭关系已解除",
+                    },
+                    owner_subject_id,
+                    str(row.get("family_member_id") or ""),
+                ),
+            )
+            revoked_access_grant_count = int(
+                (
+                    self._fetchone(
+                        """
+                        WITH revoked AS (
+                            UPDATE access_grants
+                            SET status = 'revoked', revoked_at = %s,
+                                updated_at = %s, row_version = row_version + 1
+                            WHERE relationship_id = %s AND status = 'active'
+                            RETURNING id, relationship_id, row_version, revoked_at
+                        ), events AS (
+                            INSERT INTO grant_events (
+                                id, grant_id, relationship_id, event_type,
+                                actor_subject_id, grant_version, reason, occurred_at
+                            )
+                            SELECT 'grant_event_' || md5(random()::text || clock_timestamp()::text || id),
+                                id, relationship_id, 'revoked', %s,
+                                row_version, 'relationshipTerminated', revoked_at
+                            FROM revoked
+                            RETURNING grant_id
+                        )
+                        SELECT COUNT(*)::BIGINT AS revoked_count FROM revoked
+                        """,
+                        (
+                            terminated_at_iso,
+                            terminated_at_iso,
+                            relationship_id,
+                            actor_subject_id,
+                        ),
+                    )
+                    or {}
+                ).get("revoked_count")
+                or 0
+            )
+            contribution_grants = self._fetchall(
+                """
+                SELECT id, vault_id
+                FROM owner_truth.family_contribution_grants
+                WHERE relationship_id = %s AND status = 'active'
+                FOR UPDATE
+                """,
+                (relationship_id,),
+            )
+            for contribution_grant in contribution_grants:
+                grant_id = str(contribution_grant.get("id") or "")
+                revoke_command_hash = hashlib.sha256(
+                    f"{command_id_hash}:{grant_id}".encode("utf-8")
+                ).hexdigest()
+                revoke_payload_hash = hashlib.sha256(
+                    f"{payload_hash}:{grant_id}".encode("utf-8")
+                ).hexdigest()
+                updated = self._fetchone(
+                    """
+                    UPDATE owner_truth.family_contribution_grants
+                    SET status = 'revoked', row_version = row_version + 1,
+                        revoke_command_id_hash = %s, revoke_payload_hash = %s,
+                        revoked_at = %s, revocation_reason = 'relationshipTerminated',
+                        updated_at = %s
+                    WHERE id = %s AND status = 'active'
+                    RETURNING id
+                    """,
+                    (
+                        revoke_command_hash,
+                        revoke_payload_hash,
+                        terminated_at_iso,
+                        terminated_at_iso,
+                        grant_id,
+                    ),
+                )
+                if updated is not None:
+                    revoked_contribution_grant_count += 1
+            withdrawn = self._fetchall(
+                """
+                UPDATE owner_truth.family_contribution_submissions
+                SET status = 'withdrawn', row_version = row_version + 1,
+                    decision_reason = 'relationshipTerminated', updated_at = %s
+                WHERE relationship_id = %s AND status = 'pendingReview'
+                RETURNING id, vault_id, grant_id, owner_subject_id,
+                    contributor_subject_id, source_object_id
+                """,
+                (terminated_at_iso, relationship_id),
+            )
+            withdrawn_pending_count = len(withdrawn)
+            for submission in withdrawn:
+                self._fetchone(
+                    """
+                    INSERT INTO owner_truth.family_contribution_disposal_queue (
+                        submission_id, relationship_id, grant_id,
+                        owner_subject_id, contributor_subject_id,
+                        state, reason, enqueued_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, 'pending',
+                        'relationshipTerminated', %s)
+                    ON CONFLICT (submission_id) DO NOTHING
+                    RETURNING submission_id
+                    """,
+                    (
+                        submission.get("id"),
+                        relationship_id,
+                        submission.get("grant_id"),
+                        submission.get("owner_subject_id"),
+                        submission.get("contributor_subject_id"),
+                        terminated_at_iso,
+                    ),
+                )
+                source_object_id = submission.get("source_object_id")
+                if source_object_id is not None:
+                    self.owner_truth_media_source_object_repository().revoke_access_for_family_contribution(
+                        vault_id=str(submission.get("vault_id") or owner_subject_id),
+                        source_object_id=str(source_object_id),
+                    )
+
+        relationship_epoch = int(row.get("relationship_epoch") or current_epoch)
+        receipt = {
+            "receiptId": receipt_id,
+            "schemaVersion": "family-relationship-termination-v1",
+            "relationshipId": relationship_id,
+            "ownerSubjectId": owner_subject_id,
+            "memberSubjectId": member_subject_id,
+            "actorSubjectId": actor_subject_id,
+            "actorRole": actor_role,
+            "outcome": "alreadyTerminated" if already_terminated else "terminated",
+            "previousRelationshipEpoch": current_epoch,
+            "relationshipEpoch": relationship_epoch,
+            "revokedAccessGrantCount": revoked_access_grant_count,
+            "revokedContributionGrantCount": revoked_contribution_grant_count,
+            "withdrawnPendingContributionCount": withdrawn_pending_count,
+            "retainedAcceptedSourceCount": retained_accepted_source_count,
+            "acceptedSourceDisposition": "retainedWithProvenance",
+            "publicationGrantDisposition": "preservedRequiresOwnerAction",
+            "accountsDeleted": False,
+            "terminatedAt": terminated_at_iso,
+            "commandIdHash": command_id_hash,
+            "payloadHash": payload_hash,
+        }
+        inserted = self._fetchone(
+            """
+            INSERT INTO family_relationship_termination_receipts (
+                receipt_id, relationship_id, command_id_hash, payload_hash,
+                actor_subject_id, actor_role, outcome, receipt, terminated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (relationship_id, command_id_hash) DO NOTHING
+            RETURNING receipt
+            """,
+            (
+                receipt_id,
+                relationship_id,
+                command_id_hash,
+                payload_hash,
+                actor_subject_id,
+                actor_role,
+                receipt["outcome"],
+                receipt,
+                terminated_at_iso,
+            ),
+        )
+        if inserted is None:
+            return {"errorCode": "relationshipTerminationCommandConflict"}
+        return dict(inserted.get("receipt") or receipt)
+
+    def list_family_contribution_disposal_queue(
+        self,
+        *,
+        relationship_id: str,
+    ) -> List[Dict[str, Any]]:
+        rows = self._fetchall(
+            """
+            SELECT submission_id, relationship_id, grant_id,
+                owner_subject_id, contributor_subject_id,
+                state, reason, enqueued_at, completed_at
+            FROM owner_truth.family_contribution_disposal_queue
+            WHERE relationship_id = %s
+            ORDER BY enqueued_at, submission_id
+            """,
+            (relationship_id,),
+        )
+        return [
+            {
+                "submissionId": str(row.get("submission_id") or ""),
+                "relationshipId": str(row.get("relationship_id") or ""),
+                "grantId": str(row.get("grant_id") or ""),
+                "ownerSubjectId": str(row.get("owner_subject_id") or ""),
+                "contributorSubjectId": str(row.get("contributor_subject_id") or ""),
+                "state": str(row.get("state") or ""),
+                "reason": str(row.get("reason") or ""),
+                "enqueuedAt": self._iso_value(row.get("enqueued_at")),
+                "completedAt": self._iso_value(row.get("completed_at")),
+            }
+            for row in rows
+        ]
 
     def update_family_relationship_status(
         self,

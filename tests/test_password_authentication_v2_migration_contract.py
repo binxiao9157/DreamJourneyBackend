@@ -23,11 +23,13 @@ class PasswordAuthenticationV2MigrationContractTests(unittest.TestCase):
         self.assertIn("'sensitiveoperation'", sql)
         self.assertIn("token_hash TEXT NOT NULL UNIQUE", sql)
 
-    def test_migration_loader_accepts_password_authentication_head(self):
+    def test_migration_loader_keeps_password_authentication_in_order(self):
         migrations = load_migrations(ROOT / "db/migrations")
 
-        self.assertEqual(migrations[-1].version, "0097")
-        self.assertEqual(migrations[-1].name, "voice_profile_creation_quota")
+        migration_names = {migration.version: migration.name for migration in migrations}
+        self.assertEqual(migration_names["0094"], "password_authentication_v2")
+        self.assertEqual(migrations[-1].version, "0098")
+        self.assertEqual(migrations[-1].name, "family_relationship_termination")
 
 
 if __name__ == "__main__":

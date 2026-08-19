@@ -2,6 +2,7 @@ from collections import Counter
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
+import hashlib
 from math import ceil
 import secrets
 from threading import RLock
@@ -198,6 +199,8 @@ class InMemoryStore:
         self._owner_truth_family_contribution_grant_commands: Dict[Tuple[str, str], str] = {}
         self._owner_truth_family_contribution_submissions: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._owner_truth_family_contribution_submission_commands: Dict[Tuple[str, str], str] = {}
+        self._family_relationship_termination_receipts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._family_contribution_disposal_queue: Dict[str, Dict[str, Any]] = {}
         self._effect_kernel_repository = InMemoryEffectKernelRepository()
         self._provider_effect_repository = InMemoryProviderEffectRepository()
         self._publication_external_cleanup_repository = (
@@ -4826,6 +4829,20 @@ class InMemoryStore:
                 return None
             return deepcopy(relationship)
 
+    def get_family_relationship_for_participant(
+        self,
+        relationship_id: str,
+        participant_subject_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            relationship = self._family_relationships.get(relationship_id)
+            if relationship is None or participant_subject_id not in {
+                relationship.get("ownerSubjectId"),
+                relationship.get("memberSubjectId"),
+            }:
+                return None
+            return deepcopy(relationship)
+
     def get_family_relationship_by_member(
         self,
         owner_subject_id: str,
@@ -4848,6 +4865,192 @@ class InMemoryStore:
                 if item.get("ownerSubjectId") == owner_subject_id
             ]
         return sorted(values, key=lambda item: (str(item.get("createdAt") or ""), str(item.get("id") or "")))
+
+    def list_family_relationships_for_participant(
+        self,
+        participant_subject_id: str,
+    ) -> List[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            values = [
+                deepcopy(item)
+                for item in self._family_relationships.values()
+                if participant_subject_id
+                in {item.get("ownerSubjectId"), item.get("memberSubjectId")}
+            ]
+        return sorted(
+            values,
+            key=lambda item: (
+                str(item.get("createdAt") or ""),
+                str(item.get("id") or ""),
+            ),
+        )
+
+    def terminate_family_relationship(
+        self,
+        *,
+        relationship_id: str,
+        actor_subject_id: str,
+        expected_epoch: int,
+        command_id_hash: str,
+        payload_hash: str,
+        receipt_id: str,
+        terminated_at_iso: str,
+    ) -> Dict[str, Any]:
+        source_object_ids: List[Tuple[str, str]] = []
+        with self._delegated_access_lock:
+            receipt_key = (relationship_id, command_id_hash)
+            existing_receipt = self._family_relationship_termination_receipts.get(receipt_key)
+            if existing_receipt is not None:
+                if existing_receipt.get("payloadHash") != payload_hash:
+                    return {"errorCode": "relationshipTerminationCommandConflict"}
+                replay = deepcopy(existing_receipt)
+                replay["deduplicated"] = True
+                return replay
+            relationship = self._family_relationships.get(relationship_id)
+            if relationship is None or actor_subject_id not in {
+                relationship.get("ownerSubjectId"),
+                relationship.get("memberSubjectId"),
+            }:
+                return {"errorCode": "relationshipParticipantRequired"}
+            owner_subject_id = str(relationship.get("ownerSubjectId") or "")
+            member_subject_id = str(relationship.get("memberSubjectId") or "")
+            actor_role = "owner" if actor_subject_id == owner_subject_id else "member"
+            current_epoch = int(relationship.get("relationshipEpoch") or 1)
+            already_terminated = str(relationship.get("status") or "") == "revoked"
+            if not already_terminated and current_epoch != expected_epoch:
+                return {"errorCode": "relationshipEpochMismatch"}
+
+            revoked_access_grant_count = 0
+            revoked_contribution_grant_count = 0
+            withdrawn_pending_count = 0
+            retained_accepted_sources: set[str] = set()
+            if not already_terminated:
+                relationship["status"] = "revoked"
+                relationship["relationshipEpoch"] = current_epoch + 1
+                relationship["grantEpoch"] = int(relationship.get("grantEpoch") or 0) + 1
+                relationship["updatedAt"] = terminated_at_iso
+                for member in self._family_members.get(owner_subject_id, []):
+                    if str(member.get("id") or "") != str(
+                        relationship.get("familyMemberId") or ""
+                    ):
+                        continue
+                    member["accessStatus"] = "revoked"
+                    member["invitationStatus"] = "revoked"
+                    member["isOnline"] = False
+                    member["revokedAt"] = terminated_at_iso
+                    member["lastUpdated"] = "家庭关系已解除"
+                for grant in self._access_grants.values():
+                    if grant.get("relationshipId") != relationship_id or grant.get("status") != "active":
+                        continue
+                    grant["status"] = "revoked"
+                    grant["rowVersion"] = int(grant.get("rowVersion") or 0) + 1
+                    grant["revokedAt"] = terminated_at_iso
+                    grant["updatedAt"] = terminated_at_iso
+                    self._grant_events.setdefault(str(grant.get("id") or ""), []).append(
+                        {
+                            "id": f"grant_event_{uuid.uuid4().hex}",
+                            "grantId": grant.get("id"),
+                            "relationshipId": relationship_id,
+                            "eventType": "revoked",
+                            "actorSubjectId": actor_subject_id,
+                            "grantVersion": grant["rowVersion"],
+                            "reason": "relationshipTerminated",
+                            "occurredAt": terminated_at_iso,
+                        }
+                    )
+                    revoked_access_grant_count += 1
+                for grant in self._owner_truth_family_contribution_grants.values():
+                    if grant.get("relationshipId") != relationship_id or grant.get("status") != "active":
+                        continue
+                    grant_id = str(grant.get("id") or "")
+                    grant["status"] = "revoked"
+                    grant["rowVersion"] = int(grant.get("rowVersion") or 0) + 1
+                    grant["revokeCommandIdHash"] = hashlib.sha256(
+                        f"{command_id_hash}:{grant_id}".encode("utf-8")
+                    ).hexdigest()
+                    grant["revokePayloadHash"] = hashlib.sha256(
+                        f"{payload_hash}:{grant_id}".encode("utf-8")
+                    ).hexdigest()
+                    grant["revokedAt"] = terminated_at_iso
+                    grant["revocationReason"] = "relationshipTerminated"
+                    grant["updatedAt"] = terminated_at_iso
+                    revoked_contribution_grant_count += 1
+                for submission in self._owner_truth_family_contribution_submissions.values():
+                    if submission.get("relationshipId") != relationship_id:
+                        continue
+                    status = str(submission.get("status") or "")
+                    if status == "accepted" and submission.get("sourceId"):
+                        retained_accepted_sources.add(str(submission["sourceId"]))
+                    if status != "pendingReview":
+                        continue
+                    submission["status"] = "withdrawn"
+                    submission["rowVersion"] = int(submission.get("rowVersion") or 0) + 1
+                    submission["updatedAt"] = terminated_at_iso
+                    submission["decisionReason"] = "relationshipTerminated"
+                    submission_id = str(submission.get("id") or "")
+                    self._family_contribution_disposal_queue.setdefault(
+                        submission_id,
+                        {
+                            "submissionId": submission_id,
+                            "relationshipId": relationship_id,
+                            "grantId": str(submission.get("grantId") or ""),
+                            "ownerSubjectId": owner_subject_id,
+                            "contributorSubjectId": member_subject_id,
+                            "state": "pending",
+                            "reason": "relationshipTerminated",
+                            "enqueuedAt": terminated_at_iso,
+                        },
+                    )
+                    if submission.get("sourceObjectId"):
+                        source_object_ids.append(
+                            (
+                                str(submission.get("vaultId") or owner_subject_id),
+                                str(submission["sourceObjectId"]),
+                            )
+                        )
+                    withdrawn_pending_count += 1
+
+            receipt = {
+                "receiptId": receipt_id,
+                "schemaVersion": "family-relationship-termination-v1",
+                "relationshipId": relationship_id,
+                "ownerSubjectId": owner_subject_id,
+                "memberSubjectId": member_subject_id,
+                "actorSubjectId": actor_subject_id,
+                "actorRole": actor_role,
+                "outcome": "alreadyTerminated" if already_terminated else "terminated",
+                "previousRelationshipEpoch": current_epoch,
+                "relationshipEpoch": int(relationship.get("relationshipEpoch") or current_epoch),
+                "revokedAccessGrantCount": revoked_access_grant_count,
+                "revokedContributionGrantCount": revoked_contribution_grant_count,
+                "withdrawnPendingContributionCount": withdrawn_pending_count,
+                "retainedAcceptedSourceCount": len(retained_accepted_sources),
+                "acceptedSourceDisposition": "retainedWithProvenance",
+                "publicationGrantDisposition": "preservedRequiresOwnerAction",
+                "accountsDeleted": False,
+                "terminatedAt": terminated_at_iso,
+                "commandIdHash": command_id_hash,
+                "payloadHash": payload_hash,
+            }
+            self._family_relationship_termination_receipts[receipt_key] = deepcopy(receipt)
+        for vault_id, source_object_id in source_object_ids:
+            self._owner_truth_media_source_object_repository.revoke_access_for_family_contribution(
+                vault_id=vault_id,
+                source_object_id=source_object_id,
+            )
+        return deepcopy(receipt)
+
+    def list_family_contribution_disposal_queue(
+        self,
+        *,
+        relationship_id: str,
+    ) -> List[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            return [
+                deepcopy(item)
+                for item in self._family_contribution_disposal_queue.values()
+                if item.get("relationshipId") == relationship_id
+            ]
 
     def update_family_relationship_status(
         self,

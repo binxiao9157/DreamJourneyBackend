@@ -1,0 +1,12 @@
+{
+  "version": "0098",
+  "name": "family_relationship_termination",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "familyRelationshipTerminationV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "familyRelationshipTermination": true,
+    "ownerTruthFamilyContribution": true
+  }
+}

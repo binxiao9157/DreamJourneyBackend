@@ -709,6 +709,7 @@ class OwnerTruthFamilyContributionService:
                 handoff=handoffs.get(str(item.get("id") or "")),
             )
             for item in submissions
+            if not _hidden_after_relationship_termination(item)
         ]
 
     def list_submissions_for_contributor(
@@ -729,6 +730,7 @@ class OwnerTruthFamilyContributionService:
             for item in self._store.list_owner_truth_family_contribution_submissions(
                 contributor_subject_id=subject_id,
             )
+            if not _hidden_after_relationship_termination(item)
         ]
 
     def get_submission_for_owner(
@@ -1201,6 +1203,9 @@ def _public_submission(
     handoff: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     material_kind = str(value.get("materialKind") or "")
+    effective_material_included = include_material and str(
+        value.get("status") or ""
+    ) != "withdrawn"
     payload = {
         "submissionId": str(value.get("id") or ""),
         "vaultId": str(value.get("vaultId") or ""),
@@ -1218,12 +1223,19 @@ def _public_submission(
         "updatedAt": value.get("updatedAt"),
         "decidedAt": value.get("decidedAt"),
         "decisionReason": value.get("decisionReason"),
-        "materialIncluded": include_material,
+        "materialIncluded": effective_material_included,
         "handoff": dict(handoff or _base_handoff(value)),
     }
-    if include_material and material_kind == "text":
+    if effective_material_included and material_kind == "text":
         payload["text"] = str(value.get("text") or "")
     return payload
+
+
+def _hidden_after_relationship_termination(value: Mapping[str, Any]) -> bool:
+    return (
+        str(value.get("status") or "") == "withdrawn"
+        and str(value.get("decisionReason") or "") == "relationshipTerminated"
+    )
 
 
 def _base_handoff(value: Mapping[str, Any]) -> dict[str, Any]:

@@ -95,6 +95,11 @@ from app.services.delegated_access import (
     ResourceScopeType,
     RevokeAccessGrantCommand,
 )
+from app.services.family_relationship_termination import (
+    FamilyRelationshipTerminationCommand,
+    FamilyRelationshipTerminationError,
+    FamilyRelationshipTerminationService,
+)
 from app.services.publication_authority import (
     PublicationAuthorityAccessDenied,
     PublicationAuthorityConflict,
@@ -763,6 +768,10 @@ OWNER_TRUTH_FAMILY_CONTRIBUTION_MEDIA_INGESTION_SERVICE = (
 
 def _delegated_access_service() -> DelegatedAccessService:
     return DelegatedAccessService(store)
+
+
+def _family_relationship_termination_service() -> FamilyRelationshipTerminationService:
+    return FamilyRelationshipTerminationService(store)
 
 
 def _delegated_access_http_error(error: DelegatedAccessError) -> HTTPException:
@@ -17682,6 +17691,71 @@ def change_family_relationship_lifecycle(
     except DelegatedAccessError as exc:
         raise _delegated_access_http_error(exc) from exc
     return {"status": relationship["status"], "relationship": relationship}
+
+
+@app.post("/family/relationships/{relationship_id}/terminate")
+def terminate_family_relationship(
+    request: Request,
+    relationship_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    _require_delegated_access_contract_api()
+    actor_subject_id = _request_user_principal_id(request)
+    if actor_subject_id is None:
+        raise HTTPException(status_code=401, detail="authenticated user is required")
+    try:
+        command = FamilyRelationshipTerminationCommand(
+            command_id=str(payload.get("commandId") or ""),
+            relationship_id=relationship_id,
+            actor_subject_id=actor_subject_id,
+            expected_epoch=payload.get("expectedEpoch"),
+            second_confirmation=payload.get("secondConfirmation"),
+            publication_grant_action=str(
+                payload.get("publicationGrantAction") or "preserve"
+            ),
+        )
+        result = _family_relationship_termination_service().terminate(command=command)
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, FamilyRelationshipTerminationError):
+            if exc.code == "relationshipParticipantRequired":
+                raise HTTPException(
+                    status_code=404,
+                    detail={"code": exc.code},
+                ) from exc
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "relationshipTerminationCommandInvalid"},
+        ) from exc
+    return result.public_contract()
+
+
+@app.get("/family/relationships")
+def list_family_relationship_memberships(request: Request) -> Dict[str, Any]:
+    _require_delegated_access_contract_api()
+    participant_subject_id = _request_user_principal_id(request)
+    if participant_subject_id is None:
+        raise HTTPException(status_code=401, detail="authenticated user is required")
+    relationships = store.list_family_relationships_for_participant(
+        participant_subject_id
+    )
+    return {
+        "participantSubjectId": participant_subject_id,
+        "relationships": [
+            {
+                "relationshipId": relationship["id"],
+                "ownerSubjectId": relationship["ownerSubjectId"],
+                "memberSubjectId": relationship["memberSubjectId"],
+                "familyMemberId": relationship["familyMemberId"],
+                "status": relationship["status"],
+                "relationshipEpoch": relationship["relationshipEpoch"],
+                "grantEpoch": relationship["grantEpoch"],
+                "createdAt": relationship["createdAt"],
+                "updatedAt": relationship["updatedAt"],
+            }
+            for relationship in relationships
+        ],
+    }
 
 
 @app.post("/family/access-grants")

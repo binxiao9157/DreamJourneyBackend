@@ -139,7 +139,7 @@ class VoiceProfileCreationQuotaStoreTests(unittest.TestCase):
         )
         migrations = load_migrations(root / "db/migrations")
 
-        self.assertEqual(migrations[-1].version, "0097")
+        self.assertIn("0097", {migration.version for migration in migrations})
         self.assertEqual(manifest["compatibility"], "additive")
         self.assertIn("CREATE TABLE voice_profile_creation_quotas", sql)
         self.assertIn("CREATE TABLE voice_profile_creation_commands", sql)
