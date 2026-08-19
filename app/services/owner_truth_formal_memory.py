@@ -538,7 +538,7 @@ class PostgresOwnerTruthFormalMemoryRepository:
             params.append(query.kind)
         if query.query:
             conditions.append(
-                "CAST(version.payload -> 'content' AS TEXT) ILIKE %s ESCAPE '\\\\'"
+                "CAST(version.payload -> 'content' AS TEXT) ILIKE %s ESCAPE E'\\\\'"
             )
             params.append(f"%{_postgres_ilike_literal(query.query)}%")
         for facet in query.facets:
