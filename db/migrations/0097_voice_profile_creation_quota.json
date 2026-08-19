@@ -1,0 +1,12 @@
+{
+  "version": "0097",
+  "name": "voice_profile_creation_quota",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "voiceProfileCreationQuotaV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "voiceProfileCreationQuota": true,
+    "voiceProfileLifecycle": true
+  }
+}

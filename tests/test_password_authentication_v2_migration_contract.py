@@ -26,8 +26,8 @@ class PasswordAuthenticationV2MigrationContractTests(unittest.TestCase):
     def test_migration_loader_accepts_password_authentication_head(self):
         migrations = load_migrations(ROOT / "db/migrations")
 
-        self.assertEqual(migrations[-1].version, "0096")
-        self.assertEqual(migrations[-1].name, "owner_truth_v2_facets_search")
+        self.assertEqual(migrations[-1].version, "0097")
+        self.assertEqual(migrations[-1].name, "voice_profile_creation_quota")
 
 
 if __name__ == "__main__":

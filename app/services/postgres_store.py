@@ -71,6 +71,14 @@ from app.services.account_deletion_receipts import (
     account_purge_subject_hash,
     build_account_purge_receipt,
 )
+from app.services.voice_profile_creation_quota import (
+    VOICE_PROFILE_CREATION_LIMIT,
+    VoiceProfileCreationCommandConflict,
+    VoiceProfileCreationLimitReached,
+    voice_profile_creation_quota_payload,
+    voice_profile_creation_receipt_id,
+    voice_profile_creation_reservation_payload,
+)
 from app.services.data_rights_module_inventory import record_terminal_cleanup_plan
 from app.services.owner_truth_data_rights import (
     count_owner_truth_data_rights_records,
@@ -8069,6 +8077,167 @@ class PostgresStore:
         if row is None:
             raise ValueError("voiceProfileId is already owned by another user")
         return deepcopy(row["payload"])
+
+    def get_voice_profile_creation_quota(self, user_id: str) -> Dict[str, Any]:
+        row = self._fetchone(
+            """
+            SELECT creation_count
+            FROM voice_profile_creation_quotas
+            WHERE subject_id = %s
+            """,
+            (user_id,),
+        )
+        count = int(row["creation_count"]) if row is not None else 0
+        return voice_profile_creation_quota_payload(
+            subject_id=user_id,
+            creation_count=count,
+        )
+
+    def get_voice_profile_creation_command(
+        self,
+        user_id: str,
+        command_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT command_id, voice_profile_id, creation_ordinal, accepted_at
+            FROM voice_profile_creation_commands
+            WHERE subject_id = %s AND command_id = %s
+            """,
+            (user_id, command_id),
+        )
+        if row is None:
+            return None
+        quota = self.get_voice_profile_creation_quota(user_id)
+        return voice_profile_creation_reservation_payload(
+            subject_id=user_id,
+            command_id=str(row["command_id"]),
+            voice_profile_id=str(row["voice_profile_id"]),
+            creation_ordinal=int(row["creation_ordinal"]),
+            creation_count=int(quota["creationCount"]),
+            accepted_at=self._iso_value(row["accepted_at"]),
+            idempotent=True,
+        )
+
+    def reserve_voice_profile_creation(
+        self,
+        user_id: str,
+        *,
+        command_id: str,
+        voice_profile_id: str,
+    ) -> Dict[str, Any]:
+        with self.request_unit_of_work(
+            correlation_id=f"voice-profile-create-{uuid.uuid4().hex}",
+            command_id=command_id,
+        ):
+            self._fetchone(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS acquired",
+                (f"voice-profile-creation:{user_id}",),
+            )
+            existing = self._fetchone(
+                """
+                SELECT command_id, voice_profile_id, creation_ordinal, accepted_at
+                FROM voice_profile_creation_commands
+                WHERE subject_id = %s AND command_id = %s
+                FOR UPDATE
+                """,
+                (user_id, command_id),
+            )
+            self._fetchone(
+                """
+                INSERT INTO voice_profile_creation_quotas (
+                    subject_id, creation_count, updated_at
+                )
+                SELECT %s, COUNT(*), NOW()
+                FROM voice_profiles
+                WHERE user_id = %s
+                ON CONFLICT (subject_id) DO NOTHING
+                RETURNING creation_count
+                """,
+                (user_id, user_id),
+            )
+            quota_row = self._fetchone(
+                """
+                SELECT creation_count
+                FROM voice_profile_creation_quotas
+                WHERE subject_id = %s
+                FOR UPDATE
+                """,
+                (user_id,),
+            )
+            creation_count = int((quota_row or {}).get("creation_count") or 0)
+            if existing is not None:
+                if str(existing["voice_profile_id"]) != voice_profile_id:
+                    raise VoiceProfileCreationCommandConflict(
+                        "voice profile creation command targets another profile"
+                    )
+                return voice_profile_creation_reservation_payload(
+                    subject_id=user_id,
+                    command_id=command_id,
+                    voice_profile_id=voice_profile_id,
+                    creation_ordinal=int(existing["creation_ordinal"]),
+                    creation_count=creation_count,
+                    accepted_at=self._iso_value(existing["accepted_at"]),
+                    idempotent=True,
+                )
+            profile_receipt = self._fetchone(
+                """
+                SELECT command_id
+                FROM voice_profile_creation_commands
+                WHERE subject_id = %s AND voice_profile_id = %s
+                """,
+                (user_id, voice_profile_id),
+            )
+            if profile_receipt is not None:
+                raise VoiceProfileCreationCommandConflict(
+                    "voice profile already has a creation receipt"
+                )
+            if creation_count >= VOICE_PROFILE_CREATION_LIMIT:
+                raise VoiceProfileCreationLimitReached(
+                    voice_profile_creation_quota_payload(
+                        subject_id=user_id,
+                        creation_count=creation_count,
+                    )
+                )
+            creation_ordinal = creation_count + 1
+            accepted_at = self._now()
+            receipt_id = voice_profile_creation_receipt_id(user_id, command_id)
+            self._fetchone(
+                """
+                UPDATE voice_profile_creation_quotas
+                SET creation_count = %s, updated_at = NOW()
+                WHERE subject_id = %s
+                RETURNING creation_count
+                """,
+                (creation_ordinal, user_id),
+            )
+            self._fetchone(
+                """
+                INSERT INTO voice_profile_creation_commands (
+                    subject_id, command_id, voice_profile_id, receipt_id,
+                    creation_ordinal, accepted_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING command_id
+                """,
+                (
+                    user_id,
+                    command_id,
+                    voice_profile_id,
+                    receipt_id,
+                    creation_ordinal,
+                    accepted_at,
+                ),
+            )
+            return voice_profile_creation_reservation_payload(
+                subject_id=user_id,
+                command_id=command_id,
+                voice_profile_id=voice_profile_id,
+                creation_ordinal=creation_ordinal,
+                creation_count=creation_ordinal,
+                accepted_at=accepted_at,
+                idempotent=False,
+            )
 
     def save_voice_profile_if_version(
         self,

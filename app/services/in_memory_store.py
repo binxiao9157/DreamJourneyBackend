@@ -40,6 +40,13 @@ from app.services.account_deletion_receipts import (
     account_purge_subject_hash,
     build_account_purge_receipt,
 )
+from app.services.voice_profile_creation_quota import (
+    VOICE_PROFILE_CREATION_LIMIT,
+    VoiceProfileCreationCommandConflict,
+    VoiceProfileCreationLimitReached,
+    voice_profile_creation_quota_payload,
+    voice_profile_creation_reservation_payload,
+)
 from app.services.data_rights_module_inventory import record_terminal_cleanup_plan
 from app.services.archive_store import (
     ArchiveItemDeletionForbidden,
@@ -356,6 +363,8 @@ class InMemoryStore:
         self._push_device_tokens: Dict[str, List[Dict[str, Any]]] = {}
         self._voice_profiles: Dict[str, List[Dict[str, Any]]] = {}
         self._voice_profile_lock = RLock()
+        self._voice_profile_creation_counts: Dict[str, int] = {}
+        self._voice_profile_creation_commands: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._voice_clone_slots: Dict[str, Dict[str, Any]] = {}
         self._digital_human_sessions: Dict[str, Dict[str, Any]] = {}
         self._auth_sessions: Dict[str, Dict[str, Any]] = {}
@@ -4463,6 +4472,101 @@ class InMemoryStore:
     def save_voice_profile(self, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._voice_profile_lock:
             return self._save_voice_profile_locked(user_id, payload)
+
+    def get_voice_profile_creation_quota(self, user_id: str) -> Dict[str, Any]:
+        with self._voice_profile_lock:
+            count = self._voice_profile_creation_counts.setdefault(
+                user_id,
+                len(self._voice_profiles.get(user_id, [])),
+            )
+            return voice_profile_creation_quota_payload(
+                subject_id=user_id,
+                creation_count=count,
+            )
+
+    def get_voice_profile_creation_command(
+        self,
+        user_id: str,
+        command_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._voice_profile_lock:
+            record = self._voice_profile_creation_commands.get((user_id, command_id))
+            if record is None:
+                return None
+            count = self._voice_profile_creation_counts.setdefault(
+                user_id,
+                len(self._voice_profiles.get(user_id, [])),
+            )
+            return voice_profile_creation_reservation_payload(
+                subject_id=user_id,
+                command_id=command_id,
+                voice_profile_id=str(record["voiceProfileId"]),
+                creation_ordinal=int(record["creationOrdinal"]),
+                creation_count=count,
+                accepted_at=str(record["acceptedAt"]),
+                idempotent=True,
+            )
+
+    def reserve_voice_profile_creation(
+        self,
+        user_id: str,
+        *,
+        command_id: str,
+        voice_profile_id: str,
+    ) -> Dict[str, Any]:
+        with self._voice_profile_lock:
+            key = (user_id, command_id)
+            existing = self._voice_profile_creation_commands.get(key)
+            count = self._voice_profile_creation_counts.setdefault(
+                user_id,
+                len(self._voice_profiles.get(user_id, [])),
+            )
+            if existing is not None:
+                if existing["voiceProfileId"] != voice_profile_id:
+                    raise VoiceProfileCreationCommandConflict(
+                        "voice profile creation command targets another profile"
+                    )
+                return voice_profile_creation_reservation_payload(
+                    subject_id=user_id,
+                    command_id=command_id,
+                    voice_profile_id=voice_profile_id,
+                    creation_ordinal=int(existing["creationOrdinal"]),
+                    creation_count=count,
+                    accepted_at=str(existing["acceptedAt"]),
+                    idempotent=True,
+                )
+            if any(
+                record["voiceProfileId"] == voice_profile_id
+                for (subject_id, _), record in self._voice_profile_creation_commands.items()
+                if subject_id == user_id
+            ):
+                raise VoiceProfileCreationCommandConflict(
+                    "voice profile already has a creation receipt"
+                )
+            if count >= VOICE_PROFILE_CREATION_LIMIT:
+                raise VoiceProfileCreationLimitReached(
+                    voice_profile_creation_quota_payload(
+                        subject_id=user_id,
+                        creation_count=count,
+                    )
+                )
+            accepted_at = self._now()
+            creation_ordinal = count + 1
+            self._voice_profile_creation_counts[user_id] = creation_ordinal
+            self._voice_profile_creation_commands[key] = {
+                "voiceProfileId": voice_profile_id,
+                "creationOrdinal": creation_ordinal,
+                "acceptedAt": accepted_at,
+            }
+            return voice_profile_creation_reservation_payload(
+                subject_id=user_id,
+                command_id=command_id,
+                voice_profile_id=voice_profile_id,
+                creation_ordinal=creation_ordinal,
+                creation_count=creation_ordinal,
+                accepted_at=accepted_at,
+                idempotent=False,
+            )
 
     def save_voice_profile_if_version(
         self,

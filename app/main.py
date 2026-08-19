@@ -639,6 +639,10 @@ from app.services.voice_profile_eligibility import (
     VoiceProfileEligibilityResolution,
     VoiceProfileEligibilityResolver,
 )
+from app.services.voice_profile_creation_quota import (
+    VoiceProfileCreationCommandConflict,
+    VoiceProfileCreationLimitReached,
+)
 from app.services.voice_identity_eligibility import (
     make_voice_identity_eligibility_provider,
 )
@@ -14040,6 +14044,55 @@ def _safe_voice_profile_id(value: str, user_id: str) -> str:
     return f"voice_profile_{_safe_object_segment(user_id, 'user')}"
 
 
+def _voice_profile_creation_command_id(
+    payload: Mapping[str, Any],
+    *,
+    user_id: str,
+    voice_profile_id: str,
+) -> str:
+    explicit = str(payload.get("commandId") or "").strip()
+    if explicit:
+        if len(explicit) < 8 or len(explicit) > 128 or any(
+            not (character.isalnum() or character in {"-", "_", ".", ":"})
+            for character in explicit
+        ):
+            raise HTTPException(status_code=400, detail="commandId is invalid")
+        return explicit
+    # Compatibility for clients released before PC-A4. The signed sample
+    # authorization receipt is request-bound and makes retries deterministic;
+    # current clients always send an explicit commandId.
+    authorization_reference = str(
+        payload.get("sampleAuthorizationReceiptId")
+        or payload.get("sampleAuthorizationStatementId")
+        or ""
+    ).strip()
+    if not authorization_reference:
+        raise HTTPException(status_code=400, detail="commandId is required")
+    digest = hashlib.sha256(
+        f"legacy:{user_id}:{voice_profile_id}:{authorization_reference}".encode("utf-8")
+    ).hexdigest()
+    return f"legacy-{digest[:40]}"
+
+
+def _voice_profile_creation_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, VoiceProfileCreationLimitReached):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "voice_profile_creation_limit_reached",
+                "message": "voice profile creation limit reached",
+                "creationQuota": exc.quota,
+            },
+        )
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "voice_profile_creation_command_conflict",
+            "message": str(exc),
+        },
+    )
+
+
 def _voice_clone_provider_speaker_id(profile: Dict[str, Any]) -> str:
     provider_speaker_id = str(profile.get("providerSpeakerId") or "").strip()
     if provider_speaker_id:
@@ -14651,6 +14704,13 @@ def _sanitize_voice_profile_payload(
     if requested_purpose != "training":
         raise HTTPException(status_code=400, detail="voice profile creation purpose must be training")
     existing_profile = existing_profile_override or store.get_voice_profile(user_id, voice_profile_id) or {}
+    creation_receipt: Optional[Dict[str, Any]] = None
+    needs_creation_receipt = bool(
+        audio_base64
+        and retry_generation is None
+        and not isinstance(existing_profile.get("creationReceipt"), Mapping)
+    )
+    creation_command_id = ""
     if audio_base64 and existing_profile:
         existing_state = canonical_lifecycle_state(existing_profile)
         if retry_generation is None and existing_state is not VoiceProfileLifecycleState.DRAFT:
@@ -14672,6 +14732,12 @@ def _sanitize_voice_profile_payload(
             voice_profile_id=voice_profile_id,
             now=now_at,
         )
+        if needs_creation_receipt:
+            creation_command_id = _voice_profile_creation_command_id(
+                payload,
+                user_id=user_id,
+                voice_profile_id=voice_profile_id,
+            )
         # A caller-provided subjectEligibility, consentVersion, authorization
         # text, or QA override must never admit a provider training request.
         # The server resolves a current adult/liveness receipt only after the
@@ -14715,6 +14781,15 @@ def _sanitize_voice_profile_payload(
         else:
             provider_speaker_id = voice_profile_id
             provider_binding_mode = "customSpeakerId"
+        if needs_creation_receipt:
+            try:
+                creation_receipt = store.reserve_voice_profile_creation(
+                    user_id,
+                    command_id=creation_command_id,
+                    voice_profile_id=voice_profile_id,
+                )
+            except (VoiceProfileCreationLimitReached, VoiceProfileCreationCommandConflict) as exc:
+                raise _voice_profile_creation_http_error(exc) from exc
         try:
             provider_result = provider.submit_training(
                 voice_profile_id=provider_speaker_id,
@@ -14741,6 +14816,15 @@ def _sanitize_voice_profile_payload(
         slot_update = _update_voice_clone_slot(voice_profile_id, sample_status)
         if slot_update is not None:
             provider_slot_state = str(slot_update.get("status") or provider_slot_state)
+    elif needs_creation_receipt:
+        try:
+            creation_receipt = store.reserve_voice_profile_creation(
+                user_id,
+                command_id=creation_command_id,
+                voice_profile_id=voice_profile_id,
+            )
+        except (VoiceProfileCreationLimitReached, VoiceProfileCreationCommandConflict) as exc:
+            raise _voice_profile_creation_http_error(exc) from exc
 
     profile = dict(existing_profile)
     profile.update({
@@ -14810,6 +14894,17 @@ def _sanitize_voice_profile_payload(
         )
         profile.pop("retryReservationGeneration", None)
         profile.pop("retryReservedAt", None)
+    if creation_receipt is not None:
+        profile["creationReceipt"] = {
+            key: creation_receipt[key]
+            for key in (
+                "receiptSchemaVersion",
+                "receiptId",
+                "creationOrdinal",
+                "acceptedAt",
+                "authorizationScope",
+            )
+        }
     if provider_speaker_id:
         profile["providerSpeakerId"] = provider_speaker_id
     provider_request_id = str(provider_result.get("providerRequestId") or "").strip()
@@ -15515,12 +15610,62 @@ async def realtime_voice_stream(websocket: WebSocket) -> None:
 @app.post("/voice/profiles")
 def save_voice_profile(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     actor_user_id, payload = _principal_owned_payload(request, payload)
+    voice_profile_id = _safe_voice_profile_id(
+        str(payload.get("voiceProfileId") or ""),
+        actor_user_id,
+    )
+    audio_base64 = str(payload.get("audioBase64") or "").strip()
+    command_id = ""
+    if audio_base64:
+        command_reference = str(
+            payload.get("commandId")
+            or payload.get("sampleAuthorizationReceiptId")
+            or payload.get("sampleAuthorizationStatementId")
+            or ""
+        ).strip()
+        existing_command = None
+        if command_reference:
+            command_id = _voice_profile_creation_command_id(
+                payload,
+                user_id=actor_user_id,
+                voice_profile_id=voice_profile_id,
+            )
+            payload["commandId"] = command_id
+            existing_command = store.get_voice_profile_creation_command(
+                actor_user_id,
+                command_id,
+            )
+        if existing_command is not None:
+            if str(existing_command.get("voiceProfileId") or "") != voice_profile_id:
+                raise _voice_profile_creation_http_error(
+                    VoiceProfileCreationCommandConflict(
+                        "voice profile creation command targets another profile"
+                    )
+                )
+            existing_profile = store.get_voice_profile(actor_user_id, voice_profile_id)
+            if existing_profile is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "voice_profile_creation_receipt_incomplete",
+                        "message": "voice profile creation receipt has no profile",
+                    },
+                )
+            return {
+                "status": "deduplicated",
+                "profile": _voice_clone_public_profile(existing_profile),
+                "creationQuota": store.get_voice_profile_creation_quota(actor_user_id),
+            }
     profile = _sanitize_voice_profile_payload(payload, actor_user_id=actor_user_id)
     try:
         saved = store.save_voice_profile(profile["userId"], profile)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"status": "saved", "profile": _voice_clone_public_profile(saved)}
+    return {
+        "status": "saved",
+        "profile": _voice_clone_public_profile(saved),
+        "creationQuota": store.get_voice_profile_creation_quota(actor_user_id),
+    }
 
 
 @app.get("/voice/profiles/{user_id}")
@@ -15529,6 +15674,7 @@ def list_voice_profiles(request: Request, user_id: str) -> Dict[str, Any]:
     return {
         "userId": user_id,
         "profiles": [_voice_clone_public_profile(profile) for profile in store.list_voice_profiles(user_id)],
+        "creationQuota": store.get_voice_profile_creation_quota(user_id),
     }
 
 
