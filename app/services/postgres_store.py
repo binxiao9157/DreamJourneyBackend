@@ -169,6 +169,7 @@ from app.services.owner_truth_answer_citation import (
 from app.services.owner_truth_answer_feedback import (
     PostgresOwnerTruthAnswerFeedbackRepository,
 )
+from app.services.in_app_message_center import PostgresInAppMessageCenterRepository
 from app.services.owner_truth_knowledge_dimension_confirmation import (
     PostgresOwnerTruthKnowledgeDimensionConfirmationRepository,
 )
@@ -427,6 +428,14 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("business message projection request persistence requires an active unit of work")
         return PostgresBusinessMessageProjectionRequestRepository(active.connection)
+
+    def in_app_message_center_repository(self) -> PostgresInAppMessageCenterRepository:
+        """Return the principal-scoped message lifecycle port in this UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("in-app message center requires an active unit of work")
+        return PostgresInAppMessageCenterRepository(active.connection)
 
     def async_effect_legacy_inbox_account_resolver(
         self,

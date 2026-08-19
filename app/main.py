@@ -157,6 +157,13 @@ from app.services.identity_bindings import (
     legacy_phone_login_enabled,
     make_identity_binding_service,
 )
+from app.services.in_app_message_center import (
+    IN_APP_MESSAGE_CENTER_SCHEMA_VERSION,
+    InAppMessageCenterCommandConflict,
+    InAppMessageCenterError,
+    InAppMessageCenterNotFound,
+    InAppMessageCenterService,
+)
 from app.services.test_account_allowlist import (
     TestAccountAuthorizationConflict,
     TestAccountAllowlistConflict,
@@ -5836,6 +5843,7 @@ def _ownership_path_user_id(path: str) -> str:
         r"^/memories/([^/]+)$",
         r"^/archive/items/([^/]+)(?:/|$)",
         r"^/mailbox/letters/([^/]+)(?:/|$)",
+        r"^/v2/in-app-messages/([^/]+)(?:/|$)",
         r"^/echo/delayed-replies/([^/]+)/[^/]+/answer$",
         r"^/echo/delayed-replies/([^/]+)$",
         r"^/family/members/([^/]+)(?:/|$)",
@@ -17365,6 +17373,119 @@ def archive_mailbox_letter(
     if item is None:
         raise HTTPException(status_code=404, detail="mailbox letter not found")
     return {"status": "archived", "item": item}
+
+
+def _in_app_message_center_service() -> InAppMessageCenterService:
+    repository_factory = getattr(store, "in_app_message_center_repository", None)
+    if not callable(repository_factory):
+        raise HTTPException(status_code=503, detail="in-app message center is unavailable")
+    return InAppMessageCenterService(repository_factory())
+
+
+def _in_app_message_command_id(payload: Mapping[str, Any]) -> str:
+    command_id = str(payload.get("commandId") or "").strip()
+    if not command_id:
+        raise HTTPException(status_code=400, detail="commandId is required")
+    return command_id
+
+
+def _in_app_message_command_payload(result: Any) -> Dict[str, Any]:
+    return {
+        "schemaVersion": IN_APP_MESSAGE_CENTER_SCHEMA_VERSION,
+        "status": result.command_kind.value,
+        "commandId": result.command_id,
+        "outcome": result.outcome,
+        "affectedCount": result.affected_count,
+        "unreadCount": result.unread_count,
+    }
+
+
+def _raise_in_app_message_error(exc: InAppMessageCenterError) -> None:
+    if isinstance(exc, InAppMessageCenterNotFound):
+        raise HTTPException(status_code=404, detail="message not found") from exc
+    if isinstance(exc, InAppMessageCenterCommandConflict):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v2/in-app-messages/{user_id}")
+def list_in_app_messages(
+    request: Request,
+    user_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
+    try:
+        page = _in_app_message_center_service().list_messages(
+            user_id,
+            limit=limit,
+            cursor=cursor,
+        )
+    except InAppMessageCenterError as exc:
+        _raise_in_app_message_error(exc)
+    return {
+        "schemaVersion": IN_APP_MESSAGE_CENTER_SCHEMA_VERSION,
+        "items": [item.public_payload() for item in page.messages],
+        "unreadCount": page.unread_count,
+        "nextCursor": page.next_cursor,
+    }
+
+
+@app.post("/v2/in-app-messages/{user_id}/{message_id}/read")
+def mark_in_app_message_read(
+    request: Request,
+    user_id: str,
+    message_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
+    try:
+        result = _in_app_message_center_service().mark_read(
+            user_id,
+            message_id,
+            command_id=_in_app_message_command_id(payload),
+            occurred_at=datetime.now(timezone.utc),
+        )
+    except InAppMessageCenterError as exc:
+        _raise_in_app_message_error(exc)
+    return _in_app_message_command_payload(result)
+
+
+@app.post("/v2/in-app-messages/{user_id}/read-all")
+def mark_all_in_app_messages_read(
+    request: Request,
+    user_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
+    try:
+        result = _in_app_message_center_service().mark_all_read(
+            user_id,
+            command_id=_in_app_message_command_id(payload),
+            occurred_at=datetime.now(timezone.utc),
+        )
+    except InAppMessageCenterError as exc:
+        _raise_in_app_message_error(exc)
+    return _in_app_message_command_payload(result)
+
+
+@app.post("/v2/in-app-messages/{user_id}/delete-read")
+def delete_read_in_app_messages(
+    request: Request,
+    user_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    user_id = _principal_path_owner(request, user_id)
+    try:
+        result = _in_app_message_center_service().delete_read(
+            user_id,
+            command_id=_in_app_message_command_id(payload),
+            occurred_at=datetime.now(timezone.utc),
+        )
+    except InAppMessageCenterError as exc:
+        _raise_in_app_message_error(exc)
+    return _in_app_message_command_payload(result)
 
 
 _ALLOWED_ECHO_DELAYED_REPLY_TRIGGERS = {"tenRoundBaseline", "contentSignal"}

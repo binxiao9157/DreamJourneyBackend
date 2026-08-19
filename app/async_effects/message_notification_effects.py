@@ -42,6 +42,13 @@ class InAppMessageKind(str, Enum):
     CARE_SIGNAL = "careSignal"
     FAMILY_INVITATION = "familyInvitation"
     SYSTEM_NOTICE = "systemNotice"
+    CANDIDATE_READY = "candidateReady"
+    PROJECTION_STATUS = "projectionStatus"
+    EXPORT_STATUS = "exportStatus"
+    FAMILY_CONTRIBUTION = "familyContribution"
+    AUTHORIZATION_REVOKED = "authorizationRevoked"
+    ACCOUNT_SECURITY = "accountSecurity"
+    TASK_RETRY_REQUIRED = "taskRetryRequired"
 
 
 class InAppMessageState(str, Enum):

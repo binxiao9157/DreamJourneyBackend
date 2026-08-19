@@ -1275,6 +1275,26 @@ class RouteOwnershipRegistry:
                 resource_operation="update",
                 requires_existing_resource=True,
             ),
+            _owner_path(
+                "GET",
+                "/v2/in-app-messages/{user_id}",
+                "inAppMessageOwner",
+            ),
+            _owner_path(
+                "POST",
+                "/v2/in-app-messages/{user_id}/{message_id}/read",
+                "inAppMessageOwner",
+            ),
+            _owner_path(
+                "POST",
+                "/v2/in-app-messages/{user_id}/read-all",
+                "inAppMessageOwner",
+            ),
+            _owner_path(
+                "POST",
+                "/v2/in-app-messages/{user_id}/delete-read",
+                "inAppMessageOwner",
+            ),
             _owner_body("POST", "/devices/push-token", "deviceOwner"),
             _owner_body("POST", "/echo/delayed-replies", "echoOwner"),
             _rule(

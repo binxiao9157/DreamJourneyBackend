@@ -1,0 +1,8 @@
+{
+  "version": "0100",
+  "name": "in_app_message_center",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "inAppMessageCenterV1",
+  "requiresOldWorkerDrain": false
+}

@@ -29,7 +29,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 222)
+        self.assertEqual(len(app_routes), 226)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
 
@@ -56,6 +56,10 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
             ("GET", "/ops/evidence-manifests"): RouteOwnershipCategory.SYSTEM_ONLY,
             ("GET", "/ops/data-rights/requests/{request_id}/evidence"): RouteOwnershipCategory.SYSTEM_ONLY,
             ("GET", "/mailbox/letters/{user_id}"): RouteOwnershipCategory.OWNER_PATH,
+            ("GET", "/v2/in-app-messages/{user_id}"): RouteOwnershipCategory.OWNER_PATH,
+            ("POST", "/v2/in-app-messages/{user_id}/{message_id}/read"): RouteOwnershipCategory.OWNER_PATH,
+            ("POST", "/v2/in-app-messages/{user_id}/read-all"): RouteOwnershipCategory.OWNER_PATH,
+            ("POST", "/v2/in-app-messages/{user_id}/delete-read"): RouteOwnershipCategory.OWNER_PATH,
             ("GET", "/echo/delayed-replies/{user_id}/{delayed_reply_id}/answer"): RouteOwnershipCategory.OWNER_PATH,
             ("GET", "/kb/source-ref-audit/{user_id}"): RouteOwnershipCategory.OWNER_PATH,
             ("POST", "/voice/synthesis"): RouteOwnershipCategory.OWNER_BODY,
@@ -179,8 +183,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 222)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 222)
+        self.assertEqual(summary["routeCount"], 226)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 226)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)

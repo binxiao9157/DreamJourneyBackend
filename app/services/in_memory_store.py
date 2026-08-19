@@ -116,6 +116,7 @@ from app.services.owner_truth_answer_citation import (
 from app.services.owner_truth_answer_feedback import (
     InMemoryOwnerTruthAnswerFeedbackRepository,
 )
+from app.services.in_app_message_center import InMemoryInAppMessageCenterRepository
 from app.services.owner_truth_knowledge_dimension_confirmation import (
     InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository,
 )
@@ -299,6 +300,7 @@ class InMemoryStore:
         self._owner_truth_answer_feedback_repository = (
             InMemoryOwnerTruthAnswerFeedbackRepository()
         )
+        self._in_app_message_center_repository = InMemoryInAppMessageCenterRepository()
         self._owner_truth_knowledge_dimension_confirmation_repository = (
             InMemoryOwnerTruthKnowledgeDimensionConfirmationRepository()
         )
@@ -524,6 +526,9 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthAnswerFeedbackRepository:
         return self._owner_truth_answer_feedback_repository
+
+    def in_app_message_center_repository(self) -> InMemoryInAppMessageCenterRepository:
+        return self._in_app_message_center_repository
 
     def owner_truth_knowledge_dimension_confirmation_repository(
         self,

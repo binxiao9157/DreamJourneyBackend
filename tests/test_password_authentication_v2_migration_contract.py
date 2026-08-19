@@ -28,8 +28,8 @@ class PasswordAuthenticationV2MigrationContractTests(unittest.TestCase):
 
         migration_names = {migration.version: migration.name for migration in migrations}
         self.assertEqual(migration_names["0094"], "password_authentication_v2")
-        self.assertEqual(migrations[-1].version, "0099")
-        self.assertEqual(migrations[-1].name, "owner_truth_echo_grounding_audit")
+        self.assertEqual(migrations[-1].version, "0100")
+        self.assertEqual(migrations[-1].name, "in_app_message_center")
 
 
 if __name__ == "__main__":
