@@ -2247,17 +2247,13 @@ class PostgresPublicationAuthorityRepository:
                 UPDATE publication.publications
                 SET state = 'confirmed', updated_at = %s
                 WHERE id = %s AND vault_id = %s
-                  AND (
-                    (%s IS NULL AND state = 'draft')
-                    OR (%s IS NOT NULL AND state = 'confirmed')
-                  )
+                  AND state = %s
                 """,
                 (
                     now,
                     command.publication_id,
                     context.vault_id,
-                    base_version_id,
-                    base_version_id,
+                    "confirmed" if base_version_id is not None else "draft",
                 ),
             )
             if cursor.rowcount != 1:
