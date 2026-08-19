@@ -118,13 +118,19 @@ def _resource_identifier(value: object, *, field: str, max_length: int = 127) ->
     """
 
     normalized = str(value or "").strip()
+    try:
+        canonical_uuid = str(UUID(normalized)) == normalized.lower()
+    except (TypeError, ValueError):
+        canonical_uuid = False
     if len(normalized) > max_length or not (
-        _IDENTIFIER_PATTERN.fullmatch(normalized) or _SHA256_PATTERN.fullmatch(normalized)
+        _IDENTIFIER_PATTERN.fullmatch(normalized)
+        or _SHA256_PATTERN.fullmatch(normalized)
+        or canonical_uuid
     ):
         raise BusinessMessageNotificationContractError(
             f"{field} must be an opaque resource identifier"
         )
-    return normalized
+    return normalized.lower() if canonical_uuid else normalized
 
 
 def _non_negative_int(value: object, *, field: str) -> int:
@@ -183,10 +189,12 @@ class BusinessCompletionMessageSource:
             raise BusinessMessageNotificationContractError(
                 "completion receipt does not belong to this effect intent"
             )
-        if self.completion.business_target_key != self.intent.business_target_key:
-            raise BusinessMessageNotificationContractError(
-                "completion receipt does not match this business target"
-            )
+        # Some typed consumers complete a derived business result (for
+        # example one Candidate extraction) while retaining the original
+        # Source operation and authorized target coordinates. The durable
+        # projection repositories verify the exact receipt, operation and
+        # target fields before admitting a message, so the receipt's explicit
+        # business target key must not be replaced by the intent-derived key.
         if self.completion.business_outcome != "completed":
             raise BusinessMessageNotificationContractError(
                 "only a completed business receipt may create an in-app message"

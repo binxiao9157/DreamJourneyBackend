@@ -1,5 +1,6 @@
 import unittest
 from hashlib import sha256
+from uuid import UUID
 
 from app.async_effects.consumer_repository import (
     AsyncEffectSyntheticConsumerCommand,
@@ -93,6 +94,18 @@ def _subscription(
 
 
 class BusinessMessageNotificationPlanTests(unittest.TestCase):
+    def test_canonical_uuid_resource_id_starting_with_digit_is_valid(self):
+        resource_id = "31735a38-d953-4d7a-b0e4-e5939476aa01"
+        source = _source(resource_id=resource_id)
+
+        plan = build_business_completion_message_notification_plan(
+            source,
+            notification_channels=(NotificationChannel.LOCAL,),
+            generation=2,
+        )
+
+        self.assertEqual(plan.message.resource_id, str(UUID(resource_id)))
+
     def test_canonical_hash_resource_id_is_valid_for_message_and_notification_routes(self):
         resource_id = "0" * 64
         source = _source(resource_id=resource_id)

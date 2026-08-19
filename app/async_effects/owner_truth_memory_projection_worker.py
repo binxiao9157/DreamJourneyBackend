@@ -32,6 +32,10 @@ from app.async_effects.lease_repository import (
     AsyncEffectLeaseError,
     AsyncEffectLeaseLost,
 )
+from app.async_effects.message_notification_effects import InAppMessageKind
+from app.async_effects.owner_business_message_projection import (
+    enqueue_owner_business_message,
+)
 from app.async_effects.worker_lifecycle import (
     WorkerDrainController,
     WorkerLeaseHeartbeat,
@@ -238,6 +242,14 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
                 projection_outcome=projection_outcome,
             )
         )
+        message_projection = None
+        if projection_outcome == "rebuilt":
+            message_projection = enqueue_owner_business_message(
+                self._store,
+                intent=intent,
+                completion=receipt,
+                kind=InAppMessageKind.PROJECTION_STATUS,
+            )
         completion = lease_repository.complete(lease, outcome="succeeded")
         return self._payload(
             status="completed",
@@ -251,6 +263,7 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
             projection_entry_count=snapshot.get("entryCount"),
             search_projection_outcome=search_projection_outcome,
             search_projection_document_count=search_projection_document_count,
+            message_projection=message_projection,
         )
 
     def _rebuild_projections_with_lease_heartbeat(
@@ -578,6 +591,7 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
         search_projection_document_count: int | None = None,
         retry_available_at: str | None = None,
         dead_letter: Any | None = None,
+        message_projection: Any | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "mode": "run",
@@ -625,6 +639,14 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
             and search_projection_document_count >= 0
         ):
             payload["searchProjectionDocumentCount"] = search_projection_document_count
+        if message_projection is not None:
+            payload.update(
+                {
+                    "messageProjectionKind": message_projection.kind.value,
+                    "messageProjectionOutcome": message_projection.outcome,
+                    "messageProjectionInputOutcome": message_projection.input_outcome,
+                }
+            )
         if retry_available_at is not None:
             payload["retryAvailableAt"] = retry_available_at
         if dead_letter is not None:

@@ -10,15 +10,24 @@ import unittest
 from uuid import uuid4
 
 from app.async_effects.consumer_repository import InMemoryAsyncEffectConsumerRepository
+from app.async_effects.business_message_projection_request_repository import (
+    InMemoryBusinessMessageProjectionRequestRepository,
+)
 from app.async_effects.dead_letter_repository import InMemoryAsyncEffectDeadLetterRepository
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
 from app.async_effects.lease_repository import InMemoryAsyncEffectLeaseRepository
+from app.async_effects.legacy_identity_inbox_bridge import (
+    InMemoryLegacyInboxAccountResolver,
+    LegacyAliasClaimState,
+    LegacyInboxAccountBinding,
+)
 from app.async_effects.owner_truth_memory_projection_worker import (
     OwnerTruthMemoryProjectionWorkerRuntime,
 )
 from app.async_effects.target_admission import (
     InMemoryOwnerTruthMemoryProjectionTargetAdmissionRepository,
 )
+from app.async_effects.repository import InMemoryEffectKernelRepository
 from app.core.config import Settings
 from app.domain.owner_truth.memory_projection import OwnerTruthMemoryProjectionResult
 from app.domain.owner_truth.projection_rights import (
@@ -142,6 +151,10 @@ class _Store:
         self.search_projection_repository = _SearchDocumentProjectionRepository(
             source=self.projection_repository
         )
+        self.message_effect_repository = InMemoryEffectKernelRepository()
+        self.message_input_repository = InMemoryBusinessMessageProjectionRequestRepository()
+        self.message_inbox_resolver: InMemoryLegacyInboxAccountResolver | None = None
+        self.business_message_projection_enabled = False
         self.uow_calls = 0
 
     def readiness_probe(self):
@@ -169,6 +182,17 @@ class _Store:
 
     def owner_truth_memory_search_document_projection_repository(self):
         return self.search_projection_repository
+
+    def effect_kernel_repository(self):
+        return self.message_effect_repository
+
+    def async_effect_business_message_projection_request_repository(self):
+        return self.message_input_repository
+
+    def async_effect_legacy_inbox_account_resolver(self):
+        if self.message_inbox_resolver is None:
+            raise RuntimeError("message inbox fixture is not configured")
+        return self.message_inbox_resolver
 
 
 class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
@@ -223,6 +247,25 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
             source_state="active",
             source_version_current=4,
         )
+        store.message_inbox_resolver = InMemoryLegacyInboxAccountResolver(
+            [
+                LegacyInboxAccountBinding(
+                    legacy_user_id="legacy-projection-worker",
+                    legacy_alias_hash=_digest("legacy-projection-worker"),
+                    subject_id=intent.target.owner_subject_id,
+                    vault_id=intent.target.vault_id,
+                    claim_state=LegacyAliasClaimState.VERIFIED,
+                    identity_proof_subject_id=intent.target.owner_subject_id,
+                    subject_state="active",
+                    vault_owner_subject_id=intent.target.owner_subject_id,
+                    vault_state="active",
+                    account_access_state="active",
+                    account_deletion_state="active",
+                    account_auth_epoch=int(intent.target.authority_epoch),
+                    bridge_row_version=1,
+                )
+            ]
+        )
         return store
 
     def _reset_for_intent(
@@ -274,6 +317,7 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
         self.assertIsNotNone(lease)
 
     def test_current_memory_projection_is_rebuilt_and_terminalized_atomically(self):
+        self.store.business_message_projection_enabled = True
         result = self.worker().run_once()
 
         self.assertEqual(result["status"], "completed")
@@ -283,6 +327,11 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
         self.assertEqual(result["outboxState"], "dispatched")
         self.assertEqual(result["consumerInboxState"], "completed")
         self.assertEqual(result["projectionEntryCount"], 1)
+        self.assertEqual(result["messageProjectionKind"], "projectionStatus")
+        self.assertEqual(result["messageProjectionOutcome"], "accepted")
+        self.assertEqual(result["messageProjectionInputOutcome"], "recorded")
+        self.assertEqual(self.store.message_effect_repository.record_count(), 1)
+        self.assertEqual(self.store.message_input_repository.request_count(), 1)
         self.assertNotIn("searchProjectionOutcome", result)
         self.assertEqual(len(self.store.projection_repository.contexts), 1)
         self.assertEqual(self.store.search_projection_repository.contexts, [])

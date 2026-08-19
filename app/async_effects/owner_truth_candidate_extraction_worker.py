@@ -33,6 +33,10 @@ from app.async_effects.lease_repository import (
     AsyncEffectLeaseCancelled,
     AsyncEffectLeaseLost,
 )
+from app.async_effects.message_notification_effects import InAppMessageKind
+from app.async_effects.owner_business_message_projection import (
+    enqueue_owner_business_message,
+)
 from app.async_effects.worker_lifecycle import WorkerDrainController, WorkerLeaseHeartbeat
 from app.core.config import Settings
 from app.domain.owner_truth.candidate_extraction import (
@@ -633,6 +637,14 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                     "candidate extraction completed without a terminal result"
                 )
 
+            message_projection = None
+            if result.status is ExtractionResultStatus.SUCCEEDED:
+                message_projection = enqueue_owner_business_message(
+                    self._store,
+                    intent=intent,
+                    completion=result.consumer,
+                    kind=InAppMessageKind.CANDIDATE_READY,
+                )
             completion = lease_repository.complete(lease, outcome="succeeded")
             reason = {
                 ExtractionResultStatus.SUCCEEDED: "candidateExtractionProposalsPersisted",
@@ -647,6 +659,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 completion=completion,
                 receipt=result.consumer,
                 extraction_result=result,
+                message_projection=message_projection,
             )
 
     @staticmethod
@@ -936,6 +949,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
         completion: Any | None = None,
         receipt: Any | None = None,
         extraction_result: OwnerTruthCandidateExtractionResult | None = None,
+        message_projection: Any | None = None,
         retry_available_at: str | None = None,
         dead_letter: Any | None = None,
     ) -> dict[str, Any]:
@@ -980,6 +994,14 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                     "extractionStatus": extraction_result.status.value
                     if extraction_result.status is not None
                     else None,
+                }
+            )
+        if message_projection is not None:
+            payload.update(
+                {
+                    "messageProjectionKind": message_projection.kind.value,
+                    "messageProjectionOutcome": message_projection.outcome,
+                    "messageProjectionInputOutcome": message_projection.input_outcome,
                 }
             )
         if retry_available_at is not None:

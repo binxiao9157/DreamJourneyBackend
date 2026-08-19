@@ -11,16 +11,25 @@ from uuid import uuid4
 
 import httpx
 
+from app.async_effects.business_message_projection_request_repository import (
+    InMemoryBusinessMessageProjectionRequestRepository,
+)
 from app.async_effects.consumer_repository import InMemoryAsyncEffectConsumerRepository
 from app.async_effects.dead_letter_repository import InMemoryAsyncEffectDeadLetterRepository
 from app.async_effects.contracts import AsyncEffectIntent, AsyncEffectTarget
 from app.async_effects.lease_repository import InMemoryAsyncEffectLeaseRepository
+from app.async_effects.legacy_identity_inbox_bridge import (
+    InMemoryLegacyInboxAccountResolver,
+    LegacyAliasClaimState,
+    LegacyInboxAccountBinding,
+)
 from app.async_effects.owner_truth_candidate_extraction_worker import (
     DeterministicOwnerTruthCandidateExtractor,
     ModelAssistedOwnerTruthLiveConversationExtractor,
     OwnerTruthCandidateExtractionWorkerRuntime,
 )
 from app.async_effects.target_admission import InMemoryOwnerTruthSourceTargetAdmissionRepository
+from app.async_effects.repository import InMemoryEffectKernelRepository
 from app.core.config import Settings
 from app.services.owner_truth_candidate_extraction import (
     InMemoryOwnerTruthCandidateExtractionRepository,
@@ -99,6 +108,28 @@ class _Store:
         self.candidate_repository = (
             candidate_repository or InMemoryOwnerTruthCandidateExtractionRepository()
         )
+        self.message_effect_repository = InMemoryEffectKernelRepository()
+        self.message_input_repository = InMemoryBusinessMessageProjectionRequestRepository()
+        self.business_message_projection_enabled = False
+        self.message_inbox_resolver = InMemoryLegacyInboxAccountResolver(
+            [
+                LegacyInboxAccountBinding(
+                    legacy_user_id="legacy-candidate-worker",
+                    legacy_alias_hash=_digest("legacy-candidate-worker"),
+                    subject_id=owner_subject_id,
+                    vault_id=vault_id,
+                    claim_state=LegacyAliasClaimState.VERIFIED,
+                    identity_proof_subject_id=owner_subject_id,
+                    subject_state="active",
+                    vault_owner_subject_id=owner_subject_id,
+                    vault_state="active",
+                    account_access_state="active",
+                    account_deletion_state="active",
+                    account_auth_epoch=7,
+                    bridge_row_version=1,
+                )
+            ]
+        )
         self.uow_calls = 0
         self.admission_repository.seed_vault(
             vault_id=vault_id,
@@ -141,6 +172,15 @@ class _Store:
 
     def owner_truth_candidate_extraction_repository(self):
         return self.candidate_repository
+
+    def effect_kernel_repository(self):
+        return self.message_effect_repository
+
+    def async_effect_business_message_projection_request_repository(self):
+        return self.message_input_repository
+
+    def async_effect_legacy_inbox_account_resolver(self):
+        return self.message_inbox_resolver
 
 
 class _FailingExtractor:
@@ -306,6 +346,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertIsNotNone(lease)
 
     def test_owner_authored_source_creates_one_pending_first_person_candidate_without_raw_worker_output(self) -> None:
+        self.store.business_message_projection_enabled = True
         result = self._worker().run_once()
 
         self.assertEqual(result["status"], "completed")
@@ -314,6 +355,11 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(result["extractionStatus"], "succeeded")
         self.assertEqual(result["jobState"], "succeeded")
         self.assertEqual(result["consumerInboxState"], "completed")
+        self.assertEqual(result["messageProjectionKind"], "candidateReady")
+        self.assertEqual(result["messageProjectionOutcome"], "accepted")
+        self.assertEqual(result["messageProjectionInputOutcome"], "recorded")
+        self.assertEqual(self.store.message_effect_repository.record_count(), 1)
+        self.assertEqual(self.store.message_input_repository.request_count(), 1)
         self.assertNotIn(self.source_text, json.dumps(result, ensure_ascii=False, sort_keys=True))
 
         snapshot = self.store.candidate_repository.snapshot()
