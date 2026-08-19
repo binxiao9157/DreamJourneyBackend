@@ -1264,15 +1264,17 @@ def main() -> None:
                 settings=Settings(store_backend="postgres", database_url=test_dsn),
                 enabled=True,
             )
-            production_context_packet = production_context_authority.build_packet(
-                context=review_context,
-                payload={
-                    "userId": review_vault_id,
-                    "intent": "echo_chat",
-                    "query": "请陪我回忆父亲修自行车的那段时光",
-                    "personaScope": "personal",
-                    "digitalHumanId": review_vault_id,
-                },
+            production_context_packet, production_context_materialization = (
+                production_context_authority.build_packet_with_materialization(
+                    context=review_context,
+                    payload={
+                        "userId": review_vault_id,
+                        "intent": "echo_chat",
+                        "query": "请陪我回忆父亲修自行车的那段时光",
+                        "personaScope": "personal",
+                        "digitalHumanId": review_vault_id,
+                    },
+                )
             )
             require(
                 production_context_packet["contextAuthority"]["retrievalMode"]
@@ -1316,6 +1318,34 @@ def main() -> None:
 
             raw_answer = "我只根据当前确认的个人记忆回答。"
             answer_citation_service = OwnerTruthAnswerCitationService(store, enabled=True)
+            automatic_trace_id = "ctx_pc_b3_postgres_grounding"
+            automatic_answer_citation = answer_citation_service.record_context_build(
+                context=review_context,
+                command=OwnerTruthAnswerCitationCommand(
+                    command_id="owner-truth-answer-citation-pc-b3-automatic-001",
+                    answer_text="我根据这段已确认的正式记忆陪你继续回想。",
+                    context_trace_id=automatic_trace_id,
+                ),
+                context_build=production_context_materialization,
+            )
+            automatic_answer_summary = answer_citation_summary(automatic_answer_citation)
+            require(
+                automatic_answer_citation.outcome == "created"
+                and automatic_answer_citation.context_trace_id_hash
+                == sha256(automatic_trace_id.encode("utf-8")).hexdigest()
+                and automatic_answer_citation.context_hash
+                == production_context_materialization["contextHash"]
+                and automatic_answer_citation.citation_count == 1
+                and automatic_answer_citation.citations[0]["citation"]["memoryVersionId"]
+                == corrected.memory_activation.memory_version_id,
+                "production Echo audit must bind the exact query-ranked Context and hash its trace ID",
+            )
+            require(
+                automatic_trace_id not in str(automatic_answer_summary)
+                and automatic_answer_summary["contextTraceIdHash"]
+                == automatic_answer_citation.context_trace_id_hash,
+                "production Echo audit summary must expose only the Context trace hash",
+            )
             answer_citation = answer_citation_service.record(
                 context=review_context,
                 command=OwnerTruthAnswerCitationCommand(
