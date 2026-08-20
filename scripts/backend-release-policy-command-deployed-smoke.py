@@ -209,8 +209,8 @@ def main():
             "hidden command decision must match observe/enforce mode",
         )
         require(
-            headers.get("x-dreamjourney-release-policy-reason") == "notApprovedForClosedPilot",
-            "hidden command must preserve the server denial reason",
+            headers.get("x-dreamjourney-release-policy-reason") == "missingCapturedPolicy",
+            "canary command must preserve the missing server capture reason",
         )
         require(
             headers.get("x-dreamjourney-release-policy-mode") == family_mode,
