@@ -23,4 +23,5 @@ fi
 cd "$ROOT_DIR"
 BACKEND_BASE_URL="$BACKEND_BASE_URL" \
 BACKEND_API_TOKEN="$BACKEND_API_TOKEN" \
+PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
   "$PYTHON_BIN" scripts/backend-product-confirmed-closed-capabilities-deployed-smoke.py

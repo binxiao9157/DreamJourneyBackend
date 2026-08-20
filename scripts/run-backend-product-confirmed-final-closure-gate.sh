@@ -43,6 +43,11 @@ PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/tmp/dreamjourney-python-cache}" \
   scripts/backend-release-policy-command-deployed-smoke.py \
   scripts/backend-product-confirmed-closed-capabilities-deployed-smoke.py
 
+grep -Fq 'PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"' \
+  scripts/run-backend-product-confirmed-closed-capabilities-deployed-smoke.sh
+grep -Fq 'PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"' \
+  scripts/run-backend-release-policy-command-deployed-smoke.sh
+
 if [[ "${RUN_DEPLOYED_PC_E2_SMOKE:-0}" == "1" ]]; then
   ./scripts/run-backend-product-confirmed-closed-capabilities-deployed-smoke.sh
   ./scripts/run-backend-release-policy-command-deployed-smoke.sh
