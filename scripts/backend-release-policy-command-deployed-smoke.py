@@ -170,12 +170,20 @@ def main():
             "profile command must be classified as profileSettings",
         )
         require(
-            headers.get("x-dreamjourney-release-policy-decision") == "allow",
-            "production must normalize a forged QA audience to the owner core policy",
+            headers.get("x-dreamjourney-release-policy-decision") == "observeDeny",
+            "forged QA metadata must not grant profile command authority",
         )
         require(
-            headers.get("x-dreamjourney-release-policy-decision-id", "").startswith("server:"),
-            "user command must expose a value-free server decision identifier",
+            headers.get("x-dreamjourney-release-policy-reason") == "missingCapturedPolicy",
+            "profile command must preserve the missing server capture reason",
+        )
+        require(
+            headers.get("x-dreamjourney-release-policy-mode") == "observe",
+            "non-canary profile command must remain observe-only",
+        )
+        require(
+            headers.get("x-dreamjourney-release-policy-decision-id") == "none",
+            "denied client metadata must not be promoted to a server decision id",
         )
 
         family_mode = (
