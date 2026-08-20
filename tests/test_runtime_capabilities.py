@@ -367,6 +367,175 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, serialized)
 
+    def test_filesystem_storage_never_becomes_publicly_verified(self):
+        settings = Settings(
+            owner_truth_media_capture_enabled=True,
+            owner_truth_media_storage_provider="filesystem",
+            owner_truth_media_storage_root="/var/lib/dreamjourney/private-media",
+            owner_truth_media_content_safety_provider="clamav",
+            owner_truth_media_storage_external_verified=True,
+            owner_truth_media_storage_evidence_timestamp=datetime.now(timezone.utc).isoformat(),
+            release_policy_authenticated_owner_v4_enabled=True,
+        )
+        config = RuntimeConfigService(
+            settings,
+            provider_inventory=ProviderRuntimeInventory(
+                settings,
+                clamav_scanner_ready=lambda: True,
+            ),
+        ).public_config()
+
+        storage = config["capabilitySnapshots"]["ownerTruthMediaStorage"]
+        self.assertTrue(storage["providerReady"])
+        self.assertFalse(storage["externalVerified"])
+        self.assertFalse(storage["releaseVisible"])
+        self.assertEqual(storage["provider"], "filesystem")
+        self.assertEqual(storage["reason"], "internalProviderOnly")
+
+    def test_storage_and_processing_require_independent_external_evidence(self):
+        now = datetime.now(timezone.utc).isoformat()
+        base = {
+            "owner_truth_media_capture_enabled": True,
+            "owner_truth_media_storage_provider": "cos",
+            "owner_truth_media_s3_bucket": "fixture-private-media",
+            "owner_truth_media_s3_region": "ap-shanghai",
+            "owner_truth_media_s3_endpoint_url": "https://cos.ap-shanghai.myqcloud.com",
+            "owner_truth_media_s3_access_key_id": "fixture-storage-access",
+            "owner_truth_media_s3_secret_access_key": "fixture-storage-secret",
+            "owner_truth_media_s3_server_side_encryption": "AES256",
+            "owner_truth_media_content_safety_provider": "clamav",
+            "owner_truth_media_processing_worker_enabled": True,
+            "async_effect_v1_enabled": True,
+            "async_effect_worker_enabled": True,
+            "release_policy_authenticated_owner_v4_enabled": True,
+            "owner_truth_media_storage_external_verified": True,
+            "owner_truth_media_storage_evidence_timestamp": now,
+        }
+        storage_only_settings = Settings(**base)
+        storage_only = RuntimeConfigService(
+            storage_only_settings,
+            provider_inventory=ProviderRuntimeInventory(
+                storage_only_settings,
+                clamav_scanner_ready=lambda: True,
+            ),
+        ).public_config()["capabilitySnapshots"]
+
+        self.assertTrue(storage_only["ownerTruthMediaStorage"]["externalVerified"])
+        self.assertTrue(storage_only["ownerTruthMediaStorage"]["releaseVisible"])
+        self.assertFalse(storage_only["ownerTruthMediaProcessing"]["externalVerified"])
+        self.assertFalse(storage_only["ownerTruthMediaProcessing"]["releaseVisible"])
+
+        fully_verified_settings = Settings(
+            **base,
+            owner_truth_media_processing_external_verified=True,
+            owner_truth_media_processing_evidence_timestamp=now,
+        )
+        fully_verified = RuntimeConfigService(
+            fully_verified_settings,
+            provider_inventory=ProviderRuntimeInventory(
+                fully_verified_settings,
+                clamav_scanner_ready=lambda: True,
+            ),
+        ).public_config()["capabilitySnapshots"]
+
+        self.assertTrue(fully_verified["ownerTruthMediaStorage"]["externalVerified"])
+        self.assertTrue(fully_verified["ownerTruthMediaProcessing"]["externalVerified"])
+        self.assertTrue(fully_verified["ownerTruthMediaProcessing"]["releaseVisible"])
+
+    def test_stale_media_external_evidence_fails_closed(self):
+        stale_timestamp = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+        settings = Settings(
+            owner_truth_media_capture_enabled=True,
+            owner_truth_media_storage_provider="cos",
+            owner_truth_media_s3_bucket="fixture-private-media",
+            owner_truth_media_s3_region="ap-shanghai",
+            owner_truth_media_s3_endpoint_url="https://cos.ap-shanghai.myqcloud.com",
+            owner_truth_media_s3_access_key_id="fixture-storage-access",
+            owner_truth_media_s3_secret_access_key="fixture-storage-secret",
+            owner_truth_media_s3_server_side_encryption="AES256",
+            owner_truth_media_content_safety_provider="clamav",
+            release_policy_authenticated_owner_v4_enabled=True,
+            owner_truth_media_storage_external_verified=True,
+            owner_truth_media_storage_evidence_timestamp=stale_timestamp,
+        )
+        config = RuntimeConfigService(
+            settings,
+            provider_inventory=ProviderRuntimeInventory(
+                settings,
+                clamav_scanner_ready=lambda: True,
+            ),
+        ).public_config()
+        storage = config["capabilitySnapshots"]["ownerTruthMediaStorage"]
+
+        self.assertFalse(storage["externalVerified"])
+        self.assertFalse(storage["releaseVisible"])
+        self.assertEqual(storage["reason"], "externalEvidenceStale")
+        self.assertFalse(config["capabilities"]["ownerTruthMediaCapture"])
+
+    def test_processing_fails_closed_when_storage_runtime_control_is_blocked(self):
+        now = datetime.now(timezone.utc)
+        settings = Settings(
+            owner_truth_media_capture_enabled=True,
+            owner_truth_media_storage_provider="cos",
+            owner_truth_media_s3_bucket="fixture-private-media",
+            owner_truth_media_s3_region="ap-shanghai",
+            owner_truth_media_s3_endpoint_url="https://cos.ap-shanghai.myqcloud.com",
+            owner_truth_media_s3_access_key_id="fixture-storage-access",
+            owner_truth_media_s3_secret_access_key="fixture-storage-secret",
+            owner_truth_media_s3_server_side_encryption="AES256",
+            owner_truth_media_content_safety_provider="clamav",
+            owner_truth_media_processing_worker_enabled=True,
+            async_effect_v1_enabled=True,
+            async_effect_worker_enabled=True,
+            release_policy_authenticated_owner_v4_enabled=True,
+            owner_truth_media_storage_external_verified=True,
+            owner_truth_media_storage_evidence_timestamp=now.isoformat(),
+            owner_truth_media_processing_external_verified=True,
+            owner_truth_media_processing_evidence_timestamp=now.isoformat(),
+        )
+        inventory = ProviderRuntimeInventory(
+            settings,
+            clamav_scanner_ready=lambda: True,
+        )
+        registry = RuntimeCapabilityControlRegistry(epoch_factory=lambda: "rce-ready")
+        registry.observe(
+            RuntimeCapabilityControlObservation(
+                capability="ownerTruthMediaStorage",
+                observation_id="runtime-storage-blocked",
+                observed_at=now,
+                expires_at=now + timedelta(minutes=5),
+                provider_ready=True,
+                provider_reason="externalEvidenceMissing",
+                scanner_ready=True,
+                deletion_reconciliation_healthy=False,
+            )
+        )
+        registry.observe(
+            RuntimeCapabilityControlObservation(
+                capability="ownerTruthMediaProcessing",
+                observation_id="runtime-processing-ready",
+                observed_at=now,
+                expires_at=now + timedelta(minutes=5),
+                provider_ready=True,
+                provider_reason="externalEvidenceMissing",
+                scanner_ready=True,
+                worker_ready=True,
+                deletion_reconciliation_healthy=True,
+            )
+        )
+
+        config = RuntimeConfigService(
+            settings,
+            provider_inventory=inventory,
+            capability_control_registry=registry,
+        ).public_config()
+        processing = config["capabilitySnapshots"]["ownerTruthMediaProcessing"]
+
+        self.assertFalse(processing["providerReady"])
+        self.assertFalse(processing["releaseVisible"])
+        self.assertEqual(processing["reason"], "storageRuntimeUnavailable")
+        self.assertFalse(config["capabilities"]["ownerTruthMediaProcessing"])
+
     def test_cos_storage_requires_https_endpoint_and_explicit_cos_encryption(self):
         base = {
             "owner_truth_media_capture_enabled": True,

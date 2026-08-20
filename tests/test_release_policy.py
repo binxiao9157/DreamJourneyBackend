@@ -251,6 +251,69 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertEqual(processing.requiredCapability, "ownerTruthMediaProcessing")
         self.assertFalse(processing.capabilityReady)
 
+    def test_authenticated_owner_media_requires_external_verification(self):
+        service = ReleasePolicyService(
+            authenticated_owner_v4_enabled=True,
+            capability_resolver=lambda capability: capability
+            in {"ownerTruthMediaStorage", "ownerTruthMediaProcessing"},
+            public_capability_resolver=lambda capability: False,
+        )
+
+        for feature in ("ownerMediaCaptureV1", "ownerMediaProcessingV1"):
+            with self.subTest(feature=feature):
+                decision = service.build_snapshot(
+                    audience="owner",
+                    cohort="authenticatedOwner",
+                    client_build=1,
+                    requested_feature=feature,
+                ).features[0]
+
+                self.assertFalse(decision.enabled)
+                self.assertFalse(decision.releaseVisible)
+                self.assertFalse(decision.capabilityReady)
+                self.assertEqual(decision.reason, "externalVerificationRequired")
+
+    def test_authenticated_owner_media_opens_only_after_public_capability_is_ready(self):
+        service = ReleasePolicyService(
+            authenticated_owner_v4_enabled=True,
+            capability_resolver=lambda capability: capability
+            in {"ownerTruthMediaStorage", "ownerTruthMediaProcessing"},
+            public_capability_resolver=lambda capability: capability
+            in {"ownerTruthMediaStorage", "ownerTruthMediaProcessing"},
+        )
+
+        for feature in ("ownerMediaCaptureV1", "ownerMediaProcessingV1"):
+            with self.subTest(feature=feature):
+                decision = service.build_snapshot(
+                    audience="owner",
+                    cohort="authenticatedOwner",
+                    client_build=1,
+                    requested_feature=feature,
+                ).features[0]
+
+                self.assertTrue(decision.enabled)
+                self.assertTrue(decision.releaseVisible)
+                self.assertTrue(decision.capabilityReady)
+                self.assertEqual(decision.reason, "authenticatedOwnerCore")
+
+    def test_real_otp_authentication_cannot_bypass_media_public_readiness(self):
+        # Release policy receives an authenticated Owner principal regardless
+        # of which OTP Provider established the session. Media admission must
+        # therefore remain independent from authentication readiness.
+        decision = ReleasePolicyService(
+            authenticated_owner_v4_enabled=True,
+            capability_resolver=lambda capability: capability == "ownerTruthMediaStorage",
+            public_capability_resolver=lambda capability: False,
+        ).build_snapshot(
+            audience="owner",
+            cohort="authenticatedOwner",
+            client_build=1,
+            requested_feature="ownerMediaCaptureV1",
+        ).features[0]
+
+        self.assertFalse(decision.enabled)
+        self.assertEqual(decision.reason, "externalVerificationRequired")
+
     def test_full_account_data_export_is_product_closed_for_the_client(self):
         snapshot = ReleasePolicyService().build_snapshot(
             audience="owner",

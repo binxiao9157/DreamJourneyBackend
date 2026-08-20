@@ -149,6 +149,11 @@ class Settings:
     owner_truth_media_capture_enabled: bool = False
     owner_truth_media_storage_provider: str = "disabled"
     owner_truth_media_storage_root: str = "/var/lib/dreamjourney/media"
+    # Ordinary authenticated users require a current external verification
+    # receipt in addition to operational readiness. These fields never make
+    # ``filesystem`` public; that provider remains internal-entitlement only.
+    owner_truth_media_storage_external_verified: bool = False
+    owner_truth_media_storage_evidence_timestamp: Optional[str] = None
     # ``cos`` is the selected M0 production adapter and uses Tencent COS via
     # its S3-compatible endpoint. ``s3`` remains available for isolated
     # compatibility testing. Credentials stay server-side; the media API never
@@ -173,6 +178,8 @@ class Settings:
     # The private parser/OCR/ASR queue is a separate worker lane. It remains
     # off until capture, storage and the selected processor rollout are ready.
     owner_truth_media_processing_worker_enabled: bool = False
+    owner_truth_media_processing_external_verified: bool = False
+    owner_truth_media_processing_evidence_timestamp: Optional[str] = None
     # Private physical deletion is a separate revocation-first worker lane.
     # It must not run merely because media capture or processing is enabled.
     owner_truth_media_deletion_worker_enabled: bool = False
@@ -622,6 +629,13 @@ class Settings:
                 "OWNER_TRUTH_MEDIA_STORAGE_ROOT",
                 cls.owner_truth_media_storage_root,
             ) or cls.owner_truth_media_storage_root,
+            owner_truth_media_storage_external_verified=_env_bool(
+                "OWNER_TRUTH_MEDIA_STORAGE_EXTERNAL_VERIFIED",
+                cls.owner_truth_media_storage_external_verified,
+            ),
+            owner_truth_media_storage_evidence_timestamp=_env(
+                "OWNER_TRUTH_MEDIA_STORAGE_EVIDENCE_TIMESTAMP"
+            ),
             owner_truth_media_s3_bucket=_env("OWNER_TRUTH_MEDIA_S3_BUCKET"),
             owner_truth_media_s3_prefix=_env(
                 "OWNER_TRUTH_MEDIA_S3_PREFIX",
@@ -677,6 +691,13 @@ class Settings:
             owner_truth_media_processing_worker_enabled=_env_bool(
                 "OWNER_TRUTH_MEDIA_PROCESSING_WORKER_ENABLED",
                 cls.owner_truth_media_processing_worker_enabled,
+            ),
+            owner_truth_media_processing_external_verified=_env_bool(
+                "OWNER_TRUTH_MEDIA_PROCESSING_EXTERNAL_VERIFIED",
+                cls.owner_truth_media_processing_external_verified,
+            ),
+            owner_truth_media_processing_evidence_timestamp=_env(
+                "OWNER_TRUTH_MEDIA_PROCESSING_EVIDENCE_TIMESTAMP"
             ),
             owner_truth_media_deletion_worker_enabled=_env_bool(
                 "OWNER_TRUTH_MEDIA_DELETION_WORKER_ENABLED",

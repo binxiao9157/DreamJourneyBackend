@@ -11,6 +11,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 cd "$ROOT_DIR"
+export PYTHONPYCACHEPREFIX="${TMPDIR:-/tmp}/dreamjourney-media-provider-matrix-python-cache"
 
 PYTHONPATH=. "$PYTHON_BIN" -m unittest \
   tests.test_runtime_capabilities \
@@ -20,6 +21,7 @@ PYTHONPATH=. "$PYTHON_BIN" -m unittest \
 
 PYTHONPATH=. "$PYTHON_BIN" -m py_compile \
   app/services/owner_truth_media_source_object.py \
+  app/services/media_release_admission.py \
   app/services/provider_runtime.py \
   scripts/backend-owner-truth-media-cos-provider-smoke.py \
   scripts/backend-owner-truth-media-clamav-sidecar-smoke.py
@@ -30,6 +32,8 @@ from pathlib import Path
 env_example = Path(".env.example").read_text(encoding="utf-8")
 for field in (
     "OWNER_TRUTH_MEDIA_STORAGE_PROVIDER=disabled",
+    "OWNER_TRUTH_MEDIA_STORAGE_EXTERNAL_VERIFIED=false",
+    "OWNER_TRUTH_MEDIA_STORAGE_EVIDENCE_TIMESTAMP=",
     "OWNER_TRUTH_MEDIA_S3_BUCKET=",
     "OWNER_TRUTH_MEDIA_S3_REGION=",
     "OWNER_TRUTH_MEDIA_S3_ENDPOINT_URL=",
@@ -38,6 +42,8 @@ for field in (
     "OWNER_TRUTH_MEDIA_S3_SERVER_SIDE_ENCRYPTION=",
     "OWNER_TRUTH_MEDIA_CONTENT_SAFETY_PROVIDER=disabled",
     "OWNER_TRUTH_MEDIA_CLAMAV_HOST=",
+    "OWNER_TRUTH_MEDIA_PROCESSING_EXTERNAL_VERIFIED=false",
+    "OWNER_TRUTH_MEDIA_PROCESSING_EVIDENCE_TIMESTAMP=",
 ):
     assert field in env_example, field
 

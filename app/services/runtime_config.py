@@ -19,6 +19,7 @@ from app.services.release_policy import ReleasePolicyService, parse_release_poli
 from app.services.recovery_access import RecoveryAccessPolicy
 from app.services.safety_policy import SafetyPolicy
 from app.services.provider_runtime import ProviderRuntimeInventory, ProviderRuntimeStatus
+from app.services.media_release_admission import resolve_media_external_evidence
 from app.services.tokens import TokenService
 from app.services.tts import VoiceCloneTTSProviderFactory
 from app.services.voice_clone import VoiceCloneProviderFactory, configured_voice_clone_speaker_ids
@@ -129,6 +130,7 @@ class RuntimeConfigService:
                     self.provider_inventory.status_for(capability)
                 )
             ),
+            public_capability_resolver=self._provider_public_ready,
             shadow_mode=self.settings.release_policy_command_mode != "enforce",
         )
         recovery_access = RecoveryAccessPolicy(
@@ -207,8 +209,15 @@ class RuntimeConfigService:
                 "archiveMediaUploadIntent": False,
                 "archiveAudioUpload": False,
                 "archiveVideoUpload": False,
-                "ownerTruthMediaCapture": self._provider_operational_ready(media_storage),
-                "ownerTruthMediaProcessing": self._provider_operational_ready(media_processing),
+                # Legacy booleans now mirror public readiness. Internal pilots
+                # must use the typed snapshot plus an explicit server policy
+                # entitlement and cannot inherit these aliases.
+                "ownerTruthMediaCapture": self._provider_public_ready(
+                    "ownerTruthMediaStorage"
+                ),
+                "ownerTruthMediaProcessing": self._provider_public_ready(
+                    "ownerTruthMediaProcessing"
+                ),
                 "accountDataExport": False,
                 "voiceClone": voice_clone_provider.is_configured,
                 "digitalHumanSession": False,
@@ -735,27 +744,61 @@ class RuntimeConfigService:
         release_visible: bool,
     ) -> RuntimeCapabilityInput:
         control = self._control_decision(status.capability)
+        storage_status = (
+            self.provider_inventory.status_for("ownerTruthMediaStorage")
+            if status.capability == "ownerTruthMediaProcessing"
+            else None
+        )
+        storage_operational_ready = bool(
+            storage_status is None or self._provider_operational_ready(storage_status)
+        )
+        external_evidence = resolve_media_external_evidence(
+            settings=self.settings,
+            status=status,
+            storage_status=storage_status,
+        )
+        is_media_capability = status.capability in {
+            "ownerTruthMediaStorage",
+            "ownerTruthMediaProcessing",
+        }
+        control_ready = bool(
+            (control is None or control.operational_ready)
+            and storage_operational_ready
+        )
         return RuntimeCapabilityInput(
             capability=status.capability,
             implemented=True,
             enabled=status.enabled,
-            provider_ready=(
-                status.provider_ready
-                if control is None
-                else status.provider_ready and control.operational_ready
-            ),
+            provider_ready=status.provider_ready and control_ready,
             release_visible=release_visible,
-            external_verified=False,
+            external_verified=(
+                external_evidence.external_verified if is_media_capability else False
+            ),
+            evidence_timestamp=(
+                external_evidence.evidence_timestamp if is_media_capability else None
+            ),
             provider=status.provider,
             fallback_mode=status.fallback_mode,
-            reason=(status.reason if control is None or control.operational_ready else control.reason),
+            reason=(
+                "storageRuntimeUnavailable"
+                if not storage_operational_ready
+                else external_evidence.reason
+                if control_ready and is_media_capability
+                else status.reason
+                if control_ready
+                else control.reason
+            ),
             provider_kind=status.provider_kind,
             operation=status.operation,
             data_class=status.data_class,
             region=status.region,
             retention_policy_version=status.retention_policy_version,
             configuration_status=status.configuration_status,
-            evidence_status=status.evidence_status,
+            evidence_status=(
+                external_evidence.evidence_status
+                if is_media_capability
+                else status.evidence_status
+            ),
             control_state=("legacy" if control is None else control.state.value),
             readiness_epoch=(None if control is None else control.readiness_epoch),
             readiness_observed_at=(None if control is None else control.observed_at),
@@ -777,6 +820,28 @@ class RuntimeConfigService:
             and status.provider_ready
             and (control is None or control.operational_ready)
         )
+
+    def _provider_public_ready(self, capability: str) -> bool:
+        try:
+            status = self.provider_inventory.status_for(capability)
+        except KeyError:
+            return False
+        if not self._provider_operational_ready(status):
+            return False
+        storage_status = (
+            self.provider_inventory.status_for("ownerTruthMediaStorage")
+            if capability == "ownerTruthMediaProcessing"
+            else None
+        )
+        if storage_status is not None and not self._provider_operational_ready(
+            storage_status
+        ):
+            return False
+        return resolve_media_external_evidence(
+            settings=self.settings,
+            status=status,
+            storage_status=storage_status,
+        ).external_verified
 
     def _capability_control_descriptor(self) -> Dict[str, object]:
         if self.capability_control_registry is None:

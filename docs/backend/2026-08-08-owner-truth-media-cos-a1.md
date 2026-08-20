@@ -36,6 +36,8 @@
 ```dotenv
 OWNER_TRUTH_MEDIA_CAPTURE_ENABLED=true
 OWNER_TRUTH_MEDIA_STORAGE_PROVIDER=cos
+OWNER_TRUTH_MEDIA_STORAGE_EXTERNAL_VERIFIED=false
+OWNER_TRUTH_MEDIA_STORAGE_EVIDENCE_TIMESTAMP=
 OWNER_TRUTH_MEDIA_S3_BUCKET=<private-bucket-name-appid>
 OWNER_TRUTH_MEDIA_S3_PREFIX=dreamjourney/private-media
 OWNER_TRUTH_MEDIA_S3_REGION=<bucket-region>
@@ -54,10 +56,14 @@ OWNER_TRUTH_MEDIA_CLAMAV_TIMEOUT_SECONDS=30
 
 # 在真实对象存储通过 smoke 前保持其余处理链路关闭。
 OWNER_TRUTH_MEDIA_PROCESSING_WORKER_ENABLED=false
+OWNER_TRUTH_MEDIA_PROCESSING_EXTERNAL_VERIFIED=false
+OWNER_TRUTH_MEDIA_PROCESSING_EVIDENCE_TIMESTAMP=
 OWNER_TRUTH_MEDIA_DELETION_WORKER_ENABLED=false
 ```
 
 使用 KMS 时把 `OWNER_TRUTH_MEDIA_S3_SERVER_SIDE_ENCRYPTION` 改为 `cos/kms`，并配置可访问的 `OWNER_TRUTH_MEDIA_S3_KMS_KEY_ID`。缺少 bucket、region、HTTPS endpoint、最小权限凭据或显式 SSE 时，runtime capability 将 fail-closed；endpoint 主机中的 region 与配置 region 不一致时也会在联网前拒绝，不会假装媒体功能可用。
+
+`*_EXTERNAL_VERIFIED` 不是 Provider 开关。初次部署和内部 closed pilot 必须保持 `false`；只有真实 COS/扫描/删除 E2E 通过并保存验收证据后，才把存储项设为 `true`，同时写入对应 UTC ISO-8601 时间。处理 Worker 需要自己独立的验收开关和时间，不能继承存储结果。证据缺失、无效或超过 30 天时，普通用户媒体入口自动关闭。`filesystem` 即使误配为 `true` 也只允许独立 internal entitlement，永远不会成为 public Provider。
 
 ## 4. 部署与验证顺序
 
@@ -68,6 +74,13 @@ OWNER_TRUTH_MEDIA_DELETION_WORKER_ENABLED=false
    ```
 
    该 Gate 使用 fake COS/ClamAV，覆盖缺配置、缺 SSE、错误 region、扫描器离线/超时、EICAR、删除未知回执和删除后对象仍存在；不会连接 Provider 或读取用户媒体。
+   同时运行准入隔离 Gate：
+
+   ```bash
+   bash scripts/run-backend-pc-c1-media-admission-gate.sh
+   ```
+
+   它证明普通 Owner 需要外部证据、filesystem 仅限独立 internal entitlement，且真实 OTP 不会自动开放媒体。
 2. 将后端升级到包含 A1 的版本，构建并重启 API 容器。
 3. 在 API 容器内执行：
 
@@ -77,9 +90,10 @@ OWNER_TRUTH_MEDIA_DELETION_WORKER_ENABLED=false
    ```
 
    脚本只写入一段随机 probe、执行 HEAD/readback 后立即删除；输出不会包含 bucket、key 或凭据。
-4. 查询 `/config/runtime`，确认 `ownerTruthMediaStorage.provider=cos`、`providerReady=true`，且响应中没有 bucket、endpoint、SecretId 或 SecretKey。
+4. 查询 `/config/runtime`，先确认 `ownerTruthMediaStorage.provider=cos`、`providerReady=true`、`externalVerified=false`，且响应中没有 bucket、endpoint、SecretId 或 SecretKey。
 5. 仅给测试租户打开 server-side closed-pilot policy，跑 Postgres media capture smoke，覆盖上传、授权读取、重复提交、过期、跨 owner、撤权和删除。
-6. 通过后才考虑打开处理 worker；OCR/ASR/视觉分析仍各自需要独立 Provider Gate。
+6. 保存 smoke 证据后设置存储 `EXTERNAL_VERIFIED=true` 和对应时间，重启并确认普通 Owner Release Policy 才从 `externalVerificationRequired` 切换为允许。
+7. 通过后才考虑打开处理 worker；处理能力需要独立验收和独立证据时间，OCR/ASR/视觉分析仍各自需要 Provider Gate。
 
 ## 5. 当前部署结论
 

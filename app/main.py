@@ -579,6 +579,7 @@ from app.services.archive_store import (
     ResourceVersionConflict,
 )
 from app.services.provider_runtime import ProviderRuntimeInventory
+from app.services.media_release_admission import resolve_media_external_evidence
 from app.services.clamav_runtime_evidence import collect_clamav_runtime_evidence
 from app.services.production_readiness_report import build_production_readiness_report
 from app.services.runtime_capability_control import RuntimeCapabilityControlRegistry
@@ -5660,10 +5661,12 @@ def _production_readiness_report(
     )
 
 
-def _release_policy_runtime_capability_ready(capability: str) -> bool:
-    """Resolve Provider readiness on the server without trusting client hints."""
+def _runtime_capability_operational_ready(
+    inventory: ProviderRuntimeInventory,
+    capability: str,
+) -> bool:
+    """Resolve one capability and its mandatory runtime dependencies."""
 
-    inventory = _refresh_runtime_capability_controls()
     try:
         status = inventory.status_for(capability)
     except KeyError:
@@ -5673,7 +5676,7 @@ def _release_policy_runtime_capability_ready(capability: str) -> bool:
         "ownerTruthMediaStorage",
         "ownerTruthMediaProcessing",
     }
-    return bool(
+    ready = bool(
         status.enabled
         and status.provider_ready
         and (
@@ -5681,6 +5684,43 @@ def _release_policy_runtime_capability_ready(capability: str) -> bool:
             or (control is None and not control_required)
         )
     )
+    if not ready:
+        return False
+    if capability == "ownerTruthMediaProcessing":
+        return _runtime_capability_operational_ready(
+            inventory,
+            "ownerTruthMediaStorage",
+        )
+    return True
+
+
+def _release_policy_runtime_capability_ready(capability: str) -> bool:
+    """Resolve Provider readiness on the server without trusting client hints."""
+
+    inventory = _refresh_runtime_capability_controls()
+    return _runtime_capability_operational_ready(inventory, capability)
+
+
+def _release_policy_runtime_capability_public_ready(capability: str) -> bool:
+    """Require operational readiness plus current public-release evidence."""
+
+    inventory = _refresh_runtime_capability_controls()
+    if not _runtime_capability_operational_ready(inventory, capability):
+        return False
+    try:
+        status = inventory.status_for(capability)
+    except KeyError:
+        return False
+    storage_status = (
+        inventory.status_for("ownerTruthMediaStorage")
+        if capability == "ownerTruthMediaProcessing"
+        else None
+    )
+    return resolve_media_external_evidence(
+        settings=settings,
+        status=status,
+        storage_status=storage_status,
+    ).external_verified
 
 
 RELEASE_POLICY_SERVICE = ReleasePolicyService(
@@ -5701,6 +5741,7 @@ RELEASE_POLICY_SERVICE = ReleasePolicyService(
         settings.release_policy_authenticated_owner_v4_enabled
     ),
     capability_resolver=_release_policy_runtime_capability_ready,
+    public_capability_resolver=_release_policy_runtime_capability_public_ready,
     shadow_mode=RELEASE_POLICY_COMMAND_MODE != "enforce",
 )
 RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset(

@@ -582,6 +582,10 @@ class ReleasePolicyService:
         "voiceCloneShell": "voiceCloneShell",
         "digitalHumanLivePanel": "digitalHumanLivePanel",
     }
+    _PUBLIC_EVIDENCE_REQUIRED_FEATURES = {
+        "ownerMediaCaptureV1",
+        "ownerMediaProcessingV1",
+    }
     # Product-confirmed exclusions override provider readiness, rollout
     # cohorts, client claims, and default-stage shadow behavior.
     _PRODUCT_CLOSED_FEATURES = {
@@ -640,6 +644,7 @@ class ReleasePolicyService:
         closed_pilot_enabled_features: Optional[Iterable[str]] = None,
         authenticated_owner_v4_enabled: bool = False,
         capability_resolver: Optional[Callable[[str], bool]] = None,
+        public_capability_resolver: Optional[Callable[[str], bool]] = None,
         shadow_mode: bool = True,
         enforce_default_closed_stages: bool = True,
     ) -> None:
@@ -656,6 +661,7 @@ class ReleasePolicyService:
         )
         self.authenticated_owner_v4_enabled = bool(authenticated_owner_v4_enabled)
         self.capability_resolver = capability_resolver
+        self.public_capability_resolver = public_capability_resolver
         unknown_rollout_features = (
             self.emergency_disabled_features
             | self.enforced_features
@@ -768,6 +774,9 @@ class ReleasePolicyService:
             "defaultClosedStageEffectsEnforced": False,
             "defaultClosedFeatureEffectsEnforced": self.enforce_default_closed_stages,
             "capabilityBindings": dict(sorted(self._FEATURE_CAPABILITIES.items())),
+            "publicEvidenceRequiredFeatures": sorted(
+                self._PUBLIC_EVIDENCE_REQUIRED_FEATURES
+            ),
             "publicationVisitorPolicy": self.publication_visitor_policy().model_dump(
                 mode="json"
             ),
@@ -855,7 +864,14 @@ class ReleasePolicyService:
         canonical_feature = self.canonical_feature_name(feature, audience=audience)
         required_gates = self._FEATURE_GATES.get(canonical_feature)
         required_capability = self._FEATURE_CAPABILITIES.get(canonical_feature)
-        capability_ready = self._capability_ready(required_capability)
+        operational_capability_ready = self._capability_ready(required_capability)
+        public_evidence_required = canonical_feature in self._PUBLIC_EVIDENCE_REQUIRED_FEATURES
+        public_capability_ready = (
+            self._public_capability_ready(required_capability)
+            if public_evidence_required
+            else operational_capability_ready
+        )
+        capability_ready = operational_capability_ready
         if required_gates is None:
             return ReleasePolicyFeatureDecision(
                 feature=feature,
@@ -879,16 +895,33 @@ class ReleasePolicyService:
             reason = "clientBelowMinimum"
             allowed = False
         elif (
+            public_evidence_required
+            and audience == "owner"
+            and cohort == "closedPilotAdultSelf"
+            and canonical_feature in self._closed_pilot_owner_visible_features
+        ):
+            if required_capability is not None and not operational_capability_ready:
+                reason = "capabilityUnavailable"
+                allowed = False
+            else:
+                reason = "closedPilotOwnerCore"
+                allowed = True
+        elif (
             audience == "owner"
             and cohort in {"authenticatedOwner", "closedPilotAdultSelf"}
             and canonical_feature in self._authenticated_owner_visible_features
         ):
-            if required_capability is not None and not capability_ready:
+            if required_capability is not None and not operational_capability_ready:
                 reason = "capabilityUnavailable"
                 allowed = False
+            elif public_evidence_required and not public_capability_ready:
+                reason = "externalVerificationRequired"
+                allowed = False
+                capability_ready = False
             else:
                 reason = "authenticatedOwnerCore"
                 allowed = True
+                capability_ready = public_capability_ready
         elif (
             audience == "owner"
             and cohort == "closedPilotAdultSelf"
@@ -926,6 +959,16 @@ class ReleasePolicyService:
             return False
         try:
             return self.capability_resolver(capability) is True
+        except Exception:
+            return False
+
+    def _public_capability_ready(self, capability: Optional[str]) -> bool:
+        if capability is None:
+            return True
+        if self.public_capability_resolver is None:
+            return False
+        try:
+            return self.public_capability_resolver(capability) is True
         except Exception:
             return False
 
