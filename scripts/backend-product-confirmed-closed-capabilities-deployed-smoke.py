@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import secrets
@@ -137,6 +138,7 @@ def cleanup_smoke_user(store: PostgresStore | None, user_id: str) -> None:
                 command_id="cleanupClosedCapabilitySmoke",
             ) as unit_of_work:
                 with unit_of_work.connection.cursor() as cursor:
+                    cursor.execute("DELETE FROM digital_human_sessions WHERE user_id = %s", (user_id,))
                     cursor.execute("DELETE FROM session_events WHERE user_id = %s", (user_id,))
                     cursor.execute("DELETE FROM token_families WHERE user_id = %s", (user_id,))
                     cursor.execute("DELETE FROM auth_sessions WHERE user_id = %s", (user_id,))
@@ -145,8 +147,34 @@ def cleanup_smoke_user(store: PostgresStore | None, user_id: str) -> None:
         store.close_pool()
 
 
-def assert_product_closed(body: dict, headers: dict[str, str], feature: str) -> None:
+def digital_human_session_payload(
+    store: PostgresStore,
+    session_id: str,
+) -> dict:
+    with store.request_unit_of_work(
+        correlation_id="closed-capability-session-read",
+        command_id=f"closedCapabilitySessionRead:{secrets.token_hex(8)}",
+    ) as unit_of_work:
+        with unit_of_work.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT payload FROM digital_human_sessions WHERE id = %s",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+    require(row is not None, "digital-human session fixture missing")
+    payload = row[0] if not isinstance(row, dict) else row.get("payload")
+    require(isinstance(payload, dict), "digital-human session fixture payload invalid")
+    return payload
+
+
+def assert_product_closed(
+    body: dict,
+    headers: dict[str, str],
+    feature: str,
+    path: str,
+) -> None:
     detail = body.get("detail") or {}
+    require(isinstance(detail, dict), f"{path} returned a non-contract denial: {detail!r}")
     require(detail.get("code") == "release_policy_denied", f"{feature} code drift")
     require(detail.get("feature") == feature, f"{feature} classification drift")
     require(detail.get("reason") == "productClosed", f"{feature} reason drift")
@@ -172,8 +200,34 @@ def main() -> None:
     user_id = ""
     try:
         store, user_id, user_token = issue_smoke_user()
+        empty = closed_resource_counts(store, user_id)
+        require(not any(empty.values()), "temporary smoke user must start empty")
+
+        session_id = f"pc-e2-legacy-{secrets.token_hex(8)}"
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        heartbeat_at = (now - timedelta(seconds=15)).isoformat()
+        fixture = store.acquire_digital_human_session_lease(
+            {
+                "sessionId": session_id,
+                "resourceKey": f"pc-e2-resource-{secrets.token_hex(8)}",
+                "userId": user_id,
+                "deviceId": "pc-e2-smoke",
+                "personaId": user_id,
+                "scene": "echo",
+                "lifecycleMode": "sunlight",
+                "providerMode": "legacyCloudRender",
+                "status": "active",
+                "createdAt": heartbeat_at,
+                "heartbeatAt": heartbeat_at,
+                "expiresAt": (now + timedelta(minutes=5)).isoformat(),
+            },
+            max_concurrent_sessions=1,
+            now_iso=now_iso,
+        )
+        require(fixture.get("outcome") == "created", "legacy session fixture was not created")
         before = closed_resource_counts(store, user_id)
-        require(not any(before.values()), "temporary smoke user must start empty")
+        require(before.get("digitalHumanSession") == 1, "legacy session fixture count drift")
 
         attempts = (
             (
@@ -191,7 +245,7 @@ def main() -> None:
             ),
             (
                 "POST",
-                "/digital-human/sessions/pc-e2-missing/heartbeat",
+                f"/digital-human/sessions/{session_id}/heartbeat",
                 {"userId": user_id, "deviceId": "pc-e2-smoke"},
                 user_token,
                 "digitalHumanLivePanel",
@@ -239,7 +293,7 @@ def main() -> None:
                 token=token,
                 expected_status=403,
             )
-            assert_product_closed(body, headers, feature)
+            assert_product_closed(body, headers, feature, path)
 
         worker = product_closed_summary("2026-08-20T00:00:00Z")
         require(worker.get("itemCount") == 0, "closed worker must deliver zero items")
@@ -250,6 +304,11 @@ def main() -> None:
         )
         after = closed_resource_counts(store, user_id)
         require(after == before, "closed requests must not mutate product storage")
+        persisted_session = digital_human_session_payload(store, session_id)
+        require(
+            persisted_session.get("heartbeatAt") == heartbeat_at,
+            "product-closed heartbeat must not renew the legacy session",
+        )
     finally:
         cleanup_smoke_user(store, user_id)
 
@@ -259,6 +318,7 @@ def main() -> None:
                 "status": "passed",
                 "schemaVersion": 1,
                 "blockedAttemptCount": 6,
+                "legacySessionFixtureCount": 1,
                 "digitalHumanSessionCreated": 0,
                 "digitalHumanHeartbeatAccepted": 0,
                 "timeLetterCreated": 0,
