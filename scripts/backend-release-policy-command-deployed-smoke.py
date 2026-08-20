@@ -206,7 +206,7 @@ def main():
         )
         require(
             headers.get("x-dreamjourney-release-policy-decision") == expected_decision,
-            "hidden command decision must match observe/enforce mode",
+            "family command decision must match observe/enforce mode",
         )
         require(
             headers.get("x-dreamjourney-release-policy-reason") == "missingCapturedPolicy",
@@ -214,7 +214,7 @@ def main():
         )
         require(
             headers.get("x-dreamjourney-release-policy-mode") == family_mode,
-            "hidden command mode must match feature rollout",
+            "family command mode must match feature rollout",
         )
         if family_mode == "enforce":
             detail = payload.get("detail") or {}
@@ -224,7 +224,7 @@ def main():
 
     print(
         "Backend release-policy command deployed smoke passed: "
-        f"mode={EXPECTED_MODE} forgedQA=owner core=allow hidden={expected_decision}"
+        f"mode={EXPECTED_MODE} forgedQA=observeDeny family={expected_decision}"
     )
 
 
