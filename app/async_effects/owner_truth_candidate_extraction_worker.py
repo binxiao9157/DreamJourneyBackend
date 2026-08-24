@@ -55,11 +55,15 @@ from app.domain.owner_truth.contracts import (
 from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION_V2,
+    OWNER_TRUTH_SCHEMA_VERSION_V3,
     empty_memory_facets,
     validate_memory_facets,
 )
 from app.observability.operation_metrics import OperationMetricRecorder
-from app.services.deepseek import DeepSeekLiveMemoryOrganizationProxy
+from app.services.deepseek import (
+    DeepSeekLiveMemoryOrganizationProxy,
+    DeepSeekTextMemoryOrganizationProxy,
+)
 from app.services.owner_truth_candidate_extraction import (
     OwnerTruthCandidateExtractionInput,
     OwnerTruthCandidateExtractionResult,
@@ -303,6 +307,14 @@ class LiveMemoryOrganizationProvider(Protocol):
         ...
 
 
+class TextMemoryOrganizationProvider(Protocol):
+    model: str
+    prompt_version: str
+
+    def request_organization(self, *, text: str) -> dict[str, Any]:
+        ...
+
+
 class ModelAssistedOwnerTruthLiveConversationExtractor:
     """Use semantic organization only for explicitly marked closed Live text."""
 
@@ -338,10 +350,11 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
         for chunk in self._organization_chunks(turns):
             try:
                 organization = self._organizer.request_organization(turns=chunk)
-            except httpx.HTTPError:
+            except (httpx.HTTPError, ValueError):
                 # Keep a closed Live session reviewable when the semantic
-                # organizer is temporarily unavailable. This fallback uses
-                # owner evidence only and still requires explicit review.
+                # organizer is unavailable or returns an unusable structured
+                # response. This fallback uses owner evidence only and still
+                # requires explicit review.
                 return self._fallback.extract(intent=intent, source=source)
             chunk_memories = organization.get("memories")
             if not isinstance(chunk_memories, list):
@@ -529,6 +542,97 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
         return spans
 
 
+class ModelAssistedOwnerTruthSourceExtractor:
+    """Route ordinary Owner text to typed organization without changing Live."""
+
+    _EXTRACTOR_ID = "deepSeekTextMemoryOrganizer"
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        organizer: TextMemoryOrganizationProvider | None = None,
+        live_extractor: OwnerTruthCandidateExtractor | None = None,
+    ) -> None:
+        self._organizer = organizer or DeepSeekTextMemoryOrganizationProxy(settings)
+        self._live_extractor = live_extractor or ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=settings
+        )
+        self._text_organization_enabled = (
+            settings.owner_truth_text_memory_organization_enabled
+        )
+
+    def extract(
+        self,
+        *,
+        intent: AsyncEffectIntent,
+        source: OwnerTruthCandidateExtractionInput,
+    ) -> SyntheticCandidateExtractionCommand:
+        metadata = source.source_metadata or {}
+        if self._is_live(metadata) or self._is_image_processing(metadata):
+            return self._live_extractor.extract(intent=intent, source=source)
+        if not self._text_organization_enabled:
+            return self._live_extractor.extract(intent=intent, source=source)
+
+        normalized_text = source.source_text.strip()
+        if not normalized_text:
+            return self._live_extractor.extract(intent=intent, source=source)
+
+        organization = self._organizer.request_organization(text=normalized_text)
+        memories = organization.get("memories")
+        if not isinstance(memories, list):
+            raise ValueError("text memory organizer returned an invalid memories contract")
+
+        proposals: list[CandidateProposal] = []
+        for memory in memories:
+            if not isinstance(memory, Mapping):
+                raise ValueError("text memory organizer returned an invalid memory")
+            memory_kind = MemoryKind(str(memory.get("memoryKind") or ""))
+            content = memory.get("content")
+            if not isinstance(content, Mapping):
+                raise ValueError("text memory organizer returned invalid typed content")
+            proposals.append(
+                CandidateProposal(
+                    memory_kind=memory_kind,
+                    perspective_type=PerspectiveType.FIRST_PERSON,
+                    epistemic_status=EpistemicStatus.RECALLED,
+                    sensitivity=SensitivityLevel.STANDARD,
+                    content=dict(content),
+                    evidence_span=CandidateEvidenceSpan(
+                        start=0,
+                        end=len(source.source_text),
+                    ),
+                    confidence=0.0,
+                    review_mode=CandidateReviewMode.SINGLE,
+                    payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V3,
+                )
+            )
+        return SyntheticCandidateExtractionCommand(
+            intent=intent,
+            extractor_id=self._EXTRACTOR_ID,
+            model_id=self._organizer.model,
+            prompt_version=self._organizer.prompt_version,
+            policy_version=OWNER_TRUTH_SCHEMA_VERSION,
+            source_content_hash=source.source_content_hash,
+            status=ExtractionResultStatus.SUCCEEDED,
+            proposals=tuple(proposals),
+        )
+
+    @staticmethod
+    def _is_live(metadata: Mapping[str, Any]) -> bool:
+        return metadata.get("captureMode") == "live" or isinstance(
+            metadata.get("conversationTurns"), list
+        )
+
+    @staticmethod
+    def _is_image_processing(metadata: Mapping[str, Any]) -> bool:
+        return (
+            metadata.get("origin") == "mediaSourceObjectProcessing"
+            or "candidateFacets" in metadata
+            or "candidateFacetsHash" in metadata
+        )
+
+
 class OwnerTruthCandidateExtractionWorkerRuntime:
     """One-shot, fail-closed consumer for default-off Source extraction work."""
 
@@ -555,7 +659,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
             lease_seconds=self._lease_seconds,
             configured=heartbeat_interval_seconds,
         )
-        self._extractor = extractor or ModelAssistedOwnerTruthLiveConversationExtractor(
+        self._extractor = extractor or ModelAssistedOwnerTruthSourceExtractor(
             settings=settings
         )
         self._operation_metric_recorder = operation_metric_recorder or self._make_metric_recorder()

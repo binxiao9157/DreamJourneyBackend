@@ -21,6 +21,7 @@ from app.domain.owner_truth.memory_projection import (
 from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION_V2,
+    OWNER_TRUTH_SCHEMA_VERSION_V3,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_memory_projection import (
@@ -43,7 +44,11 @@ _CONTEXT_ELIGIBLE_EPISTEMIC_STATUSES = frozenset(
     {"observed", "recalled", "reported", "uncertain"}
 )
 _CONTEXT_SUPPORTED_SCHEMA_VERSIONS = frozenset(
-    {OWNER_TRUTH_SCHEMA_VERSION, OWNER_TRUTH_SCHEMA_VERSION_V2}
+    {
+        OWNER_TRUTH_SCHEMA_VERSION,
+        OWNER_TRUTH_SCHEMA_VERSION_V2,
+        OWNER_TRUTH_SCHEMA_VERSION_V3,
+    }
 )
 
 

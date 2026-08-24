@@ -13,6 +13,7 @@ from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_CURRENT_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION_V2,
+    OWNER_TRUTH_SCHEMA_VERSION_V3,
     empty_memory_facets,
     flatten_memory_facets,
     validate_memory_payload,
@@ -75,7 +76,7 @@ class OwnerTruthDomainTests(unittest.TestCase):
 
         self.assertTrue(result.accepted)
         self.assertFalse(result.quarantined)
-        self.assertEqual(OWNER_TRUTH_CURRENT_SCHEMA_VERSION, OWNER_TRUTH_SCHEMA_VERSION_V2)
+        self.assertEqual(OWNER_TRUTH_CURRENT_SCHEMA_VERSION, OWNER_TRUTH_SCHEMA_VERSION_V3)
         terms = flatten_memory_facets(facets)
         self.assertIn("people:外公", terms)
         self.assertIn("relationships:祖孙", terms)

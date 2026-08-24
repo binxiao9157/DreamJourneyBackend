@@ -1070,6 +1070,9 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
         self.assertIn("role=assistant", prompt)
         self.assertNotIn("audio", request["json"])
         self.assertNotIn("pcm", prompt.lower())
+        self.assertEqual(request["json"]["response_format"], {"type": "json_object"})
+        self.assertEqual(request["json"]["thinking"], {"type": "disabled"})
+        self.assertGreaterEqual(request["json"]["max_tokens"], 4_096)
 
     def test_kb_extract_endpoint_rejects_non_ai_privacy_scope(self):
         client = TestClient(app)

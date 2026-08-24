@@ -29,7 +29,7 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 237)
+        self.assertEqual(len(app_routes), 239)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
 
@@ -76,6 +76,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
             ("GET", "/family/relationships"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/candidates"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/candidate-review-history"): RouteOwnershipCategory.USER_SESSION,
+            ("GET", "/v2/vaults/{vault_id}/source-records"): RouteOwnershipCategory.USER_SESSION,
+            ("GET", "/v2/vaults/{vault_id}/source-records/{source_id}"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/memories/{memory_id}/versions"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/memories"): RouteOwnershipCategory.USER_SESSION,
             ("GET", "/v2/vaults/{vault_id}/memories/{memory_id}"): RouteOwnershipCategory.USER_SESSION,
@@ -185,8 +187,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 237)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 237)
+        self.assertEqual(summary["routeCount"], 239)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 239)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)

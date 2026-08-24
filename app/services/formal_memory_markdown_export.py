@@ -23,7 +23,18 @@ from app.services.owner_truth_formal_memory import (
 FORMAL_MEMORY_MARKDOWN_EXPORT_SCHEMA_VERSION = 1
 FORMAL_MEMORY_MARKDOWN_MIME_TYPE = "text/markdown; charset=utf-8"
 FORMAL_MEMORY_MARKDOWN_MAX_RECORDS = 10_000
-_BODY_FIELDS = ("title", "summary", "claim", "label", "body", "description")
+_BODY_FIELDS = (
+    "title",
+    "event",
+    "statement",
+    "expression",
+    "emotion",
+    "summary",
+    "claim",
+    "label",
+    "body",
+    "description",
+)
 _KIND_LABELS = {"experience": "经历", "knowledge": "知识", "emotion": "情感"}
 _FACET_LABELS = {
     "people": "人物",

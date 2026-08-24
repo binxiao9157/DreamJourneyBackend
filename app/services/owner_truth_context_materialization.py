@@ -19,6 +19,7 @@ from app.domain.owner_truth.memory_projection import OwnerTruthMemoryProjectionE
 from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION_V2,
+    OWNER_TRUTH_SCHEMA_VERSION_V3,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_context_shadow_build import OwnerTruthContextShadowBuildService
@@ -39,8 +40,17 @@ _CONTENT_FIELD_BY_KIND = {
     "knowledge": "claim",
     "emotion": "label",
 }
+_V3_CONTENT_FIELD_BY_KIND = {
+    "experience": "event",
+    "knowledge": "statement",
+    "emotion": "expression",
+}
 _SUPPORTED_CONTENT_SCHEMA_VERSIONS = frozenset(
-    {OWNER_TRUTH_SCHEMA_VERSION, OWNER_TRUTH_SCHEMA_VERSION_V2}
+    {
+        OWNER_TRUTH_SCHEMA_VERSION,
+        OWNER_TRUTH_SCHEMA_VERSION_V2,
+        OWNER_TRUTH_SCHEMA_VERSION_V3,
+    }
 )
 
 
@@ -302,10 +312,16 @@ class OwnerTruthContextMaterializationService:
 
     @staticmethod
     def _render_entry(*, entry: Mapping[str, Any], citation: Mapping[str, Any]) -> str:
-        if str(entry.get("contentSchemaVersion") or "") not in _SUPPORTED_CONTENT_SCHEMA_VERSIONS:
+        content_schema_version = str(entry.get("contentSchemaVersion") or "")
+        if content_schema_version not in _SUPPORTED_CONTENT_SCHEMA_VERSIONS:
             raise OwnerTruthContextMaterializationError("Projection content schema is not supported")
         memory_kind = _nonblank_text(entry.get("memoryKind"), field="Projection memoryKind")
-        content_field = _CONTENT_FIELD_BY_KIND.get(memory_kind)
+        content_fields = (
+            _V3_CONTENT_FIELD_BY_KIND
+            if content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V3
+            else _CONTENT_FIELD_BY_KIND
+        )
+        content_field = content_fields.get(memory_kind)
         if content_field is None:
             raise OwnerTruthContextMaterializationError("Projection memory kind is not supported")
         content = entry.get("content")

@@ -69,6 +69,9 @@ from app.services.owner_truth_candidate_review import (
 from app.services.owner_truth_formal_memory import (
     InMemoryOwnerTruthFormalMemoryRepository,
 )
+from app.services.owner_truth_source_records import (
+    InMemoryOwnerTruthSourceRecordRepository,
+)
 from app.services.publication_authority import (
     InMemoryPublicationAuthorityRepository,
 )
@@ -220,6 +223,13 @@ class InMemoryStore:
         self._owner_truth_formal_memory_repository = (
             InMemoryOwnerTruthFormalMemoryRepository(
                 self._owner_truth_candidate_review_repository
+            )
+        )
+        self._owner_truth_source_record_repository = (
+            InMemoryOwnerTruthSourceRecordRepository(
+                sources=self._owner_truth_sources,
+                lock=self._owner_truth_lock,
+                candidate_review_repository=self._owner_truth_candidate_review_repository,
             )
         )
         # This is an explicit semantic double for the hidden M2 owner writer.
@@ -435,6 +445,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthFormalMemoryRepository:
         return self._owner_truth_formal_memory_repository
+
+    def owner_truth_source_record_repository(
+        self,
+    ) -> InMemoryOwnerTruthSourceRecordRepository:
+        return self._owner_truth_source_record_repository
 
     def publication_authority_repository(
         self,
@@ -3543,6 +3558,8 @@ class InMemoryStore:
                 "metadata": deepcopy(dict(record.metadata)),
                 "policyVersion": record.policy_version,
                 "authorityEpoch": int(vault["authorityEpoch"]),
+                "createdAt": self._now(),
+                "updatedAt": self._now(),
             }
             receipt = {
                 "id": record.receipt_id,

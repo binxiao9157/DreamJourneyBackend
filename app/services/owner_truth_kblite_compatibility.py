@@ -19,7 +19,10 @@ from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionAccessDenied,
     OwnerTruthMemoryProjectionError,
 )
-from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.ontology import (
+    OWNER_TRUTH_SCHEMA_VERSION,
+    OWNER_TRUTH_SCHEMA_VERSION_V3,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_memory_projection import (
     OwnerTruthMemoryProjectionService,
@@ -126,12 +129,20 @@ def _compatibility_fact(
     # backend as cacheable compatibility data.
     if str(entry.get("sensitivity") or "") != "standard":
         return None
-    if str(entry.get("contentSchemaVersion") or "") != OWNER_TRUTH_SCHEMA_VERSION:
+    content_schema_version = str(entry.get("contentSchemaVersion") or "")
+    if content_schema_version not in {
+        OWNER_TRUTH_SCHEMA_VERSION,
+        OWNER_TRUTH_SCHEMA_VERSION_V3,
+    }:
         return None
     content = entry.get("content")
     if not isinstance(content, Mapping):
         return None
-    claim = _nonblank_text(content.get("claim"))
+    claim = _nonblank_text(
+        content.get("statement")
+        if content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V3
+        else content.get("claim")
+    )
     if claim is None:
         return None
     return {
@@ -249,9 +260,16 @@ class OwnerTruthKBLiteCompatibilityReadService:
                 reason = "memory_kind_not_compatibility_fact"
             elif str(entry.get("sensitivity") or "") != "standard":
                 reason = "sensitivity_not_cacheable"
-            elif content_schema_version != OWNER_TRUTH_SCHEMA_VERSION:
+            elif content_schema_version not in {
+                OWNER_TRUTH_SCHEMA_VERSION,
+                OWNER_TRUTH_SCHEMA_VERSION_V3,
+            }:
                 reason = "content_schema_not_supported"
-            elif not isinstance(content, Mapping) or _nonblank_text(content.get("claim")) is None:
+            elif not isinstance(content, Mapping) or _nonblank_text(
+                content.get("statement")
+                if content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V3
+                else content.get("claim")
+            ) is None:
                 reason = "knowledge_claim_missing"
             else:  # pragma: no cover - _compatibility_fact covers every valid branch above.
                 reason = "compatibility_mapping_unavailable"

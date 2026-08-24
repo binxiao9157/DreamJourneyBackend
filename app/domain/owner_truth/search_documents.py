@@ -21,6 +21,7 @@ from .contracts import OwnerTruthContractError, require_nonblank, require_uuid
 from .memory_projection import OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION
 from .ontology import (
     OWNER_TRUTH_SCHEMA_VERSION_V2,
+    OWNER_TRUTH_SCHEMA_VERSION_V3,
     flatten_memory_facets,
 )
 
@@ -100,7 +101,10 @@ def _private_search_text(
     structured_terms: list[str] = []
     searchable_content = dict(content)
     facet_terms: tuple[str, ...] = ()
-    if content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V2:
+    if content_schema_version in {
+        OWNER_TRUTH_SCHEMA_VERSION_V2,
+        OWNER_TRUTH_SCHEMA_VERSION_V3,
+    }:
         facets = searchable_content.pop("facets", None)
         facet_terms = tuple(
             _normalized_text(term, field="search document facet")

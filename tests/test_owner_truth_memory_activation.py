@@ -21,6 +21,7 @@ from app.domain.owner_truth.contracts import (
 from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION_V2,
+    OWNER_TRUTH_SCHEMA_VERSION_V3,
     empty_memory_facets,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
@@ -66,11 +67,31 @@ class OwnerTruthMemoryActivationTests(unittest.TestCase):
         kind: MemoryKind = MemoryKind.EXPERIENCE,
         schema_version: str = OWNER_TRUTH_SCHEMA_VERSION,
     ) -> OwnerTruthCandidateSnapshot:
-        content = {
-            MemoryKind.EXPERIENCE: {"summary": "小时候在院子里听雨"},
-            MemoryKind.KNOWLEDGE: {"claim": "父亲总会先修好自行车"},
-            MemoryKind.EMOTION: {"label": "怀念"},
-        }[kind]
+        if schema_version == OWNER_TRUTH_SCHEMA_VERSION_V3:
+            content = {
+                MemoryKind.EXPERIENCE: {
+                    "event": "小时候在院子里听雨",
+                    "time": {"start": None, "end": None, "precision": "unknown"},
+                    "facets": empty_memory_facets(confidence=1.0),
+                },
+                MemoryKind.KNOWLEDGE: {
+                    "statement": "父亲总会先修好自行车",
+                    "knowledgeType": "personal_experience",
+                    "domains": [],
+                    "facets": empty_memory_facets(confidence=1.0),
+                },
+                MemoryKind.EMOTION: {
+                    "emotion": "怀念",
+                    "expression": "想起这件事时，我会怀念父亲。",
+                    "facets": empty_memory_facets(confidence=1.0),
+                },
+            }[kind]
+        else:
+            content = {
+                MemoryKind.EXPERIENCE: {"summary": "小时候在院子里听雨"},
+                MemoryKind.KNOWLEDGE: {"claim": "父亲总会先修好自行车"},
+                MemoryKind.EMOTION: {"label": "怀念"},
+            }[kind]
         if schema_version == OWNER_TRUTH_SCHEMA_VERSION_V2:
             content["facets"] = {
                 **empty_memory_facets(confidence=0.91),
@@ -211,6 +232,33 @@ class OwnerTruthMemoryActivationTests(unittest.TestCase):
             activated["payload"]["content"]["facets"]["emotions"][0]["evidenceMode"],
             "inferred",
         )
+
+    def test_accept_v3_preserves_typed_memory_content(self) -> None:
+        candidate = self._candidate(
+            kind=MemoryKind.KNOWLEDGE,
+            schema_version=OWNER_TRUTH_SCHEMA_VERSION_V3,
+        )
+        self.store.repository.seed(candidate)
+
+        result = self.service.decide_and_activate(
+            command=self._command(
+                candidate,
+                command_id="memory-activation-v3-accept-001",
+                action=CandidateReviewAction.ACCEPT,
+            ),
+            context=self.context,
+        )
+
+        activated = self.store.repository.snapshot()["memoryActivations"][result.review.receipt_id]
+        self.assertEqual(
+            activated["payload"]["contentSchemaVersion"],
+            OWNER_TRUTH_SCHEMA_VERSION_V3,
+        )
+        self.assertEqual(
+            activated["payload"]["content"]["statement"],
+            "父亲总会先修好自行车",
+        )
+        self.assertNotIn("claim", activated["payload"]["content"])
 
     def test_correct_v2_persists_owner_stated_facet_without_mutating_proposal(self) -> None:
         candidate = self._candidate(schema_version=OWNER_TRUTH_SCHEMA_VERSION_V2)

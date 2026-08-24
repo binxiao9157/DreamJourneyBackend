@@ -520,6 +520,16 @@ from app.services.owner_truth_formal_memory import (
     OwnerTruthFormalMemoryQuery,
     OwnerTruthFormalMemoryService,
 )
+from app.services.owner_truth_source_records import (
+    SOURCE_RECORD_DETAIL_SCHEMA_VERSION,
+    SOURCE_RECORD_LIST_SCHEMA_VERSION,
+    OwnerTruthSourceRecordAccessDenied,
+    OwnerTruthSourceRecordCursor,
+    OwnerTruthSourceRecordError,
+    OwnerTruthSourceRecordNotFound,
+    OwnerTruthSourceRecordQuery,
+    OwnerTruthSourceRecordService,
+)
 from app.services.owner_truth_legacy_migration import (
     OwnerTruthLegacyMigrationAccessDenied,
     OwnerTruthLegacyMigrationConflict,
@@ -3234,6 +3244,29 @@ def _owner_truth_formal_memory_context(
     )
 
 
+def _owner_truth_source_record_context(
+    request: Request,
+    *,
+    vault_id: str,
+) -> OwnerTruthCommandContext:
+    """Authorize the Owner-only immutable submission history surface."""
+
+    if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
+        return _owner_truth_candidate_review_context(request, vault_id=vault_id)
+    route = (
+        "GET /v2/vaults/*/source-records"
+        if request.url.path.endswith("/source-records")
+        else "GET /v2/vaults/*/source-records/*"
+    )
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="ownerTruthCandidateReview",
+        route=route,
+        user_session_required_code="ownerTruthSourceRecordUserSessionRequired",
+    )
+
+
 def _formal_memory_markdown_export_context(
     request: Request,
     *,
@@ -3303,6 +3336,16 @@ def _owner_truth_formal_memory_http_error(
     if isinstance(error, OwnerTruthFormalMemoryConflict):
         return HTTPException(status_code=409, detail={"code": "ownerTruthFormalMemoryConflict"})
     return HTTPException(status_code=400, detail={"code": "ownerTruthFormalMemoryInvalid"})
+
+
+def _owner_truth_source_record_http_error(
+    error: OwnerTruthSourceRecordError,
+) -> HTTPException:
+    if isinstance(error, OwnerTruthSourceRecordAccessDenied):
+        return HTTPException(status_code=403, detail={"code": "ownerTruthSourceRecordDenied"})
+    if isinstance(error, OwnerTruthSourceRecordNotFound):
+        return HTTPException(status_code=404, detail={"code": "ownerTruthSourceRecordNotFound"})
+    return HTTPException(status_code=400, detail={"code": "ownerTruthSourceRecordInvalid"})
 
 
 def _publication_authority_http_error(error: PublicationAuthorityError) -> HTTPException:
@@ -8066,6 +8109,69 @@ def get_owner_truth_formal_memory(
             "schemaVersion": FORMAL_MEMORY_DETAIL_SCHEMA_VERSION,
             "vaultId": context.vault_id,
             "memory": memory.detail_contract(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/source-records",
+    include_in_schema=False,
+)
+def list_owner_truth_source_records(
+    request: Request,
+    vault_id: str,
+    cursor: Optional[str] = None,
+    limit: int = 20,
+) -> JSONResponse:
+    """List each immutable Owner submission separately from formal memory."""
+
+    try:
+        context = _owner_truth_source_record_context(request, vault_id=vault_id)
+        page = OwnerTruthSourceRecordService(store).list(
+            context=context,
+            query=OwnerTruthSourceRecordQuery(
+                cursor=OwnerTruthSourceRecordCursor.decode(cursor),
+                limit=limit,
+            ),
+        )
+    except OwnerTruthSourceRecordError as error:
+        raise _owner_truth_source_record_http_error(error) from error
+    return JSONResponse(
+        content={
+            "schemaVersion": SOURCE_RECORD_LIST_SCHEMA_VERSION,
+            "vaultId": context.vault_id,
+            "records": [item.list_contract() for item in page.items],
+            "nextCursor": page.next_cursor,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/source-records/{source_id}",
+    include_in_schema=False,
+)
+def get_owner_truth_source_record(
+    request: Request,
+    vault_id: str,
+    source_id: str,
+) -> JSONResponse:
+    """Read the original text and processing summary for one submission."""
+
+    try:
+        context = _owner_truth_source_record_context(request, vault_id=vault_id)
+        record = OwnerTruthSourceRecordService(store).detail(
+            context=context,
+            source_id=source_id,
+        )
+    except OwnerTruthSourceRecordError as error:
+        raise _owner_truth_source_record_http_error(error) from error
+    return JSONResponse(
+        content={
+            "schemaVersion": SOURCE_RECORD_DETAIL_SCHEMA_VERSION,
+            "vaultId": context.vault_id,
+            "record": record.detail_contract(),
         },
         headers={"Cache-Control": "no-store"},
     )

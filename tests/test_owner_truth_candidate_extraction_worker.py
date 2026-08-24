@@ -26,6 +26,7 @@ from app.async_effects.legacy_identity_inbox_bridge import (
 from app.async_effects.owner_truth_candidate_extraction_worker import (
     DeterministicOwnerTruthCandidateExtractor,
     ModelAssistedOwnerTruthLiveConversationExtractor,
+    ModelAssistedOwnerTruthSourceExtractor,
     OwnerTruthCandidateExtractionWorkerRuntime,
 )
 from app.async_effects.target_admission import InMemoryOwnerTruthSourceTargetAdmissionRepository
@@ -221,6 +222,27 @@ class _UnavailableLiveMemoryOrganizer:
         raise httpx.ConnectError("provider unavailable", request=request)
 
 
+class _InvalidLiveMemoryOrganizer:
+    model = "deepseek-live-memory-test"
+    prompt_version = "owner-truth-live-memory-organization-test-v1"
+
+    def request_organization(self, *, turns):
+        raise ValueError("DeepSeek returned empty content")
+
+
+class _RecordingTextMemoryOrganizer:
+    model = "deepseek-text-memory-test"
+    prompt_version = "owner-truth-text-memory-organization-test-v1"
+
+    def __init__(self, memories: list[dict[str, object]]) -> None:
+        self.memories = memories
+        self.text: str | None = None
+
+    def request_organization(self, *, text: str):
+        self.text = text
+        return {"memories": self.memories}
+
+
 class _BlockingExtractor:
     def __init__(self, *, started: Event, release: Event) -> None:
         self._started = started
@@ -382,6 +404,105 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(candidate["payload"]["sensitivity"], "standard")
         self.assertEqual(candidate["payload"]["reviewMode"], "single")
         self.assertEqual(candidate["payload"]["evidenceRefs"][0]["span"], {"start": 0, "end": len(self.source_text)})
+
+    def test_owner_text_organization_creates_typed_v3_candidates(self) -> None:
+        organizer = _RecordingTextMemoryOrganizer(
+            [
+                {
+                    "memoryKind": "experience",
+                    "content": {
+                        "event": "我小时候常和外公在河边散步。",
+                        "time": {"start": None, "end": None, "precision": "unknown"},
+                        "location": "河边",
+                        "participants": ["外公"],
+                        "actions": ["散步"],
+                        "outcome": None,
+                        "facets": _facets(
+                            people=[
+                                {
+                                    "value": "外公",
+                                    "evidenceMode": "ownerStated",
+                                    "confidence": 1.0,
+                                }
+                            ],
+                            places=[
+                                {
+                                    "value": "河边",
+                                    "evidenceMode": "ownerStated",
+                                    "confidence": 1.0,
+                                }
+                            ],
+                        ),
+                    },
+                },
+                {
+                    "memoryKind": "emotion",
+                    "content": {
+                        "emotion": "怀念",
+                        "expression": "我很怀念和外公一起散步的日子。",
+                        "trigger": "想起河边散步",
+                        "targetPersonaId": None,
+                        "time": None,
+                        "intensity": 0.8,
+                        "facets": _facets(
+                            emotions=[
+                                {
+                                    "value": "怀念",
+                                    "evidenceMode": "ownerStated",
+                                    "confidence": 1.0,
+                                }
+                            ]
+                        ),
+                    },
+                },
+            ]
+        )
+        extractor = ModelAssistedOwnerTruthSourceExtractor(
+            settings=Settings(owner_truth_text_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=self.source_content_hash,
+                source_text=self.source_text,
+                source_metadata={"origin": "memoryArchiveTextCapture"},
+            ),
+        )
+
+        self.assertEqual(organizer.text, self.source_text)
+        self.assertEqual(command.extractor_id, "deepSeekTextMemoryOrganizer")
+        self.assertEqual(
+            [item.memory_kind.value for item in command.proposals],
+            ["experience", "emotion"],
+        )
+        self.assertTrue(
+            all(item.payload_schema_version == "owner-truth-v3" for item in command.proposals)
+        )
+        self.assertEqual(command.proposals[0].content["event"], "我小时候常和外公在河边散步。")
+        self.assertEqual(command.proposals[1].content["emotion"], "怀念")
+
+    def test_owner_text_organization_switch_off_keeps_legacy_fallback(self) -> None:
+        organizer = _RecordingTextMemoryOrganizer([])
+        extractor = ModelAssistedOwnerTruthSourceExtractor(
+            settings=Settings(owner_truth_text_memory_organization_enabled=False),
+            organizer=organizer,
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=self.source_content_hash,
+                source_text=self.source_text,
+                source_metadata={},
+            ),
+        )
+
+        self.assertIsNone(organizer.text)
+        self.assertEqual(command.extractor_id, "deterministicSourceEcho")
+        self.assertEqual(command.proposals[0].content["summary"], self.source_text)
+        self.assertEqual(command.proposals[0].payload_schema_version, "owner-truth-v2")
 
     def test_message_projection_failure_does_not_rollback_pending_candidate(self) -> None:
         self.store.business_message_projection_enabled = True
@@ -641,6 +762,38 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
             settings=Settings(owner_truth_live_memory_organization_enabled=True),
             organizer=_UnavailableLiveMemoryOrganizer(),
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(owner_turn),
+                source_text=owner_turn,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": [
+                        {
+                            "index": 1,
+                            "role": "user",
+                            "text": owner_turn,
+                            "captureMode": "live",
+                        }
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(command.extractor_id, "deterministicLiveConversationDigest")
+        self.assertEqual(command.model_id, "deterministic-live-conversation-digest-v1")
+        self.assertEqual(len(command.proposals), 1)
+        self.assertEqual(command.proposals[0].content["summary"], owner_turn)
+
+    def test_live_organization_invalid_response_falls_back_to_owner_evidence(self) -> None:
+        owner_turn = "我记得外公总会在河边等我。"
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=_InvalidLiveMemoryOrganizer(),
         )
 
         command = extractor.extract(

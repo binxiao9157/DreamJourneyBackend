@@ -353,6 +353,18 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/source-records",
+                session,
+                "ownerTruthSourceRecordList",
+            ),
+            _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/source-records/{source_id}",
+                session,
+                "ownerTruthSourceRecordDetail",
+            ),
+            _rule(
+                "GET",
                 "/v2/vaults/{vault_id}/memories/{memory_id}/versions",
                 session,
                 "ownerTruthMemoryVersionHistory",

@@ -7,8 +7,11 @@ import httpx
 from app.core.config import Settings
 from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_FACET_NAMES,
+    OWNER_TRUTH_SCHEMA_VERSION_V3,
     validate_memory_facets,
+    validate_memory_payload,
 )
+from app.domain.owner_truth.contracts import MemoryKind
 from app.observability.redaction import provider_dry_run_report
 from app.services.knowledge_extraction import LEGACY_TRANSCRIPT, USER_EVIDENCE_ONLY
 
@@ -540,6 +543,143 @@ class DeepSeekKnowledgeExtractionProxy:
         return [item for item in value if isinstance(item, dict)]
 
 
+class DeepSeekTextMemoryOrganizationProxy:
+    """Turn one Owner-authored text Source into typed, reviewable memories."""
+
+    model = "deepseek-v4-flash"
+    prompt_version = "owner-truth-text-memory-organization-v1"
+    maximum_source_characters = 20_000
+    maximum_memory_count = 8
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def build_request(self, *, text: str) -> Dict[str, Any]:
+        normalized = self._normalized_text(text)
+        return {
+            "url": self.settings.deepseek_base_url,
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.settings.deepseek_api_key or ''}",
+            },
+            "json": {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是家庭记忆结构化整理器，只输出严格 JSON。"
+                            "只能使用用户原文，不得补写或猜测事实。"
+                        ),
+                    },
+                    {"role": "user", "content": self.build_prompt(normalized)},
+                ],
+                "temperature": 0.1,
+                "max_tokens": 2_048,
+            },
+        }
+
+    def request_organization(self, *, text: str) -> Dict[str, Any]:
+        if not self.settings.deepseek_api_key:
+            raise ValueError("DEEPSEEK_API_KEY is not configured")
+        normalized = self._normalized_text(text)
+        request = self.build_request(text=normalized)
+        with httpx.Client(timeout=60) as client:
+            response = client.post(
+                request["url"],
+                headers=request["headers"],
+                json=request["json"],
+            )
+            response.raise_for_status()
+        content = DeepSeekImageAnalysisProxy._extract_content(response.json())
+        return self.parse_organization(content)
+
+    @classmethod
+    def build_prompt(cls, text: str) -> str:
+        return f"""请把下面一段用户主动提交的原文整理为少量、原子化、可确认的正式记忆草稿。
+
+【用户原文】
+{text}
+
+只输出以下严格 JSON，content 必须使用对应类型的字段：
+{{
+  "memories": [
+    {{"memoryKind":"experience","content":{{"event":"发生了什么","time":{{"start":null,"end":null,"precision":"unknown"}},"location":null,"participants":[],"actions":[],"outcome":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"confidence":0.9}}}}}},
+    {{"memoryKind":"knowledge","content":{{"statement":"用户明确表达的知识、观点或经验规律","knowledgeType":"personal_experience","domains":[],"applicability":null,"exceptions":[],"learnedFrom":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"confidence":0.9}}}}}},
+    {{"memoryKind":"emotion","content":{{"emotion":"情绪名称","expression":"用户如何描述这种感受","trigger":null,"targetPersonaId":null,"time":null,"intensity":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"confidence":0.9}}}}}}
+  ]
+}}
+
+规则：
+1. 最多输出 {cls.maximum_memory_count} 条；没有可靠记忆时输出 {{"memories":[]}}。
+2. 一条记忆只表达一个主要类型；同一段原文可以拆成经历、知识、情感多条记忆。
+3. experience 必须有 event 和 time；原文没有时间时使用 start/end=null、precision=unknown，绝不能猜日期。
+4. knowledge 必须有 statement、knowledgeType 和 domains；个人经验规律使用 personal_experience，领域不明确时 domains=[]。
+5. emotion 必须有 emotion 和 expression；原文没有明确强度、对象或原因时保持 null。
+6. facets 必须包含 people/time/places/relationships/emotions/values/personality 七个数组和 confidence。
+7. facet 条目格式为 {{"value":"原文支持的值","evidenceMode":"ownerStated","confidence":1.0}}；不可靠时不要填写。
+8. 不得生成诊断、评价、建议或原文没有表达的人名、地点、关系、因果和情绪。
+9. 合并原文中的重复表达，但不要把不同主题混成一个大段摘要。
+10. 不要输出 JSON 之外的任何文字。"""
+
+    @classmethod
+    def parse_organization(cls, content: str) -> Dict[str, Any]:
+        cleaned = content.replace("```json", "").replace("```", "").strip()
+        parsed = DeepSeekImageAnalysisProxy._loads_json(cleaned)
+        if parsed is None:
+            extracted = DeepSeekImageAnalysisProxy.extract_json_substring(cleaned)
+            parsed = DeepSeekImageAnalysisProxy._loads_json(extracted) if extracted else None
+        if parsed is None or not isinstance(parsed.get("memories"), list):
+            raise ValueError("DeepSeek text memory organization returned invalid JSON")
+        raw_memories = parsed["memories"]
+        if len(raw_memories) > cls.maximum_memory_count:
+            raise ValueError("DeepSeek text memory organization returned too many memories")
+
+        memories: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        primary_fields = {
+            MemoryKind.EXPERIENCE: "event",
+            MemoryKind.KNOWLEDGE: "statement",
+            MemoryKind.EMOTION: "expression",
+        }
+        for position, raw_memory in enumerate(raw_memories):
+            if not isinstance(raw_memory, Mapping):
+                raise ValueError(f"organized text memory {position} must be an object")
+            try:
+                memory_kind = MemoryKind(str(raw_memory.get("memoryKind") or ""))
+            except ValueError as error:
+                raise ValueError(f"organized text memory {position} has an invalid kind") from error
+            raw_content = raw_memory.get("content")
+            if not isinstance(raw_content, Mapping):
+                raise ValueError(f"organized text memory {position} has invalid content")
+            normalized_content = dict(raw_content)
+            validation = validate_memory_payload(
+                kind=memory_kind,
+                payload=normalized_content,
+                schema_version=OWNER_TRUTH_SCHEMA_VERSION_V3,
+            )
+            if not validation.accepted:
+                raise ValueError(
+                    f"organized text memory {position} violates typed schema: {validation.code}"
+                )
+            primary_value = str(normalized_content.get(primary_fields[memory_kind]) or "").strip()
+            dedupe_key = (memory_kind.value, primary_value)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            memories.append({"memoryKind": memory_kind.value, "content": normalized_content})
+        return {"memories": memories}
+
+    @classmethod
+    def _normalized_text(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("text memory organization requires source text")
+        if len(normalized) > cls.maximum_source_characters:
+            raise ValueError("text memory organization source is too long")
+        return normalized
+
+
 class DeepSeekLiveMemoryOrganizationProxy:
     """Organize one closed Live transcript into evidence-bound memory drafts.
 
@@ -586,8 +726,10 @@ class DeepSeekLiveMemoryOrganizationProxy:
                     },
                     {"role": "user", "content": prompt},
                 ],
+                "response_format": {"type": "json_object"},
+                "thinking": {"type": "disabled"},
                 "temperature": 0.1,
-                "max_tokens": 2_048,
+                "max_tokens": 4_096,
             },
         }
 

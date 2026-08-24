@@ -132,6 +132,10 @@ class Settings:
     # transcript. Sending that transcript to DeepSeek for semantic memory
     # organization requires this separate, explicit production switch.
     owner_truth_live_memory_organization_enabled: bool = False
+    # Owner-authored Archive text uses a separate consent and rollout lane.
+    # When enabled, the text is organized into typed review Candidates instead
+    # of being persisted as one undifferentiated echo of the Source.
+    owner_truth_text_memory_organization_enabled: bool = False
     owner_truth_memory_projection_worker_enabled: bool = False
     # SearchDocument rebuilds are an optional private derived step after the
     # default-off MemoryProjection worker succeeds. This never exposes search
@@ -597,6 +601,10 @@ class Settings:
             owner_truth_live_memory_organization_enabled=_env_bool(
                 "OWNER_TRUTH_LIVE_MEMORY_ORGANIZATION_ENABLED",
                 cls.owner_truth_live_memory_organization_enabled,
+            ),
+            owner_truth_text_memory_organization_enabled=_env_bool(
+                "OWNER_TRUTH_TEXT_MEMORY_ORGANIZATION_ENABLED",
+                cls.owner_truth_text_memory_organization_enabled,
             ),
             owner_truth_memory_projection_worker_enabled=_env_bool(
                 "OWNER_TRUTH_MEMORY_PROJECTION_WORKER_ENABLED",

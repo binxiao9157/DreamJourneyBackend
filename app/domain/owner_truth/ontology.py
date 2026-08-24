@@ -16,7 +16,8 @@ from .contracts import MemoryKind
 
 OWNER_TRUTH_SCHEMA_VERSION = "owner-truth-v1"
 OWNER_TRUTH_SCHEMA_VERSION_V2 = "owner-truth-v2"
-OWNER_TRUTH_CURRENT_SCHEMA_VERSION = OWNER_TRUTH_SCHEMA_VERSION_V2
+OWNER_TRUTH_SCHEMA_VERSION_V3 = "owner-truth-v3"
+OWNER_TRUTH_CURRENT_SCHEMA_VERSION = OWNER_TRUTH_SCHEMA_VERSION_V3
 OWNER_TRUTH_FACET_NAMES = (
     "people",
     "time",
@@ -168,12 +169,16 @@ def validate_memory_payload(
     if normalized_schema not in {
         OWNER_TRUTH_SCHEMA_VERSION,
         OWNER_TRUTH_SCHEMA_VERSION_V2,
+        OWNER_TRUTH_SCHEMA_VERSION_V3,
     }:
         return OntologyValidation(
             accepted=False,
             quarantined=True,
             code="unknownSchemaVersion",
         )
+    if normalized_schema == OWNER_TRUTH_SCHEMA_VERSION_V3:
+        return _validate_v3_memory_payload(kind=kind, payload=payload)
+
     definition = MEMORY_ONTOLOGY_V1[kind]
     missing = [
         field
@@ -192,6 +197,58 @@ def validate_memory_payload(
     return OntologyValidation(accepted=True, quarantined=False, code="accepted")
 
 
+def _nonblank_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _string_list(value: Any) -> bool:
+    return isinstance(value, list) and all(_nonblank_string(item) for item in value)
+
+
+def _validate_v3_memory_payload(
+    *,
+    kind: MemoryKind,
+    payload: Mapping[str, Any],
+) -> OntologyValidation:
+    """Validate the Stage 1 typed memory contract used by new organizers."""
+
+    if kind is MemoryKind.EXPERIENCE:
+        if not _nonblank_string(payload.get("event")):
+            return OntologyValidation(False, False, "missingRequiredField", "event")
+        time_value = payload.get("time")
+        if not isinstance(time_value, Mapping):
+            return OntologyValidation(False, False, "missingRequiredField", "time")
+        precision = str(time_value.get("precision") or "").strip()
+        if precision not in {"exact", "day", "month", "year", "approximate", "unknown"}:
+            return OntologyValidation(False, False, "invalidTimePrecision", "time.precision")
+        for field in ("start", "end"):
+            value = time_value.get(field)
+            if value is not None and not _nonblank_string(value):
+                return OntologyValidation(False, False, "invalidTimeValue", f"time.{field}")
+        for field in ("participants", "actions"):
+            if field in payload and not _string_list(payload.get(field)):
+                return OntologyValidation(False, False, "invalidStringList", field)
+    elif kind is MemoryKind.KNOWLEDGE:
+        if not _nonblank_string(payload.get("statement")):
+            return OntologyValidation(False, False, "missingRequiredField", "statement")
+        if not _nonblank_string(payload.get("knowledgeType")):
+            return OntologyValidation(False, False, "missingRequiredField", "knowledgeType")
+        if not _string_list(payload.get("domains")):
+            return OntologyValidation(False, False, "invalidStringList", "domains")
+        if "exceptions" in payload and not _string_list(payload.get("exceptions")):
+            return OntologyValidation(False, False, "invalidStringList", "exceptions")
+    elif kind is MemoryKind.EMOTION:
+        if not _nonblank_string(payload.get("emotion")):
+            return OntologyValidation(False, False, "missingRequiredField", "emotion")
+        if not _nonblank_string(payload.get("expression")):
+            return OntologyValidation(False, False, "missingRequiredField", "expression")
+        intensity = payload.get("intensity")
+        if intensity is not None and _confidence(intensity) is None:
+            return OntologyValidation(False, False, "invalidIntensity", "intensity")
+
+    return validate_memory_facets(payload.get("facets"))
+
+
 __all__ = [
     "MEMORY_ONTOLOGY_V1",
     "OWNER_TRUTH_CURRENT_SCHEMA_VERSION",
@@ -199,6 +256,7 @@ __all__ = [
     "OWNER_TRUTH_FACET_NAMES",
     "OWNER_TRUTH_SCHEMA_VERSION",
     "OWNER_TRUTH_SCHEMA_VERSION_V2",
+    "OWNER_TRUTH_SCHEMA_VERSION_V3",
     "MemoryOntologyDefinition",
     "OntologyValidation",
     "empty_memory_facets",

@@ -142,6 +142,9 @@ from app.services.owner_truth_candidate_review import (
 from app.services.owner_truth_formal_memory import (
     PostgresOwnerTruthFormalMemoryRepository,
 )
+from app.services.owner_truth_source_records import (
+    PostgresOwnerTruthSourceRecordRepository,
+)
 from app.services.publication_authority import (
     PostgresPublicationAuthorityRepository,
 )
@@ -534,6 +537,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth formal memory requires an active unit of work")
         return PostgresOwnerTruthFormalMemoryRepository(active.connection)
+
+    def owner_truth_source_record_repository(
+        self,
+    ) -> PostgresOwnerTruthSourceRecordRepository:
+        """Return the Owner-only immutable Source record reader in this UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth Source record read requires an active unit of work")
+        return PostgresOwnerTruthSourceRecordRepository(active.connection)
 
     def publication_authority_repository(
         self,
