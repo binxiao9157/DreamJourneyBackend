@@ -39,6 +39,8 @@ class ResolvedOwnerInboxAccount:
 class PostgresOwnerInboxAccountResolver:
     """Resolve a canonical account first, then a verified migration bridge."""
 
+    _CANONICAL_SUBJECT_ACCOUNT_EPOCH = 0
+
     def __init__(self, connection: Any) -> None:
         if connection is None:
             raise ValueError("an active database connection is required")
@@ -47,6 +49,36 @@ class PostgresOwnerInboxAccountResolver:
     def resolve_active(self, subject_id: str, vault_id: str) -> ResolvedOwnerInboxAccount:
         normalized_subject_id = _identifier(subject_id, field="subject_id")
         normalized_vault_id = _identifier(vault_id, field="vault_id")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT subject.status AS subject_state,
+                       vault.owner_subject_id, vault.vault_id, vault.status AS vault_state,
+                       EXISTS (
+                           SELECT 1
+                           FROM identity_bindings AS binding
+                           WHERE binding.subject_id = subject.id
+                             AND binding.status = 'active'
+                       ) AS active_identity_binding
+                FROM subjects AS subject
+                INNER JOIN owner_truth.vaults AS vault
+                    ON vault.owner_subject_id = subject.id
+                WHERE subject.id = %s AND vault.vault_id = %s
+                FOR SHARE OF subject, vault
+                """,
+                (normalized_subject_id, normalized_vault_id),
+            )
+            subject_row = cursor.fetchone()
+        if subject_row is not None:
+            return ResolvedOwnerInboxAccount(
+                snapshot=self._canonical_subject_snapshot(
+                    subject_row,
+                    subject_id=normalized_subject_id,
+                    vault_id=normalized_vault_id,
+                ),
+                source="canonicalOwner",
+            )
+
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -86,6 +118,35 @@ class PostgresOwnerInboxAccountResolver:
         return ResolvedOwnerInboxAccount(
             snapshot=legacy.snapshot,
             source="legacyBridge",
+        )
+
+    @classmethod
+    def _canonical_subject_snapshot(
+        cls,
+        row: Mapping[str, object],
+        *,
+        subject_id: str,
+        vault_id: str,
+    ) -> InboxAccountSnapshot:
+        """Resolve a native V4 account without requiring a legacy users row.
+
+        Native Subject sessions deliberately use epoch zero while lifecycle
+        authority is fenced by the Subject, active identity binding and Vault.
+        Legacy users retain their mutable account auth epoch below.
+        """
+
+        if (
+            str(row.get("subject_state") or "") != "active"
+            or not bool(row.get("active_identity_binding"))
+            or str(row.get("owner_subject_id") or "") != subject_id
+            or str(row.get("vault_id") or "") != vault_id
+            or str(row.get("vault_state") or "") != "active"
+        ):
+            raise OwnerInboxAccountResolutionError("owner inbox account is inactive")
+        return InboxAccountSnapshot(
+            inbox_subject_id=subject_id,
+            inbox_vault_id=vault_id,
+            account_epoch=cls._CANONICAL_SUBJECT_ACCOUNT_EPOCH,
         )
 
     @staticmethod

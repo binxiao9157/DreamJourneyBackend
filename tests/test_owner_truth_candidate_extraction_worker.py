@@ -192,6 +192,11 @@ class _FailingExtractor:
         raise RuntimeError("deterministic extractor fixture failure")
 
 
+class _FailingInboxResolver:
+    def resolve_active(self, *_args, **_kwargs):
+        raise RuntimeError("owner inbox fixture unavailable")
+
+
 class _RecordingLiveMemoryOrganizer:
     model = "deepseek-live-memory-test"
     prompt_version = "owner-truth-live-memory-organization-test-v1"
@@ -377,6 +382,25 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(candidate["payload"]["sensitivity"], "standard")
         self.assertEqual(candidate["payload"]["reviewMode"], "single")
         self.assertEqual(candidate["payload"]["evidenceRefs"][0]["span"], {"start": 0, "end": len(self.source_text)})
+
+    def test_message_projection_failure_does_not_rollback_pending_candidate(self) -> None:
+        self.store.business_message_projection_enabled = True
+        self.store.message_inbox_resolver = _FailingInboxResolver()
+
+        result = self._worker().run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["jobState"], "succeeded")
+        self.assertEqual(result["candidateCount"], 1)
+        self.assertEqual(result["consumerInboxState"], "completed")
+        self.assertEqual(result["messageProjectionKind"], "candidateReady")
+        self.assertEqual(result["messageProjectionOutcome"], "unavailable")
+        self.assertEqual(
+            result["messageProjectionFailureReason"],
+            "ownerBusinessMessageProjectionUnavailable",
+        )
+        snapshot = self.store.candidate_repository.snapshot()
+        self.assertEqual(len(snapshot["candidates"]), 1)
 
     def test_trusted_image_understanding_source_creates_inferred_review_candidate(self) -> None:
         facets = _facets(

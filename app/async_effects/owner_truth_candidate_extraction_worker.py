@@ -720,30 +720,49 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                     "candidate extraction completed without a terminal result"
                 )
 
-            message_projection = None
-            if result.status is ExtractionResultStatus.SUCCEEDED:
-                message_projection = enqueue_owner_business_message(
-                    self._store,
-                    intent=intent,
-                    completion=result.consumer,
-                    kind=InAppMessageKind.CANDIDATE_READY,
-                )
             completion = lease_repository.complete(lease, outcome="succeeded")
             reason = {
                 ExtractionResultStatus.SUCCEEDED: "candidateExtractionProposalsPersisted",
                 ExtractionResultStatus.QUARANTINED: "candidateExtractionQuarantined",
                 ExtractionResultStatus.FAILED: "candidateExtractionFailed",
             }[result.status]
-            return self._payload(
-                status="completed",
-                reason=reason,
-                lease=lease,
-                intent=intent,
-                completion=completion,
-                receipt=result.consumer,
-                extraction_result=result,
-                message_projection=message_projection,
-            )
+
+        # Candidate persistence and job completion are authoritative. Message
+        # projection is auxiliary and runs in its own transaction so an inbox
+        # routing outage cannot erase a reviewable Candidate.
+        message_projection = None
+        message_projection_failure_reason = None
+        if result.status is ExtractionResultStatus.SUCCEEDED:
+            try:
+                with self._unit_of_work(
+                    correlation_id=(
+                        f"owner-truth-candidate-extraction-worker-message-{lease.job_id}"
+                    ),
+                    command_id=(
+                        f"ownerTruthCandidateExtractionWorkerMessage:{lease.operation_id}"
+                    ),
+                ):
+                    message_projection = enqueue_owner_business_message(
+                        self._store,
+                        intent=intent,
+                        completion=result.consumer,
+                        kind=InAppMessageKind.CANDIDATE_READY,
+                    )
+            except Exception:
+                message_projection_failure_reason = (
+                    "ownerBusinessMessageProjectionUnavailable"
+                )
+        return self._payload(
+            status="completed",
+            reason=reason,
+            lease=lease,
+            intent=intent,
+            completion=completion,
+            receipt=result.consumer,
+            extraction_result=result,
+            message_projection=message_projection,
+            message_projection_failure_reason=message_projection_failure_reason,
+        )
 
     @staticmethod
     def _assert_typed_intent(intent: AsyncEffectIntent) -> None:
@@ -1033,6 +1052,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
         receipt: Any | None = None,
         extraction_result: OwnerTruthCandidateExtractionResult | None = None,
         message_projection: Any | None = None,
+        message_projection_failure_reason: str | None = None,
         retry_available_at: str | None = None,
         dead_letter: Any | None = None,
     ) -> dict[str, Any]:
@@ -1085,6 +1105,14 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                     "messageProjectionKind": message_projection.kind.value,
                     "messageProjectionOutcome": message_projection.outcome,
                     "messageProjectionInputOutcome": message_projection.input_outcome,
+                }
+            )
+        if message_projection_failure_reason is not None:
+            payload.update(
+                {
+                    "messageProjectionKind": InAppMessageKind.CANDIDATE_READY.value,
+                    "messageProjectionOutcome": "unavailable",
+                    "messageProjectionFailureReason": message_projection_failure_reason,
                 }
             )
         if retry_available_at is not None:
