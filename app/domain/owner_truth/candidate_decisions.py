@@ -35,6 +35,7 @@ OWNER_TRUTH_CANDIDATE_REVIEW_FEATURE = "ownerTruthCandidateReview"
 _RECEIPT_NAMESPACE = UUID("883e786a-2e66-49a4-9dac-7406cb3e9df2")
 _CORRECTED_VALUE_NAMESPACE = UUID("6973375d-851d-4713-8e37-f22036bbcf5e")
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
+_COMMAND_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
 class OwnerTruthCandidateReviewError(OwnerTruthContractError):
@@ -100,6 +101,15 @@ def _identifier(value: object, *, field: str) -> str:
     normalized = str(value or "").strip()
     if not _IDENTIFIER_PATTERN.fullmatch(normalized):
         raise OwnerTruthCandidateReviewError(f"{field} must be an opaque identifier")
+    return normalized
+
+
+def _command_identifier(value: object) -> str:
+    """Accept standard UUID command IDs while retaining a bounded alphabet."""
+
+    normalized = str(value or "").strip()
+    if not _COMMAND_IDENTIFIER_PATTERN.fullmatch(normalized):
+        raise OwnerTruthCandidateReviewError("command_id must be an opaque identifier")
     return normalized
 
 
@@ -208,7 +218,7 @@ class OwnerTruthCandidateReviewCommand:
     reason_code: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "command_id", _identifier(self.command_id, field="command_id"))
+        object.__setattr__(self, "command_id", _command_identifier(self.command_id))
         object.__setattr__(self, "candidate_id", require_uuid(self.candidate_id, field="candidate_id"))
         if self.expected_candidate_version < 1:
             raise OwnerTruthCandidateReviewError("expected_candidate_version must be positive")

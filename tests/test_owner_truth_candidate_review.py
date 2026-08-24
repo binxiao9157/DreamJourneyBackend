@@ -137,6 +137,21 @@ class OwnerTruthCandidateReviewTests(unittest.TestCase):
         self.assertEqual(len(snapshot["receipts"]), 1)
         self.assertEqual(snapshot["correctedValues"], {})
 
+    def test_accepts_standard_uuid_command_id_that_starts_with_a_digit(self):
+        candidate = self._candidate()
+        self.store.repository.seed(candidate)
+
+        result = self.service.decide(
+            command=self._command(
+                candidate,
+                command_id="1e1508c7-2715-448b-acfb-5bac5b164ecc",
+            ),
+            context=self.context,
+        )
+
+        self.assertEqual(result.outcome, "created")
+        self.assertEqual(result.decision, CandidateDecision.ACCEPTED)
+
     def test_correct_preserves_processor_candidate_and_keeps_owner_value_separate(self):
         candidate = self._candidate(kind=MemoryKind.KNOWLEDGE)
         original_payload = json.loads(json.dumps(candidate.payload, ensure_ascii=False))
