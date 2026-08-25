@@ -377,6 +377,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/memory-profile",
+                session,
+                "ownerTruthPersonMemoryProfile",
+            ),
+            _rule(
+                "GET",
                 "/v2/vaults/{vault_id}/memories/{memory_id}",
                 session,
                 "ownerTruthFormalMemoryDetail",

@@ -520,6 +520,9 @@ from app.services.owner_truth_formal_memory import (
     OwnerTruthFormalMemoryQuery,
     OwnerTruthFormalMemoryService,
 )
+from app.services.owner_truth_person_memory_profile import (
+    OwnerTruthPersonMemoryProfileService,
+)
 from app.services.owner_truth_source_records import (
     SOURCE_RECORD_DETAIL_SCHEMA_VERSION,
     SOURCE_RECORD_LIST_SCHEMA_VERSION,
@@ -3229,7 +3232,9 @@ def _owner_truth_formal_memory_context(
     if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
         return _owner_truth_candidate_review_context(request, vault_id=vault_id)
     normalized_method = request.method.upper()
-    if normalized_method == "GET" and request.url.path.endswith("/memories"):
+    if normalized_method == "GET" and request.url.path.endswith("/memory-profile"):
+        route = "GET /v2/vaults/*/memory-profile"
+    elif normalized_method == "GET" and request.url.path.endswith("/memories"):
         route = "GET /v2/vaults/*/memories"
     elif normalized_method == "GET":
         route = "GET /v2/vaults/*/memories/*"
@@ -8081,6 +8086,27 @@ def list_owner_truth_formal_memories(
             "memories": [item.list_contract() for item in page.items],
             "nextCursor": page.next_cursor,
         },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/memory-profile",
+    include_in_schema=False,
+)
+def get_owner_truth_person_memory_profile(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """Return one derived narrative per stable person-memory dimension."""
+
+    try:
+        context = _owner_truth_formal_memory_context(request, vault_id=vault_id)
+        profile = OwnerTruthPersonMemoryProfileService(store).read(context=context)
+    except OwnerTruthFormalMemoryError as error:
+        raise _owner_truth_formal_memory_http_error(error) from error
+    return JSONResponse(
+        content=profile.public_contract(),
         headers={"Cache-Control": "no-store"},
     )
 

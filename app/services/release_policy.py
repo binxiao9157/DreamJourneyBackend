@@ -1306,6 +1306,13 @@ class ReleasePolicyCommandGate:
             normalized_method == "GET"
             and len(memory_segments) == 4
             and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3] == "memory-profile"
+        ):
+            return "GET /v2/vaults/*/memory-profile"
+        if (
+            normalized_method == "GET"
+            and len(memory_segments) == 4
+            and memory_segments[:2] == ("v2", "vaults")
             and memory_segments[3] == "memories"
         ):
             return "GET /v2/vaults/*/memories"

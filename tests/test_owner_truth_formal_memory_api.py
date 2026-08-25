@@ -181,6 +181,18 @@ class OwnerTruthFormalMemoryAPITests(unittest.TestCase):
         self.assertEqual(listed.status_code, 200, listed.text)
         self.assertEqual([item["memoryId"] for item in listed.json()["memories"]], [memory_id])
 
+        profile = client.get(
+            f"/v2/vaults/{vault_id}/memory-profile",
+            headers=self._policy_headers(headers, session_id=session_id),
+        )
+        self.assertEqual(profile.status_code, 200, profile.text)
+        self.assertEqual(profile.json()["schemaVersion"], "owner-truth-person-memory-profile-v1")
+        self.assertEqual(profile.json()["memoryCount"], 1)
+        experience = profile.json()["dimensions"][0]
+        self.assertEqual(experience["dimension"], "lifeExperience")
+        self.assertEqual(experience["supportingMemoryIds"], [memory_id])
+        self.assertIn("外祖父", experience["narrative"])
+
         detail = client.get(
             f"/v2/vaults/{vault_id}/memories/{memory_id}",
             headers=self._policy_headers(headers, session_id=session_id),
