@@ -186,9 +186,19 @@ class OwnerTruthFormalMemoryAPITests(unittest.TestCase):
             headers=self._policy_headers(headers, session_id=session_id),
         )
         self.assertEqual(profile.status_code, 200, profile.text)
-        self.assertEqual(profile.json()["schemaVersion"], "owner-truth-person-memory-profile-v1")
-        self.assertEqual(profile.json()["memoryCount"], 1)
-        experience = profile.json()["dimensions"][0]
+        profile_body = profile.json()
+        self.assertEqual(profile_body["schemaVersion"], "owner-truth-person-memory-profile-v1")
+        self.assertEqual(profile_body["memoryCount"], 1)
+        self.assertEqual(
+            profile_body["lifeStory"]["schemaVersion"],
+            "owner-truth-person-life-story-v1",
+        )
+        self.assertEqual(profile_body["lifeStory"]["supportingMemoryCount"], 1)
+        self.assertEqual(
+            profile_body["lifeStory"]["chapters"][0]["supportingMemoryIds"],
+            [memory_id],
+        )
+        experience = profile_body["dimensions"][0]
         self.assertEqual(experience["dimension"], "lifeExperience")
         self.assertEqual(experience["supportingMemoryIds"], [memory_id])
         self.assertIn("外祖父", experience["narrative"])
@@ -222,6 +232,27 @@ class OwnerTruthFormalMemoryAPITests(unittest.TestCase):
         )
         self.assertEqual(refreshed.json()["memory"]["currentVersion"]["content"], corrected)
         self.assertEqual(len(refreshed.json()["memory"]["versions"]), 2)
+
+        refreshed_profile = client.get(
+            f"/v2/vaults/{vault_id}/memory-profile",
+            headers=self._policy_headers(headers, session_id=session_id),
+        )
+        self.assertEqual(refreshed_profile.status_code, 200, refreshed_profile.text)
+        refreshed_profile_body = refreshed_profile.json()
+        self.assertNotEqual(
+            refreshed_profile_body["profileVersion"],
+            profile_body["profileVersion"],
+        )
+        self.assertIn(
+            corrected["summary"],
+            refreshed_profile_body["lifeStory"]["chapters"][0]["text"],
+        )
+        self.assertEqual(
+            refreshed_profile_body["lifeStory"]["chapters"][0][
+                "supportingMemoryVersionIds"
+            ],
+            [refreshed.json()["memory"]["currentVersion"]["versionId"]],
+        )
 
     def test_unconfirmed_stale_and_cross_owner_requests_do_not_mutate(self) -> None:
         owner_id, headers, session_id = self._login("13800139962")

@@ -28,10 +28,26 @@ PERSON_MEMORY_PROFILE_SCHEMA_VERSION = "owner-truth-person-memory-profile-v1"
 PERSON_MEMORY_PROFILE_ALGORITHM_VERSION = "person-memory-dimension-summary-v1"
 PERSON_LIFE_RECORD_SCHEMA_VERSION = "owner-truth-person-life-record-v1"
 PERSON_LIFE_RECORD_ALGORITHM_VERSION = "person-life-record-plain-text-v1"
+PERSON_LIFE_STORY_SCHEMA_VERSION = "owner-truth-person-life-story-v1"
+PERSON_LIFE_STORY_ALGORITHM_VERSION = "person-life-story-chapter-projection-v1"
 _MAX_FORMAL_MEMORY_COUNT = 10_000
 _MAX_DIMENSION_EVIDENCE = 8
+_MAX_LIFE_STORY_CHAPTERS = 12
+_MAX_CHAPTER_MEMORIES_IN_TEXT = 24
 _MAX_CLAUSE_CHARACTERS = 280
 _WHITESPACE = re.compile(r"\s+")
+
+_FAMILY_KEYWORDS = (
+    "家人", "家庭", "父亲", "母亲", "爸爸", "妈妈", "爷爷", "奶奶",
+    "祖父", "祖母", "外祖", "兄弟", "姐妹", "哥哥", "姐姐", "弟弟",
+    "妹妹", "丈夫", "妻子", "爱人", "孩子", "儿子", "女儿", "祖孙",
+    "亲子", "童年", "小时候", "老家", "成长",
+)
+_LEARNING_AND_WORK_KEYWORDS = (
+    "学校", "上学", "求学", "读书", "大学", "老师", "同学", "毕业",
+    "工作", "公司", "职业", "职场", "项目", "创业", "专业", "同事",
+    "客户", "岗位", "退休",
+)
 
 
 class OwnerTruthPersonMemoryProfileError(OwnerTruthFormalMemoryError):
@@ -63,6 +79,7 @@ class OwnerTruthPersonMemoryProfile:
     updated_at: str | None
     memory_count: int
     life_record: "OwnerTruthPersonLifeRecord"
+    life_story: "OwnerTruthPersonLifeStory"
     dimensions: tuple[OwnerTruthPersonMemoryDimension, ...]
 
     def public_contract(self) -> dict[str, Any]:
@@ -75,6 +92,7 @@ class OwnerTruthPersonMemoryProfile:
             "updatedAt": self.updated_at,
             "memoryCount": self.memory_count,
             "lifeRecord": self.life_record.public_contract(),
+            "lifeStory": self.life_story.public_contract(),
             "dimensions": [item.public_contract() for item in self.dimensions],
         }
 
@@ -101,6 +119,65 @@ class OwnerTruthPersonLifeRecord:
         }
 
 
+@dataclass(frozen=True)
+class OwnerTruthPersonLifeStoryChapter:
+    chapter_id: str
+    title: str
+    paragraphs: tuple[str, ...]
+    supporting_memory_ids: tuple[str, ...]
+    supporting_memory_version_ids: tuple[str, ...]
+
+    @property
+    def text(self) -> str:
+        return "\n\n".join(self.paragraphs)
+
+    def public_contract(self) -> dict[str, Any]:
+        return {
+            "chapterId": self.chapter_id,
+            "title": self.title,
+            "format": "plainText",
+            "paragraphCount": len(self.paragraphs),
+            "paragraphs": list(self.paragraphs),
+            "text": self.text,
+            "supportingMemoryCount": len(self.supporting_memory_ids),
+            "supportingMemoryIds": list(self.supporting_memory_ids),
+            "supportingMemoryVersionIds": list(self.supporting_memory_version_ids),
+        }
+
+
+@dataclass(frozen=True)
+class OwnerTruthPersonLifeStory:
+    title: str
+    overview: str | None
+    chapters: tuple[OwnerTruthPersonLifeStoryChapter, ...]
+
+    def public_contract(self) -> dict[str, Any]:
+        supporting_ids = tuple(
+            memory_id
+            for chapter in self.chapters
+            for memory_id in chapter.supporting_memory_ids
+        )
+        return {
+            "schemaVersion": PERSON_LIFE_STORY_SCHEMA_VERSION,
+            "algorithmVersion": PERSON_LIFE_STORY_ALGORITHM_VERSION,
+            "format": "plainText",
+            "state": "ready" if self.chapters else "empty",
+            "title": self.title,
+            "overview": self.overview,
+            "chapterCount": len(self.chapters),
+            "chapters": [chapter.public_contract() for chapter in self.chapters],
+            "supportingMemoryCount": len(supporting_ids),
+        }
+
+
+@dataclass(frozen=True)
+class _LifeStoryChapterGroup:
+    key: str
+    title: str
+    priority: int
+    memories: tuple[OwnerTruthFormalMemory, ...]
+
+
 class OwnerTruthPersonMemoryProfileService:
     """Build a bounded continuous-text life record from all current memories."""
 
@@ -111,6 +188,7 @@ class OwnerTruthPersonMemoryProfileService:
         memories = self._all_current_memories(context=context)
         dimensions = _build_dimensions(memories)
         life_record = _build_life_record(dimensions)
+        life_story = _build_life_story(memories)
         profile_version = _digest(
             {
                 "schemaVersion": PERSON_MEMORY_PROFILE_SCHEMA_VERSION,
@@ -124,6 +202,7 @@ class OwnerTruthPersonMemoryProfileService:
                     for item in sorted(memories, key=lambda value: value.memory_id)
                 ],
                 "lifeRecord": life_record.public_contract(),
+                "lifeStory": life_story.public_contract(),
                 "dimensions": [item.public_contract() for item in dimensions],
             }
         )
@@ -133,6 +212,7 @@ class OwnerTruthPersonMemoryProfileService:
             updated_at=memories[0].current_version.created_at if memories else None,
             memory_count=len(memories),
             life_record=life_record,
+            life_story=life_story,
             dimensions=dimensions,
         )
 
@@ -266,6 +346,239 @@ def _build_life_record(
         title="我的人生记录",
         paragraphs=tuple(_unique(paragraphs)),
     )
+
+
+def _build_life_story(
+    memories: tuple[OwnerTruthFormalMemory, ...],
+) -> OwnerTruthPersonLifeStory:
+    if not memories:
+        return OwnerTruthPersonLifeStory(
+            title="我的人生记录",
+            overview=None,
+            chapters=(),
+        )
+
+    ordered = tuple(
+        sorted(
+            memories,
+            key=lambda item: (item.current_version.created_at, item.memory_id),
+        )
+    )
+    buckets: dict[str, dict[str, Any]] = {}
+    for memory in ordered:
+        key, title, priority = _chapter_identity(memory)
+        bucket = buckets.setdefault(
+            key,
+            {"key": key, "title": title, "priority": priority, "memories": []},
+        )
+        bucket["memories"].append(memory)
+
+    groups = [
+        _LifeStoryChapterGroup(
+            key=str(bucket["key"]),
+            title=str(bucket["title"]),
+            priority=int(bucket["priority"]),
+            memories=tuple(bucket["memories"]),
+        )
+        for bucket in buckets.values()
+    ]
+    groups.sort(
+        key=lambda item: (
+            item.priority,
+            item.memories[0].current_version.created_at,
+            item.key,
+        )
+    )
+    if len(groups) > _MAX_LIFE_STORY_CHAPTERS:
+        visible = groups[: _MAX_LIFE_STORY_CHAPTERS - 1]
+        overflow_memories = tuple(
+            memory
+            for group in groups[_MAX_LIFE_STORY_CHAPTERS - 1 :]
+            for memory in group.memories
+        )
+        groups = [
+            *visible,
+            _LifeStoryChapterGroup(
+                key="other-life-stories",
+                title="更多人生片段",
+                priority=99,
+                memories=tuple(
+                    sorted(
+                        overflow_memories,
+                        key=lambda item: (
+                            item.current_version.created_at,
+                            item.memory_id,
+                        ),
+                    )
+                ),
+            ),
+        ]
+
+    chapters = tuple(_life_story_chapter(group) for group in groups)
+    supporting_ids = tuple(
+        memory_id
+        for chapter in chapters
+        for memory_id in chapter.supporting_memory_ids
+    )
+    if len(supporting_ids) != len(set(supporting_ids)) or set(supporting_ids) != {
+        item.memory_id for item in ordered
+    }:
+        raise OwnerTruthPersonMemoryProfileError(
+            "life-story chapters must partition the current formal memories"
+        )
+    return OwnerTruthPersonLifeStory(
+        title="我的人生记录",
+        overview=_life_story_overview(chapters=chapters, memories=ordered),
+        chapters=chapters,
+    )
+
+
+def _chapter_identity(memory: OwnerTruthFormalMemory) -> tuple[str, str, int]:
+    people = _facet_values(memory, "people")
+    relationships = _facet_values(memory, "relationships")
+    places = _facet_values(memory, "places")
+    time_labels = _memory_time_labels(memory)
+    domains = _content_values(memory.current_version.content.get("domains"))
+    searchable = " ".join(
+        (
+            _primary_text(memory),
+            *people,
+            *relationships,
+            *places,
+            *time_labels,
+            *domains,
+        )
+    )
+
+    if _contains_any(searchable, _FAMILY_KEYWORDS):
+        return ("family-and-growth", "家庭与成长", 10)
+    if _contains_any(searchable, _LEARNING_AND_WORK_KEYWORDS):
+        return ("learning-and-work", "求学与工作", 20)
+    if people:
+        person = _title_fragment(people[0])
+        return (f"person:{person}", f"与{person}的故事", 30)
+    if memory.memory_kind == "knowledge":
+        if domains:
+            domain = _title_fragment(domains[0])
+            return (f"wisdom:{domain}", f"{domain}中的经验", 40)
+        return ("wisdom-and-beliefs", "经验与信念", 40)
+    if memory.memory_kind == "emotion":
+        return ("inner-world", "内心世界", 50)
+    if places:
+        place = _title_fragment(places[0])
+        return (f"place:{place}", f"在{place}的日子", 60)
+    if time_labels:
+        period = _title_fragment(time_labels[0])
+        return (f"period:{period}", f"{period}的时光", 70)
+    return ("life-fragments", "人生片段", 80)
+
+
+def _life_story_chapter(
+    group: _LifeStoryChapterGroup,
+) -> OwnerTruthPersonLifeStoryChapter:
+    memories = group.memories
+    visible_texts = _unique(_primary_text(item) for item in memories)[
+        :_MAX_CHAPTER_MEMORIES_IN_TEXT
+    ]
+    paragraphs = [
+        _paragraph(visible_texts[index : index + 3])
+        for index in range(0, len(visible_texts), 3)
+    ]
+    paragraphs = [paragraph for paragraph in paragraphs if paragraph]
+
+    reflection = _life_story_reflection(memories)
+    if reflection and reflection not in paragraphs:
+        paragraphs.append(reflection)
+    hidden_count = max(0, len(_unique(_primary_text(item) for item in memories)) - len(visible_texts))
+    if hidden_count:
+        paragraphs.append("还有一些相关片段保留在已确认记忆中，等待以后继续补充进这一章。")
+    if not paragraphs:
+        raise OwnerTruthPersonMemoryProfileError(
+            "life-story chapter cannot be built without readable formal-memory content"
+        )
+
+    return OwnerTruthPersonLifeStoryChapter(
+        chapter_id=f"chapter-{sha256(group.key.encode('utf-8')).hexdigest()[:24]}",
+        title=group.title,
+        paragraphs=tuple(paragraphs),
+        supporting_memory_ids=tuple(item.memory_id for item in memories),
+        supporting_memory_version_ids=tuple(
+            item.current_version.version_id for item in memories
+        ),
+    )
+
+
+def _life_story_reflection(
+    memories: Iterable[OwnerTruthFormalMemory],
+) -> str | None:
+    items = tuple(memories)
+    people = _all_facets(items, "people")
+    places = _all_facets(items, "places")
+    emotions = _all_facets(items, "emotions")
+    values = _all_facets(items, "values")
+    personality = _all_facets(items, "personality")
+    sentences: list[str] = []
+    if people and places:
+        sentences.append(
+            f"这些故事与{'、'.join(people[:3])}相连，也留在了{'、'.join(places[:3])}"
+        )
+    elif people:
+        sentences.append(f"{'、'.join(people[:3])}是这些故事里重要的人")
+    elif places:
+        sentences.append(f"这些片段留在了{'、'.join(places[:3])}")
+    if emotions:
+        sentences.append(f"回想起来，我仍会感到{'、'.join(emotions[:3])}")
+    traits = _first_person_trait_phrase(values=values[:3], personality=personality[:3])
+    if traits:
+        sentences.append(traits)
+    return _paragraph(sentences)
+
+
+def _life_story_overview(
+    *,
+    chapters: tuple[OwnerTruthPersonLifeStoryChapter, ...],
+    memories: tuple[OwnerTruthFormalMemory, ...],
+) -> str:
+    titles = [chapter.title for chapter in chapters]
+    if len(titles) == 1:
+        opening = f"我的人生记录目前从“{titles[0]}”这一章展开"
+    else:
+        visible_titles = titles[:4]
+        joined = "、".join(visible_titles[:-1]) + f"和{visible_titles[-1]}"
+        suffix = "等篇章" if len(titles) > len(visible_titles) else "这些篇章"
+        opening = f"回望一路走来的片段，我的故事从{joined}{suffix}展开"
+
+    people = _all_facets(memories, "people")
+    values = _all_facets(memories, "values")
+    personality = _all_facets(memories, "personality")
+    sentences = [opening]
+    if people:
+        sentences.append(f"{'、'.join(people[:4])}是故事中反复出现的重要人物")
+    traits = _first_person_trait_phrase(values=values[:4], personality=personality[:4])
+    if traits:
+        sentences.append(traits)
+    return _paragraph(sentences) or "我的人生记录正在慢慢展开。"
+
+
+def _memory_time_labels(memory: OwnerTruthFormalMemory) -> tuple[str, ...]:
+    labels = list(_facet_values(memory, "time"))
+    raw_time = memory.current_version.content.get("time")
+    if isinstance(raw_time, Mapping):
+        labels.extend(
+            normalized
+            for field in ("start", "end")
+            if (normalized := _normalize_text(raw_time.get(field)))
+        )
+    return tuple(_unique(labels))
+
+
+def _contains_any(value: str, keywords: Iterable[str]) -> bool:
+    return any(keyword in value for keyword in keywords)
+
+
+def _title_fragment(value: str) -> str:
+    normalized = _normalize_text(value).strip("，。！？；：,.!?;:、 ")
+    return normalized[:20] or "那段经历"
 
 
 def _dimension(
@@ -512,6 +825,8 @@ def _digest(value: Any) -> str:
 __all__ = [
     "PERSON_LIFE_RECORD_ALGORITHM_VERSION",
     "PERSON_LIFE_RECORD_SCHEMA_VERSION",
+    "PERSON_LIFE_STORY_ALGORITHM_VERSION",
+    "PERSON_LIFE_STORY_SCHEMA_VERSION",
     "PERSON_MEMORY_PROFILE_ALGORITHM_VERSION",
     "PERSON_MEMORY_PROFILE_SCHEMA_VERSION",
     "OwnerTruthPersonMemoryDimension",
@@ -519,4 +834,6 @@ __all__ = [
     "OwnerTruthPersonMemoryProfileError",
     "OwnerTruthPersonMemoryProfileService",
     "OwnerTruthPersonLifeRecord",
+    "OwnerTruthPersonLifeStory",
+    "OwnerTruthPersonLifeStoryChapter",
 ]

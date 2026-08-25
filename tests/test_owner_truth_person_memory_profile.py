@@ -22,6 +22,7 @@ from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.in_memory_store import InMemoryStore
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.owner_truth_person_memory_profile import (
+    PERSON_LIFE_STORY_SCHEMA_VERSION,
     PERSON_MEMORY_PROFILE_SCHEMA_VERSION,
     OwnerTruthPersonMemoryProfileService,
 )
@@ -170,6 +171,35 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
             "\n\n".join(contract["lifeRecord"]["paragraphs"]),
         )
         self.assertNotIn("#", contract["lifeRecord"]["text"])
+        life_story = contract["lifeStory"]
+        self.assertEqual(life_story["schemaVersion"], PERSON_LIFE_STORY_SCHEMA_VERSION)
+        self.assertEqual(life_story["format"], "plainText")
+        self.assertEqual(life_story["state"], "ready")
+        self.assertEqual(life_story["title"], "我的人生记录")
+        self.assertIn("家庭与成长", life_story["overview"])
+        self.assertEqual(
+            [chapter["title"] for chapter in life_story["chapters"]],
+            ["家庭与成长", "求学与工作"],
+        )
+        chapter_memory_ids = [
+            memory_id
+            for chapter in life_story["chapters"]
+            for memory_id in chapter["supportingMemoryIds"]
+        ]
+        self.assertEqual(
+            set(chapter_memory_ids),
+            {first_experience_id, second_experience_id, knowledge_id, emotion_id},
+        )
+        self.assertEqual(len(chapter_memory_ids), len(set(chapter_memory_ids)))
+        for chapter in life_story["chapters"]:
+            self.assertEqual(
+                len(chapter["supportingMemoryIds"]),
+                len(chapter["supportingMemoryVersionIds"]),
+            )
+            self.assertEqual(
+                chapter["text"],
+                "\n\n".join(chapter["paragraphs"]),
+            )
         self.assertEqual(
             [item["dimension"] for item in contract["dimensions"]],
             [
@@ -225,6 +255,12 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
         self.assertEqual(contract["lifeRecord"]["state"], "ready")
         self.assertEqual(contract["lifeRecord"]["paragraphCount"], 1)
         self.assertIn("核对事实", contract["lifeRecord"]["text"])
+        self.assertEqual(contract["lifeStory"]["chapterCount"], 1)
+        self.assertEqual(contract["lifeStory"]["chapters"][0]["title"], "经验与信念")
+        self.assertEqual(
+            contract["lifeStory"]["chapters"][0]["supportingMemoryIds"],
+            [memory_id],
+        )
         dimensions = {item["dimension"]: item for item in contract["dimensions"]}
         self.assertEqual(
             dimensions["knowledgeAndSkills"]["supportingMemoryIds"],
@@ -243,6 +279,10 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
         self.assertEqual(contract["lifeRecord"]["paragraphCount"], 0)
         self.assertEqual(contract["lifeRecord"]["paragraphs"], [])
         self.assertIsNone(contract["lifeRecord"]["text"])
+        self.assertEqual(contract["lifeStory"]["state"], "empty")
+        self.assertEqual(contract["lifeStory"]["chapterCount"], 0)
+        self.assertEqual(contract["lifeStory"]["chapters"], [])
+        self.assertIsNone(contract["lifeStory"]["overview"])
 
 
 if __name__ == "__main__":
