@@ -1,9 +1,9 @@
 """Owner-only person-memory profile derived from current formal memories.
 
 The profile is a rebuildable read model, never a second source of truth.  It
-turns the complete current ``MemoryVersion`` set into one narrative per stable
-person-memory dimension while retaining opaque supporting Memory ids for
-drill-down and audit.
+turns the complete current ``MemoryVersion`` set into one continuous plain-text
+life record. Stable dimensions remain internal evidence indexes for search and
+audit; they are not the primary reading experience.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ from app.services.owner_truth_formal_memory import (
 
 PERSON_MEMORY_PROFILE_SCHEMA_VERSION = "owner-truth-person-memory-profile-v1"
 PERSON_MEMORY_PROFILE_ALGORITHM_VERSION = "person-memory-dimension-summary-v1"
+PERSON_LIFE_RECORD_SCHEMA_VERSION = "owner-truth-person-life-record-v1"
+PERSON_LIFE_RECORD_ALGORITHM_VERSION = "person-life-record-plain-text-v1"
 _MAX_FORMAL_MEMORY_COUNT = 10_000
 _MAX_DIMENSION_EVIDENCE = 8
 _MAX_CLAUSE_CHARACTERS = 280
@@ -60,6 +62,7 @@ class OwnerTruthPersonMemoryProfile:
     profile_version: str
     updated_at: str | None
     memory_count: int
+    life_record: "OwnerTruthPersonLifeRecord"
     dimensions: tuple[OwnerTruthPersonMemoryDimension, ...]
 
     def public_contract(self) -> dict[str, Any]:
@@ -71,12 +74,35 @@ class OwnerTruthPersonMemoryProfile:
             "profileVersion": self.profile_version,
             "updatedAt": self.updated_at,
             "memoryCount": self.memory_count,
+            "lifeRecord": self.life_record.public_contract(),
             "dimensions": [item.public_contract() for item in self.dimensions],
         }
 
 
+@dataclass(frozen=True)
+class OwnerTruthPersonLifeRecord:
+    title: str
+    paragraphs: tuple[str, ...]
+
+    @property
+    def text(self) -> str | None:
+        return "\n\n".join(self.paragraphs) if self.paragraphs else None
+
+    def public_contract(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": PERSON_LIFE_RECORD_SCHEMA_VERSION,
+            "algorithmVersion": PERSON_LIFE_RECORD_ALGORITHM_VERSION,
+            "format": "plainText",
+            "state": "ready" if self.paragraphs else "empty",
+            "title": self.title,
+            "paragraphCount": len(self.paragraphs),
+            "paragraphs": list(self.paragraphs),
+            "text": self.text,
+        }
+
+
 class OwnerTruthPersonMemoryProfileService:
-    """Build a bounded dimension-level profile from all current memories."""
+    """Build a bounded continuous-text life record from all current memories."""
 
     def __init__(self, store: Any) -> None:
         self._formal_memory = OwnerTruthFormalMemoryService(store)
@@ -84,6 +110,7 @@ class OwnerTruthPersonMemoryProfileService:
     def read(self, *, context: OwnerTruthCommandContext) -> OwnerTruthPersonMemoryProfile:
         memories = self._all_current_memories(context=context)
         dimensions = _build_dimensions(memories)
+        life_record = _build_life_record(dimensions)
         profile_version = _digest(
             {
                 "schemaVersion": PERSON_MEMORY_PROFILE_SCHEMA_VERSION,
@@ -96,6 +123,7 @@ class OwnerTruthPersonMemoryProfileService:
                     }
                     for item in sorted(memories, key=lambda value: value.memory_id)
                 ],
+                "lifeRecord": life_record.public_contract(),
                 "dimensions": [item.public_contract() for item in dimensions],
             }
         )
@@ -104,6 +132,7 @@ class OwnerTruthPersonMemoryProfileService:
             profile_version=profile_version,
             updated_at=memories[0].current_version.created_at if memories else None,
             memory_count=len(memories),
+            life_record=life_record,
             dimensions=dimensions,
         )
 
@@ -190,8 +219,7 @@ def _build_dimensions(
             narrative=_facet_narrative(
                 personality,
                 facet="personality",
-                prefix="本人已确认的性格特征包括：",
-                context_prefix="这些特征主要体现在：",
+                prefix="这些记忆呈现出我的性格特征：",
             ),
         ),
         _dimension(
@@ -201,10 +229,42 @@ def _build_dimensions(
             narrative=_facet_narrative(
                 values,
                 facet="values",
-                prefix="本人已确认的价值取向包括：",
-                context_prefix="这些价值主要体现在：",
+                prefix="贯穿这些经历的价值取向包括：",
             ),
         ),
+    )
+
+
+def _build_life_record(
+    dimensions: tuple[OwnerTruthPersonMemoryDimension, ...],
+) -> OwnerTruthPersonLifeRecord:
+    by_key = {item.dimension: item for item in dimensions}
+    paragraphs: list[str] = []
+
+    for key in ("lifeExperience", "knowledgeAndSkills"):
+        narrative = by_key[key].narrative
+        if narrative:
+            paragraphs.append(narrative)
+
+    relationship_parts = [
+        by_key[key].narrative
+        for key in ("importantRelationships", "emotionsAndAttachments")
+        if by_key[key].narrative
+    ]
+    if relationship_parts:
+        paragraphs.append("".join(relationship_parts))
+
+    identity_parts = [
+        by_key[key].narrative
+        for key in ("personality", "valuesAndChoices")
+        if by_key[key].narrative
+    ]
+    if identity_parts:
+        paragraphs.append("".join(identity_parts))
+
+    return OwnerTruthPersonLifeRecord(
+        title="我的人生记录",
+        paragraphs=tuple(_unique(paragraphs)),
     )
 
 
@@ -235,18 +295,31 @@ def _experience_narrative(memories: Iterable[OwnerTruthFormalMemory]) -> str | N
     times = _all_facets(items, "time")
     values = _all_facets(items, "values")
     personality = _all_facets(items, "personality")
-    parts = [f"目前的人生轨迹由 {len(items)} 段已确认经历共同勾勒"]
-    anchors = _anchor_phrase(people=people, places=places, times=times)
-    if anchors:
-        parts.append(anchors)
-    traits = _trait_phrase(values=values, personality=personality)
+    experiences = _unique(_primary_text(item) for item in items)
+    sentences: list[str] = []
+    if experiences:
+        sentences.append(f"我的人生经历中，{_joined_sentences(experiences, limit=4)}")
+    if people and places:
+        sentences.append(
+            f"我的一些重要经历与{'、'.join(people[:_MAX_DIMENSION_EVIDENCE])}相连，"
+            f"{'、'.join(places[:_MAX_DIMENSION_EVIDENCE])}是这些记忆中反复出现的生活场景"
+        )
+    elif people:
+        sentences.append(
+            f"{'、'.join(people[:_MAX_DIMENSION_EVIDENCE])}是我人生经历中的重要人物"
+        )
+    elif places:
+        sentences.append(
+            f"我的人生记忆常发生在{'、'.join(places[:_MAX_DIMENSION_EVIDENCE])}"
+        )
+    if times:
+        sentences.append(
+            f"这些经历留下了{'、'.join(times[:_MAX_DIMENSION_EVIDENCE])}等时间线索"
+        )
+    traits = _first_person_trait_phrase(values=values, personality=personality)
     if traits:
-        parts.append(traits)
-    if len(parts) == 1:
-        contexts = _unique(_primary_text(item) for item in items)
-        if contexts:
-            parts.append(f"当前可归纳出的核心经历是：{_joined_clauses(contexts, limit=3)}")
-    return "；".join(parts) + "。"
+        sentences.append(traits)
+    return _paragraph(sentences)
 
 
 def _knowledge_narrative(memories: Iterable[OwnerTruthFormalMemory]) -> str | None:
@@ -261,15 +334,17 @@ def _knowledge_narrative(memories: Iterable[OwnerTruthFormalMemory]) -> str | No
     values = _all_facets(items, "values")
     personality = _all_facets(items, "personality")
     statements = _unique(_primary_text(item) for item in items)
-    parts = [f"已从 {len(items)} 段正式记忆中沉淀出可复用的知识、经验与判断"]
+    sentences: list[str] = []
     if domains:
-        parts.append(f"主要涉及{'、'.join(domains[:_MAX_DIMENSION_EVIDENCE])}")
+        sentences.append(
+            f"我积累的知识和经验主要涉及{'、'.join(domains[:_MAX_DIMENSION_EVIDENCE])}"
+        )
     if statements:
-        parts.append(f"核心方法可归纳为：{_joined_clauses(statements, limit=3)}")
-    traits = _trait_phrase(values=values, personality=personality)
+        sentences.append(f"我常用的方法和判断是：{_joined_sentences(statements, limit=3)}")
+    traits = _first_person_trait_phrase(values=values, personality=personality)
     if traits:
-        parts.append(traits)
-    return "；".join(parts) + "。"
+        sentences.append(traits)
+    return _paragraph(sentences)
 
 
 def _emotion_narrative(memories: Iterable[OwnerTruthFormalMemory]) -> str | None:
@@ -279,18 +354,18 @@ def _emotion_narrative(memories: Iterable[OwnerTruthFormalMemory]) -> str | None
     places = _all_facets(items, "places")
     parts: list[str] = []
     if emotions:
-        parts.append(f"情感重心主要集中在{'、'.join(emotions[:_MAX_DIMENSION_EVIDENCE])}")
+        parts.append(f"我反复提到的感受有{'、'.join(emotions[:_MAX_DIMENSION_EVIDENCE])}")
     if people:
-        parts.append(f"这些感受主要与{'、'.join(people[:_MAX_DIMENSION_EVIDENCE])}相关")
+        parts.append(f"这些情感多与{'、'.join(people[:_MAX_DIMENSION_EVIDENCE])}相连")
     if places:
-        parts.append(f"相关记忆场景包括{'、'.join(places[:_MAX_DIMENSION_EVIDENCE])}")
+        parts.append(f"相关记忆常发生在{'、'.join(places[:_MAX_DIMENSION_EVIDENCE])}")
     if not parts:
         expressions = _unique(
             _primary_text(item) for item in items if item.memory_kind == "emotion"
         )
         if expressions:
-            parts.append(f"当前确认的情感脉络是：{_joined_clauses(expressions, limit=2)}")
-    return "；".join(parts) + "。" if parts else None
+            parts.append(_joined_sentences(expressions, limit=2))
+    return _paragraph(parts)
 
 
 def _relationship_narrative(memories: Iterable[OwnerTruthFormalMemory]) -> str | None:
@@ -300,16 +375,16 @@ def _relationship_narrative(memories: Iterable[OwnerTruthFormalMemory]) -> str |
     places = _all_facets(items, "places")
     parts: list[str] = []
     if people:
-        parts.append(f"重要关系网络围绕{'、'.join(people[:_MAX_DIMENSION_EVIDENCE])}展开")
+        parts.append(f"{'、'.join(people[:_MAX_DIMENSION_EVIDENCE])}是我记忆中的重要人物")
     if relationships:
-        parts.append(f"已确认的关系类型包括{'、'.join(relationships[:_MAX_DIMENSION_EVIDENCE])}")
+        parts.append(f"这些记忆包含{'、'.join(relationships[:_MAX_DIMENSION_EVIDENCE])}等关系")
     if places:
-        parts.append(f"这些关系主要出现在{'、'.join(places[:_MAX_DIMENSION_EVIDENCE])}等生活场景")
+        parts.append(f"彼此相处的场景常与{'、'.join(places[:_MAX_DIMENSION_EVIDENCE])}有关")
     if not parts:
         contexts = _unique(_primary_text(item) for item in items)
         if contexts:
-            parts.append(f"当前可归纳的关系脉络是：{_joined_clauses(contexts, limit=2)}")
-    return "；".join(parts) + "。" if parts else None
+            parts.append(_joined_sentences(contexts, limit=2))
+    return _paragraph(parts)
 
 
 def _facet_narrative(
@@ -317,15 +392,11 @@ def _facet_narrative(
     *,
     facet: str,
     prefix: str,
-    context_prefix: str,
 ) -> str | None:
-    items = tuple(memories)
-    values = _all_facets(items, facet)
+    values = _all_facets(memories, facet)
     if not values:
         return None
-    narrative = f"{prefix}{'、'.join(values[:_MAX_DIMENSION_EVIDENCE])}"
-    narrative += f"；{context_prefix}{len(items)} 段已确认正式记忆"
-    return narrative + "。"
+    return f"{prefix}{'、'.join(values[:_MAX_DIMENSION_EVIDENCE])}。"
 
 
 def _all_facets(
@@ -347,29 +418,13 @@ def _content_values(value: Any) -> tuple[str, ...]:
     return tuple(_unique(result))
 
 
-def _anchor_phrase(
-    *,
-    people: list[str],
-    places: list[str],
-    times: list[str],
-) -> str | None:
-    anchors: list[str] = []
-    if people:
-        anchors.append(f"重要人物为{'、'.join(people[:_MAX_DIMENSION_EVIDENCE])}")
-    if places:
-        anchors.append(f"主要场景为{'、'.join(places[:_MAX_DIMENSION_EVIDENCE])}")
-    if times:
-        anchors.append(f"时间线索为{'、'.join(times[:_MAX_DIMENSION_EVIDENCE])}")
-    return "，".join(anchors) if anchors else None
-
-
-def _trait_phrase(*, values: list[str], personality: list[str]) -> str | None:
+def _first_person_trait_phrase(*, values: list[str], personality: list[str]) -> str | None:
     traits: list[str] = []
     if values:
-        traits.append(f"体现{'、'.join(values[:_MAX_DIMENSION_EVIDENCE])}的价值取向")
+        traits.append(f"我看重{'、'.join(values[:_MAX_DIMENSION_EVIDENCE])}")
     if personality:
-        traits.append(f"呈现{'、'.join(personality[:_MAX_DIMENSION_EVIDENCE])}的性格特征")
-    return "，并".join(traits) if traits else None
+        traits.append(f"这些经历也呈现出我{'、'.join(personality[:_MAX_DIMENSION_EVIDENCE])}的一面")
+    return "，".join(traits) if traits else None
 
 
 def _primary_text(memory: OwnerTruthFormalMemory) -> str:
@@ -405,12 +460,23 @@ def _facet_values(memory: OwnerTruthFormalMemory, facet: str) -> tuple[str, ...]
     return tuple(_unique(values))
 
 
-def _joined_clauses(values: Iterable[str], *, limit: int = _MAX_DIMENSION_EVIDENCE) -> str:
+def _joined_sentences(values: Iterable[str], *, limit: int) -> str:
     clauses = _unique(values)
-    visible = clauses[:limit]
-    rendered = "；".join(value.rstrip("。！？!?；;") for value in visible)
+    visible = [value.rstrip("。！？!?；;") for value in clauses[:limit]]
+    rendered = "。".join(visible)
     hidden_count = len(clauses) - len(visible)
-    return f"{rendered}；以及另外 {hidden_count} 段已确认记忆" if hidden_count else rendered
+    if hidden_count:
+        rendered += f"。其余 {hidden_count} 段记忆仍保留在原始记录中"
+    return rendered
+
+
+def _paragraph(sentences: Iterable[str]) -> str | None:
+    normalized = [
+        sentence.rstrip("。！？!?；;")
+        for sentence in _unique(sentences)
+        if sentence
+    ]
+    return "。".join(normalized) + "。" if normalized else None
 
 
 def _unique(values: Iterable[Any]) -> list[str]:
@@ -444,10 +510,13 @@ def _digest(value: Any) -> str:
 
 
 __all__ = [
+    "PERSON_LIFE_RECORD_ALGORITHM_VERSION",
+    "PERSON_LIFE_RECORD_SCHEMA_VERSION",
     "PERSON_MEMORY_PROFILE_ALGORITHM_VERSION",
     "PERSON_MEMORY_PROFILE_SCHEMA_VERSION",
     "OwnerTruthPersonMemoryDimension",
     "OwnerTruthPersonMemoryProfile",
     "OwnerTruthPersonMemoryProfileError",
     "OwnerTruthPersonMemoryProfileService",
+    "OwnerTruthPersonLifeRecord",
 ]
