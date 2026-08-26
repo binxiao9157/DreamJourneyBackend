@@ -55,8 +55,9 @@ from app.domain.owner_truth.contracts import (
 from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION_V2,
-    OWNER_TRUTH_SCHEMA_VERSION_V3,
+    OWNER_TRUTH_SCHEMA_VERSION_V4,
     empty_memory_facets,
+    enrich_memory_payload_v4,
     validate_memory_facets,
 )
 from app.observability.operation_metrics import OperationMetricRecorder
@@ -393,24 +394,28 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                 selected_spans = [spans[index] for index in source_indices]
             except (KeyError, TypeError) as error:
                 raise ValueError("live memory organizer referenced unavailable evidence") from error
+            content = enrich_memory_payload_v4(
+                kind=memory_kind,
+                payload={
+                    primary_field: primary_value,
+                    "sourceTurnIndices": list(source_indices),
+                    "facets": memory.get("facets"),
+                },
+            )
             proposals.append(
                 CandidateProposal(
                     memory_kind=memory_kind,
                     perspective_type=PerspectiveType.FIRST_PERSON,
                     epistemic_status=EpistemicStatus.RECALLED,
                     sensitivity=SensitivityLevel.STANDARD,
-                    content={
-                        primary_field: primary_value,
-                        "sourceTurnIndices": list(source_indices),
-                        "facets": memory.get("facets"),
-                    },
+                    content=content,
                     evidence_span=CandidateEvidenceSpan(
                         start=min(span.start for span in selected_spans),
                         end=max(span.end for span in selected_spans),
                     ),
                     confidence=0.0,
                     review_mode=CandidateReviewMode.SINGLE,
-                    payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V2,
+                    payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V4,
                 )
             )
         return SyntheticCandidateExtractionCommand(
@@ -591,20 +596,24 @@ class ModelAssistedOwnerTruthSourceExtractor:
             content = memory.get("content")
             if not isinstance(content, Mapping):
                 raise ValueError("text memory organizer returned invalid typed content")
+            normalized_content = enrich_memory_payload_v4(
+                kind=memory_kind,
+                payload=content,
+            )
             proposals.append(
                 CandidateProposal(
                     memory_kind=memory_kind,
                     perspective_type=PerspectiveType.FIRST_PERSON,
                     epistemic_status=EpistemicStatus.RECALLED,
                     sensitivity=SensitivityLevel.STANDARD,
-                    content=dict(content),
+                    content=normalized_content,
                     evidence_span=CandidateEvidenceSpan(
                         start=0,
                         end=len(source.source_text),
                     ),
                     confidence=0.0,
                     review_mode=CandidateReviewMode.SINGLE,
-                    payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V3,
+                    payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V4,
                 )
             )
         return SyntheticCandidateExtractionCommand(

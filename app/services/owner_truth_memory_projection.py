@@ -327,6 +327,49 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                     rights.event_hash,
                 ),
             )
+            person_model = snapshot.get("personMemoryModel")
+            if not isinstance(person_model, Mapping):
+                raise OwnerTruthMemoryProjectionError(
+                    "ready projection returned no person-memory model"
+                )
+            cursor.execute(
+                """
+                UPDATE owner_truth.person_memory_projection_versions
+                SET is_current = FALSE
+                WHERE vault_id = %s
+                  AND authority_epoch = %s
+                  AND is_current = TRUE
+                  AND projection_hash <> %s
+                """,
+                (context.vault_id, authority_epoch, snapshot["checkpoint"]),
+            )
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.person_memory_projection_versions (
+                    vault_id, authority_epoch, projection_hash, source_hash,
+                    schema_version, model_version, memory_count, payload, is_current
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                ON CONFLICT (vault_id, authority_epoch, projection_hash) DO UPDATE SET
+                    source_hash = EXCLUDED.source_hash,
+                    schema_version = EXCLUDED.schema_version,
+                    model_version = EXCLUDED.model_version,
+                    memory_count = EXCLUDED.memory_count,
+                    payload = EXCLUDED.payload,
+                    is_current = TRUE
+                """,
+                self._adapt_params(
+                    (
+                        context.vault_id,
+                        authority_epoch,
+                        snapshot["checkpoint"],
+                        snapshot["sourceHash"],
+                        str(person_model.get("schemaVersion") or ""),
+                        str(person_model.get("modelVersion") or ""),
+                        int(person_model.get("memoryCount") or 0),
+                        person_model,
+                    )
+                ),
+            )
         return OwnerTruthMemoryProjectionResult(outcome=outcome, snapshot=snapshot)
 
     def read(self, *, context: OwnerTruthCommandContext) -> dict[str, Any]:
@@ -422,6 +465,40 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                     authority_epoch=authority_epoch,
                     rights_snapshot=rights,
                     rebuild_reason="projectionInputsChanged",
+                )
+            cursor.execute(
+                """
+                SELECT projection_hash, source_hash, model_version, memory_count, payload
+                FROM owner_truth.person_memory_projection_versions
+                WHERE vault_id = %s
+                  AND authority_epoch = %s
+                  AND is_current = TRUE
+                """,
+                (context.vault_id, authority_epoch),
+            )
+            persisted_person_model = cursor.fetchone()
+            expected_person_model = expected.get("personMemoryModel")
+            if (
+                persisted_person_model is None
+                or not isinstance(expected_person_model, Mapping)
+                or str(persisted_person_model["projection_hash"]) != expected["checkpoint"]
+                or str(persisted_person_model["source_hash"]) != expected["sourceHash"]
+                or str(persisted_person_model["model_version"])
+                != str(expected_person_model.get("modelVersion") or "")
+                or int(persisted_person_model["memory_count"])
+                != int(expected_person_model.get("memoryCount") or 0)
+                or self._json_object(
+                    persisted_person_model["payload"],
+                    field="person-memory projection payload",
+                )
+                != dict(expected_person_model)
+            ):
+                return build_rebuilding_memory_projection(
+                    vault_id=context.vault_id,
+                    owner_subject_id=context.owner_subject_id,
+                    authority_epoch=authority_epoch,
+                    rights_snapshot=rights,
+                    rebuild_reason="personMemoryProjectionUnavailable",
                 )
             return stored
 

@@ -176,10 +176,10 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
         self.assertEqual(life_story["format"], "plainText")
         self.assertEqual(life_story["state"], "ready")
         self.assertEqual(life_story["title"], "我的人生记录")
-        self.assertIn("家庭与成长", life_story["overview"])
+        self.assertIn("持续整理", life_story["overview"])
         self.assertEqual(
             [chapter["title"] for chapter in life_story["chapters"]],
-            ["家庭与成长", "求学与工作"],
+            ["根脉与重要的人", "求学、工作与成长"],
         )
         chapter_memory_ids = [
             memory_id
@@ -203,17 +203,21 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
         self.assertEqual(
             [item["dimension"] for item in contract["dimensions"]],
             [
-                "lifeExperience",
-                "knowledgeAndSkills",
-                "emotionsAndAttachments",
-                "importantRelationships",
+                "lifeEvent",
+                "knowledge",
+                "emotion",
+                "relationship",
                 "personality",
-                "valuesAndChoices",
+                "value",
+                "habit",
+                "goal",
+                "identity",
+                "reflection",
             ],
         )
 
         dimensions = {item["dimension"]: item for item in contract["dimensions"]}
-        experience = dimensions["lifeExperience"]
+        experience = dimensions["lifeEvent"]
         self.assertEqual(experience["status"], "ready")
         self.assertEqual(
             set(experience["supportingMemoryIds"]),
@@ -222,21 +226,21 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
         self.assertIn("小时候常在老院子里听外祖父讲故事", experience["narrative"])
         self.assertIn("第一次独自去外地工作", experience["narrative"])
         self.assertIn("老院子", experience["narrative"])
-        self.assertIn("重视家人", experience["narrative"])
-        self.assertIn("责任", experience["narrative"])
 
         self.assertEqual(
-            dimensions["knowledgeAndSkills"]["supportingMemoryIds"],
+            dimensions["knowledge"]["supportingMemoryIds"],
             [knowledge_id],
         )
         self.assertEqual(
-            set(dimensions["emotionsAndAttachments"]["supportingMemoryIds"]),
+            set(dimensions["emotion"]["supportingMemoryIds"]),
             {emotion_id},
         )
-        self.assertIn("怀念、温暖", dimensions["emotionsAndAttachments"]["narrative"])
-        self.assertIn("外祖父", dimensions["importantRelationships"]["narrative"])
+        self.assertIn("怀念", dimensions["emotion"]["narrative"])
+        self.assertIn("外祖父", dimensions["relationship"]["narrative"])
         self.assertIn("耐心", dimensions["personality"]["narrative"])
-        self.assertIn("重视家人", dimensions["valuesAndChoices"]["narrative"])
+        self.assertIn("重视家人", dimensions["value"]["narrative"])
+        self.assertEqual(contract["memoryModel"]["memoryCount"], 4)
+        self.assertEqual(contract["memoryModel"]["modelVersion"], contract["profileVersion"])
 
         replay = self.service.read(context=self.context)
         self.assertEqual(replay.profile_version, profile.profile_version)
@@ -253,22 +257,22 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
 
         contract = self.service.read(context=self.context).public_contract()
         self.assertEqual(contract["lifeRecord"]["state"], "ready")
-        self.assertEqual(contract["lifeRecord"]["paragraphCount"], 1)
+        self.assertEqual(contract["lifeRecord"]["paragraphCount"], 2)
         self.assertIn("核对事实", contract["lifeRecord"]["text"])
         self.assertEqual(contract["lifeStory"]["chapterCount"], 1)
-        self.assertEqual(contract["lifeStory"]["chapters"][0]["title"], "经验与信念")
+        self.assertEqual(contract["lifeStory"]["chapters"][0]["title"], "经验、知识与理解")
         self.assertEqual(
             contract["lifeStory"]["chapters"][0]["supportingMemoryIds"],
             [memory_id],
         )
         dimensions = {item["dimension"]: item for item in contract["dimensions"]}
         self.assertEqual(
-            dimensions["knowledgeAndSkills"]["supportingMemoryIds"],
+            dimensions["knowledge"]["supportingMemoryIds"],
             [memory_id],
         )
-        self.assertEqual(dimensions["lifeExperience"]["status"], "empty")
-        self.assertIsNone(dimensions["lifeExperience"]["narrative"])
-        self.assertEqual(dimensions["lifeExperience"]["supportingMemoryIds"], [])
+        self.assertEqual(dimensions["lifeEvent"]["status"], "empty")
+        self.assertIsNone(dimensions["lifeEvent"]["narrative"])
+        self.assertEqual(dimensions["lifeEvent"]["supportingMemoryIds"], [])
 
     def test_empty_profile_exposes_an_empty_plain_text_life_record(self) -> None:
         contract = self.service.read(context=self.context).public_contract()

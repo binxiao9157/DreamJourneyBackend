@@ -187,11 +187,11 @@ class OwnerTruthFormalMemoryAPITests(unittest.TestCase):
         )
         self.assertEqual(profile.status_code, 200, profile.text)
         profile_body = profile.json()
-        self.assertEqual(profile_body["schemaVersion"], "owner-truth-person-memory-profile-v1")
+        self.assertEqual(profile_body["schemaVersion"], "owner-truth-person-memory-profile-v2")
         self.assertEqual(profile_body["memoryCount"], 1)
         self.assertEqual(
             profile_body["lifeStory"]["schemaVersion"],
-            "owner-truth-person-life-story-v1",
+            "owner-truth-biography-projection-v1",
         )
         self.assertEqual(profile_body["lifeStory"]["supportingMemoryCount"], 1)
         self.assertEqual(
@@ -199,9 +199,15 @@ class OwnerTruthFormalMemoryAPITests(unittest.TestCase):
             [memory_id],
         )
         experience = profile_body["dimensions"][0]
-        self.assertEqual(experience["dimension"], "lifeExperience")
+        self.assertEqual(experience["dimension"], "lifeEvent")
         self.assertEqual(experience["supportingMemoryIds"], [memory_id])
+        self.assertEqual(len(experience["supportingMemoryVersionIds"]), 1)
         self.assertIn("外祖父", experience["narrative"])
+        self.assertEqual(profile_body["memoryModel"]["memoryCount"], 1)
+        self.assertEqual(
+            profile_body["memoryModel"]["modelVersion"],
+            profile_body["profileVersion"],
+        )
 
         detail = client.get(
             f"/v2/vaults/{vault_id}/memories/{memory_id}",

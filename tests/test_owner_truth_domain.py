@@ -14,7 +14,10 @@ from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION_V2,
     OWNER_TRUTH_SCHEMA_VERSION_V3,
+    OWNER_TRUTH_SCHEMA_VERSION_V4,
+    canonicalize_memory_payload,
     empty_memory_facets,
+    enrich_memory_payload_v4,
     flatten_memory_facets,
     validate_memory_payload,
 )
@@ -76,7 +79,7 @@ class OwnerTruthDomainTests(unittest.TestCase):
 
         self.assertTrue(result.accepted)
         self.assertFalse(result.quarantined)
-        self.assertEqual(OWNER_TRUTH_CURRENT_SCHEMA_VERSION, OWNER_TRUTH_SCHEMA_VERSION_V3)
+        self.assertEqual(OWNER_TRUTH_CURRENT_SCHEMA_VERSION, OWNER_TRUTH_SCHEMA_VERSION_V4)
         terms = flatten_memory_facets(facets)
         self.assertIn("people:外公", terms)
         self.assertIn("relationships:祖孙", terms)
@@ -113,6 +116,48 @@ class OwnerTruthDomainTests(unittest.TestCase):
 
         self.assertTrue(result.accepted)
         self.assertNotIn("facets", payload)
+
+    def test_v4_correction_rebuilds_semantic_projection_before_validation(self):
+        payload = enrich_memory_payload_v4(
+            kind=MemoryKind.EXPERIENCE,
+            payload={
+                "event": "大学毕业后，我开始每天写日记。",
+                "facets": {
+                    **empty_memory_facets(confidence=1.0),
+                    "habits": [
+                        {
+                            "value": "每天写日记",
+                            "evidenceMode": "ownerStated",
+                            "confidence": 1.0,
+                        }
+                    ],
+                },
+            },
+        )
+        payload["event"] = "毕业后，我养成了每天写日记的习惯。"
+
+        stale = validate_memory_payload(
+            kind=MemoryKind.EXPERIENCE,
+            payload=payload,
+            schema_version=OWNER_TRUTH_SCHEMA_VERSION_V4,
+        )
+        self.assertFalse(stale.accepted)
+        self.assertEqual(stale.code, "inconsistentSemanticProjection")
+
+        canonical = canonicalize_memory_payload(
+            kind=MemoryKind.EXPERIENCE,
+            payload=payload,
+            schema_version=OWNER_TRUTH_SCHEMA_VERSION_V4,
+        )
+        self.assertEqual(canonical["semantic"]["narrative"], canonical["event"])
+        self.assertIn("habit", canonical["semantic"]["facets"])
+        self.assertTrue(
+            validate_memory_payload(
+                kind=MemoryKind.EXPERIENCE,
+                payload=canonical,
+                schema_version=OWNER_TRUTH_SCHEMA_VERSION_V4,
+            ).accepted
+        )
 
     def test_known_schema_missing_required_field_is_denied_not_quarantined(self):
         result = validate_memory_payload(

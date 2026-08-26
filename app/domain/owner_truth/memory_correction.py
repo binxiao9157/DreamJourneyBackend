@@ -19,7 +19,7 @@ from uuid import UUID, uuid5
 from .candidate_decisions import OwnerTruthCandidateReviewError, OwnerTruthCandidateSnapshot
 from .contracts import CandidateDecision
 from .memory_activation import OWNER_TRUTH_MEMORY_VERSION_SCHEMA_VERSION
-from .ontology import validate_memory_payload
+from .ontology import canonicalize_memory_payload, validate_memory_payload
 
 
 _CORRECTION_MEMORY_VERSION_NAMESPACE = UUID("ac0f3a9b-9d14-4a5d-94a4-47b0bdc9398b")
@@ -217,7 +217,11 @@ def build_memory_correction_plan(
     content_schema_version = str(corrected_value_schema_version or "").strip()
     if not content_schema_version:
         raise OwnerTruthMemoryCorrectionError("corrected_value_schema_version is required")
-    content = _mapping(corrected_value, field="corrected_value")
+    content = canonicalize_memory_payload(
+        kind=candidate.memory_kind,
+        payload=_mapping(corrected_value, field="corrected_value"),
+        schema_version=content_schema_version,
+    )
     validation = validate_memory_payload(
         kind=candidate.memory_kind,
         payload=content,

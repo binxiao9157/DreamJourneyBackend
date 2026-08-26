@@ -26,7 +26,11 @@ from .contracts import (
     require_nonblank,
     require_uuid,
 )
-from .ontology import OWNER_TRUTH_SCHEMA_VERSION, validate_memory_payload
+from .ontology import (
+    OWNER_TRUTH_SCHEMA_VERSION,
+    canonicalize_memory_payload,
+    validate_memory_payload,
+)
 from .source_commands import OwnerTruthCommandAuthorizationCapture, OwnerTruthCommandContext
 
 
@@ -300,6 +304,11 @@ class OwnerTruthCandidateReviewCommand:
         candidate_after_hash = candidate.content_hash
         if self.action is CandidateReviewAction.CORRECT:
             corrected_value = _normalized_mapping(self.corrected_value or {}, field="corrected_value")
+            corrected_value = canonicalize_memory_payload(
+                kind=candidate.memory_kind,
+                payload=corrected_value,
+                schema_version=self.corrected_value_schema_version,
+            )
             validation = validate_memory_payload(
                 kind=candidate.memory_kind,
                 payload=corrected_value,

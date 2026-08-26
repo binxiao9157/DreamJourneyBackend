@@ -197,6 +197,7 @@ class OwnerTruthFormalMemoryVersion:
     content: Mapping[str, Any]
     source_count: int
     created_at: str
+    evidence_refs: tuple[Mapping[str, Any], ...] = ()
 
     def public_contract(self) -> dict[str, Any]:
         return {
@@ -388,6 +389,11 @@ def _version_from_activation(
         content=deepcopy(dict(payload["content"])),
         source_count=source_count,
         created_at=_nonblank(activation.get("createdAt"), field="createdAt"),
+        evidence_refs=tuple(
+            deepcopy(dict(item))
+            for item in refs
+            if isinstance(item, Mapping)
+        ),
     )
 
 
@@ -779,6 +785,11 @@ class PostgresOwnerTruthFormalMemoryRepository:
             content=deepcopy(dict(content)),
             source_count=source_count,
             created_at=row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
+            evidence_refs=tuple(
+                deepcopy(dict(item))
+                for item in refs
+                if isinstance(item, Mapping)
+            ),
         )
 
     @staticmethod

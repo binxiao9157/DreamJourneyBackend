@@ -20,6 +20,7 @@ from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION_V2,
     OWNER_TRUTH_SCHEMA_VERSION_V3,
+    OWNER_TRUTH_SCHEMA_VERSION_V4,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_context_shadow_build import OwnerTruthContextShadowBuildService
@@ -50,6 +51,7 @@ _SUPPORTED_CONTENT_SCHEMA_VERSIONS = frozenset(
         OWNER_TRUTH_SCHEMA_VERSION,
         OWNER_TRUTH_SCHEMA_VERSION_V2,
         OWNER_TRUTH_SCHEMA_VERSION_V3,
+        OWNER_TRUTH_SCHEMA_VERSION_V4,
     }
 )
 
@@ -318,7 +320,10 @@ class OwnerTruthContextMaterializationService:
         memory_kind = _nonblank_text(entry.get("memoryKind"), field="Projection memoryKind")
         content_fields = (
             _V3_CONTENT_FIELD_BY_KIND
-            if content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V3
+            if content_schema_version in {
+                OWNER_TRUTH_SCHEMA_VERSION_V3,
+                OWNER_TRUTH_SCHEMA_VERSION_V4,
+            }
             else _CONTENT_FIELD_BY_KIND
         )
         content_field = content_fields.get(memory_kind)

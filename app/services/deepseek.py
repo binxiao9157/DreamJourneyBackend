@@ -7,7 +7,8 @@ import httpx
 from app.core.config import Settings
 from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_FACET_NAMES,
-    OWNER_TRUTH_SCHEMA_VERSION_V3,
+    OWNER_TRUTH_SCHEMA_VERSION_V4,
+    enrich_memory_payload_v4,
     validate_memory_facets,
     validate_memory_payload,
 )
@@ -604,9 +605,9 @@ class DeepSeekTextMemoryOrganizationProxy:
 只输出以下严格 JSON，content 必须使用对应类型的字段：
 {{
   "memories": [
-    {{"memoryKind":"experience","content":{{"event":"发生了什么","time":{{"start":null,"end":null,"precision":"unknown"}},"location":null,"participants":[],"actions":[],"outcome":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"confidence":0.9}}}}}},
-    {{"memoryKind":"knowledge","content":{{"statement":"用户明确表达的知识、观点或经验规律","knowledgeType":"personal_experience","domains":[],"applicability":null,"exceptions":[],"learnedFrom":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"confidence":0.9}}}}}},
-    {{"memoryKind":"emotion","content":{{"emotion":"情绪名称","expression":"用户如何描述这种感受","trigger":null,"targetPersonaId":null,"time":null,"intensity":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"confidence":0.9}}}}}}
+    {{"memoryKind":"experience","content":{{"event":"发生了什么","time":{{"start":null,"end":null,"precision":"unknown"}},"location":null,"participants":[],"actions":[],"outcome":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}}},
+    {{"memoryKind":"knowledge","content":{{"statement":"用户明确表达的知识、观点或经验规律","knowledgeType":"personal_experience","domains":[],"applicability":null,"exceptions":[],"learnedFrom":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}}},
+    {{"memoryKind":"emotion","content":{{"emotion":"情绪名称","expression":"用户如何描述这种感受","trigger":null,"targetPersonaId":null,"time":null,"intensity":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}}}
   ]
 }}
 
@@ -616,7 +617,7 @@ class DeepSeekTextMemoryOrganizationProxy:
 3. experience 必须有 event 和 time；原文没有时间时使用 start/end=null、precision=unknown，绝不能猜日期。
 4. knowledge 必须有 statement、knowledgeType 和 domains；个人经验规律使用 personal_experience，领域不明确时 domains=[]。
 5. emotion 必须有 emotion 和 expression；原文没有明确强度、对象或原因时保持 null。
-6. facets 必须包含 people/time/places/relationships/emotions/values/personality 七个数组和 confidence。
+6. facets 必须包含 people/time/places/relationships/emotions/values/personality/habits/goals/identity/reflections 十一个数组和 confidence。
 7. facet 条目格式为 {{"value":"原文支持的值","evidenceMode":"ownerStated","confidence":1.0}}；不可靠时不要填写。
 8. 不得生成诊断、评价、建议或原文没有表达的人名、地点、关系、因果和情绪。
 9. 合并原文中的重复表达，但不要把不同主题混成一个大段摘要。
@@ -652,11 +653,14 @@ class DeepSeekTextMemoryOrganizationProxy:
             raw_content = raw_memory.get("content")
             if not isinstance(raw_content, Mapping):
                 raise ValueError(f"organized text memory {position} has invalid content")
-            normalized_content = dict(raw_content)
+            normalized_content = enrich_memory_payload_v4(
+                kind=memory_kind,
+                payload=raw_content,
+            )
             validation = validate_memory_payload(
                 kind=memory_kind,
                 payload=normalized_content,
-                schema_version=OWNER_TRUTH_SCHEMA_VERSION_V3,
+                schema_version=OWNER_TRUTH_SCHEMA_VERSION_V4,
             )
             if not validation.accepted:
                 raise ValueError(
@@ -802,9 +806,9 @@ class DeepSeekLiveMemoryOrganizationProxy:
 只输出以下严格 JSON：
 {{
   "memories": [
-    {{"memoryKind":"experience","summary":"第一人称经历摘要","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[{{"value":"人物称呼","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"confidence":0.9}}}},
-    {{"memoryKind":"knowledge","claim":"用户明确表达的经验、知识或观点","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"confidence":0.9}}}},
-    {{"memoryKind":"emotion","label":"用户明确表达的感受及其对象或原因","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[{{"value":"怀念","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"values":[],"personality":[],"confidence":0.9}}}}
+    {{"memoryKind":"experience","summary":"第一人称经历摘要","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[{{"value":"人物称呼","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}},
+    {{"memoryKind":"knowledge","claim":"用户明确表达的经验、知识或观点","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}},
+    {{"memoryKind":"emotion","label":"用户明确表达的感受及其对象或原因","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[{{"value":"怀念","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}
   ]
 }}
 
@@ -815,7 +819,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
 4. role=assistant 只用于理解问题和上下文，不得成为证据，不得把助手的猜测、建议或诱导写成用户记忆。
 5. 不得补写用户没说过的人名、地点、时间、关系、因果、知识、情绪或态度。
 6. 合并重复表达，但不要把不同主题混成一条；保留第一人称语义，语言自然、简洁。
-7. facets 必须包含 people/time/places/relationships/emotions/values/personality 七个数组和 0 到 1 的 confidence；没有可靠值时数组为空。
+7. facets 必须包含 people/time/places/relationships/emotions/values/personality/habits/goals/identity/reflections 十一个数组和 0 到 1 的 confidence；没有可靠值时数组为空。
 8. 每个 facet 值必须包含 value、confidence、sourceTurnIndices 和 evidenceMode。用户原话直接表达用 ownerStated；只有确属推断时才用 inferred，禁止把推断伪装成用户陈述。
 9. facet 的 sourceTurnIndices 也只能引用 role=user；关系 facet 只是记忆内容，不代表账号、家庭或分享权限。
 10. 不要输出诊断、评价、行动建议、模型解释或 JSON 之外的文字。"""
@@ -884,7 +888,12 @@ class DeepSeekLiveMemoryOrganizationProxy:
             }
             for facet_name in OWNER_TRUTH_FACET_NAMES:
                 normalized_entries: List[Dict[str, Any]] = []
-                for facet_position, raw_entry in enumerate(raw_facets[facet_name]):
+                raw_facet_entries = raw_facets.get(facet_name, [])
+                if not isinstance(raw_facet_entries, list):
+                    raise ValueError(
+                        f"organized memory {position} facet {facet_name} must be a list"
+                    )
+                for facet_position, raw_entry in enumerate(raw_facet_entries):
                     facet_source_indices = raw_entry.get("sourceTurnIndices")
                     if (
                         not isinstance(facet_source_indices, list)

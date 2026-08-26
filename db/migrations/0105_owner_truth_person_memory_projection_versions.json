@@ -1,0 +1,12 @@
+{
+  "version": "0105",
+  "name": "owner_truth_person_memory_projection_versions",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthPersonMemoryModelV1",
+  "requiresOldWorkerDrain": true,
+  "releaseFlags": {
+    "ownerTruthMemoryProjectionWorker": true,
+    "ownerTruthPersonMemoryProfile": true
+  }
+}

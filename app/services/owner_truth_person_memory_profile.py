@@ -14,6 +14,12 @@ import json
 import re
 from typing import Any, Iterable, Mapping
 
+from app.domain.owner_truth.person_memory_model import (
+    PERSON_BIOGRAPHY_PROJECTION_SCHEMA_VERSION,
+    PERSON_MEMORY_MODEL_ALGORITHM_VERSION,
+    PERSON_MEMORY_MODEL_SCHEMA_VERSION,
+    build_person_memory_model,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_formal_memory import (
     OwnerTruthFormalMemory,
@@ -24,12 +30,12 @@ from app.services.owner_truth_formal_memory import (
 )
 
 
-PERSON_MEMORY_PROFILE_SCHEMA_VERSION = "owner-truth-person-memory-profile-v1"
-PERSON_MEMORY_PROFILE_ALGORITHM_VERSION = "person-memory-dimension-summary-v1"
-PERSON_LIFE_RECORD_SCHEMA_VERSION = "owner-truth-person-life-record-v1"
-PERSON_LIFE_RECORD_ALGORITHM_VERSION = "person-life-record-plain-text-v1"
-PERSON_LIFE_STORY_SCHEMA_VERSION = "owner-truth-person-life-story-v1"
-PERSON_LIFE_STORY_ALGORITHM_VERSION = "person-life-story-chapter-projection-v1"
+PERSON_MEMORY_PROFILE_SCHEMA_VERSION = "owner-truth-person-memory-profile-v2"
+PERSON_MEMORY_PROFILE_ALGORITHM_VERSION = PERSON_MEMORY_MODEL_ALGORITHM_VERSION
+PERSON_LIFE_RECORD_SCHEMA_VERSION = "owner-truth-person-life-record-v2"
+PERSON_LIFE_RECORD_ALGORITHM_VERSION = "person-life-record-from-biography-v2"
+PERSON_LIFE_STORY_SCHEMA_VERSION = PERSON_BIOGRAPHY_PROJECTION_SCHEMA_VERSION
+PERSON_LIFE_STORY_ALGORITHM_VERSION = PERSON_MEMORY_MODEL_ALGORITHM_VERSION
 _MAX_FORMAL_MEMORY_COUNT = 10_000
 _MAX_DIMENSION_EVIDENCE = 8
 _MAX_LIFE_STORY_CHAPTERS = 12
@@ -60,6 +66,7 @@ class OwnerTruthPersonMemoryDimension:
     title: str
     narrative: str | None
     supporting_memory_ids: tuple[str, ...]
+    supporting_memory_version_ids: tuple[str, ...] = ()
 
     def public_contract(self) -> dict[str, Any]:
         return {
@@ -69,6 +76,7 @@ class OwnerTruthPersonMemoryDimension:
             "narrative": self.narrative,
             "supportingMemoryCount": len(self.supporting_memory_ids),
             "supportingMemoryIds": list(self.supporting_memory_ids),
+            "supportingMemoryVersionIds": list(self.supporting_memory_version_ids),
         }
 
 
@@ -81,6 +89,7 @@ class OwnerTruthPersonMemoryProfile:
     life_record: "OwnerTruthPersonLifeRecord"
     life_story: "OwnerTruthPersonLifeStory"
     dimensions: tuple[OwnerTruthPersonMemoryDimension, ...]
+    memory_model: Mapping[str, Any]
 
     def public_contract(self) -> dict[str, Any]:
         return {
@@ -94,6 +103,7 @@ class OwnerTruthPersonMemoryProfile:
             "lifeRecord": self.life_record.public_contract(),
             "lifeStory": self.life_story.public_contract(),
             "dimensions": [item.public_contract() for item in self.dimensions],
+            "memoryModel": _memory_model_summary(self.memory_model),
         }
 
 
@@ -126,6 +136,7 @@ class OwnerTruthPersonLifeStoryChapter:
     paragraphs: tuple[str, ...]
     supporting_memory_ids: tuple[str, ...]
     supporting_memory_version_ids: tuple[str, ...]
+    facets: tuple[str, ...] = ()
 
     @property
     def text(self) -> str:
@@ -142,6 +153,7 @@ class OwnerTruthPersonLifeStoryChapter:
             "supportingMemoryCount": len(self.supporting_memory_ids),
             "supportingMemoryIds": list(self.supporting_memory_ids),
             "supportingMemoryVersionIds": list(self.supporting_memory_version_ids),
+            "facets": list(self.facets),
         }
 
 
@@ -150,6 +162,8 @@ class OwnerTruthPersonLifeStory:
     title: str
     overview: str | None
     chapters: tuple[OwnerTruthPersonLifeStoryChapter, ...]
+    document_version: str | None = None
+    source_fingerprint: str | None = None
 
     def public_contract(self) -> dict[str, Any]:
         supporting_ids = tuple(
@@ -164,6 +178,8 @@ class OwnerTruthPersonLifeStory:
             "state": "ready" if self.chapters else "empty",
             "title": self.title,
             "overview": self.overview,
+            "documentVersion": self.document_version,
+            "sourceFingerprint": self.source_fingerprint,
             "chapterCount": len(self.chapters),
             "chapters": [chapter.public_contract() for chapter in self.chapters],
             "supportingMemoryCount": len(supporting_ids),
@@ -186,26 +202,13 @@ class OwnerTruthPersonMemoryProfileService:
 
     def read(self, *, context: OwnerTruthCommandContext) -> OwnerTruthPersonMemoryProfile:
         memories = self._all_current_memories(context=context)
-        dimensions = _build_dimensions(memories)
-        life_record = _build_life_record(dimensions)
-        life_story = _build_life_story(memories)
-        profile_version = _digest(
-            {
-                "schemaVersion": PERSON_MEMORY_PROFILE_SCHEMA_VERSION,
-                "algorithmVersion": PERSON_MEMORY_PROFILE_ALGORITHM_VERSION,
-                "inputs": [
-                    {
-                        "memoryId": item.memory_id,
-                        "memoryVersionId": item.current_version.version_id,
-                        "contentHash": item.current_version.content_hash,
-                    }
-                    for item in sorted(memories, key=lambda value: value.memory_id)
-                ],
-                "lifeRecord": life_record.public_contract(),
-                "lifeStory": life_story.public_contract(),
-                "dimensions": [item.public_contract() for item in dimensions],
-            }
+        memory_model = build_person_memory_model(
+            _person_model_entry(item) for item in memories
         )
+        dimensions = _dimensions_from_model(memory_model)
+        life_story = _life_story_from_model(memory_model)
+        life_record = _life_record_from_story(life_story)
+        profile_version = str(memory_model["modelVersion"])
         return OwnerTruthPersonMemoryProfile(
             vault_id=context.vault_id,
             profile_version=profile_version,
@@ -214,6 +217,7 @@ class OwnerTruthPersonMemoryProfileService:
             life_record=life_record,
             life_story=life_story,
             dimensions=dimensions,
+            memory_model=memory_model,
         )
 
     def _all_current_memories(
@@ -247,6 +251,162 @@ class OwnerTruthPersonMemoryProfileService:
                 "person-memory profile contains duplicate formal memories"
             )
         return tuple(items)
+
+
+def _person_model_entry(memory: OwnerTruthFormalMemory) -> dict[str, Any]:
+    version = memory.current_version
+    first_ref = next(
+        (item for item in version.evidence_refs if isinstance(item, Mapping)),
+        {},
+    )
+    return {
+        "memoryId": memory.memory_id,
+        "memoryVersionId": version.version_id,
+        "memoryVersion": version.version_number,
+        "memoryKind": memory.memory_kind,
+        "epistemicStatus": memory.epistemic_status,
+        "sensitivity": memory.sensitivity,
+        "contentSchemaVersion": version.content_schema_version,
+        "contentHash": version.content_hash,
+        "content": dict(version.content),
+        "evidenceRefs": [dict(item) for item in version.evidence_refs],
+        "sourceId": first_ref.get("sourceId"),
+        "sourceVersion": first_ref.get("sourceVersion"),
+    }
+
+
+def _memory_model_summary(model: Mapping[str, Any]) -> dict[str, Any]:
+    cognitive = model.get("cognitiveProjection")
+    relationships = model.get("relationshipProjection")
+    biography = model.get("biographyProjection")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (cognitive, relationships, biography)
+    ):
+        raise OwnerTruthPersonMemoryProfileError("person-memory model is incomplete")
+    return {
+        "schemaVersion": PERSON_MEMORY_MODEL_SCHEMA_VERSION,
+        "algorithmVersion": PERSON_MEMORY_MODEL_ALGORITHM_VERSION,
+        "state": str(model.get("state") or ""),
+        "modelVersion": str(model.get("modelVersion") or ""),
+        "sourceFingerprint": str(model.get("sourceFingerprint") or ""),
+        "memoryCount": int(model.get("memoryCount") or 0),
+        "cognitiveItemCount": sum(
+            len(cognitive.get(name, []))
+            for name in ("facts", "experiences", "observations", "mentalModels")
+            if isinstance(cognitive.get(name), list)
+        ),
+        "entityCount": len(relationships.get("entities", [])),
+        "relationCount": len(relationships.get("relations", [])),
+        "biographyDocumentVersion": str(biography.get("documentVersion") or ""),
+    }
+
+
+def _dimensions_from_model(
+    model: Mapping[str, Any],
+) -> tuple[OwnerTruthPersonMemoryDimension, ...]:
+    raw_dimensions = model.get("dimensions")
+    if not isinstance(raw_dimensions, list):
+        raise OwnerTruthPersonMemoryProfileError("person-memory model has no dimensions")
+    dimensions: list[OwnerTruthPersonMemoryDimension] = []
+    for item in raw_dimensions:
+        if not isinstance(item, Mapping):
+            raise OwnerTruthPersonMemoryProfileError("person-memory dimension is invalid")
+        memory_ids = item.get("supportingMemoryIds")
+        version_ids = item.get("supportingMemoryVersionIds")
+        if not isinstance(memory_ids, list) or not isinstance(version_ids, list):
+            raise OwnerTruthPersonMemoryProfileError(
+                "person-memory dimension evidence is invalid"
+            )
+        dimensions.append(
+            OwnerTruthPersonMemoryDimension(
+                dimension=str(item.get("dimension") or ""),
+                title=str(item.get("title") or ""),
+                narrative=(
+                    str(item["narrative"])
+                    if isinstance(item.get("narrative"), str)
+                    else None
+                ),
+                supporting_memory_ids=tuple(str(value) for value in memory_ids),
+                supporting_memory_version_ids=tuple(
+                    str(value) for value in version_ids
+                ),
+            )
+        )
+    return tuple(dimensions)
+
+
+def _life_story_from_model(model: Mapping[str, Any]) -> OwnerTruthPersonLifeStory:
+    biography = model.get("biographyProjection")
+    if not isinstance(biography, Mapping):
+        raise OwnerTruthPersonMemoryProfileError("person-memory model has no biography")
+    raw_sections = biography.get("sections")
+    if not isinstance(raw_sections, list):
+        raise OwnerTruthPersonMemoryProfileError("biography sections are invalid")
+    chapters: list[OwnerTruthPersonLifeStoryChapter] = []
+    for section in raw_sections:
+        if not isinstance(section, Mapping):
+            raise OwnerTruthPersonMemoryProfileError("biography section is invalid")
+        blocks = section.get("blocks")
+        evidence = section.get("evidence")
+        if not isinstance(blocks, list) or not isinstance(evidence, list):
+            raise OwnerTruthPersonMemoryProfileError("biography section evidence is invalid")
+        paragraphs = tuple(
+            str(block.get("text") or "").strip()
+            for block in blocks
+            if isinstance(block, Mapping) and str(block.get("text") or "").strip()
+        )
+        citations = [item for item in evidence if isinstance(item, Mapping)]
+        memory_ids = tuple(str(item.get("memoryId") or "") for item in citations)
+        version_ids = tuple(
+            str(item.get("memoryVersionId") or "") for item in citations
+        )
+        facets = tuple(
+            dict.fromkeys(
+                str(facet)
+                for block in blocks
+                if isinstance(block, Mapping)
+                for facet in block.get("facets", [])
+            )
+        )
+        if not paragraphs or any(not value for value in (*memory_ids, *version_ids)):
+            raise OwnerTruthPersonMemoryProfileError(
+                "biography section has incomplete text or evidence"
+            )
+        chapters.append(
+            OwnerTruthPersonLifeStoryChapter(
+                chapter_id=str(section.get("sectionId") or ""),
+                title=str(section.get("title") or ""),
+                paragraphs=paragraphs,
+                supporting_memory_ids=memory_ids,
+                supporting_memory_version_ids=version_ids,
+                facets=facets,
+            )
+        )
+    return OwnerTruthPersonLifeStory(
+        title=str(biography.get("title") or "我的人生记录"),
+        overview=(
+            str(biography["overview"])
+            if isinstance(biography.get("overview"), str)
+            else None
+        ),
+        chapters=tuple(chapters),
+        document_version=str(biography.get("documentVersion") or "") or None,
+        source_fingerprint=str(biography.get("sourceFingerprint") or "") or None,
+    )
+
+
+def _life_record_from_story(
+    story: OwnerTruthPersonLifeStory,
+) -> OwnerTruthPersonLifeRecord:
+    paragraphs = [story.overview] if story.overview else []
+    paragraphs.extend(
+        paragraph for chapter in story.chapters for paragraph in chapter.paragraphs
+    )
+    return OwnerTruthPersonLifeRecord(
+        title=story.title,
+        paragraphs=tuple(_unique(paragraphs)),
+    )
 
 
 def _build_dimensions(

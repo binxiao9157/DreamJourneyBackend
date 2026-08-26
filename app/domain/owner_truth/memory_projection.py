@@ -19,9 +19,10 @@ from .projection_rights import (
     OwnerTruthProjectionRightsSnapshot,
     implicit_projection_rights_snapshot,
 )
+from .person_memory_model import build_person_memory_model
 
 
-OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION = "owner-truth-memory-projection-v1"
+OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION = "owner-truth-memory-projection-v2"
 OWNER_TRUTH_MEMORY_PROJECTION_SOURCE = "v4"
 OWNER_TRUTH_MEMORY_PROJECTION_VISIBILITY = "owner"
 
@@ -213,6 +214,7 @@ def build_ready_memory_projection(
         entries.append(item.entry())
 
     entries.sort(key=lambda item: (item["memoryId"], item["memoryVersion"], item["memoryVersionId"]))
+    person_memory_model = build_person_memory_model(entries)
     source_hash = _digest(
         {
             "schemaVersion": OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION,
@@ -228,6 +230,7 @@ def build_ready_memory_projection(
             "projectionSource": OWNER_TRUTH_MEMORY_PROJECTION_SOURCE,
             "sourceHash": source_hash,
             "entries": entries,
+            "personMemoryModel": person_memory_model,
         }
     )
     return {
@@ -242,6 +245,7 @@ def build_ready_memory_projection(
         "sourceHash": source_hash,
         "entryCount": len(entries),
         "entries": entries,
+        "personMemoryModel": person_memory_model,
     }
 
 
@@ -283,6 +287,7 @@ def build_rebuilding_memory_projection(
         "checkpoint": None,
         "entryCount": 0,
         "entries": [],
+        "personMemoryModel": None,
     }
 
 
@@ -318,6 +323,11 @@ def projection_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "rebuildReason": snapshot.get("rebuildReason"),
         "checkpoint": snapshot.get("checkpoint"),
         "entryCount": int(snapshot.get("entryCount") or 0),
+        "personMemoryModelVersion": (
+            snapshot.get("personMemoryModel", {}).get("modelVersion")
+            if isinstance(snapshot.get("personMemoryModel"), Mapping)
+            else None
+        ),
         "entries": summarized_entries,
     }
 

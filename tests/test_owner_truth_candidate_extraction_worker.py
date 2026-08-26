@@ -478,10 +478,12 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
             ["experience", "emotion"],
         )
         self.assertTrue(
-            all(item.payload_schema_version == "owner-truth-v3" for item in command.proposals)
+            all(item.payload_schema_version == "owner-truth-v4" for item in command.proposals)
         )
         self.assertEqual(command.proposals[0].content["event"], "我小时候常和外公在河边散步。")
         self.assertEqual(command.proposals[1].content["emotion"], "怀念")
+        self.assertIn("lifeEvent", command.proposals[0].content["semantic"]["facets"])
+        self.assertIn("emotion", command.proposals[1].content["semantic"]["facets"])
 
     def test_owner_text_organization_switch_off_keeps_legacy_fallback(self) -> None:
         organizer = _RecordingTextMemoryOrganizer([])
@@ -748,12 +750,13 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(payloads["knowledge"]["content"]["claim"], "我认为陪伴比讲道理更重要。")
         self.assertEqual(payloads["emotion"]["content"]["label"], "我一直很怀念外公。")
         self.assertTrue(
-            all(payload["contentSchemaVersion"] == "owner-truth-v2" for payload in payloads.values())
+            all(payload["contentSchemaVersion"] == "owner-truth-v4" for payload in payloads.values())
         )
         self.assertEqual(
             payloads["experience"]["content"]["facets"]["people"][0]["value"],
             "外公",
         )
+        self.assertIn("lifeEvent", payloads["experience"]["content"]["semantic"]["facets"])
         self.assertTrue(all(payload["reviewMode"] == "single" for payload in payloads.values()))
         self.assertTrue(all(payload["confidence"] == 0.0 for payload in payloads.values()))
 

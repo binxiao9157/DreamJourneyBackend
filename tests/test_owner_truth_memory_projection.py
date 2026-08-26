@@ -161,7 +161,12 @@ class OwnerTruthMemoryProjectionTests(unittest.TestCase):
 
         self.assertEqual(first.outcome, "rebuilt")
         self.assertEqual(second.outcome, "unchanged")
-        self.assertEqual(first.snapshot["schemaVersion"], "owner-truth-memory-projection-v1")
+        self.assertEqual(first.snapshot["schemaVersion"], "owner-truth-memory-projection-v2")
+        self.assertEqual(first.snapshot["personMemoryModel"]["memoryCount"], 1)
+        self.assertEqual(
+            first.snapshot["personMemoryModel"]["biographyProjection"]["state"],
+            "ready",
+        )
         self.assertEqual(first.snapshot["projectionSource"], "v4")
         self.assertEqual(first.snapshot["state"], "ready")
         self.assertEqual(first.snapshot["checkpoint"], second.snapshot["checkpoint"])

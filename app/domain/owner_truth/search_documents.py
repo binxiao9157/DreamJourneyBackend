@@ -22,6 +22,7 @@ from .memory_projection import OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION
 from .ontology import (
     OWNER_TRUTH_SCHEMA_VERSION_V2,
     OWNER_TRUTH_SCHEMA_VERSION_V3,
+    OWNER_TRUTH_SCHEMA_VERSION_V4,
     flatten_memory_facets,
 )
 
@@ -104,6 +105,7 @@ def _private_search_text(
     if content_schema_version in {
         OWNER_TRUTH_SCHEMA_VERSION_V2,
         OWNER_TRUTH_SCHEMA_VERSION_V3,
+        OWNER_TRUTH_SCHEMA_VERSION_V4,
     }:
         facets = searchable_content.pop("facets", None)
         facet_terms = tuple(

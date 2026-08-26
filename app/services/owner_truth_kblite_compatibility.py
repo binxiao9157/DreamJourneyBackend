@@ -22,6 +22,7 @@ from app.domain.owner_truth.memory_projection import (
 from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION_V3,
+    OWNER_TRUTH_SCHEMA_VERSION_V4,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_memory_projection import (
@@ -133,6 +134,7 @@ def _compatibility_fact(
     if content_schema_version not in {
         OWNER_TRUTH_SCHEMA_VERSION,
         OWNER_TRUTH_SCHEMA_VERSION_V3,
+        OWNER_TRUTH_SCHEMA_VERSION_V4,
     }:
         return None
     content = entry.get("content")
@@ -140,7 +142,10 @@ def _compatibility_fact(
         return None
     claim = _nonblank_text(
         content.get("statement")
-        if content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V3
+        if content_schema_version in {
+            OWNER_TRUTH_SCHEMA_VERSION_V3,
+            OWNER_TRUTH_SCHEMA_VERSION_V4,
+        }
         else content.get("claim")
     )
     if claim is None:
@@ -263,11 +268,15 @@ class OwnerTruthKBLiteCompatibilityReadService:
             elif content_schema_version not in {
                 OWNER_TRUTH_SCHEMA_VERSION,
                 OWNER_TRUTH_SCHEMA_VERSION_V3,
+                OWNER_TRUTH_SCHEMA_VERSION_V4,
             }:
                 reason = "content_schema_not_supported"
             elif not isinstance(content, Mapping) or _nonblank_text(
                 content.get("statement")
-                if content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V3
+                if content_schema_version in {
+                    OWNER_TRUTH_SCHEMA_VERSION_V3,
+                    OWNER_TRUTH_SCHEMA_VERSION_V4,
+                }
                 else content.get("claim")
             ) is None:
                 reason = "knowledge_claim_missing"

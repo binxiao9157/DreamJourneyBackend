@@ -17,8 +17,9 @@ from .contracts import MemoryKind
 OWNER_TRUTH_SCHEMA_VERSION = "owner-truth-v1"
 OWNER_TRUTH_SCHEMA_VERSION_V2 = "owner-truth-v2"
 OWNER_TRUTH_SCHEMA_VERSION_V3 = "owner-truth-v3"
-OWNER_TRUTH_CURRENT_SCHEMA_VERSION = OWNER_TRUTH_SCHEMA_VERSION_V3
-OWNER_TRUTH_FACET_NAMES = (
+OWNER_TRUTH_SCHEMA_VERSION_V4 = "owner-truth-v4"
+OWNER_TRUTH_CURRENT_SCHEMA_VERSION = OWNER_TRUTH_SCHEMA_VERSION_V4
+OWNER_TRUTH_BASE_FACET_NAMES = (
     "people",
     "time",
     "places",
@@ -26,6 +27,28 @@ OWNER_TRUTH_FACET_NAMES = (
     "emotions",
     "values",
     "personality",
+)
+OWNER_TRUTH_EXTENDED_FACET_NAMES = (
+    "habits",
+    "goals",
+    "identity",
+    "reflections",
+)
+OWNER_TRUTH_FACET_NAMES = (
+    *OWNER_TRUTH_BASE_FACET_NAMES,
+    *OWNER_TRUTH_EXTENDED_FACET_NAMES,
+)
+OWNER_TRUTH_SEMANTIC_FACETS = (
+    "lifeEvent",
+    "knowledge",
+    "emotion",
+    "relationship",
+    "value",
+    "personality",
+    "habit",
+    "goal",
+    "identity",
+    "reflection",
 )
 OWNER_TRUTH_FACET_EVIDENCE_MODES = ("ownerStated", "inferred")
 _MAX_FACET_VALUES_PER_KIND = 32
@@ -88,12 +111,16 @@ def _confidence(value: Any) -> float | None:
     return normalized
 
 
-def validate_memory_facets(value: Any) -> OntologyValidation:
+def validate_memory_facets(
+    value: Any,
+    *,
+    facet_names: tuple[str, ...] = OWNER_TRUTH_BASE_FACET_NAMES,
+) -> OntologyValidation:
     if not isinstance(value, Mapping):
         return OntologyValidation(False, False, "invalidFacets", "facets")
     if _confidence(value.get("confidence")) is None:
         return OntologyValidation(False, False, "invalidFacetConfidence", "confidence")
-    for facet_name in OWNER_TRUTH_FACET_NAMES:
+    for facet_name in facet_names:
         entries = value.get(facet_name)
         if not isinstance(entries, list) or len(entries) > _MAX_FACET_VALUES_PER_KIND:
             return OntologyValidation(False, False, "invalidFacetList", facet_name)
@@ -170,12 +197,15 @@ def validate_memory_payload(
         OWNER_TRUTH_SCHEMA_VERSION,
         OWNER_TRUTH_SCHEMA_VERSION_V2,
         OWNER_TRUTH_SCHEMA_VERSION_V3,
+        OWNER_TRUTH_SCHEMA_VERSION_V4,
     }:
         return OntologyValidation(
             accepted=False,
             quarantined=True,
             code="unknownSchemaVersion",
         )
+    if normalized_schema == OWNER_TRUTH_SCHEMA_VERSION_V4:
+        return _validate_v4_memory_payload(kind=kind, payload=payload)
     if normalized_schema == OWNER_TRUTH_SCHEMA_VERSION_V3:
         return _validate_v3_memory_payload(kind=kind, payload=payload)
 
@@ -249,17 +279,243 @@ def _validate_v3_memory_payload(
     return validate_memory_facets(payload.get("facets"))
 
 
+def _facet_entries(value: Any, facet_name: str) -> list[Mapping[str, Any]]:
+    if not isinstance(value, Mapping):
+        return []
+    entries = value.get(facet_name)
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, Mapping)]
+
+
+def _primary_text(*, kind: MemoryKind, payload: Mapping[str, Any]) -> str:
+    keys = {
+        MemoryKind.EXPERIENCE: ("event", "summary"),
+        MemoryKind.KNOWLEDGE: ("statement", "claim"),
+        MemoryKind.EMOTION: ("expression", "emotion", "label"),
+    }[kind]
+    for key in keys:
+        value = payload.get(key)
+        if _nonblank_string(value):
+            return str(value).strip()
+    return ""
+
+
+def _semantic_facets(*, kind: MemoryKind, facets: Mapping[str, Any]) -> list[str]:
+    values = {
+        {
+            MemoryKind.EXPERIENCE: "lifeEvent",
+            MemoryKind.KNOWLEDGE: "knowledge",
+            MemoryKind.EMOTION: "emotion",
+        }[kind]
+    }
+    if _facet_entries(facets, "people") or _facet_entries(facets, "relationships"):
+        values.add("relationship")
+    mappings = {
+        "emotions": "emotion",
+        "values": "value",
+        "personality": "personality",
+        "habits": "habit",
+        "goals": "goal",
+        "identity": "identity",
+        "reflections": "reflection",
+    }
+    for facet_name, semantic_name in mappings.items():
+        if _facet_entries(facets, facet_name):
+            values.add(semantic_name)
+    return [name for name in OWNER_TRUTH_SEMANTIC_FACETS if name in values]
+
+
+def _semantic_entities(facets: Mapping[str, Any]) -> list[dict[str, Any]]:
+    entities: list[dict[str, Any]] = []
+    for facet_name, entity_type in (("people", "person"), ("places", "place")):
+        for entry in _facet_entries(facets, facet_name):
+            entities.append(
+                {
+                    "entityType": entity_type,
+                    "name": str(entry.get("value") or "").strip(),
+                    "evidenceMode": str(entry.get("evidenceMode") or "ownerStated"),
+                    "confidence": float(entry.get("confidence") or 0.0),
+                }
+            )
+    return entities
+
+
+def _emotion_evidence(
+    *,
+    kind: MemoryKind,
+    payload: Mapping[str, Any],
+    facets: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    values = [
+        {
+            "emotion": str(entry.get("value") or "").strip(),
+            "evidenceMode": str(entry.get("evidenceMode") or "ownerStated"),
+            "confidence": float(entry.get("confidence") or 0.0),
+        }
+        for entry in _facet_entries(facets, "emotions")
+    ]
+    if kind is MemoryKind.EMOTION and not values:
+        emotion = str(payload.get("emotion") or payload.get("label") or "").strip()
+        if emotion:
+            values.append(
+                {
+                    "emotion": emotion,
+                    "evidenceMode": "ownerStated",
+                    "confidence": float(facets.get("confidence") or 0.0),
+                }
+            )
+    return values
+
+
+def enrich_memory_payload_v4(
+    *,
+    kind: MemoryKind,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the V4 multi-facet form without inventing new user facts.
+
+    The three historical ``MemoryKind`` values remain routing keys for old
+    clients and database constraints. ``semantic.facets`` is the non-exclusive
+    classification used by person, graph and biography projections.
+    """
+
+    result = dict(payload)
+    if kind is MemoryKind.EXPERIENCE:
+        event = str(result.get("event") or result.get("summary") or "").strip()
+        result["event"] = event
+        time_value = result.get("time")
+        if not isinstance(time_value, Mapping):
+            time_value = {"start": None, "end": None, "precision": "unknown"}
+        result["time"] = dict(time_value)
+    elif kind is MemoryKind.KNOWLEDGE:
+        result["statement"] = str(
+            result.get("statement") or result.get("claim") or ""
+        ).strip()
+        result["knowledgeType"] = str(
+            result.get("knowledgeType") or "personal_experience"
+        ).strip()
+        domains = result.get("domains")
+        result["domains"] = list(domains) if isinstance(domains, (list, tuple)) else []
+    else:
+        emotion = str(result.get("emotion") or result.get("label") or "").strip()
+        expression = str(
+            result.get("expression") or result.get("label") or emotion
+        ).strip()
+        result["emotion"] = emotion
+        result["expression"] = expression
+
+    raw_facets = result.get("facets")
+    facets = dict(raw_facets) if isinstance(raw_facets, Mapping) else {}
+    for facet_name in OWNER_TRUTH_FACET_NAMES:
+        entries = facets.get(facet_name)
+        facets[facet_name] = list(entries) if isinstance(entries, (list, tuple)) else []
+    confidence = _confidence(facets.get("confidence"))
+    facets["confidence"] = confidence if confidence is not None else 0.0
+    result["facets"] = facets
+
+    narrative = _primary_text(kind=kind, payload=result)
+    title = narrative.rstrip("。！？!?；;")[:72]
+    time_value = result.get("time") if kind is MemoryKind.EXPERIENCE else None
+    result["semantic"] = {
+        "primaryKind": {
+            MemoryKind.EXPERIENCE: "lifeEvent",
+            MemoryKind.KNOWLEDGE: "knowledge",
+            MemoryKind.EMOTION: "emotion",
+        }[kind],
+        "facets": _semantic_facets(kind=kind, facets=facets),
+        "title": title,
+        "narrative": narrative,
+        "eventTime": dict(time_value) if isinstance(time_value, Mapping) else None,
+        "entities": _semantic_entities(facets),
+        "emotionEvidence": _emotion_evidence(
+            kind=kind,
+            payload=result,
+            facets=facets,
+        ),
+    }
+    return result
+
+
+def canonicalize_memory_payload(
+    *,
+    kind: MemoryKind,
+    payload: Mapping[str, Any],
+    schema_version: str,
+) -> dict[str, Any]:
+    """Canonicalize a payload before it crosses an authority write boundary.
+
+    V4 keeps a derived ``semantic`` envelope beside the reviewed fields. An
+    Owner correction can change the primary text or facets, so the envelope
+    must be rebuilt before the corrected value is hashed and persisted.
+    Earlier schemas remain compatible and are returned as normalized maps.
+    """
+
+    normalized = dict(payload)
+    if str(schema_version or "").strip() == OWNER_TRUTH_SCHEMA_VERSION_V4:
+        return enrich_memory_payload_v4(kind=kind, payload=normalized)
+    return normalized
+
+
+def _validate_v4_memory_payload(
+    *,
+    kind: MemoryKind,
+    payload: Mapping[str, Any],
+) -> OntologyValidation:
+    typed = _validate_v3_memory_payload(kind=kind, payload=payload)
+    if not typed.accepted:
+        return typed
+    facets = validate_memory_facets(
+        payload.get("facets"),
+        facet_names=OWNER_TRUTH_FACET_NAMES,
+    )
+    if not facets.accepted:
+        return facets
+    semantic = payload.get("semantic")
+    if not isinstance(semantic, Mapping):
+        return OntologyValidation(False, False, "invalidSemanticMemory", "semantic")
+    expected_semantic = enrich_memory_payload_v4(kind=kind, payload=payload)["semantic"]
+    if dict(semantic) != expected_semantic:
+        return OntologyValidation(False, False, "inconsistentSemanticProjection", "semantic")
+    primary_kind = str(semantic.get("primaryKind") or "").strip()
+    semantic_facets = semantic.get("facets")
+    if primary_kind not in OWNER_TRUTH_SEMANTIC_FACETS:
+        return OntologyValidation(False, False, "invalidSemanticPrimaryKind", "semantic.primaryKind")
+    if (
+        not isinstance(semantic_facets, list)
+        or not semantic_facets
+        or any(value not in OWNER_TRUTH_SEMANTIC_FACETS for value in semantic_facets)
+        or len(set(semantic_facets)) != len(semantic_facets)
+        or primary_kind not in semantic_facets
+    ):
+        return OntologyValidation(False, False, "invalidSemanticFacets", "semantic.facets")
+    for field in ("title", "narrative"):
+        if not _nonblank_string(semantic.get(field)):
+            return OntologyValidation(False, False, "invalidSemanticText", f"semantic.{field}")
+    if not isinstance(semantic.get("entities"), list) or not isinstance(
+        semantic.get("emotionEvidence"), list
+    ):
+        return OntologyValidation(False, False, "invalidSemanticEvidence", "semantic")
+    return OntologyValidation(True, False, "accepted")
+
+
 __all__ = [
     "MEMORY_ONTOLOGY_V1",
     "OWNER_TRUTH_CURRENT_SCHEMA_VERSION",
+    "OWNER_TRUTH_BASE_FACET_NAMES",
+    "OWNER_TRUTH_EXTENDED_FACET_NAMES",
     "OWNER_TRUTH_FACET_EVIDENCE_MODES",
     "OWNER_TRUTH_FACET_NAMES",
+    "OWNER_TRUTH_SEMANTIC_FACETS",
     "OWNER_TRUTH_SCHEMA_VERSION",
     "OWNER_TRUTH_SCHEMA_VERSION_V2",
     "OWNER_TRUTH_SCHEMA_VERSION_V3",
+    "OWNER_TRUTH_SCHEMA_VERSION_V4",
     "MemoryOntologyDefinition",
     "OntologyValidation",
+    "canonicalize_memory_payload",
     "empty_memory_facets",
+    "enrich_memory_payload_v4",
     "flatten_memory_facets",
     "validate_memory_facets",
     "validate_memory_payload",
