@@ -161,6 +161,69 @@ class OwnerTruthPersonMemoryModelTests(unittest.TestCase):
         self.assertEqual(first["biographyProjection"]["sections"], [])
         self.assertEqual(first["relationshipProjection"]["relations"], [])
 
+    def test_equivalent_atomic_memories_become_one_semantic_group_with_all_evidence(self) -> None:
+        entries = [
+            _entry(
+                suffix=10,
+                kind="experience",
+                content={
+                    "summary": "我在北京大学完成了本科阶段学习",
+                    "facets": _facets(places=["北京大学"], identity=["本科生"]),
+                },
+            ),
+            _entry(
+                suffix=11,
+                kind="experience",
+                content={
+                    "summary": "我在北京大学完成了本科阶段学习",
+                    "facets": _facets(places=["北京大学"], identity=["毕业生"]),
+                },
+            ),
+        ]
+
+        model = build_person_memory_model(entries)
+
+        consolidation = model["semanticConsolidation"]
+        self.assertEqual(consolidation["sourceMemoryCount"], 2)
+        self.assertEqual(consolidation["groupCount"], 1)
+        self.assertEqual(consolidation["mergedGroupCount"], 1)
+        group = consolidation["groups"][0]
+        self.assertEqual(group["status"], "merged")
+        self.assertEqual(group["supportingMemoryCount"], 2)
+        self.assertEqual(len(group["evidence"]), 2)
+        self.assertEqual(len(model["cognitiveProjection"]["experiences"]), 1)
+        self.assertEqual(model["biographyProjection"]["supportingMemoryCount"], 2)
+
+    def test_explicit_single_value_conflict_is_quarantined_from_cognitive_projection(self) -> None:
+        entries = [
+            _entry(
+                suffix=20,
+                kind="knowledge",
+                content={
+                    "claim": "我现在在甲公司工作",
+                    "facets": _facets(identity=["甲公司员工"]),
+                },
+            ),
+            _entry(
+                suffix=21,
+                kind="knowledge",
+                content={
+                    "claim": "我现在在乙公司工作",
+                    "facets": _facets(identity=["乙公司员工"]),
+                },
+            ),
+        ]
+
+        model = build_person_memory_model(entries)
+
+        consolidation = model["semanticConsolidation"]
+        self.assertEqual(consolidation["conflictGroupCount"], 1)
+        self.assertEqual(model["unresolvedConflictCount"], 1)
+        group = consolidation["groups"][0]
+        self.assertEqual(group["status"], "conflict")
+        self.assertEqual(len(group["evidence"]), 2)
+        self.assertEqual(model["cognitiveProjection"]["facts"], [])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -239,15 +239,80 @@ class OwnerTruthContextMaterializationService:
                 raise OwnerTruthContextMaterializationError("Projection contains duplicate MemoryVersion")
             entries_by_version[version_id] = entry
 
+        semantic_groups = self._semantic_group_by_version(projection)
         typed_citations: list[dict[str, Any]] = []
         rendered_entries: list[tuple[dict[str, Any], str]] = []
+        rendered_group_ids: set[str] = set()
         for selected in selected_context:
             citation, entry = self._resolve_selected_entry(
                 selected=selected,
                 entries_by_version=entries_by_version,
             )
-            typed_citations.append(citation)
-            rendered_entries.append((citation, self._render_entry(entry=entry, citation=citation)))
+            semantic_group = semantic_groups.get(citation["memoryVersionId"])
+            if semantic_group is None:
+                typed_citations.append(citation)
+                rendered_entries.append(
+                    (citation, self._render_entry(entry=entry, citation=citation))
+                )
+                continue
+
+            group_id = _nonblank_text(
+                semantic_group.get("groupId"),
+                field="semantic groupId",
+            )
+            if group_id in rendered_group_ids:
+                continue
+            status = _nonblank_text(
+                semantic_group.get("status"),
+                field="semantic group status",
+            )
+            if status not in {"ready", "merged"}:
+                raise OwnerTruthContextMaterializationError(
+                    "unresolved semantic conflict cannot be materialized"
+                )
+            representative_version_id = _nonblank_text(
+                semantic_group.get("representativeMemoryVersionId"),
+                field="semantic representativeMemoryVersionId",
+            )
+            if citation["memoryVersionId"] != representative_version_id:
+                raise OwnerTruthContextMaterializationError(
+                    "selected Context item is not the semantic representative"
+                )
+            supporting_version_ids = semantic_group.get("supportingMemoryVersionIds")
+            if not isinstance(supporting_version_ids, list) or not supporting_version_ids:
+                raise OwnerTruthContextMaterializationError(
+                    "semantic group supporting MemoryVersions are invalid"
+                )
+            group_citations = [
+                self._citation_from_projection_entry(
+                    entry=self._require_projection_entry(
+                        entries_by_version=entries_by_version,
+                        version_id=_nonblank_text(
+                            version_id,
+                            field="semantic supportingMemoryVersionId",
+                        ),
+                    ),
+                    vault_id=citation["vaultId"],
+                )
+                for version_id in supporting_version_ids
+            ]
+            if representative_version_id not in {
+                item["memoryVersionId"] for item in group_citations
+            }:
+                raise OwnerTruthContextMaterializationError(
+                    "semantic representative is not part of its evidence"
+                )
+            typed_citations.extend(group_citations)
+            rendered_entries.append(
+                (
+                    citation,
+                    self._render_semantic_group(
+                        group=semantic_group,
+                        group_id=group_id,
+                    ),
+                )
+            )
+            rendered_group_ids.add(group_id)
 
         text, source_count, truncated = self._bounded_generation_text(rendered_entries)
         return typed_citations, {
@@ -257,6 +322,106 @@ class OwnerTruthContextMaterializationService:
             "sourceCount": source_count,
             "maxChars": OWNER_TRUTH_CONTEXT_MATERIALIZATION_MAX_CHARS,
             "truncated": truncated,
+        }
+
+    @staticmethod
+    def _semantic_group_by_version(
+        projection: Mapping[str, Any],
+    ) -> dict[str, Mapping[str, Any]]:
+        model = projection.get("personMemoryModel")
+        if not isinstance(model, Mapping):
+            return {}
+        consolidation = model.get("semanticConsolidation")
+        if not isinstance(consolidation, Mapping):
+            return {}
+        groups = consolidation.get("groups")
+        if not isinstance(groups, list):
+            raise OwnerTruthContextMaterializationError(
+                "person-memory semantic consolidation groups are invalid"
+            )
+        result: dict[str, Mapping[str, Any]] = {}
+        for group in groups:
+            if not isinstance(group, Mapping):
+                raise OwnerTruthContextMaterializationError(
+                    "person-memory semantic consolidation group is invalid"
+                )
+            version_ids = group.get("supportingMemoryVersionIds")
+            if not isinstance(version_ids, list) or not version_ids:
+                raise OwnerTruthContextMaterializationError(
+                    "person-memory semantic group evidence is invalid"
+                )
+            for version_id in version_ids:
+                normalized = _nonblank_text(
+                    version_id,
+                    field="semantic supportingMemoryVersionId",
+                )
+                if normalized in result:
+                    raise OwnerTruthContextMaterializationError(
+                        "MemoryVersion belongs to multiple semantic groups"
+                    )
+                result[normalized] = group
+        return result
+
+    @staticmethod
+    def _require_projection_entry(
+        *,
+        entries_by_version: Mapping[str, Mapping[str, Any]],
+        version_id: str,
+    ) -> Mapping[str, Any]:
+        entry = entries_by_version.get(version_id)
+        if entry is None:
+            raise OwnerTruthContextMaterializationError(
+                "semantic evidence is not in the current Projection"
+            )
+        return entry
+
+    @staticmethod
+    def _citation_from_projection_entry(
+        *,
+        entry: Mapping[str, Any],
+        vault_id: str,
+    ) -> dict[str, Any]:
+        citation = entry.get("citation")
+        if not isinstance(citation, Mapping):
+            raise OwnerTruthContextMaterializationError(
+                "semantic evidence citation is invalid"
+            )
+        version = _nonnegative_int(
+            entry.get("memoryVersion"),
+            field="semantic evidence memoryVersion",
+        )
+        if version < 1:
+            raise OwnerTruthContextMaterializationError(
+                "semantic evidence MemoryVersion number is invalid"
+            )
+        source_version = _nonnegative_int(
+            citation.get("sourceVersion"),
+            field="semantic evidence sourceVersion",
+        )
+        if source_version < 1:
+            raise OwnerTruthContextMaterializationError(
+                "semantic evidence SourceVersion number is invalid"
+            )
+        return {
+            "vaultId": vault_id,
+            "memoryId": _nonblank_text(
+                citation.get("memoryId"),
+                field="semantic evidence memoryId",
+            ),
+            "memoryVersionId": _nonblank_text(
+                citation.get("memoryVersionId"),
+                field="semantic evidence memoryVersionId",
+            ),
+            "memoryVersion": version,
+            "sourceId": _nonblank_text(
+                citation.get("sourceId"),
+                field="semantic evidence sourceId",
+            ),
+            "sourceVersion": source_version,
+            "contentHash": _nonblank_text(
+                citation.get("contentHash"),
+                field="semantic evidence contentHash",
+            ),
         }
 
     @staticmethod
@@ -337,6 +502,26 @@ class OwnerTruthContextMaterializationService:
             f"[confirmed-memory:{citation['memoryVersionId']}|{memory_kind}]\n"
             f"{value}"
         )
+
+    @staticmethod
+    def _render_semantic_group(
+        *,
+        group: Mapping[str, Any],
+        group_id: str,
+    ) -> str:
+        memory_kind = _nonblank_text(
+            group.get("memoryKind"),
+            field="semantic group memoryKind",
+        )
+        if memory_kind not in _CONTENT_FIELD_BY_KIND:
+            raise OwnerTruthContextMaterializationError(
+                "semantic group memory kind is not supported"
+            )
+        narrative = _nonblank_text(
+            group.get("narrative"),
+            field="semantic group narrative",
+        )
+        return f"[confirmed-memory-group:{group_id}|{memory_kind}]\n{narrative}"
 
     @staticmethod
     def _bounded_generation_text(

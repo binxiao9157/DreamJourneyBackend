@@ -291,6 +291,8 @@ def _memory_model_summary(model: Mapping[str, Any]) -> dict[str, Any]:
         "modelVersion": str(model.get("modelVersion") or ""),
         "sourceFingerprint": str(model.get("sourceFingerprint") or ""),
         "memoryCount": int(model.get("memoryCount") or 0),
+        "consolidatedMemoryCount": int(model.get("consolidatedMemoryCount") or 0),
+        "unresolvedConflictCount": int(model.get("unresolvedConflictCount") or 0),
         "cognitiveItemCount": sum(
             len(cognitive.get(name, []))
             for name in ("facts", "experiences", "observations", "mentalModels")

@@ -540,6 +540,40 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
         self.assertNotIn(restricted.content["label"], str(summary))
         self.assertNotIn("'text':", str(summary))
 
+    def test_materialization_renders_one_semantic_memory_with_all_atomic_citations(self) -> None:
+        first = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "我在北京大学完成了本科阶段学习"},
+        )
+        second = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "我在北京大学完成了本科阶段学习"},
+        )
+        self._activate(first, command_id="context-materialization-duplicate-first")
+        self._activate(second, command_id="context-materialization-duplicate-second")
+        self.projection_service.rebuild(context=self.context)
+        self.store.search_projection_repository.rebuild(context=self.context)
+
+        result = OwnerTruthContextMaterializationService(self.store, enabled=True).build(
+            context=self.context,
+            payload={
+                "intent": "echo_chat",
+                "query": "北京大学",
+                "selectionMode": "deterministicTextFallback",
+            },
+        )
+
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(len(result["selectedContext"]), 1)
+        self.assertEqual(result["generationContext"]["sourceCount"], 1)
+        self.assertIn("confirmed-memory-group:", result["generationContext"]["text"])
+        self.assertIn("北京大学", result["generationContext"]["text"])
+        self.assertEqual(len(result["typedCitations"]), 2)
+        self.assertEqual(
+            {item["sourceId"] for item in result["typedCitations"]},
+            {first.source_id, second.source_id},
+        )
+
     def test_materialization_fails_closed_without_current_projection(self) -> None:
         candidate = self._candidate(
             kind=MemoryKind.EXPERIENCE,

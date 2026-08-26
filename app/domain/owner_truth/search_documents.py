@@ -471,15 +471,30 @@ def build_owner_truth_search_document_projection(
     entries = memory_projection.get("entries")
     if not isinstance(entries, list):
         raise OwnerTruthSearchDocumentProjectionError("memory projection entries must be a list")
-    documents = tuple(
-        _search_document_from_projection_entry(
-            entry,
-            vault_id=vault_id,
-            owner_subject_id=owner_subject_id,
-            authority_epoch=authority_epoch,
+    groups = _semantic_consolidation_groups(memory_projection)
+    if groups is None:
+        documents = tuple(
+            _search_document_from_projection_entry(
+                entry,
+                vault_id=vault_id,
+                owner_subject_id=owner_subject_id,
+                authority_epoch=authority_epoch,
+            )
+            for entry in entries
         )
-        for entry in entries
-    )
+    else:
+        entries_by_version = _projection_entries_by_version(entries)
+        documents = tuple(
+            _search_document_from_semantic_group(
+                group,
+                entries_by_version=entries_by_version,
+                vault_id=vault_id,
+                owner_subject_id=owner_subject_id,
+                authority_epoch=authority_epoch,
+            )
+            for group in groups
+            if str(group.get("status") or "") in {"ready", "merged"}
+        )
     return OwnerTruthSearchDocumentProjection(
         vault_id=vault_id,
         owner_subject_id=owner_subject_id,
@@ -676,6 +691,121 @@ def _search_document_from_projection_entry(
         sensitivity=str(entry.get("sensitivity") or ""),
         search_text=search_text,
         structured_terms=structured_terms,
+        text_was_truncated=was_truncated,
+    )
+
+
+def _semantic_consolidation_groups(
+    memory_projection: Mapping[str, Any],
+) -> list[Mapping[str, Any]] | None:
+    model = memory_projection.get("personMemoryModel")
+    if not isinstance(model, Mapping):
+        return None
+    consolidation = model.get("semanticConsolidation")
+    if not isinstance(consolidation, Mapping):
+        return None
+    groups = consolidation.get("groups")
+    if not isinstance(groups, list) or any(not isinstance(item, Mapping) for item in groups):
+        raise OwnerTruthSearchDocumentProjectionError(
+            "person-memory semantic consolidation is invalid"
+        )
+    return list(groups)
+
+
+def _projection_entries_by_version(
+    entries: list[Any],
+) -> dict[str, Mapping[str, Any]]:
+    result: dict[str, Mapping[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise OwnerTruthSearchDocumentProjectionError(
+                "memory projection entry must be an object"
+            )
+        citation = entry.get("citation")
+        if not isinstance(citation, Mapping):
+            raise OwnerTruthSearchDocumentProjectionError(
+                "memory projection entry citation is missing"
+            )
+        version_id = str(citation.get("memoryVersionId") or "").strip()
+        if not version_id or version_id in result:
+            raise OwnerTruthSearchDocumentProjectionError(
+                "memory projection entries contain an invalid current version"
+            )
+        result[version_id] = entry
+    return result
+
+
+def _search_document_from_semantic_group(
+    group: Mapping[str, Any],
+    *,
+    entries_by_version: Mapping[str, Mapping[str, Any]],
+    vault_id: str,
+    owner_subject_id: str,
+    authority_epoch: int,
+) -> OwnerTruthSearchDocument:
+    representative_id = str(group.get("representativeMemoryVersionId") or "").strip()
+    supporting_ids = group.get("supportingMemoryVersionIds")
+    if (
+        not representative_id
+        or not isinstance(supporting_ids, list)
+        or not supporting_ids
+        or any(not isinstance(item, str) or not item.strip() for item in supporting_ids)
+        or representative_id not in supporting_ids
+    ):
+        raise OwnerTruthSearchDocumentProjectionError(
+            "semantic memory group has invalid evidence references"
+        )
+    representative = entries_by_version.get(representative_id)
+    if representative is None:
+        raise OwnerTruthSearchDocumentProjectionError(
+            "semantic memory representative is not in the current projection"
+        )
+
+    search_parts: list[str] = []
+    structured_terms: set[str] = set()
+    was_truncated = False
+    group_text = str(group.get("searchText") or "").strip()
+    if group_text:
+        search_parts.append(_normalized_text(group_text, field="semantic group search text"))
+    for version_id in supporting_ids:
+        entry = entries_by_version.get(version_id)
+        if entry is None:
+            raise OwnerTruthSearchDocumentProjectionError(
+                "semantic memory evidence is not in the current projection"
+            )
+        content = entry.get("content")
+        content_schema_version = str(entry.get("contentSchemaVersion") or "")
+        text, terms, entry_was_truncated = _private_search_text(
+            content,
+            content_schema_version=content_schema_version,
+        )
+        if text:
+            search_parts.append(text)
+        structured_terms.update(terms)
+        was_truncated = was_truncated or entry_was_truncated
+
+    combined_text = " ".join(dict.fromkeys(search_parts))
+    if len(combined_text) > OWNER_TRUTH_MEMORY_SEARCH_MAX_DOCUMENT_CHARACTERS:
+        combined_text = combined_text[:OWNER_TRUTH_MEMORY_SEARCH_MAX_DOCUMENT_CHARACTERS]
+        was_truncated = True
+    citation = representative.get("citation")
+    if not isinstance(citation, Mapping):
+        raise OwnerTruthSearchDocumentProjectionError(
+            "semantic memory representative citation is missing"
+        )
+    return OwnerTruthSearchDocument(
+        memory_id=str(citation.get("memoryId") or ""),
+        memory_version_id=representative_id,
+        vault_id=vault_id,
+        owner_subject_id=owner_subject_id,
+        authority_epoch=authority_epoch,
+        content_hash=str(citation.get("contentHash") or ""),
+        content_schema_version=str(representative.get("contentSchemaVersion") or ""),
+        memory_kind=str(representative.get("memoryKind") or ""),
+        perspective_type=str(representative.get("perspectiveType") or ""),
+        sensitivity=str(representative.get("sensitivity") or ""),
+        search_text=combined_text,
+        structured_terms=tuple(sorted(structured_terms)),
         text_was_truncated=was_truncated,
     )
 

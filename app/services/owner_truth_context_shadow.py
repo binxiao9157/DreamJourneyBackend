@@ -193,6 +193,7 @@ class OwnerTruthContextShadowReadService:
             raise OwnerTruthMemoryProjectionError("ready projection checkpoint must be nonblank")
         if not isinstance(entries, list):
             raise OwnerTruthMemoryProjectionError("ready projection entries must be a list")
+        semantic_groups = self._semantic_group_by_version(projection)
 
         result = self._base_result(
             context=context,
@@ -222,7 +223,25 @@ class OwnerTruthContextShadowReadService:
             sensitivity = _nonblank_text(entry.get("sensitivity"))
             visibility = _nonblank_text(entry.get("visibility"))
             content_schema_version = _nonblank_text(entry.get("contentSchemaVersion"))
-            if memory_kind not in {"experience", "knowledge", "emotion"}:
+            semantic_group = semantic_groups.get(str(citation["memoryVersionId"]))
+            semantic_status = (
+                str(semantic_group.get("status") or "")
+                if semantic_group is not None
+                else ""
+            )
+            representative_version_id = (
+                str(semantic_group.get("representativeMemoryVersionId") or "")
+                if semantic_group is not None
+                else ""
+            )
+            if semantic_status == "conflict":
+                reason = "unresolved_semantic_conflict"
+            elif (
+                semantic_status == "merged"
+                and representative_version_id != citation["memoryVersionId"]
+            ):
+                reason = "semantic_duplicate_merged"
+            elif memory_kind not in {"experience", "knowledge", "emotion"}:
                 reason = "memory_kind_not_supported"
             elif perspective_type is None or epistemic_status is None:
                 reason = "memory_perspective_or_epistemic_status_missing"
@@ -256,6 +275,11 @@ class OwnerTruthContextShadowReadService:
                             "sourceVersion": citation["sourceVersion"],
                         },
                         "citation": deepcopy(citation),
+                        "semanticGroupId": (
+                            str(semantic_group.get("groupId") or "")
+                            if semantic_group is not None
+                            else None
+                        ),
                         "reason": "confirmed_current_memory_version",
                         # This is trace ordering, not a relevance score.  A
                         # future query ranker must replace the strategy before
@@ -282,6 +306,11 @@ class OwnerTruthContextShadowReadService:
                         "sourceVersion": citation["sourceVersion"],
                     },
                     "citation": deepcopy(citation),
+                    "semanticGroupId": (
+                        str(semantic_group.get("groupId") or "")
+                        if semantic_group is not None
+                        else None
+                    ),
                     "reason": reason,
                 }
             )
@@ -297,6 +326,41 @@ class OwnerTruthContextShadowReadService:
             selected_context=selected_context,
             filtered_context=filtered_context,
         )
+        return result
+
+    @staticmethod
+    def _semantic_group_by_version(
+        projection: Mapping[str, Any],
+    ) -> dict[str, Mapping[str, Any]]:
+        model = projection.get("personMemoryModel")
+        if not isinstance(model, Mapping):
+            return {}
+        consolidation = model.get("semanticConsolidation")
+        if not isinstance(consolidation, Mapping):
+            return {}
+        groups = consolidation.get("groups")
+        if not isinstance(groups, list):
+            raise OwnerTruthMemoryProjectionError(
+                "person-memory semantic consolidation groups are invalid"
+            )
+        result: dict[str, Mapping[str, Any]] = {}
+        for group in groups:
+            if not isinstance(group, Mapping):
+                raise OwnerTruthMemoryProjectionError(
+                    "person-memory semantic consolidation group is invalid"
+                )
+            version_ids = group.get("supportingMemoryVersionIds")
+            if not isinstance(version_ids, list) or not version_ids:
+                raise OwnerTruthMemoryProjectionError(
+                    "person-memory semantic group evidence is invalid"
+                )
+            for version_id in version_ids:
+                normalized = str(version_id or "").strip()
+                if not normalized or normalized in result:
+                    raise OwnerTruthMemoryProjectionError(
+                        "MemoryVersion belongs to multiple semantic groups"
+                    )
+                result[normalized] = group
         return result
 
 
