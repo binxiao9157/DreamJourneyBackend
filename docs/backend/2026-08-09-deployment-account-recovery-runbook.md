@@ -95,10 +95,14 @@ sudo docker compose run --rm --no-deps api \
 sudo docker compose run --rm --no-deps api \
   python scripts/migrate_db.py --verify --build-id "$DEPLOY_BUILD_ID"
 sudo docker compose up -d --force-recreate api
+sudo --preserve-env=DEPLOY_BUILD_ID \
+  bash scripts/rebuild-enabled-owner-truth-workers-after-migration.sh
 sudo systemctl start dreamjourney-db-backup.service
 ```
 
 最后一次备份必须对应迁移后的新 schema head。这样迁移前、迁移后各有一个可验证恢复点，也避免新代码 head 在迁移执行前把旧数据库误判为未知 schema。
+
+Worker 对齐脚本只重建 `.env` 中明确启用的 4 个 Owner Truth Worker。每个 Worker 必须同时满足：镜像 migration head 等于仓库 head、数据库已应用同一 head、activation preflight 为 ready，且强制重建后保持 `running`、`RestartCount=0`。任一检查失败都必须停止放流，不能保留旧 Worker 镜像继续运行。
 
 放流 Gate：
 
@@ -154,6 +158,7 @@ sudo docker compose up -d --force-recreate api
 - Git 工作区不干净、目标提交不属于 `origin/main`；
 - 最新有效备份缺失、过期或 schema head 不匹配；
 - migration dry-run/apply/verify 不一致；
+- 已启用 Worker 的镜像 migration head、数据库 head、activation preflight 或容器稳定性不一致；
 - `/ready` 的 database/schema/auth/incident 任一不是 ready；
 - Provider 配置校验泄露 secret，或 capability 从 fail-closed 意外变为 enabled；
 - 回滚需要 down migration 或恢复记录仍为 `NO_GO`。

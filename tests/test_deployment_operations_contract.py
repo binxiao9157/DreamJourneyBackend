@@ -1,3 +1,4 @@
+import os
 import subprocess
 import unittest
 from pathlib import Path
@@ -19,12 +20,45 @@ class DeploymentOperationsContractTests(unittest.TestCase):
         self.assertNotIn("TOKEN", result.stdout.upper())
         self.assertNotIn("PASSWORD", result.stdout.upper())
 
+    def test_post_migration_worker_alignment_contract_is_value_free(self):
+        script = ROOT / "scripts/rebuild-enabled-owner-truth-workers-after-migration.sh"
+        self.assertTrue(os.access(script, os.X_OK))
+        result = subprocess.run(
+            ["bash", str(script), "--contract-only"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn('"status":"passed"', result.stdout)
+        self.assertIn('"workerCount":4', result.stdout)
+        self.assertNotIn("TOKEN", result.stdout.upper())
+        self.assertNotIn("PASSWORD", result.stdout.upper())
+
+        source = script.read_text()
+        for required in (
+            "owner-truth-candidate-extraction-worker",
+            "owner-truth-memory-projection-worker",
+            "owner-truth-media-processing-worker",
+            "owner-truth-media-deletion-worker",
+            "migrate_db.py --verify",
+            "owner_truth_worker_activation",
+            "--force-recreate",
+            ".RestartCount",
+            "apiImageMigrationHeadMismatch",
+        ):
+            self.assertIn(required, source)
+
+        preflight = (ROOT / "scripts/deployment-preflight.sh").read_text()
+        self.assertIn("workerImageAlignmentScriptUnavailable", preflight)
+
     def test_runbook_fixes_one_operator_and_forbids_automatic_destructive_recovery(self):
         runbook = (ROOT / "docs/backend/2026-08-09-deployment-account-recovery-runbook.md").read_text()
         for required in (
             "ubuntu",
             "miao",
             "deployment-preflight.sh",
+            "rebuild-enabled-owner-truth-workers-after-migration.sh",
             "pull --ff-only origin main",
             "migrate_db.py --apply",
             "run-backend-readiness-deployed-smoke.sh",

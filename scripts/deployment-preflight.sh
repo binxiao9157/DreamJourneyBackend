@@ -26,6 +26,7 @@ contract_only() {
   require_directory "$ROOT"
   require_file "$ROOT/docker-compose.yml"
   require_file "$ROOT/scripts/migrate_db.py"
+  require_file "$ROOT/scripts/rebuild-enabled-owner-truth-workers-after-migration.sh"
   require_file "$ROOT/scripts/db/verify_latest_backup.py"
   require_file "$ROOT/scripts/db/run-recovery-deployed-smoke.sh"
   require_file "$ROOT/docs/backend/2026-08-09-deployment-account-recovery-runbook.md"
@@ -41,6 +42,8 @@ fi
 [[ "$(id -un)" == "$DEPLOY_OPERATOR" ]] || fail "operatorMismatch"
 [[ "$(id -u)" != "0" ]] || fail "rootLoginForbidden"
 require_directory "$DEPLOY_REPOSITORY/.git"
+sudo -n test -x "$DEPLOY_REPOSITORY/scripts/rebuild-enabled-owner-truth-workers-after-migration.sh" \
+  || fail "workerImageAlignmentScriptUnavailable"
 
 repository_owner="$(stat -c '%U' "$DEPLOY_REPOSITORY")"
 [[ "$repository_owner" == "$REPOSITORY_OWNER" ]] || fail "repositoryOwnerMismatch"
