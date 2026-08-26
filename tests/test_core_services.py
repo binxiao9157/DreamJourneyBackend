@@ -42,6 +42,7 @@ from app.services.deepseek import (
     DeepSeekImageAnalysisProxy,
     DeepSeekKnowledgeExtractionProxy,
     DeepSeekLiveMemoryOrganizationProxy,
+    DeepSeekTextMemoryOrganizationProxy,
 )
 from app.services.echo_delayed_reply_effects import ECHO_DELAYED_REPLY_SCHEMA_VERSION
 from app.services.safety_policy import (
@@ -1068,11 +1069,30 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
         self.assertIn("我记得外公的笑声", prompt)
         self.assertIn("那让你有什么感受", prompt)
         self.assertIn("role=assistant", prompt)
+        self.assertIn("整理不是润色", request["json"]["messages"][0]["content"])
+        self.assertIn("尽可能贴近用户原话", prompt)
+        self.assertIn("不得润色、文学化、委婉化、夸大或弱化", prompt)
+        self.assertIn("必须保留这种来源或不确定性", prompt)
         self.assertNotIn("audio", request["json"])
         self.assertNotIn("pcm", prompt.lower())
         self.assertEqual(request["json"]["response_format"], {"type": "json_object"})
         self.assertEqual(request["json"]["thinking"], {"type": "disabled"})
         self.assertGreaterEqual(request["json"]["max_tokens"], 4_096)
+
+    def test_text_memory_organization_is_objective_and_forbids_polishing(self):
+        proxy = DeepSeekTextMemoryOrganizationProxy(
+            Settings(deepseek_api_key="deepseek-secret")
+        )
+
+        request = proxy.build_request(text="我记得我大概是 2016 年毕业的。")
+        system_prompt = request["json"]["messages"][0]["content"]
+        prompt = request["json"]["messages"][1]["content"]
+
+        self.assertIn("整理不是润色", system_prompt)
+        self.assertIn("不得文学化、美化、委婉化、夸大或弱化", system_prompt)
+        self.assertIn("尽可能贴近用户原话", prompt)
+        self.assertIn("必须保留这种来源或不确定性", prompt)
+        self.assertIn("我记得我大概是 2016 年毕业的", prompt)
 
     def test_kb_extract_endpoint_rejects_non_ai_privacy_scope(self):
         client = TestClient(app)

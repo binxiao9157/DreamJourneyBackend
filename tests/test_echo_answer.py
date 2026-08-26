@@ -25,8 +25,27 @@ class DeepSeekEchoAnswerProxyTests(unittest.TestCase):
 
         self.assertEqual(request["json"]["model"], proxy.model)
         self.assertIn("资料不足时必须明确说", request["json"]["messages"][0]["content"])
+        self.assertIn("使用第一人称“我”", request["json"]["messages"][0]["content"])
+        self.assertIn("不要每次都追问", request["json"]["messages"][0]["content"])
+        self.assertIn("不得增删、替换、推断或美化", request["json"]["messages"][0]["content"])
         self.assertIn("父亲在西交利物浦大学读书", request["json"]["messages"][1]["content"])
         self.assertNotIn("server-secret", str(request["json"]))
+
+    def test_personal_prompt_uses_second_person_without_rewriting_formal_memory(self) -> None:
+        proxy = DeepSeekEchoAnswerProxy(
+            Settings(deepseek_api_key="server-secret", deepseek_base_url="https://provider.invalid")
+        )
+
+        request = proxy.build_request(
+            query="我在哪里读大学？",
+            generation_context="[archive] note=我的大学是在西交利物浦读的。",
+            persona_scope="personal",
+        )
+
+        system_prompt = request["json"]["messages"][0]["content"]
+        self.assertIn("使用“你”或“你的”", system_prompt)
+        self.assertIn("正式记忆原文", system_prompt)
+        self.assertIn("只可以在本轮回答", system_prompt)
 
     def test_memory_fallback_selects_the_most_relevant_confirmed_memory(self) -> None:
         answer = DeepSeekEchoAnswerProxy.fallback_answer(
@@ -38,7 +57,19 @@ class DeepSeekEchoAnswerProxyTests(unittest.TestCase):
             persona_scope="personal",
         )
 
-        self.assertEqual(answer, "根据已确认的记忆：我的大学是在西交利物浦读的。")
+        self.assertEqual(answer, "你的大学是在西交利物浦读的。")
+
+    def test_family_memory_fallback_uses_first_person_without_changing_fact(self) -> None:
+        answer = DeepSeekEchoAnswerProxy.fallback_answer(
+            query="你在哪里读大学？",
+            generation_context=(
+                "[archive] kind=text; title=求学经历; note=父亲在西交利物浦读大学。"
+            ),
+            persona_scope="family",
+            persona_name="父亲",
+        )
+
+        self.assertEqual(answer, "我在西交利物浦读大学。")
 
     def test_memory_fallback_does_not_return_an_unrelated_memory(self) -> None:
         answer = DeepSeekEchoAnswerProxy.fallback_answer(
@@ -50,7 +81,7 @@ class DeepSeekEchoAnswerProxyTests(unittest.TestCase):
         )
 
         self.assertTrue(answer.startswith(DeepSeekEchoAnswerProxy.memory_gap_marker))
-        self.assertIn("那我们来聊一聊吧", answer)
+        self.assertIn("愿意从你最先想到的部分聊起吗", answer)
 
 
 class EchoAnswerAPITests(unittest.TestCase):
@@ -217,7 +248,7 @@ class EchoAnswerAPITests(unittest.TestCase):
             )
         )
         self.assertNotIn(DeepSeekEchoAnswerProxy.memory_gap_marker, answer["text"])
-        self.assertIn("那我们来聊一聊吧", answer["text"])
+        self.assertIn("愿意从你最先想到的部分聊起吗", answer["text"])
         self.assertEqual(
             answer["memoryGrounding"],
             {
@@ -261,7 +292,7 @@ class EchoAnswerAPITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         answer = response.json()["answer"]
-        self.assertIn("那我们来聊一聊吧", answer["text"])
+        self.assertIn("愿意从你最先想到的部分聊起吗", answer["text"])
         self.assertEqual(answer["citations"], [])
         self.assertEqual(answer["memoryGrounding"]["outcome"], "gap")
         self.assertEqual(answer["memoryGrounding"]["handoff"], "ownerInterview")

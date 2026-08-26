@@ -16707,14 +16707,16 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
     persona_scope = str(raw_persona_scope or "personal").strip().lower()
     if memory_gap and provider_effects_allowed:
         if persona_scope == "family":
-            subject = str(payload.get("personaName") or "这位家人").strip() or "这位家人"
             answer_text = (
-                f"我还没有从{subject}已确认的记忆中找到这个答案。"
-                "如果你愿意，可以分享一段相关的故事，交给档案所有者确认。"
+                "这件事在我现有的记忆里还不够清楚。"
+                "如果你愿意，可以讲讲相关的故事，再交给档案所有者确认。"
             )
             memory_handoff = "familyContribution"
         else:
-            answer_text = "这段记忆我还不了解。那我们来聊一聊吧，你最先想到的是什么？"
+            answer_text = (
+                "关于这件事，我目前还了解得不够清楚。"
+                "愿意从你最先想到的部分聊起吗？"
+            )
             memory_handoff = "ownerInterview"
     else:
         memory_handoff = "none"
