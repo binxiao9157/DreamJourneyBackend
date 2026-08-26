@@ -77,7 +77,7 @@ class OwnerTruthContextAuthorityTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {"OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED": "true"},
-            clear=False,
+            clear=True,
         ):
             self.assertTrue(Settings.from_env().owner_truth_context_authority_enabled)
 
@@ -85,7 +85,7 @@ class OwnerTruthContextAuthorityTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {"OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED": "true"},
-            clear=False,
+            clear=True,
         ):
             self.assertTrue(Settings.from_env().owner_truth_context_authority_enabled)
 
