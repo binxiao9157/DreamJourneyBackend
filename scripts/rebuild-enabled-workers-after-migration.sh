@@ -130,7 +130,7 @@ inventory="$(
 
 enabled_services=()
 stopped_disabled_services=()
-while IFS='|' read -r worker_kind flag_name service_name enabled; do
+while IFS='|' read -r worker_kind flag_name service_name enabled <&3; do
   [[ -n "$worker_kind" ]] || continue
   if [[ "$enabled" != "1" ]]; then
     disabled_container_id="$(docker compose ps -q --all "$service_name")"
@@ -195,7 +195,7 @@ PY
 
   docker compose up -d --no-deps --force-recreate "$service_name"
   verify_stable_worker "$service_name"
-done <<< "$inventory"
+done 3<<< "$inventory"
 
 services_csv="$(IFS=,; printf '%s' "${enabled_services[*]-}")"
 stopped_csv="$(IFS=,; printf '%s' "${stopped_disabled_services[*]-}")"

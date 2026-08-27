@@ -45,6 +45,8 @@ class DeploymentOperationsContractTests(unittest.TestCase):
             "STABILITY_DELAY_SECONDS",
             "first_state",
             "second_state",
+            "read -r worker_kind flag_name service_name enabled <&3",
+            'done 3<<< "$inventory"',
             "workerRestartedAfterRecreate",
             "apiImageMigrationHeadMismatch",
         ):
