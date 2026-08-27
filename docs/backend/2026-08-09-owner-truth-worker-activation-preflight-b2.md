@@ -11,7 +11,7 @@ Owner Truth 的 Candidate、Memory、媒体处理和媒体删除 Worker 只能�
 统一预检模块：
 
 ```text
-app.async_effects.owner_truth_worker_activation
+app.async_effects.worker_activation
 ```
 
 预检只输出 Worker、是否就绪、原因和阻断依赖，不输出凭据、bucket、object key、Owner、Vault 或业务载荷。

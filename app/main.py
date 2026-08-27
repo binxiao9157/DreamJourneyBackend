@@ -24,7 +24,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without runtime 
 
 from app.core.config import settings
 from app.async_effects.contracts import is_async_effect_store_ready
-from app.async_effects.owner_truth_worker_activation import (
+from app.async_effects.worker_activation import (
     OwnerTruthWorkerKind,
     evaluate_owner_truth_worker_activation,
 )

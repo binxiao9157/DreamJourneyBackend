@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from app.async_effects.owner_truth_worker_activation import (
+from app.async_effects.worker_activation import (
     OwnerTruthWorkerKind,
     evaluate_owner_truth_worker_activation,
 )

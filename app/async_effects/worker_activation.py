@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from enum import Enum
 import json
 import secrets
 import sys
@@ -18,10 +19,6 @@ from app.async_effects.contracts import (
     is_async_effect_store_ready,
     resolve_async_effect_runtime_status,
 )
-from app.async_effects.owner_truth_worker_activation import (
-    OwnerTruthWorkerKind,
-    evaluate_owner_truth_worker_activation,
-)
 from app.async_effects.worker_deployment_registry import (
     LONG_RUNNING_WORKERS,
     deployment_spec_for,
@@ -29,6 +26,127 @@ from app.async_effects.worker_deployment_registry import (
 from app.core.config import Settings
 from app.services.provider_runtime import ProviderRuntimeInventory
 from app.services.store_factory import close_store, make_store, open_store
+
+
+class OwnerTruthWorkerKind(str, Enum):
+    CANDIDATE_EXTRACTION = "ownerTruthCandidateExtraction"
+    MEMORY_PROJECTION = "ownerTruthMemoryProjection"
+    MEDIA_PROCESSING = "ownerTruthMediaProcessing"
+    MEDIA_DELETION = "ownerTruthMediaDeletion"
+
+
+@dataclass(frozen=True)
+class OwnerTruthWorkerActivationDecision:
+    worker: OwnerTruthWorkerKind
+    ready: bool
+    reason: str
+    blocking_dependency: str | None = None
+
+    CONTRACT_VERSION = 1
+
+    def public_descriptor(self) -> dict[str, object]:
+        return {
+            "contractVersion": self.CONTRACT_VERSION,
+            "worker": self.worker.value,
+            "ready": self.ready,
+            "reason": self.reason,
+            "blockingDependency": self.blocking_dependency,
+        }
+
+
+_OWNER_WORKER_ENABLE_FLAGS = {
+    OwnerTruthWorkerKind.CANDIDATE_EXTRACTION: (
+        "owner_truth_candidate_extraction_worker_enabled",
+        "ownerTruthCandidateExtractionWorkerDisabled",
+    ),
+    OwnerTruthWorkerKind.MEMORY_PROJECTION: (
+        "owner_truth_memory_projection_worker_enabled",
+        "ownerTruthMemoryProjectionWorkerDisabled",
+    ),
+    OwnerTruthWorkerKind.MEDIA_PROCESSING: (
+        "owner_truth_media_processing_worker_enabled",
+        "ownerTruthMediaProcessingWorkerDisabled",
+    ),
+    OwnerTruthWorkerKind.MEDIA_DELETION: (
+        "owner_truth_media_deletion_worker_enabled",
+        "ownerTruthMediaDeletionWorkerDisabled",
+    ),
+}
+
+
+def _owner_blocked(
+    worker: OwnerTruthWorkerKind,
+    reason: str,
+    dependency: str,
+) -> OwnerTruthWorkerActivationDecision:
+    return OwnerTruthWorkerActivationDecision(
+        worker=worker,
+        ready=False,
+        reason=reason,
+        blocking_dependency=dependency,
+    )
+
+
+def evaluate_owner_truth_worker_activation(
+    *,
+    worker: OwnerTruthWorkerKind,
+    settings: Settings,
+    schema_ready: bool,
+    provider_inventory: ProviderRuntimeInventory | None = None,
+) -> OwnerTruthWorkerActivationDecision:
+    if settings.store_backend != "postgres":
+        return _owner_blocked(worker, "ownerTruthWorkerPostgresRequired", "store")
+
+    runtime = resolve_async_effect_runtime_status(
+        async_effect_v1_enabled=settings.async_effect_v1_enabled,
+        worker_enabled=settings.async_effect_worker_enabled,
+        schema_ready=bool(schema_ready),
+    )
+    if not runtime.allowed:
+        return _owner_blocked(worker, runtime.reason, "asyncEffectRuntime")
+
+    flag_name, disabled_reason = _OWNER_WORKER_ENABLE_FLAGS[worker]
+    if not bool(getattr(settings, flag_name)):
+        return _owner_blocked(worker, disabled_reason, "workerKillSwitch")
+
+    if (
+        worker is OwnerTruthWorkerKind.CANDIDATE_EXTRACTION
+        and settings.owner_truth_live_memory_organization_enabled
+        and not settings.deepseek_api_key
+    ):
+        return _owner_blocked(
+            worker,
+            "ownerTruthLiveMemoryOrganizerNotConfigured",
+            "deepSeek",
+        )
+
+    if (
+        worker is OwnerTruthWorkerKind.MEMORY_PROJECTION
+        and not settings.owner_truth_candidate_extraction_worker_enabled
+    ):
+        return _owner_blocked(
+            worker,
+            "ownerTruthCandidateExtractionWorkerDisabled",
+            "candidateExtraction",
+        )
+
+    if worker in {
+        OwnerTruthWorkerKind.MEDIA_PROCESSING,
+        OwnerTruthWorkerKind.MEDIA_DELETION,
+    }:
+        inventory = provider_inventory or ProviderRuntimeInventory(
+            settings,
+            validated_at_startup=True,
+        )
+        storage = inventory.status_for("ownerTruthMediaStorage")
+        if not storage.enabled or not storage.provider_ready:
+            return _owner_blocked(worker, storage.reason, "ownerTruthMediaStorage")
+
+    return OwnerTruthWorkerActivationDecision(
+        worker=worker,
+        ready=True,
+        reason="ownerTruthWorkerActivationReady",
+    )
 
 
 @dataclass(frozen=True)
@@ -317,8 +435,11 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "OwnerTruthWorkerActivationDecision",
+    "OwnerTruthWorkerKind",
     "WorkerActivationDecision",
     "WorkerReadinessProbeError",
+    "evaluate_owner_truth_worker_activation",
     "evaluate_worker_activation",
     "live_schema_ready",
     "main",

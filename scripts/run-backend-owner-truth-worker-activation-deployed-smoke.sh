@@ -26,7 +26,7 @@ for worker in "${workers[@]}"; do
   output_file="$(mktemp)"
   trap 'rm -f "$output_file"' EXIT
   set +e
-  PYTHONPATH=. "$PYTHON_BIN" -m app.async_effects.owner_truth_worker_activation \
+  PYTHONPATH=. "$PYTHON_BIN" -m app.async_effects.worker_activation \
     --worker "$worker" >"$output_file" 2>&1
   command_status=$?
   set -e
@@ -48,10 +48,20 @@ try:
 except json.JSONDecodeError as error:
     raise SystemExit("worker preflight descriptor is not JSON") from error
 
-required = {"contractVersion", "worker", "ready", "reason", "blockingDependency"}
+required = {
+    "contractVersion",
+    "worker",
+    "ready",
+    "reason",
+    "blockingDependency",
+    "failureStage",
+    "failureCode",
+    "retryable",
+    "correlationId",
+}
 if set(descriptor) != required:
     raise SystemExit("worker preflight descriptor fields changed")
-if descriptor["contractVersion"] != 1:
+if descriptor["contractVersion"] != 2:
     raise SystemExit("worker preflight contract version changed")
 if descriptor["worker"] != os.environ["EXPECTED_WORKER"]:
     raise SystemExit("worker preflight returned a different worker")
