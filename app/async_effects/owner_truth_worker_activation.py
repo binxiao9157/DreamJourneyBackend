@@ -8,19 +8,15 @@ names, object keys, owner identifiers or job payloads.
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 from enum import Enum
-import json
 from typing import Optional
 
 from app.async_effects.contracts import (
-    is_async_effect_store_ready,
     resolve_async_effect_runtime_status,
 )
 from app.core.config import Settings
 from app.services.provider_runtime import ProviderRuntimeInventory
-from app.services.store_factory import close_store, make_store, open_store
 
 
 class OwnerTruthWorkerKind(str, Enum):
@@ -146,46 +142,12 @@ def evaluate_owner_truth_worker_activation(
     )
 
 
-def _live_schema_ready(settings: Settings) -> bool:
-    store = make_store(settings)
-    try:
-        open_store(store, wait=True)
-        readiness_probe = getattr(store, "readiness_probe", None)
-        if not callable(readiness_probe):
-            return False
-        return is_async_effect_store_ready(readiness_probe())
-    finally:
-        close_store(store)
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Validate one Owner Truth worker before process activation."
-    )
-    parser.add_argument(
-        "--worker",
-        required=True,
-        choices=[kind.value for kind in OwnerTruthWorkerKind],
-    )
-    args = parser.parse_args(argv)
-    worker = OwnerTruthWorkerKind(args.worker)
-    settings = Settings.from_env()
+    # Preserve the historical module path while using the shared six-worker
+    # registry and structured, value-free diagnostics.
+    from app.async_effects.worker_activation import main as shared_main
 
-    try:
-        decision = evaluate_owner_truth_worker_activation(
-            worker=worker,
-            settings=settings,
-            schema_ready=_live_schema_ready(settings),
-        )
-    except Exception:
-        decision = _blocked(
-            worker,
-            "ownerTruthWorkerReadinessProbeFailed",
-            "runtimeReadiness",
-        )
-
-    print(json.dumps(decision.public_descriptor(), sort_keys=True))
-    return 0 if decision.ready else 1
+    return shared_main(argv)
 
 
 if __name__ == "__main__":

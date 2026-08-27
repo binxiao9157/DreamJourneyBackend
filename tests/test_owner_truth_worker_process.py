@@ -189,46 +189,46 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
         self.assertIn("clamav/clamav:1.5.3-debian13-slim", compose)
         self.assertIn("clamav_data:/var/lib/clamav", compose)
         self.assertNotIn('"3310:3310"', compose)
-        for worker, module in (
+        for worker, service_name, module in (
             (
                 "ownerTruthCandidateExtraction",
+                "owner-truth-candidate-extraction-worker",
                 "app.async_effects.owner_truth_candidate_extraction_worker",
             ),
             (
                 "ownerTruthMemoryProjection",
+                "owner-truth-memory-projection-worker",
                 "app.async_effects.owner_truth_memory_projection_worker",
             ),
             (
                 "ownerTruthMediaProcessing",
+                "owner-truth-media-processing-worker",
                 "app.async_effects.owner_truth_media_processing_worker",
             ),
             (
                 "ownerTruthMediaDeletion",
+                "owner-truth-media-deletion-worker",
                 "app.async_effects.owner_truth_media_deletion_worker",
             ),
+            (
+                "businessMessageProjection",
+                "business-message-projection-worker",
+                "app.async_effects.business_message_projection_worker",
+            ),
+            (
+                "publicationExternalCleanupMaterializer",
+                "publication-external-cleanup-materializer-worker",
+                "app.async_effects.publication_external_cleanup_materializer_worker",
+            ),
         ):
-            service_name = {
-                "ownerTruthCandidateExtraction": "owner-truth-candidate-extraction-worker",
-                "ownerTruthMemoryProjection": "owner-truth-memory-projection-worker",
-                "ownerTruthMediaProcessing": "owner-truth-media-processing-worker",
-                "ownerTruthMediaDeletion": "owner-truth-media-deletion-worker",
-            }[worker]
             command = compose_config["services"][service_name]["command"]
             self.assertEqual(command[:2], ["sh", "-c"])
             self.assertEqual(
                 command[2],
-                "python -m app.async_effects.owner_truth_worker_activation "
+                "python -m app.async_effects.worker_activation "
                 f"--worker {worker} && "
                 f"exec python -m {module} --loop",
             )
-        self.assertIn(
-            '"app.async_effects.business_message_projection_worker", "--loop"',
-            compose,
-        )
-        self.assertIn(
-            '"app.async_effects.publication_external_cleanup_materializer_worker", "--loop"',
-            compose,
-        )
         self.assertIn("restart: unless-stopped", compose)
         self.assertEqual(compose.count("stop_grace_period: 150s"), 6)
         self.assertIn("OWNER_TRUTH_MEDIA_DELETION_WORKER_ENABLED=false", env_example)

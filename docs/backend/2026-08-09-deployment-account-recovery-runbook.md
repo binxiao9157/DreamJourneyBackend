@@ -96,13 +96,15 @@ sudo docker compose run --rm --no-deps api \
   python scripts/migrate_db.py --verify --build-id "$DEPLOY_BUILD_ID"
 sudo docker compose up -d --force-recreate api
 sudo --preserve-env=DEPLOY_BUILD_ID \
-  bash scripts/rebuild-enabled-owner-truth-workers-after-migration.sh
+  bash scripts/rebuild-enabled-workers-after-migration.sh
 sudo systemctl start dreamjourney-db-backup.service
 ```
 
 最后一次备份必须对应迁移后的新 schema head。这样迁移前、迁移后各有一个可验证恢复点，也避免新代码 head 在迁移执行前把旧数据库误判为未知 schema。
 
-Worker 对齐脚本只重建 `.env` 中明确启用的 4 个 Owner Truth Worker。每个 Worker 必须同时满足：镜像 migration head 等于仓库 head、数据库已应用同一 head、activation preflight 为 ready，且强制重建后保持 `running`、`RestartCount=0`。任一检查失败都必须停止放流，不能保留旧 Worker 镜像继续运行。
+Worker 对齐脚本以代码内的长期 Worker 注册表为唯一清单，覆盖 4 个 Owner Truth Worker、消息投影 Worker 和发布外部清理 Worker。脚本只重建 `.env` 中明确启用的 Worker，并停止仍在运行但开关已关闭的旧容器。每个已启用 Worker 必须同时满足：镜像 migration head 等于仓库 head、数据库已应用同一 head、activation preflight 为 ready，且强制重建后连续两次保持 `running`、`RestartCount=0`。任一检查失败都必须停止放流，不能保留旧 Worker 镜像继续运行。
+
+Worker activation 失败时会在标准错误输出一条脱敏 JSON 诊断，字段包括 `worker`、`failureStage`、`failureCode`、`retryable` 和 `correlationId`。排障时以 `correlationId` 关联同一次启动尝试，并依据 `failureStage` 区分配置加载、Store 创建、数据库连接、readiness probe、Store 关闭或 activation evaluation；不得把原始异常、连接串、Provider 凭据或任务 payload 写入日志。部署脚本检测到容器未运行、处于 restarting 或两次采样间发生重启时必须失败并触发部署告警，不能依赖 `restart: unless-stopped` 无限自愈。
 
 放流 Gate：
 

@@ -21,7 +21,7 @@ class DeploymentOperationsContractTests(unittest.TestCase):
         self.assertNotIn("PASSWORD", result.stdout.upper())
 
     def test_post_migration_worker_alignment_contract_is_value_free(self):
-        script = ROOT / "scripts/rebuild-enabled-owner-truth-workers-after-migration.sh"
+        script = ROOT / "scripts/rebuild-enabled-workers-after-migration.sh"
         self.assertTrue(os.access(script, os.X_OK))
         result = subprocess.run(
             ["bash", str(script), "--contract-only"],
@@ -31,23 +31,37 @@ class DeploymentOperationsContractTests(unittest.TestCase):
             text=True,
         )
         self.assertIn('"status":"passed"', result.stdout)
-        self.assertIn('"workerCount":4', result.stdout)
+        self.assertIn('"workerCount":6', result.stdout)
         self.assertNotIn("TOKEN", result.stdout.upper())
         self.assertNotIn("PASSWORD", result.stdout.upper())
 
         source = script.read_text()
         for required in (
+            "migrate_db.py --verify",
+            "worker_activation",
+            "worker_deployment_registry",
+            "--force-recreate",
+            ".RestartCount",
+            "STABILITY_DELAY_SECONDS",
+            "first_state",
+            "second_state",
+            "workerRestartedAfterRecreate",
+            "apiImageMigrationHeadMismatch",
+        ):
+            self.assertIn(required, source)
+
+        registry = (
+            ROOT / "app/async_effects/worker_deployment_registry.py"
+        ).read_text()
+        for service_name in (
             "owner-truth-candidate-extraction-worker",
             "owner-truth-memory-projection-worker",
             "owner-truth-media-processing-worker",
             "owner-truth-media-deletion-worker",
-            "migrate_db.py --verify",
-            "owner_truth_worker_activation",
-            "--force-recreate",
-            ".RestartCount",
-            "apiImageMigrationHeadMismatch",
+            "business-message-projection-worker",
+            "publication-external-cleanup-materializer-worker",
         ):
-            self.assertIn(required, source)
+            self.assertIn(service_name, registry)
 
         preflight = (ROOT / "scripts/deployment-preflight.sh").read_text()
         self.assertIn("workerImageAlignmentScriptUnavailable", preflight)
@@ -58,7 +72,7 @@ class DeploymentOperationsContractTests(unittest.TestCase):
             "ubuntu",
             "miao",
             "deployment-preflight.sh",
-            "rebuild-enabled-owner-truth-workers-after-migration.sh",
+            "rebuild-enabled-workers-after-migration.sh",
             "pull --ff-only origin main",
             "migrate_db.py --apply",
             "run-backend-readiness-deployed-smoke.sh",

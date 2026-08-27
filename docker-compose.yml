@@ -62,7 +62,7 @@ services:
       - sh
       - -c
       - >-
-        python -m app.async_effects.owner_truth_worker_activation
+        python -m app.async_effects.worker_activation
         --worker ownerTruthCandidateExtraction &&
         exec python -m app.async_effects.owner_truth_candidate_extraction_worker --loop
     env_file:
@@ -83,7 +83,7 @@ services:
       - sh
       - -c
       - >-
-        python -m app.async_effects.owner_truth_worker_activation
+        python -m app.async_effects.worker_activation
         --worker ownerTruthMemoryProjection &&
         exec python -m app.async_effects.owner_truth_memory_projection_worker --loop
     env_file:
@@ -104,7 +104,7 @@ services:
       - sh
       - -c
       - >-
-        python -m app.async_effects.owner_truth_worker_activation
+        python -m app.async_effects.worker_activation
         --worker ownerTruthMediaProcessing &&
         exec python -m app.async_effects.owner_truth_media_processing_worker --loop
     env_file:
@@ -127,7 +127,7 @@ services:
       - sh
       - -c
       - >-
-        python -m app.async_effects.owner_truth_worker_activation
+        python -m app.async_effects.worker_activation
         --worker ownerTruthMediaDeletion &&
         exec python -m app.async_effects.owner_truth_media_deletion_worker --loop
     env_file:
@@ -146,7 +146,13 @@ services:
       - business-message-worker
     restart: unless-stopped
     stop_grace_period: 150s
-    command: ["python", "-m", "app.async_effects.business_message_projection_worker", "--loop"]
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.async_effects.worker_activation
+        --worker businessMessageProjection &&
+        exec python -m app.async_effects.business_message_projection_worker --loop
     env_file:
       - .env
     depends_on:
@@ -161,7 +167,13 @@ services:
       - publication-lifecycle-worker
     restart: unless-stopped
     stop_grace_period: 150s
-    command: ["python", "-m", "app.async_effects.publication_external_cleanup_materializer_worker", "--loop"]
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.async_effects.worker_activation
+        --worker publicationExternalCleanupMaterializer &&
+        exec python -m app.async_effects.publication_external_cleanup_materializer_worker --loop
     env_file:
       - .env
     depends_on:
