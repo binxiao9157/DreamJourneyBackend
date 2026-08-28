@@ -245,7 +245,7 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         self._seed_confirmed_memory(owner_id)
         self._enable_authenticated_owner_v4(owner_id)
         payload = self._payload(owner_id)
-        payload["query"] = "海边日落"
+        payload["query"] = "我小时候最喜欢去哪里？"
 
         with patch.object(
             main_module.DeepSeekEchoAnswerProxy,
@@ -269,6 +269,58 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
             receipt[0]["contextTraceIdHash"],
             sha256(answer["contextTraceId"].encode("utf-8")).hexdigest(),
         )
+
+    def test_owner_general_followup_without_matching_memory_uses_recent_turns(self) -> None:
+        owner_id, headers = self._login("13800139768")
+        self._seed_confirmed_memory(owner_id)
+        self._enable_authenticated_owner_v4(owner_id)
+        payload = self._payload(owner_id)
+        payload["query"] = "那华为的折叠屏呢？"
+        payload["recentTurns"] = [
+            {"role": "user", "text": "苹果折叠屏怎么样？"},
+            {"role": "assistant", "text": "可以关注耐用性和系统适配。"},
+        ]
+
+        with patch.object(
+            main_module.DeepSeekEchoAnswerProxy,
+            "request_answer",
+            return_value="华为折叠屏可以重点比较形态、重量和生态适配。",
+        ) as request_answer:
+            response = client.post("/echo/answers", headers=headers, json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        request_answer.assert_called_once()
+        self.assertEqual(
+            request_answer.call_args.kwargs["recent_turns"],
+            payload["recentTurns"],
+        )
+        answer = response.json()["answer"]
+        self.assertEqual(answer["provider"], "deepseek")
+        self.assertEqual(answer["citations"], [])
+        self.assertEqual(answer["memoryGrounding"]["outcome"], "notApplicable")
+        self.assertEqual(answer["memoryGrounding"]["handoff"], "none")
+
+    def test_owner_general_followup_provider_failure_is_not_a_memory_gap(self) -> None:
+        owner_id, headers = self._login("13800139769")
+        self._seed_confirmed_memory(owner_id)
+        self._enable_authenticated_owner_v4(owner_id)
+        payload = self._payload(owner_id)
+        payload["query"] = "那华为的折叠屏呢？"
+
+        with patch.object(
+            main_module.DeepSeekEchoAnswerProxy,
+            "request_answer",
+            side_effect=RuntimeError("provider unavailable"),
+        ):
+            response = client.post("/echo/answers", headers=headers, json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        answer = response.json()["answer"]
+        self.assertEqual(answer["provider"], "service-fallback")
+        self.assertEqual(answer["fallbackReason"], "providerUnavailable")
+        self.assertEqual(answer["memoryGrounding"]["outcome"], "fallback")
+        self.assertEqual(answer["memoryGrounding"]["handoff"], "none")
+        self.assertNotIn("最先想到", answer["text"])
 
     def test_owner_answer_is_grounded_and_audits_exact_typed_citation(self) -> None:
         owner_id, headers = self._login("13800139766")

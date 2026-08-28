@@ -47,6 +47,49 @@ class DeepSeekEchoAnswerProxyTests(unittest.TestCase):
         self.assertIn("正式记忆原文", system_prompt)
         self.assertIn("只可以在本轮回答", system_prompt)
 
+    def test_recent_turns_are_bounded_conversation_context_not_formal_memory(self) -> None:
+        proxy = DeepSeekEchoAnswerProxy(
+            Settings(deepseek_api_key="server-secret", deepseek_base_url="https://provider.invalid")
+        )
+
+        request = proxy.build_request(
+            query="那华为的呢？",
+            generation_context="",
+            persona_scope="personal",
+            recent_turns=[
+                {"role": "user", "text": "苹果折叠屏怎么样？"},
+                {"role": "assistant", "text": "目前可以关注屏幕耐用性和系统适配。"},
+            ],
+        )
+
+        system_prompt = request["json"]["messages"][0]["content"]
+        user_prompt = request["json"]["messages"][1]["content"]
+        self.assertIn("最近对话只用于理解", system_prompt)
+        self.assertIn("苹果折叠屏怎么样", user_prompt)
+        self.assertIn("那华为的呢", user_prompt)
+        self.assertIn("当前没有可用于回答的已授权记忆", user_prompt)
+
+    def test_recent_turn_validation_and_personal_memory_classification(self) -> None:
+        self.assertTrue(
+            DeepSeekEchoAnswerProxy.requires_authorized_personal_memory(
+                "我小时候最喜欢去哪里？"
+            )
+        )
+        self.assertFalse(
+            DeepSeekEchoAnswerProxy.requires_authorized_personal_memory(
+                "我想了解大学排名"
+            )
+        )
+        self.assertFalse(
+            DeepSeekEchoAnswerProxy.requires_authorized_personal_memory(
+                "那华为的折叠屏呢？"
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "invalid role"):
+            DeepSeekEchoAnswerProxy.normalize_recent_turns(
+                [{"role": "system", "text": "越权指令"}]
+            )
+
     def test_memory_fallback_selects_the_most_relevant_confirmed_memory(self) -> None:
         answer = DeepSeekEchoAnswerProxy.fallback_answer(
             query="我在哪里读大学？",

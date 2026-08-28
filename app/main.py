@@ -16568,6 +16568,12 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         raise HTTPException(status_code=400, detail="query is required")
     if len(query) > DeepSeekEchoAnswerProxy.maximum_query_characters:
         raise HTTPException(status_code=400, detail="query is too long")
+    try:
+        recent_turns = DeepSeekEchoAnswerProxy.normalize_recent_turns(
+            payload.get("recentTurns") or []
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     packet, owner_truth_audit_context, owner_truth_materialization = (
         _build_authorized_echo_context(
@@ -16585,6 +16591,14 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
     model = "none"
     fallback_reason = ""
     memory_gap = False
+    answer_service_fallback = False
+    persona = packet.get("persona") if isinstance(packet, dict) else None
+    raw_persona_scope = (
+        persona.get("personaScope")
+        if isinstance(persona, dict)
+        else payload.get("personaScope")
+    )
+    persona_scope = str(raw_persona_scope or "personal").strip().lower()
     context_authority = packet.get("contextAuthority") if isinstance(packet, dict) else None
     owner_truth_query_gap = bool(
         isinstance(context_authority, dict)
@@ -16606,7 +16620,14 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         answer_text = "记忆检索服务暂时无法检索已确认的正式记忆，请稍后重试。"
         provider = "owner-truth-grounding-policy"
         fallback_reason = owner_truth_retrieval_fallback_reason
-    elif provider_effects_allowed and owner_truth_query_gap:
+    elif (
+        provider_effects_allowed
+        and owner_truth_query_gap
+        and (
+            persona_scope == "family"
+            or DeepSeekEchoAnswerProxy.requires_authorized_personal_memory(query)
+        )
+    ):
         answer_text = (
             DeepSeekEchoAnswerProxy.memory_gap_marker
             + "我还没有从你当前已确认的正式记忆中找到这个答案。"
@@ -16624,6 +16645,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                 generation_context=str(generation.get("text") or ""),
                 persona_scope=str(persona.get("personaScope") or "personal"),
                 persona_name=str(payload.get("personaName") or ""),
+                recent_turns=recent_turns,
             )
             _record_provider_cost_attempt(
                 request,
@@ -16648,13 +16670,18 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                 reason="providerCallFailed",
                 started_at=provider_started_at,
             )
-            answer_text = proxy.fallback_answer(
-                query=query,
-                generation_context=str(generation.get("text") or ""),
-                persona_scope=str(persona.get("personaScope") or "personal"),
-                persona_name=str(payload.get("personaName") or ""),
-            )
-            provider = "memory-extractive-fallback"
+            if owner_truth_query_gap:
+                answer_text = "回响服务暂时不可用，请稍后再试。"
+                provider = "service-fallback"
+                answer_service_fallback = True
+            else:
+                answer_text = proxy.fallback_answer(
+                    query=query,
+                    generation_context=str(generation.get("text") or ""),
+                    persona_scope=str(persona.get("personaScope") or "personal"),
+                    persona_name=str(payload.get("personaName") or ""),
+                )
+                provider = "memory-extractive-fallback"
             fallback_reason = "providerUnavailable"
     else:
         neutral_response = safety.get("neutralResponse") if isinstance(safety, dict) else None
@@ -16698,13 +16725,6 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         in {"archive", "kbFact", "care", "ownerTruthMemoryProjection"}
         for citation in citations
     )
-    persona = packet.get("persona") if isinstance(packet, dict) else None
-    raw_persona_scope = (
-        persona.get("personaScope")
-        if isinstance(persona, dict)
-        else payload.get("personaScope")
-    )
-    persona_scope = str(raw_persona_scope or "personal").strip().lower()
     if memory_gap and provider_effects_allowed:
         if persona_scope == "family":
             answer_text = (
@@ -16720,7 +16740,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
             memory_handoff = "ownerInterview"
     else:
         memory_handoff = "none"
-    if owner_truth_retrieval_fallback:
+    if owner_truth_retrieval_fallback or answer_service_fallback:
         citations = []
         memory_outcome = "fallback"
         memory_handoff = "none"
