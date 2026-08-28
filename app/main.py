@@ -16599,6 +16599,10 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         else payload.get("personaScope")
     )
     persona_scope = str(raw_persona_scope or "personal").strip().lower()
+    requires_authorized_memory = (
+        persona_scope == "family"
+        or DeepSeekEchoAnswerProxy.requires_authorized_personal_memory(query)
+    )
     context_authority = packet.get("contextAuthority") if isinstance(packet, dict) else None
     owner_truth_query_gap = bool(
         isinstance(context_authority, dict)
@@ -16623,10 +16627,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
     elif (
         provider_effects_allowed
         and owner_truth_query_gap
-        and (
-            persona_scope == "family"
-            or DeepSeekEchoAnswerProxy.requires_authorized_personal_memory(query)
-        )
+        and requires_authorized_memory
     ):
         answer_text = (
             DeepSeekEchoAnswerProxy.memory_gap_marker
@@ -16646,6 +16647,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                 persona_scope=str(persona.get("personaScope") or "personal"),
                 persona_name=str(payload.get("personaName") or ""),
                 recent_turns=recent_turns,
+                requires_authorized_memory=requires_authorized_memory,
             )
             _record_provider_cost_attempt(
                 request,
@@ -16659,6 +16661,40 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
             )
             provider = "deepseek"
             model = proxy.model
+            if (
+                not requires_authorized_memory
+                and answer_text.strip().startswith(DeepSeekEchoAnswerProxy.memory_gap_marker)
+            ):
+                provider_started_at = time.monotonic()
+                answer_text = proxy.request_answer(
+                    query=query,
+                    generation_context=str(generation.get("text") or ""),
+                    persona_scope=str(persona.get("personaScope") or "personal"),
+                    persona_name=str(payload.get("personaName") or ""),
+                    recent_turns=recent_turns,
+                    requires_authorized_memory=False,
+                    open_domain_repair=True,
+                )
+                _record_provider_cost_attempt(
+                    request,
+                    provider="deepseek",
+                    capability="echoAnswer",
+                    unit_type="request",
+                    units=1,
+                    state="succeeded",
+                    reason="openDomainContractRepair",
+                    started_at=provider_started_at,
+                )
+                if answer_text.strip().startswith(
+                    DeepSeekEchoAnswerProxy.memory_gap_marker
+                ):
+                    answer_text = (
+                        "我刚才没有准确理解你这句话。你可以换一种说法，我会继续听。"
+                    )
+                    provider = "service-fallback"
+                    model = "none"
+                    fallback_reason = "openDomainMemoryGapContractViolation"
+                    answer_service_fallback = True
         except Exception as exc:
             _record_provider_cost_attempt(
                 request,
@@ -16670,7 +16706,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                 reason="providerCallFailed",
                 started_at=provider_started_at,
             )
-            if owner_truth_query_gap:
+            if not requires_authorized_memory or owner_truth_query_gap:
                 answer_text = "回响服务暂时不可用，请稍后再试。"
                 provider = "service-fallback"
                 answer_service_fallback = True

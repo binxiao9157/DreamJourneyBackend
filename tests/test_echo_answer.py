@@ -68,6 +68,8 @@ class DeepSeekEchoAnswerProxyTests(unittest.TestCase):
         self.assertIn("苹果折叠屏怎么样", user_prompt)
         self.assertIn("那华为的呢", user_prompt)
         self.assertIn("当前没有可用于回答的已授权记忆", user_prompt)
+        self.assertIn("服务端已判定本轮是日常对话", system_prompt)
+        self.assertIn("本轮绝对不得输出<MEMORY_GAP>", system_prompt)
 
     def test_recent_turn_validation_and_personal_memory_classification(self) -> None:
         self.assertTrue(
@@ -207,6 +209,73 @@ class EchoAnswerAPITests(unittest.TestCase):
         answer = response.json()["answer"]
         self.assertEqual(answer["memoryGrounding"]["outcome"], "notApplicable")
         self.assertEqual(answer["memoryGrounding"]["handoff"], "none")
+
+    def test_short_open_domain_followup_repairs_an_unexpected_memory_gap(self) -> None:
+        user_id = "echo_answer_open_domain_repair"
+        with patch.object(
+            main_module.DeepSeekEchoAnswerProxy,
+            "request_answer",
+            side_effect=[
+                DeepSeekEchoAnswerProxy.memory_gap_marker + "资料不足。",
+                "微醺一点也可以，慢慢喝，记得别空腹。",
+            ],
+        ) as request_answer:
+            response = self.client.post(
+                "/echo/answers",
+                json={
+                    "userId": user_id,
+                    "query": "微醺一下。",
+                    "recentTurns": [
+                        {"role": "user", "text": "我想喝点酒。"},
+                        {"role": "assistant", "text": "想喝哪一种？"},
+                    ],
+                    "personaScope": "personal",
+                    "digitalHumanId": user_id,
+                    "lifecycleMode": "sunlight",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(request_answer.call_count, 2)
+        self.assertFalse(
+            request_answer.call_args_list[0].kwargs["requires_authorized_memory"]
+        )
+        self.assertTrue(request_answer.call_args_list[1].kwargs["open_domain_repair"])
+        answer = response.json()["answer"]
+        self.assertEqual(answer["text"], "微醺一点也可以，慢慢喝，记得别空腹。")
+        self.assertEqual(answer["provider"], "deepseek")
+        self.assertEqual(answer["memoryGrounding"]["outcome"], "notApplicable")
+        self.assertEqual(answer["memoryGrounding"]["handoff"], "none")
+
+    def test_repeated_open_domain_gap_contract_violation_fails_without_interview(self) -> None:
+        user_id = "echo_answer_open_domain_contract_failure"
+        with patch.object(
+            main_module.DeepSeekEchoAnswerProxy,
+            "request_answer",
+            return_value=DeepSeekEchoAnswerProxy.memory_gap_marker + "资料不足。",
+        ) as request_answer:
+            response = self.client.post(
+                "/echo/answers",
+                json={
+                    "userId": user_id,
+                    "query": "啤酒。",
+                    "personaScope": "personal",
+                    "digitalHumanId": user_id,
+                    "lifecycleMode": "sunlight",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(request_answer.call_count, 2)
+        answer = response.json()["answer"]
+        self.assertEqual(answer["provider"], "service-fallback")
+        self.assertEqual(
+            answer["fallbackReason"],
+            "openDomainMemoryGapContractViolation",
+        )
+        self.assertEqual(answer["memoryGrounding"]["outcome"], "fallback")
+        self.assertEqual(answer["memoryGrounding"]["handoff"], "none")
+        self.assertNotIn("最先想到", answer["text"])
 
     def test_answer_rejects_empty_query_before_provider_call(self) -> None:
         response = self.client.post(

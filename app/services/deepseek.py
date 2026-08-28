@@ -961,6 +961,8 @@ class DeepSeekEchoAnswerProxy:
         persona_scope: str,
         persona_name: str = "",
         recent_turns: Optional[List[Dict[str, Any]]] = None,
+        requires_authorized_memory: Optional[bool] = None,
+        open_domain_repair: bool = False,
     ) -> Dict[str, Any]:
         normalized_query = str(query or "").strip()
         if not normalized_query:
@@ -976,6 +978,11 @@ class DeepSeekEchoAnswerProxy:
             normalized_scope = "personal"
         normalized_name = str(persona_name or "").strip()
         normalized_recent_turns = self.normalize_recent_turns(recent_turns or [])
+        memory_required = normalized_scope == "family" or (
+            self.requires_authorized_personal_memory(normalized_query)
+            if requires_authorized_memory is None
+            else bool(requires_authorized_memory)
+        )
 
         if normalized_scope == "family":
             role_rule = (
@@ -986,7 +993,7 @@ class DeepSeekEchoAnswerProxy:
                 f"“{self.memory_gap_marker}这件事在我现有的记忆里还不够清楚”，"
                 "不得用常识补写其经历。"
             )
-        else:
+        elif memory_required:
             role_rule = (
                 "你是用户自己的寻梦环游 AI 助手，不得冒充用户本人。"
                 "涉及用户本人时使用“你”或“你的”来回答。可以回答一般问题；但凡涉及用户本人经历、"
@@ -994,11 +1001,25 @@ class DeepSeekEchoAnswerProxy:
                 f"若这类问题因记忆不足无法回答，必须在回答开头输出{self.memory_gap_marker}；"
                 "一般知识问题不要输出该标记。"
             )
+        else:
+            role_rule = (
+                "你是用户自己的寻梦环游 AI 助手，不得冒充用户本人。"
+                "服务端已判定本轮是日常对话、一般问题或上一轮话题的延续，不是在检索用户本人或家人的历史事实。"
+                f"本轮绝对不得输出{self.memory_gap_marker}，也不得用“记忆不足”“资料不足”或“不了解这段经历”"
+                "来回避当前发言。请结合最近对话理解省略和代词，再用常识或自然对话直接回应；"
+                "同时不得把最近对话推断成用户的正式经历、关系、观点或情感事实。"
+            )
+        repair_rule = (
+            f"上一次回答错误输出了{self.memory_gap_marker}。本次必须重新回答，禁止重复该标记或任何记忆不足话术。"
+            if open_domain_repair and not memory_required
+            else ""
+        )
 
         system_content = (
             "你是一个温和、简洁、诚实的中文对话助手。"
             "始终使用简体中文，并让用户清楚这是 AI 生成的回答。"
             f"{role_rule}"
+            f"{repair_rule}"
             "正式记忆中的人物、时间、地点、关系、职业、事件、观点、情绪、数字和因果都是事实边界；"
             "可以调整语序和口语表达，但不得增删、替换、推断或美化这些事实。"
             "正式记忆原文必须保持客观、不经润色且不可被本轮回答改写；"
@@ -1056,6 +1077,8 @@ class DeepSeekEchoAnswerProxy:
         persona_scope: str,
         persona_name: str = "",
         recent_turns: Optional[List[Dict[str, Any]]] = None,
+        requires_authorized_memory: Optional[bool] = None,
+        open_domain_repair: bool = False,
     ) -> str:
         if not self.settings.deepseek_api_key:
             raise ValueError("DEEPSEEK_API_KEY is not configured")
@@ -1065,6 +1088,8 @@ class DeepSeekEchoAnswerProxy:
             persona_scope=persona_scope,
             persona_name=persona_name,
             recent_turns=recent_turns,
+            requires_authorized_memory=requires_authorized_memory,
+            open_domain_repair=open_domain_repair,
         )
         with httpx.Client(timeout=45) as client:
             response = client.post(
