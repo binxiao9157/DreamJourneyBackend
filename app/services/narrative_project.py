@@ -1391,13 +1391,12 @@ class NarrativeProjectService:
             by_kind.setdefault(item.memory_kind, []).append(item)
         return [
             {
-                "clusterId": _digest([item.memory_version_id for item in values])[:16],
+                "clusterKey": _digest([item.memory_version_id for item in values])[:16],
                 "title": {"experience": "人生经历", "knowledge": "经验与认识", "emotion": "关系与感受"}.get(kind, "人生片段"),
                 "memoryVersionIds": [item.memory_version_id for item in values[:12]],
-                "memoryCount": len(values),
-                "recommended": index == 0,
+                "itemCount": len(values),
             }
-            for index, (kind, values) in enumerate(sorted(by_kind.items()))
+            for kind, values in sorted(by_kind.items())
         ][:3]
 
 

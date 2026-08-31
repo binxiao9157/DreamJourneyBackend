@@ -14,10 +14,12 @@ from app.domain.narrative.contracts import (
     NarrativeErrorCode,
     NarrativeErrorEnvelope,
     NarrativeJobState,
+    NarrativeMemoryRef,
     NarrativeNarratorType,
     require_timestamp,
     require_uuid,
 )
+from app.services.narrative_project import NarrativeProjectService
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "narrative" / "contract_v1.json"
@@ -118,6 +120,31 @@ class NarrativeContractsTests(unittest.TestCase):
             "localBodyAuthority",
         ):
             self.assertNotIn(forbidden, serialized)
+
+    def test_readiness_story_clusters_match_ios_wire_contract(self) -> None:
+        clusters = NarrativeProjectService._story_clusters([
+            NarrativeMemoryRef(
+                memory_id="11111111-1111-4111-8111-111111111111",
+                memory_version_id="22222222-2222-4222-8222-222222222222",
+                content_hash="1" * 64,
+                content={"text": "一段已确认的人生经历"},
+                memory_kind="experience",
+                perspective_type="ownerRecalled",
+                epistemic_status="ownerConfirmed",
+                sensitivity="normal",
+            )
+        ])
+
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(
+            set(clusters[0]),
+            {"clusterKey", "title", "memoryVersionIds", "itemCount"},
+        )
+        self.assertEqual(
+            clusters[0]["memoryVersionIds"],
+            ["22222222-2222-4222-8222-222222222222"],
+        )
+        self.assertEqual(clusters[0]["itemCount"], 1)
 
 
 if __name__ == "__main__":
