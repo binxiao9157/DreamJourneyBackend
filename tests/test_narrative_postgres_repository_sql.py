@@ -50,8 +50,10 @@ class _Cursor:
 class _Connection:
     def __init__(self, rows):
         self.cursor_value = _Cursor(rows)
+        self.row_factory = None
 
-    def cursor(self):
+    def cursor(self, *, row_factory=None):
+        self.row_factory = row_factory
         return self.cursor_value
 
 
@@ -109,6 +111,7 @@ class NarrativePostgresRepositorySqlTests(unittest.TestCase):
     def test_project_insert_and_update_bind_all_versioned_context_fields(self):
         created_connection = _Connection([None, self.project_row()])
         created = PostgresNarrativeRepository(created_connection).create_or_get_project(self.project)
+        self.assertIsNotNone(created_connection.row_factory)
         self.assertEqual(created.writing_context, {})
 
         paused = replace(

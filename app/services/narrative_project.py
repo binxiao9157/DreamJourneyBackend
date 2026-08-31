@@ -501,7 +501,11 @@ class PostgresNarrativeRepository:
 
     @contextmanager
     def _cursor(self):
-        with self._connection.cursor() as cursor:
+        try:
+            from psycopg.rows import dict_row
+        except ImportError:  # pragma: no cover - guarded by production dependencies
+            dict_row = None
+        with self._connection.cursor(row_factory=dict_row) as cursor:
             yield cursor
 
     @staticmethod
