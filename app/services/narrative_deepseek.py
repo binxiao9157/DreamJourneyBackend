@@ -74,7 +74,8 @@ class DeepSeekNarrativeProvider:
                 )
                 repair_request["json"]["messages"][0]["content"] += (
                     "上一输出未通过最终格式校验（" + ",".join(violations) + "）。"
-                    "请保留原有事实、引用和三种文风，只修正结构、key 与篇幅；"
+                    "请保留事实真实性、引用关系和三种文风，只修正结构、key 与篇幅；"
+                    "允许省略次要事实，但不得新增、篡改或合并事实，三篇必须使用同一组保留事实；"
                     "重新输出完整三项，每项控制在 220 至 260 个中文字。"
                 )
                 output = self._perform_request(repair_request, stage=stage)
@@ -293,7 +294,12 @@ class DeepSeekNarrativeProvider:
             "只输出严格 JSON，不要 Markdown 代码块或解释。"
         )
         if stage == "storyPlan":
-            return shared + (
+            audition_scope = (
+                "这是主笔试镜，只从 formalMemories 中选择同一组 2 至 3 条代表性记忆，"
+                "用于比较三种文风；不要试图覆盖全部人生材料。"
+                if job_type == "auditions" else ""
+            )
+            return shared + audition_scope + (
                 "本阶段只规划，不写正文。输出 {\"plan\":{\"objective\":\"\","
                 "\"structure\":[],\"memoryVersionIds\":[],\"materialGaps\":[],\"risks\":[]}}。"
             )

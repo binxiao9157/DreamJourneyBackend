@@ -145,6 +145,23 @@ class DeepSeekNarrativeProviderTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(provider._audition_contract_violations(output), [])
         self.assertIn("未通过最终格式校验", calls[1]["messages"][0]["content"])
+        self.assertIn("允许省略次要事实", calls[1]["messages"][0]["content"])
+
+    def test_audition_plan_selects_representative_memories_instead_of_all(self):
+        _, _, project, _, _ = scenarios._fixture()
+        provider = DeepSeekNarrativeProvider(_settings(), transport=lambda *_: {})
+
+        request = provider.build_request(
+            stage="storyPlan",
+            job_type="auditions",
+            project=project,
+            context={},
+            previous_output={},
+        )
+
+        prompt = request["json"]["messages"][0]["content"]
+        self.assertIn("2 至 3 条代表性记忆", prompt)
+        self.assertIn("不要试图覆盖全部人生材料", prompt)
 
     def test_four_stage_adapter_commits_only_fact_guarded_artifacts(self):
         repo, _, project, ref, job = scenarios._fixture()
