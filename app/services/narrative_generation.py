@@ -974,7 +974,7 @@ class NarrativeGenerationProcessor:
                         for key in ("emotion", "feeling", "motivation", "cause", "reason")
                     )
                 ),
-                uncertain=ref.epistemic_status not in {"confirmed", "ownerConfirmed"},
+                uncertain=ref.epistemic_status in {"inferred", "uncertain"},
             )
             for ref in refs
         }

@@ -25,7 +25,7 @@ def _hash(value):
     return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
-def _fixture():
+def _fixture(*, epistemic_status="recalled"):
     repo = InMemoryNarrativeRepository()
     scope = NarrativeScope(
         vault_id="vault-1", owner_subject_id="owner-1", actor_subject_id="owner-1",
@@ -44,7 +44,7 @@ def _fixture():
     ref = NarrativeMemoryRef(
         memory_id=str(uuid4()), memory_version_id=str(uuid4()), content_hash=_hash(content),
         content=content, memory_kind="experience", perspective_type="ownerRecalled",
-        epistemic_status="ownerConfirmed", sensitivity="normal",
+        epistemic_status=epistemic_status, sensitivity="normal",
     )
     snapshot = repo.save_snapshot(NarrativeSnapshotRecord(
         snapshot_id=str(uuid4()), project_id=project.project_id, vault_id="vault-1",
@@ -121,6 +121,16 @@ def test_three_auditions_commit_from_one_snapshot():
 def test_unknown_memory_reference_rejects_entire_audition_group():
     repo, _, project, ref, job = _fixture()
     result = NarrativeGenerationProcessor(repo, _Provider(ref.memory_version_id, invalid=True)).run_job(
+        project_id=project.project_id, job_id=job.job_id
+    )
+    assert result.state is NarrativeJobState.FAILED
+    assert result.error_code == "unsupported_fact_detected"
+    assert repo.list_artifacts(project_id=project.project_id) == ()
+
+
+def test_inferred_memory_cannot_be_rendered_as_certain():
+    repo, _, project, ref, job = _fixture(epistemic_status="inferred")
+    result = NarrativeGenerationProcessor(repo, _Provider(ref.memory_version_id)).run_job(
         project_id=project.project_id, job_id=job.job_id
     )
     assert result.state is NarrativeJobState.FAILED
