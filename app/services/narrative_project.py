@@ -661,7 +661,7 @@ class PostgresNarrativeRepository:
                     id,project_id,vault_id,authority_epoch,memory_version_refs,writing_context,
                     source_fingerprint,snapshot_hash,created_by,created_at
                 ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (project_id,snapshot_hash) DO UPDATE SET snapshot_hash=EXCLUDED.snapshot_hash
+                ON CONFLICT (project_id,snapshot_hash) DO NOTHING
                 RETURNING *""",
                 (
                     snapshot.snapshot_id, snapshot.project_id, snapshot.vault_id,
@@ -670,7 +670,17 @@ class PostgresNarrativeRepository:
                     snapshot.snapshot_hash, snapshot.created_by, snapshot.created_at,
                 ),
             )
-            return self._snapshot(cursor.fetchone())
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """SELECT * FROM narrative.memory_snapshots
+                    WHERE project_id=%s AND snapshot_hash=%s""",
+                    (snapshot.project_id, snapshot.snapshot_hash),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            raise NarrativeProjectNotFound("memory snapshot was not found after conflict")
+        return self._snapshot(row)
 
     @classmethod
     def _snapshot(cls, row: Mapping[str, Any]) -> NarrativeSnapshotRecord:

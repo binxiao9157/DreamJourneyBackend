@@ -165,8 +165,58 @@ class NarrativePostgresRepositorySqlTests(unittest.TestCase):
             "created_by": snapshot.created_by,
             "created_at": self.instant,
         }
-        stored = PostgresNarrativeRepository(_Connection([row])).save_snapshot(snapshot)
+        connection = _Connection([row])
+        stored = PostgresNarrativeRepository(connection).save_snapshot(snapshot)
         self.assertEqual(stored.writing_context["primaryReader"], "family")
+        insert_sql = connection.cursor_value.calls[0][0]
+        self.assertIn("DO NOTHING", insert_sql)
+        self.assertNotIn("DO UPDATE", insert_sql)
+
+    def test_snapshot_conflict_reuses_existing_immutable_row(self):
+        content = {"event": "在北方求学"}
+        memory = NarrativeMemoryRef(
+            memory_id=str(uuid4()),
+            memory_version_id=str(uuid4()),
+            content_hash=_hash(content),
+            content=content,
+            memory_kind="experience",
+            perspective_type="ownerRecalled",
+            epistemic_status="ownerConfirmed",
+            sensitivity="normal",
+        )
+        snapshot = NarrativeSnapshotRecord(
+            snapshot_id=str(uuid4()),
+            project_id=self.project.project_id,
+            vault_id=self.scope.vault_id,
+            authority_epoch=2,
+            memory_refs=(memory,),
+            source_fingerprint=_hash([memory.memory_version_id]),
+            snapshot_hash=_hash({"memory": memory.memory_version_id}),
+            created_by="owner-1",
+            created_at=self.instant.isoformat(),
+            writing_context={"privacyScope": "private"},
+        )
+        existing_row = {
+            "id": str(uuid4()),
+            "project_id": snapshot.project_id,
+            "vault_id": snapshot.vault_id,
+            "authority_epoch": snapshot.authority_epoch,
+            "memory_version_refs": [memory.public_contract(include_content=True)],
+            "writing_context": dict(snapshot.writing_context),
+            "source_fingerprint": snapshot.source_fingerprint,
+            "snapshot_hash": snapshot.snapshot_hash,
+            "created_by": snapshot.created_by,
+            "created_at": self.instant,
+        }
+        connection = _Connection([None, existing_row])
+
+        stored = PostgresNarrativeRepository(connection).save_snapshot(snapshot)
+
+        self.assertEqual(stored.snapshot_id, existing_row["id"])
+        self.assertEqual(len(connection.cursor_value.calls), 2)
+        select_sql, select_params = connection.cursor_value.calls[1]
+        self.assertIn("WHERE project_id=%s AND snapshot_hash=%s", select_sql)
+        self.assertEqual(select_params, (snapshot.project_id, snapshot.snapshot_hash))
 
 
 if __name__ == "__main__":
