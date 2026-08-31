@@ -111,6 +111,41 @@ class DeepSeekNarrativeProviderTests(unittest.TestCase):
                 previous_output={},
             )
 
+    def test_final_auditions_receive_one_bounded_format_repair(self):
+        _, _, project, ref, _ = scenarios._fixture()
+        calls = []
+
+        def response_for(text):
+            return {"choices": [{"message": {"content": json.dumps({
+                "artifacts": [{
+                    "key": key,
+                    "text": text,
+                    "payload": {"paragraphs": [{
+                        "paragraphId": f"{key}-p1",
+                        "text": text,
+                        "memoryVersionIds": [ref.memory_version_id],
+                    }]},
+                } for key in ("documentary", "warmReflection", "thoughtfulMemoir")]
+            }, ensure_ascii=False)}}]}
+
+        def transport(_url, _headers, body, _timeout):
+            calls.append(body)
+            text = "我在北方求学。" * (8 if len(calls) == 1 else 30)
+            return response_for(text)
+
+        provider = DeepSeekNarrativeProvider(_settings(), transport=transport)
+        output = provider.generate_stage(
+            stage="antiAIEdit",
+            job_type="auditions",
+            project=project,
+            context={"memoryFacts": []},
+            previous_output={},
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(provider._audition_contract_violations(output), [])
+        self.assertIn("未通过最终格式校验", calls[1]["messages"][0]["content"])
+
     def test_four_stage_adapter_commits_only_fact_guarded_artifacts(self):
         repo, _, project, ref, job = scenarios._fixture()
         calls = []

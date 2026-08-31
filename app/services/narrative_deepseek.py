@@ -61,6 +61,28 @@ class DeepSeekNarrativeProvider:
             context=context,
             previous_output=previous_output,
         )
+        output = self._perform_request(request, stage=stage)
+        if stage == "antiAIEdit" and job_type == "auditions":
+            violations = self._audition_contract_violations(output)
+            if violations:
+                repair_request = self.build_request(
+                    stage=stage,
+                    job_type=job_type,
+                    project=project,
+                    context=context,
+                    previous_output=output,
+                )
+                repair_request["json"]["messages"][0]["content"] += (
+                    "上一输出未通过最终格式校验（" + ",".join(violations) + "）。"
+                    "请保留原有事实、引用和三种文风，只修正结构、key 与篇幅；"
+                    "重新输出完整三项，每项控制在 220 至 260 个中文字。"
+                )
+                output = self._perform_request(repair_request, stage=stage)
+        return output
+
+    def _perform_request(
+        self, request: Mapping[str, Any], *, stage: str
+    ) -> Mapping[str, Any]:
         try:
             response = self._transport(
                 request["url"],
@@ -78,6 +100,27 @@ class DeepSeekNarrativeProvider:
             raise NarrativeProviderUnavailable("narrative provider request failed") from exc
         content = self._extract_content(response)
         return self.parse_output(content, stage=stage)
+
+    @staticmethod
+    def _audition_contract_violations(output: Mapping[str, Any]) -> list[str]:
+        artifacts = output.get("artifacts")
+        expected_keys = ("documentary", "warmReflection", "thoughtfulMemoir")
+        if not isinstance(artifacts, list):
+            return ["artifactsMissing"]
+        violations = []
+        if len(artifacts) != len(expected_keys):
+            violations.append(f"artifactCount:{len(artifacts)}")
+        for index, expected_key in enumerate(expected_keys):
+            if index >= len(artifacts) or not isinstance(artifacts[index], Mapping):
+                violations.append(f"artifactMissing:{index + 1}")
+                continue
+            artifact = artifacts[index]
+            if str(artifact.get("key") or "").strip() != expected_key:
+                violations.append(f"keyMismatch:{index + 1}")
+            text = str(artifact.get("text") or "").strip()
+            if not 200 <= len("".join(text.split())) <= 300:
+                violations.append(f"lengthMismatch:{index + 1}")
+        return violations
 
     def build_request(
         self,
@@ -278,7 +321,8 @@ class DeepSeekNarrativeProvider:
         if job_type == "auditions":
             return base + (
                 "必须恰好三项，key 依次为 documentary、warmReflection、thoughtfulMemoir；"
-                "每项正文 200 至 300 个中文字，三项使用相同事实集合。"
+                "每项正文控制在 220 至 260 个中文字（最终校验范围为 200 至 300），"
+                "三项使用相同事实集合。"
             )
         if job_type == "goldenSample":
             return base + "必须恰好一项，key 为 goldenSample，正文 500 至 800 个中文字，且独立写作而非扩写试镜。"
