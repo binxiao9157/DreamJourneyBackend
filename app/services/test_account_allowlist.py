@@ -438,6 +438,12 @@ class TestAccountAllowlistService:
             "roles": list(TEST_ACCOUNT_ROLES),
             "features": list(TEST_ACCOUNT_FEATURE_ENTITLEMENTS),
             "defaultFeatureEntitlements": [],
+            "roleFeatureEntitlements": {
+                "superTest": "allCurrentFeatures",
+                "ownerTest": "explicitOnly",
+                "familyTest": "explicitOnly",
+                "operatorTest": "explicitOnly",
+            },
             "scenarioBindingsAreAuthority": False,
             "sessionRevisionValidation": True,
             "contractVersion": TEST_ACCOUNT_AUTHORIZATION_CONTRACT_VERSION,
@@ -603,12 +609,17 @@ class TestAccountAllowlistService:
     @staticmethod
     def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
         role = str(record.get("testRole") or "").strip() or None
-        features = sorted(
+        explicit_features = sorted(
             {
                 str(item).strip()
                 for item in (record.get("featureEntitlements") or [])
                 if str(item).strip()
             }
+        )
+        features = (
+            list(TEST_ACCOUNT_FEATURE_ENTITLEMENTS)
+            if role == "superTest"
+            else explicit_features
         )
         scenarios = dict(record.get("scenarioBindings") or {})
         revision = max(1, int(record.get("entitlementRevision") or 1))

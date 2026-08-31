@@ -18,6 +18,7 @@ from app.services.test_account_admin_auth import (
     encode_test_account_admin_password,
 )
 from app.services.test_account_allowlist import (
+    TEST_ACCOUNT_FEATURE_ENTITLEMENTS,
     TestAccountAllowlistConflict,
     TestAccountAllowlistService,
     TestAccountAllowlistValidationError,
@@ -61,7 +62,7 @@ def make_admin_service() -> TestAccountAdminAuthService:
 
 
 class TestAccountAuthorizationServiceTests(unittest.TestCase):
-    def test_role_matrix_never_grants_features_implicitly(self):
+    def test_super_role_tracks_all_features_and_other_roles_are_explicit(self):
         store = InMemoryStore()
         service = make_allowlist(store)
         roles = ("superTest", "ownerTest", "familyTest", "operatorTest")
@@ -77,8 +78,16 @@ class TestAccountAuthorizationServiceTests(unittest.TestCase):
                 now=NOW,
             )["testAccount"]
             self.assertEqual(account["testRole"], role)
-            self.assertEqual(account["featureEntitlements"], [])
-            self.assertFalse(account["authorizationConfigured"])
+            if role == "superTest":
+                self.assertEqual(
+                    account["featureEntitlements"],
+                    list(TEST_ACCOUNT_FEATURE_ENTITLEMENTS),
+                )
+                self.assertIn("narrativeWriting", account["featureEntitlements"])
+                self.assertTrue(account["authorizationConfigured"])
+            else:
+                self.assertEqual(account["featureEntitlements"], [])
+                self.assertFalse(account["authorizationConfigured"])
 
     def test_new_account_has_no_product_entitlement_and_update_is_revisioned(self):
         store = InMemoryStore()
@@ -363,9 +372,19 @@ class TestAccountAuthorizationEndpointTests(unittest.TestCase):
         ):
             client = TestClient(app)
             headers = {"Authorization": f"Bearer {issued['accessToken']}"}
+            policy = client.get(
+                "/v2/release-policy?feature=narrativeWriting",
+                headers=headers,
+            )
             allowed = client.get("/profile/sub_super_test", headers=headers)
             denied = client.get("/profile/sub_other_owner", headers=headers)
 
+        self.assertEqual(policy.status_code, 200)
+        self.assertTrue(policy.json()["features"][0]["enabled"])
+        self.assertEqual(
+            policy.json()["features"][0]["reason"],
+            "authenticatedOwnerCore",
+        )
         self.assertEqual(allowed.status_code, 200)
         self.assertEqual(allowed.json()["profile"]["name"], "Self")
         self.assertEqual(denied.status_code, 403)
