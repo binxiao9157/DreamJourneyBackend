@@ -190,6 +190,7 @@ _OWNER_TRUTH_WORKERS = {
 }
 
 _DISABLED_REASONS = {
+    "narrativeGeneration": "narrativeGenerationWorkerDisabled",
     "businessMessageProjection": "businessMessageProjectionWorkerDisabled",
     "publicationExternalCleanupMaterializer": (
         "publicationExternalCleanupMaterializerDisabled"
@@ -197,6 +198,7 @@ _DISABLED_REASONS = {
 }
 
 _READY_REASONS = {
+    "narrativeGeneration": "narrativeGenerationWorkerActivationReady",
     "businessMessageProjection": "businessMessageProjectionWorkerActivationReady",
     "publicationExternalCleanupMaterializer": (
         "publicationExternalCleanupMaterializerActivationReady"
@@ -278,6 +280,31 @@ def evaluate_worker_activation(
 
     if not spec.enabled(settings):
         return _blocked(worker, _DISABLED_REASONS[worker], "workerKillSwitch")
+
+    if (
+        worker == "narrativeGeneration"
+        and settings.narrative_generation_provider != "deepseek"
+    ):
+        return _blocked(
+            worker,
+            "narrativeGenerationProviderNotConfigured",
+            "narrativeProvider",
+        )
+    if worker == "narrativeGeneration" and not settings.deepseek_api_key:
+        return _blocked(
+            worker,
+            "narrativeGenerationProviderCredentialNotConfigured",
+            "deepSeek",
+        )
+    if (
+        worker == "narrativeGeneration"
+        and settings.narrative_generation_model in {"", "disabled"}
+    ):
+        return _blocked(
+            worker,
+            "narrativeGenerationModelNotConfigured",
+            "narrativeModel",
+        )
 
     return WorkerActivationDecision(
         worker=worker,

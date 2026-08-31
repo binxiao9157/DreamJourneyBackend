@@ -31,7 +31,7 @@ class DeploymentOperationsContractTests(unittest.TestCase):
             text=True,
         )
         self.assertIn('"status":"passed"', result.stdout)
-        self.assertIn('"workerCount":6', result.stdout)
+        self.assertIn('"workerCount":7', result.stdout)
         self.assertNotIn("TOKEN", result.stdout.upper())
         self.assertNotIn("PASSWORD", result.stdout.upper())
 

@@ -128,6 +128,15 @@ class Settings:
     # Candidate extraction is a separate, deterministic QA worker. It remains
     # off unless all async-effect flags and this explicit switch are enabled.
     owner_truth_candidate_extraction_worker_enabled: bool = False
+    # Narrative generation is an independent text-only lane. The worker and
+    # provider both remain disabled until their privacy/release evidence exists.
+    narrative_generation_worker_enabled: bool = False
+    narrative_generation_provider: str = "disabled"
+    narrative_generation_model: str = "disabled"
+    narrative_generation_prompt_version: str = "narrative-writing-v1"
+    narrative_generation_pipeline_version: str = "story-plan-ledger-draft-render-guard-v1"
+    narrative_generation_timeout_seconds: float = 120.0
+    narrative_generation_max_concurrency: int = 2
     # Closed Live sessions may contain the complete user/assistant text
     # transcript. Sending that transcript to DeepSeek for semantic memory
     # organization requires this separate, explicit production switch.
@@ -597,6 +606,41 @@ class Settings:
             owner_truth_candidate_extraction_worker_enabled=_env_bool(
                 "OWNER_TRUTH_CANDIDATE_EXTRACTION_WORKER_ENABLED",
                 cls.owner_truth_candidate_extraction_worker_enabled,
+            ),
+            narrative_generation_worker_enabled=_env_bool(
+                "NARRATIVE_GENERATION_WORKER_ENABLED",
+                cls.narrative_generation_worker_enabled,
+            ),
+            narrative_generation_provider=_env(
+                "NARRATIVE_GENERATION_PROVIDER", cls.narrative_generation_provider
+            ) or cls.narrative_generation_provider,
+            narrative_generation_model=_env(
+                "NARRATIVE_GENERATION_MODEL", cls.narrative_generation_model
+            ) or cls.narrative_generation_model,
+            narrative_generation_prompt_version=_env(
+                "NARRATIVE_GENERATION_PROMPT_VERSION",
+                cls.narrative_generation_prompt_version,
+            ) or cls.narrative_generation_prompt_version,
+            narrative_generation_pipeline_version=_env(
+                "NARRATIVE_GENERATION_PIPELINE_VERSION",
+                cls.narrative_generation_pipeline_version,
+            ) or cls.narrative_generation_pipeline_version,
+            narrative_generation_timeout_seconds=max(
+                10.0,
+                _env_float(
+                    "NARRATIVE_GENERATION_TIMEOUT_SECONDS",
+                    cls.narrative_generation_timeout_seconds,
+                ),
+            ),
+            narrative_generation_max_concurrency=max(
+                1,
+                min(
+                    16,
+                    _env_int(
+                        "NARRATIVE_GENERATION_MAX_CONCURRENCY",
+                        cls.narrative_generation_max_concurrency,
+                    ),
+                ),
             ),
             owner_truth_live_memory_organization_enabled=_env_bool(
                 "OWNER_TRUTH_LIVE_MEMORY_ORGANIZATION_ENABLED",

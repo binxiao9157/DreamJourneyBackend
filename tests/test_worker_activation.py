@@ -24,13 +24,14 @@ class WorkerDeploymentRegistryTests(unittest.TestCase):
         inventory = deployment_inventory()
         serialized = json.dumps(inventory, sort_keys=True)
 
-        self.assertEqual(len(inventory), 6)
-        self.assertEqual(len({item["worker"] for item in inventory}), 6)
-        self.assertEqual(len({item["settingsFlag"] for item in inventory}), 6)
-        self.assertEqual(len({item["composeService"] for item in inventory}), 6)
+        self.assertEqual(len(inventory), 7)
+        self.assertEqual(len({item["worker"] for item in inventory}), 7)
+        self.assertEqual(len({item["settingsFlag"] for item in inventory}), 7)
+        self.assertEqual(len({item["composeService"] for item in inventory}), 7)
         self.assertEqual(
             {item["composeService"] for item in inventory},
             {
+                "narrative-generation-worker",
                 "owner-truth-candidate-extraction-worker",
                 "owner-truth-memory-projection-worker",
                 "owner-truth-media-processing-worker",
@@ -122,6 +123,62 @@ class WorkerActivationTests(unittest.TestCase):
             publication.reason,
             "publicationExternalCleanupMaterializerDisabled",
         )
+
+    def test_narrative_worker_fails_closed_until_provider_is_fully_configured(self):
+        disabled = evaluate_worker_activation(
+            worker="narrativeGeneration",
+            settings=self.settings(narrative_generation_worker_enabled=False),
+            schema_ready=True,
+        )
+        provider_missing = evaluate_worker_activation(
+            worker="narrativeGeneration",
+            settings=self.settings(narrative_generation_worker_enabled=True),
+            schema_ready=True,
+        )
+        credential_missing = evaluate_worker_activation(
+            worker="narrativeGeneration",
+            settings=self.settings(
+                narrative_generation_worker_enabled=True,
+                narrative_generation_provider="deepseek",
+                narrative_generation_model="deepseek-chat",
+            ),
+            schema_ready=True,
+        )
+        model_missing = evaluate_worker_activation(
+            worker="narrativeGeneration",
+            settings=self.settings(
+                narrative_generation_worker_enabled=True,
+                narrative_generation_provider="deepseek",
+                deepseek_api_key="fixture-key",
+            ),
+            schema_ready=True,
+        )
+        ready = evaluate_worker_activation(
+            worker="narrativeGeneration",
+            settings=self.settings(
+                narrative_generation_worker_enabled=True,
+                narrative_generation_provider="deepseek",
+                narrative_generation_model="deepseek-chat",
+                deepseek_api_key="fixture-key",
+            ),
+            schema_ready=True,
+        )
+
+        self.assertEqual(disabled.reason, "narrativeGenerationWorkerDisabled")
+        self.assertEqual(
+            provider_missing.reason,
+            "narrativeGenerationProviderNotConfigured",
+        )
+        self.assertEqual(
+            credential_missing.reason,
+            "narrativeGenerationProviderCredentialNotConfigured",
+        )
+        self.assertEqual(
+            model_missing.reason,
+            "narrativeGenerationModelNotConfigured",
+        )
+        self.assertTrue(ready.ready)
+        self.assertEqual(ready.reason, "narrativeGenerationWorkerActivationReady")
 
     def test_typed_probe_failure_is_structured_and_retryable(self):
         def failed_probe(_settings):

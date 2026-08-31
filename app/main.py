@@ -19357,3 +19357,29 @@ def care_snapshot_history(
         limit=limit,
     )
     return {"userId": user_id, "items": items}
+
+
+# Keep the autobiography/Ta Story surface in its own module. The resolver
+# reuses the same captured ReleasePolicy and Owner-Vault authorization boundary
+# as the rest of V4 instead of accepting client role headers as authority.
+from app.api.narrative import create_narrative_router
+from app.services.narrative_deepseek import narrative_provider_ready
+
+
+def _narrative_owner_context(request: Request, vault_id: str) -> OwnerTruthCommandContext:
+    return _owner_truth_captured_release_policy_context(
+        request,
+        vault_id=vault_id,
+        feature="narrativeWriting",
+        route=f"{request.method.upper()} /v2/vaults/*/narrative-projects",
+        user_session_required_code="narrativeWritingUserSessionRequired",
+    )
+
+
+app.include_router(
+    create_narrative_router(
+        store=store,
+        resolve_owner_context=_narrative_owner_context,
+        generation_available=lambda: narrative_provider_ready(settings),
+    )
+)

@@ -1,0 +1,12 @@
+{
+  "version": "0106",
+  "name": "narrative_writing",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "narrativeWritingV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "narrativeWriting": true,
+    "narrativeGenerationWorker": true
+  }
+}

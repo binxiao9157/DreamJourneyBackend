@@ -51,6 +51,15 @@ class OperationMetricCoverageEntry:
 # explicit coverage classification instead of silently becoming unobserved.
 CRITICAL_WORKER_COVERAGE = (
     OperationMetricCoverageEntry(
+        component_id=(
+            "app.async_effects.narrative_generation_worker."
+            "NarrativeGenerationWorkerRuntime"
+        ),
+        component_kind="worker",
+        status=OperationMetricCoverageStatus.INSTRUMENTED,
+        reason_code="workerAttemptRecorderAttached",
+    ),
+    OperationMetricCoverageEntry(
         component_id="app.async_effects.worker.AsyncEffectWorkerRuntime",
         component_kind="worker",
         status=OperationMetricCoverageStatus.NOT_INSTRUMENTED,

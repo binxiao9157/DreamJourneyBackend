@@ -142,6 +142,7 @@ from app.services.owner_truth_candidate_review import (
 from app.services.owner_truth_formal_memory import (
     PostgresOwnerTruthFormalMemoryRepository,
 )
+from app.services.narrative_project import PostgresNarrativeRepository
 from app.services.owner_truth_source_records import (
     PostgresOwnerTruthSourceRecordRepository,
 )
@@ -537,6 +538,14 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth formal memory requires an active unit of work")
         return PostgresOwnerTruthFormalMemoryRepository(active.connection)
+
+    def narrative_repository(self) -> PostgresNarrativeRepository:
+        """Return the narrative repository bound to the active request/worker UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("narrative repository requires an active unit of work")
+        return PostgresNarrativeRepository(active.connection)
 
     def owner_truth_source_record_repository(
         self,

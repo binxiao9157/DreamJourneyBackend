@@ -461,6 +461,9 @@ class ReleasePolicyService:
         # It reports only durable counts and continuation availability; it must
         # not inherit visibility from the QA outcome read or natural input.
         "ownerTruthInterviewOutcome": ("G0", "G1", "G2"),
+        # Private, text-only autobiography/Ta Story writing. Generation is
+        # separately fail-closed by worker/provider readiness.
+        "narrativeWriting": ("G0", "G1", "G2"),
         "echoImageInput": ("G0", "G1", "G2"),
         "timeLetters": ("G0", "G1", "G2", "G4"),
         "echoDelayedReplies": ("G0", "G1", "G2", "G4"),
@@ -522,6 +525,7 @@ class ReleasePolicyService:
         "publication",
         "publicationGrantManagement",
         "publicationVisitor",
+        "narrativeWriting",
         "careDashboard",
         "careDoctorContact",
         "digitalInheritance",
@@ -558,6 +562,7 @@ class ReleasePolicyService:
         "ownerTruthMemorySearch",
         "ownerTruthInterviewOutcome",
         "ownerTruthFamilyContribution",
+        "narrativeWriting",
         "personaSettings",
         "voiceCloneShell",
         "profileSettings",
@@ -575,6 +580,7 @@ class ReleasePolicyService:
         "echoGuidedRecommendations",
         "ownerTruthLifeMap",
         "ownerTruthFamilyContribution",
+        "narrativeWriting",
     }
     _FEATURE_CAPABILITIES = {
         "ownerMediaCaptureV1": "ownerTruthMediaStorage",
@@ -1151,6 +1157,11 @@ class ReleasePolicyCommandGate:
         publication_feature = self._publication_formal_feature(normalized_path)
         if publication_feature is not None:
             return publication_feature
+        if (
+            normalized_path.startswith("/v2/vaults/")
+            and "/narrative-projects" in normalized_path
+        ):
+            return "narrativeWriting"
         for prefix, feature in self._PREFIX_FEATURES:
             if normalized_path == prefix:
                 return feature

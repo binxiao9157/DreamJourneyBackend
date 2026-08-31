@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "narrative-golden-corpus-v1",
+  "cases": [
+    {
+      "caseId": "supported-self-memory",
+      "projectType": "selfAutobiography",
+      "narratorType": "selfFirstPerson",
+      "ledger": [{
+        "memoryVersionId": "memory-1",
+        "text": "在北方的一所大学学习计算机",
+        "uncertain": false,
+        "supportsDirectQuote": false
+      }],
+      "claim": {
+        "text": "我在北方的一所大学学习计算机。",
+        "memoryVersionIds": ["memory-1"]
+      },
+      "expected": "pass"
+    },
+    {
+      "caseId": "invented-direct-quote",
+      "projectType": "selfAutobiography",
+      "narratorType": "selfFirstPerson",
+      "ledger": [{
+        "memoryVersionId": "memory-1",
+        "text": "一位老师曾经鼓励过我",
+        "uncertain": false,
+        "supportsDirectQuote": false
+      }],
+      "claim": {
+        "text": "老师说：“你一定会成功。”",
+        "memoryVersionIds": ["memory-1"]
+      },
+      "expected": "unsupported_direct_quote"
+    },
+    {
+      "caseId": "uncertainty-upgraded",
+      "projectType": "selfAutobiography",
+      "narratorType": "selfFirstPerson",
+      "ledger": [{
+        "memoryVersionId": "memory-2",
+        "text": "似乎是在毕业后的第二年",
+        "uncertain": true,
+        "supportsDirectQuote": false
+      }],
+      "claim": {
+        "text": "这件事确定发生在毕业后的第二年。",
+        "memoryVersionIds": ["memory-2"]
+      },
+      "expected": "uncertainty_upgraded"
+    },
+    {
+      "caseId": "ta-first-person-impersonation",
+      "projectType": "taStory",
+      "narratorType": "thirdPersonBiography",
+      "ledger": [{
+        "memoryVersionId": "memory-3",
+        "text": "他在北方求学",
+        "uncertain": false,
+        "supportsDirectQuote": false
+      }],
+      "claim": {
+        "text": "我在北方读大学。",
+        "memoryVersionIds": ["memory-3"]
+      },
+      "expected": "ta_first_person_forbidden"
+    }
+  ]
+}

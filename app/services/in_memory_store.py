@@ -69,6 +69,7 @@ from app.services.owner_truth_candidate_review import (
 from app.services.owner_truth_formal_memory import (
     InMemoryOwnerTruthFormalMemoryRepository,
 )
+from app.services.narrative_project import InMemoryNarrativeRepository
 from app.services.owner_truth_source_records import (
     InMemoryOwnerTruthSourceRecordRepository,
 )
@@ -225,6 +226,7 @@ class InMemoryStore:
                 self._owner_truth_candidate_review_repository
             )
         )
+        self._narrative_repository = InMemoryNarrativeRepository()
         self._owner_truth_source_record_repository = (
             InMemoryOwnerTruthSourceRecordRepository(
                 sources=self._owner_truth_sources,
@@ -445,6 +447,9 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthFormalMemoryRepository:
         return self._owner_truth_formal_memory_repository
+
+    def narrative_repository(self) -> InMemoryNarrativeRepository:
+        return self._narrative_repository
 
     def owner_truth_source_record_repository(
         self,

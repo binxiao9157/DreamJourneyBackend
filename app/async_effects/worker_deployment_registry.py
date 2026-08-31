@@ -40,6 +40,11 @@ class WorkerDeploymentSpec:
 
 LONG_RUNNING_WORKERS: tuple[WorkerDeploymentSpec, ...] = (
     WorkerDeploymentSpec(
+        worker="narrativeGeneration",
+        settings_flag="narrative_generation_worker_enabled",
+        compose_service="narrative-generation-worker",
+    ),
+    WorkerDeploymentSpec(
         worker="ownerTruthCandidateExtraction",
         settings_flag="owner_truth_candidate_extraction_worker_enabled",
         compose_service="owner-truth-candidate-extraction-worker",

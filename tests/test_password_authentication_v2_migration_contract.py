@@ -28,8 +28,10 @@ class PasswordAuthenticationV2MigrationContractTests(unittest.TestCase):
 
         migration_names = {migration.version: migration.name for migration in migrations}
         self.assertEqual(migration_names["0094"], "password_authentication_v2")
-        self.assertEqual(migrations[-1].version, "0101")
-        self.assertEqual(migrations[-1].name, "formal_memory_markdown_export")
+        self.assertEqual(migration_names["0101"], "formal_memory_markdown_export")
+        versions = [migration.version for migration in migrations]
+        self.assertLess(versions.index("0094"), versions.index("0101"))
+        self.assertLess(versions.index("0101"), versions.index("0106"))
 
 
 if __name__ == "__main__":

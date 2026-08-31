@@ -230,7 +230,7 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
                 f"exec python -m {module} --loop",
             )
         self.assertIn("restart: unless-stopped", compose)
-        self.assertEqual(compose.count("stop_grace_period: 150s"), 6)
+        self.assertEqual(compose.count("stop_grace_period: 150s"), 7)
         self.assertIn("OWNER_TRUTH_MEDIA_DELETION_WORKER_ENABLED=false", env_example)
 
 

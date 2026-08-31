@@ -1,0 +1,147 @@
+{
+  "schemaVersion": "narrative-contract-fixture-v1",
+  "generatedAt": "2026-08-29T09:00:00Z",
+  "enums": {
+    "projectTypes": ["selfAutobiography", "taStory"],
+    "narratorTypes": ["selfFirstPerson", "thirdPersonBiography", "controllerWitness"],
+    "bookProjectStates": [
+      "notStarted", "checkingReadiness", "needsMoreMemory", "readyForConfirmation",
+      "generatingAuditions", "auditionsReady", "generatingGoldenSample",
+      "goldenSampleReview", "toneConfirmed", "outlineReview", "writing",
+      "updateAvailable", "paused", "disputed", "suspended", "archived", "deleted"
+    ],
+    "artifactTypes": [
+      "writingAudition", "goldenSample", "narrativeStyleProfile",
+      "writingConstitution", "outline", "chapter"
+    ],
+    "artifactStates": ["draft", "readyForReview", "confirmed", "final", "stale", "superseded"],
+    "commandTypes": [
+      "confirmSetup", "generateAuditions", "selectAudition", "generateGoldenSample",
+      "submitArtifactFeedback", "confirmGoldenSample", "generateOutline", "reviseOutline",
+      "confirmOutline", "generateChapter", "reviseChapter", "finalizeChapter",
+      "editArtifact", "restoreArtifactVersion", "adoptMemoryUpdate",
+      "ignoreMemoryUpdate", "pauseProject", "resumeProject", "archiveProject"
+    ],
+    "jobStates": [
+      "queued", "snapshotting", "retrieving", "planning", "drafting",
+      "validatingFacts", "editingStyle", "finalValidation", "readyForReview",
+      "needsEcho", "failed", "cancelled", "superseded"
+    ],
+    "errorCodes": [
+      "job_accepted", "release_policy_denied", "capability_unavailable",
+      "resource_not_found", "project_version_conflict", "invalid_state",
+      "memory_snapshot_stale", "contract_invalid", "unsupported_fact_detected",
+      "provider_unavailable"
+    ]
+  },
+  "sample": {
+    "project": {
+      "projectId": "10000000-0000-0000-0000-000000000001",
+      "vaultId": "vault-fixture-self",
+      "subjectPersonaId": "persona-fixture-self",
+      "projectType": "selfAutobiography",
+      "narratorType": "selfFirstPerson",
+      "state": "readyForConfirmation",
+      "projectVersion": 7,
+      "updatedAt": "2026-08-29T09:00:00Z"
+    },
+    "artifact": {
+      "artifactVersionId": "10000000-0000-0000-0000-000000000002",
+      "artifactType": "writingAudition",
+      "state": "readyForReview",
+      "versionNumber": 1,
+      "memorySnapshotId": "10000000-0000-0000-0000-000000000003",
+      "createdAt": "2026-08-29T09:01:00Z"
+    },
+    "job": {
+      "jobId": "10000000-0000-0000-0000-000000000004",
+      "commandId": "10000000-0000-0000-0000-000000000005",
+      "state": "validatingFacts",
+      "createdAt": "2026-08-29T09:02:00Z"
+    },
+    "command": {
+      "schemaVersion": "narrative-command-v1",
+      "commandId": "10000000-0000-0000-0000-000000000005",
+      "commandType": "generateAuditions",
+      "expectedProjectVersion": 7,
+      "confirmed": true,
+      "payload": {}
+    },
+    "error": {
+      "schemaVersion": "narrative-error-v1",
+      "errorCode": "project_version_conflict",
+      "message": "Project state changed. Refresh before retrying.",
+      "retryable": true,
+      "currentProjectVersion": 8
+    }
+  },
+  "transitionCases": {
+    "bookProject": {
+      "allowed": [
+        ["notStarted", "checkingReadiness"],
+        ["checkingReadiness", "needsMoreMemory"],
+        ["checkingReadiness", "readyForConfirmation"],
+        ["needsMoreMemory", "checkingReadiness"],
+        ["readyForConfirmation", "generatingAuditions"],
+        ["generatingAuditions", "auditionsReady"],
+        ["auditionsReady", "generatingGoldenSample"],
+        ["generatingGoldenSample", "goldenSampleReview"],
+        ["goldenSampleReview", "toneConfirmed"],
+        ["toneConfirmed", "outlineReview"],
+        ["outlineReview", "writing"],
+        ["writing", "updateAvailable"],
+        ["updateAvailable", "writing"],
+        ["paused", "checkingReadiness"],
+        ["disputed", "checkingReadiness"],
+        ["suspended", "checkingReadiness"],
+        ["archived", "deleted"]
+      ],
+      "rejected": [
+        ["notStarted", "writing"],
+        ["auditionsReady", "toneConfirmed"],
+        ["goldenSampleReview", "writing"],
+        ["archived", "generatingAuditions"],
+        ["deleted", "notStarted"]
+      ]
+    },
+    "artifact": {
+      "allowed": [
+        ["draft", "readyForReview"],
+        ["readyForReview", "confirmed"],
+        ["readyForReview", "final"],
+        ["draft", "superseded"],
+        ["confirmed", "stale"],
+        ["final", "stale"]
+      ],
+      "rejected": [
+        ["confirmed", "draft"],
+        ["final", "draft"],
+        ["stale", "readyForReview"],
+        ["superseded", "confirmed"]
+      ]
+    },
+    "job": {
+      "allowed": [
+        ["queued", "snapshotting"],
+        ["snapshotting", "retrieving"],
+        ["retrieving", "planning"],
+        ["planning", "drafting"],
+        ["drafting", "validatingFacts"],
+        ["validatingFacts", "editingStyle"],
+        ["editingStyle", "finalValidation"],
+        ["finalValidation", "readyForReview"],
+        ["retrieving", "needsEcho"],
+        ["drafting", "failed"],
+        ["queued", "cancelled"],
+        ["readyForReview", "superseded"]
+      ],
+      "rejected": [
+        ["queued", "readyForReview"],
+        ["needsEcho", "readyForReview"],
+        ["failed", "drafting"],
+        ["cancelled", "readyForReview"],
+        ["superseded", "queued"]
+      ]
+    }
+  }
+}

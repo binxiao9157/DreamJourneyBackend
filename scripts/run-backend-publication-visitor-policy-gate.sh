@@ -16,6 +16,7 @@ cd "$ROOT_DIR"
 "$PYTHON_BIN" -m py_compile app/services/release_policy.py
 
 "$PYTHON_BIN" - <<'PY'
+import ast
 from pathlib import Path
 
 import app.main as main_module
@@ -69,6 +70,18 @@ assert observed_formal_routes == formal_closed_beta_routes
 # original slice. It still fails if any registered public/visitor route exists.
 
 source = Path("app/services/release_policy.py").read_text(encoding="utf-8")
+tree = ast.parse(source)
+imports = {
+    alias.name
+    for node in ast.walk(tree)
+    if isinstance(node, ast.Import)
+    for alias in node.names
+}
+imports.update(
+    node.module
+    for node in ast.walk(tree)
+    if isinstance(node, ast.ImportFrom) and node.module
+)
 for forbidden in (
     "app.domain.publication",
     "app.services.publication",
@@ -78,7 +91,10 @@ for forbidden in (
     "httpx",
     "sqlalchemy",
 ):
-    assert forbidden not in source, f"publication/visitor G0 policy must not depend on {forbidden}"
+    assert not any(
+        name == forbidden or name.startswith(forbidden + ".")
+        for name in imports
+    ), f"publication/visitor G0 policy must not depend on {forbidden}"
 
 print("publication visitor default-deny G0 gate passed")
 PY

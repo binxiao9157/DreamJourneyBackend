@@ -73,6 +73,27 @@ services:
       redis:
         condition: service_started
 
+  narrative-generation-worker:
+    build: .
+    profiles:
+      - narrative-worker
+    restart: unless-stopped
+    stop_grace_period: 150s
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.async_effects.worker_activation
+        --worker narrativeGeneration &&
+        exec python -m app.async_effects.narrative_generation_worker --loop
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
   owner-truth-memory-projection-worker:
     build: .
     profiles:
