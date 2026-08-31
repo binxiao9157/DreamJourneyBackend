@@ -991,8 +991,11 @@ class NarrativeGenerationProcessor:
                 or text is None
                 or not 200 <= _text_length(text) <= 300
             ):
+                text_length = _text_length(text or "")
                 raise NarrativeGenerationError(
-                    "each audition must match its key and contain 200-300 characters"
+                    "audition_contract_invalid:"
+                    f"index={index + 1},keyMatch={key == AUDITION_KEYS[index]},"
+                    f"textLength={text_length}"
                 )
             if job.job_type == "goldenSample" and (
                 text is None or not 500 <= _text_length(text) <= 800

@@ -146,6 +146,39 @@ class DeepSeekNarrativeProviderTests(unittest.TestCase):
         self.assertEqual(provider._audition_contract_violations(output), [])
         self.assertIn("未通过最终格式校验", calls[1]["messages"][0]["content"])
         self.assertIn("允许省略次要事实", calls[1]["messages"][0]["content"])
+        self.assertIn("lengthMismatch:1:", calls[1]["messages"][0]["content"])
+
+    def test_final_auditions_normalize_provider_key_order_without_rewriting(self):
+        _, _, project, ref, _ = scenarios._fixture()
+        paragraph = "我在北方求学。" * 30
+
+        def transport(_url, _headers, _body, _timeout):
+            content = {
+                "artifacts": [{
+                    "key": key,
+                    "text": paragraph,
+                    "payload": {"paragraphs": [{
+                        "paragraphId": f"{key}-p1",
+                        "text": paragraph,
+                        "memoryVersionIds": [ref.memory_version_id],
+                    }]},
+                } for key in ("thoughtfulMemoir", "documentary", "warmReflection")]
+            }
+            return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+        provider = DeepSeekNarrativeProvider(_settings(), transport=transport)
+        output = provider.generate_stage(
+            stage="antiAIEdit",
+            job_type="auditions",
+            project=project,
+            context={},
+            previous_output={},
+        )
+
+        self.assertEqual(
+            [item["key"] for item in output["artifacts"]],
+            ["documentary", "warmReflection", "thoughtfulMemoir"],
+        )
 
     def test_audition_plan_selects_representative_memories_instead_of_all(self):
         _, _, project, _, _ = scenarios._fixture()
@@ -162,6 +195,24 @@ class DeepSeekNarrativeProviderTests(unittest.TestCase):
         prompt = request["json"]["messages"][0]["content"]
         self.assertIn("2 至 3 条代表性记忆", prompt)
         self.assertIn("不要试图覆盖全部人生材料", prompt)
+
+        factual_prompt = provider.build_request(
+            stage="factualDraft",
+            job_type="auditions",
+            project=project,
+            context={},
+            previous_output={},
+        )["json"]["messages"][0]["content"]
+        self.assertIn("previousStageOutput.plan.memoryVersionIds", factual_prompt)
+
+        render_prompt = provider.build_request(
+            stage="literaryRender",
+            job_type="auditions",
+            project=project,
+            context={},
+            previous_output={},
+        )["json"]["messages"][0]["content"]
+        self.assertIn("previousStageOutput.artifacts", render_prompt)
 
     def test_four_stage_adapter_commits_only_fact_guarded_artifacts(self):
         repo, _, project, ref, job = scenarios._fixture()
