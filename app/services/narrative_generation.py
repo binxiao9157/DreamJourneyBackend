@@ -832,9 +832,16 @@ class NarrativeCommandService:
 class NarrativeGenerationProcessor:
     """Runs the multi-stage pipeline and commits only Fact Guard-clean artifacts."""
 
-    def __init__(self, repository: NarrativeRepository, provider: NarrativeProvider) -> None:
+    def __init__(
+        self,
+        repository: NarrativeRepository,
+        provider: NarrativeProvider,
+        *,
+        audition_length_validation_enabled: bool = True,
+    ) -> None:
         self.repository = repository
         self.provider = provider
+        self._audition_length_validation_enabled = audition_length_validation_enabled
 
     def run_job(self, *, project_id: str, job_id: str) -> NarrativeJobRecord:
         job = self.repository.get_job(project_id=project_id, job_id=job_id)
@@ -1295,7 +1302,10 @@ class NarrativeGenerationProcessor:
             if job.job_type == "auditions" and (
                 key != audition_keys[index]
                 or text is None
-                or not 200 <= _text_length(text) <= 300
+                or (
+                    self._audition_length_validation_enabled
+                    and not 200 <= _text_length(text) <= 300
+                )
             ):
                 text_length = _text_length(text or "")
                 raise NarrativeGenerationError(

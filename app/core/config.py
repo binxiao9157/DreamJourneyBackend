@@ -135,6 +135,7 @@ class Settings:
     narrative_generation_model: str = "disabled"
     narrative_generation_prompt_version: str = "narrative-writing-v3-progressive-auditions"
     narrative_generation_pipeline_version: str = "selection-manifest-progressive-artifact-repair-v3"
+    narrative_audition_length_validation_enabled: bool = True
     narrative_generation_timeout_seconds: float = 120.0
     narrative_generation_max_concurrency: int = 2
     # Closed Live sessions may contain the complete user/assistant text
@@ -625,6 +626,10 @@ class Settings:
                 "NARRATIVE_GENERATION_PIPELINE_VERSION",
                 cls.narrative_generation_pipeline_version,
             ) or cls.narrative_generation_pipeline_version,
+            narrative_audition_length_validation_enabled=_env_bool(
+                "NARRATIVE_AUDITION_LENGTH_VALIDATION_ENABLED",
+                cls.narrative_audition_length_validation_enabled,
+            ),
             narrative_generation_timeout_seconds=max(
                 10.0,
                 _env_float(

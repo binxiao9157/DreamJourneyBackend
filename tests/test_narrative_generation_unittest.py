@@ -10,6 +10,9 @@ class NarrativeGenerationTests(unittest.TestCase):
     def test_three_auditions_commit_from_one_snapshot(self):
         scenarios.test_three_auditions_commit_from_one_snapshot()
 
+    def test_disabled_length_validation_keeps_fact_guards_and_accepts_short_auditions(self):
+        scenarios.test_disabled_length_validation_keeps_fact_guards_and_accepts_short_auditions()
+
     def test_unknown_memory_reference_rejects_all_invalid_auditions(self):
         scenarios.test_unknown_memory_reference_rejects_all_invalid_auditions()
 

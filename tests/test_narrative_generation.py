@@ -115,6 +115,24 @@ class _ConflictingProvider(_Provider):
         return super().generate(**kwargs)
 
 
+class _ShortProvider(_Provider):
+    def generate(self, **_):
+        paragraph = "我记得那段学习经历。"
+        return {
+            "artifacts": [
+                {
+                    "key": key,
+                    "text": paragraph,
+                    "payload": {"paragraphs": [{
+                        "paragraphId": f"{key}-p1", "text": paragraph,
+                        "memoryVersionIds": [self.memory_version_id],
+                    }]},
+                }
+                for key in ("documentary", "warmReflection", "thoughtfulMemoir")
+            ]
+        }
+
+
 def test_three_auditions_commit_from_one_snapshot():
     repo, _, project, ref, job = _fixture()
     result = NarrativeGenerationProcessor(repo, _Provider(ref.memory_version_id)).run_job(
@@ -127,6 +145,23 @@ def test_three_auditions_commit_from_one_snapshot():
     assert len(artifacts) == 3
     assert {item.memory_snapshot_id for item in artifacts} == {project.current_memory_snapshot_id}
     assert repo.get_project_for_worker(project_id=project.project_id).state is BookProjectState.AUDITIONS_READY
+
+
+def test_disabled_length_validation_keeps_fact_guards_and_accepts_short_auditions():
+    repo, _, project, ref, job = _fixture()
+    result = NarrativeGenerationProcessor(
+        repo,
+        _ShortProvider(ref.memory_version_id),
+        audition_length_validation_enabled=False,
+    ).run_job(project_id=project.project_id, job_id=job.job_id)
+
+    assert result.state is NarrativeJobState.READY_FOR_REVIEW
+    artifacts = repo.list_artifacts(
+        project_id=project.project_id,
+        artifact_type=NarrativeArtifactType.WRITING_AUDITION,
+    )
+    assert len(artifacts) == 3
+    assert {item.content_text for item in artifacts} == {"我记得那段学习经历。"}
 
 
 def test_unknown_memory_reference_rejects_all_invalid_auditions():

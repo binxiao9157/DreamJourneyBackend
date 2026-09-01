@@ -54,7 +54,11 @@ class NarrativeGenerationWorkerRuntime:
             operation_metric_recorder or self._make_metric_recorder()
         )
         self.processor = NarrativeGenerationProcessor(
-            self.repository, make_narrative_provider(settings)
+            self.repository,
+            make_narrative_provider(settings),
+            audition_length_validation_enabled=(
+                settings.narrative_audition_length_validation_enabled
+            ),
         )
 
     def _make_metric_recorder(self) -> OperationMetricRecorder:
