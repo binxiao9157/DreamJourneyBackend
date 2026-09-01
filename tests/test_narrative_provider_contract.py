@@ -57,6 +57,14 @@ class _StagedProvider:
 
     def generate_stage(self, *, stage, previous_output, **_):
         self.stages.append(stage)
+        if stage == "storyPlan":
+            return {"plan": {
+                "objective": "试镜",
+                "structure": [],
+                "memoryVersionIds": [self.memory_version_id],
+                "materialGaps": [],
+                "risks": [],
+            }}
         if stage != "antiAIEdit":
             return {"stage": stage, "previousStage": previous_output.get("stage")}
         return scenarios._Provider(self.memory_version_id).generate()

@@ -22,6 +22,7 @@ from app.domain.narrative.contracts import (
     NarrativeNarratorType,
     NarrativeProjectRecord,
     NarrativeScope,
+    NarrativeSelectionManifestRecord,
 )
 from app.domain.narrative.fact_guard import (
     FactGuardRejected,
@@ -43,8 +44,8 @@ from app.services.narrative_project import (
 )
 
 
-PROMPT_VERSION = "narrative-writing-v1"
-PIPELINE_VERSION = "story-plan-ledger-draft-render-guard-v1"
+PROMPT_VERSION = "narrative-writing-v2-selection-manifest"
+PIPELINE_VERSION = "selection-manifest-factual-draft-render-guard-v2"
 AUDITION_KEYS = ("documentary", "warmReflection", "thoughtfulMemoir")
 GENERATION_STAGES = ("storyPlan", "factualDraft", "literaryRender", "antiAIEdit")
 
@@ -871,7 +872,7 @@ class NarrativeGenerationProcessor:
             ]
             job = self._stage(job, NarrativeJobState.PLANNING)
             job = self._stage(job, NarrativeJobState.DRAFTING)
-            output = self._provider_output(
+            output, selection_manifest = self._provider_output(
                 project=project,
                 job=job,
                 facts=facts,
@@ -880,7 +881,15 @@ class NarrativeGenerationProcessor:
             )
             job = self._stage(job, NarrativeJobState.VALIDATING_FACTS)
             artifacts = self._validate_and_build(
-                project, job, snapshot.memory_refs, output
+                project,
+                job,
+                snapshot.memory_refs,
+                output,
+                selected_memory_version_ids=(
+                    selection_manifest.selected_memory_version_ids
+                    if selection_manifest is not None
+                    else None
+                ),
             )
             job = self._stage(job, NarrativeJobState.EDITING_STYLE)
             job = self._stage(job, NarrativeJobState.FINAL_VALIDATION)
@@ -916,16 +925,19 @@ class NarrativeGenerationProcessor:
         facts: Sequence[Mapping[str, Any]],
         supporting_artifacts: Sequence[Mapping[str, Any]],
         writing_context: Mapping[str, Any],
-    ) -> Mapping[str, Any]:
+    ) -> tuple[Mapping[str, Any], NarrativeSelectionManifestRecord | None]:
         generate_stage = getattr(self.provider, "generate_stage", None)
         if not callable(generate_stage):
-            return self.provider.generate(
-                job_type=job.job_type,
-                project=project,
-                memory_facts=facts,
-                input_payload=job.input_payload,
-                supporting_artifacts=supporting_artifacts,
-                writing_context=dict(writing_context),
+            return (
+                self.provider.generate(
+                    job_type=job.job_type,
+                    project=project,
+                    memory_facts=facts,
+                    input_payload=job.input_payload,
+                    supporting_artifacts=supporting_artifacts,
+                    writing_context=dict(writing_context),
+                ),
+                None,
             )
         context = {
             "memoryFacts": list(facts),
@@ -935,6 +947,92 @@ class NarrativeGenerationProcessor:
             "promptVersion": self._prompt_version,
             "pipelineVersion": self._pipeline_version,
         }
+
+        if job.job_type == "auditions":
+            manifest = self.repository.get_selection_manifest(
+                project_id=project.project_id,
+                job_id=job.job_id,
+            )
+            if manifest is None:
+                plan_output = generate_stage(
+                    stage="storyPlan",
+                    job_type=job.job_type,
+                    project=project,
+                    context=context,
+                    previous_output={},
+                )
+                selected_ids = self._selected_memory_version_ids(
+                    output=plan_output,
+                    facts=facts,
+                )
+                manifest = self.repository.save_selection_manifest(
+                    NarrativeSelectionManifestRecord(
+                        manifest_id=str(uuid4()),
+                        project_id=project.project_id,
+                        job_id=job.job_id,
+                        memory_snapshot_id=job.memory_snapshot_id,
+                        selected_memory_version_ids=selected_ids,
+                        selection_hash=_digest({
+                            "memorySnapshotId": job.memory_snapshot_id,
+                            "selectedMemoryVersionIds": list(selected_ids),
+                        }),
+                        model_id=self.provider.model_id,
+                        prompt_version=self._prompt_version,
+                        created_at=_now(),
+                    )
+                )
+                output = dict(plan_output)
+            else:
+                if manifest.memory_snapshot_id != job.memory_snapshot_id:
+                    raise NarrativeProjectConflict("memory_snapshot_stale")
+                output = {"plan": {}}
+
+            plan = output.get("plan")
+            normalized_plan = dict(plan) if isinstance(plan, Mapping) else {}
+            normalized_plan.update({
+                "memoryVersionIds": list(manifest.selected_memory_version_ids),
+                "selectionManifestId": manifest.manifest_id,
+                "selectionHash": manifest.selection_hash,
+            })
+            output = {**output, "plan": normalized_plan}
+
+            by_id = {
+                str(item.get("memoryVersionId") or ""): item
+                for item in facts
+            }
+            try:
+                selected_facts = [
+                    by_id[memory_version_id]
+                    for memory_version_id in manifest.selected_memory_version_ids
+                ]
+            except KeyError as exc:
+                raise NarrativeProjectConflict("memory_snapshot_stale") from exc
+            context = {
+                **context,
+                "memoryFacts": selected_facts,
+                "selectionManifest": {
+                    "selectionManifestId": manifest.manifest_id,
+                    "selectionHash": manifest.selection_hash,
+                    "selectedMemoryVersionIds": list(
+                        manifest.selected_memory_version_ids
+                    ),
+                },
+            }
+            for stage in GENERATION_STAGES[1:]:
+                value = generate_stage(
+                    stage=stage,
+                    job_type=job.job_type,
+                    project=project,
+                    context=context,
+                    previous_output=output,
+                )
+                if not isinstance(value, Mapping):
+                    raise NarrativeGenerationError(
+                        f"provider stage {stage} returned an invalid object"
+                    )
+                output = value
+            return output, manifest
+
         output: Mapping[str, Any] = {}
         for stage in GENERATION_STAGES:
             value = generate_stage(
@@ -947,7 +1045,37 @@ class NarrativeGenerationProcessor:
             if not isinstance(value, Mapping):
                 raise NarrativeGenerationError(f"provider stage {stage} returned an invalid object")
             output = value
-        return output
+        return output, None
+
+    @staticmethod
+    def _selected_memory_version_ids(
+        *,
+        output: Mapping[str, Any],
+        facts: Sequence[Mapping[str, Any]],
+    ) -> tuple[str, ...]:
+        plan = output.get("plan")
+        values = plan.get("memoryVersionIds") if isinstance(plan, Mapping) else None
+        if not isinstance(values, list):
+            raise NarrativeGenerationError("selection_manifest_invalid:missingMemoryVersionIds")
+        selected = tuple(str(value or "").strip() for value in values)
+        minimum = 2 if len(facts) >= 2 else 1
+        if not minimum <= len(selected) <= min(3, len(facts)):
+            raise NarrativeGenerationError(
+                "selection_manifest_invalid:memoryVersionCount"
+            )
+        if any(not value for value in selected) or len(set(selected)) != len(selected):
+            raise NarrativeGenerationError(
+                "selection_manifest_invalid:duplicateOrBlankMemoryVersionId"
+            )
+        available = {
+            str(item.get("memoryVersionId") or "").strip()
+            for item in facts
+        }
+        if not set(selected).issubset(available):
+            raise NarrativeGenerationError(
+                "selection_manifest_invalid:memoryOutsideSnapshot"
+            )
+        return selected
 
     def _validate_and_build(
         self,
@@ -955,12 +1083,18 @@ class NarrativeGenerationProcessor:
         job: NarrativeJobRecord,
         refs: Sequence[Any],
         output: Mapping[str, Any],
+        selected_memory_version_ids: Sequence[str] | None = None,
     ) -> list[NarrativeArtifactRecord]:
         raw = output.get("artifacts")
         if not isinstance(raw, list) or not raw:
             raise NarrativeGenerationError("provider output has no artifacts")
         if job.job_type == "auditions" and len(raw) != 3:
             raise NarrativeGenerationError("auditions must commit as one group of three")
+        selected_set = (
+            frozenset(str(value) for value in selected_memory_version_ids)
+            if selected_memory_version_ids is not None
+            else None
+        )
         ledger = {
             ref.memory_version_id: FactLedgerEntry(
                 memory_version_id=ref.memory_version_id,
@@ -977,6 +1111,7 @@ class NarrativeGenerationProcessor:
                 uncertain=ref.epistemic_status in {"inferred", "uncertain"},
             )
             for ref in refs
+            if selected_set is None or ref.memory_version_id in selected_set
         }
         built: list[NarrativeArtifactRecord] = []
         for index, item in enumerate(raw):
@@ -1010,6 +1145,18 @@ class NarrativeGenerationProcessor:
                         "chapter output must match the requested chapter key and contain text"
                     )
             claims = self._claims(payload, text)
+            if job.job_type == "auditions" and selected_set is not None:
+                cited_set = frozenset(
+                    memory_version_id
+                    for claim in claims
+                    for memory_version_id in claim.memory_version_ids
+                )
+                if cited_set != selected_set:
+                    raise NarrativeGenerationError(
+                        "audition_selection_mismatch:"
+                        f"index={index + 1},expectedCount={len(selected_set)},"
+                        f"citedCount={len(cited_set)}"
+                    )
             validate_claims(
                 claims=claims,
                 ledger=ledger,
@@ -1022,6 +1169,15 @@ class NarrativeGenerationProcessor:
             same = [value for value in prior if value.artifact_key == key]
             parent = max(same, key=lambda value: value.version_number) if same else None
             normalized = dict(payload)
+            if job.job_type == "auditions" and selected_set is not None:
+                manifest = self.repository.get_selection_manifest(
+                    project_id=project.project_id,
+                    job_id=job.job_id,
+                )
+                if manifest is None:
+                    raise NarrativeGenerationError("selection_manifest_missing")
+                normalized["selectionManifestId"] = manifest.manifest_id
+                normalized["selectionHash"] = manifest.selection_hash
             if job.job_type == "outline":
                 normalized["nodes"] = NarrativeCommandService._validated_outline_nodes(
                     payload.get("nodes") if isinstance(payload.get("nodes"), list) else []

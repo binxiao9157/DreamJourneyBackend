@@ -12,6 +12,7 @@ from app.domain.narrative.contracts import (
     NarrativeNarratorType,
     NarrativeProjectRecord,
     NarrativeScope,
+    NarrativeSelectionManifestRecord,
     NarrativeSnapshotRecord,
 )
 from app.services.narrative_project import PostgresNarrativeRepository
@@ -217,6 +218,40 @@ class NarrativePostgresRepositorySqlTests(unittest.TestCase):
         select_sql, select_params = connection.cursor_value.calls[1]
         self.assertIn("WHERE project_id=%s AND snapshot_hash=%s", select_sql)
         self.assertEqual(select_params, (snapshot.project_id, snapshot.snapshot_hash))
+
+    def test_selection_manifest_insert_is_append_only_and_job_scoped(self):
+        selected_ids = (str(uuid4()), str(uuid4()))
+        manifest = NarrativeSelectionManifestRecord(
+            manifest_id=str(uuid4()),
+            project_id=self.project.project_id,
+            job_id=str(uuid4()),
+            memory_snapshot_id=str(uuid4()),
+            selected_memory_version_ids=selected_ids,
+            selection_hash=_hash({"selectedMemoryVersionIds": list(selected_ids)}),
+            model_id="deepseek-chat",
+            prompt_version="narrative-writing-v2",
+            created_at=self.instant.isoformat(),
+        )
+        row = {
+            "id": manifest.manifest_id,
+            "project_id": manifest.project_id,
+            "vault_id": self.scope.vault_id,
+            "job_id": manifest.job_id,
+            "memory_snapshot_id": manifest.memory_snapshot_id,
+            "selected_memory_version_ids": list(selected_ids),
+            "selection_hash": manifest.selection_hash,
+            "model_id": manifest.model_id,
+            "prompt_version": manifest.prompt_version,
+            "created_at": self.instant,
+        }
+        connection = _Connection([row])
+
+        stored = PostgresNarrativeRepository(connection).save_selection_manifest(manifest)
+
+        self.assertEqual(stored, manifest)
+        insert_sql = connection.cursor_value.calls[0][0]
+        self.assertIn("ON CONFLICT (job_id) DO NOTHING", insert_sql)
+        self.assertNotIn("DO UPDATE", insert_sql)
 
 
 if __name__ == "__main__":

@@ -133,8 +133,8 @@ class Settings:
     narrative_generation_worker_enabled: bool = False
     narrative_generation_provider: str = "disabled"
     narrative_generation_model: str = "disabled"
-    narrative_generation_prompt_version: str = "narrative-writing-v1"
-    narrative_generation_pipeline_version: str = "story-plan-ledger-draft-render-guard-v1"
+    narrative_generation_prompt_version: str = "narrative-writing-v2-selection-manifest"
+    narrative_generation_pipeline_version: str = "selection-manifest-factual-draft-render-guard-v2"
     narrative_generation_timeout_seconds: float = 120.0
     narrative_generation_max_concurrency: int = 2
     # Closed Live sessions may contain the complete user/assistant text

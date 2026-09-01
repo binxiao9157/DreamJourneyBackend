@@ -25,7 +25,7 @@ def _hash(value):
     return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
-def _fixture(*, epistemic_status="recalled"):
+def _fixture(*, epistemic_status="recalled", memory_count=1):
     repo = InMemoryNarrativeRepository()
     scope = NarrativeScope(
         vault_id="vault-1", owner_subject_id="owner-1", actor_subject_id="owner-1",
@@ -40,16 +40,27 @@ def _fixture(*, epistemic_status="recalled"):
         created_at="2026-08-30T00:00:00+00:00", updated_at="2026-08-30T00:00:00+00:00",
     )
     project = repo.create_or_get_project(project)
-    content = {"event": "我在北方的一所大学学习计算机。"}
-    ref = NarrativeMemoryRef(
-        memory_id=str(uuid4()), memory_version_id=str(uuid4()), content_hash=_hash(content),
-        content=content, memory_kind="experience", perspective_type="ownerRecalled",
-        epistemic_status=epistemic_status, sensitivity="normal",
+    refs = tuple(
+        NarrativeMemoryRef(
+            memory_id=str(uuid4()),
+            memory_version_id=str(uuid4()),
+            content_hash=_hash({"event": f"第{index + 1}段正式记忆"}),
+            content={"event": f"第{index + 1}段正式记忆"},
+            memory_kind="experience",
+            perspective_type="ownerRecalled",
+            epistemic_status=epistemic_status,
+            sensitivity="normal",
+        )
+        for index in range(memory_count)
     )
+    ref = refs[0]
     snapshot = repo.save_snapshot(NarrativeSnapshotRecord(
         snapshot_id=str(uuid4()), project_id=project.project_id, vault_id="vault-1",
-        authority_epoch=1, memory_refs=(ref,), source_fingerprint=_hash([ref.memory_version_id]),
-        snapshot_hash=_hash(ref.public_contract(include_content=True)), created_by="owner-1",
+        authority_epoch=1, memory_refs=refs,
+        source_fingerprint=_hash([item.memory_version_id for item in refs]),
+        snapshot_hash=_hash([
+            item.public_contract(include_content=True) for item in refs
+        ]), created_by="owner-1",
         created_at="2026-08-30T00:00:00+00:00",
     ))
     project = repo.save_project(

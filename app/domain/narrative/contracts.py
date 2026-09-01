@@ -383,6 +383,53 @@ class NarrativeSnapshotRecord:
 
 
 @dataclass(frozen=True)
+class NarrativeSelectionManifestRecord:
+    manifest_id: str
+    project_id: str
+    job_id: str
+    memory_snapshot_id: str
+    selected_memory_version_ids: tuple[str, ...]
+    selection_hash: str
+    created_at: str
+    model_id: str | None = None
+    prompt_version: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("manifest_id", "project_id", "job_id", "memory_snapshot_id"):
+            object.__setattr__(
+                self,
+                field_name,
+                require_uuid(getattr(self, field_name), field=field_name),
+            )
+        normalized_ids = tuple(
+            require_uuid(value, field="selected_memory_version_id")
+            for value in self.selected_memory_version_ids
+        )
+        if not 1 <= len(normalized_ids) <= 3:
+            raise NarrativeContractError("selection manifest requires one to three MemoryVersions")
+        if len(set(normalized_ids)) != len(normalized_ids):
+            raise NarrativeContractError("selection manifest MemoryVersions must be unique")
+        object.__setattr__(self, "selected_memory_version_ids", normalized_ids)
+        if len(self.selection_hash) != 64:
+            raise NarrativeContractError("selection_hash must be SHA-256")
+        require_timestamp(self.created_at, field="created_at")
+
+    def public_contract(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": "narrative-selection-manifest-v1",
+            "selectionManifestId": self.manifest_id,
+            "projectId": self.project_id,
+            "jobId": self.job_id,
+            "memorySnapshotId": self.memory_snapshot_id,
+            "selectedMemoryVersionIds": list(self.selected_memory_version_ids),
+            "selectionHash": self.selection_hash,
+            "modelId": self.model_id,
+            "promptVersion": self.prompt_version,
+            "createdAt": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
 class NarrativeArtifactRecord:
     artifact_version_id: str
     project_id: str
@@ -507,6 +554,7 @@ __all__ = [
     "NarrativeArtifactRecord",
     "NarrativeProjectRecord",
     "NarrativeScope",
+    "NarrativeSelectionManifestRecord",
     "NarrativeSnapshotRecord",
     "require_timestamp",
     "require_uuid",

@@ -26,6 +26,7 @@ from app.domain.narrative.contracts import (
     NarrativeNarratorType,
     NarrativeProjectRecord,
     NarrativeScope,
+    NarrativeSelectionManifestRecord,
     NarrativeSnapshotRecord,
 )
 from app.domain.narrative.state_machine import JOB_TRANSITIONS, PROJECT_TRANSITIONS
@@ -96,6 +97,12 @@ class NarrativeRepository(Protocol):
     ) -> NarrativeProjectRecord: ...
     def save_snapshot(self, snapshot: NarrativeSnapshotRecord) -> NarrativeSnapshotRecord: ...
     def get_snapshot(self, *, project_id: str, snapshot_id: str) -> NarrativeSnapshotRecord: ...
+    def save_selection_manifest(
+        self, manifest: NarrativeSelectionManifestRecord
+    ) -> NarrativeSelectionManifestRecord: ...
+    def get_selection_manifest(
+        self, *, project_id: str, job_id: str
+    ) -> NarrativeSelectionManifestRecord | None: ...
     def append_artifact(self, artifact: NarrativeArtifactRecord) -> NarrativeArtifactRecord: ...
     def append_artifacts(
         self, artifacts: Iterable[NarrativeArtifactRecord]
@@ -141,6 +148,7 @@ class InMemoryNarrativeRepository:
         self._lock = RLock()
         self._projects: dict[str, NarrativeProjectRecord] = {}
         self._snapshots: dict[str, NarrativeSnapshotRecord] = {}
+        self._selection_manifests: dict[str, NarrativeSelectionManifestRecord] = {}
         self._artifacts: dict[str, NarrativeArtifactRecord] = {}
         self._jobs: dict[str, NarrativeJobRecord] = {}
         self._pending_job_ids: set[str] = set()
@@ -245,6 +253,31 @@ class InMemoryNarrativeRepository:
             if value is None or value.project_id != project_id:
                 raise NarrativeProjectNotFound("memory snapshot was not found")
             return value
+
+    def save_selection_manifest(
+        self, manifest: NarrativeSelectionManifestRecord
+    ) -> NarrativeSelectionManifestRecord:
+        with self._lock:
+            existing = self._selection_manifests.get(manifest.job_id)
+            if existing is not None:
+                if existing != manifest:
+                    raise NarrativeProjectConflict(
+                        "selection manifest already exists with different content"
+                    )
+                return existing
+            self._selection_manifests[manifest.job_id] = manifest
+            return manifest
+
+    def get_selection_manifest(
+        self, *, project_id: str, job_id: str
+    ) -> NarrativeSelectionManifestRecord | None:
+        with self._lock:
+            manifest = self._selection_manifests.get(job_id)
+            if manifest is None:
+                return None
+            if manifest.project_id != project_id:
+                raise NarrativeProjectNotFound("selection manifest was not found")
+            return manifest
 
     def append_artifact(self, artifact: NarrativeArtifactRecord) -> NarrativeArtifactRecord:
         with self._lock:
@@ -711,6 +744,85 @@ class PostgresNarrativeRepository:
         if row is None:
             raise NarrativeProjectNotFound("memory snapshot was not found")
         return self._snapshot(row)
+
+    @classmethod
+    def _selection_manifest(
+        cls, row: Mapping[str, Any]
+    ) -> NarrativeSelectionManifestRecord:
+        selected = cls._json(row["selected_memory_version_ids"])
+        if not isinstance(selected, list):
+            raise NarrativeContractError(
+                "selection manifest MemoryVersions must be an array"
+            )
+        return NarrativeSelectionManifestRecord(
+            manifest_id=str(row["id"]),
+            project_id=str(row["project_id"]),
+            job_id=str(row["job_id"]),
+            memory_snapshot_id=str(row["memory_snapshot_id"]),
+            selected_memory_version_ids=tuple(str(value) for value in selected),
+            selection_hash=str(row["selection_hash"]),
+            model_id=row.get("model_id"),
+            prompt_version=row.get("prompt_version"),
+            created_at=row["created_at"].isoformat(),
+        )
+
+    def save_selection_manifest(
+        self, manifest: NarrativeSelectionManifestRecord
+    ) -> NarrativeSelectionManifestRecord:
+        with self._cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO narrative.selection_manifests (
+                    id,project_id,vault_id,job_id,memory_snapshot_id,
+                    selected_memory_version_ids,selection_hash,model_id,prompt_version,created_at
+                ) SELECT %s,jobs.project_id,jobs.vault_id,jobs.id,jobs.memory_snapshot_id,
+                    %s,%s,%s,%s,%s FROM narrative.generation_jobs AS jobs
+                    WHERE jobs.project_id=%s AND jobs.id=%s AND jobs.memory_snapshot_id=%s
+                ON CONFLICT (job_id) DO NOTHING RETURNING *""",
+                (
+                    manifest.manifest_id,
+                    Jsonb(list(manifest.selected_memory_version_ids)),
+                    manifest.selection_hash,
+                    manifest.model_id,
+                    manifest.prompt_version,
+                    manifest.created_at,
+                    manifest.project_id,
+                    manifest.job_id,
+                    manifest.memory_snapshot_id,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """SELECT * FROM narrative.selection_manifests
+                    WHERE project_id=%s AND job_id=%s""",
+                    (manifest.project_id, manifest.job_id),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            raise NarrativeProjectNotFound("selection manifest target job was not found")
+        stored = self._selection_manifest(row)
+        if (
+            stored.memory_snapshot_id != manifest.memory_snapshot_id
+            or stored.selected_memory_version_ids
+            != manifest.selected_memory_version_ids
+            or stored.selection_hash != manifest.selection_hash
+        ):
+            raise NarrativeProjectConflict(
+                "selection manifest already exists with different content"
+            )
+        return stored
+
+    def get_selection_manifest(
+        self, *, project_id: str, job_id: str
+    ) -> NarrativeSelectionManifestRecord | None:
+        with self._cursor() as cursor:
+            cursor.execute(
+                """SELECT * FROM narrative.selection_manifests
+                WHERE project_id=%s AND job_id=%s""",
+                (project_id, job_id),
+            )
+            row = cursor.fetchone()
+        return self._selection_manifest(row) if row is not None else None
 
     @staticmethod
     def _artifact(row: Mapping[str, Any]) -> NarrativeArtifactRecord:

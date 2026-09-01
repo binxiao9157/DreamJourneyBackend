@@ -1,0 +1,12 @@
+{
+  "version": "0107",
+  "name": "narrative_selection_manifests",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "narrativeWritingV1SelectionManifest",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "narrativeWriting": true,
+    "narrativeGenerationWorker": true
+  }
+}
