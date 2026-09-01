@@ -537,6 +537,8 @@ class PostgresOwnerTruthFormalMemoryRepository:
             "memory.owner_subject_id = %s",
             "memory.status = 'active'",
             "version.is_current = TRUE",
+            "source.state = 'active'",
+            "source.source_version = version.source_version",
         ]
         params: list[Any] = [context.vault_id, context.owner_subject_id]
         if query.kind:
@@ -564,6 +566,8 @@ class PostgresOwnerTruthFormalMemoryRepository:
             FROM owner_truth.memories AS memory
             JOIN owner_truth.memory_versions AS version
               ON version.vault_id = memory.vault_id AND version.memory_id = memory.id
+            JOIN owner_truth.sources AS source
+              ON source.vault_id = version.vault_id AND source.id = version.source_id
             JOIN owner_truth.decision_receipts AS receipt
               ON receipt.vault_id = version.vault_id AND receipt.id = version.decision_receipt_id
             WHERE {' AND '.join(conditions)}
@@ -593,10 +597,14 @@ class PostgresOwnerTruthFormalMemoryRepository:
                 FROM owner_truth.memories AS memory
                 JOIN owner_truth.memory_versions AS version
                   ON version.vault_id = memory.vault_id AND version.memory_id = memory.id
+                JOIN owner_truth.sources AS source
+                  ON source.vault_id = version.vault_id AND source.id = version.source_id
                 JOIN owner_truth.decision_receipts AS receipt
                   ON receipt.vault_id = version.vault_id AND receipt.id = version.decision_receipt_id
                 WHERE memory.vault_id = %s AND memory.id = %s
                   AND memory.owner_subject_id = %s AND memory.status = 'active'
+                  AND source.state = 'active'
+                  AND source.source_version = version.source_version
                 ORDER BY version.version_number DESC
                 LIMIT %s
                 """,
@@ -681,9 +689,13 @@ class PostgresOwnerTruthFormalMemoryRepository:
                 FROM owner_truth.memories AS memory
                 JOIN owner_truth.memory_versions AS version
                   ON version.vault_id = memory.vault_id AND version.memory_id = memory.id
+                JOIN owner_truth.sources AS source
+                  ON source.vault_id = version.vault_id AND source.id = version.source_id
                 WHERE memory.vault_id = %s AND memory.id = %s
                   AND memory.owner_subject_id = %s AND memory.status = 'active'
                   AND version.is_current = TRUE
+                  AND source.state = 'active'
+                  AND source.source_version = version.source_version
                 FOR UPDATE OF memory, version
                 """,
                 (context.vault_id, memory_id, context.owner_subject_id),
