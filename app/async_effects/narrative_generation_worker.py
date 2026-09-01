@@ -59,6 +59,9 @@ class NarrativeGenerationWorkerRuntime:
             audition_length_validation_enabled=(
                 settings.narrative_audition_length_validation_enabled
             ),
+            golden_sample_length_validation_enabled=(
+                settings.narrative_golden_sample_length_validation_enabled
+            ),
         )
 
     def _make_metric_recorder(self) -> OperationMetricRecorder:

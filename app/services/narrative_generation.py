@@ -838,10 +838,14 @@ class NarrativeGenerationProcessor:
         provider: NarrativeProvider,
         *,
         audition_length_validation_enabled: bool = True,
+        golden_sample_length_validation_enabled: bool = True,
     ) -> None:
         self.repository = repository
         self.provider = provider
         self._audition_length_validation_enabled = audition_length_validation_enabled
+        self._golden_sample_length_validation_enabled = (
+            golden_sample_length_validation_enabled
+        )
 
     def run_job(self, *, project_id: str, job_id: str) -> NarrativeJobRecord:
         job = self.repository.get_job(project_id=project_id, job_id=job_id)
@@ -1314,7 +1318,11 @@ class NarrativeGenerationProcessor:
                     f"textLength={text_length}"
                 )
             if job.job_type == "goldenSample" and (
-                text is None or not 500 <= _text_length(text) <= 800
+                text is None
+                or (
+                    self._golden_sample_length_validation_enabled
+                    and not 500 <= _text_length(text) <= 800
+                )
             ):
                 raise NarrativeGenerationError(
                     "golden sample must contain 500-800 characters"

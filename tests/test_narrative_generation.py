@@ -133,6 +133,39 @@ class _ShortProvider(_Provider):
         }
 
 
+class _ShortGoldenSampleProvider(_Provider):
+    def generate(self, **_):
+        paragraph = "我记得那段学习经历。"
+        return {
+            "artifacts": [{
+                "key": "goldenSample",
+                "text": paragraph,
+                "payload": {"paragraphs": [{
+                    "paragraphId": "golden-sample-p1",
+                    "text": paragraph,
+                    "memoryVersionIds": [self.memory_version_id],
+                }]},
+            }]
+        }
+
+
+def _golden_sample_job(repo, project):
+    project = repo.save_project(
+        replace(project, state=BookProjectState.GENERATING_GOLDEN_SAMPLE),
+        expected_version=project.project_version,
+    )
+    job = repo.save_job(NarrativeJobRecord(
+        job_id=str(uuid4()), project_id=project.project_id, job_type="goldenSample",
+        state=NarrativeJobState.QUEUED,
+        memory_snapshot_id=project.current_memory_snapshot_id,
+        command_id=str(uuid4()), idempotency_key="golden-sample-test",
+        expected_project_version=project.project_version, progress_stage="queued",
+        attempt_count=0, max_attempts=3, input_payload={},
+        created_at="2026-08-30T00:00:00+00:00",
+    ))
+    return project, job
+
+
 def test_three_auditions_commit_from_one_snapshot():
     repo, _, project, ref, job = _fixture()
     result = NarrativeGenerationProcessor(repo, _Provider(ref.memory_version_id)).run_job(
@@ -162,6 +195,39 @@ def test_disabled_length_validation_keeps_fact_guards_and_accepts_short_audition
     )
     assert len(artifacts) == 3
     assert {item.content_text for item in artifacts} == {"我记得那段学习经历。"}
+
+
+def test_disabled_golden_sample_length_validation_accepts_short_sample():
+    repo, _, project, ref, _ = _fixture()
+    project, job = _golden_sample_job(repo, project)
+
+    result = NarrativeGenerationProcessor(
+        repo,
+        _ShortGoldenSampleProvider(ref.memory_version_id),
+        golden_sample_length_validation_enabled=False,
+    ).run_job(project_id=project.project_id, job_id=job.job_id)
+
+    assert result.state is NarrativeJobState.READY_FOR_REVIEW
+    artifacts = repo.list_artifacts(
+        project_id=project.project_id,
+        artifact_type=NarrativeArtifactType.GOLDEN_SAMPLE,
+    )
+    assert len(artifacts) == 1
+    assert artifacts[0].content_text == "我记得那段学习经历。"
+
+
+def test_disabled_golden_sample_length_validation_keeps_fact_guards():
+    repo, _, project, ref, _ = _fixture()
+    project, job = _golden_sample_job(repo, project)
+
+    result = NarrativeGenerationProcessor(
+        repo,
+        _ShortGoldenSampleProvider(str(uuid4())),
+        golden_sample_length_validation_enabled=False,
+    ).run_job(project_id=project.project_id, job_id=job.job_id)
+
+    assert result.state is NarrativeJobState.FAILED
+    assert result.error_code == "unsupported_fact_detected"
 
 
 def test_unknown_memory_reference_rejects_all_invalid_auditions():
