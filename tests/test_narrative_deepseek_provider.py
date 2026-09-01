@@ -116,42 +116,42 @@ class DeepSeekNarrativeProviderTests(unittest.TestCase):
                 previous_output={},
             )
 
-    def test_final_auditions_receive_one_bounded_format_repair(self):
+    def test_single_audition_repair_requests_only_the_failed_style(self):
         _, _, project, ref, _ = scenarios._fixture()
         calls = []
 
         def response_for(text):
             return {"choices": [{"message": {"content": json.dumps({
                 "artifacts": [{
-                    "key": key,
+                    "key": "documentary",
                     "text": text,
                     "payload": {"paragraphs": [{
-                        "paragraphId": f"{key}-p1",
+                        "paragraphId": "documentary-p1",
                         "text": text,
                         "memoryVersionIds": [ref.memory_version_id],
                     }]},
-                } for key in ("documentary", "warmReflection", "thoughtfulMemoir")]
+                }]
             }, ensure_ascii=False)}}]}
 
         def transport(_url, _headers, body, _timeout):
             calls.append(body)
-            text = "我在北方求学。" * (8 if len(calls) == 1 else 30)
-            return response_for(text)
+            return response_for("我在北方求学。" * 30)
 
         provider = DeepSeekNarrativeProvider(_settings(), transport=transport)
-        output = provider.generate_stage(
-            stage="antiAIEdit",
-            job_type="auditions",
+        output = provider.repair_audition_artifact(
             project=project,
             context={"memoryFacts": []},
-            previous_output={},
+            expected_key="documentary",
+            artifact={"key": "documentary", "text": "太短"},
+            violation="audition_contract_invalid:textLength=2",
         )
 
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(provider._audition_contract_violations(output), [])
-        self.assertIn("未通过最终格式校验", calls[1]["messages"][0]["content"])
-        self.assertIn("不得新增、删减", calls[1]["messages"][0]["content"])
-        self.assertIn("lengthMismatch:1:", calls[1]["messages"][0]["content"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(output["key"], "documentary")
+        prompt = calls[0]["messages"][0]["content"]
+        self.assertIn("本次只修复一篇", prompt)
+        self.assertIn("documentary", prompt)
+        self.assertIn("不得新增、删减", prompt)
 
     def test_final_auditions_normalize_provider_key_order_without_rewriting(self):
         _, _, project, ref, _ = scenarios._fixture()
@@ -310,7 +310,7 @@ class DeepSeekNarrativeProviderTests(unittest.TestCase):
             {"narrative-test-pipeline-v3"},
         )
 
-    def test_audition_rejects_a_style_that_drops_selected_memory(self):
+    def test_audition_keeps_valid_styles_when_one_style_cannot_be_repaired(self):
         repo, _, project, _, job = scenarios._fixture(memory_count=3)
         snapshot = repo.get_snapshot(
             project_id=project.project_id,
@@ -330,6 +330,18 @@ class DeepSeekNarrativeProviderTests(unittest.TestCase):
                     "materialGaps": [],
                     "risks": [],
                 }}
+            elif "本次只修复一篇" in prompt:
+                paragraph = "我记得那段经历，它构成了人生中清晰而具体的一页。" * 12
+                paragraph = paragraph[:230]
+                content = {"artifacts": [{
+                    "key": "warmReflection",
+                    "text": paragraph,
+                    "payload": {"paragraphs": [{
+                        "paragraphId": "warmReflection-p1",
+                        "text": paragraph,
+                        "memoryVersionIds": list(selected_ids[:1]),
+                    }]},
+                }]}
             else:
                 paragraph = "我记得那段经历，它构成了人生中清晰而具体的一页。" * 12
                 paragraph = paragraph[:230]
@@ -361,9 +373,79 @@ class DeepSeekNarrativeProviderTests(unittest.TestCase):
         self.assertEqual(result.state, NarrativeJobState.FAILED)
         self.assertEqual(
             result.error_code,
-            "audition_selection_mismatch:index=2,expectedCount=2,citedCount=1",
+            "audition_selection_mismatch:index=1,expectedCount=2,citedCount=1",
         )
-        self.assertEqual(repo.list_artifacts(project_id=project.project_id), ())
+        artifacts = repo.list_artifacts(project_id=project.project_id)
+        self.assertEqual(
+            {item.artifact_key for item in artifacts},
+            {"documentary", "thoughtfulMemoir"},
+        )
+        self.assertTrue(all(
+            item.payload.get("generationJobId") == job.job_id
+            for item in artifacts
+        ))
+
+    def test_short_audition_is_repaired_individually_and_group_completes(self):
+        repo, _, project, _, job = scenarios._fixture(memory_count=3)
+        snapshot = repo.get_snapshot(
+            project_id=project.project_id,
+            snapshot_id=job.memory_snapshot_id,
+        )
+        selected_ids = tuple(
+            item.memory_version_id for item in snapshot.memory_refs[:2]
+        )
+        calls = []
+
+        def artifact(key, text):
+            return {
+                "key": key,
+                "text": text,
+                "payload": {"paragraphs": [{
+                    "paragraphId": f"{key}-p1",
+                    "text": text,
+                    "memoryVersionIds": list(selected_ids),
+                }]},
+            }
+
+        def transport(_url, _headers, body, _timeout):
+            calls.append(body)
+            prompt = body["messages"][0]["content"]
+            if "本阶段只规划" in prompt:
+                content = {"plan": {
+                    "objective": "试镜",
+                    "structure": [],
+                    "memoryVersionIds": list(selected_ids),
+                    "materialGaps": [],
+                    "risks": [],
+                }}
+            elif "本次只修复一篇" in prompt:
+                repaired = ("我记得那段经历，它构成了人生中清晰而具体的一页。" * 12)[:230]
+                content = {"artifacts": [artifact("documentary", repaired)]}
+            else:
+                complete = ("我记得那段经历，它构成了人生中清晰而具体的一页。" * 12)[:230]
+                content = {"artifacts": [
+                    artifact("documentary", "内容太短"),
+                    artifact("warmReflection", complete),
+                    artifact("thoughtfulMemoir", complete),
+                ]}
+            return {"choices": [{"message": {
+                "content": json.dumps(content, ensure_ascii=False)
+            }}]}
+
+        provider = DeepSeekNarrativeProvider(_settings(), transport=transport)
+        result = NarrativeGenerationProcessor(repo, provider).run_job(
+            project_id=project.project_id,
+            job_id=job.job_id,
+        )
+
+        self.assertEqual(result.state, NarrativeJobState.READY_FOR_REVIEW)
+        self.assertEqual(len(calls), 5)
+        artifacts = repo.list_artifacts(project_id=project.project_id)
+        self.assertEqual(len(artifacts), 3)
+        self.assertEqual(
+            {item.payload.get("generationJobId") for item in artifacts},
+            {job.job_id},
+        )
 
     def test_worker_resume_reuses_persisted_selection_without_replanning(self):
         repo, _, project, _, job = scenarios._fixture(memory_count=3)

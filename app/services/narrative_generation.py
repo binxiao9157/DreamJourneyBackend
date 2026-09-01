@@ -44,8 +44,8 @@ from app.services.narrative_project import (
 )
 
 
-PROMPT_VERSION = "narrative-writing-v2-selection-manifest"
-PIPELINE_VERSION = "selection-manifest-factual-draft-render-guard-v2"
+PROMPT_VERSION = "narrative-writing-v3-progressive-auditions"
+PIPELINE_VERSION = "selection-manifest-progressive-artifact-repair-v3"
 AUDITION_KEYS = ("documentary", "warmReflection", "thoughtfulMemoir")
 GENERATION_STAGES = ("storyPlan", "factualDraft", "literaryRender", "antiAIEdit")
 
@@ -880,19 +880,65 @@ class NarrativeGenerationProcessor:
                 writing_context=snapshot.writing_context,
             )
             job = self._stage(job, NarrativeJobState.VALIDATING_FACTS)
-            artifacts = self._validate_and_build(
-                project,
-                job,
-                snapshot.memory_refs,
-                output,
-                selected_memory_version_ids=(
-                    selection_manifest.selected_memory_version_ids
-                    if selection_manifest is not None
-                    else None
-                ),
-            )
             job = self._stage(job, NarrativeJobState.EDITING_STYLE)
             job = self._stage(job, NarrativeJobState.FINAL_VALIDATION)
+            if job.job_type == "auditions":
+                if selection_manifest is None:
+                    selected_ids = tuple(
+                        ref.memory_version_id for ref in snapshot.memory_refs[:3]
+                    )
+                    selection_manifest = self.repository.save_selection_manifest(
+                        NarrativeSelectionManifestRecord(
+                            manifest_id=str(uuid4()),
+                            project_id=project.project_id,
+                            job_id=job.job_id,
+                            memory_snapshot_id=job.memory_snapshot_id,
+                            selected_memory_version_ids=selected_ids,
+                            selection_hash=_digest({
+                                "memorySnapshotId": job.memory_snapshot_id,
+                                "selectedMemoryVersionIds": list(selected_ids),
+                            }),
+                            model_id=self.provider.model_id,
+                            prompt_version=self._prompt_version,
+                            created_at=_now(),
+                        )
+                    )
+                current_project = self.repository.get_project_for_worker(
+                    project_id=project_id
+                )
+                if current_project.project_version != project.project_version:
+                    raise NarrativeProjectConflict("project_version_conflict")
+                artifacts = self._publish_auditions_progressively(
+                    project=project,
+                    job=job,
+                    refs=snapshot.memory_refs,
+                    output=output,
+                    selection_manifest=selection_manifest,
+                    context={
+                        "memoryFacts": [
+                            item for item in facts
+                            if item["memoryVersionId"]
+                            in selection_manifest.selected_memory_version_ids
+                        ],
+                        "inputPayload": dict(job.input_payload),
+                        "supportingArtifacts": support,
+                        "writingContext": dict(snapshot.writing_context),
+                        "selectionManifest": {
+                            "selectionManifestId": selection_manifest.manifest_id,
+                            "selectionHash": selection_manifest.selection_hash,
+                            "selectedMemoryVersionIds": list(
+                                selection_manifest.selected_memory_version_ids
+                            ),
+                        },
+                    },
+                )
+            else:
+                artifacts = self._validate_and_build(
+                    project,
+                    job,
+                    snapshot.memory_refs,
+                    output,
+                )
             latest = self.repository.get_job(project_id=project_id, job_id=job_id)
             if latest.state is NarrativeJobState.CANCELLED:
                 return latest
@@ -905,7 +951,7 @@ class NarrativeGenerationProcessor:
             return self.repository.publish_generation_result(
                 project=self._advanced_project(project, job, artifacts),
                 expected_project_version=project.project_version,
-                artifacts=artifacts,
+                artifacts=(() if job.job_type == "auditions" else artifacts),
                 completed_job=completed_job,
             )
         except NarrativeProviderUnavailable:
@@ -1047,6 +1093,129 @@ class NarrativeGenerationProcessor:
             output = value
         return output, None
 
+    def _publish_auditions_progressively(
+        self,
+        *,
+        project: NarrativeProjectRecord,
+        job: NarrativeJobRecord,
+        refs: Sequence[Any],
+        output: Mapping[str, Any],
+        selection_manifest: NarrativeSelectionManifestRecord,
+        context: Mapping[str, Any],
+    ) -> tuple[NarrativeArtifactRecord, ...]:
+        raw = output.get("artifacts")
+        if not isinstance(raw, list):
+            raise NarrativeGenerationError("provider output has no artifacts")
+        by_key = {
+            str(item.get("key") or "").strip(): item
+            for item in raw
+            if isinstance(item, Mapping)
+        }
+        existing = {
+            item.artifact_key: item
+            for item in self.repository.list_artifacts(
+                project_id=project.project_id,
+                artifact_type=NarrativeArtifactType.WRITING_AUDITION,
+            )
+            if item.state is NarrativeArtifactState.READY_FOR_REVIEW
+            and item.memory_snapshot_id == job.memory_snapshot_id
+            and item.payload.get("generationJobId") == job.job_id
+        }
+        pending: list[tuple[str, Mapping[str, Any], str]] = []
+
+        for key in AUDITION_KEYS:
+            if key in existing:
+                continue
+            candidate = by_key.get(key)
+            if candidate is None:
+                pending.append((key, {"key": key}, "audition artifact is missing"))
+                continue
+            try:
+                artifact = self._build_single_audition(
+                    project=project,
+                    job=job,
+                    refs=refs,
+                    item=candidate,
+                    expected_key=key,
+                    selection_manifest=selection_manifest,
+                )
+            except (NarrativeGenerationError, FactGuardRejected) as exc:
+                pending.append((key, candidate, str(exc)))
+                continue
+            existing[key] = self.repository.append_artifact(artifact)
+            self._update_audition_progress(job, len(existing))
+
+        repair = getattr(self.provider, "repair_audition_artifact", None)
+        for key, candidate, violation in pending:
+            if not callable(repair):
+                raise NarrativeGenerationError(violation)
+            latest_candidate = candidate
+            latest_violation = violation
+            for _ in range(3):
+                latest_candidate = repair(
+                    project=project,
+                    context=context,
+                    expected_key=key,
+                    artifact=latest_candidate,
+                    violation=latest_violation,
+                )
+                try:
+                    artifact = self._build_single_audition(
+                        project=project,
+                        job=job,
+                        refs=refs,
+                        item=latest_candidate,
+                        expected_key=key,
+                        selection_manifest=selection_manifest,
+                    )
+                except (NarrativeGenerationError, FactGuardRejected) as exc:
+                    latest_violation = str(exc)
+                    continue
+                existing[key] = self.repository.append_artifact(artifact)
+                self._update_audition_progress(job, len(existing))
+                break
+            else:
+                raise NarrativeGenerationError(latest_violation)
+
+        if set(existing) != set(AUDITION_KEYS):
+            raise NarrativeGenerationError("audition_generation_incomplete")
+        return tuple(existing[key] for key in AUDITION_KEYS)
+
+    def _build_single_audition(
+        self,
+        *,
+        project: NarrativeProjectRecord,
+        job: NarrativeJobRecord,
+        refs: Sequence[Any],
+        item: Mapping[str, Any],
+        expected_key: str,
+        selection_manifest: NarrativeSelectionManifestRecord,
+    ) -> NarrativeArtifactRecord:
+        artifacts = self._validate_and_build(
+            project,
+            job,
+            refs,
+            {"artifacts": [item]},
+            selected_memory_version_ids=selection_manifest.selected_memory_version_ids,
+            expected_audition_keys=(expected_key,),
+        )
+        return artifacts[0]
+
+    def _update_audition_progress(
+        self, job: NarrativeJobRecord, completed_count: int
+    ) -> NarrativeJobRecord:
+        current = self.repository.get_job(
+            project_id=job.project_id, job_id=job.job_id
+        )
+        if current.state is NarrativeJobState.CANCELLED:
+            raise NarrativeJobCancelled("job was cancelled")
+        return self.repository.update_job(
+            replace(
+                current,
+                progress_stage=f"auditionsReady:{completed_count}/{len(AUDITION_KEYS)}",
+            )
+        )
+
     @staticmethod
     def _selected_memory_version_ids(
         *,
@@ -1084,12 +1253,14 @@ class NarrativeGenerationProcessor:
         refs: Sequence[Any],
         output: Mapping[str, Any],
         selected_memory_version_ids: Sequence[str] | None = None,
+        expected_audition_keys: Sequence[str] | None = None,
     ) -> list[NarrativeArtifactRecord]:
         raw = output.get("artifacts")
         if not isinstance(raw, list) or not raw:
             raise NarrativeGenerationError("provider output has no artifacts")
-        if job.job_type == "auditions" and len(raw) != 3:
-            raise NarrativeGenerationError("auditions must commit as one group of three")
+        audition_keys = tuple(expected_audition_keys or AUDITION_KEYS)
+        if job.job_type == "auditions" and len(raw) != len(audition_keys):
+            raise NarrativeGenerationError("audition artifact count is invalid")
         selected_set = (
             frozenset(str(value) for value in selected_memory_version_ids)
             if selected_memory_version_ids is not None
@@ -1122,7 +1293,7 @@ class NarrativeGenerationProcessor:
             payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
             artifact_type = self._artifact_type(job)
             if job.job_type == "auditions" and (
-                key != AUDITION_KEYS[index]
+                key != audition_keys[index]
                 or text is None
                 or not 200 <= _text_length(text) <= 300
             ):
@@ -1178,6 +1349,7 @@ class NarrativeGenerationProcessor:
                     raise NarrativeGenerationError("selection_manifest_missing")
                 normalized["selectionManifestId"] = manifest.manifest_id
                 normalized["selectionHash"] = manifest.selection_hash
+                normalized["generationJobId"] = job.job_id
             if job.job_type == "outline":
                 normalized["nodes"] = NarrativeCommandService._validated_outline_nodes(
                     payload.get("nodes") if isinstance(payload.get("nodes"), list) else []

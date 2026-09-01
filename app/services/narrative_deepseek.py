@@ -64,26 +64,41 @@ class DeepSeekNarrativeProvider:
         output = self._perform_request(request, stage=stage)
         if stage == "antiAIEdit" and job_type == "auditions":
             output = self._normalized_audition_order(output)
-            for _ in range(2):
-                violations = self._audition_contract_violations(output)
-                if not violations:
-                    break
-                repair_request = self.build_request(
-                    stage=stage,
-                    job_type=job_type,
-                    project=project,
-                    context=context,
-                    previous_output=output,
-                )
-                repair_request["json"]["messages"][0]["content"] += (
-                    "上一输出未通过最终格式校验（" + ",".join(violations) + "）。"
-                    "请保留事实真实性、引用关系和三种文风，只修正结构、key 与篇幅；"
-                    "不得新增、删减、篡改或合并选材事实，三篇必须完整使用 selectionManifest 的同一组记忆；"
-                    "重新输出完整三项；请逐项计数并控制在 230 至 250 个中文字。"
-                )
-                output = self._perform_request(repair_request, stage=stage)
-                output = self._normalized_audition_order(output)
         return output
+
+    def repair_audition_artifact(
+        self,
+        *,
+        project: Any,
+        context: Mapping[str, Any],
+        expected_key: str,
+        artifact: Mapping[str, Any],
+        violation: str,
+    ) -> Mapping[str, Any]:
+        request = self.build_request(
+            stage="antiAIEdit",
+            job_type="auditions",
+            project=project,
+            context=context,
+            previous_output={"artifacts": [dict(artifact)]},
+        )
+        request["json"]["messages"][0]["content"] = (
+            self._system_prompt("antiAIEdit", "auditions")
+            + "本次只修复一篇主笔试镜稿，不得输出另外两篇。"
+            + f"唯一允许的 artifact key 是 {expected_key}。"
+            + "必须输出恰好一个 artifacts 元素，正文控制在 230 至 250 个中文字；"
+            + "必须完整沿用 selectionManifest 中全部 memoryVersionId，"
+            + "不得新增、删减、篡改或合并事实。"
+            + f"上一稿未通过校验：{violation}。"
+        )
+        output = self._perform_request(request, stage="antiAIEdit")
+        artifacts = output.get("artifacts")
+        if not isinstance(artifacts, list) or len(artifacts) != 1:
+            raise NarrativeGenerationError("audition_repair_invalid:artifactCount")
+        repaired = artifacts[0]
+        if not isinstance(repaired, Mapping):
+            raise NarrativeGenerationError("audition_repair_invalid:artifactObject")
+        return repaired
 
     def _perform_request(
         self, request: Mapping[str, Any], *, stage: str

@@ -10,8 +10,8 @@ class NarrativeGenerationTests(unittest.TestCase):
     def test_three_auditions_commit_from_one_snapshot(self):
         scenarios.test_three_auditions_commit_from_one_snapshot()
 
-    def test_unknown_memory_reference_rejects_entire_audition_group(self):
-        scenarios.test_unknown_memory_reference_rejects_entire_audition_group()
+    def test_unknown_memory_reference_rejects_all_invalid_auditions(self):
+        scenarios.test_unknown_memory_reference_rejects_all_invalid_auditions()
 
     def test_project_version_conflict_cannot_leave_partially_published_artifacts(self):
         scenarios.test_project_version_conflict_cannot_leave_partially_published_artifacts()

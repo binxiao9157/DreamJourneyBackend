@@ -129,13 +129,13 @@ def test_three_auditions_commit_from_one_snapshot():
     assert repo.get_project_for_worker(project_id=project.project_id).state is BookProjectState.AUDITIONS_READY
 
 
-def test_unknown_memory_reference_rejects_entire_audition_group():
+def test_unknown_memory_reference_rejects_all_invalid_auditions():
     repo, _, project, ref, job = _fixture()
     result = NarrativeGenerationProcessor(repo, _Provider(ref.memory_version_id, invalid=True)).run_job(
         project_id=project.project_id, job_id=job.job_id
     )
     assert result.state is NarrativeJobState.FAILED
-    assert result.error_code == "unsupported_fact_detected"
+    assert result.error_code.startswith("audition_selection_mismatch:")
     assert repo.list_artifacts(project_id=project.project_id) == ()
 
 
