@@ -15,6 +15,7 @@ from app.domain.owner_truth.conversation import (
     OwnerTruthConversationVersionConflict,
     SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
+    StartInterviewSessionWriteRecord,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_conversation import (
@@ -341,6 +342,80 @@ class OwnerTruthConversationTests(unittest.TestCase):
 
 
 class PostgresOwnerTruthConversationRepositoryTests(unittest.TestCase):
+    def test_start_adapts_thread_and_session_metadata_for_jsonb(self) -> None:
+        class CapturingCursor:
+            def __init__(self) -> None:
+                self.statements: list[tuple[str, tuple[object, ...]]] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                return None
+
+            def execute(self, statement: str, params: tuple[object, ...]) -> None:
+                self.statements.append((statement, params))
+
+            def fetchone(self):
+                statement = self.statements[-1][0]
+                if "INSERT INTO owner_truth.vaults" in statement:
+                    return {
+                        "owner_subject_id": "owner-a",
+                        "authority_epoch": 4,
+                        "status": "active",
+                    }
+                if "INSERT INTO owner_truth.conversation_threads" in statement:
+                    return {"row_version": 1}
+                if "INSERT INTO owner_truth.interview_sessions" in statement:
+                    return {
+                        "row_version": 1,
+                        "state": "active",
+                        "boundary": "open",
+                    }
+                return None
+
+        class CapturingConnection:
+            def __init__(self, cursor: CapturingCursor) -> None:
+                self.cursor_value = cursor
+
+            def cursor(self, *, row_factory=None):
+                return self.cursor_value
+
+        cursor = CapturingCursor()
+        repository = PostgresOwnerTruthConversationRepository(CapturingConnection(cursor))
+        record = StartInterviewSessionWriteRecord(
+            receipt_id="receipt-a",
+            command_id_hash="command-a",
+            payload_hash="payload-a",
+            thread_id="thread-a",
+            session_id="session-a",
+            expected_thread_version=0,
+            entry_mode="live",
+            vault_id="vault-a",
+            owner_subject_id="owner-a",
+            actor_subject_id="owner-a",
+            policy_version="owner-truth-v1",
+            product_session_id="echo-live-a",
+        )
+
+        result = repository.start_interview_session(record)
+
+        self.assertEqual(result.outcome, "created")
+        jsonb_inserts = [
+            params
+            for statement, params in cursor.statements
+            if "INSERT INTO owner_truth.conversation_threads" in statement
+            or "INSERT INTO owner_truth.interview_sessions" in statement
+        ]
+        self.assertEqual(len(jsonb_inserts), 2)
+        for params in jsonb_inserts:
+            metadata = params[-1]
+            self.assertFalse(isinstance(metadata, dict))
+            self.assertEqual(
+                getattr(metadata, "obj", metadata),
+                {"productSessionId": "echo-live-a"},
+            )
+
     def test_pending_review_query_binds_batch_to_current_session_thread(self) -> None:
         class CapturingCursor:
             def __init__(self) -> None:

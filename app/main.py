@@ -16661,6 +16661,27 @@ def _build_authorized_realtime_live_session(
     except OwnerTruthMemoryProjectionError as exc:
         raise _owner_truth_memory_projection_http_error(exc) from exc
 
+    snapshot_json = json.dumps(
+        snapshot,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    logger.info(
+        "liveSnapshotIssued contractVersion=%s factCount=%s snapshotChars=%s "
+        "snapshotBytes=%s checkpointHash=%s contextHash=%s",
+        5,
+        len(snapshot.get("coreFacts") or []),
+        len(snapshot_json),
+        len(snapshot_json.encode("utf-8")),
+        "sha256:" + hashlib.sha256(
+            str(snapshot.get("projectionCheckpoint") or "").encode("utf-8")
+        ).hexdigest()[:16],
+        "sha256:" + hashlib.sha256(
+            str(snapshot.get("contextHash") or "").encode("utf-8")
+        ).hexdigest()[:16],
+    )
+
     client_session_id = str(payload.get("clientSessionId") or "").strip()
     if len(client_session_id) > 128:
         raise HTTPException(

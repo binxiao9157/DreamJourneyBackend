@@ -1779,18 +1779,20 @@ class PostgresOwnerTruthConversationRepository:
                 ) VALUES (%s, %s, %s, 'active', %s, %s, %s, %s)
                 RETURNING row_version
                 """,
-                (
-                    record.thread_id,
-                    record.vault_id,
-                    record.owner_subject_id,
-                    record.entry_mode,
-                    record.policy_version,
-                    int(vault["authority_epoch"]),
+                self._adapt_params(
                     (
-                        {"productSessionId": record.product_session_id}
-                        if record.product_session_id
-                        else {}
-                    ),
+                        record.thread_id,
+                        record.vault_id,
+                        record.owner_subject_id,
+                        record.entry_mode,
+                        record.policy_version,
+                        int(vault["authority_epoch"]),
+                        (
+                            {"productSessionId": record.product_session_id}
+                            if record.product_session_id
+                            else {}
+                        ),
+                    )
                 ),
             )
             thread = cursor.fetchone()
@@ -1802,18 +1804,20 @@ class PostgresOwnerTruthConversationRepository:
                 ) VALUES (%s, %s, %s, %s, 'active', 'open', 0, %s, %s, %s)
                 RETURNING row_version, state, boundary
                 """,
-                (
-                    record.session_id,
-                    record.vault_id,
-                    record.owner_subject_id,
-                    record.thread_id,
-                    record.policy_version,
-                    int(vault["authority_epoch"]),
+                self._adapt_params(
                     (
-                        {"productSessionId": record.product_session_id}
-                        if record.product_session_id
-                        else {}
-                    ),
+                        record.session_id,
+                        record.vault_id,
+                        record.owner_subject_id,
+                        record.thread_id,
+                        record.policy_version,
+                        int(vault["authority_epoch"]),
+                        (
+                            {"productSessionId": record.product_session_id}
+                            if record.product_session_id
+                            else {}
+                        ),
+                    )
                 ),
             )
             session = cursor.fetchone()
