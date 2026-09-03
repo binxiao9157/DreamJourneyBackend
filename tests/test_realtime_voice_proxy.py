@@ -89,6 +89,65 @@ class RealtimeVoiceSessionBrokerTests(unittest.TestCase):
         self.assertNotIn(config["proxy"]["sessionToken"], str(persisted))
         self.assertEqual(len(persisted["ticketHash"]), 64)
 
+    def test_ticket_binds_live_target_and_formal_memory_checkpoint(self):
+        self.store._owner_truth_vaults[self.user["id"]] = {
+            "ownerSubjectId": self.user["id"],
+            "authorityEpoch": 7,
+            "status": "active",
+        }
+        config = self.broker.issue_runtime_config(
+            user_id=self.user["id"],
+            auth_session_id=self.auth["sessionId"],
+            purpose="echoLive",
+            persona_scope="personal",
+            target_persona_id=self.user["id"],
+            product_session_id="echo_live_product_001",
+            projection_checkpoint="checkpoint-7",
+            context_hash="sha256:context",
+            authority_epoch=7,
+            session_context={
+                "systemRole": "role",
+                "formalMemorySnapshot": {"projectionCheckpoint": "checkpoint-7"},
+            },
+        )
+
+        self.assertEqual(config["contractVersion"], 5)
+        self.assertEqual(config["echoSession"]["productSessionId"], "echo_live_product_001")
+        self.assertEqual(config["echoSession"]["projectionCheckpoint"], "checkpoint-7")
+        lease = self.broker.consume(config["proxy"]["sessionToken"])
+        self.assertEqual(lease["purpose"], "echoLive")
+        self.assertEqual(lease["targetPersonaId"], self.user["id"])
+        self.assertEqual(lease["projectionCheckpoint"], "checkpoint-7")
+        self.assertEqual(lease["authorityEpoch"], 7)
+
+    def test_client_session_id_reuses_product_session_across_provider_tickets(self):
+        first = self.broker.issue_runtime_config(
+            user_id=self.user["id"],
+            auth_session_id=self.auth["sessionId"],
+            product_session_id="echo_live_stable_001",
+            client_session_id="echo_live_stable_001",
+        )
+        first_lease = self.broker.consume(first["proxy"]["sessionToken"])
+        self.broker.release(first_lease, reason="providerReconnect")
+
+        second = self.broker.issue_runtime_config(
+            user_id=self.user["id"],
+            auth_session_id=self.auth["sessionId"],
+            product_session_id="echo_live_stable_001",
+            client_session_id="echo_live_stable_001",
+        )
+
+        self.assertEqual(
+            second["echoSession"]["productSessionId"],
+            first["echoSession"]["productSessionId"],
+        )
+        persisted = next(
+            item
+            for item in self.store._realtime_voice_session_tickets.values()
+            if item["ticketId"] != first_lease["ticketId"]
+        )
+        self.assertEqual(persisted["clientSessionId"], "echo_live_stable_001")
+
     def test_ticket_is_single_use_and_released_explicitly(self):
         config = self.issue()
         ticket = config["proxy"]["sessionToken"]
@@ -119,6 +178,43 @@ class RealtimeVoiceSessionBrokerTests(unittest.TestCase):
         self.auth_service.revoke_access_token(self.auth["accessToken"])
 
         self.assertFalse(self.broker.is_lease_authorized(lease))
+
+    def test_authority_epoch_change_revokes_bound_live_lease(self):
+        self.store._owner_truth_vaults[self.user["id"]] = {
+            "ownerSubjectId": self.user["id"],
+            "authorityEpoch": 7,
+            "status": "active",
+        }
+        config = self.broker.issue_runtime_config(
+            user_id=self.user["id"],
+            auth_session_id=self.auth["sessionId"],
+            target_persona_id=self.user["id"],
+            product_session_id="echo_live_authority_001",
+            authority_epoch=7,
+        )
+        lease = self.broker.consume(config["proxy"]["sessionToken"])
+        self.assertTrue(self.broker.is_lease_authorized(lease))
+
+        self.store._owner_truth_vaults[self.user["id"]]["authorityEpoch"] = 8
+
+        self.assertFalse(self.broker.is_lease_authorized(lease))
+
+    def test_authority_epoch_change_before_connect_rejects_ticket(self):
+        self.store._owner_truth_vaults[self.user["id"]] = {
+            "ownerSubjectId": self.user["id"],
+            "authorityEpoch": 7,
+            "status": "active",
+        }
+        config = self.broker.issue_runtime_config(
+            user_id=self.user["id"],
+            auth_session_id=self.auth["sessionId"],
+            target_persona_id=self.user["id"],
+            product_session_id="echo_live_authority_002",
+            authority_epoch=7,
+        )
+        self.store._owner_truth_vaults[self.user["id"]]["authorityEpoch"] = 8
+
+        self.assertIsNone(self.broker.consume(config["proxy"]["sessionToken"]))
 
     def test_refresh_preserves_lease_until_current_session_logs_out(self):
         config = self.issue()

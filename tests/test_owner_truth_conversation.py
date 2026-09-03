@@ -38,13 +38,41 @@ class OwnerTruthConversationTests(unittest.TestCase):
         self.session_id = str(uuid.uuid4())
         self.message_id = str(uuid.uuid4())
 
-    def start(self, *, command_id: str = "start-interview-1") -> StartInterviewSessionCommand:
+    def start(
+        self,
+        *,
+        command_id: str = "start-interview-1",
+        entry_mode: str = "naturalInput",
+        product_session_id: Optional[str] = None,
+    ) -> StartInterviewSessionCommand:
         return StartInterviewSessionCommand(
             command_id=command_id,
             thread_id=self.thread_id,
             session_id=self.session_id,
             expected_thread_version=0,
-            entry_mode="naturalInput",
+            entry_mode=entry_mode,
+            product_session_id=product_session_id,
+        )
+
+    def test_live_session_retains_product_session_binding(self) -> None:
+        command = self.start(
+            command_id="start-live-bound",
+            entry_mode="live",
+            product_session_id="echo_live_product_001",
+        )
+
+        result = self.service.start_session(command=command, context=self.context)
+
+        self.assertEqual(result.outcome, "created")
+        session = self.repository._sessions[(self.context.vault_id, self.session_id)]
+        thread = self.repository._threads[(self.context.vault_id, self.thread_id)]
+        self.assertEqual(
+            session["metadata"]["productSessionId"],
+            "echo_live_product_001",
+        )
+        self.assertEqual(
+            thread["metadata"]["productSessionId"],
+            "echo_live_product_001",
         )
 
     def append(

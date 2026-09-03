@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import secrets
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
 from app.core.config import Settings
@@ -76,10 +76,24 @@ class RealtimeVoiceSessionBroker:
                 "evidenceVersion": "dreamjourney-realtime-voice-proxy-v1",
             },
             "fallback": {"enabled": True, "mode": "text"},
-            "contractVersion": 4,
+            "contractVersion": 5,
         }
 
-    def issue_runtime_config(self, *, user_id: str, auth_session_id: str) -> Dict[str, Any]:
+    def issue_runtime_config(
+        self,
+        *,
+        user_id: str,
+        auth_session_id: str,
+        purpose: str = "echoLive",
+        persona_scope: str = "personal",
+        target_persona_id: Optional[str] = None,
+        product_session_id: Optional[str] = None,
+        client_session_id: Optional[str] = None,
+        projection_checkpoint: Optional[str] = None,
+        context_hash: Optional[str] = None,
+        authority_epoch: Optional[int] = None,
+        session_context: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
         descriptor = self.capability_descriptor()
         if descriptor["status"] != "ready":
             return descriptor
@@ -92,6 +106,10 @@ class RealtimeVoiceSessionBroker:
         raw_ticket = "djv_" + secrets.token_urlsafe(32)
         ticket_hash = self.ticket_hash(raw_ticket)
         ticket_id = "rvs_" + secrets.token_hex(16)
+        normalized_client_session_id = str(client_session_id or "").strip()[:128]
+        resolved_product_session_id = str(
+            product_session_id or normalized_client_session_id or ""
+        ).strip()[:128]
         record = {
             "ticketId": ticket_id,
             "ticketHash": ticket_hash,
@@ -104,6 +122,14 @@ class RealtimeVoiceSessionBroker:
             "createdAt": now.isoformat(),
             "updatedAt": now.isoformat(),
             "contractVersion": 1,
+            "purpose": str(purpose or "echoLive"),
+            "personaScope": str(persona_scope or "personal"),
+            "targetPersonaId": str(target_persona_id or user_id),
+            "clientSessionId": normalized_client_session_id,
+            "productSessionId": resolved_product_session_id,
+            "projectionCheckpoint": str(projection_checkpoint or ""),
+            "contextHash": str(context_hash or ""),
+            "authorityEpoch": authority_epoch,
         }
         try:
             self.store.issue_realtime_voice_session_ticket(
@@ -144,6 +170,16 @@ class RealtimeVoiceSessionBroker:
                 },
             }
         )
+        if resolved_product_session_id:
+            response["echoSession"] = {
+                "productSessionId": resolved_product_session_id,
+                "targetPersonaId": str(target_persona_id or user_id),
+                "projectionCheckpoint": str(projection_checkpoint or ""),
+                "authorityEpoch": authority_epoch,
+                "contextHash": str(context_hash or ""),
+            }
+        if isinstance(session_context, Mapping):
+            response["sessionContext"] = dict(session_context)
         return response
 
     def consume(self, raw_ticket: str) -> Optional[Dict[str, Any]]:
@@ -157,11 +193,15 @@ class RealtimeVoiceSessionBroker:
             60,
             min(int(self.settings.realtime_voice_max_session_seconds), 4 * 60 * 60),
         )
-        return self.store.consume_realtime_voice_session_ticket(
+        lease = self.store.consume_realtime_voice_session_ticket(
             self.ticket_hash(normalized),
             now_iso=now.isoformat(),
             session_expires_at_iso=(now + timedelta(seconds=max_seconds)).isoformat(),
         )
+        if lease is not None and not self._is_target_authority_current(lease):
+            self.release(lease, reason="authorityEpochChangedBeforeConnect")
+            return None
+        return lease
 
     def release(self, lease: Dict[str, Any], *, reason: str) -> None:
         ticket_id = str(lease.get("ticketId") or "")
@@ -179,11 +219,41 @@ class RealtimeVoiceSessionBroker:
         expires_at = self._parse_datetime(str(lease.get("expiresAt") or ""))
         if expires_at is None or expires_at <= datetime.now(timezone.utc):
             return False
+        if not self._is_target_authority_current(lease):
+            return False
         return bool(
             self.store.is_realtime_voice_auth_session_active(
                 str(lease.get("authSessionId") or ""),
                 str(lease.get("userId") or ""),
             )
+        )
+
+    def _is_target_authority_current(self, lease: Mapping[str, Any]) -> bool:
+        """Re-check the snapshot owner before keeping a provider stream alive."""
+
+        raw_epoch = lease.get("authorityEpoch")
+        target_persona_id = str(lease.get("targetPersonaId") or "").strip()
+        if raw_epoch is None or not target_persona_id:
+            # Older non-Live callers have no memory authority binding.
+            return True
+        try:
+            expected_epoch = int(raw_epoch)
+        except (TypeError, ValueError):
+            return False
+        getter = getattr(self.store, "get_owner_truth_vault", None)
+        if not callable(getter):
+            return False
+        vault = getter(target_persona_id)
+        if not isinstance(vault, Mapping):
+            return False
+        try:
+            current_epoch = int(vault.get("authorityEpoch") or 0)
+        except (TypeError, ValueError):
+            return False
+        return (
+            str(vault.get("ownerSubjectId") or "") == target_persona_id
+            and str(vault.get("status") or "active") == "active"
+            and current_epoch == expected_epoch
         )
 
     def upstream_url(self) -> str:
@@ -344,7 +414,7 @@ class RealtimeVoiceSessionBroker:
                 "evidenceVersion": "dreamjourney-realtime-voice-proxy-v1",
             },
             "fallback": {"enabled": True, "mode": "backendProxyOrText"},
-            "contractVersion": 4,
+            "contractVersion": 5,
         }
 
     def _public_proxy_endpoint(self) -> tuple[str, str]:

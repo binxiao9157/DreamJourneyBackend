@@ -473,6 +473,11 @@ class InMemoryOwnerTruthConversationRepository:
                 "rowVersion": 1,
                 "state": "active",
                 "entryMode": record.entry_mode,
+                "metadata": (
+                    {"productSessionId": record.product_session_id}
+                    if record.product_session_id
+                    else {}
+                ),
             }
             self._sessions[session_key] = {
                 "id": record.session_id,
@@ -488,6 +493,11 @@ class InMemoryOwnerTruthConversationRepository:
                 "candidateBatchTurnCount": 0,
                 "pendingReviewBatchId": None,
                 "fatigue": InterviewFatigue.NORMAL,
+                "metadata": (
+                    {"productSessionId": record.product_session_id}
+                    if record.product_session_id
+                    else {}
+                ),
             }
             result = OwnerTruthInterviewSessionResult(
                 outcome="created",
@@ -1766,7 +1776,7 @@ class PostgresOwnerTruthConversationRepository:
                 INSERT INTO owner_truth.conversation_threads (
                     id, vault_id, owner_subject_id, state, entry_mode,
                     policy_version, authority_epoch, metadata
-                ) VALUES (%s, %s, %s, 'active', %s, %s, %s, '{}'::jsonb)
+                ) VALUES (%s, %s, %s, 'active', %s, %s, %s, %s)
                 RETURNING row_version
                 """,
                 (
@@ -1776,6 +1786,11 @@ class PostgresOwnerTruthConversationRepository:
                     record.entry_mode,
                     record.policy_version,
                     int(vault["authority_epoch"]),
+                    (
+                        {"productSessionId": record.product_session_id}
+                        if record.product_session_id
+                        else {}
+                    ),
                 ),
             )
             thread = cursor.fetchone()
@@ -1784,7 +1799,7 @@ class PostgresOwnerTruthConversationRepository:
                 INSERT INTO owner_truth.interview_sessions (
                     id, vault_id, owner_subject_id, current_thread_id, state,
                     boundary, turn_count, policy_version, authority_epoch, metadata
-                ) VALUES (%s, %s, %s, %s, 'active', 'open', 0, %s, %s, '{}'::jsonb)
+                ) VALUES (%s, %s, %s, %s, 'active', 'open', 0, %s, %s, %s)
                 RETURNING row_version, state, boundary
                 """,
                 (
@@ -1794,6 +1809,11 @@ class PostgresOwnerTruthConversationRepository:
                     record.thread_id,
                     record.policy_version,
                     int(vault["authority_epoch"]),
+                    (
+                        {"productSessionId": record.product_session_id}
+                        if record.product_session_id
+                        else {}
+                    ),
                 ),
             )
             session = cursor.fetchone()

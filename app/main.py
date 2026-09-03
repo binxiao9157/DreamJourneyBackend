@@ -550,6 +550,10 @@ from app.services.owner_truth_legacy_shadow_parity import (
     legacy_shadow_parity_summary,
 )
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
+from app.services.formal_memory_conversation_snapshot import (
+    FormalMemoryConversationSnapshotError,
+    FormalMemoryConversationSnapshotService,
+)
 from app.services.deepseek import DeepSeekEchoAnswerProxy, DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
     KB_OPERATION_GOVERNANCE,
@@ -10474,6 +10478,9 @@ def start_owner_truth_interview_session(
             session_id=str(payload.get("sessionId") or ""),
             expected_thread_version=0,
             entry_mode=entry_mode,
+            product_session_id=(
+                str(payload.get("productSessionId") or "").strip() or None
+            ),
         )
         with store.request_unit_of_work(
             correlation_id=(
@@ -16549,6 +16556,133 @@ def _build_authorized_echo_context_packet(
     return packet
 
 
+_REALTIME_LIVE_SYSTEM_ROLE = """
+你是寻梦环游的 AI 回响，不是真人本人。只能使用 formalMemorySnapshot 中的已确认正式记忆回答事实问题。
+回答可以自然、温柔、口语化，但不得新增、替换、推断或美化事实；没有依据时明确说不知道。
+当前身份为家人时，可以用第一人称转述目标人物的已确认记忆，但仍必须说明自己是 AI，不是真人本人。
+对话保持连续，允许用户打断；助手的推测和回应不能写入正式记忆。
+""".strip()
+_REALTIME_LIVE_SPEAKING_STYLE = (
+    "温柔、耐心、自然口语化，先回应再继续交流；每次只处理一个重点，"
+    "不照搬记忆原文，不为了推动对话而机械追问。"
+)
+
+
+def _build_authorized_realtime_live_session(
+    request: Request,
+    *,
+    requester_subject_id: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve the server-owned target and bind Live to one formal snapshot."""
+
+    purpose = str(payload.get("purpose") or "echoLive").strip()
+    if purpose != "echoLive":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "echoLivePurposeInvalid"},
+        )
+    persona_scope = str(payload.get("personaScope") or "personal").strip().lower()
+    target_persona_id = str(
+        payload.get("targetPersonaId")
+        or payload.get("digitalHumanId")
+        or requester_subject_id
+    ).strip()
+    viewer_family_member_id = str(
+        payload.get("viewerFamilyMemberID") or ""
+    ).strip()
+    if not target_persona_id:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "echoLiveTargetRequired"},
+        )
+
+    if persona_scope in {"personal", "self"}:
+        if target_persona_id != requester_subject_id or viewer_family_member_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "echoLiveTargetMismatch"},
+            )
+        target_owner_subject_id = requester_subject_id
+    elif persona_scope == "family":
+        if not viewer_family_member_id or target_persona_id == requester_subject_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "echoFamilyQueryNotAuthorized"},
+            )
+        decision = _delegated_access_service().authorize(
+            owner_subject_id=target_persona_id,
+            grantee_subject_id=requester_subject_id,
+            family_member_id=viewer_family_member_id,
+            purpose=AccessGrantPurpose.FAMILY_PERSONA,
+            operation=GrantOperation.READ,
+            resource_type=ResourceScopeType.FAMILY_MEMBER,
+            resource_id=viewer_family_member_id,
+        )
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "echoFamilyQueryNotAuthorized",
+                    "reason": decision.reason,
+                },
+            )
+        # The read service remains owner-bound. The target owner is selected
+        # only after the delegated grant is verified above.
+        target_owner_subject_id = target_persona_id
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "echoLivePersonaScopeInvalid"},
+        )
+
+    context = OwnerTruthCommandContext(
+        vault_id=target_owner_subject_id,
+        owner_subject_id=target_owner_subject_id,
+        actor_subject_id=target_owner_subject_id,
+    )
+    try:
+        snapshot = FormalMemoryConversationSnapshotService(
+            store,
+            max_chars=settings.realtime_voice_snapshot_max_chars,
+        ).build(
+            context=context,
+            persona_scope="family" if persona_scope == "family" else "personal",
+        )
+    except FormalMemoryConversationSnapshotError as exc:
+        status_code = 503 if exc.code in {
+            "formalMemorySnapshotUnavailable",
+            "formalMemorySnapshotTooLarge",
+        } else 409
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": exc.code, "retryable": status_code == 503},
+        ) from exc
+    except OwnerTruthMemoryProjectionError as exc:
+        raise _owner_truth_memory_projection_http_error(exc) from exc
+
+    client_session_id = str(payload.get("clientSessionId") or "").strip()
+    if len(client_session_id) > 128:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "echoLiveClientSessionInvalid"},
+        )
+    product_session_id = client_session_id or ("echo_live_" + secrets.token_hex(16))
+    return {
+        "productSessionId": product_session_id,
+        "clientSessionId": client_session_id or None,
+        "targetPersonaId": target_persona_id,
+        "targetOwnerSubjectId": target_owner_subject_id,
+        "personaScope": "family" if persona_scope == "family" else "personal",
+        "snapshot": snapshot,
+        "sessionContext": {
+            "systemRole": _REALTIME_LIVE_SYSTEM_ROLE,
+            "speakingStyle": _REALTIME_LIVE_SPEAKING_STYLE,
+            "formalMemorySnapshot": snapshot,
+        },
+    }
+
+
 @app.post("/context/build")
 def build_context(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     owner_subject_id, payload = _principal_owned_payload(request, payload)
@@ -16834,7 +16968,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
 
 
 @app.post("/voice/realtime-token")
-def realtime_token(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+def realtime_token(request: Request, payload: Dict[str, Any]) -> JSONResponse:
     user_id, payload = _principal_owned_payload(request, payload)
     principal = getattr(request.state, "auth_principal", None)
     auth_session_id = (
@@ -16847,17 +16981,36 @@ def realtime_token(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
             status_code=401,
             detail={"code": "authenticatedVoiceSessionRequired"},
         )
+    capability = RealtimeVoiceSessionBroker(settings, store).capability_descriptor()
+    if capability.get("status") != "ready":
+        return JSONResponse(content=capability, headers={"Cache-Control": "no-store"})
+    live_session = _build_authorized_realtime_live_session(
+        request,
+        requester_subject_id=user_id,
+        payload=payload,
+    )
+    snapshot = live_session["snapshot"]
     try:
-        return TokenService(settings).issue_realtime_config(
+        response = TokenService(settings).issue_realtime_config(
             user_id=user_id,
             auth_session_id=auth_session_id,
             store=store,
+            purpose="echoLive",
+            persona_scope=live_session["personaScope"],
+            target_persona_id=live_session["targetPersonaId"],
+            product_session_id=live_session["productSessionId"],
+            client_session_id=live_session["clientSessionId"],
+            projection_checkpoint=snapshot["projectionCheckpoint"],
+            context_hash=snapshot["contextHash"],
+            authority_epoch=snapshot["authorityEpoch"],
+            session_context=live_session["sessionContext"],
         )
     except RealtimeVoiceProxyError as exc:
         raise HTTPException(
             status_code=409 if exc.retryable else 503,
             detail={"code": exc.code, "retryable": exc.retryable},
         ) from exc
+    return JSONResponse(content=response, headers={"Cache-Control": "no-store"})
 
 
 @app.websocket("/voice/realtime-stream")

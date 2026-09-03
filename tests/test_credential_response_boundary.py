@@ -199,12 +199,38 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
         object.__setattr__(settings, "public_base_url", "https://api.example.test/dreamjourney-api")
         object.__setattr__(settings, "realtime_voice_proxy_enabled", True)
         headers, user_id = self.user_headers("13800139906")
+        main_module.store._owner_truth_vaults[user_id] = {
+            "vaultId": user_id,
+            "ownerSubjectId": user_id,
+            "authorityEpoch": 0,
+            "status": "active",
+        }
+        snapshot = {
+            "schemaVersion": "formal-memory-conversation-v1",
+            "subjectId": user_id,
+            "personaScope": "personal",
+            "projectionCheckpoint": "checkpoint-boundary",
+            "authorityEpoch": 0,
+            "generatedAt": "2026-09-03T00:00:00+00:00",
+            "persona": {
+                "displayName": "",
+                "responsePerspective": "firstPerson",
+                "aiDisclosureRequired": True,
+            },
+            "coreFacts": [],
+            "dimensionSummaries": [],
+            "contextHash": "sha256:boundary",
+        }
 
-        response = client.post(
-            "/voice/realtime-token",
-            headers=headers,
-            json={"userId": user_id},
-        )
+        with patch(
+            "app.main.FormalMemoryConversationSnapshotService.build",
+            return_value=snapshot,
+        ):
+            response = client.post(
+                "/voice/realtime-token",
+                headers=headers,
+                json={"userId": user_id},
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assert_no_store(response)

@@ -265,6 +265,7 @@ class StartInterviewSessionCommand:
     session_id: str
     expected_thread_version: int
     entry_mode: str
+    product_session_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
@@ -285,6 +286,14 @@ class StartInterviewSessionCommand:
         if normalized_entry_mode not in _ENTRY_MODES:
             raise OwnerTruthConversationError("entry_mode is not supported")
         object.__setattr__(self, "entry_mode", normalized_entry_mode)
+        normalized_product_session_id = str(self.product_session_id or "").strip()
+        if len(normalized_product_session_id) > 128:
+            raise OwnerTruthConversationError("product_session_id exceeds maximum length")
+        object.__setattr__(
+            self,
+            "product_session_id",
+            normalized_product_session_id or None,
+        )
 
     def write_record(self, *, context: OwnerTruthCommandContext) -> "StartInterviewSessionWriteRecord":
         command_id_hash = _sha256(self.command_id)
@@ -296,6 +305,8 @@ class StartInterviewSessionCommand:
             "expectedThreadVersion": self.expected_thread_version,
             "entryMode": self.entry_mode,
         }
+        if self.product_session_id is not None:
+            payload["productSessionId"] = self.product_session_id
         return StartInterviewSessionWriteRecord(
             receipt_id=_receipt_id(context=context, command_id_hash=command_id_hash),
             command_id_hash=command_id_hash,
@@ -304,6 +315,7 @@ class StartInterviewSessionCommand:
             session_id=self.session_id,
             expected_thread_version=self.expected_thread_version,
             entry_mode=self.entry_mode,
+            product_session_id=self.product_session_id,
             vault_id=context.vault_id,
             owner_subject_id=context.owner_subject_id,
             actor_subject_id=context.actor_subject_id,
@@ -758,6 +770,7 @@ class StartInterviewSessionWriteRecord:
     owner_subject_id: str
     actor_subject_id: str
     policy_version: str
+    product_session_id: str | None = None
 
 
 @dataclass(frozen=True)
