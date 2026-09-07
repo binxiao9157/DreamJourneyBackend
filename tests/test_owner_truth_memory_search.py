@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from hashlib import sha256
 import json
 import unittest
@@ -126,6 +127,29 @@ class OwnerTruthMemorySearchTests(unittest.TestCase):
 
         self.assertEqual(len(result.hits), 1)
         self.assertEqual(result.hits[0].match_kind, "structuredTerm")
+
+    def test_controlled_chinese_synonyms_recall_the_same_confirmed_memory(self) -> None:
+        content = {"summary": "我在杭州的时候特别喜欢吃东坡肉"}
+        memory = replace(
+            self.memory,
+            memory_kind="experience",
+            content=content,
+            content_hash=_hash(content),
+        )
+        snapshot = build_ready_memory_projection(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_id,
+            authority_epoch=4,
+            inputs=(memory,),
+        )
+        projection = build_owner_truth_search_document_projection(memory_projection=snapshot)
+        assert projection is not None
+        service = OwnerTruthMemorySearchReadService(_Store(projection))
+
+        for query in ("我最喜欢吃什么", "我有哪些饮食偏好", "我爱吃什么菜"):
+            with self.subTest(query=query):
+                result = service.read(context=self.context, query=query, limit=5)
+                self.assertEqual(len(result.hits), 1)
 
     def test_missing_or_rebuilding_search_index_returns_no_search_state_or_stale_hits(self) -> None:
         result = OwnerTruthMemorySearchReadService(_Store(None)).read(

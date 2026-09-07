@@ -57,6 +57,15 @@ _QUERY_STOP_TERMS = frozenset(
         "那段",
     }
 )
+_QUERY_SYNONYM_GROUPS = (
+    ("饮食偏好", ("喜欢", "爱吃")),
+    ("偏好", ("喜欢", "爱吃", "爱好", "热爱")),
+    ("爱吃", ("喜欢",)),
+    ("喜欢吃", ("爱吃", "喜欢")),
+    ("毕业", ("学校", "大学", "求学")),
+    ("学校", ("大学", "毕业", "读书")),
+    ("职业", ("工作", "岗位", "从事")),
+)
 
 
 class OwnerTruthSearchDocumentProjectionError(OwnerTruthContractError):
@@ -637,6 +646,9 @@ def _deterministic_query_terms(query: str) -> tuple[str, ...]:
     """
 
     terms: set[str] = set()
+    for phrase, synonyms in _QUERY_SYNONYM_GROUPS:
+        if phrase in query:
+            terms.update(synonyms)
     for token in _QUERY_TOKEN_PATTERN.findall(query):
         if token.isascii():
             if len(token) >= 2:

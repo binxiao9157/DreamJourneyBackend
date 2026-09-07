@@ -286,6 +286,39 @@ def _semantic_assertion(record: Mapping[str, Any]) -> tuple[str, str] | None:
     return None
 
 
+def _time_year_bounds(record: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """Extract only explicit calendar years for safe interval comparison."""
+
+    event_time = record.get("eventTime")
+    if not isinstance(event_time, Mapping):
+        return None, None
+
+    def year(value: Any) -> int | None:
+        match = re.search(r"(?<!\d)(\d{4})(?!\d)", str(value or ""))
+        return int(match.group(1)) if match else None
+
+    start = year(event_time.get("start"))
+    end = year(event_time.get("end"))
+    if start is not None and end is not None and end < start:
+        return None, None
+    return start, end
+
+
+def _records_have_disjoint_explicit_time(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> bool:
+    """Return true only when two explicit year intervals cannot overlap."""
+
+    left_start, left_end = _time_year_bounds(left)
+    right_start, right_end = _time_year_bounds(right)
+    if left_end is not None and right_start is not None and left_end < right_start:
+        return True
+    if right_end is not None and left_start is not None and right_end < left_start:
+        return True
+    return False
+
+
 def _records_conflict(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
     if (
         left.get("sensitivity") != right.get("sensitivity")
@@ -294,6 +327,8 @@ def _records_conflict(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool
         return False
     left_assertion = _semantic_assertion(left)
     right_assertion = _semantic_assertion(right)
+    if _records_have_disjoint_explicit_time(left, right):
+        return False
     return (
         left_assertion is not None
         and right_assertion is not None
@@ -308,6 +343,7 @@ def _records_equivalent(left: Mapping[str, Any], right: Mapping[str, Any]) -> bo
         or left.get("sensitivity") != right.get("sensitivity")
         or left.get("perspectiveType") != right.get("perspectiveType")
         or _records_conflict(left, right)
+        or _records_have_disjoint_explicit_time(left, right)
     ):
         return False
     left_assertion = _semantic_assertion(left)

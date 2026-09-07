@@ -92,6 +92,31 @@ def _result_hash(*parts: str) -> str:
     return sha256(":".join(parts).encode("utf-8")).hexdigest()
 
 
+_FAMILY_REPORT_ORIGINS = frozenset(
+    {
+        "familyContributionGrant",
+        "familyContributionReview",
+    }
+)
+
+
+def _source_provenance(
+    metadata: Mapping[str, Any],
+) -> tuple[PerspectiveType, EpistemicStatus]:
+    """Keep server-established source provenance through model organization."""
+
+    origin = str(metadata.get("origin") or "").strip()
+    is_family_report = (
+        origin in _FAMILY_REPORT_ORIGINS
+        or bool(str(metadata.get("familyContributionGrantId") or "").strip())
+        or bool(str(metadata.get("familyContributionSubmissionId") or "").strip())
+        or metadata.get("perspectiveType") == "familyReport"
+    )
+    if is_family_report:
+        return PerspectiveType.REPORTED, EpistemicStatus.REPORTED
+    return PerspectiveType.FIRST_PERSON, EpistemicStatus.RECALLED
+
+
 class OwnerTruthCandidateExtractor(Protocol):
     """A private, provider-neutral Source-to-Candidate adapter."""
 
@@ -105,13 +130,12 @@ class OwnerTruthCandidateExtractor(Protocol):
 
 
 class DeterministicOwnerTruthCandidateExtractor:
-    """Create one reviewable Candidate from an explicit owner-authored Source.
+    """Create one reviewable Candidate from an explicit text Source.
 
-    This worker is reached only from the production ``/sources`` command,
-    which accepts text authored and explicitly submitted by the authenticated
-    Vault Owner. The proposal therefore preserves that first-person recalled
-    perspective, but remains pending until the Owner accepts it.  It does not
-    turn a model inference into a fact, call a provider, or bypass review.
+    Owner text preserves first-person recalled provenance. A server-authorized
+    family source preserves reported provenance, and trusted image inference
+    preserves inferred provenance. Every proposal remains pending until review.
+    The extractor never turns a model inference into a fact or bypasses review.
     """
 
     _EXTRACTOR_ID = "deterministicSourceEcho"
@@ -165,13 +189,16 @@ class DeterministicOwnerTruthCandidateExtractor:
         summary = live_summary or normalized_text
         is_live_digest = live_summary is not None
         is_image_inference = image_facets is not None
+        source_perspective, source_epistemic = _source_provenance(
+            source.source_metadata or {}
+        )
         proposal = CandidateProposal(
             memory_kind=MemoryKind.EXPERIENCE,
             perspective_type=(
-                PerspectiveType.INFERRED if is_image_inference else PerspectiveType.FIRST_PERSON
+                PerspectiveType.INFERRED if is_image_inference else source_perspective
             ),
             epistemic_status=(
-                EpistemicStatus.INFERRED if is_image_inference else EpistemicStatus.RECALLED
+                EpistemicStatus.INFERRED if is_image_inference else source_epistemic
             ),
             sensitivity=SensitivityLevel.STANDARD,
             content={
@@ -588,6 +615,7 @@ class ModelAssistedOwnerTruthSourceExtractor:
         if not isinstance(memories, list):
             raise ValueError("text memory organizer returned an invalid memories contract")
 
+        perspective_type, epistemic_status = _source_provenance(metadata)
         proposals: list[CandidateProposal] = []
         for memory in memories:
             if not isinstance(memory, Mapping):
@@ -603,8 +631,8 @@ class ModelAssistedOwnerTruthSourceExtractor:
             proposals.append(
                 CandidateProposal(
                     memory_kind=memory_kind,
-                    perspective_type=PerspectiveType.FIRST_PERSON,
-                    epistemic_status=EpistemicStatus.RECALLED,
+                    perspective_type=perspective_type,
+                    epistemic_status=epistemic_status,
                     sensitivity=SensitivityLevel.STANDARD,
                     content=normalized_content,
                     evidence_span=CandidateEvidenceSpan(
@@ -636,11 +664,13 @@ class ModelAssistedOwnerTruthSourceExtractor:
     @staticmethod
     def _is_image_processing(metadata: Mapping[str, Any]) -> bool:
         return (
-            metadata.get("origin") == "mediaSourceObjectProcessing"
-            or "candidateFacets" in metadata
-            or "candidateFacetsHash" in metadata
+            metadata.get("mediaKind") == "image"
+            and (
+                metadata.get("origin") == "mediaSourceObjectProcessing"
+                or "candidateFacets" in metadata
+                or "candidateFacetsHash" in metadata
+            )
         )
-
 
 class OwnerTruthCandidateExtractionWorkerRuntime:
     """One-shot, fail-closed consumer for default-off Source extraction work."""

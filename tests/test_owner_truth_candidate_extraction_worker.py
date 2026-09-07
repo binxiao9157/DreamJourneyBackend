@@ -485,6 +485,78 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertIn("lifeEvent", command.proposals[0].content["semantic"]["facets"])
         self.assertIn("emotion", command.proposals[1].content["semantic"]["facets"])
 
+    def test_family_text_organization_preserves_server_provenance(self) -> None:
+        organizer = _RecordingTextMemoryOrganizer(
+            [
+                {
+                    "memoryKind": "experience",
+                    "content": {
+                        "event": "父亲以前在杭州时很喜欢吃东坡肉。",
+                        "time": {"start": None, "end": None, "precision": "unknown"},
+                        "location": "杭州",
+                        "participants": ["父亲"],
+                        "actions": [],
+                        "outcome": None,
+                        "facets": _facets(),
+                    },
+                }
+            ]
+        )
+        extractor = ModelAssistedOwnerTruthSourceExtractor(
+            settings=Settings(owner_truth_text_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=self.source_content_hash,
+                source_text="父亲以前在杭州时很喜欢吃东坡肉。",
+                source_metadata={
+                    "origin": "familyContributionReview",
+                    "perspectiveType": "familyReport",
+                    "epistemicStatus": "reported",
+                    "familyContributionGrantId": "grant-1",
+                },
+            ),
+        )
+
+        self.assertEqual(command.proposals[0].perspective_type.value, "reported")
+        self.assertEqual(command.proposals[0].epistemic_status.value, "reported")
+
+    def test_document_processing_uses_text_organizer_not_live_fallback(self) -> None:
+        organizer = _RecordingTextMemoryOrganizer(
+            [
+                {
+                    "memoryKind": "knowledge",
+                    "content": {
+                        "claim": "我在北京大学完成了计算机专业学习。",
+                        "facets": _facets(places=[{"value": "北京大学", "evidenceMode": "ownerStated", "confidence": 1.0}]),
+                    },
+                }
+            ]
+        )
+        extractor = ModelAssistedOwnerTruthSourceExtractor(
+            settings=Settings(owner_truth_text_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=self.source_content_hash,
+                source_text="我在北京大学完成了计算机专业学习。",
+                source_metadata={
+                    "origin": "mediaSourceObjectProcessing",
+                    "mediaKind": "document",
+                },
+            ),
+        )
+
+        self.assertEqual(organizer.text, "我在北京大学完成了计算机专业学习。")
+        self.assertEqual(command.extractor_id, "deepSeekTextMemoryOrganizer")
+        self.assertEqual(command.proposals[0].memory_kind.value, "knowledge")
+
     def test_owner_text_organization_switch_off_keeps_legacy_fallback(self) -> None:
         organizer = _RecordingTextMemoryOrganizer([])
         extractor = ModelAssistedOwnerTruthSourceExtractor(

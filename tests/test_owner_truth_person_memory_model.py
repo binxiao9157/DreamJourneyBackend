@@ -224,6 +224,34 @@ class OwnerTruthPersonMemoryModelTests(unittest.TestCase):
         self.assertEqual(len(group["evidence"]), 2)
         self.assertEqual(model["cognitiveProjection"]["facts"], [])
 
+    def test_non_overlapping_explicit_time_keeps_changed_preference_records_separate(self) -> None:
+        entries = [
+            _entry(
+                suffix=30,
+                kind="experience",
+                content={
+                    "event": "2016年到2018年在杭州时，我喜欢东坡肉。",
+                    "time": {"start": "2016", "end": "2018", "precision": "year"},
+                    "facets": _facets(),
+                },
+            ),
+            _entry(
+                suffix=31,
+                kind="experience",
+                content={
+                    "event": "2026年起，我不喜欢东坡肉。",
+                    "time": {"start": "2026", "end": None, "precision": "year"},
+                    "facets": _facets(),
+                },
+            ),
+        ]
+
+        model = build_person_memory_model(entries)
+
+        self.assertEqual(model["semanticConsolidation"]["conflictGroupCount"], 0)
+        self.assertEqual(model["semanticConsolidation"]["groupCount"], 2)
+        self.assertEqual(model["unresolvedConflictCount"], 0)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
