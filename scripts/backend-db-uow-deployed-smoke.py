@@ -21,7 +21,13 @@ def require(condition, message):
         raise AssertionError(message)
 
 
-def request_json(path, *, expected_status=200, headers=None):
+def request_json(
+    path,
+    *,
+    expected_status=200,
+    headers=None,
+    expect_correlation=True,
+):
     request_headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {API_TOKEN}",
@@ -40,12 +46,18 @@ def request_json(path, *, expected_status=200, headers=None):
         body = json.loads(response.read().decode("utf-8"))
         require(response.status == expected_status, f"GET {path} returned {response.status}")
         correlation_id = str(response.headers.get("X-DreamJourney-Correlation-Id") or "")
-        require(len(correlation_id) == 32, f"GET {path} correlation id")
+        if expect_correlation:
+            require(len(correlation_id) == 32, f"GET {path} correlation id")
+        else:
+            require(not correlation_id, f"GET {path} must bypass database correlation")
         return body
 
 
 def uow_metrics():
-    observations = request_json("/ops/release-policy/observations")
+    observations = request_json(
+        "/ops/release-policy/observations",
+        expect_correlation=False,
+    )
     metrics = observations.get("databaseUnitOfWork") or {}
     require(metrics.get("schemaVersion") == 1, "database UoW schema version")
     require(isinstance(metrics.get("pool"), dict), "database pool metrics")
@@ -57,13 +69,8 @@ def main():
     require(API_TOKEN, "BACKEND_API_TOKEN is required")
 
     before = uow_metrics()
-    request_json(
-        "/config/runtime",
-        headers={
-            "X-DreamJourney-Client-Build": "9004",
-            "X-DreamJourney-Runtime-Contract-Version": "2",
-        },
-    )
+    request_json("/v2/release-policy?audience=owner&clientBuild=9004")
+    request_json("/v2/release-policy?audience=owner&clientBuild=9004&feature=echoTextInput")
     request_json("/v2/release-policy?audience=invalid", expected_status=422)
     after = uow_metrics()
 
