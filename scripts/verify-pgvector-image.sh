@@ -46,7 +46,7 @@ PY
 docker image inspect "$postgres_image" >/dev/null 2>&1 \
   || fail "postgresImageNotPulled"
 docker run --rm --entrypoint sh "$postgres_image" -c \
-  'find /usr/share/postgresql -path "*/extension/vector.control" -type f -print -quit | grep -q .' \
+  'sharedir="$(pg_config --sharedir)" && test -f "$sharedir/extension/vector.control"' \
   || fail "pgvectorExtensionUnavailable"
 
 image_id="$(docker image inspect --format '{{.Id}}' "$postgres_image")"
