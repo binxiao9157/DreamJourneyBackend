@@ -1092,7 +1092,134 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
         self.assertIn("不得文学化、美化、委婉化、夸大或弱化", system_prompt)
         self.assertIn("尽可能贴近用户原话", prompt)
         self.assertIn("必须保留这种来源或不确定性", prompt)
+        self.assertIn("纯问句、助手建议、客套话", prompt)
+        self.assertIn("尚未发生且未确认的假设", prompt)
         self.assertIn("我记得我大概是 2016 年毕业的", prompt)
+        self.assertEqual(request["json"]["response_format"], {"type": "json_object"})
+        self.assertEqual(request["json"]["thinking"], {"type": "disabled"})
+        self.assertGreaterEqual(request["json"]["max_tokens"], 4_096)
+        self.assertEqual(proxy.prompt_version, "owner-truth-text-memory-organization-v5")
+
+    def test_text_memory_organization_binds_primary_and_owner_stated_facets_to_source(self):
+        source = "我的专业是计算机科学。"
+        organization = DeepSeekTextMemoryOrganizationProxy.parse_organization(
+            json.dumps(
+                {
+                    "memories": [
+                        {
+                            "memoryKind": "knowledge",
+                            "content": {
+                                "statement": "用户的专业为计算机科学",
+                                "knowledgeType": "personal_experience",
+                                "domains": [],
+                                "facets": {
+                                    "people": [],
+                                    "time": [],
+                                    "places": [],
+                                    "relationships": [],
+                                    "emotions": [],
+                                    "values": [],
+                                    "personality": [],
+                                    "habits": [
+                                        {
+                                            "value": "热爱学习计算机",
+                                            "evidenceMode": "ownerStated",
+                                            "confidence": 1.0,
+                                        }
+                                    ],
+                                    "goals": [],
+                                    "identity": [],
+                                    "reflections": [],
+                                    "confidence": 0.9,
+                                },
+                            },
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            source_text=source,
+        )
+
+        memory = organization["memories"][0]["content"]
+        self.assertEqual(memory["statement"], source)
+        self.assertEqual(memory["facets"]["habits"], [])
+        self.assertEqual(memory["semantic"]["narrative"], source)
+
+    def test_text_memory_organization_normalizes_model_only_schema_labels(self):
+        facets = {
+            "people": [],
+            "time": [],
+            "places": [],
+            "relationships": [],
+            "emotions": [],
+            "values": [],
+            "personality": [],
+            "habits": [],
+            "goals": [],
+            "identity": [],
+            "reflections": [],
+            "confidence": 0.9,
+        }
+        organization = DeepSeekTextMemoryOrganizationProxy.parse_organization(
+            json.dumps(
+                {
+                    "memories": [
+                        {
+                            "memoryKind": "knowledge",
+                            "content": {
+                                "statement": "同事林川是我在青石咨询的项目伙伴。",
+                                "knowledgeType": "personal_experience",
+                                "domains": [],
+                                "factType": "relation",
+                                "dimensions": ["relationships"],
+                                "facets": facets,
+                            },
+                        },
+                        {
+                            "memoryKind": "emotion",
+                            "content": {
+                                "emotion": "焦虑",
+                                "expression": "我照顾生病宠物时特别焦虑。",
+                                "intensity": "特别焦虑",
+                                "facets": facets,
+                            },
+                        },
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            source_text=(
+                "同事林川是我在青石咨询的项目伙伴。"
+                "我照顾生病宠物时特别焦虑。"
+            ),
+        )
+
+        relation = organization["memories"][0]["content"]
+        emotion = organization["memories"][1]["content"]
+        self.assertEqual(relation["factType"], "knowledge")
+        self.assertIn("relationships", relation["dimensions"])
+        self.assertIn("knowledgeSkills", relation["dimensions"])
+        self.assertIsNone(emotion["intensity"])
+        self.assertEqual(emotion["expression"], "我照顾生病宠物时特别焦虑。")
+
+    def test_text_memory_organization_recognizes_explicit_unconfirmed_nonfacts(self):
+        nonfacts = (
+            "我问过自己是否应该搬到海边，这只是一个尚未决定的问题。",
+            "我想象过开一家小咖啡馆，属于闲聊里的愿望。",
+            "我在讨论中猜测旧屋可能会拆迁，未经证实。",
+            "我随口问过是否要养狗，并未养任何宠物。",
+        )
+        for text in nonfacts:
+            with self.subTest(text=text):
+                self.assertTrue(
+                    DeepSeekTextMemoryOrganizationProxy._is_explicit_nonfact_source(text)
+                )
+        self.assertFalse(
+            DeepSeekTextMemoryOrganizationProxy._is_explicit_nonfact_source(
+                "我已经决定明年学习陶艺，这是我现在的目标。"
+            )
+        )
 
     def test_kb_extract_endpoint_rejects_non_ai_privacy_scope(self):
         client = TestClient(app)

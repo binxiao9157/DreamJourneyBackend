@@ -1,8 +1,8 @@
-"""Owner-scoped persisted SearchDocument read service for Phase 4C QA.
+"""Owner-scoped persisted SearchDocument reads with a safe hybrid opt-in.
 
-The service intentionally leaves embedding/vector/provider work disabled. It
-reads only a current, checkpoint-bound SearchDocument projection and runs the
-deterministic text fallback over that private derived index.
+Normal reads use deterministic text retrieval.  A caller may explicitly inject
+the privacy-reviewed pgvector ranker; missing provider/index evidence then
+falls back transparently to text instead of pretending semantic retrieval ran.
 """
 
 from __future__ import annotations
@@ -24,6 +24,11 @@ from app.domain.owner_truth.search_documents import (
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_memory_search_projection import (
     OwnerTruthMemorySearchProjectionAccessDenied,
+)
+from app.services.owner_truth_memory_search_hybrid import (
+    OWNER_TRUTH_MEMORY_SEARCH_HYBRID_RETRIEVAL_MODE,
+    OwnerTruthMemorySearchHybridRanker,
+    OwnerTruthMemorySearchHybridUnavailable,
 )
 
 
@@ -54,8 +59,14 @@ class OwnerTruthMemorySearchReadStore(Protocol):
 class OwnerTruthMemorySearchReadService:
     """Query the current Owner's persisted, rebuildable SearchDocuments."""
 
-    def __init__(self, store: OwnerTruthMemorySearchReadStore) -> None:
+    def __init__(
+        self,
+        store: OwnerTruthMemorySearchReadStore,
+        *,
+        hybrid_ranker: OwnerTruthMemorySearchHybridRanker | None = None,
+    ) -> None:
         self._store = store
+        self._hybrid_ranker = hybrid_ranker
 
     def read(
         self,
@@ -92,14 +103,42 @@ class OwnerTruthMemorySearchReadService:
                     query=query,
                     limit=limit,
                 )
+                retrieval_mode = OWNER_TRUTH_MEMORY_SEARCH_RETRIEVAL_MODE
+                semantic_ranking_available = False
+                hits = search_owner_truth_documents(
+                    projection=projection,
+                    query_plan=query_plan,
+                )
+                if self._hybrid_ranker is not None:
+                    hybrid_repository_factory = getattr(
+                        self._store,
+                        "owner_truth_memory_search_hybrid_repository",
+                        None,
+                    )
+                    if callable(hybrid_repository_factory):
+                        try:
+                            hybrid = self._hybrid_ranker.search(
+                                repository=hybrid_repository_factory(),
+                                context=context,
+                                projection=projection,
+                                query_plan=query_plan,
+                            )
+                        except OwnerTruthMemorySearchHybridUnavailable:
+                            # No model credential, migration, extension or
+                            # index is not a reason to return invented semantic
+                            # hits. The deterministic branch remains observable.
+                            pass
+                        else:
+                            hits = hybrid.hits
+                            retrieval_mode = OWNER_TRUTH_MEMORY_SEARCH_HYBRID_RETRIEVAL_MODE
+                            semantic_ranking_available = True
                 return OwnerTruthMemorySearchReadResult(
                     state="ready",
                     projection=projection,
                     query_plan=query_plan,
-                    hits=search_owner_truth_documents(
-                        projection=projection,
-                        query_plan=query_plan,
-                    ),
+                    hits=hits,
+                    retrieval_mode=retrieval_mode,
+                    semantic_ranking_available=semantic_ranking_available,
                 )
         except (
             OwnerTruthMemoryProjectionAccessDenied,
@@ -127,7 +166,8 @@ def memory_search_presentation(
 
     presentation: dict[str, object] = {
         "state": result.state,
-        "retrievalMode": OWNER_TRUTH_MEMORY_SEARCH_RETRIEVAL_MODE,
+        "retrievalMode": result.retrieval_mode,
+        "semanticRankingAvailable": result.semantic_ranking_available,
         "resultCount": 0,
         "results": [],
     }

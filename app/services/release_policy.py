@@ -1207,6 +1207,23 @@ class ReleasePolicyCommandGate:
         ):
             return "formalMemoryMarkdownExport"
         if (
+            normalized_method == "POST"
+            and len(memory_segments) == 6
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3] == "candidates"
+            and memory_segments[5] in {"changeset-preview", "decisions"}
+        ) or (
+            normalized_method == "POST"
+            and len(memory_segments) == 5
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3] == "memory-changeset-groups"
+            and memory_segments[4] in {"preview", "confirm"}
+        ) or (
+            normalized_method == "GET"
+            and len(memory_segments) == 4
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3] in {"candidates", "candidate-review-history"}
+        ) or (
             len(memory_segments) == 4
             and memory_segments[:2] == ("v2", "vaults")
             and memory_segments[3] == "memories"

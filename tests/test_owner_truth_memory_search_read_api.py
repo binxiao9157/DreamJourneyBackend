@@ -279,10 +279,17 @@ class OwnerTruthMemorySearchReadAPITests(unittest.TestCase):
             search = body["memorySearch"]
             self.assertEqual(
                 set(search),
-                {"state", "retrievalMode", "resultCount", "results"},
+                {
+                    "state",
+                    "retrievalMode",
+                    "semanticRankingAvailable",
+                    "resultCount",
+                    "results",
+                },
             )
             self.assertEqual(search["state"], "ready")
             self.assertEqual(search["retrievalMode"], "deterministicTextFallback")
+            self.assertFalse(search["semanticRankingAvailable"])
             self.assertEqual(search["resultCount"], 1)
             self.assertEqual(len(search["results"]), 1)
             result = search["results"][0]

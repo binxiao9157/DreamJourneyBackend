@@ -606,6 +606,24 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "POST",
+                "/v2/vaults/{vault_id}/candidates/{candidate_id}/changeset-preview",
+                session,
+                "ownerTruthCandidateChangeSetPreview",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/memory-changeset-groups/preview",
+                session,
+                "ownerTruthMemoryChangeSetGroupPreview",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/memory-changeset-groups/confirm",
+                session,
+                "ownerTruthMemoryChangeSetGroupConfirm",
+            ),
+            _rule(
+                "POST",
                 "/v2/vaults/{vault_id}/candidates/{candidate_id}/decisions",
                 session,
                 "ownerTruthCandidateDecision",
@@ -1071,6 +1089,12 @@ class RouteOwnershipRegistry:
                 "/v2/vaults/{vault_id}/legacy-migration/backfill-plan",
                 session,
                 "ownerTruthLegacyBackfillPlan",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/legacy-migration/b-dry-run",
+                session,
+                "ownerTruthBMigrationDryRun",
             ),
             _rule(
                 "POST",

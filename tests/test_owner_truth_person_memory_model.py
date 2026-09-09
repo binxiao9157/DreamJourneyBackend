@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 import unittest
+from unittest.mock import patch
 
-from app.domain.owner_truth.person_memory_model import build_person_memory_model
+import app.domain.owner_truth.person_memory_model as person_memory_model
+from app.domain.owner_truth.person_memory_model import (
+    build_person_memory_model,
+    build_person_memory_model_incremental,
+)
 
 
 def _entry(
@@ -194,6 +199,32 @@ class OwnerTruthPersonMemoryModelTests(unittest.TestCase):
         self.assertEqual(len(model["cognitiveProjection"]["experiences"]), 1)
         self.assertEqual(model["biographyProjection"]["supportingMemoryCount"], 2)
 
+    def test_unknown_subjects_merge_only_when_their_fact_text_is_exactly_equal(self) -> None:
+        identical = _entry(
+            suffix=12,
+            kind="experience",
+            content={"summary": "我在北京大学完成了本科阶段学习"},
+        )
+        duplicate = _entry(
+            suffix=13,
+            kind="experience",
+            content={"summary": "我在北京大学完成了本科阶段学习"},
+        )
+        similar_but_not_identical = _entry(
+            suffix=14,
+            kind="experience",
+            content={"summary": "我在北京大学完成了研究生阶段学习"},
+        )
+
+        model = build_person_memory_model([identical, duplicate, similar_but_not_identical])
+
+        groups = model["semanticConsolidation"]["groups"]
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(
+            sorted(item["supportingMemoryCount"] for item in groups),
+            [1, 2],
+        )
+
     def test_explicit_single_value_conflict_is_quarantined_from_cognitive_projection(self) -> None:
         entries = [
             _entry(
@@ -251,6 +282,46 @@ class OwnerTruthPersonMemoryModelTests(unittest.TestCase):
         self.assertEqual(model["semanticConsolidation"]["conflictGroupCount"], 0)
         self.assertEqual(model["semanticConsolidation"]["groupCount"], 2)
         self.assertEqual(model["unresolvedConflictCount"], 0)
+
+    def test_incremental_rebuild_only_invokes_changed_dimension_narrative(self) -> None:
+        """A new knowledge fact must not recompute an unrelated life-event block."""
+
+        life_event = _entry(
+            suffix=40,
+            kind="experience",
+            content={
+                "summary": "大学毕业后，我来到上海工作。",
+                "facets": _facets(time=["2016年"]),
+            },
+        )
+        first = build_person_memory_model([life_event])
+        knowledge = _entry(
+            suffix=41,
+            kind="knowledge",
+            content={
+                "claim": "我做项目时习惯先把风险逐项核对。",
+                "facets": _facets(),
+            },
+        )
+
+        with patch.object(
+            person_memory_model,
+            "_dimension_narrative",
+            wraps=person_memory_model._dimension_narrative,
+        ) as narrative:
+            incremental = build_person_memory_model_incremental(
+                previous_model=first,
+                entries=[life_event, knowledge],
+            )
+
+        self.assertEqual(
+            [call.kwargs["facet"] for call in narrative.call_args_list],
+            ["knowledge"],
+        )
+        derivation = incremental["incrementalDerivation"]
+        self.assertEqual(derivation["rebuiltDimensions"], ["knowledge"])
+        self.assertEqual(derivation["reusedDimensionCount"], 9)
+        self.assertNotIn("lifeEvent", derivation["rebuiltDimensions"])
 
 
 if __name__ == "__main__":  # pragma: no cover

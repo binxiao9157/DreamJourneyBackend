@@ -189,6 +189,9 @@ def main() -> None:
     previous_closed_pilot_features = set(
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features
     )
+    previous_authenticated_owner_v4_enabled = (
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled
+    )
 
     try:
         create_database(admin_dsn, database_name)
@@ -223,6 +226,7 @@ def main() -> None:
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.discard(
             "ownerTruthFamilyContribution"
         )
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = False
 
         client = TestClient(main_module.app)
         owner_id, owner_headers, owner_session_id = login(
@@ -259,10 +263,7 @@ def main() -> None:
         require(default_closed.status_code == 403, "formal grant must default closed")
         require(route_code(default_closed) == "release_policy_denied", "default denial code changed")
 
-        main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = frozenset({owner_id})
-        main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features.add(
-            "ownerTruthFamilyContribution"
-        )
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = True
         owner_policy_headers = formal_headers(
             owner_headers,
             session_id=owner_session_id,
@@ -271,7 +272,10 @@ def main() -> None:
         created = client.post(formal_path, headers=owner_policy_headers, json=create_payload)
         require(created.status_code == 201, f"formal grant creation failed: {created.text}")
         grant = created.json()["grant"]
-        require(grant.get("admissionMode") == "closedPilot", "grant mode must be formal")
+        require(
+            grant.get("admissionMode") == "authenticatedOwner",
+            "grant mode must be authenticated Owner formal admission",
+        )
         require("authorizationEvidence" not in created.text, "public grant leaked authorization evidence")
 
         persisted_mode, evidence = persisted_grant_summary(
@@ -279,7 +283,10 @@ def main() -> None:
             vault_id=vault_id,
             grant_id=str(grant["grantId"]),
         )
-        require(persisted_mode == "closedPilot", "stored formal admission mode changed")
+        require(
+            persisted_mode == "authenticatedOwner",
+            "stored authenticated Owner admission mode changed",
+        )
         require(
             evidence.get("feature") == "ownerTruthFamilyContribution",
             "stored evidence must bind the formal feature",
@@ -415,6 +422,13 @@ def main() -> None:
             "family Candidate must remain bound to the reviewed Source",
         )
         candidate = pending_candidates[0]
+        proposed_change_set = dict(candidate.proposed_change_set or {})
+        require(
+            bool(proposed_change_set.get("changeSetId"))
+            and bool(proposed_change_set.get("proposalHash"))
+            and type(proposed_change_set.get("baseMemoryRevision")) is int,
+            "family Candidate must expose a persisted V5 ChangeSet preview",
+        )
         activation = candidate_service.decide_and_activate(
             command=OwnerTruthCandidateReviewCommand(
                 command_id="formal-family-candidate-accept-001",
@@ -424,6 +438,9 @@ def main() -> None:
                 corrected_value=None,
                 corrected_value_schema_version=candidate.content_schema_version,
                 reason_code="ownerReviewedFamilyContribution",
+                expected_memory_revision=proposed_change_set["baseMemoryRevision"],
+                expected_change_set_id=proposed_change_set["changeSetId"],
+                expected_proposal_hash=proposed_change_set["proposalHash"],
             ),
             context=candidate_context,
         )
@@ -544,6 +561,9 @@ def main() -> None:
         main_module.RELEASE_POLICY_CLOSED_PILOT_OWNER_IDS = previous_closed_pilot_owner_ids
         main_module.RELEASE_POLICY_SERVICE.closed_pilot_enabled_features = (
             previous_closed_pilot_features
+        )
+        main_module.RELEASE_POLICY_SERVICE.authenticated_owner_v4_enabled = (
+            previous_authenticated_owner_v4_enabled
         )
         if store is not None:
             store.close_pool()

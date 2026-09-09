@@ -504,6 +504,96 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(len(batches), 1)
         self.assertEqual(batches[0].captured_candidate_batch_turn_count, 5)
 
+    def test_live_end_waits_for_a_contiguous_durable_turn_prefix(self) -> None:
+        _, headers, _ = self._login("13800139723")
+        vault_id = "vault-interview-live-delivery-watermark"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        started = self._start_session(
+            vault_id=vault_id,
+            headers=headers,
+            thread_id=thread_id,
+            session_id=session_id,
+            entry_mode="live",
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+
+        second = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "text": "我第二次补充这段经历。",
+                "role": "owner",
+                "captureMode": "live",
+                "clientSequenceNumber": 2,
+                "capturedAt": "2026-09-08T10:00:02Z",
+            },
+        )
+        self.assertEqual(second.status_code, 201, second.text)
+        self.assertEqual(second.json()["receipt"]["clientSequenceNumber"], 2)
+        self.assertEqual(second.json()["receipt"]["continuousClientSequence"], 0)
+        self.assertEqual(second.json()["receipt"]["deliveryState"], "awaitingPriorTurns")
+
+        premature_end = self._end_session(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=2,
+            expected_session_version=2,
+            headers=headers,
+            extra={"lastClientSequenceNumber": 2},
+        )
+        self.assertEqual(premature_end.status_code, 409, premature_end.text)
+        self.assertEqual(
+            premature_end.json()["detail"],
+            {
+                "code": "ownerTruthInterviewTurnsPending",
+                "requestedClientSequence": 2,
+                "continuousClientSequence": 0,
+            },
+        )
+
+        first = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 2,
+                "expectedSessionVersion": 2,
+                "text": "我第一段先说的是童年住在河边。",
+                "role": "owner",
+                "captureMode": "live",
+                "clientSequenceNumber": 1,
+                "capturedAt": "2026-09-08T10:00:01+00:00",
+            },
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertEqual(first.json()["receipt"]["continuousClientSequence"], 2)
+        self.assertEqual(first.json()["receipt"]["deliveryState"], "contiguous")
+
+        ended = self._end_session(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=3,
+            expected_session_version=3,
+            headers=headers,
+            extra={"lastClientSequenceNumber": 2},
+        )
+        self.assertEqual(ended.status_code, 201, ended.text)
+        self.assertEqual(ended.json()["receipt"]["continuousClientSequence"], 2)
+        self.assertEqual(
+            ended.json()["receipt"]["deliveryState"],
+            "closedAfterContiguousDelivery",
+        )
+
     def test_end_requires_owner_current_versions_and_exact_payload(self) -> None:
         _, owner_headers, _ = self._login("13800139619")
         vault_id = "vault-interview-explicit-end-controls"

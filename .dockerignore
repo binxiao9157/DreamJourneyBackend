@@ -1,0 +1,32 @@
+# Keep local credentials and development state out of the Docker build context.
+.git/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets/
+private/
+
+# Local runtimes, caches, and test artifacts are not part of the release image.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+tmp/
+coverage/
+htmlcov/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# The release image copies only application/runtime inputs explicitly.
+tests/
+docs/

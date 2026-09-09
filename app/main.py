@@ -251,6 +251,11 @@ from app.domain.owner_truth.candidate_decisions import (
     OwnerTruthCandidateReviewSourceInactive,
     OwnerTruthCandidateVersionConflict,
 )
+from app.domain.owner_truth.memory_changeset_group import (
+    OwnerTruthMemoryChangeSetGroupCommand,
+    OwnerTruthMemoryChangeSetGroupDependency,
+    OwnerTruthMemoryChangeSetGroupSelection,
+)
 from app.domain.owner_truth.interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchAcceptCommand,
     OwnerTruthInterviewCandidateBatchDecisionConflict,
@@ -293,6 +298,7 @@ from app.domain.owner_truth.conversation import (
     OwnerTruthConversationError,
     OwnerTruthConversationVersionConflict,
     OwnerTruthInterviewSessionStateConflict,
+    OwnerTruthInterviewTurnsPending,
     PauseInterviewForTopicSwitchCommand,
     RecordInterviewPacingCommand,
     RestoreDoNotAskInterviewBoundaryCommand,
@@ -319,6 +325,9 @@ from app.domain.owner_truth.source_commands import (
     OwnerTruthSourceVersionConflict,
 )
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
+from app.services.owner_truth_memory_changeset_group_review import (
+    OwnerTruthMemoryChangeSetGroupReviewService,
+)
 from app.services.owner_truth_interview_candidate_batch_decision import (
     OwnerTruthInterviewCandidateBatchDecisionService,
 )
@@ -372,6 +381,10 @@ from app.services.owner_truth_memory_search_read import (
     OwnerTruthMemorySearchReadAccessDenied,
     OwnerTruthMemorySearchReadService,
     memory_search_presentation,
+)
+from app.services.owner_truth_memory_search_hybrid import OwnerTruthMemorySearchHybridRanker
+from app.services.owner_truth_memory_search_embedding_runtime import (
+    build_configured_embedding_provider,
 )
 from app.services.owner_truth_memory_search_projection import (
     OwnerTruthMemorySearchDocumentProjectionService,
@@ -545,6 +558,10 @@ from app.services.owner_truth_legacy_backfill import (
     OwnerTruthLegacyBackfillPlanService,
     legacy_backfill_plan_summary,
 )
+from app.services.owner_truth_b_migration_dry_run import (
+    OwnerTruthBMigrationDryRunService,
+    owner_truth_b_migration_dry_run_summary,
+)
 from app.services.owner_truth_legacy_shadow_parity import (
     OwnerTruthLegacyShadowParityService,
     legacy_shadow_parity_summary,
@@ -553,6 +570,11 @@ from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectio
 from app.services.formal_memory_conversation_snapshot import (
     FormalMemoryConversationSnapshotError,
     FormalMemoryConversationSnapshotService,
+)
+from app.services.owner_truth_echo_conversation_context import (
+    OwnerTruthEchoConversationContextError,
+    OwnerTruthEchoConversationContextService,
+    resolve_owner_truth_retrieval_query,
 )
 from app.services.deepseek import DeepSeekEchoAnswerProxy, DeepSeekKnowledgeExtractionProxy
 from app.services.knowledge_store import (
@@ -722,6 +744,31 @@ RUNTIME_CAPABILITY_CONTROL_REGISTRY = RuntimeCapabilityControlRegistry()
 RUNTIME_CAPABILITY_REFRESH_LOCK = RLock()
 RUNTIME_CAPABILITY_LAST_REFRESH_MONOTONIC = 0.0
 logger = logging.getLogger(__name__)
+
+
+def _owner_truth_memory_search_hybrid_ranker() -> Optional[OwnerTruthMemorySearchHybridRanker]:
+    """Return the configured semantic ranker only after local safety admission.
+
+    This is intentionally constructed from server configuration instead of a
+    mutable ``app.state`` test hook.  The builder checks provider selection,
+    model/migration compatibility, credentials, and the explicit private-data
+    egress approval without making a provider request.  Any incomplete state
+    keeps the request on its labelled deterministic fallback.
+    """
+
+    provider = build_configured_embedding_provider(settings)
+    if provider is None:
+        return None
+    return OwnerTruthMemorySearchHybridRanker(provider)
+
+
+def _owner_truth_memory_search_read_service() -> OwnerTruthMemorySearchReadService:
+    """Create the request-path search service with optional hybrid wiring."""
+
+    return OwnerTruthMemorySearchReadService(
+        store,
+        hybrid_ranker=_owner_truth_memory_search_hybrid_ranker(),
+    )
 
 
 def _queue_verified_owner_truth_media_processing(
@@ -1615,11 +1662,14 @@ def _owner_truth_direct_candidate_review_context(
 
     if str(request.headers.get("x-dreamjourney-qa-owner-truth") or "").strip() == "1":
         return _owner_truth_candidate_review_context(request, vault_id=vault_id)
-    route = (
-        f"{request.method.upper()} /v2/vaults/*/candidates"
-        if request.method.upper() == "GET"
-        else f"{request.method.upper()} /v2/vaults/*/candidates/*/decisions"
-    )
+    if request.method.upper() == "GET":
+        route = f"{request.method.upper()} /v2/vaults/*/candidates"
+    elif "/memory-changeset-groups/" in request.url.path:
+        route = f"{request.method.upper()} /v2/vaults/*/memory-changeset-groups/*"
+    elif request.url.path.endswith("/changeset-preview"):
+        route = f"{request.method.upper()} /v2/vaults/*/candidates/*/changeset-preview"
+    else:
+        route = f"{request.method.upper()} /v2/vaults/*/candidates/*/decisions"
     return _owner_truth_captured_release_policy_context(
         request,
         vault_id=vault_id,
@@ -2196,6 +2246,9 @@ _OWNER_TRUTH_INTERVIEW_END_PAYLOAD_FIELDS = frozenset(
         "expectedSessionVersion",
     }
 )
+_OWNER_TRUTH_INTERVIEW_END_OPTIONAL_PAYLOAD_FIELDS = frozenset(
+    {"lastClientSequenceNumber"}
+)
 _OWNER_TRUTH_INTERVIEW_TOPIC_SWITCH_PAYLOAD_FIELDS = frozenset(
     {
         "commandId",
@@ -2306,7 +2359,13 @@ def _owner_truth_end_interview_session_command(
 ) -> EndInterviewSessionCommand:
     """Decode an explicit, value-free end-of-session lifecycle fence."""
 
-    if set(payload) != _OWNER_TRUTH_INTERVIEW_END_PAYLOAD_FIELDS:
+    if (
+        not _OWNER_TRUTH_INTERVIEW_END_PAYLOAD_FIELDS.issubset(payload)
+        or not set(payload).issubset(
+            _OWNER_TRUTH_INTERVIEW_END_PAYLOAD_FIELDS
+            | _OWNER_TRUTH_INTERVIEW_END_OPTIONAL_PAYLOAD_FIELDS
+        )
+    ):
         raise HTTPException(
             status_code=400,
             detail={"code": "ownerTruthInterviewSessionInvalid"},
@@ -2315,11 +2374,16 @@ def _owner_truth_end_interview_session_command(
     thread_id = payload.get("threadId")
     expected_thread_version = payload.get("expectedThreadVersion")
     expected_session_version = payload.get("expectedSessionVersion")
+    last_client_sequence_number = payload.get("lastClientSequenceNumber")
     if (
         not isinstance(command_id, str)
         or not isinstance(thread_id, str)
         or type(expected_thread_version) is not int
         or type(expected_session_version) is not int
+        or (
+            "lastClientSequenceNumber" in payload
+            and type(last_client_sequence_number) is not int
+        )
     ):
         raise HTTPException(
             status_code=400,
@@ -2331,6 +2395,7 @@ def _owner_truth_end_interview_session_command(
         session_id=session_id,
         expected_thread_version=expected_thread_version,
         expected_session_version=expected_session_version,
+        last_client_sequence_number=last_client_sequence_number,
     )
 
 
@@ -4396,6 +4461,15 @@ def _owner_truth_interview_session_state_http_error(
             status_code=409,
             detail={"code": "ownerTruthInterviewSessionConflict"},
         )
+    if isinstance(error, OwnerTruthInterviewTurnsPending):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "ownerTruthInterviewTurnsPending",
+                "requestedClientSequence": error.requested_sequence,
+                "continuousClientSequence": error.continuous_sequence,
+            },
+        )
     if isinstance(error, OwnerTruthConversationError):
         return HTTPException(
             status_code=400,
@@ -4826,6 +4900,155 @@ def _owner_truth_candidate_expected_version(payload: Dict[str, Any]) -> int:
         ) from error
 
 
+def _owner_truth_candidate_expected_memory_revision(payload: Dict[str, Any]) -> Optional[int]:
+    """Decode an optional non-negative formal-memory revision for CAS writes."""
+
+    value = payload.get("expectedMemoryRevision")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise OwnerTruthCandidateReviewError(
+            "expectedMemoryRevision must be a non-negative integer when provided"
+        )
+    try:
+        revision = int(value)
+    except (TypeError, ValueError) as error:
+        raise OwnerTruthCandidateReviewError(
+            "expectedMemoryRevision must be a non-negative integer when provided"
+        ) from error
+    if revision < 0:
+        raise OwnerTruthCandidateReviewError(
+            "expectedMemoryRevision must be a non-negative integer when provided"
+        )
+    return revision
+
+
+def _owner_truth_candidate_changeset_preview_payload(
+    payload: Dict[str, Any],
+) -> tuple[Optional[Mapping[str, Any]], Optional[str]]:
+    """Decode a correction preview without admitting unrelated client fields."""
+
+    allowed = {"correctedValue", "correctedValueSchemaVersion"}
+    unexpected = set(payload) - allowed
+    if unexpected:
+        raise OwnerTruthCandidateReviewError(
+            "Candidate ChangeSet preview payload contains unsupported fields"
+        )
+    corrected_value = payload.get("correctedValue")
+    corrected_schema = payload.get("correctedValueSchemaVersion")
+    if corrected_value is None and corrected_schema is None:
+        return None, None
+    if not isinstance(corrected_value, Mapping):
+        raise OwnerTruthCandidateReviewError(
+            "correctedValue must be an object when previewing a correction"
+        )
+    schema_version = str(corrected_schema or "").strip()
+    if not schema_version:
+        raise OwnerTruthCandidateReviewError(
+            "correctedValueSchemaVersion is required with correctedValue"
+        )
+    return corrected_value, schema_version
+
+
+def _owner_truth_memory_changeset_group_command(
+    payload: Dict[str, Any],
+    *,
+    confirmation: bool,
+) -> OwnerTruthMemoryChangeSetGroupCommand:
+    """Decode an explicit dependency group without trusting client state.
+
+    A group preview and a terminal confirmation carry the same candidate
+    selections plus an explicit graph.  The only client-provided mutation is a
+    correction value; all current facts, proposal contents and activation
+    plans are rebuilt server-side under the owner UoW.
+    """
+
+    allowed = {"commandId", "selections", "dependencies"}
+    if confirmation:
+        allowed.update(
+            {
+                "expectedMemoryRevision",
+                "expectedGroupProposalId",
+                "expectedGroupProposalHash",
+            }
+        )
+    unexpected = set(payload) - allowed
+    if unexpected:
+        raise OwnerTruthCandidateReviewError(
+            "ChangeSet group payload contains unsupported fields"
+        )
+    raw_selections = payload.get("selections")
+    if not isinstance(raw_selections, list):
+        raise OwnerTruthCandidateReviewError(
+            "ChangeSet group selections must be an array"
+        )
+    selections: list[OwnerTruthMemoryChangeSetGroupSelection] = []
+    for raw_selection in raw_selections:
+        if not isinstance(raw_selection, Mapping):
+            raise OwnerTruthCandidateReviewError(
+                "each ChangeSet group selection must be an object"
+            )
+        corrected_value = raw_selection.get("correctedValue")
+        corrected_schema = raw_selection.get("correctedValueSchemaVersion")
+        selections.append(
+            OwnerTruthMemoryChangeSetGroupSelection(
+                candidate_id=str(raw_selection.get("candidateId") or ""),
+                expected_candidate_version=_owner_truth_candidate_expected_version(
+                    dict(raw_selection)
+                ),
+                action=str(raw_selection.get("action") or ""),
+                corrected_value=(
+                    dict(corrected_value)
+                    if isinstance(corrected_value, Mapping)
+                    else corrected_value
+                ),
+                corrected_value_schema_version=(
+                    str(corrected_schema).strip()
+                    if corrected_schema is not None
+                    else None
+                ),
+                reason_code=str(raw_selection.get("reasonCode") or "ownerReviewed"),
+            )
+        )
+    raw_dependencies = payload.get("dependencies")
+    if not isinstance(raw_dependencies, list):
+        raise OwnerTruthCandidateReviewError(
+            "ChangeSet group dependencies must be an array"
+        )
+    dependencies: list[OwnerTruthMemoryChangeSetGroupDependency] = []
+    for raw_dependency in raw_dependencies:
+        if not isinstance(raw_dependency, Mapping):
+            raise OwnerTruthCandidateReviewError(
+                "each ChangeSet group dependency must be an object"
+            )
+        dependencies.append(
+            OwnerTruthMemoryChangeSetGroupDependency(
+                before_candidate_id=str(raw_dependency.get("beforeCandidateId") or ""),
+                after_candidate_id=str(raw_dependency.get("afterCandidateId") or ""),
+            )
+        )
+    return OwnerTruthMemoryChangeSetGroupCommand(
+        command_id=str(payload.get("commandId") or ""),
+        selections=tuple(selections),
+        dependencies=tuple(dependencies),
+        expected_memory_revision=(
+            _owner_truth_candidate_expected_memory_revision(payload)
+            if confirmation
+            else None
+        ),
+        expected_group_proposal_id=(
+            str(payload.get("expectedGroupProposalId") or "").strip() or None
+            if confirmation
+            else None
+        ),
+        expected_group_proposal_hash=(
+            str(payload.get("expectedGroupProposalHash") or "").strip() or None
+            if confirmation
+            else None
+        ),
+    )
+
+
 def _owner_truth_interview_candidate_batch_selections(
     payload: Dict[str, Any],
 ) -> tuple[OwnerTruthInterviewCandidateBatchSelection, ...]:
@@ -4875,7 +5098,7 @@ def _owner_truth_interview_candidate_confirmation_activation_command(
 
 
 def _owner_truth_candidate_inbox_item_response(item: Any) -> Dict[str, Any]:
-    return {
+    response = {
         "candidateId": item.candidate_id,
         "sourceId": item.source_id,
         "memoryKind": item.memory_kind,
@@ -4890,6 +5113,10 @@ def _owner_truth_candidate_inbox_item_response(item: Any) -> Dict[str, Any]:
         "candidateVersion": item.candidate_row_version,
         "createdAt": item.created_at,
     }
+    proposed_change_set = getattr(item, "proposed_change_set", None)
+    if isinstance(proposed_change_set, Mapping):
+        response["proposedChangeSet"] = dict(proposed_change_set)
+    return response
 
 
 def _owner_truth_candidate_review_history_item_response(item: Any) -> Dict[str, Any]:
@@ -4948,8 +5175,11 @@ def _owner_truth_candidate_decision_response(result: Any) -> Dict[str, Any]:
             "status": activation.outcome,
             "memoryId": activation.memory_id,
             "memoryVersionId": activation.memory_version_id,
+            "memoryVersion": activation.memory_version,
+            "authorityEpoch": activation.authority_epoch,
             "contentHash": activation.content_hash,
         },
+        "memoryRevision": result.memory_revision,
     }
 
 
@@ -5178,6 +5408,10 @@ def _owner_truth_interview_current_session_response(
             "boundary": snapshot.boundary.value,
             "entryMode": snapshot.entry_mode,
         }
+        if snapshot.product_session_id is not None:
+            current_session["productSessionId"] = snapshot.product_session_id
+        if snapshot.continuous_client_sequence > 0:
+            current_session["continuousClientSequence"] = snapshot.continuous_client_sequence
     return {
         "schemaVersion": "owner-truth-interview-current-session-v1",
         "vaultId": vault_id,
@@ -5205,6 +5439,9 @@ def _owner_truth_interview_session_command_response(
             "boundary",
             "messageId",
             "messageSequence",
+            "clientSequenceNumber",
+            "continuousClientSequence",
+            "deliveryState",
         )
         if key in receipt
     }
@@ -6585,6 +6822,54 @@ def _legacy_archive_v2_authority_retirement(
     }
 
 
+def _owner_truth_private_echo_session_context(
+    request: Request,
+    *,
+    owner_subject_id: str,
+    payload: Dict[str, Any],
+) -> Optional[OwnerTruthCommandContext]:
+    """Return the authenticated Owner context for a private text session.
+
+    This deliberately has a smaller responsibility than V4 formal-memory
+    authority. A product session needs a server-owned, owner-scoped place to
+    retain short-lived follow-up turns even while formal-memory review is
+    temporarily disabled by release policy. It never selects, reads, or
+    writes formal facts by itself.
+    """
+
+    principal = getattr(request.state, "auth_principal", None)
+    if isinstance(principal, RequestPrincipal) and principal.kind == PrincipalKind.USER:
+        if (
+            str(principal.principal_id or "").strip() != owner_subject_id
+        ):
+            return None
+    elif isinstance(principal, RequestPrincipal) and principal.kind != PrincipalKind.ANONYMOUS:
+        return None
+    elif AUTH_ROUTE_MODE == "enforce" or bool(_configured_backend_api_token()):
+        # Production requests must already have been authenticated by the
+        # route boundary. The unauthenticated branch exists only for the
+        # explicitly configured local legacy/test mode used by contract tests.
+        return None
+
+    persona_scope = str(payload.get("personaScope") or "personal").strip().lower()
+    digital_human_id = (
+        str(payload.get("digitalHumanId") or owner_subject_id).strip()
+        or owner_subject_id
+    )
+    viewer_family_member_id = str(payload.get("viewerFamilyMemberID") or "").strip()
+    if (
+        persona_scope not in {"personal", "self"}
+        or digital_human_id != owner_subject_id
+        or viewer_family_member_id
+    ):
+        return None
+    return OwnerTruthCommandContext(
+        vault_id=owner_subject_id,
+        owner_subject_id=owner_subject_id,
+        actor_subject_id=owner_subject_id,
+    )
+
+
 def _owner_truth_context_authority_context(
     request: Request,
     *,
@@ -6598,17 +6883,18 @@ def _owner_truth_context_authority_context(
         or OWNER_TRUTH_CONTEXT_AUTHORITY_CLOSED_PILOT_ENABLED
     ):
         return None
-    principal = getattr(request.state, "auth_principal", None)
-    if (
-        not isinstance(principal, RequestPrincipal)
-        or principal.kind != PrincipalKind.USER
-        or str(principal.principal_id or "").strip() != owner_subject_id
-    ):
+    context = _owner_truth_private_echo_session_context(
+        request,
+        owner_subject_id=owner_subject_id,
+        payload=payload,
+    )
+    if context is None:
         return None
-    persona_scope = str(payload.get("personaScope") or "personal").strip()
-    digital_human_id = str(payload.get("digitalHumanId") or owner_subject_id).strip() or owner_subject_id
-    viewer_family_member_id = str(payload.get("viewerFamilyMemberID") or "").strip()
-    if persona_scope == "family" or digital_human_id != owner_subject_id or viewer_family_member_id:
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, RequestPrincipal):
+        # Formal-memory authority is never inferred from a local legacy test
+        # identity. Only the bounded product-session context supports that
+        # mode for deterministic transport tests.
         return None
     decision = RELEASE_POLICY_SERVICE.build_snapshot(
         audience="owner",
@@ -6618,11 +6904,7 @@ def _owner_truth_context_authority_context(
     ).features[0]
     if not decision.enabled:
         return None
-    return OwnerTruthCommandContext(
-        vault_id=owner_subject_id,
-        owner_subject_id=owner_subject_id,
-        actor_subject_id=owner_subject_id,
-    )
+    return context
 
 
 def _set_release_policy_diagnostic_headers(response: Any, diagnostic: Dict[str, str]) -> Any:
@@ -6909,7 +7191,18 @@ NO_STORE_EXACT_PATHS = {
     "/archive/image-analysis",
 }
 INFRASTRUCTURE_PATHS = frozenset({"/health", "/live", "/ready"})
-DATABASE_TRANSACTION_BYPASS_PATHS = INFRASTRUCTURE_PATHS | frozenset({"/config/runtime"})
+# These endpoints either expose static API metadata or aggregate already-recorded
+# observability state. They must remain reachable even while a database pool is
+# unavailable, and none of them performs a domain write in the request path.
+DATABASE_TRANSACTION_BYPASS_PATHS = INFRASTRUCTURE_PATHS | frozenset(
+    {
+        "/config/runtime",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+        "/ops/release-policy/observations",
+    }
+)
 ANONYMOUS_AUTH_PATHS = {
     "/auth/login",
     "/auth/refresh",
@@ -7971,12 +8264,15 @@ def owner_truth_candidate_inbox(
 
     try:
         context = _owner_truth_direct_candidate_review_context(request, vault_id=vault_id)
-        items = OwnerTruthCandidateReviewService(store).list_pending(context=context)
+        service = OwnerTruthCandidateReviewService(store)
+        items = service.list_pending(context=context)
+        memory_revision = service.memory_revision(context=context)
     except OwnerTruthContractError as error:
         raise _owner_truth_candidate_review_http_error(error) from error
     return {
         "schemaVersion": "owner-truth-candidate-inbox-v1",
         "vaultId": context.vault_id,
+        "memoryRevision": memory_revision,
         "candidates": [
             _owner_truth_candidate_inbox_item_response(item) for item in items
         ],
@@ -10238,6 +10534,109 @@ async def upload_owner_truth_family_contribution_image_content(
 
 
 @app.post(
+    "/v2/vaults/{vault_id}/candidates/{candidate_id}/changeset-preview",
+    include_in_schema=False,
+)
+def preview_owner_truth_candidate_changeset(
+    request: Request,
+    vault_id: str,
+    candidate_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Show the exact V5 fact mutation before an Owner makes it terminal."""
+
+    try:
+        context = _owner_truth_direct_candidate_review_context(request, vault_id=vault_id)
+        corrected_value, corrected_schema_version = (
+            _owner_truth_candidate_changeset_preview_payload(payload)
+        )
+        proposal = OwnerTruthCandidateReviewService(store).preview_changeset(
+            candidate_id=candidate_id,
+            context=context,
+            corrected_value=corrected_value,
+            corrected_value_schema_version=corrected_schema_version,
+        )
+        if proposal is None:
+            raise OwnerTruthCandidateReviewConflict(
+                "Candidate ChangeSet preview is unavailable for this schema"
+            )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    return JSONResponse(
+        content={
+            "schemaVersion": "owner-truth-candidate-changeset-preview-v1",
+            "vaultId": context.vault_id,
+            "candidateId": candidate_id,
+            "proposedChangeSet": proposal.payload(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memory-changeset-groups/preview",
+    include_in_schema=False,
+)
+def preview_owner_truth_memory_changeset_group(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Show one owner-visible, dependency-aware group proposal before commit."""
+
+    try:
+        context = _owner_truth_direct_candidate_review_context(request, vault_id=vault_id)
+        command = _owner_truth_memory_changeset_group_command(
+            payload,
+            confirmation=False,
+        )
+        proposal = OwnerTruthMemoryChangeSetGroupReviewService(store).preview(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    return JSONResponse(
+        content={
+            "schemaVersion": "owner-truth-memory-changeset-group-preview-response-v1",
+            "vaultId": context.vault_id,
+            "groupProposal": proposal.payload(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/memory-changeset-groups/confirm",
+    include_in_schema=False,
+)
+def confirm_owner_truth_memory_changeset_group(
+    request: Request,
+    vault_id: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    """Atomically commit a previously visible V5 Candidate dependency group."""
+
+    try:
+        context = _owner_truth_direct_candidate_review_context(request, vault_id=vault_id)
+        command = _owner_truth_memory_changeset_group_command(
+            payload,
+            confirmation=True,
+        )
+        result = OwnerTruthMemoryChangeSetGroupReviewService(store).confirm(
+            command=command,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=result.payload(),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
     "/v2/vaults/{vault_id}/candidates/{candidate_id}/decisions",
     include_in_schema=False,
 )
@@ -10262,6 +10661,13 @@ def review_owner_truth_candidate(
                 or OWNER_TRUTH_SCHEMA_VERSION
             ),
             reason_code=str(payload.get("reasonCode") or "ownerReviewed"),
+            expected_memory_revision=_owner_truth_candidate_expected_memory_revision(payload),
+            expected_change_set_id=(
+                str(payload.get("expectedChangeSetId") or "").strip() or None
+            ),
+            expected_proposal_hash=(
+                str(payload.get("expectedProposalHash") or "").strip() or None
+            ),
         )
         result = OwnerTruthCandidateReviewService(store).decide_and_activate(
             command=command,
@@ -10282,12 +10688,16 @@ def review_owner_truth_candidate(
 def read_owner_truth_current_interview_session(
     request: Request,
     vault_id: str,
+    productSessionId: Optional[str] = Query(default=None, min_length=1, max_length=128),
 ) -> JSONResponse:
-    """Read the one active natural-input session without exposing its content."""
+    """Read one active product-scoped session without exposing its content."""
 
     try:
         context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
-        snapshot = OwnerTruthInterviewSessionReadService(store).read_current(context=context)
+        snapshot = OwnerTruthInterviewSessionReadService(store).read_current(
+            context=context,
+            product_session_id=productSessionId,
+        )
     except OwnerTruthContractError as error:
         raise _owner_truth_interview_session_state_http_error(error) from error
     return JSONResponse(
@@ -10590,6 +11000,8 @@ def append_owner_truth_interview_narrative(
             ),
             text=narrative_text,
             capture_mode=capture_mode,
+            client_sequence_number=payload.get("clientSequenceNumber"),
+            captured_at=payload.get("capturedAt"),
         )
         formal_review_batch_session_version: Optional[int] = None
         automation = None
@@ -11778,7 +12190,11 @@ def build_owner_truth_context_shadow(
 
     try:
         context = _owner_truth_context_shadow_context(request, vault_id=vault_id)
-        shadow = OwnerTruthContextShadowBuildService(store, enabled=True).build(
+        shadow = OwnerTruthContextShadowBuildService(
+            store,
+            enabled=True,
+            hybrid_ranker=_owner_truth_memory_search_hybrid_ranker(),
+        ).build(
             context=context,
             payload=payload,
         )
@@ -11840,6 +12256,7 @@ def materialize_owner_truth_context_shadow(
         materialization = OwnerTruthContextMaterializationService(
             store,
             enabled=True,
+            hybrid_ranker=_owner_truth_memory_search_hybrid_ranker(),
         ).build(
             context=context,
             payload=payload,
@@ -12760,7 +13177,7 @@ def search_owner_truth_memory_presentation(
             raise OwnerTruthMemorySearchReadError(
                 "memory-search presentation contains unsupported fields"
             )
-        result = OwnerTruthMemorySearchReadService(store).read(
+        result = _owner_truth_memory_search_read_service().read(
             context=context,
             query=payload["query"],
             limit=8,
@@ -12840,7 +13257,7 @@ def read_owner_truth_memory_search(
             )
         if "query" not in payload:
             raise OwnerTruthMemorySearchReadError("memory-search query is required")
-        result = OwnerTruthMemorySearchReadService(store).read(
+        result = _owner_truth_memory_search_read_service().read(
             context=context,
             query=payload["query"],
             limit=payload.get("limit", 20),
@@ -13074,6 +13491,10 @@ def resolve_owner_truth_answer_citation_correction(
 
     try:
         context = _owner_truth_correction_request_context(request, vault_id=vault_id)
+        try:
+            expected_memory_revision = _owner_truth_candidate_expected_memory_revision(payload)
+        except OwnerTruthCandidateReviewError as error:
+            raise OwnerTruthCorrectionResolutionConflict(str(error)) from error
         command = OwnerTruthCorrectionResolutionCommand(
             command_id=payload.get("commandId"),
             expected_candidate_version=_owner_truth_candidate_expected_version(payload),
@@ -13084,6 +13505,13 @@ def resolve_owner_truth_answer_citation_correction(
                 payload.get("correctedValueSchemaVersion") or OWNER_TRUTH_SCHEMA_VERSION
             ),
             reason_code=payload.get("reasonCode"),
+            expected_memory_revision=expected_memory_revision,
+            expected_change_set_id=(
+                str(payload.get("expectedChangeSetId") or "").strip() or None
+            ),
+            expected_proposal_hash=(
+                str(payload.get("expectedProposalHash") or "").strip() or None
+            ),
         )
         result = OwnerTruthCorrectionRequestService(store, enabled=True).resolve(
             context=context,
@@ -13145,6 +13573,36 @@ def plan_owner_truth_legacy_backfill(
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
         content=legacy_backfill_plan_summary(result),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v2/vaults/{vault_id}/legacy-migration/b-dry-run",
+    include_in_schema=False,
+)
+def dry_run_owner_truth_b_migration(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """Create a QA-only, value-free B migration report without data promotion.
+
+    This is intentionally a report endpoint, not a migration writer. It
+    reuses the immutable legacy inventory/backfill plan and rejects any
+    authority mismatch before an operator can treat an old record as current
+    formal memory.
+    """
+
+    try:
+        context = _owner_truth_legacy_migration_context(request, vault_id=vault_id)
+        result = OwnerTruthBMigrationDryRunService(store, enabled=True).dry_run(
+            context=context
+        )
+    except OwnerTruthLegacyMigrationError as error:
+        raise _owner_truth_legacy_migration_http_error(error) from error
+    return JSONResponse(
+        status_code=201 if result.outcome == "created" else 200,
+        content=owner_truth_b_migration_dry_run_summary(result),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -16488,6 +16946,8 @@ def _build_authorized_echo_context(
     *,
     owner_subject_id: str,
     payload: Dict[str, Any],
+    authority_context: Optional[OwnerTruthCommandContext] = None,
+    retrieval_query: Optional[str] = None,
 ) -> Tuple[
     Dict[str, Any],
     Optional[OwnerTruthCommandContext],
@@ -16517,11 +16977,12 @@ def _build_authorized_echo_context(
             visitor_session_active=False,
         )
         raise HTTPException(status_code=409, detail=decision.denial_payload())
-    authority_context = _owner_truth_context_authority_context(
-        request,
-        owner_subject_id=owner_subject_id,
-        payload=payload,
-    )
+    if authority_context is None:
+        authority_context = _owner_truth_context_authority_context(
+            request,
+            owner_subject_id=owner_subject_id,
+            payload=payload,
+        )
     try:
         if authority_context is None:
             packet = ContextPacketBuilder(store, settings).build(payload)
@@ -16531,9 +16992,11 @@ def _build_authorized_echo_context(
                 store,
                 settings=settings,
                 enabled=True,
+                hybrid_ranker=_owner_truth_memory_search_hybrid_ranker(),
             ).build_packet_with_materialization(
                 context=authority_context,
                 payload=payload,
+                retrieval_query=retrieval_query,
             )
     except OwnerTruthMemoryProjectionError as exc:
         raise _owner_truth_memory_projection_http_error(exc) from exc
@@ -16723,18 +17186,67 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         raise HTTPException(status_code=400, detail="query is required")
     if len(query) > DeepSeekEchoAnswerProxy.maximum_query_characters:
         raise HTTPException(status_code=400, detail="query is too long")
-    try:
-        recent_turns = DeepSeekEchoAnswerProxy.normalize_recent_turns(
-            payload.get("recentTurns") or []
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    product_session_id = str(payload.get("productSessionId") or "").strip()
+    if len(product_session_id) > 128:
+        raise HTTPException(status_code=400, detail="productSessionId is too long")
+    client_turn_id = str(payload.get("clientTurnId") or "").strip()
+    if len(client_turn_id) > 128:
+        raise HTTPException(status_code=400, detail="clientTurnId is too long")
 
+    owner_truth_audit_context = _owner_truth_context_authority_context(
+        request,
+        owner_subject_id=owner_subject_id,
+        payload=payload,
+    )
+    text_session_context = _owner_truth_private_echo_session_context(
+        request,
+        owner_subject_id=owner_subject_id,
+        payload=payload,
+    )
+    text_conversation_context = None
+    if product_session_id:
+        # A product session is always a server-owned conversation. Never let
+        # a release-policy toggle turn client-supplied `recentTurns` back into
+        # an authority source for that session.
+        if text_session_context is None:
+            recent_turns = []
+        else:
+            try:
+                text_conversation_context = OwnerTruthEchoConversationContextService(
+                    store
+                ).read_recent(
+                    context=text_session_context,
+                    product_session_id=product_session_id,
+                )
+                recent_turns = text_conversation_context.prompt_turns
+            except OwnerTruthEchoConversationContextError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "ownerTruthEchoConversationContextUnavailable",
+                        "retryable": True,
+                    },
+                ) from exc
+    else:
+        try:
+            recent_turns = DeepSeekEchoAnswerProxy.normalize_recent_turns(
+                payload.get("recentTurns") or []
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    retrieval_query = query
+    if text_conversation_context is not None:
+        retrieval_query = resolve_owner_truth_retrieval_query(
+            query=query,
+            recent_turns=text_conversation_context.prompt_turns,
+        ).retrieval_query
     packet, owner_truth_audit_context, owner_truth_materialization = (
         _build_authorized_echo_context(
             request,
             owner_subject_id=owner_subject_id,
             payload=payload,
+            authority_context=owner_truth_audit_context,
+            retrieval_query=retrieval_query,
         )
     )
     safety = packet.get("safetyPolicy") if isinstance(packet, dict) else None
@@ -16962,6 +17474,31 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         except OwnerTruthMemoryProjectionError as error:
             raise _owner_truth_answer_citation_http_error(error) from error
 
+    conversation_context_summary = None
+    if text_conversation_context is not None:
+        if provider_effects_allowed and provider != "service-fallback" and answer_text:
+            try:
+                recorded_context = OwnerTruthEchoConversationContextService(
+                    store
+                ).record_answered_exchange(
+                    context=text_session_context,
+                    product_session_id=product_session_id,
+                    request_id=client_turn_id or ("echo-" + secrets.token_hex(16)),
+                    user_text=query,
+                    assistant_text=answer_text,
+                )
+                conversation_context_summary = recorded_context.public_summary(
+                    source="server"
+                )
+            except OwnerTruthEchoConversationContextError:
+                conversation_context_summary = text_conversation_context.public_summary(
+                    source="serverUnavailable"
+                )
+        else:
+            conversation_context_summary = text_conversation_context.public_summary(
+                source="server"
+            )
+
     return JSONResponse(
         content={
             "status": "answered",
@@ -16982,6 +17519,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                     "outcome": memory_outcome,
                     "handoff": memory_handoff,
                 },
+                "conversationContext": conversation_context_summary,
             },
         },
         headers={"Cache-Control": "no-store"},
@@ -17024,6 +17562,7 @@ def realtime_token(request: Request, payload: Dict[str, Any]) -> JSONResponse:
             projection_checkpoint=snapshot["projectionCheckpoint"],
             context_hash=snapshot["contextHash"],
             authority_epoch=snapshot["authorityEpoch"],
+            memory_revision=snapshot["memoryRevision"],
             session_context=live_session["sessionContext"],
         )
     except RealtimeVoiceProxyError as exc:

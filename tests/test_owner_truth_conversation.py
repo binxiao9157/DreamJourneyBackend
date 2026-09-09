@@ -11,8 +11,11 @@ from app.domain.owner_truth.conversation import (
     InterviewBoundary,
     InterviewSessionState,
     OwnerTruthConversationAccessDenied,
+    OwnerTruthConversationConflict,
     OwnerTruthInterviewSessionStateConflict,
+    OwnerTruthInterviewTurnsPending,
     OwnerTruthConversationVersionConflict,
+    PauseInterviewForTopicSwitchWriteRecord,
     SetInterviewBoundaryCommand,
     StartInterviewSessionCommand,
     StartInterviewSessionWriteRecord,
@@ -76,6 +79,70 @@ class OwnerTruthConversationTests(unittest.TestCase):
             "echo_live_product_001",
         )
 
+    def test_product_session_lookup_is_exact_and_legacy_lane_excludes_live(self) -> None:
+        first_thread_id = str(uuid.uuid4())
+        first_session_id = str(uuid.uuid4())
+        second_thread_id = str(uuid.uuid4())
+        second_session_id = str(uuid.uuid4())
+        self.service.start_session(
+            command=StartInterviewSessionCommand(
+                command_id="start-live-product-a",
+                thread_id=first_thread_id,
+                session_id=first_session_id,
+                expected_thread_version=0,
+                entry_mode="live",
+                product_session_id="echo_live_product_a",
+            ),
+            context=self.context,
+        )
+        self.service.start_session(
+            command=StartInterviewSessionCommand(
+                command_id="start-live-product-b",
+                thread_id=second_thread_id,
+                session_id=second_session_id,
+                expected_thread_version=0,
+                entry_mode="live",
+                product_session_id="echo_live_product_b",
+            ),
+            context=self.context,
+        )
+
+        first = self.service.read_current_session(
+            context=self.context,
+            product_session_id="echo_live_product_a",
+        )
+        second = self.service.read_current_session(
+            context=self.context,
+            product_session_id="echo_live_product_b",
+        )
+
+        self.assertEqual(first.session_id if first else None, first_session_id)
+        self.assertEqual(second.session_id if second else None, second_session_id)
+        self.assertIsNone(self.service.read_current_session(context=self.context))
+
+    def test_active_product_session_cannot_be_started_twice(self) -> None:
+        self.service.start_session(
+            command=self.start(
+                command_id="start-live-product-first",
+                entry_mode="live",
+                product_session_id="echo_live_product_shared",
+            ),
+            context=self.context,
+        )
+
+        with self.assertRaises(OwnerTruthInterviewSessionStateConflict):
+            self.service.start_session(
+                command=StartInterviewSessionCommand(
+                    command_id="start-live-product-reused",
+                    thread_id=str(uuid.uuid4()),
+                    session_id=str(uuid.uuid4()),
+                    expected_thread_version=0,
+                    entry_mode="live",
+                    product_session_id="echo_live_product_shared",
+                ),
+                context=self.context,
+            )
+
     def append(
         self,
         *,
@@ -84,6 +151,9 @@ class OwnerTruthConversationTests(unittest.TestCase):
         expected_thread_version: int = 1,
         expected_session_version: int = 1,
         text: str = "我想从第一次创业失败的经历讲起。",
+        capture_mode: str = "naturalInput",
+        client_sequence_number: Optional[int] = None,
+        captured_at: Optional[str] = None,
     ) -> AppendInterviewMessageCommand:
         return AppendInterviewMessageCommand(
             command_id=command_id,
@@ -95,6 +165,9 @@ class OwnerTruthConversationTests(unittest.TestCase):
             author=ConversationMessageAuthor.OWNER,
             kind=ConversationMessageKind.NARRATIVE,
             text=text,
+            capture_mode=capture_mode,
+            client_sequence_number=client_sequence_number,
+            captured_at=captured_at,
         )
 
     def end(
@@ -103,6 +176,7 @@ class OwnerTruthConversationTests(unittest.TestCase):
         command_id: str = "end-interview-1",
         expected_thread_version: int = 1,
         expected_session_version: int = 1,
+        last_client_sequence_number: Optional[int] = None,
     ) -> EndInterviewSessionCommand:
         return EndInterviewSessionCommand(
             command_id=command_id,
@@ -110,6 +184,7 @@ class OwnerTruthConversationTests(unittest.TestCase):
             session_id=self.session_id,
             expected_thread_version=expected_thread_version,
             expected_session_version=expected_session_version,
+            last_client_sequence_number=last_client_sequence_number,
         )
 
     def test_start_replays_without_creating_a_second_thread_or_session(self) -> None:
@@ -306,6 +381,187 @@ class OwnerTruthConversationTests(unittest.TestCase):
                 context=self.context,
             )
 
+    def test_lost_live_receipts_replay_after_process_restart_and_new_product_session_isolated(self) -> None:
+        product_session_id = "echo-live-restart-proof"
+        self.service.start_session(
+            command=self.start(
+                command_id="start-restart-proof",
+                entry_mode="live",
+                product_session_id=product_session_id,
+            ),
+            context=self.context,
+        )
+        first_turn = self.append(
+            command_id="append-restart-proof",
+            message_id=self.message_id,
+            capture_mode="live",
+            client_sequence_number=1,
+            captured_at="2026-09-08T12:00:00Z",
+        )
+        created_turn = self.service.append_message(command=first_turn, context=self.context)
+
+        # A fresh service instance models an app/server process restart while
+        # keeping the same persistent repository and durable command receipts.
+        recovered_service = OwnerTruthConversationService(self.repository)
+        replayed_turn = recovered_service.append_message(
+            command=self.append(
+                command_id="append-restart-proof",
+                message_id=self.message_id,
+                expected_thread_version=2,
+                expected_session_version=2,
+                capture_mode="live",
+                client_sequence_number=1,
+                captured_at="2026-09-08T12:00:00Z",
+            ),
+            context=self.context,
+        )
+        self.assertEqual(replayed_turn.outcome, "deduplicated")
+        self.assertEqual(replayed_turn.message_id, created_turn.message_id)
+        self.assertEqual(replayed_turn.continuous_client_sequence, 1)
+
+        closed = recovered_service.end_session(
+            command=self.end(
+                command_id="end-restart-proof",
+                expected_thread_version=2,
+                expected_session_version=2,
+                last_client_sequence_number=1,
+            ),
+            context=self.context,
+        )
+        replayed_close = OwnerTruthConversationService(self.repository).end_session(
+            command=self.end(
+                command_id="end-restart-proof",
+                expected_thread_version=3,
+                expected_session_version=3,
+                last_client_sequence_number=1,
+            ),
+            context=self.context,
+        )
+        self.assertEqual(closed.outcome, "created")
+        self.assertEqual(replayed_close.outcome, "deduplicated")
+        self.assertEqual(replayed_close.continuous_client_sequence, 1)
+
+        new_thread_id = str(uuid.uuid4())
+        new_session_id = str(uuid.uuid4())
+        fresh = OwnerTruthConversationService(self.repository)
+        fresh.start_session(
+            command=StartInterviewSessionCommand(
+                command_id="start-after-restart-proof",
+                thread_id=new_thread_id,
+                session_id=new_session_id,
+                expected_thread_version=0,
+                entry_mode="live",
+                product_session_id=product_session_id,
+            ),
+            context=self.context,
+        )
+        current = fresh.read_current_session(
+            context=self.context,
+            product_session_id=product_session_id,
+        )
+        self.assertEqual(current.session_id if current else None, new_session_id)
+        self.assertEqual(current.thread_id if current else None, new_thread_id)
+        with self.assertRaises(OwnerTruthInterviewSessionStateConflict):
+            fresh.append_message(
+                command=self.append(
+                    command_id="append-ended-session-after-new-live",
+                    message_id=str(uuid.uuid4()),
+                    expected_thread_version=3,
+                    expected_session_version=3,
+                    capture_mode="live",
+                    client_sequence_number=2,
+                    captured_at="2026-09-08T12:00:02Z",
+                ),
+                context=self.context,
+            )
+
+    def test_live_delivery_watermark_rejects_early_close_then_accepts_late_turn(self) -> None:
+        self.service.start_session(
+            command=self.start(entry_mode="live", product_session_id="live-product-a"),
+            context=self.context,
+        )
+        second = self.service.append_message(
+            command=self.append(
+                command_id="append-live-sequence-2",
+                message_id=str(uuid.uuid4()),
+                client_sequence_number=2,
+                captured_at="2026-09-08T10:00:02Z",
+                capture_mode="live",
+            ),
+            context=self.context,
+        )
+        self.assertEqual(second.client_sequence_number, 2)
+        self.assertEqual(second.continuous_client_sequence, 0)
+        self.assertEqual(second.delivery_state, "awaitingPriorTurns")
+
+        with self.assertRaises(OwnerTruthInterviewTurnsPending) as raised:
+            self.service.end_session(
+                command=self.end(
+                    command_id="end-live-before-sequence-1",
+                    expected_thread_version=2,
+                    expected_session_version=2,
+                    last_client_sequence_number=2,
+                ),
+                context=self.context,
+            )
+        self.assertEqual(raised.exception.requested_sequence, 2)
+        self.assertEqual(raised.exception.continuous_sequence, 0)
+
+        first = self.service.append_message(
+            command=self.append(
+                command_id="append-live-sequence-1",
+                message_id=str(uuid.uuid4()),
+                expected_thread_version=2,
+                expected_session_version=2,
+                client_sequence_number=1,
+                captured_at="2026-09-08T10:00:01+00:00",
+                capture_mode="live",
+            ),
+            context=self.context,
+        )
+        self.assertEqual(first.continuous_client_sequence, 2)
+        self.assertEqual(first.delivery_state, "contiguous")
+
+        ended = self.service.end_session(
+            command=self.end(
+                command_id="end-live-after-all-turns",
+                expected_thread_version=3,
+                expected_session_version=3,
+                last_client_sequence_number=2,
+            ),
+            context=self.context,
+        )
+        self.assertEqual(ended.continuous_client_sequence, 2)
+        self.assertEqual(ended.delivery_state, "closedAfterContiguousDelivery")
+        session = self.service.read_session(session_id=self.session_id, context=self.context)
+        self.assertEqual(session.product_session_id, "live-product-a")
+        self.assertEqual(session.continuous_client_sequence, 2)
+        self.assertEqual(session.close_requested_client_sequence, 2)
+
+    def test_live_delivery_watermark_rejects_another_command_claiming_same_turn(self) -> None:
+        self.service.start_session(command=self.start(entry_mode="live"), context=self.context)
+        self.service.append_message(
+            command=self.append(
+                command_id="append-live-sequence-1",
+                client_sequence_number=1,
+                capture_mode="live",
+            ),
+            context=self.context,
+        )
+
+        with self.assertRaises(OwnerTruthConversationConflict):
+            self.service.append_message(
+                command=self.append(
+                    command_id="append-live-sequence-1-reused",
+                    message_id=str(uuid.uuid4()),
+                    expected_thread_version=2,
+                    expected_session_version=2,
+                    client_sequence_number=1,
+                    capture_mode="live",
+                ),
+                context=self.context,
+            )
+
     def test_explicit_end_allows_paused_session_but_preserves_boundary(self) -> None:
         self.service.start_session(command=self.start(), context=self.context)
         self.service.set_boundary(
@@ -342,6 +598,88 @@ class OwnerTruthConversationTests(unittest.TestCase):
 
 
 class PostgresOwnerTruthConversationRepositoryTests(unittest.TestCase):
+    def test_pause_for_topic_switch_does_not_require_end_delivery_watermark(self) -> None:
+        class CapturingCursor:
+            def __init__(self) -> None:
+                self.statement = ""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                return None
+
+            def execute(self, statement: str, params: tuple[object, ...]) -> None:
+                self.statement = statement
+
+            def fetchone(self):
+                if "FROM owner_truth.vaults" in self.statement:
+                    return {
+                        "owner_subject_id": "owner-a",
+                        "authority_epoch": 4,
+                        "status": "active",
+                    }
+                if "FROM owner_truth.conversation_command_receipts" in self.statement:
+                    return None
+                if "FROM owner_truth.interview_sessions AS s" in self.statement:
+                    return {
+                        "id": "session-a",
+                        "owner_subject_id": "owner-a",
+                        "current_thread_id": "thread-a",
+                        "state": "active",
+                        "boundary": "open",
+                        "turn_count": 0,
+                        "deepening_turn_count": 0,
+                        "candidate_batch_turn_count": 0,
+                        "pending_review_batch_id": None,
+                        "fatigue": "normal",
+                        "authority_epoch": 4,
+                        "row_version": 1,
+                        "continuous_client_sequence": 0,
+                        "close_requested_client_sequence": None,
+                        "thread_id": "thread-a",
+                        "thread_state": "active",
+                        "thread_owner_subject_id": "owner-a",
+                        "thread_authority_epoch": 4,
+                        "thread_row_version": 1,
+                        "thread_entry_mode": "live",
+                    }
+                if "UPDATE owner_truth.conversation_threads" in self.statement:
+                    return {"row_version": 2}
+                if "UPDATE owner_truth.interview_sessions" in self.statement:
+                    return {"row_version": 2, "state": "paused", "boundary": "open"}
+                return None
+
+        class CapturingConnection:
+            def __init__(self, cursor: CapturingCursor) -> None:
+                self.cursor_value = cursor
+
+            def cursor(self, *, row_factory=None):
+                return self.cursor_value
+
+        repository = PostgresOwnerTruthConversationRepository(
+            CapturingConnection(CapturingCursor())
+        )
+        result = repository.pause_interview_for_topic_switch(
+            PauseInterviewForTopicSwitchWriteRecord(
+                receipt_id="receipt-a",
+                command_id_hash="command-a",
+                payload_hash="payload-a",
+                thread_id="thread-a",
+                session_id="session-a",
+                expected_thread_version=1,
+                expected_session_version=1,
+                vault_id="vault-a",
+                owner_subject_id="owner-a",
+                actor_subject_id="owner-a",
+                policy_version="owner-truth-v1",
+            )
+        )
+
+        self.assertEqual(result.state, InterviewSessionState.PAUSED)
+        self.assertEqual(result.thread_version, 2)
+        self.assertEqual(result.session_version, 2)
+
     def test_start_adapts_thread_and_session_metadata_for_jsonb(self) -> None:
         class CapturingCursor:
             def __init__(self) -> None:

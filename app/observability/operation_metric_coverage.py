@@ -94,6 +94,15 @@ CRITICAL_WORKER_COVERAGE = (
     ),
     OperationMetricCoverageEntry(
         component_id=(
+            "app.async_effects.owner_truth_memory_search_embedding_worker."
+            "OwnerTruthMemorySearchEmbeddingWorkerRuntime"
+        ),
+        component_kind="worker",
+        status=OperationMetricCoverageStatus.INSTRUMENTED,
+        reason_code="workerAttemptRecorderAttached",
+    ),
+    OperationMetricCoverageEntry(
+        component_id=(
             "app.async_effects.owner_truth_candidate_extraction_worker."
             "OwnerTruthCandidateExtractionWorkerRuntime"
         ),

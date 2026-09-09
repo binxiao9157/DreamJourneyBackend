@@ -494,6 +494,70 @@ class OwnerTruthInterviewCandidateProjectionRecoveryQueryContractTests(TestCase)
         self.assertIn("projection_job.cancel_requested_at IS NULL", statement)
 
 
+class _BatchDecisionLookupCursor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, statement: str, params: tuple[object, ...] = ()) -> None:
+        self.calls.append((statement, params))
+
+    @staticmethod
+    def fetchone():
+        return None
+
+
+class _BatchDecisionLookupConnection:
+    def __init__(self) -> None:
+        self.cursor_instance = _BatchDecisionLookupCursor()
+
+    def cursor(self, **_kwargs):
+        return self.cursor_instance
+
+
+class OwnerTruthInterviewCandidateBatchDecisionLookupContractTests(TestCase):
+    def test_lookup_serializes_on_root_command_before_reading_receipt(self) -> None:
+        connection = _BatchDecisionLookupConnection()
+        repository = PostgresOwnerTruthInterviewCandidateBatchDecisionRepository(connection)
+        command = OwnerTruthInterviewCandidateBatchAcceptCommand(
+            command_id="concurrent-formal-replay",
+            review_batch_id=str(uuid4()),
+            selections=(
+                OwnerTruthInterviewCandidateBatchSelection(
+                    candidate_id=str(uuid4()),
+                    expected_candidate_version=1,
+                ),
+            ),
+            reason_code="ownerReviewed",
+        )
+        context = OwnerTruthCommandContext(
+            vault_id="concurrent-formal-vault",
+            owner_subject_id="concurrent-formal-owner",
+            actor_subject_id="concurrent-formal-owner",
+        )
+
+        self.assertIsNone(repository.lookup(command=command, context=context))
+
+        self.assertEqual(len(connection.cursor_instance.calls), 2)
+        lock_statement, lock_params = connection.cursor_instance.calls[0]
+        lookup_statement, lookup_params = connection.cursor_instance.calls[1]
+        self.assertIn("pg_advisory_xact_lock", lock_statement)
+        self.assertEqual(
+            lock_params,
+            (
+                "owner-truth-interview-batch-decision:"
+                f"{context.vault_id}:{command.command_id_hash}",
+            ),
+        )
+        self.assertIn("FROM owner_truth.interview_review_batch_candidate_decisions", lookup_statement)
+        self.assertEqual(lookup_params, (context.vault_id, command.command_id_hash))
+
+
 if __name__ == "__main__":
     import unittest
 

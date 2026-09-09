@@ -58,6 +58,7 @@ bash scripts/deployment-preflight.sh
 - `main` 工作区干净且能读取 `origin/main`；
 - `.env` 和私密备份目录权限正确，旧备份已移出仓库；
 - Compose 配置有效；
+- pgvector 镜像检查脚本存在且可执行；
 - 数据库备份和 retention timer 均已启用。
 
 任一项失败均停止部署，不能通过 `git reset --hard`、放宽密钥权限或跳过备份来解除。
@@ -81,12 +82,96 @@ sudo -iu miao git -C "$REPO" pull --ff-only origin main
 export TARGET_COMMIT="$(sudo -iu miao git -C "$REPO" rev-parse HEAD)"
 ```
 
+### 4.1 pgvector 首次迁移门禁
+
+当目标提交包含 `0113_owner_truth_memory_search_hybrid_pgvector`，但当前数据库镜像尚不含 pgvector 时，必须先完成本节，不能直接执行迁移。该变更沿用 PostgreSQL 16 数据卷，不升级 PostgreSQL 主版本。
+
+1. 审核 `pgvector/pgvector:pg16` 的来源、架构和 PostgreSQL 主版本，在变更单中记录计划使用的不可变镜像摘要。
+2. 拉取镜像后，将生产 `.env` 的 `POSTGRES_IMAGE` 设置为经过审核的 `pgvector/pgvector@sha256:...`。不得把摘要、`.env` 内容或数据库口令写入 Git、聊天或普通日志。
+3. 切换生产数据库容器前，先在同一主机启动不挂载生产数据卷的一次性 pgvector 容器；在其中执行全部迁移、原子审核和 pgvector/Worker 烟测。所有烟测只写合成数据并自行删除数据库。
+
+```bash
+cd "$REPO"
+sudo docker pull pgvector/pgvector:pg16
+sudo bash scripts/verify-pgvector-image.sh live
+# 使用 root-only wrapper 启动一次性数据库并通过 stdin 注入 DATABASE_URL：
+bash scripts/run-backend-owner-truth-memory-changeset-group-postgres-smoke.sh
+bash scripts/run-backend-owner-truth-memory-search-pgvector-postgres-smoke.sh
+```
+
+隔离数据库连接只能存在于受控进程环境，不能进入命令历史、交付报告或聊天。真实执行时必须通过 root-only 环境文件、stdin 或等价 secret 注入方式传入，禁止把 DSN 展开在命令行。
+
+pgvector 烟测中的向量提供者是明确标注的确定性合成测试替身，只证明数据库、索引、Worker 重试和版本失效链路；它不构成真实 embedding 模型质量证据。真实模型必须另行运行 200 场景合成语料评测，并保留只含指标的结果。
+
+### 4.2 B 迁移执行门禁
+
+当目标提交包含 `0117_owner_truth_b_migration_execution` 时，在一次性
+pgvector 数据库中额外运行：
+
+```bash
+bash scripts/run-backend-owner-truth-b-migration-execution-postgres-smoke.sh
+```
+
+该烟测必须证明：小批次检查点可恢复；中途事务失败不残留 Source 或
+Outbox；重试复用确定性 Source；两个执行者不会重复生效；旧行改变后旧
+dry-run 立即失效；最终只产生 `Source -> Candidate` 整理任务，正式记忆
+写入数始终为零。烟测使用合成旧数据并删除本次可销毁数据库，不能接入
+生产 DSN。
+
+生产中的旧资料重放不是普通 schema 发布的一部分。只有经过单独审批、
+确认 dry-run 报告后，才可临时设置
+`OWNER_TRUTH_B_MIGRATION_EXECUTION_ENABLED=true`，并通过 root-only 环境
+向 `scripts/execute-owner-truth-b-migration-batch.py` 注入 Owner、Vault、
+report ID 和 `OWNER_TRUTH_B_MIGRATION_EXECUTION_ACK=YES`。每次最多处理
+25 条（即单批最多 25 条）；执行结果只记录 hash、计数、状态和不透明 ID。完成或暂停后恢复
+开关为 `false`。不得把该命令改成直接写 `MemoryVersion`，也不得用它执行
+未经审批的生产语义迁移。
+
+### 4.3 A 阶段 DFX 与真实模型门禁
+
+切换生产容器前，必须在可销毁 pgvector 数据库运行服务端 baseline。该
+入口使用生产 Postgres 仓储、事务、投影、HNSW 检索及 Worker，但 embedding
+与候选整理均为确定性替身，因此只证明数据库和后端自身性能：
+
+```bash
+OWNER_TRUTH_DFX_POSTGRES_APPROVED=1 \
+  bash scripts/run-backend-owner-truth-dfx-postgres-load.sh \
+  --profile baseline --result /受控证据目录/owner-truth-dfx-postgres.json
+```
+
+结果至少包含 100 在线会话、20 检索 QPS、5 接收 QPS、3 整理并发，以及
+可靠回执、内部混合检索、Live 预生成快照、原子审核、正式提交到可检索、
+短会话到候选的 P50/P95/P99、失败/超时、连接池、数据库连接、积压变化、
+CPU 和内存证据。任一目标不通过均不得改小预算后宣称通过。
+
+`capacity` 档会创建 300 人乘每人 5,000 条的 150 万条合成事实，必须额外
+设置 `OWNER_TRUTH_DFX_CAPACITY_ACK=YES`，并先核对磁盘、执行窗口与费用。
+机器不足时允许分档执行并如实报告规模，但不能把较小规模外推为容量通过。
+
+真实 embedding 质量另用 200 场景合成语料运行，且只有审批了模型、数据
+出境边界与费用后才能设置
+`OWNER_TRUTH_MEMORY_SEARCH_QUALITY_EVALUATION_APPROVED=1`。真实 DeepSeek
+与火山用例也必须单列模型/供应商证据。DFX 的确定性替身结果、真实模型
+结果与生产业务数据都不得互相冒充。
+
+真实 DeepSeek 最小门禁只使用脚本内置合成事实，共发出三次请求，且报告
+不保留提示词、模型回答或凭据：
+
+```bash
+OWNER_TRUTH_REAL_MODEL_VALIDATION_APPROVED=1 \
+  python scripts/run-owner-truth-real-deepseek-validation.py \
+  --result /var/lib/dreamjourney/evidence/owner-truth-real-deepseek.json
+```
+
+生产容器切换前必须完成迁移前备份并记录旧镜像摘要。`CREATE EXTENSION vector` 成功后，不得自动切回不含 pgvector 的普通 PostgreSQL 镜像。代码可通过关闭 embedding/hybrid 开关回退，数据库镜像必须继续提供已安装扩展；涉及数据恢复时遵循第 5.2 和第 6 节。
+
 随后构建并执行前向迁移：
 
 ```bash
 cd "$REPO"
 export DEPLOY_BUILD_ID="$(sudo -iu miao git -C "$REPO" rev-parse --short HEAD)"
 sudo docker compose up -d postgres redis
+sudo bash scripts/verify-pgvector-image.sh live
 sudo docker compose build api
 sudo docker compose run --rm --no-deps api \
   python scripts/migrate_db.py --dry-run --build-id "$DEPLOY_BUILD_ID"

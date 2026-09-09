@@ -151,6 +151,101 @@ class OwnerTruthMemorySearchTests(unittest.TestCase):
                 result = service.read(context=self.context, query=query, limit=5)
                 self.assertEqual(len(result.hits), 1)
 
+    def test_controlled_synonyms_do_not_turn_generic_preferences_or_work_into_personal_facts(self) -> None:
+        food_content = {"summary": "我喜欢读书和散步。"}
+        food_memory = replace(
+            self.memory,
+            memory_kind="experience",
+            content=food_content,
+            content_hash=_hash(food_content),
+        )
+        education_content = {"claim": "我在大学教书。"}
+        education_memory = replace(
+            self.memory,
+            memory_id=str(uuid4()),
+            memory_version_id=str(uuid4()),
+            memory_kind="knowledge",
+            content=education_content,
+            content_hash=_hash(education_content),
+        )
+        snapshot = build_ready_memory_projection(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_id,
+            authority_epoch=4,
+            inputs=(food_memory, education_memory),
+        )
+        projection = build_owner_truth_search_document_projection(memory_projection=snapshot)
+        assert projection is not None
+        service = OwnerTruthMemorySearchReadService(_Store(projection))
+
+        self.assertEqual(
+            service.read(context=self.context, query="我爱吃什么菜", limit=5).hits,
+            (),
+        )
+        self.assertEqual(
+            service.read(context=self.context, query="我哪个学校毕业", limit=5).hits,
+            (),
+        )
+
+    def test_education_filter_does_not_hide_a_university_friend_or_reading_group_fact(self) -> None:
+        """Only genuine education questions may require education evidence.
+
+        "大学同学" and "读书会" are ordinary person/activity references.
+        Treating either word as a degree lookup used to remove their confirmed
+        facts before ranking, even when the exact name was present in the query.
+        """
+
+        degree_content = {"claim": "我毕业于北京大学，专业是计算机科学。"}
+        friend_content = {"claim": "我和大学同学周宁一直保持联系。"}
+        reading_group_content = {"claim": "我每月都会参加社区读书会。"}
+        degree_memory = replace(
+            self.memory,
+            content=degree_content,
+            content_hash=_hash(degree_content),
+        )
+        friend_memory = replace(
+            self.memory,
+            memory_id=str(uuid4()),
+            memory_version_id=str(uuid4()),
+            content=friend_content,
+            content_hash=_hash(friend_content),
+        )
+        reading_group_memory = replace(
+            self.memory,
+            memory_id=str(uuid4()),
+            memory_version_id=str(uuid4()),
+            content=reading_group_content,
+            content_hash=_hash(reading_group_content),
+        )
+        snapshot = build_ready_memory_projection(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_id,
+            authority_epoch=4,
+            inputs=(degree_memory, friend_memory, reading_group_memory),
+        )
+        projection = build_owner_truth_search_document_projection(memory_projection=snapshot)
+        assert projection is not None
+        service = OwnerTruthMemorySearchReadService(_Store(projection))
+
+        friend_result = service.read(context=self.context, query="大学同学周宁", limit=5)
+        self.assertEqual(friend_result.hits[0].document.memory_version_id, friend_memory.memory_version_id)
+
+        reading_group_result = service.read(context=self.context, query="读书会", limit=5)
+        self.assertEqual(
+            reading_group_result.hits[0].document.memory_version_id,
+            reading_group_memory.memory_version_id,
+        )
+
+        education_result = service.read(context=self.context, query="我的专业是什么", limit=5)
+        self.assertEqual(
+            education_result.hits[0].document.memory_version_id,
+            degree_memory.memory_version_id,
+        )
+        self.assertEqual(
+            {hit.document.memory_version_id for hit in education_result.hits},
+            {degree_memory.memory_version_id},
+        )
+
     def test_missing_or_rebuilding_search_index_returns_no_search_state_or_stale_hits(self) -> None:
         result = OwnerTruthMemorySearchReadService(_Store(None)).read(
             context=self.context,
@@ -161,6 +256,14 @@ class OwnerTruthMemorySearchTests(unittest.TestCase):
         self.assertIsNone(result.projection)
         self.assertIsNone(result.query_plan)
         self.assertEqual(result.hits, ())
+
+    def test_revoked_ready_projection_does_not_materialize_search_documents(self) -> None:
+        revoked = dict(self.snapshot)
+        revoked["rightsState"] = "revoked"
+
+        self.assertIsNone(
+            build_owner_truth_search_document_projection(memory_projection=revoked)
+        )
 
     def test_cross_owner_and_oversized_query_fail_closed(self) -> None:
         service = OwnerTruthMemorySearchReadService(_Store(self.search_projection))

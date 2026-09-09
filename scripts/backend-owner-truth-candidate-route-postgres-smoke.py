@@ -506,6 +506,7 @@ def main() -> None:
             async_effect_worker_enabled=True,
             owner_truth_candidate_extraction_worker_enabled=True,
             owner_truth_memory_projection_worker_enabled=True,
+            owner_truth_memory_search_projection_worker_enabled=True,
         )
         extraction_result = OwnerTruthCandidateExtractionWorkerRuntime(
             settings=worker_settings,
@@ -540,6 +541,7 @@ def main() -> None:
         formal_candidate_id = str(formal_candidate.get("candidateId") or "")
         formal_candidate_version = int(formal_candidate.get("candidateVersion") or 0)
         formal_source_id = str(formal_candidate.get("sourceId") or "")
+        formal_change_set = dict(formal_candidate.get("proposedChangeSet") or {})
         require(
             formal_candidate_id and formal_candidate_version == 1 and formal_source_id,
             "closed-pilot Candidate must retain stable review identifiers",
@@ -549,6 +551,12 @@ def main() -> None:
             and formal_candidate.get("epistemicStatus") == "recalled"
             and formal_candidate.get("sensitivity") == "standard",
             "owner-authored Source Candidate must retain Context-eligible metadata until review",
+        )
+        require(
+            bool(formal_change_set.get("changeSetId"))
+            and bool(formal_change_set.get("proposalHash"))
+            and type(formal_change_set.get("baseMemoryRevision")) is int,
+            "formal Candidate must carry its persisted V5 ChangeSet preview",
         )
         require(
             "X-DreamJourney-QA-Owner-Truth" not in formal_candidate_headers,
@@ -577,6 +585,9 @@ def main() -> None:
             json={
                 "commandId": "closed-pilot-source-candidate-accept-v1",
                 "expectedCandidateVersion": formal_candidate_version,
+                "expectedMemoryRevision": formal_change_set["baseMemoryRevision"],
+                "expectedChangeSetId": formal_change_set["changeSetId"],
+                "expectedProposalHash": formal_change_set["proposalHash"],
                 "action": "accept",
                 "reasonCode": "ownerReviewed",
             },
@@ -604,6 +615,8 @@ def main() -> None:
             all(
                 result.get("status") == "completed"
                 and result.get("projectionOutcome") in {"rebuilt", "unchanged"}
+                and result.get("searchProjectionOutcome") in {"rebuilt", "unchanged"}
+                and result.get("searchProjectionDocumentCount") == 1
                 for result in projection_results
             ),
             "accepted closed-pilot Candidate must drain queued confirmed Projection rebuilds",
@@ -619,7 +632,7 @@ def main() -> None:
             json={
                 "userId": formal_owner_id,
                 "intent": "echo_chat",
-                "query": "请只使用已经确认的个人回忆陪我聊聊。",
+                "query": "我在河边散步时，家人讲过什么从前的故事？",
                 "personaScope": "personal",
                 "digitalHumanId": formal_owner_id,
             },
@@ -634,7 +647,8 @@ def main() -> None:
         require(
             len(selected_context) == 1
             and ((selected_context[0].get("citation") or {}).get("sourceId") == formal_source_id),
-            "closed-pilot Context must cite the confirmed Source through Projection",
+            "closed-pilot Context must cite the confirmed Source through Projection: "
+            f"{json.dumps(selected_context, ensure_ascii=False, sort_keys=True)}",
         )
 
         answer_text = "我只会依据已经确认的个人记忆回答。"
@@ -648,7 +662,7 @@ def main() -> None:
             json={
                 "commandId": "closed-pilot-answer-citation-v1",
                 "intent": "echo_chat",
-                "query": "请说说这段已经确认的个人经历。",
+                "query": "我在河边散步时，家人讲过什么从前的故事？",
                 "answerText": answer_text,
             },
         )
@@ -744,6 +758,40 @@ def main() -> None:
             "closed-pilot correction request must not echo private correction text",
         )
 
+        corrected_content = dict(formal_candidate.get("content") or {})
+        corrected_content["event"] = "外祖父在河边讲起从前的故事。"
+        correction_preview = client.post(
+            (
+                f"/v2/vaults/{formal_vault_id}/candidates/"
+                f"{correction_summary['candidateId']}/changeset-preview"
+            ),
+            headers=policy_headers(
+                formal_auth_headers,
+                session_id=formal_session_id,
+                feature="ownerTruthCandidateReview",
+            ),
+            json={
+                "correctedValue": corrected_content,
+                "correctedValueSchemaVersion": "owner-truth-v5",
+            },
+        )
+        require(
+            correction_preview.status_code == 200,
+            f"closed-pilot correction ChangeSet preview failed: {correction_preview.text}",
+        )
+        correction_change_set = correction_preview.json().get("proposedChangeSet") or {}
+        correction_operations = correction_change_set.get("operations") or []
+        require(
+            len(correction_operations) == 1
+            and correction_operations[0].get("candidateId") == correction_summary["candidateId"]
+            and correction_change_set.get("baseMemoryRevision")
+            == (formal_decision_body.get("memoryRevision") or 1)
+            and correction_change_set.get("changeSetId")
+            and correction_change_set.get("proposalHash"),
+            "closed-pilot correction must expose the exact V5 ChangeSet before confirmation: "
+            f"{json.dumps(correction_change_set, ensure_ascii=False, sort_keys=True)}",
+        )
+
         correction_resolution = client.post(
             (
                 f"/v2/vaults/{formal_vault_id}/correction-requests/"
@@ -757,10 +805,13 @@ def main() -> None:
             json={
                 "commandId": "closed-pilot-correction-resolve-v1",
                 "expectedCandidateVersion": correction_summary["candidateVersion"],
+                "expectedMemoryRevision": correction_change_set["baseMemoryRevision"],
+                "expectedChangeSetId": correction_change_set["changeSetId"],
                 "expectedMemoryVersionId": correction_summary["expectedMemoryVersionId"],
+                "expectedProposalHash": correction_change_set["proposalHash"],
                 "action": "correct",
-                "correctedValue": {"summary": "外祖父在河边讲起从前的故事"},
-                "correctedValueSchemaVersion": "owner-truth-v1",
+                "correctedValue": corrected_content,
+                "correctedValueSchemaVersion": "owner-truth-v5",
                 "reasonCode": "ownerConfirmedCorrection",
             },
         )
@@ -832,8 +883,12 @@ def main() -> None:
         ).run_once()
         require(
             correction_projection_result.get("status") == "completed"
-            and correction_projection_result.get("projectionOutcome") in {"rebuilt", "unchanged"},
-            "corrected closed-pilot Candidate must rebuild confirmed Projection",
+            and correction_projection_result.get("projectionOutcome") in {"rebuilt", "unchanged"}
+            and correction_projection_result.get("searchProjectionOutcome")
+            in {"rebuilt", "unchanged"}
+            and correction_projection_result.get("searchProjectionDocumentCount") == 1,
+            "corrected closed-pilot Candidate must rebuild confirmed and SearchDocument "
+            f"projections: {json.dumps(correction_projection_result, sort_keys=True)}",
         )
 
         corrected_context_response = client.post(
@@ -846,7 +901,7 @@ def main() -> None:
             json={
                 "userId": formal_owner_id,
                 "intent": "echo_chat",
-                "query": "请只使用已经确认的个人回忆陪我聊聊。",
+                "query": "我在河边散步时，是谁讲起了从前的故事？",
                 "personaScope": "personal",
                 "digitalHumanId": formal_owner_id,
             },
@@ -862,7 +917,9 @@ def main() -> None:
             len(corrected_selected_context) == 1
             and ((corrected_selected_context[0].get("citation") or {}).get("sourceId")
                  == correction_summary["correctionSourceId"]),
-            "corrected Context must cite the replacement Source instead of the superseded Source",
+            "corrected Context must cite the replacement Source instead of the superseded Source: "
+            f"expected={correction_summary['correctionSourceId']} "
+            f"actual={json.dumps(corrected_selected_context, ensure_ascii=False, sort_keys=True)}",
         )
 
         with psycopg.connect(test_dsn) as connection:

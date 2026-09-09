@@ -55,6 +55,11 @@ LONG_RUNNING_WORKERS: tuple[WorkerDeploymentSpec, ...] = (
         compose_service="owner-truth-memory-projection-worker",
     ),
     WorkerDeploymentSpec(
+        worker="ownerTruthMemorySearchEmbedding",
+        settings_flag="owner_truth_memory_search_embedding_worker_enabled",
+        compose_service="owner-truth-memory-search-embedding-worker",
+    ),
+    WorkerDeploymentSpec(
         worker="ownerTruthMediaProcessing",
         settings_flag="owner_truth_media_processing_worker_enabled",
         compose_service="owner-truth-media-processing-worker",

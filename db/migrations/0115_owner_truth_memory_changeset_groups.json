@@ -1,0 +1,26 @@
+{
+  "version": "0115",
+  "name": "owner_truth_memory_changeset_groups",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthMemoryChangeSetGroupV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true,
+    "ownerTruthCandidateReview": false
+  },
+  "summary": "Adds immutable, owner-visible V5 ChangeSet dependency groups and root idempotency receipts while retaining existing child formal-memory ChangeSets as the sole fact authority.",
+  "operations": [
+    "create atomic ChangeSet group proposal, member and dependency audit tables",
+    "bind group members to existing per-Candidate immutable preview records",
+    "create root command receipt storage for idempotent all-or-nothing confirmation"
+  ],
+  "rollback": "Disable group-review entry points and retain immutable audit material. Do not remove formal memory versions or child receipts.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "requiresConcurrentTransactionEvidence": true
+  }
+}

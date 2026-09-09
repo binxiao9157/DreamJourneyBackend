@@ -18,11 +18,16 @@ from typing import Any, Iterable, Mapping
 import unicodedata
 
 from .contracts import OwnerTruthContractError, require_nonblank, require_uuid
+from .formal_fact_eligibility import (
+    FormalFactEligibilityError,
+    evaluate_formal_fact_eligibility,
+)
 from .memory_projection import OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION
 from .ontology import (
     OWNER_TRUTH_SCHEMA_VERSION_V2,
     OWNER_TRUTH_SCHEMA_VERSION_V3,
     OWNER_TRUTH_SCHEMA_VERSION_V4,
+    OWNER_TRUTH_SCHEMA_VERSION_V5,
     flatten_memory_facets,
 )
 
@@ -58,13 +63,45 @@ _QUERY_STOP_TERMS = frozenset(
     }
 )
 _QUERY_SYNONYM_GROUPS = (
-    ("饮食偏好", ("喜欢", "爱吃")),
+    ("饮食偏好", ("喜欢", "爱吃", "喜欢吃", "食物", "菜")),
+    ("饮食喜好", ("喜欢", "爱吃", "喜欢吃", "食物", "菜")),
+    ("爱吃什么菜", ("爱吃", "喜欢", "喜欢吃", "食物", "菜")),
     ("偏好", ("喜欢", "爱吃", "爱好", "热爱")),
-    ("爱吃", ("喜欢",)),
-    ("喜欢吃", ("爱吃", "喜欢")),
+    ("口味", ("喜欢", "爱吃", "喜欢吃", "食物", "菜")),
+    ("爱吃", ("喜欢", "喜欢吃", "食物", "菜")),
+    ("喜欢吃", ("爱吃", "喜欢", "食物", "菜")),
     ("毕业", ("学校", "大学", "求学")),
     ("学校", ("大学", "毕业", "读书")),
+    ("学历", ("毕业", "学校", "大学", "求学")),
     ("职业", ("工作", "岗位", "从事")),
+)
+
+# These constraints make broad Chinese synonym expansion safe enough for the
+# deterministic fallback.  They are not a claim of semantic/vector ranking:
+# a food question cannot be satisfied by an arbitrary "喜欢" fact, and a
+# graduation question cannot be satisfied by someone merely teaching at a
+# university.
+_FOOD_QUERY_MARKERS = ("饮食", "吃", "菜", "食物", "口味", "饭")
+_FOOD_EVIDENCE_MARKERS = ("吃", "菜", "食", "饭", "肉", "面", "味")
+# "大学同学" and "读书会" identify a person or activity rather than an
+# educational credential.  Requiring degree evidence for either silently
+# discards valid same-name and life-event facts before ranking.  Keep the
+# hard evidence fence for questions that actually ask about a qualification.
+_EDUCATION_QUERY_MARKERS = ("毕业", "学校", "专业", "学历", "硕士", "本科", "博士", "上学", "求学")
+_EDUCATION_EVIDENCE_MARKERS = ("毕业", "上学", "求学", "本科", "硕士", "博士", "学历", "专业", "就读")
+_COLOR_QUERY_MARKERS = ("颜色", "色彩")
+_COLOR_EVIDENCE_MARKERS = (
+    "颜色",
+    "色彩",
+    "红色",
+    "蓝色",
+    "绿色",
+    "黄色",
+    "黑色",
+    "白色",
+    "灰色",
+    "紫色",
+    "粉色",
 )
 
 
@@ -100,6 +137,54 @@ def _text_leaves(value: Any) -> Iterable[str]:
             yield from _text_leaves(item)
 
 
+def _v5_search_terms(content: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return only human-readable V5 facts, never opaque identities/evidence IDs."""
+
+    values: list[Any] = [
+        content.get("factType"),
+        content.get("predicate"),
+        content.get("statement"),
+    ]
+    values.extend(content.get("dimensions", []) if isinstance(content.get("dimensions"), list) else [])
+    for object_value in (content.get("object"),):
+        if isinstance(object_value, Mapping):
+            values.extend((object_value.get("label"), object_value.get("category")))
+    qualifiers = content.get("qualifiers")
+    if isinstance(qualifiers, Mapping):
+        values.extend(
+            (
+                qualifiers.get("polarity"),
+                qualifiers.get("strengthExpression"),
+                qualifiers.get("currentApplicability"),
+                qualifiers.get("scenario"),
+            )
+        )
+        time_value = qualifiers.get("validTime")
+        if isinstance(time_value, Mapping):
+            values.extend(
+                (time_value.get("start"), time_value.get("end"), time_value.get("expression"))
+            )
+        place = qualifiers.get("place")
+        if isinstance(place, Mapping):
+            values.extend((place.get("label"), place.get("category")))
+    affect = content.get("affect")
+    if isinstance(affect, Mapping):
+        values.extend((affect.get("trigger"), affect.get("emotionExpression")))
+        for field in ("experiencer", "target", "reporter"):
+            subject = affect.get(field)
+            if isinstance(subject, Mapping):
+                values.append(subject.get("label"))
+    normalized: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            normalized.add(_normalized_text(value, field="search document typed fact"))
+        except OwnerTruthSearchDocumentProjectionError:
+            continue
+    return tuple(sorted(normalized))
+
+
 def _private_search_text(
     content: Mapping[str, Any],
     *,
@@ -115,12 +200,19 @@ def _private_search_text(
         OWNER_TRUTH_SCHEMA_VERSION_V2,
         OWNER_TRUTH_SCHEMA_VERSION_V3,
         OWNER_TRUTH_SCHEMA_VERSION_V4,
+        OWNER_TRUTH_SCHEMA_VERSION_V5,
     }:
         facets = searchable_content.pop("facets", None)
         facet_terms = tuple(
             _normalized_text(term, field="search document facet")
             for term in flatten_memory_facets(facets)
         )
+    if content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V5:
+        structured_terms.extend(_v5_search_terms(searchable_content))
+        # These values are authority or evidence identifiers.  They help no
+        # natural-language retrieval and must not become accidental terms.
+        for field in ("provenance", "memorySubjectId", "claimSubjectId", "affect"):
+            searchable_content.pop(field, None)
     for raw_value in _text_leaves(searchable_content):
         try:
             normalized = _normalized_text(raw_value, field="search document content")
@@ -246,10 +338,15 @@ class OwnerTruthMemorySearchQueryPlan:
         ):
             raise OwnerTruthMemorySearchReadError("limit is outside the supported range")
 
-    def value_free_summary(self) -> dict[str, object]:
+    def value_free_summary(
+        self,
+        *,
+        retrieval_mode: str = OWNER_TRUTH_MEMORY_SEARCH_RETRIEVAL_MODE,
+        semantic_ranking_available: bool = False,
+    ) -> dict[str, object]:
         return {
-            "retrievalMode": OWNER_TRUTH_MEMORY_SEARCH_RETRIEVAL_MODE,
-            "semanticRankingAvailable": False,
+            "retrievalMode": retrieval_mode,
+            "semanticRankingAvailable": semantic_ranking_available,
             "authorityEpoch": self.authority_epoch,
             "projectionCheckpoint": self.projection_checkpoint,
             "queryCharacterCount": len(self.normalized_query),
@@ -402,10 +499,24 @@ class OwnerTruthMemorySearchReadResult:
     projection: OwnerTruthSearchDocumentProjection | None
     query_plan: OwnerTruthMemorySearchQueryPlan | None
     hits: tuple[OwnerTruthMemorySearchHit, ...]
+    retrieval_mode: str = OWNER_TRUTH_MEMORY_SEARCH_RETRIEVAL_MODE
+    semantic_ranking_available: bool = False
 
     def __post_init__(self) -> None:
         state = require_nonblank(self.state, field="state")
         object.__setattr__(self, "state", state)
+        retrieval_mode = require_nonblank(self.retrieval_mode, field="retrieval_mode")
+        if retrieval_mode not in {"deterministicTextFallback", "postgresHybridRrf"}:
+            raise OwnerTruthMemorySearchReadError("memory search retrieval_mode is unsupported")
+        if not isinstance(self.semantic_ranking_available, bool):
+            raise OwnerTruthMemorySearchReadError(
+                "memory search semantic_ranking_available must be boolean"
+            )
+        if (retrieval_mode == "postgresHybridRrf") != self.semantic_ranking_available:
+            raise OwnerTruthMemorySearchReadError(
+                "memory search retrieval mode and semantic availability disagree"
+            )
+        object.__setattr__(self, "retrieval_mode", retrieval_mode)
         hits = tuple(self.hits)
         if any(not isinstance(item, OwnerTruthMemorySearchHit) for item in hits):
             raise OwnerTruthMemorySearchReadError("search hits must be typed")
@@ -437,7 +548,10 @@ class OwnerTruthMemorySearchReadResult:
         }
         if self.projection is not None and self.query_plan is not None:
             summary["projection"] = self.projection.value_free_summary()
-            summary["queryPlan"] = self.query_plan.value_free_summary()
+            summary["queryPlan"] = self.query_plan.value_free_summary(
+                retrieval_mode=self.retrieval_mode,
+                semantic_ranking_available=self.semantic_ranking_available,
+            )
         return summary
 
 
@@ -456,6 +570,10 @@ def build_owner_truth_search_document_projection(
         raise OwnerTruthSearchDocumentProjectionError("memory projection must be an object")
     state = str(memory_projection.get("state") or "")
     if state != "ready":
+        return None
+    # Search documents are a derived private projection.  A structurally ready
+    # payload is not readable after the source authority has been revoked.
+    if str(memory_projection.get("rightsState") or "") != "active":
         return None
     if str(memory_projection.get("schemaVersion") or "") != OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION:
         raise OwnerTruthSearchDocumentProjectionError("memory projection schema is unsupported")
@@ -480,8 +598,12 @@ def build_owner_truth_search_document_projection(
     entries = memory_projection.get("entries")
     if not isinstance(entries, list):
         raise OwnerTruthSearchDocumentProjectionError("memory projection entries must be a list")
+    try:
+        eligibility = evaluate_formal_fact_eligibility(memory_projection)
+    except FormalFactEligibilityError as error:
+        raise OwnerTruthSearchDocumentProjectionError(str(error)) from error
     groups = _semantic_consolidation_groups(memory_projection)
-    if groups is None:
+    if not groups:
         documents = tuple(
             _search_document_from_projection_entry(
                 entry,
@@ -489,11 +611,17 @@ def build_owner_truth_search_document_projection(
                 owner_subject_id=owner_subject_id,
                 authority_epoch=authority_epoch,
             )
-            for entry in entries
+            for entry in eligibility.eligible_entries
         )
     else:
         entries_by_version = _projection_entries_by_version(entries)
-        documents = tuple(
+        grouped_version_ids = {
+            version_id
+            for group in groups
+            for version_id in group.get("supportingMemoryVersionIds", [])
+            if isinstance(version_id, str)
+        }
+        grouped_documents = tuple(
             _search_document_from_semantic_group(
                 group,
                 entries_by_version=entries_by_version,
@@ -502,8 +630,23 @@ def build_owner_truth_search_document_projection(
                 authority_epoch=authority_epoch,
             )
             for group in groups
-            if str(group.get("status") or "") in {"ready", "merged"}
+            if (
+                str(group.get("status") or "") in {"ready", "merged"}
+                and str(group.get("representativeMemoryVersionId") or "")
+                in eligibility.eligible_memory_version_ids
+            )
         )
+        ungrouped_documents = tuple(
+            _search_document_from_projection_entry(
+                entry,
+                vault_id=vault_id,
+                owner_subject_id=owner_subject_id,
+                authority_epoch=authority_epoch,
+            )
+            for entry in eligibility.eligible_entries
+            if _projection_entry_memory_version_id(entry) not in grouped_version_ids
+        )
+        documents = (*grouped_documents, *ungrouped_documents)
     return OwnerTruthSearchDocumentProjection(
         vault_id=vault_id,
         owner_subject_id=owner_subject_id,
@@ -591,7 +734,13 @@ def search_owner_truth_documents(
     scored: list[tuple[int, int, OwnerTruthSearchDocument, str]] = []
     query = query_plan.normalized_query
     query_terms = _deterministic_query_terms(query)
+    required_evidence_markers = _query_required_evidence_markers(query)
     for document in projection.documents:
+        if required_evidence_markers and not _document_contains_any_marker(
+            document,
+            required_evidence_markers,
+        ):
+            continue
         structured_match_count = sum(
             1 for term in document.structured_terms if query in term
         )
@@ -670,6 +819,26 @@ def _deterministic_query_terms(query: str) -> tuple[str, ...]:
     return tuple(sorted(terms, key=lambda item: (-len(item), item)))
 
 
+def _query_required_evidence_markers(query: str) -> tuple[str, ...]:
+    """Return type/object evidence that broad synonym matches must satisfy."""
+
+    if any(marker in query for marker in _FOOD_QUERY_MARKERS):
+        return _FOOD_EVIDENCE_MARKERS
+    if any(marker in query for marker in _EDUCATION_QUERY_MARKERS):
+        return _EDUCATION_EVIDENCE_MARKERS
+    if any(marker in query for marker in _COLOR_QUERY_MARKERS):
+        return _COLOR_EVIDENCE_MARKERS
+    return ()
+
+
+def _document_contains_any_marker(
+    document: OwnerTruthSearchDocument,
+    markers: Iterable[str],
+) -> bool:
+    searchable = " ".join((document.search_text, *document.structured_terms))
+    return any(marker in searchable for marker in markers)
+
+
 def _search_document_from_projection_entry(
     entry: Any,
     *,
@@ -745,6 +914,20 @@ def _projection_entries_by_version(
             )
         result[version_id] = entry
     return result
+
+
+def _projection_entry_memory_version_id(entry: Mapping[str, Any]) -> str:
+    citation = entry.get("citation")
+    if isinstance(citation, Mapping):
+        version_id = str(citation.get("memoryVersionId") or "").strip()
+        if version_id:
+            return version_id
+    version_id = str(entry.get("memoryVersionId") or "").strip()
+    if version_id:
+        return version_id
+    raise OwnerTruthSearchDocumentProjectionError(
+        "memory projection entry citation is missing"
+    )
 
 
 def _search_document_from_semantic_group(

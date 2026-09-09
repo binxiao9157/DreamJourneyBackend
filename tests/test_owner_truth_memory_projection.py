@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from hashlib import sha256
 import json
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from app.domain.owner_truth.candidate_decisions import (
@@ -19,6 +20,11 @@ from app.domain.owner_truth.contracts import (
     SensitivityLevel,
 )
 from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.memory_projection import (
+    OwnerTruthMemoryProjectionError,
+    hydrate_ready_memory_projection,
+    restore_persisted_ready_memory_projection,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
@@ -225,6 +231,100 @@ class OwnerTruthMemoryProjectionTests(unittest.TestCase):
         revoked = self.projection_service.read(context=self.context)
         self.assertEqual(revoked["state"], "rebuilding")
         self.assertEqual(revoked["entries"], [])
+
+    def test_persisted_ready_projection_hydrates_without_semantic_rebuild(self) -> None:
+        candidate = self._candidate()
+        self._activate(candidate, command_id="projection-hydrate-001")
+        rebuilt = self.projection_service.rebuild(context=self.context).snapshot
+        authority_epoch, inputs = self.store.review_repository.list_memory_projection_inputs(
+            context=self.context
+        )
+        memory_revision = self.store.review_repository.memory_revision(context=self.context)
+
+        with patch(
+            "app.domain.owner_truth.memory_projection.build_person_memory_model",
+            side_effect=AssertionError("normal reads must not rebuild the semantic model"),
+        ):
+            hydrated = hydrate_ready_memory_projection(
+                vault_id=self.vault_id,
+                owner_subject_id=self.owner_id,
+                authority_epoch=authority_epoch,
+                inputs=inputs,
+                person_memory_model=rebuilt["personMemoryModel"],
+                memory_revision=memory_revision,
+                expected_source_hash=rebuilt["sourceHash"],
+                expected_checkpoint=rebuilt["checkpoint"],
+            )
+
+        self.assertEqual(hydrated, rebuilt)
+
+    def test_persisted_projection_tampering_fails_closed(self) -> None:
+        candidate = self._candidate()
+        self._activate(candidate, command_id="projection-hydrate-tamper-001")
+        rebuilt = self.projection_service.rebuild(context=self.context).snapshot
+        authority_epoch, inputs = self.store.review_repository.list_memory_projection_inputs(
+            context=self.context
+        )
+        memory_revision = self.store.review_repository.memory_revision(context=self.context)
+        mismatched_model = dict(rebuilt["personMemoryModel"])
+        mismatched_model["memoryCount"] = 0
+
+        with self.assertRaises(OwnerTruthMemoryProjectionError):
+            hydrate_ready_memory_projection(
+                vault_id=self.vault_id,
+                owner_subject_id=self.owner_id,
+                authority_epoch=authority_epoch,
+                inputs=inputs,
+                person_memory_model=mismatched_model,
+                memory_revision=memory_revision,
+            )
+
+        with self.assertRaises(OwnerTruthMemoryProjectionError):
+            hydrate_ready_memory_projection(
+                vault_id=self.vault_id,
+                owner_subject_id=self.owner_id,
+                authority_epoch=authority_epoch,
+                inputs=inputs,
+                person_memory_model=rebuilt["personMemoryModel"],
+                memory_revision=memory_revision,
+                expected_checkpoint="0" * 64,
+            )
+
+    def test_transactionally_fenced_projection_restore_is_structural_only(self) -> None:
+        candidate = self._candidate()
+        self._activate(candidate, command_id="projection-restore-001")
+        rebuilt = self.projection_service.rebuild(context=self.context).snapshot
+        memory_revision = self.store.review_repository.memory_revision(context=self.context)
+
+        with patch(
+            "app.domain.owner_truth.memory_projection.build_person_memory_model",
+            side_effect=AssertionError("persisted reads must not rebuild semantic data"),
+        ):
+            restored = restore_persisted_ready_memory_projection(
+                vault_id=self.vault_id,
+                owner_subject_id=self.owner_id,
+                authority_epoch=0,
+                entries=rebuilt["entries"],
+                person_memory_model=rebuilt["personMemoryModel"],
+                source_hash=rebuilt["sourceHash"],
+                checkpoint=rebuilt["checkpoint"],
+                memory_revision=memory_revision,
+            )
+
+        self.assertEqual(restored, rebuilt)
+
+        duplicated = [rebuilt["entries"][0], rebuilt["entries"][0]]
+        with self.assertRaises(OwnerTruthMemoryProjectionError):
+            restore_persisted_ready_memory_projection(
+                vault_id=self.vault_id,
+                owner_subject_id=self.owner_id,
+                authority_epoch=0,
+                entries=duplicated,
+                person_memory_model=rebuilt["personMemoryModel"],
+                source_hash=rebuilt["sourceHash"],
+                checkpoint=rebuilt["checkpoint"],
+                memory_revision=memory_revision,
+            )
 
 
 if __name__ == "__main__":

@@ -143,6 +143,9 @@ class OwnerTruthCorrectionRequestTests(unittest.TestCase):
         expected_memory_version_id: str,
         action: CandidateReviewAction = CandidateReviewAction.CORRECT,
         corrected_value: dict[str, str] | None = None,
+        expected_memory_revision: int | None = None,
+        expected_change_set_id: str | None = None,
+        expected_proposal_hash: str | None = None,
     ) -> OwnerTruthCorrectionResolutionCommand:
         return OwnerTruthCorrectionResolutionCommand(
             command_id=command_id,
@@ -156,6 +159,33 @@ class OwnerTruthCorrectionRequestTests(unittest.TestCase):
             ),
             corrected_value_schema_version=OWNER_TRUTH_SCHEMA_VERSION,
             reason_code="ownerConfirmedCorrection",
+            expected_memory_revision=expected_memory_revision,
+            expected_change_set_id=expected_change_set_id,
+            expected_proposal_hash=expected_proposal_hash,
+        )
+
+    def test_resolution_binding_is_part_of_identity_and_review_command(self) -> None:
+        change_set_id = "d668a6ef-ec5d-4180-ab3f-a5580dd6a04c"
+        proposal_hash = "a" * 64
+        command = self._resolution_command(
+            command_id="correction-resolution-bound-001",
+            expected_memory_version_id=self.citation["citation"]["memoryVersionId"],
+            expected_memory_revision=3,
+            expected_change_set_id=change_set_id,
+            expected_proposal_hash=proposal_hash,
+        )
+
+        review = command.review_command(candidate_id=str(uuid4()))
+
+        self.assertEqual(review.expected_memory_revision, 3)
+        self.assertEqual(review.expected_change_set_id, change_set_id)
+        self.assertEqual(review.expected_proposal_hash, proposal_hash)
+        self.assertNotEqual(
+            command.payload_hash,
+            self._resolution_command(
+                command_id="correction-resolution-bound-001",
+                expected_memory_version_id=self.citation["citation"]["memoryVersionId"],
+            ).payload_hash,
         )
 
     def test_creates_pending_candidate_from_exact_answer_citation_and_replays(self) -> None:

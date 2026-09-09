@@ -28,7 +28,9 @@ from .contracts import (
 )
 from .ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
+    OWNER_TRUTH_SCHEMA_VERSION_V5,
     canonicalize_memory_payload,
+    reextract_owner_corrected_memory_payload,
     validate_memory_payload,
 )
 from .source_commands import OwnerTruthCommandAuthorizationCapture, OwnerTruthCommandContext
@@ -220,12 +222,39 @@ class OwnerTruthCandidateReviewCommand:
     corrected_value: Mapping[str, Any] | None
     corrected_value_schema_version: str
     reason_code: str
+    expected_memory_revision: int | None = None
+    expected_change_set_id: str | None = None
+    expected_proposal_hash: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", _command_identifier(self.command_id))
         object.__setattr__(self, "candidate_id", require_uuid(self.candidate_id, field="candidate_id"))
         if self.expected_candidate_version < 1:
             raise OwnerTruthCandidateReviewError("expected_candidate_version must be positive")
+        if self.expected_memory_revision is not None and (
+            not isinstance(self.expected_memory_revision, int)
+            or isinstance(self.expected_memory_revision, bool)
+            or self.expected_memory_revision < 0
+        ):
+            raise OwnerTruthCandidateReviewError(
+                "expected_memory_revision must be a non-negative integer when provided"
+            )
+        if (self.expected_change_set_id is None) != (self.expected_proposal_hash is None):
+            raise OwnerTruthCandidateReviewError(
+                "expected_change_set_id and expected_proposal_hash must be provided together"
+            )
+        if self.expected_change_set_id is not None:
+            object.__setattr__(
+                self,
+                "expected_change_set_id",
+                require_uuid(self.expected_change_set_id, field="expected_change_set_id"),
+            )
+            normalized_proposal_hash = str(self.expected_proposal_hash or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", normalized_proposal_hash):
+                raise OwnerTruthCandidateReviewError(
+                    "expected_proposal_hash must be a lowercase SHA-256 digest"
+                )
+            object.__setattr__(self, "expected_proposal_hash", normalized_proposal_hash)
         try:
             object.__setattr__(self, "action", CandidateReviewAction(self.action))
         except ValueError as exc:
@@ -265,6 +294,9 @@ class OwnerTruthCandidateReviewCommand:
                 "correctedValue": self.corrected_value,
                 "correctedValueSchemaVersion": self.corrected_value_schema_version,
                 "expectedCandidateVersion": self.expected_candidate_version,
+                "expectedMemoryRevision": self.expected_memory_revision,
+                "expectedChangeSetId": self.expected_change_set_id,
+                "expectedProposalHash": self.expected_proposal_hash,
                 "reasonCode": self.reason_code,
             }
         )
@@ -304,11 +336,21 @@ class OwnerTruthCandidateReviewCommand:
         candidate_after_hash = candidate.content_hash
         if self.action is CandidateReviewAction.CORRECT:
             corrected_value = _normalized_mapping(self.corrected_value or {}, field="corrected_value")
-            corrected_value = canonicalize_memory_payload(
-                kind=candidate.memory_kind,
-                payload=corrected_value,
-                schema_version=self.corrected_value_schema_version,
-            )
+            if (
+                self.corrected_value_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V5
+                and candidate.content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V5
+            ):
+                corrected_value = reextract_owner_corrected_memory_payload(
+                    kind=candidate.memory_kind,
+                    source_payload=candidate.content,
+                    corrected_payload=corrected_value,
+                )
+            else:
+                corrected_value = canonicalize_memory_payload(
+                    kind=candidate.memory_kind,
+                    payload=corrected_value,
+                    schema_version=self.corrected_value_schema_version,
+                )
             validation = validate_memory_payload(
                 kind=candidate.memory_kind,
                 payload=corrected_value,
@@ -338,6 +380,8 @@ class OwnerTruthCandidateReviewCommand:
             "reasonCode": self.reason_code,
             "schemaVersion": OWNER_TRUTH_DECISION_BASIS_SCHEMA_VERSION,
             "sourceRefs": [dict(item) for item in candidate.source_refs],
+            "expectedChangeSetId": self.expected_change_set_id,
+            "expectedProposalHash": self.expected_proposal_hash,
         }
         return OwnerTruthCandidateDecisionWriteRecord(
             receipt_id=receipt_id,
@@ -361,6 +405,8 @@ class OwnerTruthCandidateReviewCommand:
             ),
             corrected_value=corrected_value,
             authorization_capture=context.authorization_capture,
+            expected_change_set_id=self.expected_change_set_id,
+            expected_proposal_hash=self.expected_proposal_hash,
         )
 
 
@@ -385,6 +431,8 @@ class OwnerTruthCandidateDecisionWriteRecord:
     corrected_value_schema_version: str | None
     corrected_value: Mapping[str, Any] | None
     authorization_capture: OwnerTruthCommandAuthorizationCapture | None = None
+    expected_change_set_id: str | None = None
+    expected_proposal_hash: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "receipt_id", require_uuid(self.receipt_id, field="receipt_id"))
@@ -444,6 +492,22 @@ class OwnerTruthCandidateDecisionWriteRecord:
             if not re.fullmatch(r"[0-9a-f]{64}", value):
                 raise OwnerTruthCandidateReviewError(f"{field} must be a lowercase SHA-256 digest")
             object.__setattr__(self, field, value)
+        if (self.expected_change_set_id is None) != (self.expected_proposal_hash is None):
+            raise OwnerTruthCandidateReviewError(
+                "decision record proposal identity must be complete"
+            )
+        if self.expected_change_set_id is not None:
+            object.__setattr__(
+                self,
+                "expected_change_set_id",
+                require_uuid(self.expected_change_set_id, field="expected_change_set_id"),
+            )
+            normalized_proposal_hash = str(self.expected_proposal_hash or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", normalized_proposal_hash):
+                raise OwnerTruthCandidateReviewError(
+                    "expected_proposal_hash must be a lowercase SHA-256 digest"
+                )
+            object.__setattr__(self, "expected_proposal_hash", normalized_proposal_hash)
         object.__setattr__(self, "decision_basis", _normalized_mapping(self.decision_basis, field="decision_basis"))
         if self.decision_basis.get("schemaVersion") != OWNER_TRUTH_DECISION_BASIS_SCHEMA_VERSION:
             raise OwnerTruthCandidateReviewError("decision_basis schemaVersion is unsupported")

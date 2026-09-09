@@ -1,0 +1,25 @@
+{
+  "version": "0118",
+  "name": "owner_truth_family_contribution_authenticated_owner",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthFamilyContributionAuthenticatedOwnerV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthFamilyContribution": true
+  },
+  "summary": "Widens value-minimized formal family-contribution grants from the closed-pilot cohort to authenticated Owners while preserving QA and prior grants.",
+  "operations": [
+    "retain qa and closedPilot admission modes",
+    "allow authenticatedOwner only with the existing value-minimized authorization capture",
+    "validate the widened constraints without rewriting grants or memory facts"
+  ],
+  "rollback": "Disable ownerTruthFamilyContribution for authenticated Owners. Retain all grants and accepted user facts; do not narrow the database constraint while authenticatedOwner grants exist.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false
+  }
+}

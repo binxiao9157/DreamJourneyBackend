@@ -13,6 +13,15 @@ from app.services.realtime_voice_proxy import (
 )
 
 
+class _ProjectionReader:
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+
+    def read(self, *, context):
+        del context
+        return dict(self.snapshot)
+
+
 class _ClientFrames:
     def __init__(self, frames):
         self.frames = list(frames)
@@ -95,6 +104,15 @@ class RealtimeVoiceSessionBrokerTests(unittest.TestCase):
             "authorityEpoch": 7,
             "status": "active",
         }
+        self.store.owner_truth_memory_projection_repository = lambda: _ProjectionReader(
+            {
+                "state": "ready",
+                "rightsState": "active",
+                "authorityEpoch": 7,
+                "checkpoint": "checkpoint-7",
+                "memoryRevision": 12,
+            }
+        )
         config = self.broker.issue_runtime_config(
             user_id=self.user["id"],
             auth_session_id=self.auth["sessionId"],
@@ -105,13 +123,18 @@ class RealtimeVoiceSessionBrokerTests(unittest.TestCase):
             projection_checkpoint="checkpoint-7",
             context_hash="sha256:context",
             authority_epoch=7,
+            memory_revision=12,
             session_context={
                 "systemRole": "role",
-                "formalMemorySnapshot": {"projectionCheckpoint": "checkpoint-7"},
+                "formalMemorySnapshot": {
+                    "projectionCheckpoint": "checkpoint-7",
+                    "contextHash": "sha256:context",
+                    "memoryRevision": 12,
+                },
             },
         )
 
-        self.assertEqual(config["contractVersion"], 5)
+        self.assertEqual(config["contractVersion"], 6)
         self.assertEqual(config["echoSession"]["productSessionId"], "echo_live_product_001")
         self.assertEqual(config["echoSession"]["projectionCheckpoint"], "checkpoint-7")
         lease = self.broker.consume(config["proxy"]["sessionToken"])
@@ -119,6 +142,68 @@ class RealtimeVoiceSessionBrokerTests(unittest.TestCase):
         self.assertEqual(lease["targetPersonaId"], self.user["id"])
         self.assertEqual(lease["projectionCheckpoint"], "checkpoint-7")
         self.assertEqual(lease["authorityEpoch"], 7)
+        self.assertEqual(lease["memoryRevision"], 12)
+
+    def test_formal_memory_revision_change_revokes_an_active_bound_live_lease(self):
+        self.store._owner_truth_vaults[self.user["id"]] = {
+            "ownerSubjectId": self.user["id"],
+            "authorityEpoch": 7,
+            "status": "active",
+        }
+        reader = _ProjectionReader(
+            {
+                "state": "ready",
+                "rightsState": "active",
+                "authorityEpoch": 7,
+                "checkpoint": "checkpoint-current",
+                "memoryRevision": 12,
+            }
+        )
+        self.store.owner_truth_memory_projection_repository = lambda: reader
+        config = self.broker.issue_runtime_config(
+            user_id=self.user["id"],
+            auth_session_id=self.auth["sessionId"],
+            purpose="echoLive",
+            target_persona_id=self.user["id"],
+            product_session_id="echo_live_memory_revision_001",
+            projection_checkpoint="checkpoint-current",
+            context_hash="sha256:current-context",
+            authority_epoch=7,
+            memory_revision=12,
+            session_context={
+                "formalMemorySnapshot": {
+                    "projectionCheckpoint": "checkpoint-current",
+                    "contextHash": "sha256:current-context",
+                    "memoryRevision": 12,
+                }
+            },
+        )
+        lease = self.broker.consume(config["proxy"]["sessionToken"])
+        self.assertIsNotNone(lease)
+        self.assertTrue(self.broker.is_lease_authorized(lease))
+
+        reader.snapshot["memoryRevision"] = 13
+        reader.snapshot["checkpoint"] = "checkpoint-new"
+
+        self.assertFalse(self.broker.is_lease_authorized(lease))
+
+    def test_live_ticket_rejects_a_snapshot_that_does_not_match_its_binding(self):
+        with self.assertRaises(RealtimeVoiceProxyError) as raised:
+            self.broker.issue_runtime_config(
+                user_id=self.user["id"],
+                auth_session_id=self.auth["sessionId"],
+                projection_checkpoint="checkpoint-7",
+                context_hash="sha256:expected",
+                memory_revision=12,
+                session_context={
+                    "formalMemorySnapshot": {
+                        "projectionCheckpoint": "checkpoint-other",
+                        "contextHash": "sha256:other",
+                        "memoryRevision": 12,
+                    }
+                },
+            )
+        self.assertEqual(raised.exception.code, "realtimeVoiceFormalMemoryBindingInvalid")
 
     def test_client_session_id_reuses_product_session_across_provider_tickets(self):
         first = self.broker.issue_runtime_config(

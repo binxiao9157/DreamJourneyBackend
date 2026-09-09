@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "owner-truth-memory-changeset-quality-corpus-v1",
+  "syntheticOnly": true,
+  "variants": [
+    {"dish": "菌菇面", "placeA": "青河", "placeB": "南湾", "yearA": 2011, "yearB": 2018, "subjectA": "person-owner-01", "subjectB": "person-family-01"},
+    {"dish": "桂花糕", "placeA": "北桥", "placeB": "海岚", "yearA": 2012, "yearB": 2019, "subjectA": "person-owner-02", "subjectB": "person-family-02"},
+    {"dish": "清汤面", "placeA": "云溪", "placeB": "星港", "yearA": 2013, "yearB": 2020, "subjectA": "person-owner-03", "subjectB": "person-family-03"},
+    {"dish": "莲子羹", "placeA": "松林", "placeB": "江城", "yearA": 2014, "yearB": 2021, "subjectA": "person-owner-04", "subjectB": "person-family-04"},
+    {"dish": "葱油饼", "placeA": "河畔", "placeB": "春屿", "yearA": 2015, "yearB": 2022, "subjectA": "person-owner-05", "subjectB": "person-family-05"},
+    {"dish": "米豆腐", "placeA": "石湾", "placeB": "柳城", "yearA": 2016, "yearB": 2023, "subjectA": "person-owner-06", "subjectB": "person-family-06"},
+    {"dish": "竹筒饭", "placeA": "长溪", "placeB": "望海", "yearA": 2017, "yearB": 2024, "subjectA": "person-owner-07", "subjectB": "person-family-07"},
+    {"dish": "山药粥", "placeA": "临湖", "placeB": "晴川", "yearA": 2018, "yearB": 2025, "subjectA": "person-owner-08", "subjectB": "person-family-08"},
+    {"dish": "豆花饭", "placeA": "月桥", "placeB": "栖霞", "yearA": 2019, "yearB": 2026, "subjectA": "person-owner-09", "subjectB": "person-family-09"},
+    {"dish": "青菜粥", "placeA": "竹里", "placeB": "安港", "yearA": 2020, "yearB": 2027, "subjectA": "person-owner-10", "subjectB": "person-family-10"}
+  ],
+  "families": [
+    {"category": "exactDuplicate", "expectedOperation": "duplicate"},
+    {"category": "newEvidence", "expectedOperation": "addEvidence"},
+    {"category": "disjointHistoricalPeriods", "expectedOperation": "temporalChange"},
+    {"category": "historicalToCurrentOpposite", "expectedOperation": "temporalChange"},
+    {"category": "overlappingOpposite", "expectedOperation": "dispute"},
+    {"category": "sameScopeOpposite", "expectedOperation": "dispute"},
+    {"category": "unknownTimeOpposite", "expectedOperation": "dispute"},
+    {"category": "differentSubject", "expectedOperation": "add"},
+    {"category": "differentObject", "expectedOperation": "add"},
+    {"category": "personalQuestion", "expectedOperation": "noPersonalFact"},
+    {"category": "explicitCorrection", "expectedOperation": "correct"},
+    {"category": "additiveRefinement", "expectedOperation": "refine"},
+    {"category": "weakerRestatementSameEvidence", "expectedOperation": "duplicate"},
+    {"category": "weakerRestatementNewEvidence", "expectedOperation": "addEvidence"},
+    {"category": "destructiveReplacement", "expectedOperation": "dispute"},
+    {"category": "uncertainTimeOpposite", "expectedOperation": "dispute"},
+    {"category": "differentScenario", "expectedOperation": "temporalChange"},
+    {"category": "differentPlace", "expectedOperation": "temporalChange"},
+    {"category": "differentFactType", "expectedOperation": "add"},
+    {"category": "explicitCorrectionDifferentObject", "expectedOperation": "correct"}
+  ]
+}

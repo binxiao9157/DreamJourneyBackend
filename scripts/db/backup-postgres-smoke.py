@@ -89,6 +89,10 @@ if "psql" in args:
     else:
         raise SystemExit(2)
 elif "pg_dump" in args:
+    started_file = os.environ.get("FAKE_DOCKER_DUMP_STARTED_FILE")
+    if started_file:
+        with open(started_file, "w", encoding="utf-8") as handle:
+            handle.write("started\\n")
     if os.environ.get("FAKE_DOCKER_DELAY_DUMP") == "1":
         time.sleep(30)
     sys.stdout.buffer.write(b"PGDMP-dreamjourney-smoke")
@@ -212,6 +216,9 @@ else:
 
         interrupted_env = dict(env)
         interrupted_env["FAKE_DOCKER_DELAY_DUMP"] = "1"
+        dump_started = temp / "interrupted-dump-started"
+        interrupted_env["FAKE_DOCKER_DUMP_STARTED_FILE"] = str(dump_started)
+        failures_before_interruption = failure_receipts(backup_root)
         interrupted = subprocess.Popen(
             [BACKUP_SHELL, str(BACKUP_SCRIPT)],
             cwd=ROOT_DIR,
@@ -221,11 +228,11 @@ else:
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        for _ in range(50):
-            if (backup_root / ".backup.lock.d").exists():
+        for _ in range(250):
+            if dump_started.exists():
                 break
             time.sleep(0.02)
-        time.sleep(0.1)
+        require(dump_started.exists(), "interrupted backup did not start pg_dump")
         # Interrupt the whole backup process group.  Signalling only the
         # parent shell leaves the foreground fake pg_dump alive for 30 seconds,
         # so Bash cannot run its TERM trap and write the interruption receipt.
@@ -238,15 +245,15 @@ else:
             except ProcessLookupError:
                 pass
         require(interrupted.returncode != 0, "interrupted backup must fail")
-        interrupted_manifests = [
-            json.loads(path.read_text(encoding="utf-8"))
-            for path in (backup_root / "failures").glob("*.failure.json")
-        ]
-        interrupted_codes = [item.get("errorCode") for item in interrupted_manifests]
+        interrupted_payload = new_failure_receipt(
+            before=failures_before_interruption,
+            backup_root=backup_root,
+            expectation="backup interruption",
+        )
         require(
-            "backupInterrupted" in interrupted_codes,
+            interrupted_payload["errorCode"] == "backupInterrupted",
             "interruption failure receipt: "
-            f"codes={interrupted_codes} stdout={interrupted_stdout[-500:]} "
+            f"payload={interrupted_payload} stdout={interrupted_stdout[-500:]} "
             f"stderr={interrupted_stderr[-500:]}",
         )
 

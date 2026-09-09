@@ -407,12 +407,21 @@ class InMemoryOwnerTruthFormalMemoryRepository:
         candidates = snapshot["candidates"]
         grouped: dict[str, list[tuple[Mapping[str, Any], Mapping[str, Any]]]] = {}
         for activation in snapshot["memoryActivations"].values():
+            # Duplicate/no-fact decisions intentionally retain an audit-only
+            # changeset record. They have no MemoryVersion and must never be
+            # rendered as a malformed formal-memory item.
+            if activation.get("isActivationAuditOnly") is True:
+                continue
             candidate = candidates.get(str(activation.get("candidateId") or ""))
             if not isinstance(candidate, Mapping):
                 continue
             if candidate.get("vaultId") != context.vault_id or candidate.get("ownerSubjectId") != context.owner_subject_id:
                 continue
-            grouped.setdefault(str(activation.get("memoryId") or ""), []).append((activation, candidate))
+            memory_id = str(activation.get("memoryId") or "").strip()
+            payload = activation.get("payload")
+            if not memory_id or not isinstance(payload, Mapping):
+                continue
+            grouped.setdefault(memory_id, []).append((activation, candidate))
         values: list[OwnerTruthFormalMemory] = []
         for memory_id, rows in grouped.items():
             versions = tuple(sorted(

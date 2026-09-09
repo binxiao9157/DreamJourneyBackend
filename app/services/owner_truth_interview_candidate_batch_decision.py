@@ -536,11 +536,10 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
                 raise OwnerTruthInterviewCandidateBatchDecisionConflict(
                     "interview batch decision authority epoch is stale"
                 )
-            cursor.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS locked",
-                (
-                    f"owner-truth-interview-batch-decision:{context.vault_id}:{command.command_id_hash}",
-                ),
+            self._lock_command(
+                cursor,
+                vault_id=context.vault_id,
+                command_id_hash=command.command_id_hash,
             )
             cursor.execute(
                 """
@@ -656,6 +655,15 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
         context: OwnerTruthCommandContext,
     ) -> OwnerTruthInterviewCandidateBatchDecisionLedgerRecord | None:
         with self._cursor() as cursor:
+            # Lock before the first receipt read. Otherwise a concurrent replay
+            # can observe the Candidate after the winning transaction commits
+            # but miss the root command that made the transition, producing a
+            # false not-ready conflict instead of an idempotent replay.
+            self._lock_command(
+                cursor,
+                vault_id=context.vault_id,
+                command_id_hash=command.command_id_hash,
+            )
             cursor.execute(
                 """
                 SELECT id, review_batch_id, command_id_hash, payload_hash,
@@ -687,6 +695,18 @@ class PostgresOwnerTruthInterviewCandidateBatchDecisionRepository:
             context=context,
         )
         return existing
+
+    @staticmethod
+    def _lock_command(
+        cursor: Any,
+        *,
+        vault_id: str,
+        command_id_hash: str,
+    ) -> None:
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS locked",
+            (f"owner-truth-interview-batch-decision:{vault_id}:{command_id_hash}",),
+        )
 
     def formal_activation_admission(
         self,

@@ -176,6 +176,7 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
 
         self.assertIn("owner-truth-candidate-extraction-worker:", compose)
         self.assertIn("owner-truth-memory-projection-worker:", compose)
+        self.assertIn("owner-truth-memory-search-embedding-worker:", compose)
         self.assertIn("owner-truth-media-processing-worker:", compose)
         self.assertIn("owner-truth-media-deletion-worker:", compose)
         self.assertIn("business-message-projection-worker:", compose)
@@ -199,6 +200,11 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
                 "ownerTruthMemoryProjection",
                 "owner-truth-memory-projection-worker",
                 "app.async_effects.owner_truth_memory_projection_worker",
+            ),
+            (
+                "ownerTruthMemorySearchEmbedding",
+                "owner-truth-memory-search-embedding-worker",
+                "app.async_effects.owner_truth_memory_search_embedding_worker",
             ),
             (
                 "ownerTruthMediaProcessing",
@@ -230,7 +236,7 @@ class OwnerTruthWorkerProcessTests(unittest.TestCase):
                 f"exec python -m {module} --loop",
             )
         self.assertIn("restart: unless-stopped", compose)
-        self.assertEqual(compose.count("stop_grace_period: 150s"), 7)
+        self.assertEqual(compose.count("stop_grace_period: 150s"), 8)
         self.assertIn("OWNER_TRUTH_MEDIA_DELETION_WORKER_ENABLED=false", env_example)
 
 

@@ -54,10 +54,9 @@ from app.domain.owner_truth.contracts import (
 )
 from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
-    OWNER_TRUTH_SCHEMA_VERSION_V2,
-    OWNER_TRUTH_SCHEMA_VERSION_V4,
+    OWNER_TRUTH_SCHEMA_VERSION_V5,
     empty_memory_facets,
-    enrich_memory_payload_v4,
+    enrich_memory_payload_v5,
     validate_memory_facets,
 )
 from app.observability.operation_metrics import OperationMetricRecorder
@@ -115,6 +114,72 @@ def _source_provenance(
     if is_family_report:
         return PerspectiveType.REPORTED, EpistemicStatus.REPORTED
     return PerspectiveType.FIRST_PERSON, EpistemicStatus.RECALLED
+
+
+def _typed_source_provenance(
+    *,
+    source: OwnerTruthCandidateExtractionInput,
+    inferred: bool = False,
+) -> dict[str, Any]:
+    """Build provenance only from the already-persisted Source boundary.
+
+    The extraction model is never allowed to choose who spoke, which account
+    contributed, or what evidence supports a Candidate.  Tests may use an
+    input without a database identity, in which case the immutable candidate
+    write record still retains its source span and this typed field remains
+    intentionally empty rather than fabricated.
+    """
+
+    metadata = source.source_metadata or {}
+    perspective, _epistemic = _source_provenance(metadata)
+    origin = str(metadata.get("origin") or "").strip()
+    if inferred:
+        mode = "inferred"
+    elif perspective is PerspectiveType.REPORTED:
+        mode = "familyReport"
+    elif origin in {
+        "documentImport",
+        "ocrSourceProcessing",
+        "mediaSourceObjectProcessing",
+    } or str(metadata.get("mediaKind") or "").strip() in {"document", "ocr"}:
+        mode = "documented"
+    elif str(metadata.get("speakerIdentity") or "").strip() == "unknown":
+        mode = "unknown"
+    else:
+        mode = "selfReport"
+
+    evidence_refs: list[dict[str, Any]] = []
+    if source.source_id is not None and source.source_version is not None:
+        evidence_refs.append(
+            {
+                "sourceId": source.source_id,
+                "sourceVersion": source.source_version,
+                "relation": "supports",
+            }
+        )
+    return {
+        "mode": mode,
+        "speakerPersonId": metadata.get("speakerPersonId"),
+        "contributorAccountId": (
+            metadata.get("contributorAccountId")
+            or metadata.get("submittedByAccountId")
+        ),
+        "evidenceRefs": evidence_refs,
+    }
+
+
+def _typed_subjects(
+    source: OwnerTruthCandidateExtractionInput,
+) -> tuple[str | None, str | None]:
+    """Retain server-established subject scope without guessing from text."""
+
+    metadata = source.source_metadata or {}
+    memory_subject_id = metadata.get("memorySubjectId")
+    claim_subject_id = metadata.get("claimSubjectId")
+    return (
+        memory_subject_id if isinstance(memory_subject_id, str) else None,
+        claim_subject_id if isinstance(claim_subject_id, str) else None,
+    )
 
 
 class OwnerTruthCandidateExtractor(Protocol):
@@ -192,6 +257,7 @@ class DeterministicOwnerTruthCandidateExtractor:
         source_perspective, source_epistemic = _source_provenance(
             source.source_metadata or {}
         )
+        memory_subject_id, claim_subject_id = _typed_subjects(source)
         proposal = CandidateProposal(
             memory_kind=MemoryKind.EXPERIENCE,
             perspective_type=(
@@ -201,14 +267,23 @@ class DeterministicOwnerTruthCandidateExtractor:
                 EpistemicStatus.INFERRED if is_image_inference else source_epistemic
             ),
             sensitivity=SensitivityLevel.STANDARD,
-            content={
-                "summary": summary,
-                "facets": image_facets or empty_memory_facets(confidence=0.0),
-            },
+            content=enrich_memory_payload_v5(
+                kind=MemoryKind.EXPERIENCE,
+                payload={
+                    "summary": summary,
+                    "facets": image_facets or empty_memory_facets(confidence=0.0),
+                },
+                provenance=_typed_source_provenance(
+                    source=source,
+                    inferred=is_image_inference,
+                ),
+                memory_subject_id=memory_subject_id,
+                claim_subject_id=claim_subject_id,
+            ),
             evidence_span=CandidateEvidenceSpan(start=0, end=len(source.source_text)),
             confidence=0.0,
             review_mode=CandidateReviewMode.SINGLE,
-            payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V2,
+            payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V5,
         )
         return SyntheticCandidateExtractionCommand(
             intent=intent,
@@ -342,6 +417,9 @@ class TextMemoryOrganizationProvider(Protocol):
     def request_organization(self, *, text: str) -> dict[str, Any]:
         ...
 
+    def request_family_organization(self, *, text: str) -> dict[str, Any]:
+        ...
+
 
 class ModelAssistedOwnerTruthLiveConversationExtractor:
     """Use semantic organization only for explicitly marked closed Live text."""
@@ -403,6 +481,10 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                 seen_memories.add(dedupe_key)
                 memories.append(memory)
         spans = self._owner_evidence_spans(source=source, turns=turns)
+        source_perspective, source_epistemic = _source_provenance(
+            source.source_metadata or {}
+        )
+        memory_subject_id, claim_subject_id = _typed_subjects(source)
         proposals: list[CandidateProposal] = []
         for memory in memories:
             if not isinstance(memory, dict):
@@ -421,19 +503,28 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                 selected_spans = [spans[index] for index in source_indices]
             except (KeyError, TypeError) as error:
                 raise ValueError("live memory organizer referenced unavailable evidence") from error
-            content = enrich_memory_payload_v4(
+            content = enrich_memory_payload_v5(
                 kind=memory_kind,
                 payload={
                     primary_field: primary_value,
                     "sourceTurnIndices": list(source_indices),
                     "facets": memory.get("facets"),
+                    "factType": memory.get("factType"),
+                    "dimensions": memory.get("dimensions"),
+                    "predicate": memory.get("predicate"),
+                    "object": memory.get("object"),
+                    "qualifiers": memory.get("qualifiers"),
+                    "affect": memory.get("affect"),
                 },
+                provenance=_typed_source_provenance(source=source),
+                memory_subject_id=memory_subject_id,
+                claim_subject_id=claim_subject_id,
             )
             proposals.append(
                 CandidateProposal(
                     memory_kind=memory_kind,
-                    perspective_type=PerspectiveType.FIRST_PERSON,
-                    epistemic_status=EpistemicStatus.RECALLED,
+                    perspective_type=source_perspective,
+                    epistemic_status=source_epistemic,
                     sensitivity=SensitivityLevel.STANDARD,
                     content=content,
                     evidence_span=CandidateEvidenceSpan(
@@ -442,7 +533,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                     ),
                     confidence=0.0,
                     review_mode=CandidateReviewMode.SINGLE,
-                    payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V4,
+                    payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V5,
                 )
             )
         return SyntheticCandidateExtractionCommand(
@@ -610,23 +701,48 @@ class ModelAssistedOwnerTruthSourceExtractor:
         if not normalized_text:
             return self._live_extractor.extract(intent=intent, source=source)
 
-        organization = self._organizer.request_organization(text=normalized_text)
+        perspective_type, epistemic_status = _source_provenance(metadata)
+        memory_subject_id, claim_subject_id = _typed_subjects(source)
+        family_organization = getattr(
+            self._organizer,
+            "request_family_organization",
+            None,
+        )
+        family_scope_enforced = perspective_type is PerspectiveType.REPORTED
+        if family_scope_enforced and not callable(family_organization):
+            raise RuntimeError(
+                "family text organization requires subject-role classification"
+            )
+        if family_scope_enforced:
+            organization = family_organization(text=normalized_text)
+        else:
+            organization = self._organizer.request_organization(text=normalized_text)
         memories = organization.get("memories")
         if not isinstance(memories, list):
             raise ValueError("text memory organizer returned an invalid memories contract")
 
-        perspective_type, epistemic_status = _source_provenance(metadata)
         proposals: list[CandidateProposal] = []
         for memory in memories:
             if not isinstance(memory, Mapping):
                 raise ValueError("text memory organizer returned an invalid memory")
+            if family_scope_enforced:
+                subject_role = str(memory.get("subjectRole") or "").strip()
+                if subject_role in {"reporterSelf", "unknown"}:
+                    continue
+                if subject_role != "memorySubject":
+                    raise ValueError(
+                        "family text memory organizer returned an invalid subject role"
+                    )
             memory_kind = MemoryKind(str(memory.get("memoryKind") or ""))
             content = memory.get("content")
             if not isinstance(content, Mapping):
                 raise ValueError("text memory organizer returned invalid typed content")
-            normalized_content = enrich_memory_payload_v4(
+            normalized_content = enrich_memory_payload_v5(
                 kind=memory_kind,
                 payload=content,
+                provenance=_typed_source_provenance(source=source),
+                memory_subject_id=memory_subject_id,
+                claim_subject_id=claim_subject_id,
             )
             proposals.append(
                 CandidateProposal(
@@ -641,7 +757,7 @@ class ModelAssistedOwnerTruthSourceExtractor:
                     ),
                     confidence=0.0,
                     review_mode=CandidateReviewMode.SINGLE,
-                    payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V4,
+                    payload_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V5,
                 )
             )
         return SyntheticCandidateExtractionCommand(
@@ -864,8 +980,16 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 )
 
             completion = lease_repository.complete(lease, outcome="succeeded")
+            extraction_completed_without_candidates = (
+                result.status is ExtractionResultStatus.SUCCEEDED
+                and not result.candidate_ids
+            )
             reason = {
-                ExtractionResultStatus.SUCCEEDED: "candidateExtractionProposalsPersisted",
+                ExtractionResultStatus.SUCCEEDED: (
+                    "candidateExtractionCompletedNoChange"
+                    if extraction_completed_without_candidates
+                    else "candidateExtractionProposalsPersisted"
+                ),
                 ExtractionResultStatus.QUARANTINED: "candidateExtractionQuarantined",
                 ExtractionResultStatus.FAILED: "candidateExtractionFailed",
             }[result.status]
@@ -875,7 +999,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
         # routing outage cannot erase a reviewable Candidate.
         message_projection = None
         message_projection_failure_reason = None
-        if result.status is ExtractionResultStatus.SUCCEEDED:
+        if result.status is ExtractionResultStatus.SUCCEEDED and result.candidate_ids:
             try:
                 with self._unit_of_work(
                     correlation_id=(
@@ -1233,9 +1357,20 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 }
             )
         if extraction_result is not None:
+            candidate_count = len(extraction_result.candidate_ids)
             payload.update(
                 {
-                    "candidateCount": len(extraction_result.candidate_ids),
+                    "candidateCount": candidate_count,
+                    "candidateOutcome": (
+                        "completedNoChange"
+                        if (
+                            extraction_result.status is ExtractionResultStatus.SUCCEEDED
+                            and candidate_count == 0
+                        )
+                        else "pendingReview"
+                        if extraction_result.status is ExtractionResultStatus.SUCCEEDED
+                        else None
+                    ),
                     "extractionId": extraction_result.extraction_id,
                     "extractionStatus": extraction_result.status.value
                     if extraction_result.status is not None

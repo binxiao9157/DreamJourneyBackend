@@ -204,6 +204,12 @@ from app.services.owner_truth_legacy_migration import (
 from app.services.owner_truth_legacy_backfill import (
     PostgresOwnerTruthLegacyBackfillRepository,
 )
+from app.services.owner_truth_b_migration_dry_run import (
+    PostgresOwnerTruthBMigrationDryRunRepository,
+)
+from app.services.owner_truth_b_migration_execution import (
+    PostgresOwnerTruthBMigrationExecutionRepository,
+)
 from app.services.owner_truth_legacy_tail_shadow import (
     PostgresOwnerTruthLegacyTailShadowRepository,
 )
@@ -212,6 +218,9 @@ from app.services.owner_truth_migration_parity_shadow import (
 )
 from app.services.owner_truth_conversation import (
     PostgresOwnerTruthConversationRepository,
+)
+from app.services.owner_truth_echo_conversation_context import (
+    PostgresOwnerTruthEchoConversationContextRepository,
 )
 from app.services.owner_truth_interview_candidate_proposal import (
     PostgresOwnerTruthInterviewCandidateProposalRepository,
@@ -648,6 +657,35 @@ class PostgresStore:
             PostgresOwnerTruthMemoryProjectionRepository(active.connection),
         )
 
+    def owner_truth_memory_search_hybrid_repository(self):
+        """Return the same-PostgreSQL pgvector read port in the active UoW.
+
+        This port has no provider credentials and cannot enable semantic
+        retrieval on its own.  The read service only reaches it after an
+        explicitly injected, privacy-reviewed embedding provider succeeds.
+        """
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth hybrid search requires an active unit of work")
+        from app.services.owner_truth_memory_search_hybrid import (
+            PostgresOwnerTruthMemorySearchHybridRepository,
+        )
+
+        return PostgresOwnerTruthMemorySearchHybridRepository(active.connection)
+
+    def owner_truth_memory_search_embedding_repository(self):
+        """Return private derived-vector task persistence in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth embedding backfill requires an active unit of work")
+        from app.services.owner_truth_memory_search_embedding_backfill import (
+            PostgresOwnerTruthMemorySearchEmbeddingRepository,
+        )
+
+        return PostgresOwnerTruthMemorySearchEmbeddingRepository(active.connection)
+
     def owner_truth_answer_citation_repository(
         self,
     ) -> PostgresOwnerTruthAnswerCitationRepository:
@@ -786,6 +824,26 @@ class PostgresStore:
             raise RuntimeError("owner truth legacy backfill planning requires an active unit of work")
         return PostgresOwnerTruthLegacyBackfillRepository(active.connection)
 
+    def owner_truth_b_migration_dry_run_repository(
+        self,
+    ) -> PostgresOwnerTruthBMigrationDryRunRepository:
+        """Return B's append-only dry-run report store in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth B migration dry run requires an active unit of work")
+        return PostgresOwnerTruthBMigrationDryRunRepository(active.connection)
+
+    def owner_truth_b_migration_execution_repository(
+        self,
+    ) -> PostgresOwnerTruthBMigrationExecutionRepository:
+        """Return B's bounded migration executor in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth B migration execution requires an active unit of work")
+        return PostgresOwnerTruthBMigrationExecutionRepository(active.connection)
+
     def owner_truth_legacy_tail_shadow_repository(
         self,
     ) -> PostgresOwnerTruthLegacyTailShadowRepository:
@@ -820,6 +878,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth conversation requires an active unit of work")
         return PostgresOwnerTruthConversationRepository(active.connection)
+
+    def owner_truth_echo_conversation_context_repository(
+        self,
+    ) -> PostgresOwnerTruthEchoConversationContextRepository:
+        """Return bounded private text Echo context inside the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("owner truth text Echo context requires an active unit of work")
+        return PostgresOwnerTruthEchoConversationContextRepository(active.connection)
 
     def owner_truth_interview_candidate_proposal_repository(
         self,

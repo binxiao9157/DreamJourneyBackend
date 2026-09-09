@@ -24,7 +24,9 @@ from .contracts import MemoryKind
 from .ontology import (
     OWNER_TRUTH_FACET_NAMES,
     OWNER_TRUTH_SEMANTIC_FACETS,
+    OWNER_TRUTH_SCHEMA_VERSION_V5,
     enrich_memory_payload_v4,
+    enrich_memory_payload_v5,
 )
 
 
@@ -191,8 +193,18 @@ def _normalize_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
     content = entry.get("content")
     if not isinstance(content, Mapping):
         raise PersonMemoryModelError("formal memory content must be an object")
-    enriched = enrich_memory_payload_v4(kind=kind, payload=content)
+    content_schema_version = _text(entry.get("contentSchemaVersion"))
+    enriched = (
+        enrich_memory_payload_v5(kind=kind, payload=content)
+        if content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V5
+        else enrich_memory_payload_v4(kind=kind, payload=content)
+    )
     semantic = enriched["semantic"]
+    qualifiers = enriched.get("qualifiers")
+    typed_time = qualifiers.get("validTime") if isinstance(qualifiers, Mapping) else None
+    event_time = typed_time if isinstance(typed_time, Mapping) else semantic["eventTime"]
+    typed_object = enriched.get("object")
+    typed_object = dict(typed_object) if isinstance(typed_object, Mapping) else None
     evidence_refs = entry.get("evidenceRefs")
     if not isinstance(evidence_refs, (list, tuple)):
         evidence_refs = []
@@ -202,12 +214,12 @@ def _normalize_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
         "memoryVersion": int(entry.get("memoryVersion") or 1),
         "memoryKind": kind.value,
         "contentHash": _text(entry.get("contentHash")),
-        "contentSchemaVersion": _text(entry.get("contentSchemaVersion")),
+        "contentSchemaVersion": content_schema_version,
         "primaryKind": semantic["primaryKind"],
         "facets": list(semantic["facets"]),
         "title": semantic["title"],
         "narrative": semantic["narrative"],
-        "eventTime": semantic["eventTime"],
+        "eventTime": event_time,
         "entities": list(semantic["entities"]),
         "emotionEvidence": list(semantic["emotionEvidence"]),
         "facetEvidence": {
@@ -216,9 +228,38 @@ def _normalize_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
         "perspectiveType": _text(entry.get("perspectiveType")) or "firstPerson",
         "epistemicStatus": _text(entry.get("epistemicStatus")) or "uncertain",
         "sensitivity": _text(entry.get("sensitivity")) or "standard",
-        "semanticSlot": _text(enriched.get("semanticSlot"), maximum=128),
-        "semanticValue": _text(enriched.get("semanticValue"), maximum=256),
+        "factType": _text(enriched.get("factType"), maximum=80),
+        "dimensions": [
+            _text(value, maximum=80)
+            for value in enriched.get("dimensions", [])
+            if _text(value, maximum=80)
+        ],
+        "predicate": _text(enriched.get("predicate"), maximum=128),
+        "object": typed_object,
+        "qualifiers": dict(qualifiers) if isinstance(qualifiers, Mapping) else {},
+        "affect": (
+            dict(enriched["affect"])
+            if isinstance(enriched.get("affect"), Mapping)
+            else None
+        ),
+        "provenance": (
+            dict(enriched["provenance"])
+            if isinstance(enriched.get("provenance"), Mapping)
+            else {}
+        ),
+        "semanticSlot": _text(enriched.get("semanticSlot"), maximum=128)
+        or _text(enriched.get("predicate"), maximum=128),
+        "semanticValue": _text(enriched.get("semanticValue"), maximum=256)
+        or _text(
+            typed_object.get("label") if typed_object is not None else None,
+            maximum=256,
+        ),
         "evidenceRefs": [dict(value) for value in evidence_refs if isinstance(value, Mapping)],
+        # Subject identity is part of the asserted fact, not merely display
+        # metadata.  It must survive projection normalisation so a statement
+        # about a parent can never be merged into the Owner's own fact.
+        "memorySubjectId": _text(enriched.get("memorySubjectId"), maximum=160) or None,
+        "claimSubjectId": _text(enriched.get("claimSubjectId"), maximum=160) or None,
         "citation": _citation(entry),
     }
 
@@ -261,11 +302,50 @@ def _record_anchor(record: Mapping[str, Any]) -> set[str]:
     return anchors
 
 
-def _semantic_assertion(record: Mapping[str, Any]) -> tuple[str, str] | None:
+def _claim_subject_key(record: Mapping[str, Any]) -> str:
+    """Return a non-guessing subject key for semantic grouping.
+
+    ``unknown`` does not mean Owner. It is only an anonymous conflict bucket:
+    opposite assertions without an identified subject must be quarantined
+    rather than silently treated as two independently usable owner facts.
+    Equivalence remains stricter in ``_records_equivalent`` and only permits
+    exact duplicates when both subjects are unknown.
+    """
+
+    explicit = _semantic_text(record.get("claimSubjectId") or record.get("memorySubjectId"))
+    if explicit:
+        return explicit
+    return "unknown:unidentified"
+
+
+def _explicit_claim_subject_key(record: Mapping[str, Any]) -> str | None:
+    """Return the declared fact subject without inventing an Owner identity."""
+
+    explicit = _semantic_text(record.get("claimSubjectId") or record.get("memorySubjectId"))
+    return explicit or None
+
+
+def _semantic_assertion(record: Mapping[str, Any]) -> tuple[str, str, str] | None:
+    subject = _claim_subject_key(record)
+    fact_type = _semantic_text(record.get("factType"))
+    predicate = _semantic_text(record.get("predicate"))
+    typed_object = record.get("object")
+    object_label = _semantic_text(
+        typed_object.get("label") if isinstance(typed_object, Mapping) else None
+    )
+    qualifiers = record.get("qualifiers")
+    polarity = _semantic_text(
+        qualifiers.get("polarity") if isinstance(qualifiers, Mapping) else None
+    )
+    if fact_type and predicate and object_label:
+        if fact_type == "preference":
+            return subject, f"preference:{object_label}", polarity or "unknown"
+        return subject, f"{predicate}:{object_label}", polarity or "affirmed"
+
     explicit_slot = _semantic_text(record.get("semanticSlot"))
     explicit_value = _semantic_text(record.get("semanticValue"))
     if explicit_slot and explicit_value:
-        return explicit_slot, explicit_value
+        return subject, explicit_slot, explicit_value
 
     narrative = _text(record.get("narrative"))
     for slot, pattern in _SINGLETON_FACT_PATTERNS:
@@ -274,7 +354,7 @@ def _semantic_assertion(record: Mapping[str, Any]) -> tuple[str, str] | None:
             continue
         value = _semantic_text(match.group("value"))
         if value:
-            return slot, value
+            return subject, slot, value
 
     preference = _PREFERENCE_PATTERN.search(narrative)
     if preference is not None:
@@ -282,7 +362,7 @@ def _semantic_assertion(record: Mapping[str, Any]) -> tuple[str, str] | None:
         if target:
             polarity = preference.group("polarity")
             value = "negative" if polarity in {"不喜欢", "不爱", "讨厌"} else "positive"
-            return f"preference:{target}", value
+            return subject, f"preference:{target}", value
     return None
 
 
@@ -333,11 +413,14 @@ def _records_conflict(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool
         left_assertion is not None
         and right_assertion is not None
         and left_assertion[0] == right_assertion[0]
-        and left_assertion[1] != right_assertion[1]
+        and left_assertion[1] == right_assertion[1]
+        and left_assertion[2] != right_assertion[2]
     )
 
 
 def _records_equivalent(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    left_subject = _explicit_claim_subject_key(left)
+    right_subject = _explicit_claim_subject_key(right)
     if (
         left.get("primaryKind") != right.get("primaryKind")
         or left.get("sensitivity") != right.get("sensitivity")
@@ -346,13 +429,25 @@ def _records_equivalent(left: Mapping[str, Any], right: Mapping[str, Any]) -> bo
         or _records_have_disjoint_explicit_time(left, right)
     ):
         return False
-    left_assertion = _semantic_assertion(left)
-    right_assertion = _semantic_assertion(right)
-    if left_assertion is not None and left_assertion == right_assertion:
-        return True
+    if left_subject != right_subject:
+        return False
 
     left_text = _semantic_text(left.get("narrative"))
     right_text = _semantic_text(right.get("narrative"))
+    # A missing subject never means the Owner and must not allow a fuzzy merge.
+    # An exact duplicate is different: it is safe to retain one semantic record
+    # with both immutable citations, without assigning either fact to a person.
+    if left_subject is None and not (left_text and left_text == right_text):
+        return False
+
+    left_assertion = _semantic_assertion(left)
+    right_assertion = _semantic_assertion(right)
+    # Once both entries have a typed assertion, that identity is authoritative.
+    # Fuzzy narrative containment (for example "第1道菜" inside "第10道菜")
+    # must never collapse two distinct formal facts into one group.
+    if left_assertion is not None and right_assertion is not None:
+        return left_assertion == right_assertion
+
     if not left_text or not right_text:
         return False
     if left_text == right_text:
@@ -783,34 +878,50 @@ def _biography_projection(records: list[dict[str, Any]], source_fingerprint: str
             },
         ]
 
-    sections: list[dict[str, Any]] = []
-    for section in ordered:
-        section_records = section["records"]
-        blocks: list[dict[str, Any]] = []
-        for index in range(0, len(section_records), _MAX_BLOCK_MEMORIES):
-            chunk = section_records[index : index + _MAX_BLOCK_MEMORIES]
-            blocks.append(
-                {
-                    "blockId": f"block-{_digest([version_id for item in chunk for version_id in item['supportingMemoryVersionIds']])[:24]}",
-                    "blockType": "narrative",
-                    "text": _block_text(chunk, block_index=len(blocks)),
-                    "facets": [
-                        facet
-                        for facet in OWNER_TRUTH_SEMANTIC_FACETS
-                        if any(facet in item["facets"] for item in chunk)
-                    ],
-                    "evidence": _unique_citations(chunk),
-                }
-            )
-        sections.append(
+    sections = [_biography_section(section) for section in ordered]
+    overview = _biography_overview(records)
+    return _biography_document(
+        records=records,
+        source_fingerprint=source_fingerprint,
+        overview=overview,
+        sections=sections,
+    )
+
+
+def _biography_section(section: Mapping[str, Any]) -> dict[str, Any]:
+    """Build one independently reusable biography section.
+
+    A section is keyed by its stable semantic bucket.  Keeping this small
+    unit separate lets incremental derivation rebuild only the affected
+    chapter while retaining the exact prior text/evidence for other chapters.
+    """
+
+    section_records = list(section["records"])
+    blocks: list[dict[str, Any]] = []
+    for index in range(0, len(section_records), _MAX_BLOCK_MEMORIES):
+        chunk = section_records[index : index + _MAX_BLOCK_MEMORIES]
+        blocks.append(
             {
-                "sectionId": section["sectionId"],
-                "title": section["title"],
-                "blocks": blocks,
-                "evidence": _unique_citations(section_records),
+                "blockId": f"block-{_digest([version_id for item in chunk for version_id in item['supportingMemoryVersionIds']])[:24]}",
+                "blockType": "narrative",
+                "text": _block_text(chunk, block_index=len(blocks)),
+                "facets": [
+                    facet
+                    for facet in OWNER_TRUTH_SEMANTIC_FACETS
+                    if any(facet in item["facets"] for item in chunk)
+                ],
+                "evidence": _unique_citations(chunk),
             }
         )
+    return {
+        "sectionId": section["sectionId"],
+        "title": section["title"],
+        "blocks": blocks,
+        "evidence": _unique_citations(section_records),
+    }
 
+
+def _biography_overview(records: list[dict[str, Any]]) -> str | None:
     people = Counter(
         item["value"]
         for record in records
@@ -830,7 +941,16 @@ def _biography_projection(records: list[dict[str, Any]], source_fingerprint: str
         overview_parts.append(
             f"{'、'.join(value for value, _ in values.most_common(4))}构成了我许多选择背后的坚持"
         )
-    overview = "。".join(overview_parts) + "。" if records else None
+    return "。".join(overview_parts) + "。" if records else None
+
+
+def _biography_document(
+    *,
+    records: list[dict[str, Any]],
+    source_fingerprint: str,
+    overview: str | None,
+    sections: list[dict[str, Any]],
+) -> dict[str, Any]:
     document_material = {
         "sourceFingerprint": source_fingerprint,
         "title": "我的人生记录",
@@ -848,6 +968,65 @@ def _biography_projection(records: list[dict[str, Any]], source_fingerprint: str
             len(record["supportingMemoryIds"]) for record in records
         ),
     }
+
+
+def _section_signature(records: Iterable[Mapping[str, Any]]) -> tuple[tuple[str, str, str], ...]:
+    """Return the current-version identity that makes a section reusable."""
+
+    values = []
+    for record in records:
+        values.append(
+            (
+                _text(record.get("memoryId")),
+                _text(record.get("memoryVersionId")),
+                _text(record.get("contentHash")),
+            )
+        )
+    return tuple(sorted(values))
+
+
+def _section_signature_from_document(section: Mapping[str, Any]) -> tuple[tuple[str, str, str], ...]:
+    evidence = section.get("evidence")
+    if not isinstance(evidence, list):
+        return ()
+    values = []
+    for item in evidence:
+        if not isinstance(item, Mapping):
+            continue
+        values.append(
+            (
+                _text(item.get("memoryId")),
+                _text(item.get("memoryVersionId")),
+                _text(item.get("contentHash")),
+            )
+        )
+    return tuple(sorted(values))
+
+
+def _biography_sections(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Partition records exactly as the full biography projection does."""
+
+    buckets: dict[str, dict[str, Any]] = {}
+    for record in records:
+        key, title, priority = _section_identity(record)
+        bucket = buckets.setdefault(
+            key,
+            {"sectionId": key, "title": title, "priority": priority, "records": []},
+        )
+        bucket["records"].append(record)
+    ordered = sorted(buckets.values(), key=lambda value: (value["priority"], value["sectionId"]))
+    if len(ordered) > _MAX_SECTION_COUNT:
+        overflow = [record for value in ordered[_MAX_SECTION_COUNT - 1 :] for record in value["records"]]
+        ordered = [
+            *ordered[: _MAX_SECTION_COUNT - 1],
+            {
+                "sectionId": "more-life-stories",
+                "title": "更多人生片段",
+                "priority": 99,
+                "records": overflow,
+            },
+        ]
+    return ordered
 
 
 def _dimensions(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -976,6 +1155,319 @@ def build_person_memory_model(entries: Iterable[Mapping[str, Any]]) -> dict[str,
     }
 
 
+def _record_identity(record: Mapping[str, Any]) -> tuple[str, str, str]:
+    return (
+        _text(record.get("memoryId")),
+        _text(record.get("memoryVersionId")),
+        _text(record.get("contentHash")),
+    )
+
+
+def _clone_json(value: Any) -> Any:
+    """Copy projection material without sharing a mutable cache object."""
+
+    return json.loads(_canonical_json(value))
+
+
+def _current_records_from_entries(
+    *,
+    previous_model: Mapping[str, Any],
+    entries: Iterable[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str], dict[str, dict[str, Any]]]:
+    """Normalize only new or changed current versions.
+
+    The caller still supplies the current authority set so deletion is visible,
+    but byte-identical MemoryVersions are copied from the preceding derived
+    model rather than being re-normalized as though every fact were new.
+    """
+
+    raw_previous = previous_model.get("formalMemories")
+    if not isinstance(raw_previous, list):
+        raise PersonMemoryModelError("incremental model has no prior formal memories")
+    previous_by_memory_id: dict[str, dict[str, Any]] = {}
+    for item in raw_previous:
+        if not isinstance(item, Mapping):
+            raise PersonMemoryModelError("incremental model has malformed formal memory")
+        memory_id = _text(item.get("memoryId"))
+        if not memory_id or memory_id in previous_by_memory_id:
+            raise PersonMemoryModelError("incremental model has duplicate formal memories")
+        previous_by_memory_id[memory_id] = _clone_json(item)
+
+    current_entries: dict[str, Mapping[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise PersonMemoryModelError("formal memory entry must be an object")
+        memory_id = _text(entry.get("memoryId"))
+        if not memory_id or memory_id in current_entries:
+            raise PersonMemoryModelError("person memory input contains duplicate current versions")
+        current_entries[memory_id] = entry
+
+    changed_memory_ids = set(previous_by_memory_id) - set(current_entries)
+    records: list[dict[str, Any]] = []
+    for memory_id, entry in current_entries.items():
+        prior = previous_by_memory_id.get(memory_id)
+        incoming_identity = (
+            memory_id,
+            _text(entry.get("memoryVersionId")),
+            _text(entry.get("contentHash")),
+        )
+        if prior is not None and _record_identity(prior) == incoming_identity:
+            records.append(_clone_json(prior))
+            continue
+        records.append(_normalize_entry(entry))
+        changed_memory_ids.add(memory_id)
+    records.sort(key=lambda value: (value["memoryVersion"], value["memoryVersionId"]))
+    version_ids = [record["memoryVersionId"] for record in records]
+    if len(version_ids) != len(set(version_ids)):
+        raise PersonMemoryModelError("person memory input contains duplicate current versions")
+    return records, changed_memory_ids, previous_by_memory_id
+
+
+def _affected_memory_ids_from_semantic_groups(
+    *,
+    previous_model: Mapping[str, Any],
+    current_consolidation: Mapping[str, Any],
+    direct_changed_memory_ids: set[str],
+) -> set[str]:
+    """Include unchanged facts whose consolidation group changed around them."""
+
+    affected = set(direct_changed_memory_ids)
+    previous = previous_model.get("semanticConsolidation")
+    prior_groups = previous.get("groups") if isinstance(previous, Mapping) else []
+    current_groups = current_consolidation.get("groups")
+    if not isinstance(prior_groups, list) or not isinstance(current_groups, list):
+        # A malformed prior cache never authorizes a partial semantic rebuild.
+        return set()
+
+    def add_group_members(groups: Iterable[Any]) -> None:
+        for group in groups:
+            if not isinstance(group, Mapping):
+                continue
+            members = {
+                _text(value)
+                for value in group.get("supportingMemoryIds", [])
+                if _text(value)
+            }
+            if members.intersection(affected):
+                affected.update(members)
+
+    # A changed fact can merge with or dispute an older fact. Repeatedly
+    # expand both historic and current connected components until stable.
+    while True:
+        before = set(affected)
+        add_group_members(prior_groups)
+        add_group_members(current_groups)
+        if affected == before:
+            return affected
+
+
+def _facets_for_memory_ids(
+    *,
+    memory_ids: Iterable[str],
+    current_records: Iterable[Mapping[str, Any]],
+    previous_records: Mapping[str, Mapping[str, Any]],
+) -> set[str]:
+    affected: set[str] = set()
+    by_current = {str(record.get("memoryId") or ""): record for record in current_records}
+    for memory_id in memory_ids:
+        for record in (previous_records.get(memory_id), by_current.get(memory_id)):
+            if not isinstance(record, Mapping):
+                continue
+            facets = record.get("facets")
+            if isinstance(facets, list):
+                affected.update(_text(value) for value in facets if _text(value))
+    return affected
+
+
+def _incremental_dimensions(
+    *,
+    previous_model: Mapping[str, Any],
+    records: list[dict[str, Any]],
+    affected_facets: set[str],
+) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+    raw_previous = previous_model.get("dimensions")
+    previous_by_dimension = {
+        _text(item.get("dimension")): item
+        for item in raw_previous
+        if isinstance(raw_previous, list)
+        and isinstance(item, Mapping)
+        and _text(item.get("dimension"))
+    }
+    dimensions: list[dict[str, Any]] = []
+    rebuilt: list[str] = []
+    for facet, title in _DIMENSION_DEFINITIONS:
+        prior = previous_by_dimension.get(facet)
+        if facet not in affected_facets and prior is not None:
+            dimensions.append(_clone_json(prior))
+            continue
+        supporting = [record for record in records if facet in record["facets"]]
+        memory_ids = sorted(
+            {
+                memory_id
+                for record in supporting
+                for memory_id in record["supportingMemoryIds"]
+            }
+        )
+        version_ids = sorted(
+            {
+                version_id
+                for record in supporting
+                for version_id in record["supportingMemoryVersionIds"]
+            }
+        )
+        dimensions.append(
+            {
+                "dimension": facet,
+                "title": title,
+                "status": "ready" if supporting else "empty",
+                "narrative": _dimension_narrative(facet=facet, records=supporting),
+                "supportingMemoryCount": len(memory_ids),
+                "supportingMemoryIds": memory_ids,
+                "supportingMemoryVersionIds": version_ids,
+            }
+        )
+        rebuilt.append(facet)
+    return dimensions, tuple(rebuilt)
+
+
+def _incremental_biography_projection(
+    *,
+    previous_model: Mapping[str, Any],
+    records: list[dict[str, Any]],
+    source_fingerprint: str,
+    affected_memory_ids: set[str],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    previous_biography = previous_model.get("biographyProjection")
+    previous_sections = (
+        previous_biography.get("sections")
+        if isinstance(previous_biography, Mapping)
+        else []
+    )
+    previous_by_id = {
+        _text(section.get("sectionId")): section
+        for section in previous_sections
+        if isinstance(section, Mapping) and _text(section.get("sectionId"))
+    }
+    sections: list[dict[str, Any]] = []
+    rebuilt: list[str] = []
+    for section in _biography_sections(records):
+        section_id = _text(section.get("sectionId"))
+        prior = previous_by_id.get(section_id)
+        signature = _section_signature(section["records"])
+        section_memory_ids = {memory_id for memory_id, _, _ in signature}
+        if (
+            prior is not None
+            and not section_memory_ids.intersection(affected_memory_ids)
+            and _section_signature_from_document(prior) == signature
+        ):
+            sections.append(_clone_json(prior))
+            continue
+        sections.append(_biography_section(section))
+        rebuilt.append(section_id)
+    return (
+        _biography_document(
+            records=records,
+            source_fingerprint=source_fingerprint,
+            overview=_biography_overview(records),
+            sections=sections,
+        ),
+        tuple(rebuilt),
+    )
+
+
+def build_person_memory_model_incremental(
+    *,
+    previous_model: Mapping[str, Any],
+    entries: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Update current-formal projections without rebuilding unaffected dimensions.
+
+    The authoritative input remains the full current formal-memory set. This
+    function uses the prior *derived* model only as a rebuildable cache: it
+    re-normalizes changed versions, recomputes the semantic safety pass and
+    global machine projections, then rebuilds only the dimensions and
+    biography sections whose supporting facts changed. No previous narrative
+    is accepted as a new fact, and a malformed prior cache fails closed.
+    """
+
+    if not isinstance(previous_model, Mapping):
+        raise PersonMemoryModelError("incremental model requires a prior projection")
+    records, direct_changed, previous_records = _current_records_from_entries(
+        previous_model=previous_model,
+        entries=entries,
+    )
+    source_fingerprint = _digest(
+        [
+            {
+                "memoryId": record["memoryId"],
+                "memoryVersionId": record["memoryVersionId"],
+                "contentHash": record["contentHash"],
+            }
+            for record in records
+        ]
+    )
+    semantic_consolidation, consolidated_records = _semantic_consolidation(records)
+    affected_memory_ids = _affected_memory_ids_from_semantic_groups(
+        previous_model=previous_model,
+        current_consolidation=semantic_consolidation,
+        direct_changed_memory_ids=direct_changed,
+    )
+    if not affected_memory_ids and direct_changed:
+        # Missing semantic history makes selective reuse unsafe.
+        affected_memory_ids = {record["memoryId"] for record in records}
+    affected_facets = _facets_for_memory_ids(
+        memory_ids=affected_memory_ids,
+        current_records=records,
+        previous_records=previous_records,
+    )
+    dimensions, rebuilt_dimensions = _incremental_dimensions(
+        previous_model=previous_model,
+        records=consolidated_records,
+        affected_facets=affected_facets,
+    )
+    biography, rebuilt_sections = _incremental_biography_projection(
+        previous_model=previous_model,
+        records=consolidated_records,
+        source_fingerprint=source_fingerprint,
+        affected_memory_ids=affected_memory_ids,
+    )
+    cognitive = _cognitive_projection(consolidated_records)
+    relationships = _relationship_projection(consolidated_records)
+    model_material = {
+        "sourceFingerprint": source_fingerprint,
+        "formalMemories": records,
+        "semanticConsolidation": semantic_consolidation,
+        "cognitiveProjection": cognitive,
+        "relationshipProjection": relationships,
+        "biographyProjection": biography,
+        "dimensions": dimensions,
+    }
+    return {
+        "schemaVersion": PERSON_MEMORY_MODEL_SCHEMA_VERSION,
+        "algorithmVersion": PERSON_MEMORY_MODEL_ALGORITHM_VERSION,
+        "state": "ready" if records else "empty",
+        "modelVersion": _digest(model_material),
+        "memoryCount": len(records),
+        "consolidatedMemoryCount": len(consolidated_records),
+        "unresolvedConflictCount": int(semantic_consolidation["conflictGroupCount"]),
+        **model_material,
+        "incrementalDerivation": {
+            "mode": "incremental",
+            "changedMemoryCount": len(direct_changed),
+            "affectedMemoryCount": len(affected_memory_ids),
+            "rebuiltDimensions": list(rebuilt_dimensions),
+            "reusedDimensionCount": len(_DIMENSION_DEFINITIONS) - len(rebuilt_dimensions),
+            "rebuiltBiographySections": list(rebuilt_sections),
+            "globalComponentsRebuilt": [
+                "semanticConsolidation",
+                "cognitiveProjection",
+                "relationshipProjection",
+                "biographyOverview",
+            ],
+        },
+    }
+
+
 __all__ = [
     "PERSON_BIOGRAPHY_PROJECTION_SCHEMA_VERSION",
     "PERSON_COGNITIVE_PROJECTION_SCHEMA_VERSION",
@@ -985,4 +1477,5 @@ __all__ = [
     "PERSON_SEMANTIC_CONSOLIDATION_SCHEMA_VERSION",
     "PersonMemoryModelError",
     "build_person_memory_model",
+    "build_person_memory_model_incremental",
 ]

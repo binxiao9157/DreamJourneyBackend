@@ -7,6 +7,7 @@ aggregate to this repository is the next Work Item.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from copy import deepcopy
 from threading import RLock
 from typing import Any, Dict, Optional
@@ -63,6 +64,23 @@ class InMemoryEffectKernelRepository:
                 "summary": _summary(intent, outcome="accepted"),
             }
             return _summary(intent, outcome="accepted")
+
+    @contextmanager
+    def transaction(self):
+        """Model the aggregate rollback boundary used by the Postgres writer.
+
+        The production repository shares the caller's database transaction.
+        Group-review tests need the semantic double to make the same promise:
+        a later Outbox failure cannot leave an earlier pending effect behind.
+        """
+
+        with self._lock:
+            before = deepcopy(self._records)
+            try:
+                yield
+            except Exception:
+                self._records = before
+                raise
 
     def is_runnable(self, intent: AsyncEffectIntent) -> bool:
         """Return whether this exact semantic-double intent can still run.

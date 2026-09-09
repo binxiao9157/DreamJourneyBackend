@@ -8,6 +8,8 @@ from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
 from app.core.config import Settings
+from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 
 
 class RealtimeVoiceProxyError(ValueError):
@@ -76,7 +78,7 @@ class RealtimeVoiceSessionBroker:
                 "evidenceVersion": "dreamjourney-realtime-voice-proxy-v1",
             },
             "fallback": {"enabled": True, "mode": "text"},
-            "contractVersion": 5,
+            "contractVersion": 6,
         }
 
     def issue_runtime_config(
@@ -92,6 +94,7 @@ class RealtimeVoiceSessionBroker:
         projection_checkpoint: Optional[str] = None,
         context_hash: Optional[str] = None,
         authority_epoch: Optional[int] = None,
+        memory_revision: Optional[int] = None,
         session_context: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         descriptor = self.capability_descriptor()
@@ -110,6 +113,15 @@ class RealtimeVoiceSessionBroker:
         resolved_product_session_id = str(
             product_session_id or normalized_client_session_id or ""
         ).strip()[:128]
+        resolved_projection_checkpoint = str(projection_checkpoint or "").strip()
+        resolved_context_hash = str(context_hash or "").strip()
+        resolved_memory_revision = self._optional_nonnegative_int(memory_revision)
+        self._assert_formal_memory_binding_contract(
+            projection_checkpoint=resolved_projection_checkpoint,
+            context_hash=resolved_context_hash,
+            memory_revision=resolved_memory_revision,
+            session_context=session_context,
+        )
         record = {
             "ticketId": ticket_id,
             "ticketHash": ticket_hash,
@@ -121,15 +133,16 @@ class RealtimeVoiceSessionBroker:
             "expiresAt": expires_at.isoformat(),
             "createdAt": now.isoformat(),
             "updatedAt": now.isoformat(),
-            "contractVersion": 1,
+            "contractVersion": 2,
             "purpose": str(purpose or "echoLive"),
             "personaScope": str(persona_scope or "personal"),
             "targetPersonaId": str(target_persona_id or user_id),
             "clientSessionId": normalized_client_session_id,
             "productSessionId": resolved_product_session_id,
-            "projectionCheckpoint": str(projection_checkpoint or ""),
-            "contextHash": str(context_hash or ""),
+            "projectionCheckpoint": resolved_projection_checkpoint,
+            "contextHash": resolved_context_hash,
             "authorityEpoch": authority_epoch,
+            "memoryRevision": resolved_memory_revision,
         }
         try:
             self.store.issue_realtime_voice_session_ticket(
@@ -174,9 +187,10 @@ class RealtimeVoiceSessionBroker:
             response["echoSession"] = {
                 "productSessionId": resolved_product_session_id,
                 "targetPersonaId": str(target_persona_id or user_id),
-                "projectionCheckpoint": str(projection_checkpoint or ""),
+                "projectionCheckpoint": resolved_projection_checkpoint,
                 "authorityEpoch": authority_epoch,
-                "contextHash": str(context_hash or ""),
+                "memoryRevision": resolved_memory_revision,
+                "contextHash": resolved_context_hash,
             }
         if isinstance(session_context, Mapping):
             response["sessionContext"] = dict(session_context)
@@ -250,11 +264,106 @@ class RealtimeVoiceSessionBroker:
             current_epoch = int(vault.get("authorityEpoch") or 0)
         except (TypeError, ValueError):
             return False
-        return (
+        authority_current = (
             str(vault.get("ownerSubjectId") or "") == target_persona_id
             and str(vault.get("status") or "active") == "active"
             and current_epoch == expected_epoch
         )
+        if not authority_current:
+            return False
+        return self._is_formal_memory_binding_current(
+            lease,
+            target_persona_id=target_persona_id,
+            expected_authority_epoch=expected_epoch,
+        )
+
+    def _is_formal_memory_binding_current(
+        self,
+        lease: Mapping[str, Any],
+        *,
+        target_persona_id: str,
+        expected_authority_epoch: int,
+    ) -> bool:
+        """Fence an active Live stream when its formal-fact snapshot changes.
+
+        Older generic voice tickets have no formal-memory fields and remain
+        valid under their previous contract. A Live ticket with any snapshot
+        binding, however, must retain all three keys. A lightweight projection
+        read every configured authorization interval avoids rebuilding or
+        sending an external model prompt for each audio turn.
+        """
+
+        checkpoint = str(lease.get("projectionCheckpoint") or "").strip()
+        context_hash = str(lease.get("contextHash") or "").strip()
+        if not checkpoint and not context_hash and lease.get("memoryRevision") is None:
+            return True
+        expected_revision = self._optional_nonnegative_int(lease.get("memoryRevision"))
+        if not checkpoint or not context_hash or expected_revision is None:
+            return False
+        try:
+            projection = OwnerTruthMemoryProjectionService(self.store).read(
+                context=OwnerTruthCommandContext(
+                    vault_id=target_persona_id,
+                    owner_subject_id=target_persona_id,
+                    actor_subject_id=target_persona_id,
+                )
+            )
+        except Exception:
+            return False
+        try:
+            current_revision = int(projection.get("memoryRevision"))
+            current_epoch = int(projection.get("authorityEpoch"))
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return (
+            str(projection.get("state") or "") == "ready"
+            and str(projection.get("rightsState") or "") == "active"
+            and str(projection.get("checkpoint") or "") == checkpoint
+            and current_revision == expected_revision
+            and current_epoch == expected_authority_epoch
+        )
+
+    @staticmethod
+    def _optional_nonnegative_int(value: object) -> int | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            raise RealtimeVoiceProxyError("realtimeVoiceFormalMemoryBindingInvalid")
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError) as error:
+            raise RealtimeVoiceProxyError("realtimeVoiceFormalMemoryBindingInvalid") from error
+        if normalized < 0:
+            raise RealtimeVoiceProxyError("realtimeVoiceFormalMemoryBindingInvalid")
+        return normalized
+
+    @staticmethod
+    def _assert_formal_memory_binding_contract(
+        *,
+        projection_checkpoint: str,
+        context_hash: str,
+        memory_revision: int | None,
+        session_context: Optional[Mapping[str, Any]],
+    ) -> None:
+        """Reject mismatched ticket and injected snapshot contracts at issue time."""
+
+        binding_values = (projection_checkpoint, context_hash, memory_revision)
+        has_binding = any(value not in {None, ""} for value in binding_values)
+        if not has_binding:
+            return
+        if not projection_checkpoint or not context_hash or memory_revision is None:
+            raise RealtimeVoiceProxyError("realtimeVoiceFormalMemoryBindingInvalid")
+        if not isinstance(session_context, Mapping):
+            raise RealtimeVoiceProxyError("realtimeVoiceFormalMemoryBindingInvalid")
+        snapshot = session_context.get("formalMemorySnapshot")
+        if not isinstance(snapshot, Mapping):
+            raise RealtimeVoiceProxyError("realtimeVoiceFormalMemoryBindingInvalid")
+        if (
+            str(snapshot.get("projectionCheckpoint") or "") != projection_checkpoint
+            or str(snapshot.get("contextHash") or "") != context_hash
+            or snapshot.get("memoryRevision") != memory_revision
+        ):
+            raise RealtimeVoiceProxyError("realtimeVoiceFormalMemoryBindingInvalid")
 
     def upstream_url(self) -> str:
         address = str(self.settings.volcengine_realtime_address or "").strip().rstrip("/")
@@ -414,7 +523,7 @@ class RealtimeVoiceSessionBroker:
                 "evidenceVersion": "dreamjourney-realtime-voice-proxy-v1",
             },
             "fallback": {"enabled": True, "mode": "backendProxyOrText"},
-            "contractVersion": 5,
+            "contractVersion": 6,
         }
 
     def _public_proxy_endpoint(self) -> tuple[str, str]:

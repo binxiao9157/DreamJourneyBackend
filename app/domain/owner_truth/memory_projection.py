@@ -176,13 +176,225 @@ def build_ready_memory_projection(
     authority_epoch: int,
     inputs: Iterable[OwnerTruthMemoryProjectionInput],
     rights_snapshot: OwnerTruthProjectionRightsSnapshot | None = None,
+    memory_revision: int = 0,
 ) -> dict[str, Any]:
     """Create a stable checkpoint from a complete set of current inputs."""
+
+    normalized_vault_id, normalized_owner_id, rights, entries = (
+        _validated_projection_entries(
+            vault_id=vault_id,
+            owner_subject_id=owner_subject_id,
+            authority_epoch=authority_epoch,
+            inputs=inputs,
+            rights_snapshot=rights_snapshot,
+            memory_revision=memory_revision,
+        )
+    )
+    return _ready_projection_from_entries(
+        vault_id=normalized_vault_id,
+        owner_subject_id=normalized_owner_id,
+        authority_epoch=authority_epoch,
+        memory_revision=memory_revision,
+        rights=rights,
+        entries=entries,
+        person_memory_model=build_person_memory_model(entries),
+    )
+
+
+def hydrate_ready_memory_projection(
+    *,
+    vault_id: str,
+    owner_subject_id: str,
+    authority_epoch: int,
+    inputs: Iterable[OwnerTruthMemoryProjectionInput],
+    person_memory_model: Mapping[str, Any],
+    rights_snapshot: OwnerTruthProjectionRightsSnapshot | None = None,
+    memory_revision: int = 0,
+    expected_source_hash: str | None = None,
+    expected_checkpoint: str | None = None,
+) -> dict[str, Any]:
+    """Hydrate a persisted projection without rebuilding semantic derivatives.
+
+    Normal reads validate the current revision and re-hash the persisted facts
+    plus the persisted person model. Expensive semantic consolidation remains
+    a rebuild/Worker responsibility rather than running once per query.
+    """
+
+    normalized_vault_id, normalized_owner_id, rights, entries = (
+        _validated_projection_entries(
+            vault_id=vault_id,
+            owner_subject_id=owner_subject_id,
+            authority_epoch=authority_epoch,
+            inputs=inputs,
+            rights_snapshot=rights_snapshot,
+            memory_revision=memory_revision,
+        )
+    )
+    persisted_model = _copy_object(
+        person_memory_model,
+        field="persisted person_memory_model",
+    )
+    persisted_memory_count = persisted_model.get("memoryCount")
+    if (
+        not isinstance(persisted_memory_count, int)
+        or isinstance(persisted_memory_count, bool)
+        or persisted_memory_count != len(entries)
+    ):
+        raise OwnerTruthMemoryProjectionError(
+            "persisted person-memory model count does not match projection entries"
+        )
+    snapshot = _ready_projection_from_entries(
+        vault_id=normalized_vault_id,
+        owner_subject_id=normalized_owner_id,
+        authority_epoch=authority_epoch,
+        memory_revision=memory_revision,
+        rights=rights,
+        entries=entries,
+        person_memory_model=persisted_model,
+    )
+    if expected_source_hash is not None and snapshot["sourceHash"] != expected_source_hash:
+        raise OwnerTruthMemoryProjectionError(
+            "persisted memory projection source hash does not match"
+        )
+    if expected_checkpoint is not None and snapshot["checkpoint"] != expected_checkpoint:
+        raise OwnerTruthMemoryProjectionError(
+            "persisted memory projection checkpoint does not match"
+        )
+    return snapshot
+
+
+def restore_persisted_ready_memory_projection(
+    *,
+    vault_id: str,
+    owner_subject_id: str,
+    authority_epoch: int,
+    entries: Iterable[Mapping[str, Any]],
+    person_memory_model: Mapping[str, Any],
+    source_hash: str,
+    checkpoint: str,
+    rights_snapshot: OwnerTruthProjectionRightsSnapshot | None = None,
+    memory_revision: int = 0,
+) -> dict[str, Any]:
+    """Restore a transactionally fenced persisted projection for normal reads.
+
+    PostgreSQL validates every derived entry against its current MemoryVersion
+    when it is written. The 0119 revision fence locks the ready checkpoint,
+    current formal-memory revision and rights-trigger invalidation for the read
+    transaction. Re-running ontology validation and semantic consolidation on
+    every request would duplicate Worker work and collapse under concurrent
+    Live/search traffic, so this path performs bounded structural checks only.
+    """
 
     normalized_vault_id = require_nonblank(vault_id, field="vault_id")
     normalized_owner_id = require_nonblank(owner_subject_id, field="owner_subject_id")
     if authority_epoch < 0:
         raise OwnerTruthMemoryProjectionError("authority_epoch must not be negative")
+    if not isinstance(memory_revision, int) or isinstance(memory_revision, bool) or memory_revision < 0:
+        raise OwnerTruthMemoryProjectionError("memory_revision must be a non-negative integer")
+    rights = rights_snapshot or implicit_projection_rights_snapshot(
+        vault_id=normalized_vault_id,
+        owner_subject_id=normalized_owner_id,
+        authority_epoch=authority_epoch,
+    )
+    if (
+        rights.vault_id != normalized_vault_id
+        or rights.owner_subject_id != normalized_owner_id
+        or rights.authority_epoch != authority_epoch
+        or not rights.projection_allowed
+    ):
+        raise OwnerTruthMemoryProjectionError("persisted projection rights are invalid")
+    normalized_source_hash = require_nonblank(source_hash, field="source_hash")
+    normalized_checkpoint = require_nonblank(checkpoint, field="checkpoint")
+
+    restored_entries: list[dict[str, Any]] = []
+    seen_memory_ids: set[str] = set()
+    seen_version_ids: set[str] = set()
+    for raw_entry in entries:
+        if not isinstance(raw_entry, Mapping):
+            raise OwnerTruthMemoryProjectionError("persisted projection entry must be an object")
+        entry = dict(raw_entry)
+        memory_id = require_uuid(str(entry.get("memoryId") or ""), field="memory_id")
+        version_id = require_uuid(
+            str(entry.get("memoryVersionId") or ""),
+            field="memory_version_id",
+        )
+        if memory_id in seen_memory_ids or version_id in seen_version_ids:
+            raise OwnerTruthMemoryProjectionError(
+                "persisted projection contains duplicate current memories"
+            )
+        if not isinstance(entry.get("content"), Mapping):
+            raise OwnerTruthMemoryProjectionError("persisted projection content must be an object")
+        if not isinstance(entry.get("evidenceRefs"), list):
+            raise OwnerTruthMemoryProjectionError(
+                "persisted projection evidenceRefs must be a list"
+            )
+        citation = entry.get("citation")
+        if (
+            not isinstance(citation, Mapping)
+            or str(citation.get("memoryId") or "") != memory_id
+            or str(citation.get("memoryVersionId") or "") != version_id
+        ):
+            raise OwnerTruthMemoryProjectionError("persisted projection citation is invalid")
+        seen_memory_ids.add(memory_id)
+        seen_version_ids.add(version_id)
+        restored_entries.append(entry)
+    restored_entries.sort(
+        key=lambda item: (
+            str(item["memoryId"]),
+            int(item.get("memoryVersion") or 0),
+            str(item["memoryVersionId"]),
+        )
+    )
+
+    if not isinstance(person_memory_model, Mapping):
+        raise OwnerTruthMemoryProjectionError(
+            "persisted person-memory model must be an object"
+        )
+    persisted_model = dict(person_memory_model)
+    persisted_memory_count = persisted_model.get("memoryCount")
+    if (
+        not isinstance(persisted_memory_count, int)
+        or isinstance(persisted_memory_count, bool)
+        or persisted_memory_count != len(restored_entries)
+        or not str(persisted_model.get("modelVersion") or "").strip()
+    ):
+        raise OwnerTruthMemoryProjectionError(
+            "persisted person-memory model does not match projection entries"
+        )
+    return {
+        "schemaVersion": OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION,
+        "projectionSource": OWNER_TRUTH_MEMORY_PROJECTION_SOURCE,
+        "state": "ready",
+        "vaultId": normalized_vault_id,
+        "ownerSubjectId": normalized_owner_id,
+        "authorityEpoch": authority_epoch,
+        "memoryRevision": memory_revision,
+        **rights.projection_fence(),
+        "checkpoint": normalized_checkpoint,
+        "sourceHash": normalized_source_hash,
+        "entryCount": len(restored_entries),
+        "entries": restored_entries,
+        "personMemoryModel": persisted_model,
+    }
+
+
+def _validated_projection_entries(
+    *,
+    vault_id: str,
+    owner_subject_id: str,
+    authority_epoch: int,
+    inputs: Iterable[OwnerTruthMemoryProjectionInput],
+    rights_snapshot: OwnerTruthProjectionRightsSnapshot | None,
+    memory_revision: int,
+) -> tuple[str, str, OwnerTruthProjectionRightsSnapshot, list[dict[str, Any]]]:
+    """Validate authority and materialize the stable fact-entry list once."""
+
+    normalized_vault_id = require_nonblank(vault_id, field="vault_id")
+    normalized_owner_id = require_nonblank(owner_subject_id, field="owner_subject_id")
+    if authority_epoch < 0:
+        raise OwnerTruthMemoryProjectionError("authority_epoch must not be negative")
+    if not isinstance(memory_revision, int) or isinstance(memory_revision, bool) or memory_revision < 0:
+        raise OwnerTruthMemoryProjectionError("memory_revision must be a non-negative integer")
     rights = rights_snapshot or implicit_projection_rights_snapshot(
         vault_id=normalized_vault_id,
         owner_subject_id=normalized_owner_id,
@@ -214,13 +426,29 @@ def build_ready_memory_projection(
         entries.append(item.entry())
 
     entries.sort(key=lambda item: (item["memoryId"], item["memoryVersion"], item["memoryVersionId"]))
-    person_memory_model = build_person_memory_model(entries)
+    return normalized_vault_id, normalized_owner_id, rights, entries
+
+
+def _ready_projection_from_entries(
+    *,
+    vault_id: str,
+    owner_subject_id: str,
+    authority_epoch: int,
+    memory_revision: int,
+    rights: OwnerTruthProjectionRightsSnapshot,
+    entries: list[dict[str, Any]],
+    person_memory_model: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Hash one ready projection from already validated persisted material."""
+
+    copied_model = _copy_object(person_memory_model, field="person_memory_model")
     source_hash = _digest(
         {
             "schemaVersion": OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION,
-            "vaultId": normalized_vault_id,
-            "ownerSubjectId": normalized_owner_id,
+            "vaultId": vault_id,
+            "ownerSubjectId": owner_subject_id,
             "authorityEpoch": authority_epoch,
+            "memoryRevision": memory_revision,
             "rights": rights.projection_fence(),
             "entries": entries,
         }
@@ -230,22 +458,23 @@ def build_ready_memory_projection(
             "projectionSource": OWNER_TRUTH_MEMORY_PROJECTION_SOURCE,
             "sourceHash": source_hash,
             "entries": entries,
-            "personMemoryModel": person_memory_model,
+            "personMemoryModel": copied_model,
         }
     )
     return {
         "schemaVersion": OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION,
         "projectionSource": OWNER_TRUTH_MEMORY_PROJECTION_SOURCE,
         "state": "ready",
-        "vaultId": normalized_vault_id,
-        "ownerSubjectId": normalized_owner_id,
+        "vaultId": vault_id,
+        "ownerSubjectId": owner_subject_id,
         "authorityEpoch": authority_epoch,
+        "memoryRevision": memory_revision,
         **rights.projection_fence(),
         "checkpoint": projection_hash,
         "sourceHash": source_hash,
         "entryCount": len(entries),
         "entries": entries,
-        "personMemoryModel": person_memory_model,
+        "personMemoryModel": copied_model,
     }
 
 
@@ -341,6 +570,8 @@ __all__ = [
     "OwnerTruthMemoryProjectionInput",
     "OwnerTruthMemoryProjectionResult",
     "build_ready_memory_projection",
+    "hydrate_ready_memory_projection",
+    "restore_persisted_ready_memory_projection",
     "build_rebuilding_memory_projection",
     "projection_summary",
 ]

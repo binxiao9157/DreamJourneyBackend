@@ -15,7 +15,12 @@ from threading import RLock
 from typing import Any, Mapping, Protocol
 
 from app.domain.owner_truth.candidate_decisions import OwnerTruthCandidateReviewAccessDenied
+from app.domain.owner_truth.memory_projection import (
+    OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION,
+    OWNER_TRUTH_MEMORY_PROJECTION_SOURCE,
+)
 from app.domain.owner_truth.search_documents import (
+    OWNER_TRUTH_SEARCH_DOCUMENT_PROJECTION_SCHEMA_VERSION,
     OwnerTruthSearchDocument,
     OwnerTruthSearchDocumentProjection,
     OwnerTruthSearchDocumentProjectionError,
@@ -164,7 +169,7 @@ class PostgresOwnerTruthMemorySearchDocumentProjectionRepository:
                 and int(existing["document_count"]) == len(projection.documents)
                 and str(existing["document_hash"]) == digest
                 and str(existing["schema_version"])
-                == "owner-truth-search-document-projection-v1"
+                == OWNER_TRUTH_SEARCH_DOCUMENT_PROJECTION_SCHEMA_VERSION
                 and stored is not None
                 and stored.document_digest() == digest
                 else "rebuilt"
@@ -194,7 +199,7 @@ class PostgresOwnerTruthMemorySearchDocumentProjectionRepository:
                     projection.owner_subject_id,
                     projection.checkpoint,
                     digest,
-                    "owner-truth-search-document-projection-v1",
+                    OWNER_TRUTH_SEARCH_DOCUMENT_PROJECTION_SCHEMA_VERSION,
                 ),
             )
             cursor.execute(
@@ -258,41 +263,73 @@ class PostgresOwnerTruthMemorySearchDocumentProjectionRepository:
         context: OwnerTruthCommandContext,
     ) -> OwnerTruthSearchDocumentProjection | None:
         _assert_owner_context(context)
-        current = self._current_projection(context=context)
-        if current is None:
-            return None
         with self._cursor() as cursor:
-            self._assert_active_vault(
-                cursor,
-                context=context,
-                authority_epoch=current.authority_epoch,
-                lock=False,
-            )
             cursor.execute(
                 """
-                SELECT owner_subject_id, state, source_projection_checkpoint,
-                    document_count, document_hash, schema_version
-                FROM owner_truth.search_document_checkpoints
-                WHERE vault_id = %s AND authority_epoch = %s
+                SELECT
+                    vault.authority_epoch,
+                    search_checkpoint.owner_subject_id,
+                    search_checkpoint.state,
+                    search_checkpoint.source_projection_checkpoint,
+                    search_checkpoint.document_count,
+                    search_checkpoint.document_hash,
+                    search_checkpoint.schema_version,
+                    memory_checkpoint.owner_subject_id AS memory_owner_subject_id,
+                    memory_checkpoint.projection_source,
+                    memory_checkpoint.state AS memory_state,
+                    memory_checkpoint.projection_hash,
+                    memory_checkpoint.schema_version AS memory_schema_version,
+                    memory_checkpoint.memory_revision,
+                    memory_revision.revision AS current_memory_revision
+                FROM owner_truth.vaults AS vault
+                JOIN owner_truth.memory_projection_checkpoints AS memory_checkpoint
+                  ON memory_checkpoint.vault_id = vault.vault_id
+                 AND memory_checkpoint.authority_epoch = vault.authority_epoch
+                JOIN owner_truth.memory_revisions AS memory_revision
+                  ON memory_revision.vault_id = vault.vault_id
+                JOIN owner_truth.search_document_checkpoints AS search_checkpoint
+                  ON search_checkpoint.vault_id = vault.vault_id
+                 AND search_checkpoint.authority_epoch = vault.authority_epoch
+                WHERE vault.vault_id = %s
+                  AND vault.owner_subject_id = %s
+                  AND vault.status = 'active'
+                FOR SHARE OF vault, memory_checkpoint, memory_revision, search_checkpoint
                 """,
-                (current.vault_id, current.authority_epoch),
+                (context.vault_id, context.owner_subject_id),
             )
             checkpoint = cursor.fetchone()
             if (
                 checkpoint is None
-                or str(checkpoint["owner_subject_id"]) != current.owner_subject_id
+                or str(checkpoint["owner_subject_id"]) != context.owner_subject_id
                 or str(checkpoint["state"]) != "ready"
-                or str(checkpoint["source_projection_checkpoint"]) != current.checkpoint
-                or int(checkpoint["document_count"]) != len(current.documents)
-                or str(checkpoint["document_hash"]) != current.document_digest()
+                or str(checkpoint["memory_owner_subject_id"]) != context.owner_subject_id
+                or str(checkpoint["projection_source"])
+                != OWNER_TRUTH_MEMORY_PROJECTION_SOURCE
+                or str(checkpoint["memory_state"]) != "ready"
+                or str(checkpoint["source_projection_checkpoint"])
+                != str(checkpoint["projection_hash"])
+                or int(checkpoint["memory_revision"])
+                != int(checkpoint["current_memory_revision"])
                 or str(checkpoint["schema_version"])
-                != "owner-truth-search-document-projection-v1"
+                != OWNER_TRUTH_SEARCH_DOCUMENT_PROJECTION_SCHEMA_VERSION
+                or str(checkpoint["memory_schema_version"])
+                != OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION
             ):
                 return None
-            stored = self._stored_projection(cursor, projection=current)
+            persisted = OwnerTruthSearchDocumentProjection(
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                authority_epoch=int(checkpoint["authority_epoch"]),
+                checkpoint=str(checkpoint["projection_hash"]),
+                documents=(),
+            )
+            stored = self._stored_projection(cursor, projection=persisted)
         if stored is None:
             return None
-        if stored.document_digest() != current.document_digest():
+        if (
+            len(stored.documents) != int(checkpoint["document_count"])
+            or stored.document_digest() != str(checkpoint["document_hash"])
+        ):
             return None
         return stored
 

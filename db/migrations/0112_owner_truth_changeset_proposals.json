@@ -1,0 +1,24 @@
+{
+  "version": "0112",
+  "name": "owner_truth_changeset_proposals",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthChangeSetProposalV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true
+  },
+  "summary": "Adds immutable pre-review V5 ChangeSet proposals and binds terminal decision receipts to the exact Owner-visible proposal hash.",
+  "operations": [
+    "create immutable changeset proposal and operation tables",
+    "add nullable paired proposal binding columns to decision receipts",
+    "enforce receipt-to-proposal consistency with a deferred foreign key"
+  ],
+  "rollback": "No destructive down migration. Disable V5 candidate decisions for clients that cannot bind proposals, retain proposal audit rows, and use a forward-compatible repair migration if needed.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true
+  }
+}

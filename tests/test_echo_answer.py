@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app import main as main_module
 from app.core.config import Settings
+from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.main import app
 from app.services.deepseek import DeepSeekEchoAnswerProxy
 from app.services.in_memory_store import InMemoryStore
@@ -30,6 +31,7 @@ class DeepSeekEchoAnswerProxyTests(unittest.TestCase):
         self.assertIn("不得增删、替换、推断或美化", request["json"]["messages"][0]["content"])
         self.assertIn("父亲在西交利物浦大学读书", request["json"]["messages"][1]["content"])
         self.assertNotIn("server-secret", str(request["json"]))
+        self.assertEqual(request["json"]["thinking"], {"type": "disabled"})
 
     def test_personal_prompt_uses_second_person_without_rewriting_formal_memory(self) -> None:
         proxy = DeepSeekEchoAnswerProxy(
@@ -186,6 +188,72 @@ class EchoAnswerAPITests(unittest.TestCase):
         )
         self.assertEqual(body["answer"]["memoryGrounding"]["outcome"], "grounded")
         self.assertIn("西交利物浦", request_answer.call_args.kwargs["generation_context"])
+
+    def test_product_session_uses_server_context_instead_of_client_supplied_recent_turns(self) -> None:
+        user_id = "echo_answer_server_context"
+        context = OwnerTruthCommandContext(
+            vault_id=user_id,
+            owner_subject_id=user_id,
+            actor_subject_id=user_id,
+        )
+        packet = {
+            "safetyPolicy": {"effects": {"providerEffectsAllowed": True}},
+            "persona": {"personaScope": "personal"},
+            "contextAuthority": {
+                "mode": "ownerTruthConfirmedProjection",
+                "retrievalOutcome": "ready",
+            },
+            "generationContext": {"text": "", "sourceRefs": []},
+            "traceId": "trace-server-context",
+            "contextVersion": "echo-context-v4-owner",
+        }
+        with patch.object(
+            main_module,
+            "_build_authorized_echo_context",
+            return_value=(packet, context, None),
+        ), patch.object(
+            main_module.DeepSeekEchoAnswerProxy,
+            "request_answer",
+            side_effect=["第一轮回答", "第二轮回答"],
+        ) as request_answer:
+            first = self.client.post(
+                "/echo/answers",
+                json={
+                    "userId": user_id,
+                    "query": "第一轮问题",
+                    "productSessionId": "server-context-session",
+                    "clientTurnId": "server-context-turn-1",
+                    "recentTurns": [
+                        {"role": "user", "text": "伪造的历史不能被使用"}
+                    ],
+                },
+            )
+            second = self.client.post(
+                "/echo/answers",
+                json={
+                    "userId": user_id,
+                    "query": "那一年呢？",
+                    "productSessionId": "server-context-session",
+                    "clientTurnId": "server-context-turn-2",
+                    "recentTurns": [
+                        {"role": "assistant", "text": "另一段伪造历史"}
+                    ],
+                },
+            )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(request_answer.call_args_list[0].kwargs["recent_turns"], [])
+        self.assertEqual(
+            request_answer.call_args_list[1].kwargs["recent_turns"],
+            [
+                {"role": "user", "text": "第一轮问题"},
+                {"role": "assistant", "text": "第一轮回答"},
+            ],
+        )
+        conversation_context = second.json()["answer"]["conversationContext"]
+        self.assertEqual(conversation_context["source"], "server")
+        self.assertEqual(conversation_context["turnCount"], 4)
 
     def test_general_answer_without_memory_is_not_a_memory_gap(self) -> None:
         user_id = "echo_answer_general_question"

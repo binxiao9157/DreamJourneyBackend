@@ -3,6 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 import unittest
+from dataclasses import replace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -16,7 +17,11 @@ from app.domain.owner_truth.contracts import (
     PerspectiveType,
     SensitivityLevel,
 )
-from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.ontology import (
+    OWNER_TRUTH_SCHEMA_VERSION,
+    OWNER_TRUTH_SCHEMA_VERSION_V5,
+    enrich_memory_payload_v5,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
@@ -350,6 +355,192 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(
             client.get(f"/v2/vaults/{vault_id}/candidates", headers=headers).json()["candidates"],
             [],
+        )
+
+    def test_v5_candidate_binds_an_owner_visible_changeset_before_decision(self) -> None:
+        owner_id, headers = self._login("13800139142")
+        vault_id = "vault-api-v5-changeset-preview"
+        candidate = self._candidate(vault_id=vault_id, owner_subject_id=owner_id)
+        content = enrich_memory_payload_v5(
+            kind=MemoryKind.KNOWLEDGE,
+            payload={
+                "statement": "我在 2016 年从 A 大学计算机专业毕业。",
+                "knowledgeType": "education",
+                "domains": ["knowledgeSkills"],
+                "factType": "knowledge",
+                "predicate": "graduatedFrom",
+                "object": {"label": "A 大学", "category": "university"},
+                "qualifiers": {"validTime": {"precision": "year", "expression": "2016 年"}},
+            },
+            provenance={"mode": "selfReport"},
+            memory_subject_id="person-owner",
+            claim_subject_id="person-owner",
+        )
+        candidate = replace(
+            candidate,
+            memory_kind=MemoryKind.KNOWLEDGE,
+            content_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V5,
+            content_hash=_content_hash(content),
+            payload={
+                **candidate.payload,
+                "content": content,
+                "contentSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION_V5,
+            },
+        )
+        self._seed(candidate)
+
+        inbox = client.get(f"/v2/vaults/{vault_id}/candidates", headers=headers)
+        self.assertEqual(inbox.status_code, 200, inbox.text)
+        proposed = inbox.json()["candidates"][0]["proposedChangeSet"]
+        self.assertEqual(proposed["baseMemoryRevision"], 0)
+        self.assertEqual(len(proposed["operations"]), 1)
+        self.assertEqual(proposed["operations"][0]["operationKind"], "add")
+
+        rejected_without_binding = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
+            headers=headers,
+            json={
+                "commandId": "candidate-api-v5-missing-proposal-001",
+                "expectedCandidateVersion": 1,
+                "expectedMemoryRevision": 0,
+                "action": "accept",
+                "reasonCode": "ownerReviewed",
+            },
+        )
+        self.assertEqual(rejected_without_binding.status_code, 409)
+        self.assertEqual(
+            rejected_without_binding.json()["detail"]["code"],
+            "ownerTruthCandidateReviewConflict",
+        )
+
+        refreshed = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/changeset-preview",
+            headers=headers,
+            json={},
+        )
+        self.assertEqual(refreshed.status_code, 200, refreshed.text)
+        self.assertEqual(
+            refreshed.json()["proposedChangeSet"]["proposalHash"],
+            proposed["proposalHash"],
+        )
+
+        created = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
+            headers=headers,
+            json={
+                "commandId": "candidate-api-v5-bound-proposal-001",
+                "expectedCandidateVersion": 1,
+                "expectedMemoryRevision": proposed["baseMemoryRevision"],
+                "expectedChangeSetId": proposed["changeSetId"],
+                "expectedProposalHash": proposed["proposalHash"],
+                "action": "accept",
+                "reasonCode": "ownerReviewed",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()["memoryActivation"]["status"], "created")
+
+    def test_v5_dependency_group_previews_commits_atomically_and_replays(self) -> None:
+        owner_id, headers = self._login("13800139172")
+        vault_id = "vault-api-v5-changeset-group"
+        candidates: list[OwnerTruthCandidateSnapshot] = []
+        for index in range(2):
+            candidate = self._candidate(vault_id=vault_id, owner_subject_id=owner_id)
+            content = enrich_memory_payload_v5(
+                kind=MemoryKind.KNOWLEDGE,
+                payload={
+                    "statement": "我在 2016 年从 A 大学计算机专业毕业。",
+                    "knowledgeType": "education",
+                    "domains": ["knowledgeSkills"],
+                    "factType": "knowledge",
+                    "predicate": "graduatedFrom",
+                    "object": {"label": "A 大学", "category": "university"},
+                    "qualifiers": {
+                        "validTime": {"precision": "year", "expression": "2016 年"},
+                        "captureOrdinal": index,
+                    },
+                },
+                provenance={"mode": "selfReport"},
+                memory_subject_id="person-owner",
+                claim_subject_id="person-owner",
+            )
+            candidate = replace(
+                candidate,
+                memory_kind=MemoryKind.KNOWLEDGE,
+                content_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V5,
+                content_hash=_content_hash(content),
+                payload={
+                    **candidate.payload,
+                    "content": content,
+                    "contentSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION_V5,
+                },
+            )
+            candidates.append(candidate)
+            self._seed(candidate)
+
+        selections = [
+            {
+                "candidateId": candidate.candidate_id,
+                "expectedCandidateVersion": candidate.row_version,
+                "action": "accept",
+                "reasonCode": "ownerReviewed",
+            }
+            for candidate in candidates
+        ]
+        dependencies = [
+            {
+                "beforeCandidateId": candidates[0].candidate_id,
+                "afterCandidateId": candidates[1].candidate_id,
+            }
+        ]
+        preview = client.post(
+            f"/v2/vaults/{vault_id}/memory-changeset-groups/preview",
+            headers=headers,
+            json={
+                "commandId": "candidate-api-group-preview-001",
+                "selections": selections,
+                "dependencies": dependencies,
+            },
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.headers["cache-control"], "no-store")
+        group = preview.json()["groupProposal"]
+        self.assertEqual(group["baseMemoryRevision"], 0)
+        self.assertEqual(len(group["members"]), 2)
+        self.assertEqual(
+            [member["proposedChangeSet"]["baseMemoryRevision"] for member in group["members"]],
+            [0, 1],
+        )
+
+        command = {
+            "commandId": "candidate-api-group-confirm-001",
+            "selections": selections,
+            "dependencies": dependencies,
+            "expectedMemoryRevision": group["baseMemoryRevision"],
+            "expectedGroupProposalId": group["groupProposalId"],
+            "expectedGroupProposalHash": group["groupProposalHash"],
+        }
+        created = client.post(
+            f"/v2/vaults/{vault_id}/memory-changeset-groups/confirm",
+            headers=headers,
+            json=command,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()["status"], "created")
+        self.assertEqual(created.json()["appliedMemoryRevision"], 2)
+        self.assertEqual(len(created.json()["members"]), 2)
+        self.assertEqual(created.json()["projectionEffectCount"], 2)
+
+        replay = client.post(
+            f"/v2/vaults/{vault_id}/memory-changeset-groups/confirm",
+            headers=headers,
+            json=command,
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["status"], "deduplicated")
+        self.assertEqual(
+            replay.json()["groupReceiptId"],
+            created.json()["groupReceiptId"],
         )
 
     def test_owner_can_read_terminal_candidate_history_without_reopening_review(self) -> None:

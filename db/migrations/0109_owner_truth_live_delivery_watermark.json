@@ -1,0 +1,12 @@
+{
+  "version": "0109",
+  "name": "owner_truth_live_delivery_watermark",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthLiveReliableDeliveryV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true,
+    "ownerTruthLiveReliableDelivery": true
+  }
+}

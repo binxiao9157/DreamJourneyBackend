@@ -69,6 +69,8 @@ class OwnerTruthCandidateExtractionInput:
     source_content_hash: str
     source_text: str
     source_metadata: Mapping[str, Any] | None = None
+    source_id: str | None = None
+    source_version: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_content_hash, str) or len(self.source_content_hash) != 64:
@@ -91,6 +93,25 @@ class OwnerTruthCandidateExtractionInput:
                 "candidate extraction Source metadata is not recoverable"
             ) from error
         object.__setattr__(self, "source_metadata", normalized_metadata)
+        source_id = str(self.source_id or "").strip() or None
+        source_version = self.source_version
+        if (source_id is None) != (source_version is None):
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction Source identity must include id and version together"
+            )
+        if source_id is not None and not source_id:
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction Source id is unavailable"
+            )
+        if source_version is not None and (
+            isinstance(source_version, bool)
+            or not isinstance(source_version, int)
+            or source_version < 0
+        ):
+            raise OwnerTruthCandidateExtractionInputUnavailable(
+                "candidate extraction Source version is invalid"
+            )
+        object.__setattr__(self, "source_id", source_id)
 
 
 class OwnerTruthCandidateExtractionStore(Protocol):
@@ -516,6 +537,8 @@ class PostgresOwnerTruthCandidateExtractionInputRepository:
             source_content_hash=str(source["content_hash"]),
             source_text=text if isinstance(text, str) else "",
             source_metadata=metadata if isinstance(metadata, Mapping) else {},
+            source_id=source_id,
+            source_version=int(source["source_version"]),
         )
 
     def _cursor(self):

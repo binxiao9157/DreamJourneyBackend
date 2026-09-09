@@ -1423,6 +1423,21 @@ class NarrativeProjectService:
         page = OwnerTruthFormalMemoryService(self.formal_memory_store).list(
             context=context, query=OwnerTruthFormalMemoryQuery(limit=100)
         )
+        if page.items:
+            from app.services.owner_truth_derived_memory_access import (
+                OwnerTruthDerivedMemoryAccessDenied,
+                require_owner_truth_derived_memory_access,
+            )
+
+            try:
+                require_owner_truth_derived_memory_access(
+                    store=self.formal_memory_store,
+                    context=context,
+                )
+            except OwnerTruthDerivedMemoryAccessDenied as error:
+                raise NarrativeReadinessInsufficient(
+                    "formal memories are unavailable"
+                ) from error
         return tuple(
             self._memory_ref(item)
             for item in page.items

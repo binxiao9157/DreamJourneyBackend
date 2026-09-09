@@ -52,6 +52,7 @@ class OperationMetricCoverageTests(unittest.TestCase):
             {
                 "OwnerTruthCandidateExtractionWorkerRuntime",
                 "OwnerTruthMemoryProjectionWorkerRuntime",
+                "OwnerTruthMemorySearchEmbeddingWorkerRuntime",
                 "OwnerTruthMediaProcessingWorkerRuntime",
                 "OwnerTruthMediaDeletionWorkerRuntime",
                 "BusinessMessageProjectionWorkerRuntime",
@@ -75,7 +76,7 @@ class OperationMetricCoverageTests(unittest.TestCase):
 
         self.assertEqual(summary["schemaVersion"], OPERATION_METRIC_COVERAGE_SCHEMA_VERSION)
         self.assertEqual(summary["httpRouteCoverage"]["instrumentedCount"], 1)
-        self.assertEqual(summary["criticalWorkerCoverage"]["instrumentedCount"], 6)
+        self.assertEqual(summary["criticalWorkerCoverage"]["instrumentedCount"], 7)
         self.assertEqual(summary["criticalWorkerCoverage"]["notInstrumentedCount"], 3)
         self.assertFalse(summary["coverageComplete"])
         self.assertFalse(summary["sloClaimAllowed"])

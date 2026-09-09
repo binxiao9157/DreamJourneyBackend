@@ -226,7 +226,9 @@ def create_narrative_router(
         try:
             with _uow(store, f"narrative-artifacts:{project_id}", None):
                 repo = repository()
-                repo.get_project(scope=value_scope, project_id=project_id)
+                NarrativeProjectService(repo, store).synchronize_memory_status(
+                    scope=value_scope, project_id=project_id
+                )
                 values = repo.list_artifacts(
                     project_id=project_id, artifact_type=artifactType
                 )
@@ -246,7 +248,9 @@ def create_narrative_router(
         try:
             with _uow(store, f"narrative-artifact:{artifact_version_id}", None):
                 repo = repository()
-                repo.get_project(scope=value_scope, project_id=project_id)
+                NarrativeProjectService(repo, store).synchronize_memory_status(
+                    scope=value_scope, project_id=project_id
+                )
                 return repo.get_artifact(
                     project_id=project_id, artifact_version_id=artifact_version_id
                 ).public_contract()

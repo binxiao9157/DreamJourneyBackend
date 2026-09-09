@@ -1,0 +1,225 @@
+{
+  "schemaVersion": "owner-truth-key-scenario-automated-mapping-v1",
+  "sourceFixtureSha256": "2aac55e60eefd226ffa8eda5ba00f08c1fad2516ffd4e6e8f4f0542be73801c7",
+  "scenarios": [
+    {
+      "id": "K01",
+      "name": "饮食偏好近义召回",
+      "backendTests": [
+        "tests.test_owner_truth_memory_search.OwnerTruthMemorySearchTests.test_controlled_chinese_synonyms_recall_the_same_confirmed_memory",
+        "tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests.test_past_and_current_preference_is_a_temporal_change_not_a_conflict"
+      ]
+    },
+    {
+      "id": "K02",
+      "name": "特别喜欢不等于现在最喜欢",
+      "backendTests": [
+        "tests.test_owner_truth_terra_b_audit_regressions.OwnerTruthTerraBAuditRegressionTests.test_p02_weaker_candidate_preserves_confirmed_stronger_qualifier"
+      ]
+    },
+    {
+      "id": "K03",
+      "name": "分时偏好变化",
+      "backendTests": [
+        "tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests.test_past_and_current_preference_is_a_temporal_change_not_a_conflict",
+        "tests.test_owner_truth_person_memory_model.OwnerTruthPersonMemoryModelTests.test_non_overlapping_explicit_time_keeps_changed_preference_records_separate"
+      ]
+    },
+    {
+      "id": "K04",
+      "name": "学校明确更正",
+      "backendTests": [
+        "tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests.test_explicit_correction_targets_current_version",
+        "tests.test_owner_truth_memory_changeset_review.OwnerTruthMemoryChangeSetReviewTests.test_new_evidence_supersedes_the_current_version_instead_of_adding_a_record",
+        "tests.test_owner_truth_formal_memory.OwnerTruthFormalMemoryTests.test_confirmed_correction_is_idempotent_and_exposes_current_plus_three_history"
+      ]
+    },
+    {
+      "id": "K05",
+      "name": "毕业年份连续追问与歧义",
+      "backendTests": [
+        "tests.test_owner_truth_context_authority_api.OwnerTruthContextAuthorityAPITests.test_server_session_followup_resolves_before_formal_memory_retrieval",
+        "tests.test_owner_truth_echo_conversation_context.OwnerTruthEchoConversationContextTests.test_product_session_context_replays_completed_turns_and_deduplicates_request"
+      ]
+    },
+    {
+      "id": "K06",
+      "name": "在世家人转述身份不丢",
+      "backendTests": [
+        "tests.test_owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerTests.test_family_text_organization_preserves_server_provenance",
+        "tests.test_owner_truth_family_contribution_formal_api.OwnerTruthFamilyContributionFormalAPITests.test_authenticated_grant_accepts_only_static_submission_and_can_be_revoked"
+      ]
+    },
+    {
+      "id": "K07",
+      "name": "家人材料中的混合情绪主体",
+      "backendTests": [
+        "tests.test_owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerTests.test_family_text_organization_excludes_reporter_self_memories",
+        "tests.test_owner_truth_domain.OwnerTruthDomainTests.test_v5_keeps_family_claim_and_reporter_affect_subjects_separate"
+      ]
+    },
+    {
+      "id": "K08",
+      "name": "问句不是个人事实",
+      "backendTests": [
+        "tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests.test_question_is_not_promoted_to_a_cross_session_fact",
+        "tests.test_owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerTests.test_live_session_with_no_new_fact_completes_without_a_false_review_notification"
+      ]
+    },
+    {
+      "id": "K09",
+      "name": "首问与短答共同支持事实",
+      "backendTests": [
+        "tests.test_owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerTests.test_live_digest_uses_only_user_evidence_and_excludes_assistant_suggestions",
+        "tests.test_owner_truth_interview_input_api.OwnerTruthInterviewInputAPITests.test_live_assistant_turn_is_context_only_and_batch_waits_for_explicit_end"
+      ]
+    },
+    {
+      "id": "K10",
+      "name": "目标与已发生经历分开",
+      "backendTests": [
+        "tests.test_owner_truth_domain.OwnerTruthDomainTests.test_v5_keeps_goal_experience_and_self_reported_skill_distinct"
+      ]
+    },
+    {
+      "id": "K11",
+      "name": "历史情绪不扩展为当前性格",
+      "backendTests": [
+        "tests.test_owner_truth_domain.OwnerTruthDomainTests.test_v5_historical_affect_does_not_become_current_trait_or_diagnosis"
+      ]
+    },
+    {
+      "id": "K12",
+      "name": "同源转发与同键重放",
+      "backendTests": [
+        "tests.test_evidence_store.InMemoryEvidenceStoreTests.test_append_is_idempotent_and_rejects_same_id_with_different_payload",
+        "tests.test_owner_truth_create_source.OwnerTruthCreateSourceCommandTests.test_same_command_replays_the_original_receipt_without_duplicate_source",
+        "tests.test_owner_truth_create_source.OwnerTruthCreateSourceCommandTests.test_reusing_command_id_with_changed_payload_is_an_explicit_conflict"
+      ]
+    },
+    {
+      "id": "K13",
+      "name": "十回合整场只产生一个审核批次",
+      "backendTests": [
+        "tests.test_owner_truth_interview_input_api.OwnerTruthInterviewInputAPITests.test_owner_can_end_session_once_and_create_one_session_exit_review_batch",
+        "tests.test_owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerTests.test_closed_live_conversation_uses_semantic_organization_for_pending_memories"
+      ]
+    },
+    {
+      "id": "K14",
+      "name": "缺序号与提前结束",
+      "backendTests": [
+        "tests.test_owner_truth_conversation.OwnerTruthConversationTests.test_live_delivery_watermark_rejects_early_close_then_accepts_late_turn",
+        "tests.test_owner_truth_interview_input_api.OwnerTruthInterviewInputAPITests.test_live_end_waits_for_a_contiguous_durable_turn_prefix"
+      ]
+    },
+    {
+      "id": "K15",
+      "name": "供应商重连与用户新开场区分",
+      "backendTests": [
+        "tests.test_owner_truth_conversation.OwnerTruthConversationTests.test_lost_live_receipts_replay_after_process_restart_and_new_product_session_isolated",
+        "tests.test_realtime_voice_proxy.RealtimeVoiceSessionBrokerTests.test_client_session_id_reuses_product_session_across_provider_tickets"
+      ]
+    },
+    {
+      "id": "K16",
+      "name": "并发审核和事务失败",
+      "backendTests": [
+        "tests.test_owner_truth_memory_changeset_group_review.OwnerTruthMemoryChangeSetGroupReviewTests.test_second_formal_write_failure_rolls_back_every_member",
+        "tests.test_owner_truth_memory_changeset_group_review.OwnerTruthMemoryChangeSetGroupReviewTests.test_second_receipt_failure_rolls_back_every_member",
+        "tests.test_owner_truth_memory_changeset_group_review.OwnerTruthMemoryChangeSetGroupReviewTests.test_second_outbox_failure_rolls_back_every_member_and_effect",
+        "tests.test_owner_truth_memory_changeset_group_review.OwnerTruthMemoryChangeSetGroupReviewTests.test_stale_group_preview_does_not_partially_decide_candidates"
+      ]
+    },
+    {
+      "id": "K17",
+      "name": "事实成功与概览失败分开",
+      "backendTests": [
+        "tests.test_owner_truth_person_memory_profile.OwnerTruthPersonMemoryProfileTests.test_profile_marks_last_evidence_bound_version_stale_when_derivation_fails",
+        "tests.test_owner_truth_thread_summary_projection.OwnerTruthThreadSummaryProjectionTests.test_source_change_invalidates_checkpoint_until_explicit_rebuild"
+      ]
+    },
+    {
+      "id": "K18",
+      "name": "删除和撤权传播",
+      "backendTests": [
+        "tests.test_owner_truth_projection_rights_fence.OwnerTruthProjectionRightsFenceTests.test_revocation_blocks_every_derived_formal_memory_reader",
+        "tests.test_owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerTests.test_stale_revoked_and_deleted_sources_are_terminally_blocked",
+        "tests.test_realtime_voice_proxy.RealtimeVoiceSessionBrokerTests.test_authority_epoch_change_revokes_bound_live_lease"
+      ]
+    },
+    {
+      "id": "K19",
+      "name": "跨档案及部分授权隔离",
+      "backendTests": [
+        "tests.test_owner_truth_conversation.OwnerTruthConversationTests.test_cross_owner_context_cannot_read_or_append_to_the_session",
+        "tests.test_owner_truth_context_shadow.OwnerTruthContextShadowTests.test_non_owner_is_denied",
+        "tests.test_owner_truth_memory_search.OwnerTruthMemorySearchTests.test_cross_owner_and_oversized_query_fail_closed"
+      ]
+    },
+    {
+      "id": "K20",
+      "name": "同事实两种对话",
+      "backendTests": [
+        "tests.test_owner_truth_formal_fact_eligibility.FormalFactEligibilityTests.test_live_snapshot_and_search_use_the_same_eligible_versions",
+        "tests.test_owner_truth_context_authority_api.OwnerTruthContextAuthorityAPITests.test_owner_answer_is_grounded_and_audits_exact_typed_citation",
+        "tests.test_realtime_voice_proxy.RealtimeVoiceSessionBrokerTests.test_ticket_binds_live_target_and_formal_memory_checkpoint"
+      ]
+    },
+    {
+      "id": "K21",
+      "name": "Live中途事实更新能力门槛",
+      "backendTests": [
+        "tests.test_realtime_voice_proxy.RealtimeVoiceSessionBrokerTests.test_formal_memory_revision_change_revokes_an_active_bound_live_lease",
+        "tests.test_realtime_voice_proxy.RealtimeVoiceSessionBrokerTests.test_live_ticket_rejects_a_snapshot_that_does_not_match_its_binding"
+      ]
+    },
+    {
+      "id": "K22",
+      "name": "原生打断和播放后续听",
+      "backendTests": [
+        "tests.test_realtime_voice_proxy.RealtimeVoiceSessionBrokerTests.test_client_frames_are_forwarded_opaquely_with_a_shared_budget"
+      ],
+      "iosTests": [
+        "AudioOwnerLeaseModelTests/testUserBargeInReturnsSpeakingTurnToListening",
+        "AudioOwnerLeaseModelTests/testUserControlledLiveDoesNotScheduleLegacyDelayedReplyAtTenTurns"
+      ]
+    },
+    {
+      "id": "K23",
+      "name": "新话题连聊及无新增结果",
+      "backendTests": [
+        "tests.test_owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerTests.test_live_session_with_no_new_fact_completes_without_a_false_review_notification",
+        "tests.test_echo_answer.EchoAnswerAPITests.test_general_answer_without_memory_is_not_a_memory_gap",
+        "tests.test_owner_truth_conversation.OwnerTruthConversationTests.test_message_append_is_owner_scoped_idempotent_and_does_not_promote_memory"
+      ]
+    },
+    {
+      "id": "K24",
+      "name": "照片与陌生人物",
+      "backendTests": [
+        "tests.test_owner_truth_verified_media_processor_shadow.VerifiedMediaExtractionResultShadowTests.test_successful_media_result_is_value_minimized_and_requires_a_separate_proposal",
+        "tests.test_owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerTests.test_trusted_image_understanding_source_creates_inferred_review_candidate",
+        "tests.test_owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerTests.test_tampered_image_understanding_facets_fail_closed"
+      ]
+    },
+    {
+      "id": "K25",
+      "name": "整体文本与自传无反向污染",
+      "backendTests": [
+        "tests.test_owner_truth_person_memory_profile.OwnerTruthPersonMemoryProfileTests.test_profile_aggregates_current_memories_into_dimension_narratives",
+        "tests.test_owner_truth_person_memory_profile.OwnerTruthPersonMemoryProfileTests.test_paragraph_evidence_uses_each_biography_block_not_the_whole_chapter",
+        "tests.test_narrative_deepseek_provider.DeepSeekNarrativeProviderTests.test_four_stage_adapter_commits_only_fact_guarded_artifacts"
+      ]
+    },
+    {
+      "id": "K26",
+      "name": "媒体文本与整理失败诚实处理",
+      "backendTests": [
+        "tests.test_owner_truth_media_processing_worker.OwnerTruthMediaProcessingWorkerTests.test_text_media_creates_private_import_source_and_candidate_effect",
+        "tests.test_owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerTests.test_adapter_failure_retries_until_the_explicit_attempt_limit",
+        "tests.test_owner_truth_candidate_extraction_worker.OwnerTruthCandidateExtractionWorkerTests.test_replay_deduplicates_the_immutable_extraction_and_candidate"
+      ]
+    }
+  ]
+}

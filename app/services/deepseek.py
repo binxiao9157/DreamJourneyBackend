@@ -1,5 +1,7 @@
 import json
 from enum import Enum
+import re
+import time
 from typing import Any, Dict, List, Mapping, Optional
 
 import httpx
@@ -7,8 +9,8 @@ import httpx
 from app.core.config import Settings
 from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_FACET_NAMES,
-    OWNER_TRUTH_SCHEMA_VERSION_V4,
-    enrich_memory_payload_v4,
+    OWNER_TRUTH_SCHEMA_VERSION_V5,
+    enrich_memory_payload_v5,
     validate_memory_facets,
     validate_memory_payload,
 )
@@ -548,14 +550,52 @@ class DeepSeekTextMemoryOrganizationProxy:
     """Turn one Owner-authored text Source into typed, reviewable memories."""
 
     model = "deepseek-v4-flash"
-    prompt_version = "owner-truth-text-memory-organization-v2"
+    prompt_version = "owner-truth-text-memory-organization-v5"
     maximum_source_characters = 20_000
     maximum_memory_count = 8
+    maximum_primary_characters = 1_000
+    maximum_attempt_count = 3
+    _allowed_extractor_fact_types = {
+        MemoryKind.EXPERIENCE: {
+            "attribute",
+            "event",
+            "relation",
+            "preference",
+            "habit",
+            "value",
+            "traitReport",
+            "goal",
+            "other",
+        },
+        MemoryKind.KNOWLEDGE: {
+            "attribute",
+            "knowledge",
+            "preference",
+            "habit",
+            "value",
+            "traitReport",
+            "goal",
+            "other",
+        },
+        MemoryKind.EMOTION: {"affect", "other"},
+    }
+    _explicit_nonfact_opening = re.compile(
+        r"^(?:我)?(?:曾?问过|随口问过|设想过|假设过|提出过|想象过|说过或许|在讨论中猜测)"
+    )
+    _explicit_nonfact_closing = re.compile(
+        r"(?:尚未决定|没有把它当作已发生|反思提问|不是当前.*事实|尚未报名|"
+        r"闲聊里的愿望|并没有申请|仍然只是可能性|未经证实|并未.*(?:养|发生|成为))"
+    )
 
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    def build_request(self, *, text: str) -> Dict[str, Any]:
+    def build_request(
+        self,
+        *,
+        text: str,
+        extraction_scope: str = "ownerSelf",
+    ) -> Dict[str, Any]:
         normalized = self._normalized_text(text)
         return {
             "url": self.settings.deepseek_base_url,
@@ -575,31 +615,99 @@ class DeepSeekTextMemoryOrganizationProxy:
                             "不得文学化、美化、委婉化、夸大或弱化用户表达。"
                         ),
                     },
-                    {"role": "user", "content": self.build_prompt(normalized)},
+                    {
+                        "role": "user",
+                        "content": self.build_prompt(
+                            normalized,
+                            extraction_scope=extraction_scope,
+                        ),
+                    },
                 ],
+                "response_format": {"type": "json_object"},
+                "thinking": {"type": "disabled"},
                 "temperature": 0.1,
-                "max_tokens": 2_048,
+                "max_tokens": 4_096,
             },
         }
 
     def request_organization(self, *, text: str) -> Dict[str, Any]:
+        return self._request_organization(text=text, extraction_scope="ownerSelf")
+
+    def request_family_organization(self, *, text: str) -> Dict[str, Any]:
+        """Organize a family contribution without importing reporter-self facts.
+
+        The archive subject and contributor identity remain server-owned. The
+        model only classifies whether each proposed memory is about the archive
+        subject or about the reporter, and the caller admits only the former.
+        """
+
+        return self._request_organization(text=text, extraction_scope="familyContribution")
+
+    def _request_organization(
+        self,
+        *,
+        text: str,
+        extraction_scope: str,
+    ) -> Dict[str, Any]:
         if not self.settings.deepseek_api_key:
             raise ValueError("DEEPSEEK_API_KEY is not configured")
         normalized = self._normalized_text(text)
-        request = self.build_request(text=normalized)
-        with httpx.Client(timeout=60) as client:
-            response = client.post(
-                request["url"],
-                headers=request["headers"],
-                json=request["json"],
-            )
-            response.raise_for_status()
-        content = DeepSeekImageAnalysisProxy._extract_content(response.json())
-        return self.parse_organization(content)
+        request = self.build_request(
+            text=normalized,
+            extraction_scope=extraction_scope,
+        )
+        last_error: Optional[Exception] = None
+        for attempt in range(self.maximum_attempt_count):
+            try:
+                with httpx.Client(timeout=90) as client:
+                    response = client.post(
+                        request["url"],
+                        headers=request["headers"],
+                        json=request["json"],
+                    )
+                    response.raise_for_status()
+                content = DeepSeekImageAnalysisProxy._extract_content(response.json())
+                if self._is_explicit_nonfact_source(normalized):
+                    return {"memories": []}
+                return self.parse_organization(
+                    content,
+                    require_subject_role=extraction_scope == "familyContribution",
+                    source_text=normalized,
+                )
+            except Exception as error:
+                last_error = error
+                if attempt + 1 >= self.maximum_attempt_count or not self._is_retryable(error):
+                    raise
+                time.sleep(0.35 * (2**attempt))
+        raise last_error or ValueError("DeepSeek text memory organization failed")
 
     @classmethod
-    def build_prompt(cls, text: str) -> str:
+    def build_prompt(
+        cls,
+        text: str,
+        *,
+        extraction_scope: str = "ownerSelf",
+    ) -> str:
+        if extraction_scope not in {"ownerSelf", "familyContribution"}:
+            raise ValueError("text memory organization scope is unsupported")
+        family_scope = extraction_scope == "familyContribution"
+        scope_instruction = (
+            "这是家人向他人档案提供的材料。每条 memory 必须增加 subjectRole，"
+            "只可为 memorySubject、reporterSelf 或 unknown。memorySubject 表示内容主体是档案本人；"
+            "reporterSelf 表示内容主体是转述者本人；无法确定时使用 unknown。"
+            "材料中被回忆、被描述其人生经历的人是档案本人，即使原文称其为父亲、祖父、母亲等亲属称谓，"
+            "也标为 memorySubject；说、提到、回忆或转述这件事的家人只是证据来源。"
+            "必须保留对档案本人的直接转述，但转述者自己的当前情绪、经历或评价应另标 reporterSelf，"
+            "不得混入档案本人候选。例如‘父亲以前在杭州工作，我听完后现在很难过’，"
+            "前半句为 memorySubject，后半句为 reporterSelf。"
+            if family_scope
+            else "这是档案本人主动提交的材料，不需要输出 subjectRole。"
+        )
+        subject_role_field = '"subjectRole":"memorySubject",' if family_scope else ""
         return f"""请把下面一段用户主动提交的原文整理为少量、原子化、可确认的客观正式记忆草稿。
+
+【主体范围】
+{scope_instruction}
 
 【用户原文】
 {text}
@@ -607,9 +715,9 @@ class DeepSeekTextMemoryOrganizationProxy:
 只输出以下严格 JSON，content 必须使用对应类型的字段：
 {{
   "memories": [
-    {{"memoryKind":"experience","content":{{"event":"发生了什么","time":{{"start":null,"end":null,"precision":"unknown"}},"location":null,"participants":[],"actions":[],"outcome":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}}},
-    {{"memoryKind":"knowledge","content":{{"statement":"用户明确表达的知识、观点或经验规律","knowledgeType":"personal_experience","domains":[],"applicability":null,"exceptions":[],"learnedFrom":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}}},
-    {{"memoryKind":"emotion","content":{{"emotion":"情绪名称","expression":"用户如何描述这种感受","trigger":null,"targetPersonaId":null,"time":null,"intensity":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}}}
+    {{"memoryKind":"experience",{subject_role_field}"content":{{"event":"发生了什么","time":{{"start":null,"end":null,"precision":"unknown"}},"location":null,"participants":[],"actions":[],"outcome":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}}},
+    {{"memoryKind":"knowledge",{subject_role_field}"content":{{"statement":"用户明确表达的知识、观点或经验规律","knowledgeType":"personal_experience","domains":[],"applicability":null,"exceptions":[],"learnedFrom":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}}},
+    {{"memoryKind":"emotion",{subject_role_field}"content":{{"emotion":"情绪名称","expression":"用户如何描述这种感受","trigger":null,"targetPersonaId":null,"time":null,"intensity":null,"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}}}
   ]
 }}
 
@@ -621,13 +729,24 @@ class DeepSeekTextMemoryOrganizationProxy:
 5. emotion 必须有 emotion 和 expression；原文没有明确强度、对象或原因时保持 null。
 6. facets 必须包含 people/time/places/relationships/emotions/values/personality/habits/goals/identity/reflections 十一个数组和 confidence。
 7. facet 条目格式为 {{"value":"原文支持的值","evidenceMode":"ownerStated","confidence":1.0}}；不可靠时不要填写。
-8. 不得生成诊断、评价、建议或原文没有表达的人名、地点、关系、因果和情绪。
-9. event、statement、expression 必须使用中性、客观且尽可能贴近用户原话的表述。只允许删除无意义口头填充、合并原文重复、补齐标点和拆分原子事实；不得同义美化、文学化、委婉化、夸大或弱化。
-10. 用户说“我记得”“我觉得”“可能”“大概”等内容时，必须保留这种来源或不确定性，不得改写成已经核实的确定事实。
-11. 不要把不同主题混成一个大段摘要，不要输出 JSON 之外的任何文字。"""
+8. content 还必须包含 factType（attribute/event/relation/knowledge/preference/habit/affect/value/traitReport/goal/other）、dimensions（可多选）、predicate、object（可为 null）和 qualifiers。qualifiers 至少含 polarity（positive/negative/neutral/unknown）、strengthExpression、superlativeAsserted、currentApplicability（current/historical/unknown）、validTime（start/end/precision/expression）、place、scenario。没有原文依据时使用 null 或 unknown，禁止猜测。
+9. emotion 类型还必须提供 affect，其中 experiencer、target、trigger、emotionExpression、reporter 都可为 null；不得把他人的感受或助手的推测写成用户的感受。
+10. 不得生成诊断、评价、建议或原文没有表达的人名、地点、关系、因果和情绪。
+11. event、statement、expression 必须尽可能贴近用户原话，直接摘录用户原文中的连续句子或短语，保留学校、专业、人物、地点、时间、否定词、程度词和转述来源；只允许删除无意义口头填充、合并原文重复、补齐标点和拆分原子事实，不得换同义词、概括、美化、文学化、委婉化、夸大或弱化。
+12. 用户说“我记得”“我觉得”“可能”“大概”等内容时，必须保留这种来源或不确定性，不得改写成已经核实的确定事实。
+13. 先做入库判断。纯问句、助手建议、客套话以及尚未发生且未确认的假设、想象或可能性必须输出 {{"memories":[]}}。例如“我问过是否搬家，这只是尚未决定的问题”“我想象过开店，属于闲聊里的愿望”“我猜测旧屋可能拆迁，未经证实”都不得记录。不要把“问过、设想过、假设过、想象过”本身曲解为已发生事实。只有用户明确确认某个愿望或目标就是需要记录的当前目标时，才按原话生成 goal 并保留未实现状态。
+14. 明确的更正、撤回、删除和最新核对结果必须形成候选，并完整保留“更正/撤回/删除”、旧值、新值及否定关系，供后续 ChangeSet 判断，不得因为存在否定词而丢弃。
+15. facets 中 evidenceMode=ownerStated 的 value 也必须是用户原文里的连续字面片段，不能输出上位概念、同义概括或模型生成的标签；没有可直接引用的片段就留空数组。
+16. 不要把不同主题混成一个大段摘要，不要输出 JSON 之外的任何文字。"""
 
     @classmethod
-    def parse_organization(cls, content: str) -> Dict[str, Any]:
+    def parse_organization(
+        cls,
+        content: str,
+        *,
+        require_subject_role: bool = False,
+        source_text: Optional[str] = None,
+    ) -> Dict[str, Any]:
         cleaned = content.replace("```json", "").replace("```", "").strip()
         parsed = DeepSeekImageAnalysisProxy._loads_json(cleaned)
         if parsed is None:
@@ -649,6 +768,15 @@ class DeepSeekTextMemoryOrganizationProxy:
         for position, raw_memory in enumerate(raw_memories):
             if not isinstance(raw_memory, Mapping):
                 raise ValueError(f"organized text memory {position} must be an object")
+            subject_role = str(raw_memory.get("subjectRole") or "").strip()
+            if require_subject_role and subject_role not in {
+                "memorySubject",
+                "reporterSelf",
+                "unknown",
+            }:
+                raise ValueError(
+                    f"organized text memory {position} has an invalid subject role"
+                )
             try:
                 memory_kind = MemoryKind(str(raw_memory.get("memoryKind") or ""))
             except ValueError as error:
@@ -656,14 +784,22 @@ class DeepSeekTextMemoryOrganizationProxy:
             raw_content = raw_memory.get("content")
             if not isinstance(raw_content, Mapping):
                 raise ValueError(f"organized text memory {position} has invalid content")
-            normalized_content = enrich_memory_payload_v4(
+            normalized_content = enrich_memory_payload_v5(
                 kind=memory_kind,
                 payload=raw_content,
             )
+            if source_text is not None:
+                normalized_content = cls._bind_content_to_source(
+                    kind=memory_kind,
+                    content=normalized_content,
+                    source_text=source_text,
+                )
+                if normalized_content is None:
+                    continue
             validation = validate_memory_payload(
                 kind=memory_kind,
                 payload=normalized_content,
-                schema_version=OWNER_TRUTH_SCHEMA_VERSION_V4,
+                schema_version=OWNER_TRUTH_SCHEMA_VERSION_V5,
             )
             if not validation.accepted:
                 raise ValueError(
@@ -674,8 +810,139 @@ class DeepSeekTextMemoryOrganizationProxy:
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
-            memories.append({"memoryKind": memory_kind.value, "content": normalized_content})
+            normalized_memory = {
+                "memoryKind": memory_kind.value,
+                "content": normalized_content,
+            }
+            if require_subject_role:
+                normalized_memory["subjectRole"] = subject_role
+            memories.append(normalized_memory)
         return {"memories": memories}
+
+    @classmethod
+    def _bind_content_to_source(
+        cls,
+        *,
+        kind: MemoryKind,
+        content: Mapping[str, Any],
+        source_text: str,
+    ) -> Optional[Dict[str, Any]]:
+        primary_fields = {
+            MemoryKind.EXPERIENCE: "event",
+            MemoryKind.KNOWLEDGE: "statement",
+            MemoryKind.EMOTION: "expression",
+        }
+        primary_field = primary_fields[kind]
+        primary_value = str(content.get(primary_field) or "").strip()
+        evidence_span = cls._source_evidence_span(
+            source_text=source_text,
+            proposed_value=primary_value,
+        )
+        if evidence_span is None:
+            return None
+
+        normalized = dict(content)
+        normalized[primary_field] = evidence_span
+        fact_type = str(normalized.get("factType") or "").strip()
+        if fact_type and fact_type not in cls._allowed_extractor_fact_types[kind]:
+            # factType is a derived search aid, not user-authored authority.
+            # Dropping an incompatible model label lets V5 derive the safe
+            # default while preserving any independently valid dimensions.
+            normalized.pop("factType", None)
+        if kind is MemoryKind.EMOTION and normalized.get("intensity") is not None:
+            intensity = normalized.get("intensity")
+            try:
+                numeric_intensity = float(intensity)
+            except (TypeError, ValueError):
+                numeric_intensity = None
+            if (
+                isinstance(intensity, bool)
+                or numeric_intensity is None
+                or not 0.0 <= numeric_intensity <= 1.0
+            ):
+                # Source wording remains in expression/strengthExpression. Do
+                # not invent a numeric score from qualitative language.
+                normalized["intensity"] = None
+            else:
+                normalized["intensity"] = numeric_intensity
+        facets = normalized.get("facets")
+        if isinstance(facets, Mapping):
+            source_key = cls._evidence_key(source_text)
+            normalized_facets = dict(facets)
+            for facet_name in OWNER_TRUTH_FACET_NAMES:
+                entries = facets.get(facet_name)
+                if not isinstance(entries, list):
+                    continue
+                normalized_facets[facet_name] = [
+                    dict(entry)
+                    for entry in entries
+                    if isinstance(entry, Mapping)
+                    and (
+                        str(entry.get("evidenceMode") or "") != "ownerStated"
+                        or cls._evidence_key(str(entry.get("value") or "")) in source_key
+                    )
+                    and cls._evidence_key(str(entry.get("value") or ""))
+                ]
+            normalized["facets"] = normalized_facets
+        return enrich_memory_payload_v5(kind=kind, payload=normalized)
+
+    @classmethod
+    def _source_evidence_span(
+        cls,
+        *,
+        source_text: str,
+        proposed_value: str,
+    ) -> Optional[str]:
+        source = source_text.strip()
+        proposed_key = cls._evidence_key(proposed_value)
+        source_key = cls._evidence_key(source)
+        if not source or not proposed_key:
+            return None
+        if proposed_key in source_key and len(proposed_value) <= cls.maximum_primary_characters:
+            return proposed_value
+
+        spans = [
+            span.strip()
+            for span in re.split(r"(?<=[。！？!?；;])|[\r\n]+", source)
+            if span.strip() and len(span.strip()) <= cls.maximum_primary_characters
+        ]
+        if not spans and len(source) <= cls.maximum_primary_characters:
+            spans = [source]
+        proposed_bigrams = cls._evidence_bigrams(proposed_key)
+        best_span: Optional[str] = None
+        best_score = 0.0
+        for span in spans:
+            span_key = cls._evidence_key(span)
+            overlap = len(proposed_bigrams.intersection(cls._evidence_bigrams(span_key)))
+            score = overlap / max(1, len(proposed_bigrams))
+            if score > best_score:
+                best_score = score
+                best_span = span
+        return best_span if best_score >= 0.2 else None
+
+    @classmethod
+    def _is_explicit_nonfact_source(cls, text: str) -> bool:
+        normalized = text.strip()
+        return bool(
+            cls._explicit_nonfact_opening.search(normalized)
+            and cls._explicit_nonfact_closing.search(normalized)
+        )
+
+    @staticmethod
+    def _evidence_key(value: str) -> str:
+        return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", str(value or "").casefold())
+
+    @staticmethod
+    def _evidence_bigrams(value: str) -> set[str]:
+        if len(value) < 2:
+            return {value} if value else set()
+        return {value[index : index + 2] for index in range(len(value) - 1)}
+
+    @staticmethod
+    def _is_retryable(error: Exception) -> bool:
+        if isinstance(error, httpx.HTTPStatusError):
+            return error.response.status_code in {408, 409, 425, 429} or error.response.status_code >= 500
+        return isinstance(error, (httpx.RequestError, ValueError, json.JSONDecodeError))
 
     @classmethod
     def _normalized_text(cls, value: str) -> str:
@@ -697,7 +964,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
     """
 
     model = "deepseek-v4-flash"
-    prompt_version = "owner-truth-live-memory-organization-v3"
+    prompt_version = "owner-truth-live-memory-organization-v4"
     maximum_turn_count = 200
     maximum_turn_characters = 4_000
     maximum_total_characters = 30_000
@@ -826,9 +1093,11 @@ class DeepSeekLiveMemoryOrganizationProxy:
 6. 合并重复表达，但不要把不同主题混成一条；保留第一人称语义。summary、claim、label 必须中性、客观且尽可能贴近用户原话，只允许删除无意义口头填充、补齐标点和拆分原子事实，不得润色、文学化、委婉化、夸大或弱化。
 7. facets 必须包含 people/time/places/relationships/emotions/values/personality/habits/goals/identity/reflections 十一个数组和 0 到 1 的 confidence；没有可靠值时数组为空。
 8. 每个 facet 值必须包含 value、confidence、sourceTurnIndices 和 evidenceMode。用户原话直接表达用 ownerStated；只有确属推断时才用 inferred，禁止把推断伪装成用户陈述。
-9. facet 的 sourceTurnIndices 也只能引用 role=user；关系 facet 只是记忆内容，不代表账号、家庭或分享权限。
-10. 用户说“我记得”“我觉得”“可能”“大概”等内容时，必须保留这种来源或不确定性，不得改写成已经核实的确定事实。
-11. 不要输出诊断、评价、行动建议、模型解释或 JSON 之外的文字。"""
+9. 每条记忆还必须有 factType、dimensions、predicate、object（可为 null）和 qualifiers。qualifiers 至少含 polarity、strengthExpression、superlativeAsserted、currentApplicability、validTime、place、scenario。只可填写用户原话可支持的结构，未知保留 null 或 unknown。
+10. emotion 类型还要给 affect（experiencer、target、trigger、emotionExpression、reporter）；所有值都必须由 role=user 证据支持。
+11. facet 的 sourceTurnIndices 也只能引用 role=user；关系 facet 只是记忆内容，不代表账号、家庭或分享权限。
+12. 用户说“我记得”“我觉得”“可能”“大概”等内容时，必须保留这种来源或不确定性，不得改写成已经核实的确定事实。
+13. 不要输出诊断、评价、行动建议、模型解释或 JSON 之外的文字。"""
 
     @classmethod
     def parse_organization(
@@ -927,14 +1196,23 @@ class DeepSeekLiveMemoryOrganizationProxy:
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
-            memories.append(
-                {
-                    "memoryKind": memory_kind,
-                    primary_field: primary_value,
-                    "sourceTurnIndices": source_indices,
-                    "facets": normalized_facets,
-                }
-            )
+            normalized_memory: Dict[str, Any] = {
+                "memoryKind": memory_kind,
+                primary_field: primary_value,
+                "sourceTurnIndices": source_indices,
+                "facets": normalized_facets,
+            }
+            for field in (
+                "factType",
+                "dimensions",
+                "predicate",
+                "object",
+                "qualifiers",
+                "affect",
+            ):
+                if field in raw_memory:
+                    normalized_memory[field] = raw_memory[field]
+            memories.append(normalized_memory)
         return {"memories": memories}
 
 
@@ -1064,6 +1342,7 @@ class DeepSeekEchoAnswerProxy:
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": user_content},
                 ],
+                "thinking": {"type": "disabled"},
                 "temperature": 0.2,
                 "max_tokens": 512,
             },

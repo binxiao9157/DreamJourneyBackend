@@ -26,6 +26,7 @@ from app.services.owner_truth_context_shadow import (
     OWNER_TRUTH_CONTEXT_SHADOW_SOURCE,
     OwnerTruthContextShadowReadService,
 )
+from app.services.owner_truth_memory_search_hybrid import OwnerTruthMemorySearchHybridRanker
 from app.services.owner_truth_memory_search_read import OwnerTruthMemorySearchReadService
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionStore
 
@@ -78,6 +79,18 @@ def _request_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         "queryLength": len(query),
         "selectionMode": _selection_mode(payload),
     }
+
+
+def _server_retrieval_query(payload: Mapping[str, Any]) -> str:
+    """Read only the private retrieval cue injected by the authority service.
+
+    This is intentionally not a public Context request field.  The normal
+    ``query`` remains the user request fingerprint, while the private cue is
+    derived from authenticated same-session history immediately before this
+    build.  It only changes which already-authorized formal facts are ranked.
+    """
+
+    return _optional_text(payload.get("_ownerTruthServerRetrievalQuery"))
 
 
 def _context_build_hash(
@@ -135,9 +148,18 @@ class OwnerTruthContextShadowBuildService:
     policy and citation evidence behind the existing Owner Truth QA gate.
     """
 
-    def __init__(self, store: OwnerTruthMemoryProjectionStore, *, enabled: bool = False) -> None:
+    def __init__(
+        self,
+        store: OwnerTruthMemoryProjectionStore,
+        *,
+        enabled: bool = False,
+        hybrid_ranker: OwnerTruthMemorySearchHybridRanker | None = None,
+    ) -> None:
         self._store = store
         self._enabled = bool(enabled)
+        # The server must explicitly inject a privacy-reviewed embedding
+        # runtime. Without one, the normal deterministic text lane remains.
+        self._hybrid_ranker = hybrid_ranker
 
     def build(
         self,
@@ -150,7 +172,9 @@ class OwnerTruthContextShadowBuildService:
         request_payload = payload or {}
         request = _request_summary(request_payload)
         selection_mode = str(request["selectionMode"])
-        raw_query = _optional_text(request_payload.get("query"))
+        raw_query = _server_retrieval_query(request_payload) or _optional_text(
+            request_payload.get("query")
+        )
         shadow = OwnerTruthContextShadowReadService(
             self._store,
             enabled=self._enabled,
@@ -287,10 +311,13 @@ class OwnerTruthContextShadowBuildService:
             candidate_count: int = 0,
             selected_count: int = 0,
             fallback_reason: str | None = None,
+            retrieval_mode: str = OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK,
+            semantic_ranking_available: bool = False,
         ) -> dict[str, Any]:
             latency_ms = int((time.perf_counter() - started) * 1000)
             return {
-                "mode": OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK,
+                "mode": retrieval_mode,
+                "semanticRankingAvailable": semantic_ranking_available,
                 "outcome": outcome,
                 "candidateLimit": OWNER_TRUTH_CONTEXT_QUERY_CANDIDATE_LIMIT,
                 "selectedLimit": OWNER_TRUTH_CONTEXT_QUERY_SELECTED_LIMIT,
@@ -329,7 +356,10 @@ class OwnerTruthContextShadowBuildService:
             )
 
         try:
-            search = OwnerTruthMemorySearchReadService(self._store).read(
+            search = OwnerTruthMemorySearchReadService(
+                self._store,
+                hybrid_ranker=self._hybrid_ranker,
+            ).read(
                 context=context,
                 query=query,
                 limit=OWNER_TRUTH_CONTEXT_QUERY_CANDIDATE_LIMIT,
@@ -354,6 +384,9 @@ class OwnerTruthContextShadowBuildService:
                 outcome="fallback",
                 fallback_reason=_FALLBACK_SEARCH_UNAVAILABLE,
             )
+
+        retrieval_mode = str(search.retrieval_mode or OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK)
+        semantic_ranking_available = bool(search.semantic_ranking_available)
 
         selected_by_version = {
             str(item.get("memoryVersionId") or ""): item for item in selected_context
@@ -399,7 +432,7 @@ class OwnerTruthContextShadowBuildService:
             ranked["reason"] = "confirmed_current_memory_version_query_match"
             ranked["rank"] = {
                 "position": len(ranked_selected) + 1,
-                "strategy": OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK,
+                "strategy": retrieval_mode,
             }
             ranked_selected.append(ranked)
             selected_versions.add(memory_version_id)
@@ -428,6 +461,8 @@ class OwnerTruthContextShadowBuildService:
                 candidate_count=len(search.hits),
                 selected_count=len(ranked_selected),
                 fallback_reason=None if ranked_selected else _FALLBACK_QUERY_NO_MATCH,
+                retrieval_mode=retrieval_mode,
+                semantic_ranking_available=semantic_ranking_available,
             ),
         )
 

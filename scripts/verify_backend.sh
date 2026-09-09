@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
+export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/tmp/dreamjourney-python-cache}"
 
 PYTHON_BIN="${PYTHON_BIN:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
@@ -54,6 +55,24 @@ PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-worker-process-gate.sh
 
 echo "== Owner Truth memory-search offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-memory-search-offline-evaluation-gate.sh
+
+echo "== Owner Truth memory-search 200-case quality corpus gate =="
+PYTHON_BIN="$PYTHON_BIN" bash scripts/run-backend-owner-truth-memory-search-quality-corpus-gate.sh
+
+echo "== Owner Truth formal-memory comparison 200-case quality gate =="
+STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" scripts/run-owner-truth-memory-changeset-quality-gate.py >/dev/null
+
+echo "== Owner Truth K01-K26 executable scenario mapping gate =="
+STORE_BACKEND=memory PYTHONPATH=. "$PYTHON_BIN" scripts/run-owner-truth-key-scenario-gate.py >/dev/null
+
+echo "== Owner Truth real DeepSeek validation command contract =="
+"$PYTHON_BIN" -m unittest -q tests.test_owner_truth_real_deepseek_validation_runner
+
+echo "== Owner Truth real text-organization quality command contract =="
+"$PYTHON_BIN" -m unittest -q tests.test_owner_truth_real_text_organization_quality_runner
+
+echo "== Owner Truth pgvector deployment contract gate =="
+bash scripts/verify-pgvector-image.sh --contract-only
 
 echo "== Owner Truth Context/Citation offline evaluation gate =="
 PYTHON_BIN="$PYTHON_BIN" scripts/run-backend-owner-truth-context-citation-offline-evaluation-gate.sh
@@ -526,9 +545,34 @@ test -f tests/test_owner_truth_memory_search_projection.py
 test -f tests/test_owner_truth_memory_search_projection_migration_contract.py
 test -f scripts/backend-owner-truth-memory-search-projection-postgres-smoke.py
 test -f scripts/run-backend-owner-truth-memory-search-projection-postgres-smoke.sh
+test -f scripts/backend-owner-truth-memory-search-pgvector-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-memory-search-pgvector-postgres-smoke.sh
+test -f tests/test_owner_truth_memory_search_pgvector_postgres_smoke_contract.py
+test -f db/migrations/0117_owner_truth_b_migration_execution.sql
+test -f db/migrations/0117_owner_truth_b_migration_execution.json
+test -f app/domain/owner_truth/b_migration_execution.py
+test -f app/services/owner_truth_b_migration_execution.py
+test -f tests/test_owner_truth_b_migration_execution.py
+test -f tests/test_owner_truth_b_migration_execution_migration_contract.py
+test -f scripts/execute-owner-truth-b-migration-batch.py
+test -f tests/test_owner_truth_b_migration_execution_command_contract.py
+test -f scripts/backend-owner-truth-b-migration-execution-postgres-smoke.py
+test -f scripts/run-backend-owner-truth-b-migration-execution-postgres-smoke.sh
+test -f tests/test_owner_truth_b_migration_execution_postgres_smoke_contract.py
+test -f app/services/owner_truth_dfx_load.py
+test -f tests/test_owner_truth_dfx_load.py
+test -f scripts/backend-owner-truth-dfx-postgres-load.py
+test -f scripts/run-backend-owner-truth-dfx-postgres-load.sh
+test -f tests/test_owner_truth_dfx_postgres_load_contract.py
 test -f app/services/owner_truth_memory_search_offline_evaluation.py
 test -f tests/test_owner_truth_memory_search_offline_evaluation.py
 test -f scripts/run-backend-owner-truth-memory-search-offline-evaluation-gate.sh
+test -f app/services/owner_truth_memory_search_quality_corpus.py
+test -f tests/fixtures/owner_truth/memory_search_quality_zh_v1.json
+test -f tests/test_owner_truth_b_memory_quality_fixture.py
+test -f tests/test_owner_truth_memory_search_quality_corpus.py
+test -f tests/test_owner_truth_memory_search_quality_evaluation_runner.py
+test -f scripts/run-backend-owner-truth-memory-search-quality-corpus-gate.sh
 test -f tests/test_owner_truth_authority_epoch_offline_evaluation.py
 test -f tests/fixtures/owner_truth/authority_epoch_offline_evaluation_v1.json
 test -f scripts/run-backend-owner-truth-authority-epoch-offline-evaluation-gate.sh

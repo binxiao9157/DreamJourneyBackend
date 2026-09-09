@@ -29,10 +29,15 @@ class NarrativeSelectionManifestMigrationContractTests(unittest.TestCase):
         self.assertNotIn("content_text", SQL)
         self.assertNotIn("provider_key", SQL.lower())
 
-    def test_migration_loader_accepts_selection_manifest_head(self):
+    def test_migration_loader_keeps_selection_manifest_after_later_additive_heads(self):
         migrations = load_migrations(ROOT / "db/migrations")
-        self.assertEqual(migrations[-1].version, "0107")
-        self.assertEqual(migrations[-1].name, "narrative_selection_manifests")
+        by_version = {migration.version: migration for migration in migrations}
+        self.assertEqual(by_version["0107"].name, "narrative_selection_manifests")
+        self.assertGreater(int(migrations[-1].version), int(by_version["0107"].version))
+        self.assertEqual(
+            [migration.version for migration in migrations],
+            sorted(migration.version for migration in migrations),
+        )
 
 
 if __name__ == "__main__":

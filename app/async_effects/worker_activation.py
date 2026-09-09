@@ -31,6 +31,7 @@ from app.services.store_factory import close_store, make_store, open_store
 class OwnerTruthWorkerKind(str, Enum):
     CANDIDATE_EXTRACTION = "ownerTruthCandidateExtraction"
     MEMORY_PROJECTION = "ownerTruthMemoryProjection"
+    MEMORY_SEARCH_EMBEDDING = "ownerTruthMemorySearchEmbedding"
     MEDIA_PROCESSING = "ownerTruthMediaProcessing"
     MEDIA_DELETION = "ownerTruthMediaDeletion"
 
@@ -62,6 +63,10 @@ _OWNER_WORKER_ENABLE_FLAGS = {
     OwnerTruthWorkerKind.MEMORY_PROJECTION: (
         "owner_truth_memory_projection_worker_enabled",
         "ownerTruthMemoryProjectionWorkerDisabled",
+    ),
+    OwnerTruthWorkerKind.MEMORY_SEARCH_EMBEDDING: (
+        "owner_truth_memory_search_embedding_worker_enabled",
+        "ownerTruthMemorySearchEmbeddingWorkerDisabled",
     ),
     OwnerTruthWorkerKind.MEDIA_PROCESSING: (
         "owner_truth_media_processing_worker_enabled",
@@ -129,6 +134,31 @@ def evaluate_owner_truth_worker_activation(
             "ownerTruthCandidateExtractionWorkerDisabled",
             "candidateExtraction",
         )
+
+    if worker is OwnerTruthWorkerKind.MEMORY_SEARCH_EMBEDDING:
+        if not settings.owner_truth_memory_projection_worker_enabled:
+            return _owner_blocked(
+                worker,
+                "ownerTruthMemoryProjectionWorkerDisabled",
+                "memoryProjection",
+            )
+        if not settings.owner_truth_memory_search_projection_worker_enabled:
+            return _owner_blocked(
+                worker,
+                "ownerTruthMemorySearchProjectionWorkerDisabled",
+                "searchProjection",
+            )
+        inventory = provider_inventory or ProviderRuntimeInventory(
+            settings,
+            validated_at_startup=True,
+        )
+        embedding = inventory.status_for("ownerTruthMemorySearchEmbedding")
+        if not embedding.enabled or not embedding.provider_ready:
+            return _owner_blocked(
+                worker,
+                embedding.reason,
+                "ownerTruthMemorySearchEmbedding",
+            )
 
     if worker in {
         OwnerTruthWorkerKind.MEDIA_PROCESSING,

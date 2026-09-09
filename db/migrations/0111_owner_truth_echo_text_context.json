@@ -1,0 +1,25 @@
+{
+  "version": "0111",
+  "name": "owner_truth_echo_text_context",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthEchoTextContextV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true,
+    "ownerTruthEchoTextContext": true
+  },
+  "summary": "Adds bounded, expiring server-side text Echo follow-up context without introducing a second formal-memory authority.",
+  "operations": [
+    "create owner-scoped product-session context table",
+    "store only bounded completed user/assistant turns",
+    "expire text context after 24 hours and cascade-remove it with its Vault"
+  ],
+  "rollback": "No destructive down migration. Disable the new client field and let the short retention window expire private context rows before any optional later cleanup.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true
+  }
+}

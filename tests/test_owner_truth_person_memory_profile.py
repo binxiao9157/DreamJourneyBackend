@@ -3,6 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from app.domain.owner_truth.candidate_decisions import (
@@ -24,6 +25,7 @@ from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewS
 from app.services.owner_truth_person_memory_profile import (
     PERSON_LIFE_STORY_SCHEMA_VERSION,
     PERSON_MEMORY_PROFILE_SCHEMA_VERSION,
+    OwnerTruthPersonMemoryProfileError,
     OwnerTruthPersonMemoryProfileService,
 )
 
@@ -171,6 +173,25 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
             "\n\n".join(contract["lifeRecord"]["paragraphs"]),
         )
         self.assertNotIn("#", contract["lifeRecord"]["text"])
+        life_record_evidence = contract["lifeRecord"]["paragraphEvidence"]
+        self.assertEqual(
+            len(life_record_evidence),
+            contract["lifeRecord"]["paragraphCount"],
+        )
+        self.assertEqual(
+            [item["paragraphIndex"] for item in life_record_evidence],
+            list(range(contract["lifeRecord"]["paragraphCount"])),
+        )
+        for item in life_record_evidence:
+            self.assertEqual(
+                item["supportingMemoryCount"],
+                len(item["supportingMemoryIds"]),
+            )
+            self.assertEqual(
+                item["supportingMemoryCount"],
+                len(item["supportingMemoryVersionIds"]),
+            )
+            self.assertTrue(item["supportingMemoryIds"])
         life_story = contract["lifeStory"]
         self.assertEqual(life_story["schemaVersion"], PERSON_LIFE_STORY_SCHEMA_VERSION)
         self.assertEqual(life_story["format"], "plainText")
@@ -199,6 +220,13 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
             self.assertEqual(
                 chapter["text"],
                 "\n\n".join(chapter["paragraphs"]),
+            )
+            self.assertEqual(
+                [item["paragraphIndex"] for item in chapter["paragraphEvidence"]],
+                list(range(chapter["paragraphCount"])),
+            )
+            self.assertTrue(
+                all(item["supportingMemoryIds"] for item in chapter["paragraphEvidence"])
             )
         self.assertEqual(
             [item["dimension"] for item in contract["dimensions"]],
@@ -274,6 +302,80 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
         self.assertIsNone(dimensions["lifeEvent"]["narrative"])
         self.assertEqual(dimensions["lifeEvent"]["supportingMemoryIds"], [])
 
+    def test_profile_reuses_unchanged_dimensions_and_exposes_incremental_state(self) -> None:
+        self._activate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "大学毕业后，我来到上海工作。", "facets": _facets(time=["2016年"])},
+            created_at="2026-08-20T10:00:00+00:00",
+        )
+        first = self.service.read(context=self.context)
+        unchanged = self.service.read(context=self.context)
+
+        self.assertEqual(first.public_contract()["rebuildMode"], "full")
+        self.assertEqual(unchanged.public_contract()["rebuildMode"], "unchanged")
+        self.assertEqual(unchanged.public_contract()["affectedDimensions"], [])
+        self.assertIs(first.dimensions[0], unchanged.dimensions[0])
+
+        self._activate(
+            kind=MemoryKind.KNOWLEDGE,
+            content={"claim": "我在项目管理上习惯先核对风险。", "facets": _facets()},
+            created_at="2026-08-21T10:00:00+00:00",
+        )
+        with patch(
+            "app.services.owner_truth_person_memory_profile.build_person_memory_model"
+        ) as full_rebuild:
+            incremental = self.service.read(context=self.context)
+        full_rebuild.assert_not_called()
+        contract = incremental.public_contract()
+        self.assertEqual(contract["rebuildMode"], "incremental")
+        self.assertEqual(contract["derivationState"], "ready")
+        self.assertIn("knowledge", contract["affectedDimensions"])
+        self.assertNotIn("lifeEvent", contract["affectedDimensions"])
+        self.assertEqual(contract["sourceFingerprint"], incremental.source_fingerprint)
+
+    def test_profile_marks_last_evidence_bound_version_stale_when_derivation_fails(self) -> None:
+        self._activate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "我在学校读书时参加过辩论队。", "facets": _facets()},
+            created_at="2026-08-20T10:00:00+00:00",
+        )
+        ready = self.service.read(context=self.context)
+        self._activate(
+            kind=MemoryKind.KNOWLEDGE,
+            content={"claim": "我做事时会先记录事实。", "facets": _facets()},
+            created_at="2026-08-21T10:00:00+00:00",
+        )
+        with patch(
+            "app.services.owner_truth_person_memory_profile.build_person_memory_model_incremental",
+            side_effect=OwnerTruthPersonMemoryProfileError("synthetic derivation failure"),
+        ):
+            stale = self.service.read(context=self.context)
+        contract = stale.public_contract()
+        self.assertEqual(contract["state"], "stale")
+        self.assertEqual(contract["derivationState"], "stale")
+        self.assertEqual(contract["staleReason"], "derivationFailed")
+        self.assertEqual(contract["profileVersion"], ready.profile_version)
+
+    def test_paragraph_evidence_uses_each_biography_block_not_the_whole_chapter(self) -> None:
+        for index in range(4):
+            self._activate(
+                kind=MemoryKind.EXPERIENCE,
+                content={
+                    "summary": f"大学毕业后的第{index + 1}段求学与工作经历。",
+                    "facets": _facets(time=[f"201{index}年"]),
+                },
+                created_at=f"2026-08-{20 + index:02d}T10:00:00+00:00",
+            )
+        profile = self.service.read(context=self.context)
+        chapter = next(
+            item for item in profile.life_story.chapters if item.title == "求学、工作与成长"
+        )
+        self.assertGreaterEqual(len(chapter.paragraph_evidence), 2)
+        first, second = chapter.paragraph_evidence[:2]
+        self.assertLess(len(first.supporting_memory_ids), len(chapter.supporting_memory_ids))
+        self.assertLess(len(second.supporting_memory_ids), len(chapter.supporting_memory_ids))
+        self.assertNotEqual(first.supporting_memory_ids, second.supporting_memory_ids)
+
     def test_empty_profile_exposes_an_empty_plain_text_life_record(self) -> None:
         contract = self.service.read(context=self.context).public_contract()
 
@@ -283,6 +385,7 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
         self.assertEqual(contract["lifeRecord"]["paragraphCount"], 0)
         self.assertEqual(contract["lifeRecord"]["paragraphs"], [])
         self.assertIsNone(contract["lifeRecord"]["text"])
+        self.assertEqual(contract["lifeRecord"]["paragraphEvidence"], [])
         self.assertEqual(contract["lifeStory"]["state"], "empty")
         self.assertEqual(contract["lifeStory"]["chapterCount"], 0)
         self.assertEqual(contract["lifeStory"]["chapters"], [])

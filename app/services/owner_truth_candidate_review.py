@@ -10,6 +10,7 @@ from hashlib import sha256
 import json
 from threading import RLock
 from typing import Any, Callable, ContextManager, Mapping, Protocol
+from uuid import UUID, uuid5
 
 from app.async_effects.contracts import AsyncEffectIntent, EffectReceiptSummary
 from app.domain.owner_truth.candidate_decisions import (
@@ -29,6 +30,16 @@ from app.domain.owner_truth.memory_activation import (
     OwnerTruthMemoryActivationResult,
     build_memory_activation_plan,
 )
+from app.domain.owner_truth.memory_changeset import (
+    OwnerTruthCurrentFormalMemory,
+    OwnerTruthMemoryChangeSet,
+    OwnerTruthMemoryChangeSetProposal,
+    build_memory_changeset_proposal,
+)
+from app.domain.owner_truth.memory_changeset_activation import (
+    OwnerTruthMemoryChangeSetActivationError,
+    build_memory_changeset_activation_plan,
+)
 from app.domain.owner_truth.memory_correction import (
     OwnerTruthMemoryCorrectionActivationResult,
     OwnerTruthMemoryCorrectionError,
@@ -40,6 +51,7 @@ from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionError,
     OwnerTruthMemoryProjectionInput,
 )
+from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION_V5
 from app.domain.owner_truth.source_commands import (
     OwnerTruthCommandAuthorizationCapture,
     OwnerTruthCommandContext,
@@ -49,12 +61,55 @@ from app.services.owner_truth_memory_projection_effects import (
 )
 
 
+_MEMORY_CHANGESET_RELATION_NAMESPACE = UUID("0355e56b-1d6e-49f8-8b83-3d82c8a0791f")
+
+
 def _canonical_json(value: Mapping[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _reason_hash(reason_code: str) -> str:
     return sha256(reason_code.encode("utf-8")).hexdigest()
+
+
+def _candidate_at_review_version(
+    candidate: OwnerTruthCandidateSnapshot,
+    *,
+    expected_candidate_version: Any,
+) -> OwnerTruthCandidateSnapshot:
+    """Recover the immutable Candidate row version that an Owner reviewed.
+
+    Terminal review increments the Candidate row only to fence a second
+    decision. It must not change the identity of the pre-review ChangeSet that
+    was shown to the Owner. The receipt stores the version used by that review,
+    so activation recomputes its proposal against that immutable identity.
+    """
+
+    try:
+        row_version = int(expected_candidate_version)
+    except (TypeError, ValueError) as exc:
+        raise OwnerTruthCandidateReviewConflict(
+            "DecisionReceipt is missing its reviewed Candidate version"
+        ) from exc
+    if row_version < 1 or row_version != candidate.row_version - 1:
+        raise OwnerTruthCandidateReviewConflict(
+            "DecisionReceipt reviewed Candidate version is invalid"
+        )
+    return replace(candidate, row_version=row_version)
+
+
+def _receipt_changeset_binding_matches(
+    receipt: Mapping[str, Any],
+    *,
+    change_set_id: str,
+    proposal_hash: str,
+) -> bool:
+    """Compare database UUID values with their canonical domain strings."""
+
+    return (
+        str(receipt.get("expected_change_set_id") or "") == change_set_id
+        and str(receipt.get("expected_proposal_hash") or "") == proposal_hash
+    )
 
 
 def _authorization_capture_payload(
@@ -129,6 +184,7 @@ class OwnerTruthCandidateInboxItem:
     review_mode: str
     candidate_row_version: int
     created_at: str | None = None
+    proposed_change_set: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +238,7 @@ class OwnerTruthCandidateDecisionActivationResult:
     review: OwnerTruthCandidateReviewResult
     memory_activation: OwnerTruthMemoryActivationResult
     projection_effect: EffectReceiptSummary | None = None
+    memory_revision: int | None = None
 
 
 class OwnerTruthCandidateReviewStore(Protocol):
@@ -213,7 +270,12 @@ def _assert_generic_activation_allowed(candidate: OwnerTruthCandidateSnapshot) -
         )
 
 
-def _inbox_item(candidate: OwnerTruthCandidateSnapshot, *, created_at: str | None = None) -> OwnerTruthCandidateInboxItem:
+def _inbox_item(
+    candidate: OwnerTruthCandidateSnapshot,
+    *,
+    created_at: str | None = None,
+    proposed_change_set: Mapping[str, Any] | None = None,
+) -> OwnerTruthCandidateInboxItem:
     payload = dict(candidate.payload)
     return OwnerTruthCandidateInboxItem(
         candidate_id=candidate.candidate_id,
@@ -229,6 +291,11 @@ def _inbox_item(candidate: OwnerTruthCandidateSnapshot, *, created_at: str | Non
         review_mode=str(payload.get("reviewMode") or "single"),
         candidate_row_version=candidate.row_version,
         created_at=created_at,
+        proposed_change_set=(
+            deepcopy(dict(proposed_change_set))
+            if isinstance(proposed_change_set, Mapping)
+            else None
+        ),
     )
 
 
@@ -249,6 +316,22 @@ def _review_history_item(
         memory_id = None
         memory_version_id = None
         memory_version = None
+    elif activation.get("isActivationAuditOnly") is True:
+        # A reviewed duplicate or a non-personal statement still has an
+        # immutable ChangeSet receipt, but must not masquerade as a current
+        # formal-memory version in the Owner's review history.
+        change_set = activation.get("changeSet")
+        change_set_operation = (
+            change_set.get("operation") if isinstance(change_set, Mapping) else None
+        )
+        operation = str(activation.get("operation") or change_set_operation or "").strip()
+        activation_status = "deduplicated" if operation == "duplicate" else "notApplicable"
+        memory_id = str(activation.get("memoryId") or "").strip() or None
+        memory_version_id = str(activation.get("memoryVersionId") or "").strip() or None
+        try:
+            memory_version = int(activation.get("memoryVersion"))
+        except (TypeError, ValueError):
+            memory_version = None
     else:
         activation_status = "current" if activation.get("isCurrent") is True else "superseded"
         memory_id = str(activation.get("memoryId") or "").strip() or None
@@ -376,6 +459,11 @@ class InMemoryOwnerTruthCandidateReviewRepository:
         self._candidate_receipts: dict[str, str] = {}
         self._corrected_values: dict[str, dict[str, Any]] = {}
         self._memory_activations: dict[str, dict[str, Any]] = {}
+        self._memory_revisions: dict[str, int] = {}
+        self._memory_changesets: dict[str, dict[str, Any]] = {}
+        self._memory_changeset_proposals: dict[str, dict[str, Any]] = {}
+        self._memory_changeset_group_proposals: dict[str, dict[str, Any]] = {}
+        self._memory_changeset_group_receipts: dict[str, dict[str, Any]] = {}
         self._memory_projection_rebuild_runnable_reader = (
             memory_projection_rebuild_runnable_reader
         )
@@ -401,11 +489,43 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 vault_status,
                 candidate.authority_epoch,
             )
+            self._memory_revisions.setdefault(candidate.vault_id, 0)
 
     @contextmanager
     def transaction(self):
         with self._lock:
-            yield
+            # The semantic double must model the all-or-nothing boundary used
+            # by the real PostgreSQL Unit of Work.  A stale formal revision
+            # cannot leave an accepted Candidate without its matching receipt
+            # activation merely because an in-memory test has no database.
+            before = {
+                "candidates": deepcopy(self._candidates),
+                "candidateDecidedAt": deepcopy(self._candidate_decided_at),
+                "candidateReceipts": deepcopy(self._candidate_receipts),
+                "correctedValues": deepcopy(self._corrected_values),
+                "memoryActivations": deepcopy(self._memory_activations),
+                "memoryChangesets": deepcopy(self._memory_changesets),
+                "memoryChangesetProposals": deepcopy(self._memory_changeset_proposals),
+                "memoryChangeSetGroupProposals": deepcopy(self._memory_changeset_group_proposals),
+                "memoryChangeSetGroupReceipts": deepcopy(self._memory_changeset_group_receipts),
+                "memoryRevisions": deepcopy(self._memory_revisions),
+                "receipts": deepcopy(self._receipts),
+            }
+            try:
+                yield
+            except Exception:
+                self._candidates = before["candidates"]
+                self._candidate_decided_at = before["candidateDecidedAt"]
+                self._candidate_receipts = before["candidateReceipts"]
+                self._corrected_values = before["correctedValues"]
+                self._memory_activations = before["memoryActivations"]
+                self._memory_changesets = before["memoryChangesets"]
+                self._memory_changeset_proposals = before["memoryChangesetProposals"]
+                self._memory_changeset_group_proposals = before["memoryChangeSetGroupProposals"]
+                self._memory_changeset_group_receipts = before["memoryChangeSetGroupReceipts"]
+                self._memory_revisions = before["memoryRevisions"]
+                self._receipts = before["receipts"]
+                raise
 
     def list_pending(self, *, context: OwnerTruthCommandContext) -> tuple[OwnerTruthCandidateInboxItem, ...]:
         _assert_owner_context(context)
@@ -413,16 +533,67 @@ class InMemoryOwnerTruthCandidateReviewRepository:
             vault = self._vault_states.get(context.vault_id)
             if vault is None or vault[0] != context.owner_subject_id or vault[1] != "active":
                 raise OwnerTruthCandidateReviewAccessDenied("Vault is not active for this Owner")
-            items = [
-                _inbox_item(candidate, created_at=self._candidate_created_at.get(candidate.candidate_id))
-                for candidate in self._candidates.values()
-                if candidate.vault_id == context.vault_id
-                and candidate.owner_subject_id == context.owner_subject_id
-                and candidate.decision is CandidateDecision.PENDING
-                and candidate.authority_epoch == vault[2]
-                and self._source_states.get((candidate.vault_id, candidate.source_id)) == "active"
-            ]
+            current_memories = self._current_formal_memories(context=context)
+            base_memory_revision = int(self._memory_revisions.get(context.vault_id, 0))
+            items = []
+            for candidate in self._candidates.values():
+                if (
+                    candidate.vault_id != context.vault_id
+                    or candidate.owner_subject_id != context.owner_subject_id
+                    or candidate.decision is not CandidateDecision.PENDING
+                    or candidate.authority_epoch != vault[2]
+                    or self._source_states.get((candidate.vault_id, candidate.source_id)) != "active"
+                ):
+                    continue
+                proposal = self._propose_changeset(
+                    candidate=candidate,
+                    current_memories=current_memories,
+                    base_memory_revision=base_memory_revision,
+                )
+                items.append(
+                    _inbox_item(
+                        candidate,
+                        created_at=self._candidate_created_at.get(candidate.candidate_id),
+                        proposed_change_set=(proposal.payload() if proposal is not None else None),
+                    )
+                )
         return tuple(sorted(items, key=lambda item: item.candidate_id))
+
+    def preview_changeset(
+        self,
+        *,
+        candidate_id: str,
+        context: OwnerTruthCommandContext,
+        corrected_value: Mapping[str, Any] | None = None,
+        corrected_value_schema_version: str | None = None,
+    ) -> OwnerTruthMemoryChangeSetProposal | None:
+        """Create the exact Owner-visible V5 diff before a terminal decision.
+
+        This read path does not mutate the processor-owned Candidate. A
+        correction is validated through the same canonical content path used
+        by the later DecisionReceipt, so its preview cannot be bound to a
+        different owner value.
+        """
+
+        _assert_owner_context(context)
+        with self._lock:
+            candidate = self._candidates.get(str(candidate_id or ""))
+            if candidate is None:
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "Candidate does not exist in this Vault"
+                )
+            self._assert_live_target(candidate=candidate, context=context)
+            if candidate.decision is not CandidateDecision.PENDING:
+                raise OwnerTruthCandidateReviewConflict(
+                    "terminal Candidate cannot receive a ChangeSet preview"
+                )
+            return self._propose_changeset(
+                candidate=candidate,
+                current_memories=self._current_formal_memories(context=context),
+                base_memory_revision=int(self._memory_revisions.get(context.vault_id, 0)),
+                resolved_content=corrected_value,
+                resolved_content_schema_version=corrected_value_schema_version,
+            )
 
     def list_review_history(
         self,
@@ -485,6 +656,7 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 record
                 for record in self._memory_activations.values()
                 if str(record.get("memoryId") or "") == memory_id
+                and record.get("isActivationAuditOnly") is not True
             ]
             if not records:
                 raise OwnerTruthCandidateReviewAccessDenied(
@@ -701,6 +873,12 @@ class InMemoryOwnerTruthCandidateReviewRepository:
             if not allow_correction:
                 _assert_generic_activation_allowed(candidate)
             record = command.write_record(candidate=candidate, context=context)
+            self._assert_proposal_binding(
+                candidate=candidate,
+                command=command,
+                record=record,
+                context=context,
+            )
             existing_receipt_id = self._candidate_receipts.get(candidate.candidate_id)
             if existing_receipt_id is not None or candidate.decision is not CandidateDecision.PENDING:
                 raise OwnerTruthCandidateReviewConflict("terminal Candidate cannot receive a new decision")
@@ -725,6 +903,8 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 "authorizationCapture": _authorization_capture_payload(
                     record.authorization_capture
                 ),
+                "expectedChangeSetId": record.expected_change_set_id,
+                "expectedProposalHash": record.expected_proposal_hash,
             }
             self._candidates[candidate.candidate_id] = decided
             self._candidate_decided_at[candidate.candidate_id] = datetime.now(
@@ -752,13 +932,166 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 corrected_value_id=record.corrected_value_id,
             )
 
+    def _current_formal_memories(
+        self,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthCurrentFormalMemory, ...]:
+        """Return only current authoritative versions for one in-memory Vault."""
+
+        memories: list[OwnerTruthCurrentFormalMemory] = []
+        for record in self._memory_activations.values():
+            if record.get("isActivationAuditOnly") or record.get("isCurrent") is not True:
+                continue
+            candidate = self._candidates.get(str(record.get("candidateId") or ""))
+            payload = record.get("payload")
+            if (
+                candidate is None
+                or candidate.vault_id != context.vault_id
+                or candidate.owner_subject_id != context.owner_subject_id
+                or not isinstance(payload, Mapping)
+                or not isinstance(payload.get("content"), Mapping)
+                or not isinstance(payload.get("evidenceRefs"), list)
+            ):
+                continue
+            memories.append(
+                OwnerTruthCurrentFormalMemory(
+                    memory_id=str(record.get("memoryId") or ""),
+                    memory_version_id=str(record.get("memoryVersionId") or ""),
+                    vault_id=context.vault_id,
+                    owner_subject_id=context.owner_subject_id,
+                    version_number=int(record.get("memoryVersion") or 0),
+                    memory_kind=str(record.get("memoryKind") or candidate.memory_kind.value),
+                    content_schema_version=str(
+                        payload.get("contentSchemaVersion")
+                        or candidate.content_schema_version
+                    ),
+                    content=payload["content"],
+                    evidence_refs=tuple(payload["evidenceRefs"]),
+                )
+            )
+        return tuple(sorted(memories, key=lambda item: (item.memory_id, item.version_number)))
+
+    def _propose_changeset(
+        self,
+        *,
+        candidate: OwnerTruthCandidateSnapshot,
+        current_memories: tuple[OwnerTruthCurrentFormalMemory, ...],
+        base_memory_revision: int,
+        resolved_content: Mapping[str, Any] | None = None,
+        resolved_content_schema_version: str | None = None,
+    ) -> OwnerTruthMemoryChangeSetProposal | None:
+        """Create a deterministic, immutable preview without changing a Candidate."""
+
+        if candidate.content_schema_version != OWNER_TRUTH_SCHEMA_VERSION_V5:
+            return None
+        proposal = build_memory_changeset_proposal(
+            candidate=candidate,
+            current_memories=current_memories,
+            base_memory_revision=base_memory_revision,
+            resolved_content=resolved_content,
+            resolved_content_schema_version=resolved_content_schema_version,
+        )
+        self._memory_changeset_proposals[proposal.proposal_id] = proposal.payload()
+        return proposal
+
+    def _assert_proposal_binding(
+        self,
+        *,
+        candidate: OwnerTruthCandidateSnapshot,
+        command: OwnerTruthCandidateReviewCommand,
+        record: OwnerTruthCandidateDecisionWriteRecord,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthMemoryChangeSetProposal | None:
+        """Fail closed when an Owner confirms an outdated or unseen V5 diff."""
+
+        if candidate.content_schema_version != OWNER_TRUTH_SCHEMA_VERSION_V5:
+            return None
+        if (
+            command.expected_change_set_id is None
+            or command.expected_proposal_hash is None
+            or command.expected_memory_revision is None
+        ):
+            raise OwnerTruthCandidateReviewConflict(
+                "V5 Candidate review requires a proposed ChangeSet and base memory revision"
+            )
+        current_revision = int(self._memory_revisions.get(context.vault_id, 0))
+        proposal = self._propose_changeset(
+            candidate=candidate,
+            current_memories=self._current_formal_memories(context=context),
+            base_memory_revision=current_revision,
+            resolved_content=record.corrected_value,
+            resolved_content_schema_version=record.corrected_value_schema_version,
+        )
+        if proposal is None:  # pragma: no cover - guarded above
+            raise OwnerTruthCandidateReviewConflict("V5 ChangeSet proposal is unavailable")
+        if command.expected_memory_revision != proposal.change_set.base_memory_revision:
+            raise OwnerTruthCandidateReviewConflict(
+                "formal memory revision does not match the proposed ChangeSet"
+            )
+        if (
+            command.expected_change_set_id != proposal.change_set.change_set_id
+            or command.expected_proposal_hash != proposal.proposal_hash
+        ):
+            raise OwnerTruthCandidateReviewConflict(
+                "proposed ChangeSet is stale; reload the Candidate review diff"
+            )
+        return proposal
+
+    @staticmethod
+    def _activation_result_from_record(
+        *,
+        record: Mapping[str, Any],
+        outcome: str,
+        receipt_id: str,
+        candidate: OwnerTruthCandidateSnapshot,
+    ) -> OwnerTruthMemoryActivationResult:
+        return OwnerTruthMemoryActivationResult(
+            outcome=outcome,
+            receipt_id=receipt_id,
+            candidate_id=candidate.candidate_id,
+            decision=candidate.decision,
+            memory_id=(str(record["memoryId"]) if record.get("memoryId") else None),
+            memory_version_id=(
+                str(record["memoryVersionId"])
+                if record.get("memoryVersionId")
+                else None
+            ),
+            memory_version=(
+                int(record["memoryVersion"])
+                if record.get("memoryVersion") is not None
+                else None
+            ),
+            authority_epoch=(
+                int(record["authorityEpoch"])
+                if record.get("authorityEpoch") is not None
+                else None
+            ),
+            content_hash=(str(record["contentHash"]) if record.get("contentHash") else None),
+        )
+
+    def memory_revision(self, *, context: OwnerTruthCommandContext) -> int:
+        """Read the monotonic current-formal revision without exposing facts."""
+
+        _assert_owner_context(context)
+        with self._lock:
+            self.assert_active_owner_vault(context=context)
+            return int(self._memory_revisions.get(context.vault_id, 0))
+
     def activate_memory_version(
         self,
         *,
         receipt_id: str,
         context: OwnerTruthCommandContext,
+        expected_memory_revision: int | None = None,
     ) -> OwnerTruthMemoryActivationResult:
-        """Create one deterministic initial version from a terminal receipt."""
+        """Apply one receipt through the V5 changeset path or legacy activation.
+
+        Older payload schemas retain their isolated compatibility path.  New
+        V5 candidates use a current-formal snapshot, revision compare-and-swap
+        and one explicit changeset operation; they never silently create a
+        duplicate record for the same reviewed fact.
+        """
 
         _assert_owner_context(context)
         with self._lock:
@@ -780,19 +1113,14 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                     "DecisionReceipt does not match its terminal Candidate"
                 )
             decision = candidate.decision
-            if decision in {CandidateDecision.REJECTED, CandidateDecision.INVALIDATED}:
-                return OwnerTruthMemoryActivationResult(
-                    outcome="notApplicable",
+            existing_activation = self._memory_activations.get(str(receipt_id))
+            if existing_activation is not None:
+                return self._activation_result_from_record(
+                    record=existing_activation,
+                    outcome="deduplicated",
                     receipt_id=str(receipt_id),
-                    candidate_id=candidate.candidate_id,
-                    decision=decision,
-                    memory_id=None,
-                    memory_version_id=None,
-                    memory_version=None,
-                    authority_epoch=None,
-                    content_hash=None,
+                    candidate=candidate,
                 )
-
             self._assert_live_target(candidate=candidate, context=context)
             corrected_value = None
             corrected_schema_version = None
@@ -806,6 +1134,113 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 corrected_value = stored["content"]
                 corrected_schema_version = str(stored["contentSchemaVersion"])
 
+            if candidate.content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V5:
+                current_revision = int(self._memory_revisions.get(context.vault_id, 0))
+                if (
+                    expected_memory_revision is not None
+                    and expected_memory_revision != current_revision
+                ):
+                    raise OwnerTruthCandidateReviewConflict(
+                        "formal memory revision does not match expectedMemoryRevision"
+                    )
+                reviewed_candidate = _candidate_at_review_version(
+                    candidate,
+                    expected_candidate_version=receipt.get("expectedCandidateVersion"),
+                )
+                proposal = self._propose_changeset(
+                    candidate=reviewed_candidate,
+                    current_memories=self._current_formal_memories(context=context),
+                    base_memory_revision=current_revision,
+                    resolved_content=corrected_value,
+                    resolved_content_schema_version=corrected_schema_version,
+                )
+                if proposal is None:  # pragma: no cover - V5 guard
+                    raise OwnerTruthCandidateReviewConflict("V5 ChangeSet proposal is unavailable")
+                if (
+                    receipt.get("expectedChangeSetId")
+                    != proposal.change_set.change_set_id
+                    or receipt.get("expectedProposalHash") != proposal.proposal_hash
+                ):
+                    raise OwnerTruthCandidateReviewConflict(
+                        "review receipt is not bound to the current proposed ChangeSet"
+                    )
+                try:
+                    changeset_plan = build_memory_changeset_activation_plan(
+                        candidate=reviewed_candidate,
+                        receipt_id=str(receipt_id),
+                        receipt_decision=decision,
+                        receipt_after_hash=str(receipt["candidateAfterHash"]),
+                        current_memories=self._current_formal_memories(context=context),
+                        base_memory_revision=current_revision,
+                        resolved_content=corrected_value,
+                        resolved_content_schema_version=corrected_schema_version,
+                    )
+                except OwnerTruthMemoryChangeSetActivationError as exc:
+                    raise OwnerTruthCandidateReviewConflict(
+                        f"formal memory changeset cannot be applied: {exc}"
+                    ) from exc
+
+                operation = changeset_plan.change_set.operation
+                activation_record: dict[str, Any] = {
+                    "authorityEpoch": changeset_plan.authority_epoch,
+                    "candidateId": changeset_plan.candidate_id,
+                    "changeSet": {
+                        "baseMemoryRevision": changeset_plan.change_set.base_memory_revision,
+                        "changeSetId": changeset_plan.change_set.change_set_id,
+                        "operation": operation.kind.value,
+                        "reason": operation.reason,
+                        "targetMemoryId": operation.target_memory_id,
+                        "targetMemoryVersionId": operation.target_memory_version_id,
+                    },
+                    "contentHash": changeset_plan.content_hash,
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                    "isCurrent": changeset_plan.writes_memory_version,
+                    "isActivationAuditOnly": not changeset_plan.writes_memory_version,
+                    "memoryId": changeset_plan.memory_id,
+                    "memoryKind": changeset_plan.memory_kind,
+                    "memoryVersion": changeset_plan.memory_version,
+                    "memoryVersionId": changeset_plan.memory_version_id,
+                    "payload": (
+                        deepcopy(dict(changeset_plan.payload))
+                        if changeset_plan.payload is not None
+                        else None
+                    ),
+                    "sourceId": changeset_plan.source_id,
+                    "sourceVersion": changeset_plan.source_version,
+                }
+                if changeset_plan.outcome == "revised" and changeset_plan.memory_id:
+                    for item in self._memory_activations.values():
+                        if (
+                            item.get("memoryId") == changeset_plan.memory_id
+                            and item.get("isCurrent") is True
+                        ):
+                            item["isCurrent"] = False
+                self._memory_activations[str(receipt_id)] = activation_record
+                self._memory_changesets[changeset_plan.change_set.change_set_id] = deepcopy(
+                    activation_record["changeSet"]
+                )
+                if changeset_plan.writes_memory_version:
+                    self._memory_revisions[context.vault_id] = current_revision + 1
+                return self._activation_result_from_record(
+                    record=activation_record,
+                    outcome=changeset_plan.outcome,
+                    receipt_id=str(receipt_id),
+                    candidate=candidate,
+                )
+
+            if decision in {CandidateDecision.REJECTED, CandidateDecision.INVALIDATED}:
+                return OwnerTruthMemoryActivationResult(
+                    outcome="notApplicable",
+                    receipt_id=str(receipt_id),
+                    candidate_id=candidate.candidate_id,
+                    decision=decision,
+                    memory_id=None,
+                    memory_version_id=None,
+                    memory_version=None,
+                    authority_epoch=None,
+                    content_hash=None,
+                )
+
             plan = build_memory_activation_plan(
                 candidate=candidate,
                 receipt_id=str(receipt_id),
@@ -816,33 +1251,13 @@ class InMemoryOwnerTruthCandidateReviewRepository:
             )
             if plan is None:  # defensive: non-activating decisions returned above
                 raise OwnerTruthCandidateReviewConflict("terminal decision cannot activate MemoryVersion")
-            existing = self._memory_activations.get(plan.receipt_id)
-            if existing is not None:
-                if (
-                    existing["memoryId"] != plan.memory_id
-                    or existing["memoryVersionId"] != plan.memory_version_id
-                    or existing["contentHash"] != plan.content_hash
-                ):
-                    raise OwnerTruthCandidateReviewConflict(
-                        "DecisionReceipt already activates a different MemoryVersion"
-                    )
-                return OwnerTruthMemoryActivationResult(
-                    outcome="deduplicated",
-                    receipt_id=plan.receipt_id,
-                    candidate_id=plan.candidate_id,
-                    decision=decision,
-                    memory_id=plan.memory_id,
-                    memory_version_id=plan.memory_version_id,
-                    memory_version=int(existing["memoryVersion"]),
-                    authority_epoch=int(existing["authorityEpoch"]),
-                    content_hash=plan.content_hash,
-                )
             self._memory_activations[plan.receipt_id] = {
                 "authorityEpoch": plan.authority_epoch,
                 "candidateId": plan.candidate_id,
                 "contentHash": plan.content_hash,
                 "isCurrent": True,
                 "memoryId": plan.memory_id,
+                "memoryKind": plan.memory_kind,
                 "memoryVersionId": plan.memory_version_id,
                 "memoryVersion": 1,
                 "createdAt": datetime.now(timezone.utc).isoformat(),
@@ -1172,6 +1587,11 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 },
                 "correctedValues": deepcopy(self._corrected_values),
                 "memoryActivations": deepcopy(self._memory_activations),
+                "memoryChangesets": deepcopy(self._memory_changesets),
+                "memoryChangesetProposals": deepcopy(self._memory_changeset_proposals),
+                "memoryChangeSetGroupProposals": deepcopy(self._memory_changeset_group_proposals),
+                "memoryChangeSetGroupReceipts": deepcopy(self._memory_changeset_group_receipts),
+                "memoryRevisions": deepcopy(self._memory_revisions),
                 "receipts": deepcopy(self._receipts),
             }
 
@@ -1185,6 +1605,160 @@ class InMemoryOwnerTruthCandidateReviewRepository:
         with self._lock:
             candidate = self._candidates.get(str(candidate_id or ""))
             return None if candidate is None else deepcopy(candidate)
+
+    def changeset_group_state(
+        self,
+        *,
+        candidate_ids: tuple[str, ...],
+        context: OwnerTruthCommandContext,
+        lock: bool,
+    ) -> tuple[
+        tuple[OwnerTruthCandidateSnapshot, ...],
+        tuple[OwnerTruthCurrentFormalMemory, ...],
+        int,
+    ]:
+        """Load one owner-scoped group against a single formal-memory revision.
+
+        ``lock`` has no behavioural distinction for this in-memory semantic
+        double because its RLock serializes both reads and writes.  It is kept
+        in the port so the PostgreSQL implementation can take current-version
+        and Candidate locks during the terminal compare-and-swap.
+        """
+
+        del lock
+        _assert_owner_context(context)
+        normalized_ids = tuple(str(candidate_id or "").strip() for candidate_id in candidate_ids)
+        if not normalized_ids or len(normalized_ids) != len(set(normalized_ids)):
+            raise OwnerTruthCandidateReviewConflict("ChangeSet group Candidate IDs are invalid")
+        with self._lock:
+            self.assert_active_owner_vault(context=context)
+            candidates: list[OwnerTruthCandidateSnapshot] = []
+            for candidate_id in normalized_ids:
+                candidate = self._candidates.get(candidate_id)
+                if candidate is None:
+                    raise OwnerTruthCandidateReviewAccessDenied(
+                        "Candidate does not exist in this Vault"
+                    )
+                self._assert_live_target(candidate=candidate, context=context)
+                if candidate.decision is not CandidateDecision.PENDING:
+                    raise OwnerTruthCandidateReviewConflict(
+                        "terminal Candidate cannot enter a ChangeSet group"
+                    )
+                candidates.append(deepcopy(candidate))
+            return (
+                tuple(candidates),
+                self._current_formal_memories(context=context),
+                int(self._memory_revisions.get(context.vault_id, 0)),
+            )
+
+    def persist_changeset_group_proposal(
+        self,
+        *,
+        proposal: Any,
+        context: OwnerTruthCommandContext,
+    ) -> None:
+        """Persist immutable group and child previews for later terminal binding."""
+
+        _assert_owner_context(context)
+        if (
+            getattr(proposal, "vault_id", None) != context.vault_id
+            or getattr(proposal, "owner_subject_id", None) != context.owner_subject_id
+        ):
+            raise OwnerTruthCandidateReviewAccessDenied(
+                "ChangeSet group proposal does not belong to this Owner Vault"
+            )
+        proposal_id = str(getattr(proposal, "proposal_id", ""))
+        proposal_hash = str(getattr(proposal, "proposal_hash", ""))
+        payload_method = getattr(proposal, "payload", None)
+        members = tuple(getattr(proposal, "members", ()))
+        if not proposal_id or not proposal_hash or not callable(payload_method) or not members:
+            raise OwnerTruthCandidateReviewConflict("ChangeSet group proposal is malformed")
+        with self._lock:
+            existing = self._memory_changeset_group_proposals.get(proposal_id)
+            if existing is not None:
+                if existing.get("groupProposalHash") != proposal_hash:
+                    raise OwnerTruthCandidateReviewConflict(
+                        "ChangeSet group proposal ID cannot be reused with different content"
+                    )
+                return
+            for member in members:
+                child = getattr(member, "proposal", None)
+                child_payload = child.payload() if child is not None else None
+                if not isinstance(child_payload, Mapping):
+                    raise OwnerTruthCandidateReviewConflict(
+                        "ChangeSet group member proposal is malformed"
+                    )
+                self._memory_changeset_proposals.setdefault(
+                    str(child.proposal_id),
+                    deepcopy(dict(child_payload)),
+                )
+            self._memory_changeset_group_proposals[proposal_id] = deepcopy(dict(payload_method()))
+
+    def has_changeset_group_proposal(
+        self,
+        *,
+        proposal: Any,
+        context: OwnerTruthCommandContext,
+    ) -> bool:
+        _assert_owner_context(context)
+        with self._lock:
+            stored = self._memory_changeset_group_proposals.get(
+                str(getattr(proposal, "proposal_id", ""))
+            )
+            return bool(
+                isinstance(stored, Mapping)
+                and stored.get("vaultId") == context.vault_id
+                and stored.get("groupProposalHash") == getattr(proposal, "proposal_hash", None)
+            )
+
+    def lookup_changeset_group_receipt(
+        self,
+        *,
+        command_id_hash: str,
+        context: OwnerTruthCommandContext,
+    ) -> Mapping[str, Any] | None:
+        _assert_owner_context(context)
+        with self._lock:
+            stored = self._memory_changeset_group_receipts.get(str(command_id_hash or ""))
+            if stored is None:
+                return None
+            if (
+                stored.get("vaultId") != context.vault_id
+                or stored.get("ownerSubjectId") != context.owner_subject_id
+            ):
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "ChangeSet group receipt does not belong to this Owner Vault"
+                )
+            return deepcopy(stored)
+
+    def persist_changeset_group_receipt(
+        self,
+        *,
+        result: Any,
+        command: Any,
+        context: OwnerTruthCommandContext,
+    ) -> None:
+        _assert_owner_context(context)
+        payload_method = getattr(result, "payload", None)
+        command_id_hash = str(getattr(command, "command_id_hash", ""))
+        payload_hash = str(getattr(command, "payload_hash", ""))
+        if not command_id_hash or not payload_hash or not callable(payload_method):
+            raise OwnerTruthCandidateReviewConflict("ChangeSet group receipt is malformed")
+        with self._lock:
+            existing = self._memory_changeset_group_receipts.get(command_id_hash)
+            if existing is not None:
+                if existing.get("payloadHash") != payload_hash:
+                    raise OwnerTruthCandidateReviewConflict(
+                        "group commandId cannot be reused with different content"
+                    )
+                return
+            payload = dict(payload_method())
+            self._memory_changeset_group_receipts[command_id_hash] = {
+                **deepcopy(payload),
+                "vaultId": context.vault_id,
+                "ownerSubjectId": context.owner_subject_id,
+                "payloadHash": payload_hash,
+            }
 
 
 class PostgresOwnerTruthCandidateReviewRepository:
@@ -1227,13 +1801,76 @@ class PostgresOwnerTruthCandidateReviewRepository:
                 ),
             )
             rows = cursor.fetchall()
-        return tuple(
-            _inbox_item(
-                self._candidate_from_row(row),
-                created_at=(row.get("created_at").isoformat() if row.get("created_at") else None),
+            current_memories = self._current_formal_memories(
+                cursor,
+                context=context,
+                lock=False,
             )
-            for row in rows
-        )
+            base_memory_revision = self._memory_revision_for_read(
+                cursor,
+                vault_id=context.vault_id,
+            )
+            items: list[OwnerTruthCandidateInboxItem] = []
+            for row in rows:
+                candidate = self._candidate_from_row(row)
+                proposal = self._propose_changeset(
+                    cursor,
+                    candidate=candidate,
+                    current_memories=current_memories,
+                    base_memory_revision=base_memory_revision,
+                )
+                items.append(
+                    _inbox_item(
+                        candidate,
+                        created_at=(row.get("created_at").isoformat() if row.get("created_at") else None),
+                        proposed_change_set=(proposal.payload() if proposal is not None else None),
+                    )
+                )
+        return tuple(items)
+
+    def preview_changeset(
+        self,
+        *,
+        candidate_id: str,
+        context: OwnerTruthCommandContext,
+        corrected_value: Mapping[str, Any] | None = None,
+        corrected_value_schema_version: str | None = None,
+    ) -> OwnerTruthMemoryChangeSetProposal | None:
+        """Persist a deterministic, Owner-visible V5 ChangeSet preview.
+
+        PostgreSQL stores the immutable preview so a later decision can prove
+        which diff the Owner saw. The terminal decision still reacquires locks
+        and recomputes it against the current formal-memory revision.
+        """
+
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            vault = self._active_vault(cursor, context=context, lock=False)
+            candidate = self._locked_candidate(
+                cursor,
+                candidate_id=str(candidate_id or ""),
+                context=context,
+            )
+            self._assert_candidate_live(cursor, candidate=candidate, context=context, vault=vault)
+            if candidate.decision is not CandidateDecision.PENDING:
+                raise OwnerTruthCandidateReviewConflict(
+                    "terminal Candidate cannot receive a ChangeSet preview"
+                )
+            return self._propose_changeset(
+                cursor,
+                candidate=candidate,
+                current_memories=self._current_formal_memories(
+                    cursor,
+                    context=context,
+                    lock=False,
+                ),
+                base_memory_revision=self._memory_revision_for_read(
+                    cursor,
+                    vault_id=context.vault_id,
+                ),
+                resolved_content=corrected_value,
+                resolved_content_schema_version=corrected_value_schema_version,
+            )
 
     def list_review_history(
         self,
@@ -1254,18 +1891,26 @@ class PostgresOwnerTruthCandidateReviewRepository:
                     memory.id AS memory_id,
                     version.id AS memory_version_id,
                     version.version_number AS memory_version,
-                    version.is_current AS memory_version_is_current
+                    version.is_current AS memory_version_is_current,
+                    changeset.operation_kind AS changeset_operation_kind,
+                    changeset.activation_outcome AS changeset_activation_outcome,
+                    changeset.target_memory_id AS changeset_memory_id,
+                    changeset.target_memory_version_id AS changeset_memory_version_id,
+                    changeset.target_memory_version AS changeset_memory_version
                 FROM owner_truth.memory_candidates AS c
                 JOIN owner_truth.decision_receipts AS receipt
                   ON receipt.vault_id = c.vault_id
                  AND receipt.candidate_id = c.id
                  AND receipt.decision = c.decision_status
-                LEFT JOIN owner_truth.memories AS memory
-                  ON memory.vault_id = receipt.vault_id
-                 AND memory.decision_receipt_id = receipt.id
                 LEFT JOIN owner_truth.memory_versions AS version
                   ON version.vault_id = receipt.vault_id
                  AND version.decision_receipt_id = receipt.id
+                LEFT JOIN owner_truth.memories AS memory
+                  ON memory.vault_id = version.vault_id
+                 AND memory.id = version.memory_id
+                LEFT JOIN owner_truth.memory_changesets AS changeset
+                  ON changeset.vault_id = receipt.vault_id
+                 AND changeset.decision_receipt_id = receipt.id
                 WHERE c.vault_id = %s
                   AND c.owner_subject_id = %s
                   AND c.decision_status <> 'pending'
@@ -1290,6 +1935,14 @@ class PostgresOwnerTruthCandidateReviewRepository:
                     "memoryId": str(row.get("memory_id") or ""),
                     "memoryVersionId": str(row.get("memory_version_id") or ""),
                     "memoryVersion": row.get("memory_version"),
+                }
+            elif row.get("changeset_operation_kind") is not None:
+                activation = {
+                    "isActivationAuditOnly": True,
+                    "operation": row.get("changeset_operation_kind"),
+                    "memoryId": row.get("changeset_memory_id"),
+                    "memoryVersionId": row.get("changeset_memory_version_id"),
+                    "memoryVersion": row.get("changeset_memory_version"),
                 }
             history.append(
                 _review_history_item(
@@ -1373,6 +2026,273 @@ class PostgresOwnerTruthCandidateReviewRepository:
         with self._cursor() as cursor:
             self._active_vault(cursor, context=context, lock=False)
 
+    def changeset_group_state(
+        self,
+        *,
+        candidate_ids: tuple[str, ...],
+        context: OwnerTruthCommandContext,
+        lock: bool,
+    ) -> tuple[
+        tuple[OwnerTruthCandidateSnapshot, ...],
+        tuple[OwnerTruthCurrentFormalMemory, ...],
+        int,
+    ]:
+        """Read related pending Candidates and one formal-memory snapshot.
+
+        Terminal group confirmation calls this with ``lock=True``. That locks
+        the vault revision and current versions before a child DecisionReceipt
+        is written, so a competing write wins as a whole or returns stale.
+        """
+
+        _assert_owner_context(context)
+        normalized_ids = tuple(str(candidate_id or "").strip() for candidate_id in candidate_ids)
+        if not normalized_ids or len(normalized_ids) != len(set(normalized_ids)):
+            raise OwnerTruthCandidateReviewConflict("ChangeSet group Candidate IDs are invalid")
+        with self._cursor() as cursor:
+            vault = self._active_vault(cursor, context=context, lock=lock)
+            candidates: list[OwnerTruthCandidateSnapshot] = []
+            for candidate_id in normalized_ids:
+                candidate = self._locked_candidate(
+                    cursor,
+                    candidate_id=candidate_id,
+                    context=context,
+                )
+                self._assert_candidate_live(
+                    cursor,
+                    candidate=candidate,
+                    context=context,
+                    vault=vault,
+                )
+                if candidate.decision is not CandidateDecision.PENDING:
+                    raise OwnerTruthCandidateReviewConflict(
+                        "terminal Candidate cannot enter a ChangeSet group"
+                    )
+                candidates.append(candidate)
+            current_memories = self._current_formal_memories(
+                cursor,
+                context=context,
+                lock=lock,
+            )
+            revision = (
+                self._memory_revision_for_update(cursor, vault_id=context.vault_id)
+                if lock
+                else self._memory_revision_for_read(cursor, vault_id=context.vault_id)
+            )
+        return tuple(candidates), current_memories, revision
+
+    def persist_changeset_group_proposal(
+        self,
+        *,
+        proposal: Any,
+        context: OwnerTruthCommandContext,
+    ) -> None:
+        """Persist the group header plus immutable per-Candidate previews."""
+
+        _assert_owner_context(context)
+        if (
+            getattr(proposal, "vault_id", None) != context.vault_id
+            or getattr(proposal, "owner_subject_id", None) != context.owner_subject_id
+        ):
+            raise OwnerTruthCandidateReviewAccessDenied(
+                "ChangeSet group proposal does not belong to this Owner Vault"
+            )
+        payload_method = getattr(proposal, "payload", None)
+        members = tuple(getattr(proposal, "members", ()))
+        if not callable(payload_method) or not members:
+            raise OwnerTruthCandidateReviewConflict("ChangeSet group proposal is malformed")
+        with self._cursor() as cursor:
+            for member in members:
+                child_proposal = getattr(member, "proposal", None)
+                if not isinstance(child_proposal, OwnerTruthMemoryChangeSetProposal):
+                    raise OwnerTruthCandidateReviewConflict(
+                        "ChangeSet group member proposal is malformed"
+                    )
+                self._persist_proposed_changeset(cursor, proposal=child_proposal)
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.memory_changeset_group_proposals (
+                    id, vault_id, owner_subject_id, base_memory_revision,
+                    proposal_hash, schema_version, payload
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (vault_id, id) DO NOTHING
+                """,
+                self._adapt_params(
+                    (
+                        proposal.proposal_id,
+                        proposal.vault_id,
+                        proposal.owner_subject_id,
+                        proposal.base_memory_revision,
+                        proposal.proposal_hash,
+                        proposal.schema_version,
+                        payload_method(),
+                    )
+                ),
+            )
+            cursor.execute(
+                """
+                SELECT proposal_hash, owner_subject_id
+                FROM owner_truth.memory_changeset_group_proposals
+                WHERE vault_id = %s AND id = %s
+                FOR UPDATE
+                """,
+                (context.vault_id, proposal.proposal_id),
+            )
+            stored = cursor.fetchone()
+            if (
+                stored is None
+                or str(stored.get("proposal_hash") or "") != proposal.proposal_hash
+                or str(stored.get("owner_subject_id") or "") != context.owner_subject_id
+            ):
+                raise OwnerTruthCandidateReviewConflict(
+                    "ChangeSet group proposal ID cannot be reused with different content"
+                )
+            operation_index_by_candidate = {
+                member.selection.candidate_id: member.operation_index
+                for member in members
+            }
+            for member in members:
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.memory_changeset_group_proposal_members (
+                        group_proposal_id, vault_id, operation_index, candidate_id,
+                        candidate_row_version, child_proposal_id, child_change_set_id,
+                        requested_action, anticipated_outcome, applied_memory_revision
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (vault_id, group_proposal_id, operation_index) DO NOTHING
+                    """,
+                    (
+                        proposal.proposal_id,
+                        context.vault_id,
+                        member.operation_index,
+                        member.selection.candidate_id,
+                        member.selection.expected_candidate_version,
+                        member.proposal.proposal_id,
+                        member.proposal.change_set.change_set_id,
+                        member.selection.action.value,
+                        member.anticipated_outcome,
+                        member.applied_memory_revision,
+                    ),
+                )
+            for dependency in proposal.dependencies:
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.memory_changeset_group_proposal_dependencies (
+                        group_proposal_id, vault_id, before_operation_index,
+                        after_operation_index
+                    ) VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (vault_id, group_proposal_id, before_operation_index,
+                                 after_operation_index) DO NOTHING
+                    """,
+                    (
+                        proposal.proposal_id,
+                        context.vault_id,
+                        operation_index_by_candidate[dependency.before_candidate_id],
+                        operation_index_by_candidate[dependency.after_candidate_id],
+                    ),
+                )
+
+    def has_changeset_group_proposal(
+        self,
+        *,
+        proposal: Any,
+        context: OwnerTruthCommandContext,
+    ) -> bool:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM owner_truth.memory_changeset_group_proposals
+                WHERE vault_id = %s
+                  AND owner_subject_id = %s
+                  AND id = %s
+                  AND proposal_hash = %s
+                """,
+                (
+                    context.vault_id,
+                    context.owner_subject_id,
+                    getattr(proposal, "proposal_id", ""),
+                    getattr(proposal, "proposal_hash", ""),
+                ),
+            )
+            return cursor.fetchone() is not None
+
+    def lookup_changeset_group_receipt(
+        self,
+        *,
+        command_id_hash: str,
+        context: OwnerTruthCommandContext,
+    ) -> Mapping[str, Any] | None:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT payload_hash, result_payload
+                FROM owner_truth.memory_changeset_group_receipts
+                WHERE vault_id = %s AND owner_subject_id = %s AND command_id_hash = %s
+                """,
+                (context.vault_id, context.owner_subject_id, command_id_hash),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        payload = self._json_mapping(row.get("result_payload"), field="group receipt payload")
+        return {**payload, "payloadHash": str(row.get("payload_hash") or "")}
+
+    def persist_changeset_group_receipt(
+        self,
+        *,
+        result: Any,
+        command: Any,
+        context: OwnerTruthCommandContext,
+    ) -> None:
+        _assert_owner_context(context)
+        payload_method = getattr(result, "payload", None)
+        command_id_hash = str(getattr(command, "command_id_hash", ""))
+        payload_hash = str(getattr(command, "payload_hash", ""))
+        if not callable(payload_method) or not command_id_hash or not payload_hash:
+            raise OwnerTruthCandidateReviewConflict("ChangeSet group receipt is malformed")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT payload_hash
+                FROM owner_truth.memory_changeset_group_receipts
+                WHERE vault_id = %s AND command_id_hash = %s
+                FOR UPDATE
+                """,
+                (context.vault_id, command_id_hash),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                if str(existing.get("payload_hash") or "") != payload_hash:
+                    raise OwnerTruthCandidateReviewConflict(
+                        "group commandId cannot be reused with different content"
+                    )
+                return
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.memory_changeset_group_receipts (
+                    id, vault_id, owner_subject_id, group_proposal_id,
+                    group_proposal_hash, command_id_hash, payload_hash,
+                    base_memory_revision, applied_memory_revision, result_payload
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                self._adapt_params(
+                    (
+                        result.group_receipt_id,
+                        context.vault_id,
+                        context.owner_subject_id,
+                        result.group_proposal_id,
+                        result.group_proposal_hash,
+                        command_id_hash,
+                        payload_hash,
+                        result.base_memory_revision,
+                        result.applied_memory_revision,
+                        payload_method(),
+                    )
+                ),
+            )
+
     def decide(
         self,
         *,
@@ -1400,6 +2320,13 @@ class PostgresOwnerTruthCandidateReviewRepository:
             if not allow_correction:
                 _assert_generic_activation_allowed(candidate)
             record = command.write_record(candidate=candidate, context=context)
+            self._assert_proposal_binding(
+                cursor,
+                candidate=candidate,
+                command=command,
+                record=record,
+                context=context,
+            )
             self._assert_candidate_has_no_receipt(cursor, candidate=candidate)
 
             cursor.execute(
@@ -1432,8 +2359,9 @@ class PostgresOwnerTruthCandidateReviewRepository:
                     authority_epoch, policy_version, rationale_hash,
                     command_id_hash, payload_hash, expected_candidate_version,
                     candidate_before_hash, candidate_after_hash, decision_basis,
-                    authorization_evidence
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    authorization_evidence, expected_change_set_id,
+                    expected_proposal_hash
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 self._adapt_params(
                     (
@@ -1452,6 +2380,8 @@ class PostgresOwnerTruthCandidateReviewRepository:
                         record.candidate_after_hash,
                         dict(record.decision_basis),
                         _authorization_capture_payload(record.authorization_capture),
+                        record.expected_change_set_id,
+                        record.expected_proposal_hash,
                     )
                 ),
             )
@@ -1487,15 +2417,698 @@ class PostgresOwnerTruthCandidateReviewRepository:
             corrected_value_id=record.corrected_value_id,
         )
 
+    def memory_revision(self, *, context: OwnerTruthCommandContext) -> int:
+        """Read the current Vault-wide V5 formal-memory revision."""
+
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            self._active_vault(cursor, context=context, lock=False)
+            cursor.execute(
+                """
+                SELECT revision
+                FROM owner_truth.memory_revisions
+                WHERE vault_id = %s
+                """,
+                (context.vault_id,),
+            )
+            row = cursor.fetchone()
+        return 0 if row is None else int(row["revision"])
+
+    @staticmethod
+    def _memory_revision_for_update(cursor: Any, *, vault_id: str) -> int:
+        cursor.execute(
+            """
+            INSERT INTO owner_truth.memory_revisions (vault_id, revision)
+            VALUES (%s, 0)
+            ON CONFLICT (vault_id) DO NOTHING
+            """,
+            (vault_id,),
+        )
+        cursor.execute(
+            """
+            SELECT revision
+            FROM owner_truth.memory_revisions
+            WHERE vault_id = %s
+            FOR UPDATE
+            """,
+            (vault_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - INSERT/SELECT transaction invariant
+            raise OwnerTruthCandidateReviewConflict("formal memory revision is unavailable")
+        return int(row["revision"])
+
+    @staticmethod
+    def _memory_revision_for_read(cursor: Any, *, vault_id: str) -> int:
+        cursor.execute(
+            """
+            SELECT revision
+            FROM owner_truth.memory_revisions
+            WHERE vault_id = %s
+            """,
+            (vault_id,),
+        )
+        row = cursor.fetchone()
+        return 0 if row is None else int(row["revision"])
+
+    @staticmethod
+    def _json_mapping(value: Any, *, field: str) -> Mapping[str, Any]:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise OwnerTruthCandidateReviewConflict(f"{field} is malformed") from exc
+        if not isinstance(value, Mapping):
+            raise OwnerTruthCandidateReviewConflict(f"{field} is unavailable")
+        return value
+
+    def _current_formal_memories(
+        self,
+        cursor: Any,
+        *,
+        context: OwnerTruthCommandContext,
+        lock: bool,
+    ) -> tuple[OwnerTruthCurrentFormalMemory, ...]:
+        """Read current, owner-authoritative versions for a V5 ChangeSet."""
+
+        cursor.execute(
+            """
+            SELECT memory.id AS memory_id,
+                version.id AS memory_version_id,
+                memory.memory_kind,
+                version.version_number,
+                version.schema_version,
+                version.payload
+            FROM owner_truth.memories AS memory
+            JOIN owner_truth.memory_versions AS version
+              ON version.vault_id = memory.vault_id
+             AND version.memory_id = memory.id
+             AND version.is_current = TRUE
+            WHERE memory.vault_id = %s
+              AND memory.owner_subject_id = %s
+              AND memory.status = 'active'
+            ORDER BY memory.id ASC
+            """ + ("FOR UPDATE OF memory, version" if lock else ""),
+            (context.vault_id, context.owner_subject_id),
+        )
+        values: list[OwnerTruthCurrentFormalMemory] = []
+        for row in cursor.fetchall():
+            payload = self._json_mapping(row.get("payload"), field="current MemoryVersion payload")
+            content = payload.get("content")
+            evidence_refs = payload.get("evidenceRefs")
+            if not isinstance(content, Mapping) or not isinstance(evidence_refs, list):
+                raise OwnerTruthCandidateReviewConflict(
+                    "current formal MemoryVersion is missing typed content or provenance"
+                )
+            try:
+                values.append(
+                    OwnerTruthCurrentFormalMemory(
+                        memory_id=str(row["memory_id"]),
+                        memory_version_id=str(row["memory_version_id"]),
+                        vault_id=context.vault_id,
+                        owner_subject_id=context.owner_subject_id,
+                        version_number=int(row["version_number"]),
+                        memory_kind=str(row["memory_kind"]),
+                        content_schema_version=str(row["schema_version"]),
+                        content=content,
+                        evidence_refs=tuple(
+                            item for item in evidence_refs if isinstance(item, Mapping)
+                        ),
+                    )
+                )
+            except (OwnerTruthContractError, TypeError, ValueError) as exc:
+                raise OwnerTruthCandidateReviewConflict(
+                    "current formal MemoryVersion cannot participate in a safe changeset"
+                ) from exc
+        return tuple(values)
+
+    def _current_formal_memories_for_update(
+        self,
+        cursor: Any,
+        *,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[OwnerTruthCurrentFormalMemory, ...]:
+        return self._current_formal_memories(cursor, context=context, lock=True)
+
+    def _propose_changeset(
+        self,
+        cursor: Any,
+        *,
+        candidate: OwnerTruthCandidateSnapshot,
+        current_memories: tuple[OwnerTruthCurrentFormalMemory, ...],
+        base_memory_revision: int,
+        resolved_content: Mapping[str, Any] | None = None,
+        resolved_content_schema_version: str | None = None,
+    ) -> OwnerTruthMemoryChangeSetProposal | None:
+        if candidate.content_schema_version != OWNER_TRUTH_SCHEMA_VERSION_V5:
+            return None
+        proposal = build_memory_changeset_proposal(
+            candidate=candidate,
+            current_memories=current_memories,
+            base_memory_revision=base_memory_revision,
+            resolved_content=resolved_content,
+            resolved_content_schema_version=resolved_content_schema_version,
+        )
+        self._persist_proposed_changeset(cursor, proposal=proposal)
+        return proposal
+
+    def _persist_proposed_changeset(
+        self,
+        cursor: Any,
+        *,
+        proposal: OwnerTruthMemoryChangeSetProposal,
+    ) -> None:
+        """Persist a preview as immutable audit material before Owner review."""
+
+        payload = proposal.payload()
+        cursor.execute(
+            """
+            INSERT INTO owner_truth.memory_changeset_proposals (
+                id, vault_id, candidate_id, candidate_content_hash,
+                candidate_row_version, base_memory_revision, change_set_id,
+                proposal_hash, schema_version, payload
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (vault_id, id) DO NOTHING
+            """,
+            self._adapt_params(
+                (
+                    proposal.proposal_id,
+                    proposal.change_set.vault_id,
+                    proposal.change_set.candidate_id,
+                    proposal.candidate_content_hash,
+                    proposal.candidate_row_version,
+                    proposal.change_set.base_memory_revision,
+                    proposal.change_set.change_set_id,
+                    proposal.proposal_hash,
+                    proposal.schema_version,
+                    payload,
+                )
+            ),
+        )
+        for index, operation in enumerate(proposal.change_set.operations):
+            dependencies = [
+                before
+                for before, after in proposal.change_set.dependencies
+                if after == index
+            ]
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.memory_changeset_proposal_operations (
+                    proposal_id, vault_id, operation_index, operation_kind,
+                    candidate_id, target_memory_id, target_memory_version_id,
+                    target_memory_version, candidate_assertion, changed_fields,
+                    added_evidence_count, reason, depends_on_operation_indexes
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (vault_id, proposal_id, operation_index) DO NOTHING
+                """,
+                self._adapt_changeset_operation_params(
+                    (
+                        proposal.proposal_id,
+                        proposal.change_set.vault_id,
+                        index,
+                        operation.kind.value,
+                        operation.candidate_id,
+                        operation.target_memory_id,
+                        operation.target_memory_version_id,
+                        operation.target_memory_version,
+                        list(operation.candidate_assertion_key),
+                        list(operation.changed_fields),
+                        operation.added_evidence_count,
+                        operation.reason,
+                    ),
+                    dependencies=dependencies,
+                ),
+            )
+
+    def _assert_proposal_binding(
+        self,
+        cursor: Any,
+        *,
+        candidate: OwnerTruthCandidateSnapshot,
+        command: OwnerTruthCandidateReviewCommand,
+        record: OwnerTruthCandidateDecisionWriteRecord,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthMemoryChangeSetProposal | None:
+        if candidate.content_schema_version != OWNER_TRUTH_SCHEMA_VERSION_V5:
+            return None
+        if (
+            command.expected_change_set_id is None
+            or command.expected_proposal_hash is None
+            or command.expected_memory_revision is None
+        ):
+            raise OwnerTruthCandidateReviewConflict(
+                "V5 Candidate review requires a proposed ChangeSet and base memory revision"
+            )
+        current_revision = self._memory_revision_for_update(cursor, vault_id=context.vault_id)
+        proposal = self._propose_changeset(
+            cursor,
+            candidate=candidate,
+            current_memories=self._current_formal_memories_for_update(cursor, context=context),
+            base_memory_revision=current_revision,
+            resolved_content=record.corrected_value,
+            resolved_content_schema_version=record.corrected_value_schema_version,
+        )
+        if proposal is None:  # pragma: no cover - V5 guard
+            raise OwnerTruthCandidateReviewConflict("V5 ChangeSet proposal is unavailable")
+        if command.expected_memory_revision != proposal.change_set.base_memory_revision:
+            raise OwnerTruthCandidateReviewConflict(
+                "formal memory revision does not match the proposed ChangeSet"
+            )
+        if (
+            command.expected_change_set_id != proposal.change_set.change_set_id
+            or command.expected_proposal_hash != proposal.proposal_hash
+        ):
+            raise OwnerTruthCandidateReviewConflict(
+                "proposed ChangeSet is stale; reload the Candidate review diff"
+            )
+        return proposal
+
+    @staticmethod
+    def _changeset_by_receipt(
+        cursor: Any,
+        *,
+        vault_id: str,
+        receipt_id: str,
+    ) -> Mapping[str, Any] | None:
+        cursor.execute(
+            """
+            SELECT id, activation_outcome, target_memory_id,
+                target_memory_version_id, target_memory_version
+            FROM owner_truth.memory_changesets
+            WHERE vault_id = %s AND decision_receipt_id = %s
+            FOR UPDATE
+            """,
+            (vault_id, receipt_id),
+        )
+        return cursor.fetchone()
+
+    @staticmethod
+    def _version_by_receipt_or_id(
+        cursor: Any,
+        *,
+        vault_id: str,
+        receipt_id: str,
+        version_id: str | None,
+    ) -> Mapping[str, Any] | None:
+        if version_id:
+            cursor.execute(
+                """
+                SELECT memory_id, id AS memory_version_id, version_number, content_hash
+                FROM owner_truth.memory_versions
+                WHERE vault_id = %s AND id = %s
+                FOR UPDATE
+                """,
+                (vault_id, version_id),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT memory_id, id AS memory_version_id, version_number, content_hash
+                FROM owner_truth.memory_versions
+                WHERE vault_id = %s AND decision_receipt_id = %s
+                FOR UPDATE
+                """,
+                (vault_id, receipt_id),
+            )
+        return cursor.fetchone()
+
+    def _existing_changeset_activation(
+        self,
+        cursor: Any,
+        *,
+        record: Mapping[str, Any],
+        receipt_id: str,
+        candidate: OwnerTruthCandidateSnapshot,
+    ) -> OwnerTruthMemoryActivationResult:
+        outcome = str(record.get("activation_outcome") or "")
+        if outcome == "notApplicable":
+            return OwnerTruthMemoryActivationResult(
+                outcome=outcome,
+                receipt_id=receipt_id,
+                candidate_id=candidate.candidate_id,
+                decision=candidate.decision,
+                memory_id=None,
+                memory_version_id=None,
+                memory_version=None,
+                authority_epoch=None,
+                content_hash=None,
+            )
+        version = self._version_by_receipt_or_id(
+            cursor,
+            vault_id=candidate.vault_id,
+            receipt_id=receipt_id,
+            version_id=(
+                str(record.get("target_memory_version_id"))
+                if outcome == "duplicate" and record.get("target_memory_version_id")
+                else None
+            ),
+        )
+        if version is None:
+            raise OwnerTruthCandidateReviewConflict(
+                "persisted MemoryChangeSet is missing its MemoryVersion result"
+            )
+        return OwnerTruthMemoryActivationResult(
+            outcome=outcome,
+            receipt_id=receipt_id,
+            candidate_id=candidate.candidate_id,
+            decision=candidate.decision,
+            memory_id=str(version["memory_id"]),
+            memory_version_id=str(version["memory_version_id"]),
+            memory_version=int(version["version_number"]),
+            authority_epoch=candidate.authority_epoch,
+            content_hash=str(version["content_hash"]),
+        )
+
+    def _persist_memory_changeset(
+        self,
+        cursor: Any,
+        *,
+        changeset: OwnerTruthMemoryChangeSet,
+        receipt_id: str,
+        outcome: str,
+        applied_memory_revision: int,
+    ) -> None:
+        operation = changeset.operation
+        cursor.execute(
+            """
+            INSERT INTO owner_truth.memory_changesets (
+                id, vault_id, decision_receipt_id, candidate_id,
+                base_memory_revision, applied_memory_revision, operation_kind,
+                activation_outcome, target_memory_id, target_memory_version_id,
+                target_memory_version, candidate_assertion, reason
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            self._adapt_params(
+                (
+                    changeset.change_set_id,
+                    changeset.vault_id,
+                    receipt_id,
+                    changeset.candidate_id,
+                    changeset.base_memory_revision,
+                    applied_memory_revision,
+                    operation.kind.value,
+                    outcome,
+                    operation.target_memory_id,
+                    operation.target_memory_version_id,
+                    operation.target_memory_version,
+                    list(operation.candidate_assertion_key),
+                    operation.reason,
+                )
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO owner_truth.memory_changeset_operations (
+                changeset_id, vault_id, operation_index, operation_kind,
+                changed_fields, added_evidence_count
+            ) VALUES (%s, %s, 1, %s, %s, %s)
+            """,
+            self._adapt_params(
+                (
+                    changeset.change_set_id,
+                    changeset.vault_id,
+                    operation.kind.value,
+                    list(operation.changed_fields),
+                    operation.added_evidence_count,
+                )
+            ),
+        )
+
+    def _activate_v5_memory_version(
+        self,
+        cursor: Any,
+        *,
+        receipt: Mapping[str, Any],
+        candidate: OwnerTruthCandidateSnapshot,
+        decision: CandidateDecision,
+        context: OwnerTruthCommandContext,
+        vault: Mapping[str, Any],
+        expected_memory_revision: int | None,
+    ) -> OwnerTruthMemoryActivationResult:
+        """Apply one typed Candidate as an atomic, audited V5 changeset."""
+
+        receipt_id = str(receipt["id"])
+        existing = self._changeset_by_receipt(
+            cursor,
+            vault_id=context.vault_id,
+            receipt_id=receipt_id,
+        )
+        if existing is not None:
+            return self._existing_changeset_activation(
+                cursor,
+                record=existing,
+                receipt_id=receipt_id,
+                candidate=candidate,
+            )
+
+        current_revision = self._memory_revision_for_update(
+            cursor,
+            vault_id=context.vault_id,
+        )
+        if (
+            expected_memory_revision is not None
+            and expected_memory_revision != current_revision
+        ):
+            raise OwnerTruthCandidateReviewConflict(
+                "formal memory revision does not match expectedMemoryRevision"
+            )
+
+        corrected_value = None
+        corrected_schema_version = None
+        if decision is CandidateDecision.CORRECTED:
+            correction = self._corrected_value_by_receipt(
+                cursor,
+                vault_id=context.vault_id,
+                receipt_id=receipt_id,
+            )
+            if correction is None:
+                raise OwnerTruthCandidateReviewConflict(
+                    "corrected DecisionReceipt is missing its immutable value"
+                )
+            corrected_value = correction["content"]
+            corrected_schema_version = str(correction["content_schema_version"])
+
+        current_memories = self._current_formal_memories_for_update(
+            cursor,
+            context=context,
+        )
+        reviewed_candidate = _candidate_at_review_version(
+            candidate,
+            expected_candidate_version=receipt.get("expected_candidate_version"),
+        )
+        proposal = self._propose_changeset(
+            cursor,
+            candidate=reviewed_candidate,
+            current_memories=current_memories,
+            base_memory_revision=current_revision,
+            resolved_content=corrected_value,
+            resolved_content_schema_version=corrected_schema_version,
+        )
+        if proposal is None:
+            raise OwnerTruthCandidateReviewConflict(
+                "V5 DecisionReceipt is missing its proposed ChangeSet"
+            )
+        if not _receipt_changeset_binding_matches(
+            receipt,
+            change_set_id=proposal.change_set.change_set_id,
+            proposal_hash=proposal.proposal_hash,
+        ):
+            raise OwnerTruthCandidateReviewConflict(
+                "review receipt is not bound to the current proposed ChangeSet"
+            )
+
+        try:
+            changeset_plan = build_memory_changeset_activation_plan(
+                candidate=reviewed_candidate,
+                receipt_id=receipt_id,
+                receipt_decision=decision,
+                receipt_after_hash=str(receipt["candidate_after_hash"]),
+                current_memories=current_memories,
+                base_memory_revision=current_revision,
+                resolved_content=corrected_value,
+                resolved_content_schema_version=corrected_schema_version,
+            )
+        except OwnerTruthMemoryChangeSetActivationError as exc:
+            raise OwnerTruthCandidateReviewConflict(
+                f"formal memory changeset cannot be applied: {exc}"
+            ) from exc
+
+        self._assert_candidate_live(
+            cursor,
+            candidate=candidate,
+            context=context,
+            vault=vault,
+            expected_source_version=changeset_plan.source_version,
+        )
+
+        if changeset_plan.writes_memory_version:
+            if (
+                not changeset_plan.memory_id
+                or not changeset_plan.memory_version_id
+                or not changeset_plan.payload
+                or not changeset_plan.source_id
+                or changeset_plan.source_version is None
+                or not changeset_plan.memory_kind
+            ):
+                raise OwnerTruthCandidateReviewConflict(
+                    "formal memory changeset write plan is incomplete"
+                )
+            if changeset_plan.creates_memory_record:
+                if (
+                    not changeset_plan.perspective_type
+                    or not changeset_plan.epistemic_status
+                    or not changeset_plan.sensitivity
+                    or not changeset_plan.policy_version
+                    or changeset_plan.authority_epoch is None
+                    or not changeset_plan.content_hash
+                    or not changeset_plan.content_schema_version
+                ):
+                    raise OwnerTruthCandidateReviewConflict(
+                        "initial formal memory changeset plan is incomplete"
+                    )
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.memories (
+                        id, vault_id, owner_subject_id, source_id, source_version,
+                        memory_kind, perspective_type, epistemic_status, sensitivity,
+                        status, policy_version, content_hash, authority_epoch,
+                        decision_receipt_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s, %s)
+                    """,
+                    (
+                        changeset_plan.memory_id,
+                        context.vault_id,
+                        context.owner_subject_id,
+                        changeset_plan.source_id,
+                        changeset_plan.source_version,
+                        changeset_plan.memory_kind,
+                        changeset_plan.perspective_type,
+                        changeset_plan.epistemic_status,
+                        changeset_plan.sensitivity,
+                        changeset_plan.policy_version,
+                        changeset_plan.content_hash,
+                        changeset_plan.authority_epoch,
+                        receipt_id,
+                    ),
+                )
+            else:
+                if not changeset_plan.supersedes_version_id:
+                    raise OwnerTruthCandidateReviewConflict(
+                        "replacement formal memory changeset has no predecessor"
+                    )
+                cursor.execute(
+                    """
+                    UPDATE owner_truth.memory_versions
+                    SET is_current = FALSE
+                    WHERE vault_id = %s AND id = %s AND is_current = TRUE
+                    RETURNING id
+                    """,
+                    (context.vault_id, changeset_plan.supersedes_version_id),
+                )
+                if cursor.fetchone() is None:
+                    raise OwnerTruthCandidateReviewConflict(
+                        "formal memory predecessor is no longer current"
+                    )
+
+            cursor.execute(
+                """
+                INSERT INTO owner_truth.memory_versions (
+                    id, vault_id, memory_id, version_number, is_current,
+                    schema_version, content_hash, payload, source_id,
+                    source_version, decision_receipt_id, supersedes_version_id
+                ) VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                self._adapt_params(
+                    (
+                        changeset_plan.memory_version_id,
+                        context.vault_id,
+                        changeset_plan.memory_id,
+                        changeset_plan.memory_version,
+                        changeset_plan.content_schema_version,
+                        changeset_plan.content_hash,
+                        dict(changeset_plan.payload),
+                        changeset_plan.source_id,
+                        changeset_plan.source_version,
+                        receipt_id,
+                        changeset_plan.supersedes_version_id,
+                    )
+                ),
+            )
+            if changeset_plan.relation_to_memory_id and changeset_plan.relation_type:
+                relation_id = str(
+                    uuid5(
+                        _MEMORY_CHANGESET_RELATION_NAMESPACE,
+                        f"{context.vault_id}:{receipt_id}:{changeset_plan.memory_id}:"
+                        f"{changeset_plan.relation_to_memory_id}:{changeset_plan.relation_type}",
+                    )
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO owner_truth.memory_relations (
+                        id, vault_id, from_memory_id, to_memory_id, relation_type
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (vault_id, from_memory_id, to_memory_id, relation_type) DO NOTHING
+                    """,
+                    (
+                        relation_id,
+                        context.vault_id,
+                        changeset_plan.memory_id,
+                        changeset_plan.relation_to_memory_id,
+                        changeset_plan.relation_type,
+                    ),
+                )
+            cursor.execute(
+                """
+                UPDATE owner_truth.memory_revisions
+                SET revision = revision + 1, updated_at = NOW()
+                WHERE vault_id = %s
+                RETURNING revision
+                """,
+                (context.vault_id,),
+            )
+            revision_row = cursor.fetchone()
+            if revision_row is None:  # pragma: no cover - locked-row invariant
+                raise OwnerTruthCandidateReviewConflict("formal memory revision did not advance")
+            applied_memory_revision = int(revision_row["revision"])
+        else:
+            applied_memory_revision = current_revision
+
+        self._persist_memory_changeset(
+            cursor,
+            changeset=changeset_plan.change_set,
+            receipt_id=receipt_id,
+            outcome=changeset_plan.outcome,
+            applied_memory_revision=applied_memory_revision,
+        )
+        return OwnerTruthMemoryActivationResult(
+            outcome=changeset_plan.outcome,
+            receipt_id=receipt_id,
+            candidate_id=candidate.candidate_id,
+            decision=decision,
+            memory_id=changeset_plan.memory_id,
+            memory_version_id=changeset_plan.memory_version_id,
+            memory_version=changeset_plan.memory_version,
+            authority_epoch=changeset_plan.authority_epoch,
+            content_hash=changeset_plan.content_hash,
+        )
+
     def activate_memory_version(
         self,
         *,
         receipt_id: str,
         context: OwnerTruthCommandContext,
+        expected_memory_revision: int | None = None,
     ) -> OwnerTruthMemoryActivationResult:
         """Activate exactly one initial MemoryVersion from one DecisionReceipt."""
 
         _assert_owner_context(context)
+        # The schema-backed V5 path is introduced below with its own revision
+        # row.  Preserve the legacy activation contract while callers roll out
+        # the new optional compare-and-swap field.
+        if expected_memory_revision is not None and expected_memory_revision < 0:
+            raise OwnerTruthCandidateReviewConflict(
+                "expectedMemoryRevision must be non-negative"
+            )
         with self._cursor() as cursor:
             cursor.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS locked",
@@ -1521,6 +3134,16 @@ class PostgresOwnerTruthCandidateReviewRepository:
                     "DecisionReceipt does not match its terminal Candidate"
                 )
             decision = candidate.decision
+            if candidate.content_schema_version == OWNER_TRUTH_SCHEMA_VERSION_V5:
+                return self._activate_v5_memory_version(
+                    cursor,
+                    receipt=receipt,
+                    candidate=candidate,
+                    decision=decision,
+                    context=context,
+                    vault=vault,
+                    expected_memory_revision=expected_memory_revision,
+                )
             if decision in {CandidateDecision.REJECTED, CandidateDecision.INVALIDATED}:
                 return OwnerTruthMemoryActivationResult(
                     outcome="notApplicable",
@@ -2044,7 +3667,8 @@ class PostgresOwnerTruthCandidateReviewRepository:
             """
             SELECT id, candidate_id, decision, actor_subject_id, policy_version,
                 payload_hash, expected_candidate_version,
-                candidate_before_hash, candidate_after_hash, authorization_evidence
+                candidate_before_hash, candidate_after_hash, authorization_evidence,
+                expected_change_set_id, expected_proposal_hash
             FROM owner_truth.decision_receipts
             WHERE vault_id = %s AND command_id_hash = %s
             FOR UPDATE
@@ -2062,7 +3686,9 @@ class PostgresOwnerTruthCandidateReviewRepository:
     ) -> Mapping[str, Any] | None:
         cursor.execute(
             """
-            SELECT id, candidate_id, decision, candidate_after_hash
+            SELECT id, candidate_id, decision, expected_candidate_version,
+                candidate_after_hash,
+                expected_change_set_id, expected_proposal_hash
             FROM owner_truth.decision_receipts
             WHERE vault_id = %s AND id = %s
             FOR UPDATE
@@ -2140,8 +3766,27 @@ class PostgresOwnerTruthCandidateReviewRepository:
         try:
             from psycopg.types.json import Jsonb
         except ImportError:  # pragma: no cover - production dependency
-            return tuple(_canonical_json(value) if isinstance(value, Mapping) else value for value in values)
-        return tuple(Jsonb(dict(value)) if isinstance(value, Mapping) else value for value in values)
+            return tuple(
+                _canonical_json(value)
+                if isinstance(value, (Mapping, list, tuple))
+                else value
+                for value in values
+            )
+        return tuple(
+            Jsonb(value) if isinstance(value, (Mapping, list, tuple)) else value
+            for value in values
+        )
+
+    @classmethod
+    def _adapt_changeset_operation_params(
+        cls,
+        values: tuple[Any, ...],
+        *,
+        dependencies: list[int],
+    ) -> tuple[Any, ...]:
+        # Proposal assertions are JSONB, but dependency indexes are a native
+        # PostgreSQL integer[] and must not pass through the JSONB adapter.
+        return cls._adapt_params(values) + (list(dependencies),)
 
     def _cursor(self):
         try:
@@ -2162,6 +3807,20 @@ class OwnerTruthCandidateReviewService:
             command_id="ownerTruthCandidateInbox",
         ):
             return self._store.owner_truth_candidate_review_repository().list_pending(context=context)
+
+    def memory_revision(self, *, context: OwnerTruthCommandContext) -> int:
+        """Read the Vault-wide revision used for an optimistic review write."""
+
+        _assert_owner_context(context)
+        with self._request_unit_of_work(
+            correlation_id=f"owner-truth-memory-revision-{context.vault_id}",
+            command_id="ownerTruthMemoryRevision",
+        ):
+            repository = self._store.owner_truth_candidate_review_repository()
+            reader = getattr(repository, "memory_revision", None)
+            if not callable(reader):
+                return 0
+            return int(reader(context=context))
 
     def list_review_history(
         self,
@@ -2196,6 +3855,41 @@ class OwnerTruthCandidateReviewService:
             return self._store.owner_truth_candidate_review_repository().list_memory_version_history(
                 memory_id=normalized_memory_id,
                 context=context,
+            )
+
+    def preview_changeset(
+        self,
+        *,
+        candidate_id: str,
+        context: OwnerTruthCommandContext,
+        corrected_value: Mapping[str, Any] | None = None,
+        corrected_value_schema_version: str | None = None,
+    ) -> OwnerTruthMemoryChangeSetProposal | None:
+        """Return a pre-review ChangeSet that a later decision must bind."""
+
+        _assert_owner_context(context)
+        normalized_candidate_id = str(candidate_id or "").strip()
+        if not normalized_candidate_id:
+            raise OwnerTruthCandidateReviewAccessDenied(
+                "Candidate does not exist in this Owner Vault"
+            )
+        with self._request_unit_of_work(
+            correlation_id=(
+                f"owner-truth-candidate-changeset-preview-{normalized_candidate_id}"
+            ),
+            command_id=f"ownerTruthCandidateChangesetPreview:{normalized_candidate_id}",
+        ):
+            repository = self._store.owner_truth_candidate_review_repository()
+            preview = getattr(repository, "preview_changeset", None)
+            if not callable(preview):
+                raise OwnerTruthCandidateReviewConflict(
+                    "Candidate ChangeSet preview is unavailable"
+                )
+            return preview(
+                candidate_id=normalized_candidate_id,
+                context=context,
+                corrected_value=corrected_value,
+                corrected_value_schema_version=corrected_value_schema_version,
             )
 
     def decide(
@@ -2241,15 +3935,23 @@ class OwnerTruthCandidateReviewService:
                 activation = repository.activate_memory_version(
                     receipt_id=review.receipt_id,
                     context=context,
+                    expected_memory_revision=command.expected_memory_revision,
                 )
                 projection_effect = self._write_projection_rebuild_effect(
                     context=context,
                     activation=activation,
                 )
+                revision_reader = getattr(repository, "memory_revision", None)
+                memory_revision = (
+                    int(revision_reader(context=context))
+                    if callable(revision_reader)
+                    else None
+                )
             return OwnerTruthCandidateDecisionActivationResult(
                 review=review,
                 memory_activation=activation,
                 projection_effect=projection_effect,
+                memory_revision=memory_revision,
             )
 
     def _write_projection_rebuild_effect(
@@ -2266,7 +3968,7 @@ class OwnerTruthCandidateReviewService:
         kernel until their own migration path opts into it.
         """
 
-        if activation.memory_version_id is None:
+        if activation.outcome not in {"created", "revised", "deduplicated"} or activation.memory_version_id is None:
             return None
         factory = getattr(self._store, "effect_kernel_repository", None)
         if not callable(factory):

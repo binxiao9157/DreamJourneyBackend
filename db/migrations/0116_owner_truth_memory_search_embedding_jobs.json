@@ -1,0 +1,27 @@
+{
+  "version": "0116",
+  "name": "owner_truth_memory_search_embedding_jobs",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthSearchEmbeddingBackfillV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true,
+    "ownerTruthMemorySearchEmbedding": false
+  },
+  "summary": "Adds durable current-SearchDocument embedding jobs with checkpoint, model, retry and lease fences; formal memory remains unaffected if vector work is disabled or retries.",
+  "operations": [
+    "create current SearchDocument embedding backfill job table and claim index",
+    "validate job scope/hash/checkpoint before queue mutation",
+    "allow derived vector retry without re-writing MemoryVersion"
+  ],
+  "rollback": "Disable ownerTruthMemorySearchEmbedding worker and retain derived jobs/vectors for forensic and forward-compatible cleanup. Do not delete or rewrite formal memories.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "requiresEmbeddingEgressApproval": true,
+    "requiresSyntheticChineseEvaluation": true
+  }
+}

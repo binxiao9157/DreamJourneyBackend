@@ -8,10 +8,11 @@ audit; they are not the primary reading experience.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
 import re
+from threading import RLock
 from typing import Any, Iterable, Mapping
 
 from app.domain.owner_truth.person_memory_model import (
@@ -19,6 +20,7 @@ from app.domain.owner_truth.person_memory_model import (
     PERSON_MEMORY_MODEL_ALGORITHM_VERSION,
     PERSON_MEMORY_MODEL_SCHEMA_VERSION,
     build_person_memory_model,
+    build_person_memory_model_incremental,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_formal_memory import (
@@ -27,6 +29,9 @@ from app.services.owner_truth_formal_memory import (
     OwnerTruthFormalMemoryError,
     OwnerTruthFormalMemoryQuery,
     OwnerTruthFormalMemoryService,
+)
+from app.services.owner_truth_derived_memory_access import (
+    require_owner_truth_derived_memory_access,
 )
 
 
@@ -61,6 +66,34 @@ class OwnerTruthPersonMemoryProfileError(OwnerTruthFormalMemoryError):
 
 
 @dataclass(frozen=True)
+class _ProfileCacheEntry:
+    """Private, rebuildable derived-read cache; never a memory authority."""
+
+    source_fingerprint: str
+    profile: "OwnerTruthPersonMemoryProfile"
+
+
+class _OwnerTruthPersonMemoryProfileCache:
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._entries: dict[tuple[str, str], _ProfileCacheEntry] = {}
+
+    def get(self, *, vault_id: str, owner_subject_id: str) -> _ProfileCacheEntry | None:
+        with self._lock:
+            return self._entries.get((vault_id, owner_subject_id))
+
+    def put(
+        self,
+        *,
+        vault_id: str,
+        owner_subject_id: str,
+        entry: _ProfileCacheEntry,
+    ) -> None:
+        with self._lock:
+            self._entries[(vault_id, owner_subject_id)] = entry
+
+
+@dataclass(frozen=True)
 class OwnerTruthPersonMemoryDimension:
     dimension: str
     title: str
@@ -90,16 +123,34 @@ class OwnerTruthPersonMemoryProfile:
     life_story: "OwnerTruthPersonLifeStory"
     dimensions: tuple[OwnerTruthPersonMemoryDimension, ...]
     memory_model: Mapping[str, Any]
+    source_fingerprint: str = ""
+    derivation_state: str = "ready"
+    stale_reason: str | None = None
+    rebuild_mode: str = "full"
+    affected_dimensions: tuple[str, ...] = ()
 
     def public_contract(self) -> dict[str, Any]:
+        if self.derivation_state not in {"ready", "stale"}:
+            raise OwnerTruthPersonMemoryProfileError("person-memory derivation state is invalid")
+        if self.rebuild_mode not in {"full", "incremental", "unchanged", "staleFallback"}:
+            raise OwnerTruthPersonMemoryProfileError("person-memory rebuild mode is invalid")
         return {
             "schemaVersion": PERSON_MEMORY_PROFILE_SCHEMA_VERSION,
             "algorithmVersion": PERSON_MEMORY_PROFILE_ALGORITHM_VERSION,
-            "state": "ready" if self.memory_count else "empty",
+            "state": (
+                "stale"
+                if self.derivation_state == "stale"
+                else ("ready" if self.memory_count else "empty")
+            ),
             "vaultId": self.vault_id,
             "profileVersion": self.profile_version,
             "updatedAt": self.updated_at,
             "memoryCount": self.memory_count,
+            "sourceFingerprint": self.source_fingerprint or None,
+            "derivationState": self.derivation_state,
+            "staleReason": self.stale_reason,
+            "rebuildMode": self.rebuild_mode,
+            "affectedDimensions": list(self.affected_dimensions),
             "lifeRecord": self.life_record.public_contract(),
             "lifeStory": self.life_story.public_contract(),
             "dimensions": [item.public_contract() for item in self.dimensions],
@@ -111,6 +162,20 @@ class OwnerTruthPersonMemoryProfile:
 class OwnerTruthPersonLifeRecord:
     title: str
     paragraphs: tuple[str, ...]
+    paragraph_evidence: tuple["OwnerTruthPersonMemoryParagraphEvidence", ...] = ()
+
+    def __post_init__(self) -> None:
+        if len(self.paragraph_evidence) not in {0, len(self.paragraphs)}:
+            raise OwnerTruthPersonMemoryProfileError(
+                "life-record paragraph evidence must align with every paragraph"
+            )
+        if self.paragraph_evidence:
+            expected_indexes = tuple(range(len(self.paragraphs)))
+            actual_indexes = tuple(item.paragraph_index for item in self.paragraph_evidence)
+            if actual_indexes != expected_indexes:
+                raise OwnerTruthPersonMemoryProfileError(
+                    "life-record paragraph evidence indexes are invalid"
+                )
 
     @property
     def text(self) -> str | None:
@@ -126,6 +191,50 @@ class OwnerTruthPersonLifeRecord:
             "paragraphCount": len(self.paragraphs),
             "paragraphs": list(self.paragraphs),
             "text": self.text,
+            "paragraphEvidence": [
+                item.public_contract() for item in self.paragraph_evidence
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class OwnerTruthPersonMemoryParagraphEvidence:
+    """Trace one derived paragraph to the current formal facts behind it."""
+
+    paragraph_index: int
+    supporting_memory_ids: tuple[str, ...]
+    supporting_memory_version_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.paragraph_index < 0:
+            raise OwnerTruthPersonMemoryProfileError(
+                "person-memory paragraph evidence index is invalid"
+            )
+        if not self.supporting_memory_ids or (
+            len(self.supporting_memory_ids)
+            != len(self.supporting_memory_version_ids)
+        ):
+            raise OwnerTruthPersonMemoryProfileError(
+                "person-memory paragraph evidence is incomplete"
+            )
+        if len(set(self.supporting_memory_ids)) != len(self.supporting_memory_ids):
+            raise OwnerTruthPersonMemoryProfileError(
+                "person-memory paragraph evidence repeats a formal memory"
+            )
+        if (
+            len(set(self.supporting_memory_version_ids))
+            != len(self.supporting_memory_version_ids)
+        ):
+            raise OwnerTruthPersonMemoryProfileError(
+                "person-memory paragraph evidence repeats a formal-memory version"
+            )
+
+    def public_contract(self) -> dict[str, Any]:
+        return {
+            "paragraphIndex": self.paragraph_index,
+            "supportingMemoryCount": len(self.supporting_memory_ids),
+            "supportingMemoryIds": list(self.supporting_memory_ids),
+            "supportingMemoryVersionIds": list(self.supporting_memory_version_ids),
         }
 
 
@@ -137,6 +246,20 @@ class OwnerTruthPersonLifeStoryChapter:
     supporting_memory_ids: tuple[str, ...]
     supporting_memory_version_ids: tuple[str, ...]
     facets: tuple[str, ...] = ()
+    paragraph_evidence: tuple[OwnerTruthPersonMemoryParagraphEvidence, ...] = ()
+
+    def __post_init__(self) -> None:
+        if len(self.paragraph_evidence) not in {0, len(self.paragraphs)}:
+            raise OwnerTruthPersonMemoryProfileError(
+                "life-story paragraph evidence must align with every paragraph"
+            )
+        if self.paragraph_evidence:
+            expected_indexes = tuple(range(len(self.paragraphs)))
+            actual_indexes = tuple(item.paragraph_index for item in self.paragraph_evidence)
+            if actual_indexes != expected_indexes:
+                raise OwnerTruthPersonMemoryProfileError(
+                    "life-story paragraph evidence indexes are invalid"
+                )
 
     @property
     def text(self) -> str:
@@ -154,6 +277,9 @@ class OwnerTruthPersonLifeStoryChapter:
             "supportingMemoryIds": list(self.supporting_memory_ids),
             "supportingMemoryVersionIds": list(self.supporting_memory_version_ids),
             "facets": list(self.facets),
+            "paragraphEvidence": [
+                item.public_contract() for item in self.paragraph_evidence
+            ],
         }
 
 
@@ -198,27 +324,103 @@ class OwnerTruthPersonMemoryProfileService:
     """Build a bounded continuous-text life record from all current memories."""
 
     def __init__(self, store: Any) -> None:
+        self._store = store
         self._formal_memory = OwnerTruthFormalMemoryService(store)
+        cache = getattr(store, "_owner_truth_person_memory_profile_cache", None)
+        if cache is None:
+            cache = _OwnerTruthPersonMemoryProfileCache()
+            setattr(store, "_owner_truth_person_memory_profile_cache", cache)
+        if not isinstance(cache, _OwnerTruthPersonMemoryProfileCache):
+            raise OwnerTruthPersonMemoryProfileError("person-memory cache contract is invalid")
+        self._cache = cache
 
     def read(self, *, context: OwnerTruthCommandContext) -> OwnerTruthPersonMemoryProfile:
         memories = self._all_current_memories(context=context)
-        memory_model = build_person_memory_model(
-            _person_model_entry(item) for item in memories
-        )
-        dimensions = _dimensions_from_model(memory_model)
-        life_story = _life_story_from_model(memory_model)
-        life_record = _life_record_from_story(life_story)
-        profile_version = str(memory_model["modelVersion"])
-        return OwnerTruthPersonMemoryProfile(
+        if memories:
+            require_owner_truth_derived_memory_access(store=self._store, context=context)
+        entries = tuple(_person_model_entry(item) for item in memories)
+        source_fingerprint = _profile_source_fingerprint(entries)
+        cached = self._cache.get(
             vault_id=context.vault_id,
-            profile_version=profile_version,
-            updated_at=memories[0].current_version.created_at if memories else None,
-            memory_count=len(memories),
-            life_record=life_record,
-            life_story=life_story,
-            dimensions=dimensions,
-            memory_model=memory_model,
+            owner_subject_id=context.owner_subject_id,
         )
+        if cached is not None and cached.source_fingerprint == source_fingerprint:
+            # Current rights were checked above. A byte-identical current fact
+            # set needs no fresh full-document derivation.
+            return replace(
+                cached.profile,
+                derivation_state="ready",
+                stale_reason=None,
+                rebuild_mode="unchanged",
+                affected_dimensions=(),
+            )
+        try:
+            if cached is None:
+                memory_model = build_person_memory_model(entries)
+                rebuild_mode = "full"
+            else:
+                # The source set is current formal authority, while the prior
+                # model is only a rebuildable cache. The domain helper keeps
+                # unaffected dimensions and life-story sections intact rather
+                # than calculating the complete profile then relabelling it
+                # as incremental.
+                memory_model = build_person_memory_model_incremental(
+                    previous_model=cached.profile.memory_model,
+                    entries=entries,
+                )
+                rebuild_mode = "incremental"
+            dimensions = _dimensions_from_model(memory_model)
+            life_story = _life_story_from_model(memory_model)
+            life_record = _life_record_from_story(life_story)
+            affected_dimensions = _affected_dimensions(
+                previous=cached.profile if cached is not None else None,
+                current=dimensions,
+            )
+            if cached is not None:
+                dimensions = _reuse_unchanged_dimensions(
+                    previous=cached.profile.dimensions,
+                    current=dimensions,
+                )
+                life_story = _reuse_unchanged_life_story(
+                    previous=cached.profile.life_story,
+                    current=life_story,
+                )
+                life_record = _life_record_from_story(life_story)
+            profile = OwnerTruthPersonMemoryProfile(
+                vault_id=context.vault_id,
+                profile_version=str(memory_model["modelVersion"]),
+                updated_at=max(
+                    (item.current_version.created_at for item in memories),
+                    default=None,
+                ),
+                memory_count=len(memories),
+                life_record=life_record,
+                life_story=life_story,
+                dimensions=dimensions,
+                memory_model=memory_model,
+                source_fingerprint=source_fingerprint,
+                derivation_state="ready",
+                rebuild_mode=rebuild_mode,
+                affected_dimensions=affected_dimensions,
+            )
+        except OwnerTruthPersonMemoryProfileError:
+            if cached is None:
+                raise
+            # A failed derived rebuild must not masquerade as a current formal
+            # view. The last evidence-bound version remains marked stale.
+            return replace(
+                cached.profile,
+                derivation_state="stale",
+                stale_reason="derivationFailed",
+                rebuild_mode="staleFallback",
+                affected_dimensions=(),
+            )
+        self._cache.put(
+            vault_id=context.vault_id,
+            owner_subject_id=context.owner_subject_id,
+            entry=_ProfileCacheEntry(source_fingerprint=source_fingerprint, profile=profile),
+        )
+        return profile
 
     def _all_current_memories(
         self,
@@ -273,6 +475,108 @@ def _person_model_entry(memory: OwnerTruthFormalMemory) -> dict[str, Any]:
         "sourceId": first_ref.get("sourceId"),
         "sourceVersion": first_ref.get("sourceVersion"),
     }
+
+
+def _profile_source_fingerprint(entries: Iterable[Mapping[str, Any]]) -> str:
+    """Bind a derived profile to current formal version/hash pairs only."""
+
+    material = [
+        {
+            "memoryId": str(entry.get("memoryId") or ""),
+            "memoryVersionId": str(entry.get("memoryVersionId") or ""),
+            "contentHash": str(entry.get("contentHash") or ""),
+        }
+        for entry in entries
+    ]
+    return sha256(
+        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _dimension_fingerprint(dimension: OwnerTruthPersonMemoryDimension) -> str:
+    return sha256(
+        json.dumps(
+            {
+                "dimension": dimension.dimension,
+                "narrative": dimension.narrative,
+                "supportingMemoryIds": list(dimension.supporting_memory_ids),
+                "supportingMemoryVersionIds": list(dimension.supporting_memory_version_ids),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _affected_dimensions(
+    *,
+    previous: OwnerTruthPersonMemoryProfile | None,
+    current: tuple[OwnerTruthPersonMemoryDimension, ...],
+) -> tuple[str, ...]:
+    if previous is None:
+        return tuple(item.dimension for item in current)
+    before = {item.dimension: _dimension_fingerprint(item) for item in previous.dimensions}
+    return tuple(
+        item.dimension
+        for item in current
+        if before.get(item.dimension) != _dimension_fingerprint(item)
+    )
+
+
+def _reuse_unchanged_dimensions(
+    *,
+    previous: tuple[OwnerTruthPersonMemoryDimension, ...],
+    current: tuple[OwnerTruthPersonMemoryDimension, ...],
+) -> tuple[OwnerTruthPersonMemoryDimension, ...]:
+    previous_by_key = {item.dimension: item for item in previous}
+    return tuple(
+        previous_by_key[item.dimension]
+        if (
+            item.dimension in previous_by_key
+            and _dimension_fingerprint(previous_by_key[item.dimension])
+            == _dimension_fingerprint(item)
+        )
+        else item
+        for item in current
+    )
+
+
+def _chapter_fingerprint(chapter: OwnerTruthPersonLifeStoryChapter) -> str:
+    return sha256(
+        json.dumps(
+            {
+                "chapterId": chapter.chapter_id,
+                "title": chapter.title,
+                "paragraphs": list(chapter.paragraphs),
+                "supportingMemoryIds": list(chapter.supporting_memory_ids),
+                "supportingMemoryVersionIds": list(chapter.supporting_memory_version_ids),
+                "paragraphEvidence": [item.public_contract() for item in chapter.paragraph_evidence],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _reuse_unchanged_life_story(
+    *,
+    previous: OwnerTruthPersonLifeStory,
+    current: OwnerTruthPersonLifeStory,
+) -> OwnerTruthPersonLifeStory:
+    previous_by_id = {chapter.chapter_id: chapter for chapter in previous.chapters}
+    chapters = tuple(
+        previous_by_id[chapter.chapter_id]
+        if (
+            chapter.chapter_id in previous_by_id
+            and _chapter_fingerprint(previous_by_id[chapter.chapter_id])
+            == _chapter_fingerprint(chapter)
+        )
+        else chapter
+        for chapter in current.chapters
+    )
+    return replace(current, chapters=chapters)
 
 
 def _memory_model_summary(model: Mapping[str, Any]) -> dict[str, Any]:
@@ -353,11 +657,34 @@ def _life_story_from_model(model: Mapping[str, Any]) -> OwnerTruthPersonLifeStor
         evidence = section.get("evidence")
         if not isinstance(blocks, list) or not isinstance(evidence, list):
             raise OwnerTruthPersonMemoryProfileError("biography section evidence is invalid")
-        paragraphs = tuple(
-            str(block.get("text") or "").strip()
-            for block in blocks
-            if isinstance(block, Mapping) and str(block.get("text") or "").strip()
-        )
+        block_pairs: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+        for block in blocks:
+            if not isinstance(block, Mapping):
+                continue
+            text = str(block.get("text") or "").strip()
+            block_citations = block.get("evidence")
+            if not text or not isinstance(block_citations, list):
+                continue
+            block_memory_ids = tuple(
+                str(item.get("memoryId") or "")
+                for item in block_citations
+                if isinstance(item, Mapping)
+            )
+            block_version_ids = tuple(
+                str(item.get("memoryVersionId") or "")
+                for item in block_citations
+                if isinstance(item, Mapping)
+            )
+            if (
+                not block_memory_ids
+                or len(block_memory_ids) != len(block_version_ids)
+                or any(not value for value in (*block_memory_ids, *block_version_ids))
+            ):
+                raise OwnerTruthPersonMemoryProfileError(
+                    "biography block has incomplete evidence"
+                )
+            block_pairs.append((text, block_memory_ids, block_version_ids))
+        paragraphs = tuple(item[0] for item in block_pairs)
         citations = [item for item in evidence if isinstance(item, Mapping)]
         memory_ids = tuple(str(item.get("memoryId") or "") for item in citations)
         version_ids = tuple(
@@ -383,6 +710,14 @@ def _life_story_from_model(model: Mapping[str, Any]) -> OwnerTruthPersonLifeStor
                 supporting_memory_ids=memory_ids,
                 supporting_memory_version_ids=version_ids,
                 facets=facets,
+                paragraph_evidence=tuple(
+                    OwnerTruthPersonMemoryParagraphEvidence(
+                        paragraph_index=index,
+                        supporting_memory_ids=block_memory_ids,
+                        supporting_memory_version_ids=block_version_ids,
+                    )
+                    for index, (_, block_memory_ids, block_version_ids) in enumerate(block_pairs)
+                ),
             )
         )
     return OwnerTruthPersonLifeStory(
@@ -401,13 +736,54 @@ def _life_story_from_model(model: Mapping[str, Any]) -> OwnerTruthPersonLifeStor
 def _life_record_from_story(
     story: OwnerTruthPersonLifeStory,
 ) -> OwnerTruthPersonLifeRecord:
-    paragraphs = [story.overview] if story.overview else []
-    paragraphs.extend(
-        paragraph for chapter in story.chapters for paragraph in chapter.paragraphs
-    )
+    all_memory_versions: dict[str, str] = {}
+    for chapter in story.chapters:
+        all_memory_versions.update(
+            dict(zip(chapter.supporting_memory_ids, chapter.supporting_memory_version_ids))
+        )
+    all_memory_ids = tuple(all_memory_versions)
+    all_version_ids = tuple(all_memory_versions[memory_id] for memory_id in all_memory_ids)
+    pairs: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+    if story.overview:
+        pairs.append((story.overview, all_memory_ids, all_version_ids))
+    for chapter in story.chapters:
+        if chapter.paragraph_evidence:
+            pairs.extend(
+                (
+                    paragraph,
+                    evidence.supporting_memory_ids,
+                    evidence.supporting_memory_version_ids,
+                )
+                for paragraph, evidence in zip(
+                    chapter.paragraphs,
+                    chapter.paragraph_evidence,
+                )
+            )
+        else:
+            pairs.extend(
+                (paragraph, chapter.supporting_memory_ids, chapter.supporting_memory_version_ids)
+                for paragraph in chapter.paragraphs
+            )
+
+    paragraphs: list[str] = []
+    paragraph_evidence: list[OwnerTruthPersonMemoryParagraphEvidence] = []
+    seen: set[str] = set()
+    for paragraph, memory_ids, version_ids in pairs:
+        if paragraph in seen:
+            continue
+        seen.add(paragraph)
+        paragraph_evidence.append(
+            OwnerTruthPersonMemoryParagraphEvidence(
+                paragraph_index=len(paragraphs),
+                supporting_memory_ids=memory_ids,
+                supporting_memory_version_ids=version_ids,
+            )
+        )
+        paragraphs.append(paragraph)
     return OwnerTruthPersonLifeRecord(
         title=story.title,
-        paragraphs=tuple(_unique(paragraphs)),
+        paragraphs=tuple(paragraphs),
+        paragraph_evidence=tuple(paragraph_evidence),
     )
 
 
@@ -639,21 +1015,56 @@ def _life_story_chapter(
     group: _LifeStoryChapterGroup,
 ) -> OwnerTruthPersonLifeStoryChapter:
     memories = group.memories
-    visible_texts = _unique(_primary_text(item) for item in memories)[
-        :_MAX_CHAPTER_MEMORIES_IN_TEXT
-    ]
-    paragraphs = [
-        _paragraph(visible_texts[index : index + 3])
-        for index in range(0, len(visible_texts), 3)
-    ]
-    paragraphs = [paragraph for paragraph in paragraphs if paragraph]
+    visible_entries: list[tuple[str, OwnerTruthFormalMemory]] = []
+    seen_texts: set[str] = set()
+    for memory in memories:
+        text = _primary_text(memory)
+        if not text or text in seen_texts:
+            continue
+        seen_texts.add(text)
+        visible_entries.append((text, memory))
+        if len(visible_entries) == _MAX_CHAPTER_MEMORIES_IN_TEXT:
+            break
+
+    paragraphs: list[str] = []
+    paragraph_evidence: list[OwnerTruthPersonMemoryParagraphEvidence] = []
+
+    def append_with_evidence(
+        text: str | None,
+        evidence_memories: Iterable[OwnerTruthFormalMemory],
+    ) -> None:
+        if not text or text in paragraphs:
+            return
+        evidence_items = tuple(evidence_memories)
+        paragraph_evidence.append(
+            OwnerTruthPersonMemoryParagraphEvidence(
+                paragraph_index=len(paragraphs),
+                supporting_memory_ids=tuple(item.memory_id for item in evidence_items),
+                supporting_memory_version_ids=tuple(
+                    item.current_version.version_id for item in evidence_items
+                ),
+            )
+        )
+        paragraphs.append(text)
+
+    for index in range(0, len(visible_entries), 3):
+        entry_group = visible_entries[index : index + 3]
+        append_with_evidence(
+            _paragraph(text for text, _ in entry_group),
+            (memory for _, memory in entry_group),
+        )
 
     reflection = _life_story_reflection(memories)
-    if reflection and reflection not in paragraphs:
-        paragraphs.append(reflection)
-    hidden_count = max(0, len(_unique(_primary_text(item) for item in memories)) - len(visible_texts))
+    append_with_evidence(reflection, memories)
+    hidden_count = max(
+        0,
+        len(_unique(_primary_text(item) for item in memories)) - len(visible_entries),
+    )
     if hidden_count:
-        paragraphs.append("还有一些相关片段保留在已确认记忆中，等待以后继续补充进这一章。")
+        append_with_evidence(
+            "还有一些相关片段保留在已确认记忆中，等待以后继续补充进这一章。",
+            memories,
+        )
     if not paragraphs:
         raise OwnerTruthPersonMemoryProfileError(
             "life-story chapter cannot be built without readable formal-memory content"
@@ -667,6 +1078,7 @@ def _life_story_chapter(
         supporting_memory_version_ids=tuple(
             item.current_version.version_id for item in memories
         ),
+        paragraph_evidence=tuple(paragraph_evidence),
     )
 
 
@@ -992,6 +1404,7 @@ __all__ = [
     "PERSON_MEMORY_PROFILE_ALGORITHM_VERSION",
     "PERSON_MEMORY_PROFILE_SCHEMA_VERSION",
     "OwnerTruthPersonMemoryDimension",
+    "OwnerTruthPersonMemoryParagraphEvidence",
     "OwnerTruthPersonMemoryProfile",
     "OwnerTruthPersonMemoryProfileError",
     "OwnerTruthPersonMemoryProfileService",

@@ -129,6 +129,38 @@ class OwnerTruthLegacyBackfillAPITests(unittest.TestCase):
         self.assertEqual(replay.status_code, 200)
         self.assertEqual(replay.json()["planId"], payload["planId"])
 
+    def test_owner_can_create_value_free_b_dry_run_without_promoting_legacy_data(self) -> None:
+        owner_id, headers = self._login("13800139445")
+        vault_id = "vault-b-dry-run-owner"
+        self._seed_active_vault(owner_id, vault_id)
+        private_body = "这段旧档案正文不得进入 B dry-run 响应"
+        main_module.store.add_archive_item(
+            owner_id,
+            {"id": "legacy-b-dry-run-private-id", "kind": "text", "note": private_body},
+        )
+
+        created = client.post(
+            f"/v2/vaults/{vault_id}/legacy-migration/b-dry-run",
+            headers=headers,
+        )
+        replay = client.post(
+            f"/v2/vaults/{vault_id}/legacy-migration/b-dry-run",
+            headers=headers,
+        )
+
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.headers["cache-control"], "no-store")
+        payload = created.json()
+        self.assertEqual(payload["schemaVersion"], "owner-truth-b-migration-dry-run-v1")
+        self.assertEqual(payload["formalMemoryWriteCount"], 0)
+        self.assertEqual(payload["targetState"], "notCreated")
+        self.assertGreaterEqual(payload["entryCount"], 1)
+        self.assertNotIn(private_body, str(payload))
+        self.assertNotIn("legacy-b-dry-run-private-id", str(payload))
+        self.assertEqual(main_module.store.owner_truth_source_count(vault_id), 1)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay.json()["reportId"], payload["reportId"])
+
     def test_cross_owner_is_rejected_before_inventory_or_plan_is_written(self) -> None:
         owner_id, _owner_headers = self._login("13800139443")
         vault_id = "vault-backfill-cross-owner"

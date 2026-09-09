@@ -260,6 +260,9 @@ class OwnerTruthCorrectionResolutionCommand:
     corrected_value: Mapping[str, Any] | None
     corrected_value_schema_version: str
     reason_code: str
+    expected_memory_revision: int | None = None
+    expected_change_set_id: str | None = None
+    expected_proposal_hash: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", _identifier(self.command_id, field="command_id"))
@@ -284,6 +287,29 @@ class OwnerTruthCorrectionResolutionCommand:
             )
         object.__setattr__(self, "action", action)
         object.__setattr__(self, "reason_code", _identifier(self.reason_code, field="reason_code"))
+        if self.expected_memory_revision is not None and (
+            not isinstance(self.expected_memory_revision, int)
+            or isinstance(self.expected_memory_revision, bool)
+            or self.expected_memory_revision < 0
+        ):
+            raise OwnerTruthCorrectionResolutionConflict(
+                "expected_memory_revision must be a non-negative integer when provided"
+            )
+        if (self.expected_change_set_id is None) != (self.expected_proposal_hash is None):
+            raise OwnerTruthCorrectionResolutionConflict(
+                "expected_change_set_id and expected_proposal_hash must be provided together"
+            )
+        if self.expected_change_set_id is not None:
+            object.__setattr__(
+                self,
+                "expected_change_set_id",
+                _uuid(self.expected_change_set_id, field="expected_change_set_id"),
+            )
+            object.__setattr__(
+                self,
+                "expected_proposal_hash",
+                _hash(self.expected_proposal_hash, field="expected_proposal_hash"),
+            )
         schema_version = _nonblank_text(
             self.corrected_value_schema_version,
             field="corrected_value_schema_version",
@@ -316,7 +342,10 @@ class OwnerTruthCorrectionResolutionCommand:
                 "correctedValue": self.corrected_value,
                 "correctedValueSchemaVersion": self.corrected_value_schema_version,
                 "expectedCandidateVersion": self.expected_candidate_version,
+                "expectedChangeSetId": self.expected_change_set_id,
+                "expectedMemoryRevision": self.expected_memory_revision,
                 "expectedMemoryVersionId": self.expected_memory_version_id,
+                "expectedProposalHash": self.expected_proposal_hash,
                 "reasonCode": self.reason_code,
             }
         )
@@ -330,6 +359,9 @@ class OwnerTruthCorrectionResolutionCommand:
             corrected_value=self.corrected_value,
             corrected_value_schema_version=self.corrected_value_schema_version,
             reason_code=self.reason_code,
+            expected_memory_revision=self.expected_memory_revision,
+            expected_change_set_id=self.expected_change_set_id,
+            expected_proposal_hash=self.expected_proposal_hash,
         )
 
     def resolution_id(self, *, vault_id: str, correction_request_id: str) -> str:

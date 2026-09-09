@@ -34,6 +34,7 @@ from app.services.owner_truth_context_shadow_build import (
     OWNER_TRUTH_CONTEXT_QUERY_SELECTED_LIMIT,
     OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK,
 )
+from app.services.owner_truth_memory_search_hybrid import OwnerTruthMemorySearchHybridRanker
 
 
 OWNER_TRUTH_CONTEXT_AUTHORITY_MODE = "ownerTruthConfirmedProjection"
@@ -62,10 +63,18 @@ def _request_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
 class OwnerTruthContextAuthorityService:
     """Build a normal Echo packet from current confirmed Projection only."""
 
-    def __init__(self, store: Any, *, settings: Settings, enabled: bool = False) -> None:
+    def __init__(
+        self,
+        store: Any,
+        *,
+        settings: Settings,
+        enabled: bool = False,
+        hybrid_ranker: OwnerTruthMemorySearchHybridRanker | None = None,
+    ) -> None:
         self._store = store
         self._settings = settings
         self._enabled = bool(enabled)
+        self._hybrid_ranker = hybrid_ranker
 
     def build_packet(
         self,
@@ -84,6 +93,7 @@ class OwnerTruthContextAuthorityService:
         *,
         context: OwnerTruthCommandContext,
         payload: Mapping[str, Any],
+        retrieval_query: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Return the exact materialization used by one production answer.
 
@@ -99,7 +109,11 @@ class OwnerTruthContextAuthorityService:
             # ``build`` exits through its existing neutral packet before legacy
             # Archive/KBLite/Care or provider reads are attempted.
             return builder.build(canonical_payload), None
-        materialization = self.materialize(context=context, payload=canonical_payload)
+        materialization = self.materialize(
+            context=context,
+            payload=canonical_payload,
+            retrieval_query=retrieval_query,
+        )
         return builder.build_from_owner_truth_materialization(
             canonical_payload,
             materialization=materialization,
@@ -110,6 +124,7 @@ class OwnerTruthContextAuthorityService:
         *,
         context: OwnerTruthCommandContext,
         payload: Mapping[str, Any],
+        retrieval_query: str | None = None,
     ) -> dict[str, Any]:
         vault_reader = getattr(self._store, "get_owner_truth_vault", None)
         vault = vault_reader(context.vault_id) if callable(vault_reader) else None
@@ -121,14 +136,21 @@ class OwnerTruthContextAuthorityService:
             return self._empty_materialization(context=context, payload=payload)
         # Context selection is server-defined. The client cannot switch this
         # production path back to citation order by submitting selectionMode.
+        # The original request remains the packet and audit subject.  A
+        # server-owned, same-session follow-up cue may only narrow retrieval;
+        # it cannot alter safety evaluation, persona routing, or the answer
+        # text that is later persisted as the user's actual turn.
+        effective_query = _text(retrieval_query) or _text(payload.get("query"))
         materialization_payload = {
             "intent": _text(payload.get("intent"), "echo_chat"),
             "query": _text(payload.get("query")),
             "selectionMode": OWNER_TRUTH_CONTEXT_SHADOW_SELECTION_MODE_QUERY_TEXT_FALLBACK,
+            "_ownerTruthServerRetrievalQuery": effective_query,
         }
         materialization = OwnerTruthContextMaterializationService(
             self._store,
             enabled=self._enabled,
+            hybrid_ranker=self._hybrid_ranker,
         ).build(
             context=context,
             payload=materialization_payload,

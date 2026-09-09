@@ -27,7 +27,13 @@ from app.domain.owner_truth.projection_rights import (
     ProjectionRightsState,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.domain.narrative.contracts import NarrativeScope
 from app.async_effects.repository import InMemoryEffectKernelRepository
+from app.services.narrative_project import (
+    InMemoryNarrativeRepository,
+    NarrativeProjectService,
+    NarrativeReadinessInsufficient,
+)
 from app.services.owner_truth_candidate_review import (
     InMemoryOwnerTruthCandidateReviewRepository,
     OwnerTruthCandidateReviewService,
@@ -40,6 +46,15 @@ from app.services.owner_truth_kblite_compatibility import (
 from app.services.owner_truth_memory_projection import (
     InMemoryOwnerTruthMemoryProjectionRepository,
     OwnerTruthMemoryProjectionService,
+)
+from app.services.owner_truth_formal_memory import (
+    InMemoryOwnerTruthFormalMemoryRepository,
+)
+from app.services.owner_truth_derived_memory_access import (
+    OwnerTruthDerivedMemoryAccessDenied,
+)
+from app.services.owner_truth_person_memory_profile import (
+    OwnerTruthPersonMemoryProfileService,
 )
 from app.services.owner_truth_projection_rights import (
     InMemoryOwnerTruthProjectionRightsRepository,
@@ -58,6 +73,9 @@ class _Store:
         self.review_repository = InMemoryOwnerTruthCandidateReviewRepository()
         self.rights_repository = InMemoryOwnerTruthProjectionRightsRepository()
         self.effect_repository = InMemoryEffectKernelRepository()
+        self.formal_memory_repository = InMemoryOwnerTruthFormalMemoryRepository(
+            self.review_repository
+        )
         self.projection_repository = InMemoryOwnerTruthMemoryProjectionRepository(
             self.review_repository,
             rights_repository=self.rights_repository,
@@ -73,6 +91,9 @@ class _Store:
 
     def owner_truth_projection_rights_repository(self):
         return self.rights_repository
+
+    def owner_truth_formal_memory_repository(self):
+        return self.formal_memory_repository
 
     def effect_kernel_repository(self):
         return self.effect_repository
@@ -220,6 +241,35 @@ class OwnerTruthProjectionRightsFenceTests(unittest.TestCase):
         self.assertEqual(blocked_rebuild.outcome, "blocked")
         self.assertNotIn(candidate.content["claim"], str(context))
         self.assertNotIn(candidate.content["claim"], str(envelope))
+
+    def test_revocation_blocks_every_derived_formal_memory_reader(self) -> None:
+        self._activate()
+        profile_service = OwnerTruthPersonMemoryProfileService(self.store)
+        narrative_service = NarrativeProjectService(
+            InMemoryNarrativeRepository(),
+            self.store,
+        )
+        narrative_scope = NarrativeScope(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_id,
+            actor_subject_id=self.owner_id,
+            subject_persona_id=self.owner_id,
+            authority_epoch=0,
+        )
+
+        self.assertEqual(profile_service.read(context=self.context).memory_count, 1)
+        self.assertEqual(len(narrative_service._current_refs(narrative_scope)), 1)
+
+        self._record_rights(
+            expected_revision=0,
+            state=ProjectionRightsState.REVOKED,
+            suffix="derived-readers-revoke-001",
+        )
+
+        with self.assertRaises(OwnerTruthDerivedMemoryAccessDenied):
+            profile_service.read(context=self.context)
+        with self.assertRaises(NarrativeReadinessInsufficient):
+            narrative_service._current_refs(narrative_scope)
 
     def test_non_owner_cannot_change_rights_and_revocation_is_terminal(self) -> None:
         outsider = OwnerTruthCommandContext(

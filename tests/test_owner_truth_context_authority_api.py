@@ -21,12 +21,19 @@ from app.domain.owner_truth.contracts import (
     PerspectiveType,
     SensitivityLevel,
 )
-from app.domain.owner_truth.ontology import OWNER_TRUTH_SCHEMA_VERSION
+from app.domain.owner_truth.ontology import (
+    OWNER_TRUTH_SCHEMA_VERSION,
+    OWNER_TRUTH_SCHEMA_VERSION_V5,
+    enrich_memory_payload_v5,
+)
 from app.domain.owner_truth.source_commands import CreateTextSourceCommand, OwnerTruthCommandContext
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
 from app.services.owner_truth_candidate_review import OwnerTruthCandidateReviewService
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
+from app.services.owner_truth_echo_conversation_context import (
+    OwnerTruthEchoConversationContextService,
+)
 from app.services.owner_truth_source import OwnerTruthSourceCommandService
 from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 
@@ -171,6 +178,94 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         return candidate
 
     @staticmethod
+    def _seed_confirmed_school_memory(owner_id: str) -> OwnerTruthCandidateSnapshot:
+        context = OwnerTruthCommandContext(
+            vault_id=owner_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        source_id = str(uuid4())
+        OwnerTruthSourceCommandService(main_module.store).create_text_source(
+            command=CreateTextSourceCommand(
+                command_id=f"context-authority-school-source-{source_id}",
+                source_id=source_id,
+                expected_version=0,
+                text="本人主动确认的教育经历来源。",
+                metadata={"origin": "context-authority-followup-test"},
+            ),
+            context=context,
+        )
+        content = enrich_memory_payload_v5(
+            kind=MemoryKind.KNOWLEDGE,
+            payload={
+                "statement": "我于 2016 年从 A 大学计算机专业毕业。",
+                "knowledgeType": "education",
+                "domains": ["教育"],
+                "factType": "knowledge",
+                "predicate": "graduatedFrom",
+                "object": {"label": "A 大学", "category": "school"},
+                "qualifiers": {
+                    "polarity": "positive",
+                    "currentApplicability": "historical",
+                    "validTime": {"precision": "year", "expression": "2016 年"},
+                },
+            },
+            provenance={"mode": "selfReport"},
+            memory_subject_id=owner_id,
+            claim_subject_id=owner_id,
+        )
+        candidate = OwnerTruthCandidateSnapshot(
+            candidate_id=str(uuid4()),
+            vault_id=owner_id,
+            owner_subject_id=owner_id,
+            source_id=source_id,
+            memory_kind=MemoryKind.KNOWLEDGE,
+            perspective_type=PerspectiveType.FIRST_PERSON,
+            epistemic_status=EpistemicStatus.RECALLED,
+            sensitivity=SensitivityLevel.STANDARD,
+            decision=CandidateDecision.PENDING,
+            policy_version=OWNER_TRUTH_SCHEMA_VERSION,
+            authority_epoch=0,
+            row_version=1,
+            content_hash=_content_hash(content),
+            content_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V5,
+            payload={
+                "content": content,
+                "contentSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION_V5,
+                "evidenceRefs": [{"sourceId": source_id, "sourceVersion": 1}],
+                "reviewMode": "single",
+                "schemaVersion": "owner-truth-candidate-proposal-v1",
+            },
+        )
+        main_module.store.owner_truth_candidate_review_repository().seed(candidate)
+        review_service = OwnerTruthCandidateReviewService(main_module.store)
+        proposal = review_service.preview_changeset(
+            candidate_id=candidate.candidate_id,
+            context=context,
+        )
+        assert proposal is not None
+        review_service.decide_and_activate(
+            command=OwnerTruthCandidateReviewCommand(
+                command_id=f"context-authority-school-accept-{candidate.candidate_id}",
+                candidate_id=candidate.candidate_id,
+                expected_candidate_version=1,
+                expected_memory_revision=proposal.change_set.base_memory_revision,
+                expected_change_set_id=proposal.change_set.change_set_id,
+                expected_proposal_hash=proposal.proposal_hash,
+                action=CandidateReviewAction.ACCEPT,
+                corrected_value=None,
+                corrected_value_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V5,
+                reason_code="ownerReviewed",
+            ),
+            context=context,
+        )
+        OwnerTruthMemoryProjectionService(main_module.store).rebuild(context=context)
+        main_module.store.owner_truth_memory_search_document_projection_repository().rebuild(
+            context=context
+        )
+        return candidate
+
+    @staticmethod
     def _payload(owner_id: str) -> dict[str, str]:
         return {
             "userId": owner_id,
@@ -299,6 +394,52 @@ class OwnerTruthContextAuthorityAPITests(unittest.TestCase):
         self.assertEqual(answer["citations"], [])
         self.assertEqual(answer["memoryGrounding"]["outcome"], "notApplicable")
         self.assertEqual(answer["memoryGrounding"]["handoff"], "none")
+
+    def test_server_session_followup_resolves_before_formal_memory_retrieval(self) -> None:
+        owner_id, headers = self._login("13800139770")
+        self._seed_confirmed_school_memory(owner_id)
+        self._enable_authenticated_owner_v4(owner_id)
+        context = OwnerTruthCommandContext(
+            vault_id=owner_id,
+            owner_subject_id=owner_id,
+            actor_subject_id=owner_id,
+        )
+        OwnerTruthEchoConversationContextService(main_module.store).record_answered_exchange(
+            context=context,
+            product_session_id="followup-school-001",
+            request_id="followup-school-prior-turn",
+            user_text="我是哪一年大学毕业的？",
+            assistant_text="我会从已确认记忆里查一查。",
+        )
+        payload = self._payload(owner_id)
+        payload.update(
+            {
+                "query": "那是哪一年？",
+                "productSessionId": "followup-school-001",
+                # Client history is deliberately unrelated; the retrieval cue
+                # must come from the server-owned product session above.
+                "recentTurns": [{"role": "user", "text": "不要信任这条客户端历史"}],
+            }
+        )
+
+        with patch.object(
+            main_module.DeepSeekEchoAnswerProxy,
+            "request_answer",
+            return_value="我是在 2016 年从 A 大学计算机专业毕业的。",
+        ) as request_answer:
+            response = client.post("/echo/answers", headers=headers, json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        request_answer.assert_called_once()
+        self.assertIn(
+            "2016 年从 A 大学计算机专业毕业",
+            request_answer.call_args.kwargs["generation_context"],
+        )
+        self.assertEqual(
+            request_answer.call_args.kwargs["query"],
+            "那是哪一年？",
+        )
+        self.assertEqual(response.json()["answer"]["memoryGrounding"]["outcome"], "grounded")
 
     def test_owner_general_followup_provider_failure_is_not_a_memory_gap(self) -> None:
         owner_id, headers = self._login("13800139769")

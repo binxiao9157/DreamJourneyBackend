@@ -25,6 +25,10 @@ from app.domain.owner_truth.legacy_migration import (
     OwnerTruthLegacyMigrationError,
     build_legacy_migration_inventory,
 )
+from app.domain.owner_truth.b_migration_execution import (
+    OwnerTruthBMigrationExecutionConflict,
+    OwnerTruthLegacyReplayMaterial,
+)
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 
 
@@ -307,6 +311,109 @@ def build_inventory_from_legacy_rows(
     )
 
 
+def _domain_rows(
+    rows: LegacyMigrationLegacyRows,
+    domain: LegacyMigrationDomain,
+) -> tuple[Sequence[Mapping[str, Any]], str, bool]:
+    if domain is LegacyMigrationDomain.ARCHIVE_ITEM:
+        return rows.archive_items, "archive-row", True
+    if domain is LegacyMigrationDomain.MEMORY:
+        return rows.memories, "memory-row", False
+    raise OwnerTruthBMigrationExecutionConflict(
+        "only legacy Archive and Memory text may enter Source review replay"
+    )
+
+
+def _legacy_text_fragments(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Extract only user-authored text fields; never serialize a legacy graph.
+
+    Some historical clients used ``note`` while others used ``summary`` or a
+    nested ``content`` object.  The fixed allow-list preserves their text
+    verbatim and keeps unknown structures in manual evidence review.
+    """
+
+    keys = (
+        "title",
+        "text",
+        "note",
+        "summary",
+        "description",
+        "body",
+        "transcript",
+        "content",
+    )
+    values: list[str] = []
+
+    def append(value: object, *, depth: int) -> None:
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized and normalized not in values:
+                values.append(normalized)
+            return
+        if depth >= 2 or not isinstance(value, Mapping):
+            return
+        for key in keys:
+            if key in value:
+                append(value.get(key), depth=depth + 1)
+
+    append(payload, depth=0)
+    return tuple(values)
+
+
+def build_replay_material_from_legacy_rows(
+    *,
+    owner_subject_id: str,
+    domain: LegacyMigrationDomain,
+    legacy_id_hash: str,
+    record_hash: str,
+    rows: LegacyMigrationLegacyRows,
+) -> OwnerTruthLegacyReplayMaterial:
+    """Re-read one dry-run row and fail closed if identity or body changed."""
+
+    owner = _nonblank(owner_subject_id, field="owner_subject_id")
+    normalized_domain = LegacyMigrationDomain(domain)
+    candidates, fallback_prefix, observed_only = _domain_rows(rows, normalized_domain)
+    identity_match: LegacyMigrationRecord | None = None
+    identity_payload: Mapping[str, Any] | None = None
+    for index, row in enumerate(candidates, start=1):
+        record = _legacy_record(
+            domain=normalized_domain,
+            row=row,
+            canonical_owner_subject_id=owner,
+            fallback_identity=f"{fallback_prefix}-{index}",
+            observed_only=observed_only,
+        )
+        if record.legacy_id_hash != str(legacy_id_hash or "").strip().lower():
+            continue
+        identity_match = record
+        identity_payload = _mapping(row.get("payload"))
+        break
+    if identity_match is None:
+        raise OwnerTruthBMigrationExecutionConflict(
+            "legacy record disappeared after the approved dry run"
+        )
+    if identity_match.record_hash != str(record_hash or "").strip().lower():
+        raise OwnerTruthBMigrationExecutionConflict(
+            "legacy record changed after the approved dry run"
+        )
+    fragments = _legacy_text_fragments(identity_payload or {})
+    if not fragments:
+        return OwnerTruthLegacyReplayMaterial(
+            domain=normalized_domain.value,
+            legacy_id_hash=identity_match.legacy_id_hash,
+            record_hash=identity_match.record_hash,
+            text=None,
+            material_state="manualEvidenceReview",
+        )
+    return OwnerTruthLegacyReplayMaterial(
+        domain=normalized_domain.value,
+        legacy_id_hash=identity_match.legacy_id_hash,
+        record_hash=identity_match.record_hash,
+        text="\n\n".join(fragments),
+        material_state="textReady",
+    )
+
+
 def _checkpoints_for(inventory: LegacyMigrationInventory) -> tuple[LegacyMigrationCheckpoint, ...]:
     unavailable = set(inventory.unavailable_domains)
     by_domain: dict[LegacyMigrationDomain, list[LegacyMigrationEntry]] = {
@@ -343,6 +450,16 @@ class OwnerTruthLegacyMigrationRepository(Protocol):
         owner_subject_id: str,
         classifier_version: str,
     ) -> LegacyMigrationInventory:
+        ...
+
+    def read_replay_material(
+        self,
+        *,
+        owner_subject_id: str,
+        domain: LegacyMigrationDomain,
+        legacy_id_hash: str,
+        record_hash: str,
+    ) -> OwnerTruthLegacyReplayMaterial:
         ...
 
     def persist(
@@ -383,6 +500,22 @@ class InMemoryOwnerTruthLegacyMigrationRepository:
             vault_id=vault_id,
             owner_subject_id=owner_subject_id,
             classifier_version=classifier_version,
+            rows=self._row_supplier(owner_subject_id),
+        )
+
+    def read_replay_material(
+        self,
+        *,
+        owner_subject_id: str,
+        domain: LegacyMigrationDomain,
+        legacy_id_hash: str,
+        record_hash: str,
+    ) -> OwnerTruthLegacyReplayMaterial:
+        return build_replay_material_from_legacy_rows(
+            owner_subject_id=owner_subject_id,
+            domain=domain,
+            legacy_id_hash=legacy_id_hash,
+            record_hash=record_hash,
             rows=self._row_supplier(owner_subject_id),
         )
 
@@ -518,6 +651,55 @@ class PostgresOwnerTruthLegacyMigrationRepository:
                 kb_changes=tuple(dict(row) for row in kb_changes),
                 kb_receipts=tuple(dict(row) for row in kb_receipts),
             ),
+        )
+
+    def read_replay_material(
+        self,
+        *,
+        owner_subject_id: str,
+        domain: LegacyMigrationDomain,
+        legacy_id_hash: str,
+        record_hash: str,
+    ) -> OwnerTruthLegacyReplayMaterial:
+        owner = _nonblank(owner_subject_id, field="owner_subject_id")
+        normalized_domain = LegacyMigrationDomain(domain)
+        with self._cursor() as cursor:
+            if normalized_domain is LegacyMigrationDomain.ARCHIVE_ITEM:
+                cursor.execute(
+                    """
+                    SELECT id, user_id, owner_subject_id, authority_state, payload
+                    FROM archive_items
+                    WHERE user_id = %s
+                    ORDER BY id ASC
+                    """,
+                    (owner,),
+                )
+                rows = LegacyMigrationLegacyRows(
+                    archive_items=tuple(dict(row) for row in cursor.fetchall())
+                )
+            elif normalized_domain is LegacyMigrationDomain.MEMORY:
+                cursor.execute(
+                    """
+                    SELECT id, user_id, owner_subject_id, authority_state, payload
+                    FROM memories
+                    WHERE user_id = %s
+                    ORDER BY id ASC
+                    """,
+                    (owner,),
+                )
+                rows = LegacyMigrationLegacyRows(
+                    memories=tuple(dict(row) for row in cursor.fetchall())
+                )
+            else:
+                raise OwnerTruthBMigrationExecutionConflict(
+                    "legacy domain cannot be replayed as a text Source"
+                )
+        return build_replay_material_from_legacy_rows(
+            owner_subject_id=owner,
+            domain=normalized_domain,
+            legacy_id_hash=legacy_id_hash,
+            record_hash=record_hash,
+            rows=rows,
         )
 
     def persist(
@@ -787,5 +969,6 @@ __all__ = [
     "OwnerTruthLegacyMigrationUnavailable",
     "PostgresOwnerTruthLegacyMigrationRepository",
     "build_inventory_from_legacy_rows",
+    "build_replay_material_from_legacy_rows",
     "legacy_migration_summary",
 ]

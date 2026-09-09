@@ -24,16 +24,17 @@ class WorkerDeploymentRegistryTests(unittest.TestCase):
         inventory = deployment_inventory()
         serialized = json.dumps(inventory, sort_keys=True)
 
-        self.assertEqual(len(inventory), 7)
-        self.assertEqual(len({item["worker"] for item in inventory}), 7)
-        self.assertEqual(len({item["settingsFlag"] for item in inventory}), 7)
-        self.assertEqual(len({item["composeService"] for item in inventory}), 7)
+        self.assertEqual(len(inventory), 8)
+        self.assertEqual(len({item["worker"] for item in inventory}), 8)
+        self.assertEqual(len({item["settingsFlag"] for item in inventory}), 8)
+        self.assertEqual(len({item["composeService"] for item in inventory}), 8)
         self.assertEqual(
             {item["composeService"] for item in inventory},
             {
                 "narrative-generation-worker",
                 "owner-truth-candidate-extraction-worker",
                 "owner-truth-memory-projection-worker",
+                "owner-truth-memory-search-embedding-worker",
                 "owner-truth-media-processing-worker",
                 "owner-truth-media-deletion-worker",
                 "business-message-projection-worker",

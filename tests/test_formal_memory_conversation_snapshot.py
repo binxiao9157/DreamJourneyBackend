@@ -1,5 +1,8 @@
+import json
 import unittest
+from unittest.mock import patch
 
+import app.services.formal_memory_conversation_snapshot as snapshot_module
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.formal_memory_conversation_snapshot import (
     FormalMemoryConversationSnapshotError,
@@ -21,7 +24,9 @@ class _ProjectionStore:
 def _ready_projection():
     return {
         "state": "ready",
+        "rightsState": "active",
         "authorityEpoch": 7,
+        "memoryRevision": 12,
         "checkpoint": "checkpoint-7",
         "entries": [
             {
@@ -56,18 +61,24 @@ class FormalMemoryConversationSnapshotTests(unittest.TestCase):
         self.assertEqual(first["contextHash"], second["contextHash"])
         self.assertEqual(first["coreFacts"], second["coreFacts"])
         self.assertEqual(first["projectionCheckpoint"], "checkpoint-7")
-        self.assertEqual(first["coreFacts"][0]["statement"], "本科毕业于 A 大学计算机专业。")
+        self.assertEqual(
+            {item["statement"] for item in first["coreFacts"]},
+            {"本科毕业于 A 大学计算机专业。", "小时候住在河边的小村庄。"},
+        )
 
     def test_snapshot_hash_excludes_generation_time_but_keeps_authority_binding(self):
         snapshot = FormalMemoryConversationSnapshotService(
             _ProjectionStore(_ready_projection())
         ).build(context=self.context, persona_scope="personal")
 
-        self.assertEqual(snapshot["schemaVersion"], "formal-memory-conversation-v1")
+        self.assertEqual(snapshot["schemaVersion"], "formal-memory-conversation-v2")
         self.assertEqual(snapshot["subjectId"], "subject-1")
         self.assertEqual(snapshot["authorityEpoch"], 7)
         self.assertTrue(snapshot["contextHash"].startswith("sha256:"))
         self.assertIn("generatedAt", snapshot)
+        self.assertEqual(snapshot["coverage"]["eligibleFactCount"], 2)
+        self.assertIn("qualifiers", snapshot["coreFacts"][0])
+        self.assertIn("provenanceMode", snapshot["coreFacts"][0])
 
     def test_snapshot_contains_only_current_formal_fact_fields(self):
         snapshot = FormalMemoryConversationSnapshotService(
@@ -79,8 +90,8 @@ class FormalMemoryConversationSnapshotTests(unittest.TestCase):
         self.assertNotIn("candidate", serialized.lower())
         self.assertNotIn("review", serialized.lower())
         self.assertEqual(
-            [item["sourceMemoryVersionIds"] for item in snapshot["coreFacts"]],
-            [["memory-version-school"], ["memory-version-home"]],
+            {tuple(item["sourceMemoryVersionIds"]) for item in snapshot["coreFacts"]},
+            {("memory-version-school",), ("memory-version-home",)},
         )
 
     def test_unavailable_projection_fails_closed(self):
@@ -94,17 +105,61 @@ class FormalMemoryConversationSnapshotTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "formalMemorySnapshotUnavailable")
 
-    def test_oversized_projection_is_not_silently_truncated(self):
+    def test_revoked_ready_projection_cannot_be_injected_into_live_context(self):
         projection = _ready_projection()
-        projection["entries"][0]["content"]["claim"] = "事实 " * 2_000
+        projection["rightsState"] = "revoked"
 
         with self.assertRaises(FormalMemoryConversationSnapshotError) as raised:
             FormalMemoryConversationSnapshotService(
-                _ProjectionStore(projection),
-                max_chars=1_024,
+                _ProjectionStore(projection)
             ).build(context=self.context)
 
-        self.assertEqual(raised.exception.code, "formalMemorySnapshotTooLarge")
+        self.assertEqual(raised.exception.code, "formalMemorySnapshotUnavailable")
+
+    def test_oversized_projection_is_budgeted_with_explicit_coverage(self):
+        projection = _ready_projection()
+        projection["entries"].extend(
+            {
+                "memoryVersionId": f"memory-version-{index}",
+                "memoryKind": "knowledge",
+                "content": {"claim": f"第 {index} 条已确认事实"},
+            }
+            for index in range(64)
+        )
+
+        snapshot = FormalMemoryConversationSnapshotService(
+            _ProjectionStore(projection),
+            max_chars=1_024,
+        ).build(context=self.context)
+
+        self.assertLessEqual(len(json.dumps(snapshot, ensure_ascii=False)), 1_024)
+        self.assertEqual(snapshot["coverage"]["eligibleFactCount"], 66)
+        self.assertTrue(snapshot["coverage"]["truncated"])
+        self.assertGreater(snapshot["coverage"]["omittedFactCount"], 0)
+
+    def test_oversized_projection_uses_bounded_serialization_work(self):
+        projection = _ready_projection()
+        projection["entries"].extend(
+            {
+                "memoryVersionId": f"memory-version-large-{index}",
+                "memoryKind": "knowledge",
+                "content": {"claim": (f"第 {index} 条已确认事实 " + "内容" * 120)},
+            }
+            for index in range(512)
+        )
+        service = FormalMemoryConversationSnapshotService(
+            _ProjectionStore(projection),
+            max_chars=4_096,
+        )
+
+        with patch(
+            "app.services.formal_memory_conversation_snapshot._transport_json",
+            wraps=snapshot_module._transport_json,
+        ) as transport_json:
+            snapshot = service.build(context=self.context)
+
+        self.assertTrue(snapshot["coverage"]["truncated"])
+        self.assertLessEqual(transport_json.call_count, 12)
 
 
 if __name__ == "__main__":

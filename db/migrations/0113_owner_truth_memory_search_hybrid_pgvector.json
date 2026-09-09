@@ -1,0 +1,27 @@
+{
+  "version": "0113",
+  "name": "owner_truth_memory_search_hybrid_pgvector",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthHybridSearchV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true,
+    "ownerTruthHybridSearch": false
+  },
+  "summary": "Adds a private same-PostgreSQL pgvector embedding index, bound to current SearchDocument checkpoint and model/version/dimension contracts.",
+  "operations": [
+    "require pgvector extension",
+    "create current SearchDocument embedding table and scoped HNSW index",
+    "validate checkpoint/content-hash lineage before each embedding write"
+  ],
+  "rollback": "Disable ownerTruthHybridSearch, stop embedding writes, and retain derived rows for forward-compatible cleanup after an approved verification window. Do not delete formal memories.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "requiresEmbeddingEgressApproval": true,
+    "requiresSyntheticChineseEvaluation": true
+  }
+}

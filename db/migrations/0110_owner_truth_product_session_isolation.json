@@ -1,0 +1,27 @@
+{
+  "version": "0110",
+  "name": "owner_truth_product_session_isolation",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthProductSessionIsolationV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true,
+    "ownerTruthLiveReliableDelivery": true,
+    "ownerTruthProductSessionIsolation": true
+  },
+  "summary": "Materializes product-session identity for active interview sessions, preserving one natural-input session while isolating Live reconnect and new sessions.",
+  "operations": [
+    "add nullable bounded product_session_id to conversation_threads and interview_sessions",
+    "backfill product_session_id from existing metadata without rewriting history",
+    "replace one-active-per-vault index with natural-input and product-session scoped unique indexes",
+    "add product-session resume lookup indexes"
+  ],
+  "rollback": "No automatic destructive rollback. Restore the former single-active index only after all active product-scoped sessions have been ended or reconciled in an isolated recovery run.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true
+  }
+}

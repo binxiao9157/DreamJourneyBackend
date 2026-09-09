@@ -18,6 +18,7 @@ class OwnerTruthWorkerActivationPreflightTests(unittest.TestCase):
             "async_effect_worker_enabled": True,
             "owner_truth_candidate_extraction_worker_enabled": True,
             "owner_truth_memory_projection_worker_enabled": True,
+            "owner_truth_memory_search_projection_worker_enabled": True,
         }
         values.update(overrides)
         return Settings(**values)
@@ -67,6 +68,38 @@ class OwnerTruthWorkerActivationPreflightTests(unittest.TestCase):
         self.assertFalse(decision.ready)
         self.assertEqual(decision.reason, "ownerTruthCandidateExtractionWorkerDisabled")
         self.assertEqual(decision.blocking_dependency, "candidateExtraction")
+
+    def test_embedding_worker_requires_projection_and_privacy_approved_provider(self):
+        projection_missing = evaluate_owner_truth_worker_activation(
+            worker=OwnerTruthWorkerKind.MEMORY_SEARCH_EMBEDDING,
+            settings=self.settings(
+                owner_truth_memory_search_embedding_worker_enabled=True,
+                owner_truth_memory_search_projection_worker_enabled=False,
+            ),
+            schema_ready=True,
+        )
+        provider_missing = evaluate_owner_truth_worker_activation(
+            worker=OwnerTruthWorkerKind.MEMORY_SEARCH_EMBEDDING,
+            settings=self.settings(
+                owner_truth_memory_search_embedding_worker_enabled=True,
+            ),
+            schema_ready=True,
+        )
+        ready = evaluate_owner_truth_worker_activation(
+            worker=OwnerTruthWorkerKind.MEMORY_SEARCH_EMBEDDING,
+            settings=self.settings(
+                owner_truth_memory_search_embedding_worker_enabled=True,
+                owner_truth_memory_search_embedding_provider="httpJson",
+                owner_truth_memory_search_embedding_http_json_url="https://embedding.test/v1/embeddings",
+                owner_truth_memory_search_embedding_http_json_api_key="fixture-embedding-key",
+                owner_truth_memory_search_embedding_egress_approved=True,
+            ),
+            schema_ready=True,
+        )
+
+        self.assertEqual(projection_missing.reason, "ownerTruthMemorySearchProjectionWorkerDisabled")
+        self.assertEqual(provider_missing.reason, "runtimeDisabled")
+        self.assertTrue(ready.ready)
 
     def test_live_memory_organization_requires_deepseek_before_worker_start(self):
         missing = evaluate_owner_truth_worker_activation(

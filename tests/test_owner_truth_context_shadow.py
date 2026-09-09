@@ -49,6 +49,13 @@ from app.services.owner_truth_memory_projection import (
 from app.services.owner_truth_memory_search_projection import (
     InMemoryOwnerTruthMemorySearchDocumentProjectionRepository,
 )
+from app.services.owner_truth_memory_search_hybrid import (
+    OWNER_TRUTH_MEMORY_SEARCH_HYBRID_RETRIEVAL_MODE,
+    OwnerTruthEmbeddingModel,
+    OwnerTruthHybridSearchCandidate,
+    OwnerTruthMemorySearchHybridRanker,
+    OwnerTruthQueryEmbedding,
+)
 
 
 def _hash(value: object) -> str:
@@ -69,6 +76,7 @@ class _Store:
                 self.projection_repository
             )
         )
+        self.hybrid_repository = None
 
     @contextmanager
     def request_unit_of_work(self, *, correlation_id: str, command_id: str):
@@ -82,6 +90,9 @@ class _Store:
 
     def owner_truth_memory_search_document_projection_repository(self):
         return self.search_projection_repository
+
+    def owner_truth_memory_search_hybrid_repository(self):
+        return self.hybrid_repository
 
     def get_kb_snapshot(self, _user_id: str):
         self.legacy_kblite_read_count += 1
@@ -98,6 +109,26 @@ class _Store:
 
     def get_family_relationship_by_member(self, _user_id: str, _member_id: str):
         return None
+
+
+class _HybridProvider:
+    model = OwnerTruthEmbeddingModel("context-shadow-test", "v1", 2)
+
+    def embed_query(self, *, query: str) -> OwnerTruthQueryEmbedding:
+        if not query:
+            raise AssertionError("hybrid context retrieval requires its query")
+        return OwnerTruthQueryEmbedding(model=self.model, values=(0.25, 0.75))
+
+
+class _HybridRepository:
+    def __init__(self, candidates: tuple[OwnerTruthHybridSearchCandidate, ...]) -> None:
+        self.candidates = candidates
+        self.request_count = 0
+
+    def search_hybrid(self, *, context, query_plan, query_embedding):
+        del context, query_plan, query_embedding
+        self.request_count += 1
+        return self.candidates
 
 
 class OwnerTruthContextShadowTests(unittest.TestCase):
@@ -573,6 +604,51 @@ class OwnerTruthContextShadowTests(unittest.TestCase):
             {item["sourceId"] for item in result["typedCitations"]},
             {first.source_id, second.source_id},
         )
+
+    def test_query_context_reports_explicitly_injected_hybrid_retrieval(self) -> None:
+        candidate = self._candidate(
+            kind=MemoryKind.EXPERIENCE,
+            content={"summary": "我在北京大学完成了本科阶段学习"},
+        )
+        self._activate(candidate, command_id="context-hybrid-retrieval")
+        self.projection_service.rebuild(context=self.context)
+        rebuilt = self.store.search_projection_repository.rebuild(context=self.context)
+        self.assertIsNotNone(rebuilt.projection)
+        assert rebuilt.projection is not None
+        document = rebuilt.projection.documents[0]
+        hybrid_repository = _HybridRepository(
+            (
+                OwnerTruthHybridSearchCandidate(
+                    memory_version_id=document.memory_version_id,
+                    content_hash=document.content_hash,
+                    lexical_rank=1,
+                    vector_rank=1,
+                    rrf_score=0.1,
+                ),
+            )
+        )
+        self.store.hybrid_repository = hybrid_repository
+
+        result = OwnerTruthContextShadowBuildService(
+            self.store,
+            enabled=True,
+            hybrid_ranker=OwnerTruthMemorySearchHybridRanker(_HybridProvider()),
+        ).build(
+            context=self.context,
+            payload={
+                "intent": "echo_chat",
+                "query": "北京大学",
+                "selectionMode": "deterministicTextFallback",
+            },
+        )
+
+        self.assertEqual(result["retrieval"]["mode"], OWNER_TRUTH_MEMORY_SEARCH_HYBRID_RETRIEVAL_MODE)
+        self.assertTrue(result["retrieval"]["semanticRankingAvailable"])
+        self.assertEqual(
+            result["selectedContext"][0]["rank"]["strategy"],
+            OWNER_TRUTH_MEMORY_SEARCH_HYBRID_RETRIEVAL_MODE,
+        )
+        self.assertEqual(hybrid_repository.request_count, 1)
 
     def test_materialization_fails_closed_without_current_projection(self) -> None:
         candidate = self._candidate(

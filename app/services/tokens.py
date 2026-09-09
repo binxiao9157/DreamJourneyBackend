@@ -28,6 +28,7 @@ class TokenService:
         projection_checkpoint: Optional[str] = None,
         context_hash: Optional[str] = None,
         authority_epoch: Optional[int] = None,
+        memory_revision: Optional[int] = None,
         session_context: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         return RealtimeVoiceSessionBroker(self.settings, store).issue_runtime_config(
@@ -41,5 +42,6 @@ class TokenService:
             projection_checkpoint=projection_checkpoint,
             context_hash=context_hash,
             authority_epoch=authority_epoch,
+            memory_revision=memory_revision,
             session_context=session_context,
         )

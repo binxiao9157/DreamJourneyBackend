@@ -9,6 +9,7 @@ later command with its own review policy.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
 import json
@@ -56,6 +57,17 @@ class OwnerTruthConversationVersionConflict(OwnerTruthConversationError):
 
 class OwnerTruthInterviewSessionStateConflict(OwnerTruthConversationError):
     """A message was attempted while the interview session is not active."""
+
+
+class OwnerTruthInterviewTurnsPending(OwnerTruthConversationError):
+    """A client tried to close a Live session before durable turns were contiguous."""
+
+    def __init__(self, *, requested_sequence: int, continuous_sequence: int):
+        self.requested_sequence = requested_sequence
+        self.continuous_sequence = continuous_sequence
+        super().__init__(
+            "interview session is awaiting durable turns before it can be ended"
+        )
 
 
 class ConversationMessageAuthor(str, Enum):
@@ -129,6 +141,31 @@ def _canonical_json(value: Mapping[str, Any]) -> str:
 
 def _sha256(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
+
+
+def _optional_client_sequence(value: object, *, field: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value < 1:
+        raise OwnerTruthConversationError(f"{field} must be a positive integer when supplied")
+    return int(value)
+
+
+def _optional_captured_at(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    if len(normalized) > 64:
+        raise OwnerTruthConversationError("captured_at exceeds maximum length")
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise OwnerTruthConversationError("captured_at must be an ISO-8601 instant") from exc
+    if parsed.tzinfo is None:
+        raise OwnerTruthConversationError("captured_at must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _positive_version(value: int, *, field: str, allow_zero: bool = False) -> int:
@@ -335,6 +372,8 @@ class AppendInterviewMessageCommand:
     kind: ConversationMessageKind
     text: str
     capture_mode: str = "naturalInput"
+    client_sequence_number: int | None = None
+    captured_at: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
@@ -361,6 +400,15 @@ class AppendInterviewMessageCommand:
         if capture_mode not in {"naturalInput", "live"}:
             raise OwnerTruthConversationError("capture_mode is not supported")
         object.__setattr__(self, "capture_mode", capture_mode)
+        object.__setattr__(
+            self,
+            "client_sequence_number",
+            _optional_client_sequence(
+                self.client_sequence_number,
+                field="client_sequence_number",
+            ),
+        )
+        object.__setattr__(self, "captured_at", _optional_captured_at(self.captured_at))
 
     def write_record(self, *, context: OwnerTruthCommandContext) -> "AppendInterviewMessageWriteRecord":
         command_id_hash = _sha256(self.command_id)
@@ -372,22 +420,28 @@ class AppendInterviewMessageCommand:
         # persisting the explicit Live consent boundary on Live turns.
         if self.capture_mode == "live":
             content_payload["captureMode"] = self.capture_mode
-        payload = {
+        if self.captured_at is not None:
+            content_payload["capturedAt"] = self.captured_at
+        # Optimistic version guards protect the first write, but they do not
+        # define the turn's meaning.  A lost ACK must be safely replayable
+        # after the client refreshes session/thread versions with the same
+        # command/message/content identity.
+        idempotency_payload = {
             "schemaVersion": OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION,
             "commandType": "appendInterviewMessage",
             "threadId": self.thread_id,
             "sessionId": self.session_id,
             "messageId": self.message_id,
-            "expectedThreadVersion": self.expected_thread_version,
-            "expectedSessionVersion": self.expected_session_version,
             "author": self.author.value,
             "kind": self.kind.value,
             "content": content_payload,
         }
+        if self.client_sequence_number is not None:
+            idempotency_payload["clientSequenceNumber"] = self.client_sequence_number
         return AppendInterviewMessageWriteRecord(
             receipt_id=_receipt_id(context=context, command_id_hash=command_id_hash),
             command_id_hash=command_id_hash,
-            payload_hash=_sha256(_canonical_json(payload)),
+            payload_hash=_sha256(_canonical_json(idempotency_payload)),
             thread_id=self.thread_id,
             session_id=self.session_id,
             message_id=self.message_id,
@@ -397,6 +451,8 @@ class AppendInterviewMessageCommand:
             kind=self.kind,
             content_hash=_sha256(_canonical_json(content_payload)),
             content_payload=content_payload,
+            client_sequence_number=self.client_sequence_number,
+            captured_at=self.captured_at,
             vault_id=context.vault_id,
             owner_subject_id=context.owner_subject_id,
             actor_subject_id=context.actor_subject_id,
@@ -579,6 +635,7 @@ class EndInterviewSessionCommand:
     session_id: str
     expected_thread_version: int
     expected_session_version: int
+    last_client_sequence_number: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
@@ -586,6 +643,14 @@ class EndInterviewSessionCommand:
         object.__setattr__(self, "session_id", require_uuid(self.session_id, field="session_id"))
         _positive_version(self.expected_thread_version, field="expected_thread_version")
         _positive_version(self.expected_session_version, field="expected_session_version")
+        object.__setattr__(
+            self,
+            "last_client_sequence_number",
+            _optional_client_sequence(
+                self.last_client_sequence_number,
+                field="last_client_sequence_number",
+            ),
+        )
 
     def write_record(
         self,
@@ -593,23 +658,28 @@ class EndInterviewSessionCommand:
         context: OwnerTruthCommandContext,
     ) -> "EndInterviewSessionWriteRecord":
         command_id_hash = _sha256(self.command_id)
-        payload = {
+        # Expected versions fence the first end write, but are intentionally
+        # not part of the end command's durable identity.  If the terminal
+        # receipt was lost, a client must be able to refresh versions and
+        # replay the same close without reopening or conflicting the session.
+        idempotency_payload = {
             "schemaVersion": OWNER_TRUTH_CONVERSATION_SCHEMA_VERSION,
             "commandType": "endInterviewSession",
             "threadId": self.thread_id,
             "sessionId": self.session_id,
-            "expectedThreadVersion": self.expected_thread_version,
-            "expectedSessionVersion": self.expected_session_version,
             "state": InterviewSessionState.ENDED.value,
         }
+        if self.last_client_sequence_number is not None:
+            idempotency_payload["lastClientSequenceNumber"] = self.last_client_sequence_number
         return EndInterviewSessionWriteRecord(
             receipt_id=_receipt_id(context=context, command_id_hash=command_id_hash),
             command_id_hash=command_id_hash,
-            payload_hash=_sha256(_canonical_json(payload)),
+            payload_hash=_sha256(_canonical_json(idempotency_payload)),
             thread_id=self.thread_id,
             session_id=self.session_id,
             expected_thread_version=self.expected_thread_version,
             expected_session_version=self.expected_session_version,
+            last_client_sequence_number=self.last_client_sequence_number,
             vault_id=context.vault_id,
             owner_subject_id=context.owner_subject_id,
             actor_subject_id=context.actor_subject_id,
@@ -787,6 +857,8 @@ class AppendInterviewMessageWriteRecord:
     kind: ConversationMessageKind
     content_hash: str
     content_payload: Mapping[str, Any]
+    client_sequence_number: int | None
+    captured_at: str | None
     vault_id: str
     owner_subject_id: str
     actor_subject_id: str
@@ -850,6 +922,7 @@ class EndInterviewSessionWriteRecord:
     session_id: str
     expected_thread_version: int
     expected_session_version: int
+    last_client_sequence_number: int | None
     vault_id: str
     owner_subject_id: str
     actor_subject_id: str
@@ -914,6 +987,9 @@ class OwnerTruthInterviewSessionResult:
     boundary: InterviewBoundary
     message_id: Optional[str] = None
     message_sequence: Optional[int] = None
+    client_sequence_number: Optional[int] = None
+    continuous_client_sequence: Optional[int] = None
+    delivery_state: Optional[str] = None
     authority_effects: Tuple[str, ...] = ()
 
     def public_receipt(self) -> Mapping[str, Any]:
@@ -935,6 +1011,12 @@ class OwnerTruthInterviewSessionResult:
             result["messageId"] = self.message_id
         if self.message_sequence is not None:
             result["messageSequence"] = self.message_sequence
+        if self.client_sequence_number is not None:
+            result["clientSequenceNumber"] = self.client_sequence_number
+        if self.continuous_client_sequence is not None:
+            result["continuousClientSequence"] = self.continuous_client_sequence
+        if self.delivery_state is not None:
+            result["deliveryState"] = self.delivery_state
         return result
 
 
@@ -955,6 +1037,9 @@ class OwnerTruthInterviewSessionSnapshot:
     fatigue: InterviewFatigue
     authority_epoch: int
     entry_mode: str = "naturalInput"
+    product_session_id: str | None = None
+    continuous_client_sequence: int = 0
+    close_requested_client_sequence: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1112,6 +1197,7 @@ __all__ = [
     "OwnerTruthInterviewSessionResult",
     "OwnerTruthInterviewSessionSnapshot",
     "OwnerTruthInterviewSessionStateConflict",
+    "OwnerTruthInterviewTurnsPending",
     "OwnerTruthInterviewReviewBatchResult",
     "OwnerTruthInterviewReviewBatchSnapshot",
     "PauseInterviewForTopicSwitchCommand",

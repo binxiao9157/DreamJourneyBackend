@@ -32,6 +32,7 @@ from app.async_effects.owner_truth_candidate_extraction_worker import (
 from app.async_effects.target_admission import InMemoryOwnerTruthSourceTargetAdmissionRepository
 from app.async_effects.repository import InMemoryEffectKernelRepository
 from app.core.config import Settings
+from app.services.deepseek import DeepSeekTextMemoryOrganizationProxy
 from app.services.owner_truth_candidate_extraction import (
     InMemoryOwnerTruthCandidateExtractionRepository,
     OwnerTruthCandidateExtractionInput,
@@ -243,6 +244,16 @@ class _RecordingTextMemoryOrganizer:
         return {"memories": self.memories}
 
 
+class _RecordingFamilyScopedTextMemoryOrganizer(_RecordingTextMemoryOrganizer):
+    def __init__(self, memories: list[dict[str, object]]) -> None:
+        super().__init__(memories)
+        self.family_text: str | None = None
+
+    def request_family_organization(self, *, text: str):
+        self.family_text = text
+        return {"memories": self.memories}
+
+
 class _BlockingExtractor:
     def __init__(self, *, started: Event, release: Event) -> None:
         self._started = started
@@ -405,7 +416,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(candidate["payload"]["reviewMode"], "single")
         self.assertEqual(candidate["payload"]["evidenceRefs"][0]["span"], {"start": 0, "end": len(self.source_text)})
 
-    def test_owner_text_organization_creates_typed_v3_candidates(self) -> None:
+    def test_owner_text_organization_creates_typed_v5_candidates(self) -> None:
         organizer = _RecordingTextMemoryOrganizer(
             [
                 {
@@ -478,18 +489,21 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
             ["experience", "emotion"],
         )
         self.assertTrue(
-            all(item.payload_schema_version == "owner-truth-v4" for item in command.proposals)
+            all(item.payload_schema_version == "owner-truth-v5" for item in command.proposals)
         )
         self.assertEqual(command.proposals[0].content["event"], "我小时候常和外公在河边散步。")
         self.assertEqual(command.proposals[1].content["emotion"], "怀念")
         self.assertIn("lifeEvent", command.proposals[0].content["semantic"]["facets"])
         self.assertIn("emotion", command.proposals[1].content["semantic"]["facets"])
+        self.assertEqual(command.proposals[0].content["provenance"]["mode"], "selfReport")
+        self.assertEqual(command.proposals[1].content["factType"], "affect")
 
     def test_family_text_organization_preserves_server_provenance(self) -> None:
-        organizer = _RecordingTextMemoryOrganizer(
+        organizer = _RecordingFamilyScopedTextMemoryOrganizer(
             [
                 {
                     "memoryKind": "experience",
+                    "subjectRole": "memorySubject",
                     "content": {
                         "event": "父亲以前在杭州时很喜欢吃东坡肉。",
                         "time": {"start": None, "end": None, "precision": "unknown"},
@@ -523,6 +537,129 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
 
         self.assertEqual(command.proposals[0].perspective_type.value, "reported")
         self.assertEqual(command.proposals[0].epistemic_status.value, "reported")
+        self.assertEqual(command.proposals[0].content["provenance"]["mode"], "familyReport")
+
+    def test_family_text_organization_fails_closed_without_subject_role_support(self) -> None:
+        extractor = ModelAssistedOwnerTruthSourceExtractor(
+            settings=Settings(owner_truth_text_memory_organization_enabled=True),
+            organizer=_RecordingTextMemoryOrganizer([]),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "requires subject-role classification",
+        ):
+            extractor.extract(
+                intent=self.intent,
+                source=OwnerTruthCandidateExtractionInput(
+                    source_content_hash=self.source_content_hash,
+                    source_text="父亲以前在杭州工作，我听完后现在很难过。",
+                    source_metadata={
+                        "origin": "familyContributionReview",
+                        "perspectiveType": "familyReport",
+                        "epistemicStatus": "reported",
+                    },
+                ),
+            )
+
+    def test_family_text_organization_excludes_reporter_self_memories(self) -> None:
+        organizer = _RecordingFamilyScopedTextMemoryOrganizer(
+            [
+                {
+                    "memoryKind": "experience",
+                    "subjectRole": "memorySubject",
+                    "content": {
+                        "event": "父亲以前在杭州时很喜欢吃东坡肉。",
+                        "time": {"start": None, "end": None, "precision": "unknown"},
+                        "location": "杭州",
+                        "participants": ["父亲"],
+                        "actions": [],
+                        "outcome": None,
+                        "facets": _facets(),
+                    },
+                },
+                {
+                    "memoryKind": "emotion",
+                    "subjectRole": "reporterSelf",
+                    "content": {
+                        "emotion": "难过",
+                        "expression": "女儿现在很难过。",
+                        "trigger": None,
+                        "targetPersonaId": None,
+                        "time": None,
+                        "intensity": None,
+                        "facets": _facets(),
+                    },
+                },
+            ]
+        )
+        extractor = ModelAssistedOwnerTruthSourceExtractor(
+            settings=Settings(owner_truth_text_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=self.source_content_hash,
+                source_text="父亲以前在杭州时很喜欢吃东坡肉，我听完后现在很难过。",
+                source_metadata={
+                    "origin": "familyContributionReview",
+                    "perspectiveType": "familyReport",
+                    "epistemicStatus": "reported",
+                    "memorySubjectId": "person-father",
+                    "claimSubjectId": "person-father",
+                    "speakerPersonId": "person-daughter",
+                    "contributorAccountId": "account-daughter",
+                },
+            ),
+        )
+
+        self.assertIsNone(organizer.text)
+        self.assertIsNotNone(organizer.family_text)
+        self.assertEqual(len(command.proposals), 1)
+        proposal = command.proposals[0]
+        self.assertEqual(proposal.content["memorySubjectId"], "person-father")
+        self.assertEqual(proposal.content["claimSubjectId"], "person-father")
+        self.assertEqual(proposal.content["provenance"]["speakerPersonId"], "person-daughter")
+        self.assertNotIn("难过", json.dumps(proposal.content, ensure_ascii=False))
+
+    def test_family_text_provider_contract_requires_explicit_subject_roles(self) -> None:
+        proxy = DeepSeekTextMemoryOrganizationProxy(
+            Settings(deepseek_api_key="test-only-placeholder")
+        )
+        request = proxy.build_request(
+            text="父亲以前在杭州工作，我听完后现在很难过。",
+            extraction_scope="familyContribution",
+        )
+        prompt = request["json"]["messages"][1]["content"]
+        self.assertIn("subjectRole", prompt)
+        self.assertIn("reporterSelf", prompt)
+        self.assertIn("不得混入档案本人候选", prompt)
+
+        with self.assertRaisesRegex(ValueError, "invalid subject role"):
+            proxy.parse_organization(
+                json.dumps(
+                    {
+                        "memories": [
+                            {
+                                "memoryKind": "experience",
+                                "content": {
+                                    "event": "父亲以前在杭州工作。",
+                                    "time": {
+                                        "start": None,
+                                        "end": None,
+                                        "precision": "unknown",
+                                    },
+                                    "facets": _facets(),
+                                },
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                require_subject_role=True,
+            )
 
     def test_document_processing_uses_text_organizer_not_live_fallback(self) -> None:
         organizer = _RecordingTextMemoryOrganizer(
@@ -557,7 +694,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(command.extractor_id, "deepSeekTextMemoryOrganizer")
         self.assertEqual(command.proposals[0].memory_kind.value, "knowledge")
 
-    def test_owner_text_organization_switch_off_keeps_legacy_fallback(self) -> None:
+    def test_owner_text_organization_switch_off_keeps_typed_fallback(self) -> None:
         organizer = _RecordingTextMemoryOrganizer([])
         extractor = ModelAssistedOwnerTruthSourceExtractor(
             settings=Settings(owner_truth_text_memory_organization_enabled=False),
@@ -576,7 +713,8 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertIsNone(organizer.text)
         self.assertEqual(command.extractor_id, "deterministicSourceEcho")
         self.assertEqual(command.proposals[0].content["summary"], self.source_text)
-        self.assertEqual(command.proposals[0].payload_schema_version, "owner-truth-v2")
+        self.assertEqual(command.proposals[0].payload_schema_version, "owner-truth-v5")
+        self.assertEqual(command.proposals[0].content["provenance"]["mode"], "selfReport")
 
     def test_message_projection_failure_does_not_rollback_pending_candidate(self) -> None:
         self.store.business_message_projection_enabled = True
@@ -822,13 +960,15 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(payloads["knowledge"]["content"]["claim"], "我认为陪伴比讲道理更重要。")
         self.assertEqual(payloads["emotion"]["content"]["label"], "我一直很怀念外公。")
         self.assertTrue(
-            all(payload["contentSchemaVersion"] == "owner-truth-v4" for payload in payloads.values())
+            all(payload["contentSchemaVersion"] == "owner-truth-v5" for payload in payloads.values())
         )
         self.assertEqual(
             payloads["experience"]["content"]["facets"]["people"][0]["value"],
             "外公",
         )
         self.assertIn("lifeEvent", payloads["experience"]["content"]["semantic"]["facets"])
+        self.assertEqual(payloads["experience"]["content"]["provenance"]["mode"], "selfReport")
+        self.assertEqual(payloads["emotion"]["content"]["factType"], "affect")
         self.assertTrue(all(payload["reviewMode"] == "single" for payload in payloads.values()))
         self.assertTrue(all(payload["confidence"] == 0.0 for payload in payloads.values()))
 
@@ -1043,6 +1183,45 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
             extractor.extract(intent=self.intent, source=source)
 
         self.assertIsNone(organizer.turns)
+
+    def test_live_session_with_no_new_fact_completes_without_a_false_review_notification(self) -> None:
+        owner_turn = "今天只是聊了些已经确认过的往事，没有新的事实。"
+        store = self._new_store(
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {
+                        "index": 1,
+                        "role": "user",
+                        "text": owner_turn,
+                        "captureMode": "live",
+                    }
+                ],
+            }
+        )
+        store.input_repository.source_text = owner_turn
+        store.input_repository.source_content_hash = _digest(owner_turn)
+        store.business_message_projection_enabled = True
+        store.lease_repository.seed(self.intent)
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=_RecordingLiveMemoryOrganizer([]),
+        )
+
+        result = self._worker(store=store, extractor=extractor).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["reason"], "candidateExtractionCompletedNoChange")
+        self.assertEqual(result["candidateOutcome"], "completedNoChange")
+        self.assertEqual(result["candidateCount"], 0)
+        self.assertEqual(result["extractionStatus"], "succeeded")
+        self.assertNotIn("messageProjectionKind", result)
+        self.assertEqual(store.message_effect_repository.record_count(), 0)
+        self.assertEqual(store.message_input_repository.request_count(), 0)
+        snapshot = store.candidate_repository.snapshot()
+        self.assertEqual(len(snapshot["extractions"]), 1)
+        self.assertEqual(snapshot["candidates"], {})
 
     def test_replay_deduplicates_the_immutable_extraction_and_candidate(self) -> None:
         first = self._worker().run_once()

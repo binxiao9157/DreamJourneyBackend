@@ -93,6 +93,9 @@ from app.services.owner_truth_media_source_object import (
 from app.services.owner_truth_conversation import (
     InMemoryOwnerTruthConversationRepository,
 )
+from app.services.owner_truth_echo_conversation_context import (
+    InMemoryOwnerTruthEchoConversationContextRepository,
+)
 from app.services.owner_truth_interview_candidate_proposal import (
     InMemoryOwnerTruthInterviewCandidateProposalRepository,
 )
@@ -148,6 +151,12 @@ from app.services.owner_truth_legacy_migration import (
 )
 from app.services.owner_truth_legacy_backfill import (
     InMemoryOwnerTruthLegacyBackfillRepository,
+)
+from app.services.owner_truth_b_migration_dry_run import (
+    InMemoryOwnerTruthBMigrationDryRunRepository,
+)
+from app.services.owner_truth_b_migration_execution import (
+    InMemoryOwnerTruthBMigrationExecutionRepository,
 )
 from app.services.owner_truth_legacy_tail_shadow import (
     InMemoryOwnerTruthLegacyTailShadowRepository,
@@ -262,6 +271,9 @@ class InMemoryStore:
         self._owner_truth_conversation_repository = (
             InMemoryOwnerTruthConversationRepository()
         )
+        self._owner_truth_echo_conversation_context_repository = (
+            InMemoryOwnerTruthEchoConversationContextRepository()
+        )
         self._owner_truth_interview_candidate_proposal_repository = (
             InMemoryOwnerTruthInterviewCandidateProposalRepository(
                 review_batch_snapshot_lookup=(
@@ -356,6 +368,14 @@ class InMemoryStore:
         )
         self._owner_truth_legacy_backfill_repository = (
             InMemoryOwnerTruthLegacyBackfillRepository(
+                authority_supplier=self._owner_truth_legacy_backfill_authority,
+            )
+        )
+        self._owner_truth_b_migration_dry_run_repository = (
+            InMemoryOwnerTruthBMigrationDryRunRepository()
+        )
+        self._owner_truth_b_migration_execution_repository = (
+            InMemoryOwnerTruthBMigrationExecutionRepository(
                 authority_supplier=self._owner_truth_legacy_backfill_authority,
             )
         )
@@ -481,6 +501,11 @@ class InMemoryStore:
     ) -> InMemoryOwnerTruthConversationRepository:
         return self._owner_truth_conversation_repository
 
+    def owner_truth_echo_conversation_context_repository(
+        self,
+    ) -> InMemoryOwnerTruthEchoConversationContextRepository:
+        return self._owner_truth_echo_conversation_context_repository
+
     def owner_truth_interview_candidate_proposal_repository(
         self,
     ) -> InMemoryOwnerTruthInterviewCandidateProposalRepository:
@@ -599,6 +624,16 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthLegacyBackfillRepository:
         return self._owner_truth_legacy_backfill_repository
+
+    def owner_truth_b_migration_dry_run_repository(
+        self,
+    ) -> InMemoryOwnerTruthBMigrationDryRunRepository:
+        return self._owner_truth_b_migration_dry_run_repository
+
+    def owner_truth_b_migration_execution_repository(
+        self,
+    ) -> InMemoryOwnerTruthBMigrationExecutionRepository:
+        return self._owner_truth_b_migration_execution_repository
 
     def owner_truth_legacy_tail_shadow_repository(
         self,

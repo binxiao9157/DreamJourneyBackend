@@ -20,6 +20,9 @@ from app.services.owner_truth_media_source_object import (
     clamav_scanner_runtime_ready,
     cos_endpoint_matches_region,
 )
+from app.services.owner_truth_memory_search_embedding_runtime import (
+    embedding_runtime_readiness,
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,7 @@ class ProviderRuntimeInventory:
     _IDENTITY_CAPABILITY = "identityChallenge"
     _VOICE_CAPABILITY = "voiceCloneShell"
     _DIGITAL_HUMAN_CAPABILITY = "digitalHumanLivePanel"
+    _MEMORY_SEARCH_EMBEDDING_CAPABILITY = "ownerTruthMemorySearchEmbedding"
 
     def __init__(
         self,
@@ -84,12 +88,14 @@ class ProviderRuntimeInventory:
         self._validated_at_startup = validated_at_startup
         self._clamav_scanner_ready = clamav_scanner_ready or self._default_clamav_scanner_ready
         storage = self._media_storage_status()
+        embedding = self._memory_search_embedding_status()
         self._statuses = {
             storage.capability: storage,
             self._MEDIA_PROCESSING_CAPABILITY: self._media_processing_status(storage),
             self._IDENTITY_CAPABILITY: self._identity_challenge_status(),
             self._VOICE_CAPABILITY: self._voice_clone_status(),
             self._DIGITAL_HUMAN_CAPABILITY: self._digital_human_status(),
+            embedding.capability: embedding,
         }
 
     def status_for(self, capability: str) -> ProviderRuntimeStatus:
@@ -367,6 +373,30 @@ class ProviderRuntimeInventory:
                 "configuredButBrokerBlocked" if provider_configured else "incomplete"
             ),
             evidence_status="notVerified",
+        )
+
+    def _memory_search_embedding_status(self) -> ProviderRuntimeStatus:
+        """Expose the semantic-search readiness without endpoint or key data."""
+
+        readiness = embedding_runtime_readiness(self._settings)
+        return ProviderRuntimeStatus(
+            capability=self._MEMORY_SEARCH_EMBEDDING_CAPABILITY,
+            enabled=readiness.enabled,
+            provider_ready=readiness.provider_ready,
+            provider=readiness.provider,
+            provider_kind="privateTextEmbedding",
+            operation="embedCurrentSearchDocumentsAndQueries",
+            data_class="ownerConfirmedSearchDocument",
+            region="providerManaged",
+            retention_policy_version="ownerTruthSearchEmbeddingRetention-v1",
+            fallback_mode="deterministicTextFallback",
+            reason=readiness.reason,
+            configuration_status=readiness.configuration_status,
+            evidence_status=(
+                "configuredPendingProviderProbe"
+                if readiness.provider_ready
+                else "notVerified"
+            ),
         )
 
     def _media_safety_reason(self) -> Optional[str]:

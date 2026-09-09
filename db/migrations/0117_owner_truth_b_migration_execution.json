@@ -1,0 +1,27 @@
+{
+  "version": "0117",
+  "name": "owner_truth_b_migration_execution",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthBMigrationExecutionV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true,
+    "ownerTruthBMigrationExecution": false
+  },
+  "summary": "Adds bounded, resumable checkpoints that replay immutable legacy text only through the current Source, Candidate and Owner-review lane.",
+  "operations": [
+    "create report-bound migration execution run and per-entry checkpoints",
+    "record append-only attempt receipts without legacy bodies",
+    "enforce deterministic transitions and zero direct formal-memory writes"
+  ],
+  "rollback": "Disable ownerTruthBMigrationExecution and retain checkpoints and Sources for audit/review. Do not delete accepted user facts, run a destructive down migration, or re-enable a legacy writer.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "requiresOwnerReviewForEveryCandidate": true,
+    "allowsDirectFormalMemoryWrite": false
+  }
+}

@@ -60,8 +60,9 @@ class OwnerTruthInterviewSessionReadService:
         self,
         *,
         context: OwnerTruthCommandContext,
+        product_session_id: str | None = None,
     ) -> OwnerTruthInterviewSessionSnapshot | None:
-        """Return the active resumable session, never a session history list."""
+        """Return the active resumable session for one product session only."""
 
         with self._store.request_unit_of_work(
             correlation_id=(
@@ -72,7 +73,10 @@ class OwnerTruthInterviewSessionReadService:
         ):
             return OwnerTruthConversationService(
                 self._store.owner_truth_conversation_repository()
-            ).read_current_session(context=context)
+            ).read_current_session(
+                context=context,
+                product_session_id=product_session_id,
+            )
 
 
 __all__ = [

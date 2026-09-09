@@ -206,11 +206,12 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
             "status": "active",
         }
         snapshot = {
-            "schemaVersion": "formal-memory-conversation-v1",
+            "schemaVersion": "formal-memory-conversation-v2",
             "subjectId": user_id,
             "personaScope": "personal",
             "projectionCheckpoint": "checkpoint-boundary",
             "authorityEpoch": 0,
+            "memoryRevision": 0,
             "generatedAt": "2026-09-03T00:00:00+00:00",
             "persona": {
                 "displayName": "",
@@ -239,6 +240,11 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
         self.assertEqual(body["accessPath"], "backendRealtimeProxy")
         self.assertFalse(body["mobileDirectAllowed"])
         self.assertTrue(body["proxy"]["sessionToken"].startswith("djv_"))
+        self.assertEqual(body["echoSession"]["memoryRevision"], 0)
+        self.assertEqual(
+            body["sessionContext"]["formalMemorySnapshot"]["memoryRevision"],
+            0,
+        )
         self.assert_value_free(body)
 
     def test_legacy_tts_response_is_no_store_and_redacts_provider_references(self):

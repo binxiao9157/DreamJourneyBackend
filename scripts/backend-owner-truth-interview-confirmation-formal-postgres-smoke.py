@@ -641,7 +641,11 @@ def assert_concurrent_formal_replay_is_idempotent(
             )
         )
     statuses = sorted(response.status_code for response in responses)
-    require(statuses == [200, 201], f"concurrent formal replay statuses mismatch: {statuses}")
+    require(
+        statuses == [200, 201],
+        "concurrent formal replay statuses mismatch: "
+        f"{statuses}; responses={[response.text for response in responses]}",
+    )
     outcomes = sorted(str(response.json().get("status") or "") for response in responses)
     require(outcomes == ["created", "deduplicated"], "concurrent formal replay must create once")
 

@@ -41,6 +41,7 @@ from app.domain.owner_truth.conversation import (
     OwnerTruthInterviewSessionResult,
     OwnerTruthInterviewSessionSnapshot,
     OwnerTruthInterviewSessionStateConflict,
+    OwnerTruthInterviewTurnsPending,
     PauseInterviewForTopicSwitchCommand,
     PauseInterviewForTopicSwitchWriteRecord,
     RecordInterviewPacingCommand,
@@ -140,12 +141,15 @@ class OwnerTruthConversationRepository(Protocol):
         self,
         *,
         context: OwnerTruthCommandContext,
+        product_session_id: str | None = None,
     ) -> OwnerTruthInterviewSessionSnapshot | None:
-        """Return the one active session that may resume natural input.
+        """Return the active session for one product-level conversation.
 
         A caller never receives private message or review content from this
-        lookup.  The one-active-session invariant makes this a deterministic
-        ownership-bound resume target rather than a history listing.
+        lookup.  ``product_session_id`` keeps a reconnect tied to its original
+        Live session and prevents a delayed receipt from being resumed as a
+        newly opened conversation.  ``None`` is reserved for the legacy
+        natural-input lane, which remains single-active per Vault.
         """
 
         ...
@@ -195,6 +199,15 @@ def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
         raise OwnerTruthConversationAccessDenied(
             "only the Vault Owner may mutate a guided interview session"
         )
+
+
+def _optional_product_session_id(value: str | None) -> str | None:
+    """Normalize the opaque product-session selector used only for resumption."""
+
+    normalized = str(value or "").strip()
+    if len(normalized) > 128:
+        raise OwnerTruthConversationError("product_session_id exceeds maximum length")
+    return normalized or None
 
 
 def _normalized_thread_id_for_authority_read(value: object) -> str:
@@ -364,11 +377,15 @@ class OwnerTruthConversationService:
         self,
         *,
         context: OwnerTruthCommandContext,
+        product_session_id: str | None = None,
     ) -> OwnerTruthInterviewSessionSnapshot | None:
         """Read the active natural-input session without listing history."""
 
         _assert_owner_context(context)
-        return self._repository.get_current_interview_session(context=context)
+        return self._repository.get_current_interview_session(
+            context=context,
+            product_session_id=_optional_product_session_id(product_session_id),
+        )
 
     def read_message_authority(
         self,
@@ -459,9 +476,11 @@ class InMemoryOwnerTruthConversationRepository:
                 item["state"] is InterviewSessionState.ACTIVE
                 for (vault_id, _), item in self._sessions.items()
                 if vault_id == record.vault_id
+                and self._product_session_id_from_metadata(item.get("metadata"))
+                == record.product_session_id
             ):
                 raise OwnerTruthInterviewSessionStateConflict(
-                    "only one active interview session is allowed in a Vault"
+                    "an active interview session already owns this product session"
                 )
 
             authority_epoch = int(vault["authorityEpoch"])
@@ -493,6 +512,8 @@ class InMemoryOwnerTruthConversationRepository:
                 "candidateBatchTurnCount": 0,
                 "pendingReviewBatchId": None,
                 "fatigue": InterviewFatigue.NORMAL,
+                "continuousClientSequence": 0,
+                "closeRequestedClientSequence": None,
                 "metadata": (
                     {"productSessionId": record.product_session_id}
                     if record.product_session_id
@@ -934,6 +955,22 @@ class InMemoryOwnerTruthConversationRepository:
                 raise OwnerTruthConversationConflict(
                     "messageId already exists without this command receipt"
                 )
+            if record.client_sequence_number is not None:
+                duplicate_client_sequence = next(
+                    (
+                        item
+                        for item in self._messages.values()
+                        if item["vaultId"] == record.vault_id
+                        and item["sessionId"] == record.session_id
+                        and item.get("clientSequenceNumber")
+                        == record.client_sequence_number
+                    ),
+                    None,
+                )
+                if duplicate_client_sequence is not None:
+                    raise OwnerTruthConversationConflict(
+                        "clientSequenceNumber already belongs to another persisted turn"
+                    )
             sequence = 1 + sum(
                 1
                 for message in self._messages.values()
@@ -951,7 +988,14 @@ class InMemoryOwnerTruthConversationRepository:
                 "kind": record.kind,
                 "contentHash": record.content_hash,
                 "contentPayload": deepcopy(dict(record.content_payload)),
+                "clientSequenceNumber": record.client_sequence_number,
+                "capturedAt": record.captured_at,
             }
+            continuous_client_sequence = self._continuous_client_sequence(
+                vault_id=record.vault_id,
+                session_id=record.session_id,
+            )
+            session["continuousClientSequence"] = continuous_client_sequence
             thread["rowVersion"] += 1
             session["rowVersion"] += 1
             if record.author.value == "owner":
@@ -973,6 +1017,20 @@ class InMemoryOwnerTruthConversationRepository:
                 boundary=session["boundary"],
                 message_id=record.message_id,
                 message_sequence=sequence,
+                client_sequence_number=record.client_sequence_number,
+                continuous_client_sequence=(
+                    continuous_client_sequence
+                    if record.client_sequence_number is not None
+                    else None
+                ),
+                delivery_state=(
+                    "contiguous"
+                    if record.client_sequence_number is not None
+                    and record.client_sequence_number <= continuous_client_sequence
+                    else "awaitingPriorTurns"
+                    if record.client_sequence_number is not None
+                    else None
+                ),
             )
             self._store_receipt(record, result)
             return result
@@ -1151,10 +1209,20 @@ class InMemoryOwnerTruthConversationRepository:
                 expected=record.expected_session_version,
                 current=int(session["rowVersion"]),
             )
+            continuous_client_sequence = int(session.get("continuousClientSequence") or 0)
+            if (
+                record.last_client_sequence_number is not None
+                and record.last_client_sequence_number != continuous_client_sequence
+            ):
+                raise OwnerTruthInterviewTurnsPending(
+                    requested_sequence=record.last_client_sequence_number,
+                    continuous_sequence=continuous_client_sequence,
+                )
             thread["state"] = ConversationThreadState.ENDED.value
             thread["rowVersion"] += 1
             session["state"] = InterviewSessionState.ENDED
             session["rowVersion"] += 1
+            session["closeRequestedClientSequence"] = record.last_client_sequence_number
             result = OwnerTruthInterviewSessionResult(
                 outcome="created",
                 receipt_id=record.receipt_id,
@@ -1164,6 +1232,16 @@ class InMemoryOwnerTruthConversationRepository:
                 session_version=int(session["rowVersion"]),
                 state=session["state"],
                 boundary=session["boundary"],
+                continuous_client_sequence=(
+                    continuous_client_sequence
+                    if record.last_client_sequence_number is not None
+                    else None
+                ),
+                delivery_state=(
+                    "closedAfterContiguousDelivery"
+                    if record.last_client_sequence_number is not None
+                    else None
+                ),
             )
             self._store_receipt(record, result)
             return result
@@ -1255,14 +1333,23 @@ class InMemoryOwnerTruthConversationRepository:
                 fatigue=session["fatigue"],
                 authority_epoch=int(vault["authorityEpoch"]),
                 entry_mode=str(thread["entryMode"]),
+                product_session_id=(
+                    str(session["metadata"].get("productSessionId") or "") or None
+                    if isinstance(session.get("metadata"), Mapping)
+                    else None
+                ),
+                continuous_client_sequence=int(session.get("continuousClientSequence") or 0),
+                close_requested_client_sequence=session.get("closeRequestedClientSequence"),
             )
 
     def get_current_interview_session(
         self,
         *,
         context: OwnerTruthCommandContext,
+        product_session_id: str | None = None,
     ) -> OwnerTruthInterviewSessionSnapshot | None:
         _assert_owner_context(context)
+        product_session_id = _optional_product_session_id(product_session_id)
         with self._lock:
             vault = self._ensure_active_vault(
                 vault_id=context.vault_id,
@@ -1275,12 +1362,14 @@ class InMemoryOwnerTruthConversationRepository:
                 and str(session["ownerSubjectId"]) == context.owner_subject_id
                 and int(session["authorityEpoch"]) == int(vault["authorityEpoch"])
                 and session["state"] is InterviewSessionState.ACTIVE
+                and self._product_session_id_from_metadata(session.get("metadata"))
+                == product_session_id
             )
             if not current_sessions:
                 return None
             if len(current_sessions) != 1:
                 raise OwnerTruthConversationConflict(
-                    "Owner Vault has more than one active interview session"
+                    "Owner Vault has more than one active interview session for this product session"
                 )
             session = current_sessions[0]
             thread = self._threads.get((context.vault_id, str(session["threadId"])))
@@ -1309,7 +1398,21 @@ class InMemoryOwnerTruthConversationRepository:
                 fatigue=session["fatigue"],
                 authority_epoch=int(vault["authorityEpoch"]),
                 entry_mode=str(thread["entryMode"]),
+                product_session_id=(
+                    str(session["metadata"].get("productSessionId") or "") or None
+                    if isinstance(session.get("metadata"), Mapping)
+                    else None
+                ),
+                continuous_client_sequence=int(session.get("continuousClientSequence") or 0),
+                close_requested_client_sequence=session.get("closeRequestedClientSequence"),
             )
+
+    @staticmethod
+    def _product_session_id_from_metadata(value: Any) -> str | None:
+        if not isinstance(value, Mapping):
+            return None
+        product_session_id = str(value.get("productSessionId") or "").strip()
+        return product_session_id or None
 
     def get_interview_message_authority(
         self,
@@ -1571,6 +1674,24 @@ class InMemoryOwnerTruthConversationRepository:
             default=0,
         )
 
+    def _continuous_client_sequence(
+        self,
+        *,
+        vault_id: str,
+        session_id: str,
+    ) -> int:
+        sequences = {
+            int(item["clientSequenceNumber"])
+            for item in self._messages.values()
+            if item["vaultId"] == vault_id
+            and item["sessionId"] == session_id
+            and item.get("clientSequenceNumber") is not None
+        }
+        continuous = 0
+        while continuous + 1 in sequences:
+            continuous += 1
+        return continuous
+
     @staticmethod
     def _review_batch_snapshot_from_item(
         item: Mapping[str, Any],
@@ -1632,11 +1753,22 @@ class InMemoryOwnerTruthConversationRepository:
             return None
         expected = {
             "commandType": self._command_type(record),
-            "payloadHash": record.payload_hash,
             "actorSubjectId": record.actor_subject_id,
             "ownerSubjectId": record.owner_subject_id,
             "policyVersion": record.policy_version,
         }
+        if isinstance(record, AppendInterviewMessageWriteRecord):
+            expected.update(
+                {
+                    "messageId": record.message_id,
+                    "contentHash": record.content_hash,
+                    "author": record.author.value,
+                    "kind": record.kind.value,
+                    "clientSequenceNumber": record.client_sequence_number,
+                }
+            )
+        else:
+            expected["payloadHash"] = record.payload_hash
         if any(existing.get(key) != value for key, value in expected.items()):
             raise OwnerTruthConversationConflict(
                 "commandId cannot be reused with a different conversation command"
@@ -1675,7 +1807,7 @@ class InMemoryOwnerTruthConversationRepository:
         raise TypeError("unsupported owner truth conversation write record")
 
     def _store_receipt(self, record: Any, result: Any) -> None:
-        self._receipts[(record.vault_id, record.command_id_hash)] = {
+        receipt = {
             "commandType": self._command_type(record),
             "payloadHash": record.payload_hash,
             "actorSubjectId": record.actor_subject_id,
@@ -1683,6 +1815,17 @@ class InMemoryOwnerTruthConversationRepository:
             "policyVersion": record.policy_version,
             "result": result,
         }
+        if isinstance(record, AppendInterviewMessageWriteRecord):
+            receipt.update(
+                {
+                    "messageId": record.message_id,
+                    "contentHash": record.content_hash,
+                    "author": record.author.value,
+                    "kind": record.kind.value,
+                    "clientSequenceNumber": record.client_sequence_number,
+                }
+            )
+        self._receipts[(record.vault_id, record.command_id_hash)] = receipt
 
     @staticmethod
     def _replay_result(
@@ -1706,6 +1849,9 @@ class InMemoryOwnerTruthConversationRepository:
             boundary=result.boundary,
             message_id=result.message_id,
             message_sequence=result.message_sequence,
+            client_sequence_number=result.client_sequence_number,
+            continuous_client_sequence=result.continuous_client_sequence,
+            delivery_state=result.delivery_state,
             authority_effects=result.authority_effects,
         )
 
@@ -1771,12 +1917,13 @@ class PostgresOwnerTruthConversationRepository:
                 )
             self._assert_thread_absent(cursor, record=record)
             self._assert_session_absent(cursor, record=record)
+            self._assert_active_product_session_absent(cursor, record=record)
             cursor.execute(
                 """
                 INSERT INTO owner_truth.conversation_threads (
                     id, vault_id, owner_subject_id, state, entry_mode,
-                    policy_version, authority_epoch, metadata
-                ) VALUES (%s, %s, %s, 'active', %s, %s, %s, %s)
+                    policy_version, authority_epoch, product_session_id, metadata
+                ) VALUES (%s, %s, %s, 'active', %s, %s, %s, %s, %s)
                 RETURNING row_version
                 """,
                 self._adapt_params(
@@ -1787,6 +1934,7 @@ class PostgresOwnerTruthConversationRepository:
                         record.entry_mode,
                         record.policy_version,
                         int(vault["authority_epoch"]),
+                        record.product_session_id,
                         (
                             {"productSessionId": record.product_session_id}
                             if record.product_session_id
@@ -1800,8 +1948,9 @@ class PostgresOwnerTruthConversationRepository:
                 """
                 INSERT INTO owner_truth.interview_sessions (
                     id, vault_id, owner_subject_id, current_thread_id, state,
-                    boundary, turn_count, policy_version, authority_epoch, metadata
-                ) VALUES (%s, %s, %s, %s, 'active', 'open', 0, %s, %s, %s)
+                    boundary, turn_count, policy_version, authority_epoch,
+                    product_session_id, metadata
+                ) VALUES (%s, %s, %s, %s, 'active', 'open', 0, %s, %s, %s, %s)
                 RETURNING row_version, state, boundary
                 """,
                 self._adapt_params(
@@ -1812,6 +1961,7 @@ class PostgresOwnerTruthConversationRepository:
                         record.thread_id,
                         record.policy_version,
                         int(vault["authority_epoch"]),
+                        record.product_session_id,
                         (
                             {"productSessionId": record.product_session_id}
                             if record.product_session_id
@@ -1883,6 +2033,7 @@ class PostgresOwnerTruthConversationRepository:
                 current=int(session["row_version"]),
             )
             self._assert_message_absent(cursor, record=record)
+            self._assert_client_sequence_absent(cursor, record=record)
             next_boundary = (
                 InterviewBoundary.OPEN.value
                 if _should_consume_skip_once_after_append(
@@ -1900,6 +2051,12 @@ class PostgresOwnerTruthConversationRepository:
                 (record.vault_id, record.thread_id),
             )
             sequence = int(cursor.fetchone()["next_sequence"])
+            continuous_client_sequence = self._continuous_client_sequence_after_append(
+                cursor,
+                vault_id=record.vault_id,
+                session_id=record.session_id,
+                client_sequence_number=record.client_sequence_number,
+            )
             cursor.execute(
                 """
                 UPDATE owner_truth.conversation_threads
@@ -1922,14 +2079,16 @@ class PostgresOwnerTruthConversationRepository:
                 SET boundary = %s,
                     turn_count = turn_count + %s,
                     candidate_batch_turn_count = candidate_batch_turn_count + %s,
+                    continuous_client_sequence = %s,
                     updated_at = NOW()
                 WHERE vault_id = %s AND id = %s AND row_version = %s
-                RETURNING row_version, state, boundary
+                RETURNING row_version, state, boundary, continuous_client_sequence
                 """,
                 (
                     next_boundary,
                     1 if record.author.value == "owner" else 0,
                     1 if record.author.value == "owner" else 0,
+                    continuous_client_sequence,
                     record.vault_id,
                     record.session_id,
                     record.expected_session_version,
@@ -1947,8 +2106,9 @@ class PostgresOwnerTruthConversationRepository:
                 INSERT INTO owner_truth.conversation_messages (
                     id, vault_id, owner_subject_id, thread_id, session_id,
                     sequence_number, author, kind, content_schema_version,
-                    content_hash, content_payload, authority_epoch
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    content_hash, content_payload, authority_epoch,
+                    client_sequence_number, captured_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 self._adapt_params(
                     (
@@ -1964,6 +2124,8 @@ class PostgresOwnerTruthConversationRepository:
                         record.content_hash,
                         dict(record.content_payload),
                         int(vault["authority_epoch"]),
+                        record.client_sequence_number,
+                        record.captured_at,
                     )
                 ),
             )
@@ -1986,6 +2148,21 @@ class PostgresOwnerTruthConversationRepository:
             boundary=InterviewBoundary(str(updated_session["boundary"])),
             message_id=record.message_id,
             message_sequence=sequence,
+            client_sequence_number=record.client_sequence_number,
+            continuous_client_sequence=(
+                int(updated_session["continuous_client_sequence"])
+                if record.client_sequence_number is not None
+                else None
+            ),
+            delivery_state=(
+                "contiguous"
+                if record.client_sequence_number is not None
+                and record.client_sequence_number
+                <= int(updated_session["continuous_client_sequence"])
+                else "awaitingPriorTurns"
+                if record.client_sequence_number is not None
+                else None
+            ),
         )
 
     def set_interview_boundary(
@@ -2293,6 +2470,15 @@ class PostgresOwnerTruthConversationRepository:
                 expected=record.expected_session_version,
                 current=int(session["row_version"]),
             )
+            if (
+                record.last_client_sequence_number is not None
+                and record.last_client_sequence_number
+                != int(session["continuous_client_sequence"])
+            ):
+                raise OwnerTruthInterviewTurnsPending(
+                    requested_sequence=record.last_client_sequence_number,
+                    continuous_sequence=int(session["continuous_client_sequence"]),
+                )
             cursor.execute(
                 """
                 UPDATE owner_truth.conversation_threads
@@ -2312,11 +2498,19 @@ class PostgresOwnerTruthConversationRepository:
             cursor.execute(
                 """
                 UPDATE owner_truth.interview_sessions
-                SET state = 'ended', updated_at = NOW()
+                SET state = 'ended',
+                    close_requested_client_sequence = %s,
+                    updated_at = NOW()
                 WHERE vault_id = %s AND id = %s AND row_version = %s
-                RETURNING row_version, state, boundary
+                RETURNING row_version, state, boundary,
+                    continuous_client_sequence, close_requested_client_sequence
                 """,
-                (record.vault_id, record.session_id, record.expected_session_version),
+                (
+                    record.last_client_sequence_number,
+                    record.vault_id,
+                    record.session_id,
+                    record.expected_session_version,
+                ),
             )
             updated_session = cursor.fetchone()
             if updated_session is None:
@@ -2342,6 +2536,16 @@ class PostgresOwnerTruthConversationRepository:
             session_version=int(updated_session["row_version"]),
             state=InterviewSessionState(str(updated_session["state"])),
             boundary=InterviewBoundary(str(updated_session["boundary"])),
+            continuous_client_sequence=(
+                int(updated_session["continuous_client_sequence"])
+                if record.last_client_sequence_number is not None
+                else None
+            ),
+            delivery_state=(
+                "closedAfterContiguousDelivery"
+                if record.last_client_sequence_number is not None
+                else None
+            ),
         )
 
     def record_interview_pacing(
@@ -2816,7 +3020,9 @@ class PostgresOwnerTruthConversationRepository:
                     s.state, s.boundary, s.row_version, s.turn_count,
                     s.deepening_turn_count, s.candidate_batch_turn_count,
                     s.pending_review_batch_id, s.fatigue,
-                    s.authority_epoch, t.row_version AS thread_row_version,
+                    s.authority_epoch, s.metadata AS session_metadata,
+                    s.continuous_client_sequence, s.close_requested_client_sequence,
+                    t.row_version AS thread_row_version,
                     t.entry_mode AS thread_entry_mode
                 FROM owner_truth.interview_sessions AS s
                 JOIN owner_truth.conversation_threads AS t
@@ -2862,14 +3068,25 @@ class PostgresOwnerTruthConversationRepository:
             fatigue=InterviewFatigue(str(row["fatigue"])),
             authority_epoch=int(row["authority_epoch"]),
             entry_mode=str(row["thread_entry_mode"]),
+            product_session_id=self._product_session_id_from_metadata(
+                row.get("session_metadata")
+            ),
+            continuous_client_sequence=int(row["continuous_client_sequence"]),
+            close_requested_client_sequence=(
+                None
+                if row["close_requested_client_sequence"] is None
+                else int(row["close_requested_client_sequence"])
+            ),
         )
 
     def get_current_interview_session(
         self,
         *,
         context: OwnerTruthCommandContext,
+        product_session_id: str | None = None,
     ) -> OwnerTruthInterviewSessionSnapshot | None:
         _assert_owner_context(context)
+        product_session_id = _optional_product_session_id(product_session_id)
         with self._cursor() as cursor:
             vault = self._active_vault(
                 cursor,
@@ -2883,7 +3100,10 @@ class PostgresOwnerTruthConversationRepository:
                     s.state, s.boundary, s.row_version, s.turn_count,
                     s.deepening_turn_count, s.candidate_batch_turn_count,
                     s.pending_review_batch_id, s.fatigue,
-                    s.authority_epoch, t.row_version AS thread_row_version,
+                    s.authority_epoch, s.product_session_id,
+                    s.metadata AS session_metadata,
+                    s.continuous_client_sequence, s.close_requested_client_sequence,
+                    t.row_version AS thread_row_version,
                     t.entry_mode AS thread_entry_mode
                 FROM owner_truth.interview_sessions AS s
                 JOIN owner_truth.conversation_threads AS t
@@ -2895,6 +3115,10 @@ class PostgresOwnerTruthConversationRepository:
                   AND t.owner_subject_id = %s
                   AND t.authority_epoch = %s
                   AND t.state = %s
+                  AND COALESCE(
+                        s.product_session_id,
+                        NULLIF(BTRIM(s.metadata ->> 'productSessionId'), '')
+                      ) IS NOT DISTINCT FROM %s
                 ORDER BY s.updated_at DESC, s.id ASC
                 LIMIT 2
                 """,
@@ -2906,6 +3130,7 @@ class PostgresOwnerTruthConversationRepository:
                     context.owner_subject_id,
                     int(vault["authority_epoch"]),
                     ConversationThreadState.ACTIVE.value,
+                    product_session_id,
                 ),
             )
             rows = cursor.fetchall()
@@ -2913,7 +3138,7 @@ class PostgresOwnerTruthConversationRepository:
             return None
         if len(rows) != 1:
             raise OwnerTruthConversationConflict(
-                "Owner Vault has more than one active interview session"
+                "Owner Vault has more than one active interview session for this product session"
             )
         row = rows[0]
         return OwnerTruthInterviewSessionSnapshot(
@@ -2936,6 +3161,17 @@ class PostgresOwnerTruthConversationRepository:
             fatigue=InterviewFatigue(str(row["fatigue"])),
             authority_epoch=int(row["authority_epoch"]),
             entry_mode=str(row["thread_entry_mode"]),
+            product_session_id=(
+                str(row["product_session_id"] or "").strip() or None
+                if row.get("product_session_id") is not None
+                else self._product_session_id_from_metadata(row.get("session_metadata"))
+            ),
+            continuous_client_sequence=int(row["continuous_client_sequence"]),
+            close_requested_client_sequence=(
+                None
+                if row["close_requested_client_sequence"] is None
+                else int(row["close_requested_client_sequence"])
+            ),
         )
 
     def get_interview_message_authority(
@@ -3292,9 +3528,8 @@ class PostgresOwnerTruthConversationRepository:
         existing: Mapping[str, Any],
         record: Any,
     ) -> OwnerTruthInterviewSessionResult:
-        if any(
+        common_identity_mismatch = any(
             (
-                str(existing["payload_hash"]) != record.payload_hash,
                 str(existing["command_type"]) != self._command_type(record),
                 str(existing["target_thread_id"]) != record.thread_id,
                 str(existing["target_session_id"]) != record.session_id,
@@ -3302,6 +3537,14 @@ class PostgresOwnerTruthConversationRepository:
                 str(existing["owner_subject_id"]) != record.owner_subject_id,
                 str(existing["policy_version"]) != record.policy_version,
             )
+        )
+        # An append is identified by the immutable captured message, rather
+        # than the optimistic expected versions carried by one delivery
+        # attempt.  A lost ACK commonly causes the client to retry the same
+        # message after it has refreshed those versions.
+        if common_identity_mismatch or (
+            not isinstance(record, AppendInterviewMessageWriteRecord)
+            and str(existing["payload_hash"]) != record.payload_hash
         ):
             raise OwnerTruthConversationConflict(
                 "commandId cannot be reused with a different conversation command"
@@ -3312,7 +3555,8 @@ class PostgresOwnerTruthConversationRepository:
         if message_id is not None:
             cursor.execute(
                 """
-                SELECT sequence_number FROM owner_truth.conversation_messages
+                SELECT sequence_number, client_sequence_number, content_hash, author, kind
+                FROM owner_truth.conversation_messages
                 WHERE vault_id = %s AND id = %s
                 """,
                 (record.vault_id, str(message_id)),
@@ -3322,7 +3566,36 @@ class PostgresOwnerTruthConversationRepository:
                 raise OwnerTruthConversationConflict(
                     "conversation command receipt points to a missing message"
                 )
+            if isinstance(record, AppendInterviewMessageWriteRecord) and any(
+                (
+                    str(message_id) != record.message_id,
+                    str(message["content_hash"]) != record.content_hash,
+                    str(message["author"]) != record.author.value,
+                    str(message["kind"]) != record.kind.value,
+                    (
+                        None
+                        if message["client_sequence_number"] is None
+                        else int(message["client_sequence_number"])
+                    )
+                    != record.client_sequence_number,
+                )
+            ):
+                raise OwnerTruthConversationConflict(
+                    "commandId cannot be reused with a different captured message"
+                )
             message_sequence = int(message["sequence_number"])
+            message_client_sequence = (
+                None
+                if message["client_sequence_number"] is None
+                else int(message["client_sequence_number"])
+            )
+        else:
+            message_client_sequence = None
+        requested_close_sequence = (
+            record.last_client_sequence_number
+            if isinstance(record, EndInterviewSessionWriteRecord)
+            else None
+        )
         return OwnerTruthInterviewSessionResult(
             outcome="deduplicated",
             receipt_id=str(existing["id"]),
@@ -3334,6 +3607,23 @@ class PostgresOwnerTruthConversationRepository:
             boundary=InterviewBoundary(str(session["boundary"])),
             message_id=None if message_id is None else str(message_id),
             message_sequence=message_sequence,
+            client_sequence_number=message_client_sequence,
+            continuous_client_sequence=(
+                int(session["continuous_client_sequence"])
+                if message_client_sequence is not None
+                or requested_close_sequence is not None
+                else None
+            ),
+            delivery_state=(
+                "contiguous"
+                if message_client_sequence is not None
+                and message_client_sequence <= int(session["continuous_client_sequence"])
+                else "awaitingPriorTurns"
+                if message_client_sequence is not None
+                else "closedAfterContiguousDelivery"
+                if requested_close_sequence is not None
+                else None
+            ),
         )
 
     def _deduplicated_review_batch_result(
@@ -3450,6 +3740,69 @@ class PostgresOwnerTruthConversationRepository:
             raise OwnerTruthConversationConflict("messageId already exists without this command receipt")
 
     @staticmethod
+    def _assert_client_sequence_absent(
+        cursor: Any,
+        *,
+        record: AppendInterviewMessageWriteRecord,
+    ) -> None:
+        if record.client_sequence_number is None:
+            return
+        cursor.execute(
+            """
+            SELECT id FROM owner_truth.conversation_messages
+            WHERE vault_id = %s
+              AND session_id = %s
+              AND client_sequence_number = %s
+            FOR UPDATE
+            """,
+            (
+                record.vault_id,
+                record.session_id,
+                record.client_sequence_number,
+            ),
+        )
+        if cursor.fetchone() is not None:
+            raise OwnerTruthConversationConflict(
+                "clientSequenceNumber already belongs to another persisted turn"
+            )
+
+    @staticmethod
+    def _assert_active_product_session_absent(
+        cursor: Any,
+        *,
+        record: StartInterviewSessionWriteRecord,
+    ) -> None:
+        """Fence one Live product session without blocking a newer one.
+
+        The legacy natural-input lane intentionally uses ``NULL`` and remains
+        single-active.  A Live reconnect supplies its stable product session
+        ID, so a delayed old turn can only ever resolve to that same session.
+        """
+
+        cursor.execute(
+            """
+            SELECT id
+            FROM owner_truth.interview_sessions
+            WHERE vault_id = %s
+              AND state = %s
+              AND COALESCE(
+                    product_session_id,
+                    NULLIF(BTRIM(metadata ->> 'productSessionId'), '')
+              ) IS NOT DISTINCT FROM %s
+            FOR UPDATE
+            """,
+            (
+                record.vault_id,
+                InterviewSessionState.ACTIVE.value,
+                record.product_session_id,
+            ),
+        )
+        if cursor.fetchone() is not None:
+            raise OwnerTruthInterviewSessionStateConflict(
+                "an active interview session already owns this product session"
+            )
+
+    @staticmethod
     def _review_batch_trigger_for_session(
         *,
         session: Mapping[str, Any],
@@ -3480,6 +3833,49 @@ class PostgresOwnerTruthConversationRepository:
             (vault_id, thread_id, session_id),
         )
         return int(cursor.fetchone()["through_message_sequence"])
+
+    @staticmethod
+    def _continuous_client_sequence_after_append(
+        cursor: Any,
+        *,
+        vault_id: str,
+        session_id: str,
+        client_sequence_number: int | None,
+    ) -> int:
+        """Return the contiguous prefix after adding one still-uncommitted turn.
+
+        The session row is already locked by the caller.  This deliberately
+        computes a prefix rather than ``MAX`` so a late packet cannot make an
+        incomplete Live transcript appear safe to close.
+        """
+
+        cursor.execute(
+            """
+            SELECT client_sequence_number
+            FROM owner_truth.conversation_messages
+            WHERE vault_id = %s
+              AND session_id = %s
+              AND client_sequence_number IS NOT NULL
+            """,
+            (vault_id, session_id),
+        )
+        sequences = {
+            int(row["client_sequence_number"])
+            for row in cursor.fetchall()
+        }
+        if client_sequence_number is not None:
+            sequences.add(client_sequence_number)
+        continuous = 0
+        while continuous + 1 in sequences:
+            continuous += 1
+        return continuous
+
+    @staticmethod
+    def _product_session_id_from_metadata(value: Any) -> str | None:
+        if not isinstance(value, Mapping):
+            return None
+        product_session_id = str(value.get("productSessionId") or "").strip()
+        return product_session_id or None
 
     @staticmethod
     def _review_batch_snapshot_from_row(
@@ -3535,6 +3931,7 @@ class PostgresOwnerTruthConversationRepository:
                 s.boundary, s.turn_count, s.deepening_turn_count,
                 s.candidate_batch_turn_count, s.pending_review_batch_id,
                 s.fatigue, s.authority_epoch, s.row_version,
+                s.continuous_client_sequence, s.close_requested_client_sequence,
                 t.id AS thread_id, t.state AS thread_state,
                 t.owner_subject_id AS thread_owner_subject_id,
                 t.authority_epoch AS thread_authority_epoch,
@@ -3570,6 +3967,12 @@ class PostgresOwnerTruthConversationRepository:
             "fatigue": str(row["fatigue"]),
             "authority_epoch": int(row["authority_epoch"]),
             "row_version": int(row["row_version"]),
+            "continuous_client_sequence": int(row["continuous_client_sequence"]),
+            "close_requested_client_sequence": (
+                None
+                if row["close_requested_client_sequence"] is None
+                else int(row["close_requested_client_sequence"])
+            ),
         }
         thread = {
             "id": str(row["thread_id"]),

@@ -16,6 +16,7 @@ from threading import RLock
 from typing import Any, ContextManager, Mapping, Protocol
 
 from app.domain.owner_truth.memory_projection import (
+    OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION,
     OWNER_TRUTH_MEMORY_PROJECTION_SOURCE,
     OwnerTruthMemoryProjectionAccessDenied,
     OwnerTruthMemoryProjectionError,
@@ -23,6 +24,7 @@ from app.domain.owner_truth.memory_projection import (
     OwnerTruthMemoryProjectionResult,
     build_ready_memory_projection,
     build_rebuilding_memory_projection,
+    restore_persisted_ready_memory_projection,
 )
 from app.domain.owner_truth.candidate_decisions import OwnerTruthCandidateReviewAccessDenied
 from app.domain.owner_truth.projection_rights import OwnerTruthProjectionRightsSnapshot
@@ -84,6 +86,7 @@ class InMemoryOwnerTruthMemoryProjectionRepository:
     ) -> OwnerTruthMemoryProjectionResult:
         _assert_owner_context(context)
         authority_epoch, inputs = self._projection_inputs(context=context)
+        memory_revision = self._memory_revision(context=context)
         rights = self._rights_snapshot(context=context, authority_epoch=authority_epoch)
         if not rights.projection_allowed:
             return OwnerTruthMemoryProjectionResult(
@@ -102,6 +105,7 @@ class InMemoryOwnerTruthMemoryProjectionRepository:
             authority_epoch=authority_epoch,
             inputs=inputs,
             rights_snapshot=rights,
+            memory_revision=memory_revision,
         )
         key = (context.vault_id, authority_epoch)
         with self._lock:
@@ -119,6 +123,7 @@ class InMemoryOwnerTruthMemoryProjectionRepository:
     def read(self, *, context: OwnerTruthCommandContext) -> dict[str, Any]:
         _assert_owner_context(context)
         authority_epoch, inputs = self._projection_inputs(context=context)
+        memory_revision = self._memory_revision(context=context)
         rights = self._rights_snapshot(context=context, authority_epoch=authority_epoch)
         if not rights.projection_allowed:
             return build_rebuilding_memory_projection(
@@ -134,6 +139,7 @@ class InMemoryOwnerTruthMemoryProjectionRepository:
             authority_epoch=authority_epoch,
             inputs=inputs,
             rights_snapshot=rights,
+            memory_revision=memory_revision,
         )
         with self._lock:
             snapshot = self._snapshots.get((context.vault_id, authority_epoch))
@@ -169,6 +175,18 @@ class InMemoryOwnerTruthMemoryProjectionRepository:
                 "in-memory source repository does not expose MemoryVersion projection inputs"
             )
         return supplier(context=context)
+
+    def _memory_revision(self, *, context: OwnerTruthCommandContext) -> int:
+        reader = getattr(self._source_repository, "memory_revision", None)
+        if not callable(reader):
+            # This compatibility double may serve a legacy source-only test
+            # fixture.  The projection still carries an explicit value, while
+            # the production repository below reads the authoritative row.
+            return 0
+        revision = reader(context=context)
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+            raise OwnerTruthMemoryProjectionError("formal memory revision is invalid")
+        return revision
 
     def _rights_snapshot(
         self,
@@ -228,12 +246,19 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                 context=context,
                 authority_epoch=authority_epoch,
             )
+            self._ensure_memory_revision(cursor, vault_id=context.vault_id)
+            memory_revision = self._memory_revision(
+                cursor,
+                vault_id=context.vault_id,
+                lock=True,
+            )
             snapshot = build_ready_memory_projection(
                 vault_id=context.vault_id,
                 owner_subject_id=context.owner_subject_id,
                 authority_epoch=authority_epoch,
                 inputs=inputs,
                 rights_snapshot=rights,
+                memory_revision=memory_revision,
             )
             cursor.execute(
                 """
@@ -299,9 +324,9 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                 INSERT INTO owner_truth.memory_projection_checkpoints (
                     vault_id, authority_epoch, owner_subject_id, projection_source,
                     state, entry_count, source_hash, projection_hash, schema_version,
-                    rights_revision, rights_event_hash,
+                    rights_revision, rights_event_hash, memory_revision,
                     updated_at
-                ) VALUES (%s, %s, %s, %s, 'ready', %s, %s, %s, %s, %s, %s, NOW())
+                ) VALUES (%s, %s, %s, %s, 'ready', %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (vault_id, authority_epoch) DO UPDATE SET
                     owner_subject_id = EXCLUDED.owner_subject_id,
                     projection_source = EXCLUDED.projection_source,
@@ -312,6 +337,7 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                     schema_version = EXCLUDED.schema_version,
                     rights_revision = EXCLUDED.rights_revision,
                     rights_event_hash = EXCLUDED.rights_event_hash,
+                    memory_revision = EXCLUDED.memory_revision,
                     updated_at = NOW()
                 """,
                 (
@@ -325,6 +351,7 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                     snapshot["schemaVersion"],
                     rights.revision,
                     rights.event_hash,
+                    memory_revision,
                 ),
             )
             person_model = snapshot.get("personMemoryModel")
@@ -375,7 +402,7 @@ class PostgresOwnerTruthMemoryProjectionRepository:
     def read(self, *, context: OwnerTruthCommandContext) -> dict[str, Any]:
         _assert_owner_context(context)
         with self._cursor() as cursor:
-            vault = self._active_vault(cursor, context=context, lock=False)
+            vault = self._active_vault(cursor, context=context, lock=True)
             authority_epoch = int(vault["authority_epoch"])
             rights = self._rights_snapshot(context=context, authority_epoch=authority_epoch)
             if not rights.projection_allowed:
@@ -389,13 +416,20 @@ class PostgresOwnerTruthMemoryProjectionRepository:
             cursor.execute(
                 """
                 SELECT owner_subject_id, projection_source, state, entry_count,
-                    source_hash, projection_hash, schema_version, rights_revision, rights_event_hash
+                    source_hash, projection_hash, schema_version, rights_revision,
+                    rights_event_hash, memory_revision
                 FROM owner_truth.memory_projection_checkpoints
                 WHERE vault_id = %s AND authority_epoch = %s
+                FOR SHARE
                 """,
                 (context.vault_id, authority_epoch),
             )
             checkpoint = cursor.fetchone()
+            memory_revision = self._memory_revision(
+                cursor,
+                vault_id=context.vault_id,
+                lock=True,
+            )
             if (
                 checkpoint is None
                 or str(checkpoint["owner_subject_id"]) != context.owner_subject_id
@@ -409,23 +443,10 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                     rights_snapshot=rights,
                     rebuild_reason="projectionUnavailable",
                 )
-            inputs = self._load_current_inputs(
-                cursor,
-                context=context,
-                authority_epoch=authority_epoch,
-            )
-            expected = build_ready_memory_projection(
-                vault_id=context.vault_id,
-                owner_subject_id=context.owner_subject_id,
-                authority_epoch=authority_epoch,
-                inputs=inputs,
-                rights_snapshot=rights,
-            )
             if (
-                str(checkpoint["source_hash"]) != expected["sourceHash"]
-                or str(checkpoint["projection_hash"]) != expected["checkpoint"]
-                or int(checkpoint["entry_count"]) != expected["entryCount"]
-                or str(checkpoint["schema_version"]) != expected["schemaVersion"]
+                int(checkpoint["memory_revision"]) != memory_revision
+                or str(checkpoint["schema_version"])
+                != OWNER_TRUTH_MEMORY_PROJECTION_SCHEMA_VERSION
                 or int(checkpoint["rights_revision"]) != rights.revision
                 or str(checkpoint["rights_event_hash"]) != rights.event_hash
             ):
@@ -441,24 +462,12 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                     )
                     else "projectionInputsChanged",
                 )
-            stored_inputs = self._load_stored_inputs(
+            stored_entries = self._load_stored_entries(
                 cursor,
                 vault_id=context.vault_id,
-                owner_subject_id=context.owner_subject_id,
                 authority_epoch=authority_epoch,
             )
-            stored = build_ready_memory_projection(
-                vault_id=context.vault_id,
-                owner_subject_id=context.owner_subject_id,
-                authority_epoch=authority_epoch,
-                inputs=stored_inputs,
-                rights_snapshot=rights,
-            )
-            if (
-                stored["sourceHash"] != expected["sourceHash"]
-                or stored["checkpoint"] != expected["checkpoint"]
-                or stored["entryCount"] != expected["entryCount"]
-            ):
+            if int(checkpoint["entry_count"]) != len(stored_entries):
                 return build_rebuilding_memory_projection(
                     vault_id=context.vault_id,
                     owner_subject_id=context.owner_subject_id,
@@ -473,25 +482,30 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                 WHERE vault_id = %s
                   AND authority_epoch = %s
                   AND is_current = TRUE
+                FOR SHARE
                 """,
                 (context.vault_id, authority_epoch),
             )
             persisted_person_model = cursor.fetchone()
-            expected_person_model = expected.get("personMemoryModel")
-            if (
-                persisted_person_model is None
-                or not isinstance(expected_person_model, Mapping)
-                or str(persisted_person_model["projection_hash"]) != expected["checkpoint"]
-                or str(persisted_person_model["source_hash"]) != expected["sourceHash"]
-                or str(persisted_person_model["model_version"])
-                != str(expected_person_model.get("modelVersion") or "")
-                or int(persisted_person_model["memory_count"])
-                != int(expected_person_model.get("memoryCount") or 0)
-                or self._json_object(
+            persisted_person_model_payload = (
+                self._json_object(
                     persisted_person_model["payload"],
                     field="person-memory projection payload",
                 )
-                != dict(expected_person_model)
+                if persisted_person_model is not None
+                else None
+            )
+            if (
+                persisted_person_model is None
+                or persisted_person_model_payload is None
+                or str(persisted_person_model["projection_hash"])
+                != str(checkpoint["projection_hash"])
+                or str(persisted_person_model["source_hash"])
+                != str(checkpoint["source_hash"])
+                or str(persisted_person_model["model_version"])
+                != str(persisted_person_model_payload.get("modelVersion") or "")
+                or int(persisted_person_model["memory_count"])
+                != int(persisted_person_model_payload.get("memoryCount") or 0)
             ):
                 return build_rebuilding_memory_projection(
                     vault_id=context.vault_id,
@@ -500,7 +514,26 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                     rights_snapshot=rights,
                     rebuild_reason="personMemoryProjectionUnavailable",
                 )
-            return stored
+            try:
+                return restore_persisted_ready_memory_projection(
+                    vault_id=context.vault_id,
+                    owner_subject_id=context.owner_subject_id,
+                    authority_epoch=authority_epoch,
+                    entries=stored_entries,
+                    person_memory_model=persisted_person_model_payload,
+                    rights_snapshot=rights,
+                    memory_revision=memory_revision,
+                    source_hash=str(checkpoint["source_hash"]),
+                    checkpoint=str(checkpoint["projection_hash"]),
+                )
+            except OwnerTruthMemoryProjectionError:
+                return build_rebuilding_memory_projection(
+                    vault_id=context.vault_id,
+                    owner_subject_id=context.owner_subject_id,
+                    authority_epoch=authority_epoch,
+                    rights_snapshot=rights,
+                    rebuild_reason="projectionInputsChanged",
+                )
 
     def _rights_snapshot(
         self,
@@ -512,6 +545,37 @@ class PostgresOwnerTruthMemoryProjectionRepository:
             context=context,
             authority_epoch=authority_epoch,
         )
+
+    @staticmethod
+    def _ensure_memory_revision(cursor: Any, *, vault_id: str) -> None:
+        cursor.execute(
+            """
+            INSERT INTO owner_truth.memory_revisions (vault_id, revision)
+            VALUES (%s, 0)
+            ON CONFLICT (vault_id) DO NOTHING
+            """,
+            (vault_id,),
+        )
+
+    @staticmethod
+    def _memory_revision(cursor: Any, *, vault_id: str, lock: bool = False) -> int:
+        """Read the same authoritative revision used by Candidate activation.
+
+        The revision participates in the projection source hash.  This makes
+        a changed formal-memory chain invalidate old Live/search snapshots
+        even if its current rows happen to serialize identically.
+        """
+
+        cursor.execute(
+            """
+            SELECT revision
+            FROM owner_truth.memory_revisions
+            WHERE vault_id = %s
+            """ + (" FOR SHARE" if lock else ""),
+            (vault_id,),
+        )
+        row = cursor.fetchone()
+        return 0 if row is None else int(row["revision"])
 
     def _active_vault(
         self,
@@ -595,14 +659,13 @@ class PostgresOwnerTruthMemoryProjectionRepository:
             for row in cursor.fetchall()
         )
 
-    def _load_stored_inputs(
+    def _load_stored_entries(
         self,
         cursor: Any,
         *,
         vault_id: str,
-        owner_subject_id: str,
         authority_epoch: int,
-    ) -> tuple[OwnerTruthMemoryProjectionInput, ...]:
+    ) -> tuple[dict[str, Any], ...]:
         cursor.execute(
             """
             SELECT memory_id, memory_version_id, version_number, source_id,
@@ -615,12 +678,7 @@ class PostgresOwnerTruthMemoryProjectionRepository:
             (vault_id, authority_epoch),
         )
         return tuple(
-            self._projection_input_from_entry_row(
-                row,
-                vault_id=vault_id,
-                owner_subject_id=owner_subject_id,
-                authority_epoch=authority_epoch,
-            )
+            self._projection_entry_from_row(row)
             for row in cursor.fetchall()
         )
 
@@ -656,35 +714,41 @@ class PostgresOwnerTruthMemoryProjectionRepository:
         )
 
     @staticmethod
-    def _projection_input_from_entry_row(
+    def _projection_entry_from_row(
         row: Mapping[str, Any],
-        *,
-        vault_id: str,
-        owner_subject_id: str,
-        authority_epoch: int,
-    ) -> OwnerTruthMemoryProjectionInput:
+    ) -> dict[str, Any]:
         payload = PostgresOwnerTruthMemoryProjectionRepository._json_object(
             row.get("payload"),
             field="projection entry payload",
         )
-        return OwnerTruthMemoryProjectionInput(
-            memory_id=str(row["memory_id"]),
-            memory_version_id=str(row["memory_version_id"]),
-            vault_id=vault_id,
-            owner_subject_id=owner_subject_id,
-            authority_epoch=authority_epoch,
-            version_number=int(row["version_number"]),
-            source_id=str(row["source_id"]),
-            source_version=int(row["source_version"]),
-            memory_kind=str(row["memory_kind"]),
-            perspective_type=str(row["perspective_type"]),
-            epistemic_status=str(row["epistemic_status"]),
-            sensitivity=str(row["sensitivity"]),
-            content_schema_version=str(row["content_schema_version"]),
-            content_hash=str(row["content_hash"]),
-            content=payload.get("content"),
-            evidence_refs=tuple(payload.get("evidenceRefs") or ()),
-        )
+        memory_id = str(row["memory_id"])
+        memory_version_id = str(row["memory_version_id"])
+        source_id = str(row["source_id"])
+        source_version = int(row["source_version"])
+        content_hash = str(row["content_hash"])
+        return {
+            "memoryId": memory_id,
+            "memoryVersionId": memory_version_id,
+            "memoryVersion": int(row["version_number"]),
+            "sourceId": source_id,
+            "sourceVersion": source_version,
+            "memoryKind": str(row["memory_kind"]),
+            "perspectiveType": str(row["perspective_type"]),
+            "epistemicStatus": str(row["epistemic_status"]),
+            "sensitivity": str(row["sensitivity"]),
+            "visibility": "owner",
+            "contentSchemaVersion": str(row["content_schema_version"]),
+            "contentHash": content_hash,
+            "content": payload.get("content"),
+            "evidenceRefs": list(payload.get("evidenceRefs") or ()),
+            "citation": {
+                "memoryId": memory_id,
+                "memoryVersionId": memory_version_id,
+                "sourceId": source_id,
+                "sourceVersion": source_version,
+                "contentHash": content_hash,
+            },
+        }
 
     @staticmethod
     def _json_object(value: Any, *, field: str) -> dict[str, Any]:

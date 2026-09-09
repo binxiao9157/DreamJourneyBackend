@@ -147,11 +147,34 @@ class Settings:
     # When enabled, the text is organized into typed review Candidates instead
     # of being persisted as one undifferentiated echo of the Source.
     owner_truth_text_memory_organization_enabled: bool = False
+    # Operations-only replay of an approved legacy dry run. Replayed text can
+    # only enter Source -> Candidate review and never becomes formal memory
+    # without a later Owner decision.
+    owner_truth_b_migration_execution_enabled: bool = False
     owner_truth_memory_projection_worker_enabled: bool = False
     # SearchDocument rebuilds are an optional private derived step after the
     # default-off MemoryProjection worker succeeds. This never exposes search
     # or enables a public retrieval surface by itself.
     owner_truth_memory_search_projection_worker_enabled: bool = False
+    # Semantic search remains an opt-in derived capability.  It requires a
+    # separately recorded private-data egress approval and a model contract
+    # matching the installed pgvector migration; a provider URL alone cannot
+    # enable outbound requests.
+    owner_truth_memory_search_embedding_provider: str = "disabled"
+    owner_truth_memory_search_embedding_http_json_url: Optional[str] = None
+    owner_truth_memory_search_embedding_http_json_api_key: Optional[str] = None
+    owner_truth_memory_search_embedding_timeout_seconds: float = 10.0
+    # Provider-facing model name may differ from the immutable internal index
+    # contract (for example SiliconFlow expects ``BAAI/bge-m3``).
+    owner_truth_memory_search_embedding_provider_model_id: str = "bge-m3"
+    owner_truth_memory_search_embedding_model_id: str = "bge-m3"
+    owner_truth_memory_search_embedding_model_version: str = "v1"
+    owner_truth_memory_search_embedding_dimensions: int = 1024
+    owner_truth_memory_search_embedding_egress_approved: bool = False
+    owner_truth_memory_search_embedding_worker_enabled: bool = False
+    owner_truth_memory_search_embedding_batch_size: int = 16
+    owner_truth_memory_search_embedding_backfill_scan_limit: int = 128
+    owner_truth_memory_search_embedding_max_attempts: int = 5
     # Enable confirmed V4 Projection Context for an authenticated Owner's
     # personal Echo. This is independent of login test-account allowlists.
     owner_truth_context_authority_enabled: bool = False
@@ -661,6 +684,10 @@ class Settings:
                 "OWNER_TRUTH_TEXT_MEMORY_ORGANIZATION_ENABLED",
                 cls.owner_truth_text_memory_organization_enabled,
             ),
+            owner_truth_b_migration_execution_enabled=_env_bool(
+                "OWNER_TRUTH_B_MIGRATION_EXECUTION_ENABLED",
+                cls.owner_truth_b_migration_execution_enabled,
+            ),
             owner_truth_memory_projection_worker_enabled=_env_bool(
                 "OWNER_TRUTH_MEMORY_PROJECTION_WORKER_ENABLED",
                 cls.owner_truth_memory_projection_worker_enabled,
@@ -668,6 +695,74 @@ class Settings:
             owner_truth_memory_search_projection_worker_enabled=_env_bool(
                 "OWNER_TRUTH_MEMORY_SEARCH_PROJECTION_WORKER_ENABLED",
                 cls.owner_truth_memory_search_projection_worker_enabled,
+            ),
+            owner_truth_memory_search_embedding_provider=_env(
+                "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_PROVIDER",
+                cls.owner_truth_memory_search_embedding_provider,
+            ) or cls.owner_truth_memory_search_embedding_provider,
+            owner_truth_memory_search_embedding_http_json_url=_env(
+                "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_HTTP_JSON_URL"
+            ),
+            owner_truth_memory_search_embedding_http_json_api_key=_env(
+                "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_HTTP_JSON_API_KEY"
+            ),
+            owner_truth_memory_search_embedding_timeout_seconds=_env_float(
+                "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_TIMEOUT_SECONDS",
+                cls.owner_truth_memory_search_embedding_timeout_seconds,
+            ),
+            owner_truth_memory_search_embedding_provider_model_id=_env(
+                "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_PROVIDER_MODEL_ID",
+                cls.owner_truth_memory_search_embedding_provider_model_id,
+            ) or cls.owner_truth_memory_search_embedding_provider_model_id,
+            owner_truth_memory_search_embedding_model_id=_env(
+                "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_MODEL_ID",
+                cls.owner_truth_memory_search_embedding_model_id,
+            ) or cls.owner_truth_memory_search_embedding_model_id,
+            owner_truth_memory_search_embedding_model_version=_env(
+                "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_MODEL_VERSION",
+                cls.owner_truth_memory_search_embedding_model_version,
+            ) or cls.owner_truth_memory_search_embedding_model_version,
+            owner_truth_memory_search_embedding_dimensions=_env_int(
+                "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_DIMENSIONS",
+                cls.owner_truth_memory_search_embedding_dimensions,
+            ),
+            owner_truth_memory_search_embedding_egress_approved=_env_bool(
+                "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_EGRESS_APPROVED",
+                cls.owner_truth_memory_search_embedding_egress_approved,
+            ),
+            owner_truth_memory_search_embedding_worker_enabled=_env_bool(
+                "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_WORKER_ENABLED",
+                cls.owner_truth_memory_search_embedding_worker_enabled,
+            ),
+            owner_truth_memory_search_embedding_batch_size=max(
+                1,
+                min(
+                    128,
+                    _env_int(
+                        "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_BATCH_SIZE",
+                        cls.owner_truth_memory_search_embedding_batch_size,
+                    ),
+                ),
+            ),
+            owner_truth_memory_search_embedding_backfill_scan_limit=max(
+                1,
+                min(
+                    2_048,
+                    _env_int(
+                        "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_BACKFILL_SCAN_LIMIT",
+                        cls.owner_truth_memory_search_embedding_backfill_scan_limit,
+                    ),
+                ),
+            ),
+            owner_truth_memory_search_embedding_max_attempts=max(
+                1,
+                min(
+                    100,
+                    _env_int(
+                        "OWNER_TRUTH_MEMORY_SEARCH_EMBEDDING_MAX_ATTEMPTS",
+                        cls.owner_truth_memory_search_embedding_max_attempts,
+                    ),
+                ),
             ),
             owner_truth_context_authority_enabled=_env_bool(
                 "OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED",

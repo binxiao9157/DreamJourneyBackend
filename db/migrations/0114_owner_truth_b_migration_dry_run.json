@@ -1,0 +1,27 @@
+{
+  "version": "0114",
+  "name": "owner_truth_b_migration_dry_run",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthBMigrationDryRunV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true,
+    "ownerTruthBMigrationDryRun": false
+  },
+  "summary": "Adds append-only, value-free B migration dry-run receipts that are fenced by immutable legacy inventory, plan and authority checkpoints.",
+  "operations": [
+    "create no-write dry-run report and entry tables",
+    "bind each report to legacy inventory and admission plan",
+    "enforce append-only report evidence and zero formal-memory writes"
+  ],
+  "rollback": "Disable ownerTruthBMigrationDryRun and retain reports as audit evidence. Do not delete current formal memories or use a rollback to re-enable a legacy writer.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "requiresOwnerReviewForSemanticChanges": true,
+    "requiresDerivedArtifactRevocationCheck": true
+  }
+}

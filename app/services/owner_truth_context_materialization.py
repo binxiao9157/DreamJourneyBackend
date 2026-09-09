@@ -15,15 +15,21 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping
 
+from app.domain.owner_truth.formal_fact_eligibility import (
+    FormalFactEligibilityError,
+    evaluate_formal_fact_eligibility,
+)
 from app.domain.owner_truth.memory_projection import OwnerTruthMemoryProjectionError
 from app.domain.owner_truth.ontology import (
     OWNER_TRUTH_SCHEMA_VERSION,
     OWNER_TRUTH_SCHEMA_VERSION_V2,
     OWNER_TRUTH_SCHEMA_VERSION_V3,
     OWNER_TRUTH_SCHEMA_VERSION_V4,
+    OWNER_TRUTH_SCHEMA_VERSION_V5,
 )
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_context_shadow_build import OwnerTruthContextShadowBuildService
+from app.services.owner_truth_memory_search_hybrid import OwnerTruthMemorySearchHybridRanker
 from app.services.owner_truth_memory_projection import (
     OwnerTruthMemoryProjectionService,
     OwnerTruthMemoryProjectionStore,
@@ -52,6 +58,7 @@ _SUPPORTED_CONTENT_SCHEMA_VERSIONS = frozenset(
         OWNER_TRUTH_SCHEMA_VERSION_V2,
         OWNER_TRUTH_SCHEMA_VERSION_V3,
         OWNER_TRUTH_SCHEMA_VERSION_V4,
+        OWNER_TRUTH_SCHEMA_VERSION_V5,
     }
 )
 
@@ -101,9 +108,16 @@ class OwnerTruthContextMaterializationService:
     authority consumes it; QA surfaces receive a value-free summary.
     """
 
-    def __init__(self, store: OwnerTruthMemoryProjectionStore, *, enabled: bool = False) -> None:
+    def __init__(
+        self,
+        store: OwnerTruthMemoryProjectionStore,
+        *,
+        enabled: bool = False,
+        hybrid_ranker: OwnerTruthMemorySearchHybridRanker | None = None,
+    ) -> None:
         self._store = store
         self._enabled = bool(enabled)
+        self._hybrid_ranker = hybrid_ranker
 
     def build(
         self,
@@ -111,7 +125,11 @@ class OwnerTruthContextMaterializationService:
         context: OwnerTruthCommandContext,
         payload: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        shadow = OwnerTruthContextShadowBuildService(self._store, enabled=self._enabled).build(
+        shadow = OwnerTruthContextShadowBuildService(
+            self._store,
+            enabled=self._enabled,
+            hybrid_ranker=self._hybrid_ranker,
+        ).build(
             context=context,
             payload=payload,
         )
@@ -239,6 +257,12 @@ class OwnerTruthContextMaterializationService:
                 raise OwnerTruthContextMaterializationError("Projection contains duplicate MemoryVersion")
             entries_by_version[version_id] = entry
 
+        try:
+            eligibility = evaluate_formal_fact_eligibility(projection)
+        except FormalFactEligibilityError as error:
+            raise OwnerTruthContextMaterializationError(
+                "Projection formal fact eligibility is invalid"
+            ) from error
         semantic_groups = self._semantic_group_by_version(projection)
         typed_citations: list[dict[str, Any]] = []
         rendered_entries: list[tuple[dict[str, Any], str]] = []
@@ -248,6 +272,10 @@ class OwnerTruthContextMaterializationService:
                 selected=selected,
                 entries_by_version=entries_by_version,
             )
+            if citation["memoryVersionId"] not in eligibility.eligible_memory_version_ids:
+                raise OwnerTruthContextMaterializationError(
+                    "selected Context item is not eligible for formal-memory use"
+                )
             semantic_group = semantic_groups.get(citation["memoryVersionId"])
             if semantic_group is None:
                 typed_citations.append(citation)

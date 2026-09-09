@@ -78,7 +78,7 @@ def build_memory_projection_rebuild_effect_intent(
     a tamper-detecting opaque reference, not a transport for memory content.
     """
 
-    if activation.outcome not in {"created", "deduplicated"}:
+    if activation.outcome not in {"created", "revised", "deduplicated"}:
         raise OwnerTruthMemoryActivationError(
             "only an activated MemoryVersion can request a compatibility projection rebuild"
         )

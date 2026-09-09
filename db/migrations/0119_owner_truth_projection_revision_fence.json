@@ -1,0 +1,27 @@
+{
+  "version": "0119",
+  "name": "owner_truth_projection_revision_fence",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthProjectionRevisionFenceV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true
+  },
+  "summary": "Binds persisted memory projections to the authoritative revision and invalidates derived reads transactionally so request paths reuse Worker-built semantic models.",
+  "operations": [
+    "add memory_revision to the private projection checkpoint",
+    "invalidate memory/search projections when formal facts, sources, rights or revisions change",
+    "verify revision and rights inside the projection checkpoint database trigger",
+    "mark pre-0119 derived projections rebuilding without changing formal facts"
+  ],
+  "rollback": "Keep the additive column and invalidation triggers. Disable optimized reads if necessary and rebuild projections; do not restore stale ready checkpoints or delete formal facts.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false,
+    "invalidatesDerivedProjections": true
+  }
+}
