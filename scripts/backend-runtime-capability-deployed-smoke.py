@@ -99,6 +99,10 @@ def require_inventory_snapshot_alignment(capability, descriptor, snapshot):
         require(snapshot.get("releaseVisible") is False, "filesystem storage public visibility")
 
 
+def expected_public_media_alias(snapshot):
+    return bool(snapshot.get("providerReady") and snapshot.get("externalVerified"))
+
+
 def main():
     runtime = request_runtime()
     require(runtime.get("capabilitySnapshotSchemaVersion") == 1, "snapshot schema must be v1")
@@ -263,12 +267,14 @@ def main():
     storage = snapshots["ownerTruthMediaStorage"]
     processing = snapshots["ownerTruthMediaProcessing"]
     require(
-        capabilities.get("ownerTruthMediaCapture") is storage["providerReady"],
-        "capture alias must follow the startup provider decision",
+        capabilities.get("ownerTruthMediaCapture")
+        is expected_public_media_alias(storage),
+        "capture alias must follow public media readiness",
     )
     require(
-        capabilities.get("ownerTruthMediaProcessing") is processing["providerReady"],
-        "processing alias must follow the startup provider decision",
+        capabilities.get("ownerTruthMediaProcessing")
+        is expected_public_media_alias(processing),
+        "processing alias must follow public media readiness",
     )
     require(
         capabilities.get("identityChallenge") is snapshots["identityChallenge"]["enabled"],

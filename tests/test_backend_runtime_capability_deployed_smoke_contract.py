@@ -60,6 +60,34 @@ class BackendRuntimeCapabilityDeployedSmokeContractTests(unittest.TestCase):
                 capability_snapshot(externalVerified=True),
             )
 
+    def test_internal_media_provider_does_not_open_public_alias(self):
+        self.assertFalse(MODULE.expected_public_media_alias(capability_snapshot()))
+
+    def test_externally_verified_ready_media_opens_public_alias(self):
+        self.assertTrue(
+            MODULE.expected_public_media_alias(
+                capability_snapshot(
+                    provider="cos",
+                    externalVerified=True,
+                    evidenceStatus="externallyVerified",
+                    reason="ready",
+                )
+            )
+        )
+
+    def test_externally_verified_but_unready_media_stays_closed(self):
+        self.assertFalse(
+            MODULE.expected_public_media_alias(
+                capability_snapshot(
+                    providerReady=False,
+                    provider="cos",
+                    externalVerified=True,
+                    evidenceStatus="externallyVerified",
+                    reason="runtimeUnavailable",
+                )
+            )
+        )
+
     def test_provider_identity_mismatch_still_fails_closed(self):
         with self.assertRaisesRegex(AssertionError, "provider inventory/snapshot mismatch"):
             MODULE.require_inventory_snapshot_alignment(
