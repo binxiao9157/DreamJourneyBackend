@@ -259,6 +259,7 @@ test -f docker-compose.yml
 test -f .env.example
 test -f requirements.txt
 test -f scripts/migrate_db.py
+test -f scripts/rebuild-owner-truth-derived-projections.py
 test -f scripts/backend-readiness-postgres-smoke.py
 test -f scripts/backend-publication-authority-postgres-smoke.py
 test -f scripts/run-backend-publication-authority-postgres-smoke.sh

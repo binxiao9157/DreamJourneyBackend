@@ -179,11 +179,21 @@ sudo docker compose run --rm --no-deps api \
   python scripts/migrate_db.py --apply --build-id "$DEPLOY_BUILD_ID"
 sudo docker compose run --rm --no-deps api \
   python scripts/migrate_db.py --verify --build-id "$DEPLOY_BUILD_ID"
+sudo docker compose run --rm --no-deps api \
+  python scripts/rebuild-owner-truth-derived-projections.py --limit 100
+sudo docker compose run --rm --no-deps api \
+  python scripts/rebuild-owner-truth-derived-projections.py --apply --limit 100
 sudo docker compose up -d --force-recreate api
 sudo --preserve-env=DEPLOY_BUILD_ID \
   bash scripts/rebuild-enabled-workers-after-migration.sh
 sudo systemctl start dreamjourney-db-backup.service
 ```
+
+派生投影重建命令只从当前已授权正式记忆重建 memory/search projection，不修改
+Source、Candidate、Memory 或 MemoryVersion，也不输出用户正文。执行 `--apply`
+后必须再运行一次默认 dry-run；只有 `eligibleCount=0` 才能启动向量回填
+Worker。若仍有 eligible target 或失败项，保持对应读取 fail-closed，不得直接把
+checkpoint 状态改成 `ready`。
 
 最后一次备份必须对应迁移后的新 schema head。这样迁移前、迁移后各有一个可验证恢复点，也避免新代码 head 在迁移执行前把旧数据库误判为未知 schema。
 

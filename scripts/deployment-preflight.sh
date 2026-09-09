@@ -27,6 +27,7 @@ contract_only() {
   require_file "$ROOT/docker-compose.yml"
   require_file "$ROOT/scripts/migrate_db.py"
   require_file "$ROOT/scripts/rebuild-enabled-workers-after-migration.sh"
+  require_file "$ROOT/scripts/rebuild-owner-truth-derived-projections.py"
   require_file "$ROOT/scripts/verify-pgvector-image.sh"
   require_file "$ROOT/scripts/db/verify_latest_backup.py"
   require_file "$ROOT/scripts/db/run-recovery-deployed-smoke.sh"
@@ -45,6 +46,8 @@ fi
 require_directory "$DEPLOY_REPOSITORY/.git"
 sudo -n test -x "$DEPLOY_REPOSITORY/scripts/rebuild-enabled-workers-after-migration.sh" \
   || fail "workerImageAlignmentScriptUnavailable"
+sudo -n test -x "$DEPLOY_REPOSITORY/scripts/rebuild-owner-truth-derived-projections.py" \
+  || fail "derivedProjectionMaintenanceScriptUnavailable"
 sudo -n test -x "$DEPLOY_REPOSITORY/scripts/verify-pgvector-image.sh" \
   || fail "pgvectorImagePreflightUnavailable"
 

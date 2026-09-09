@@ -69,6 +69,13 @@ class DeploymentOperationsContractTests(unittest.TestCase):
         preflight = (ROOT / "scripts/deployment-preflight.sh").read_text()
         self.assertIn("workerImageAlignmentScriptUnavailable", preflight)
         self.assertIn("pgvectorImagePreflightUnavailable", preflight)
+        self.assertIn("derivedProjectionMaintenanceScriptUnavailable", preflight)
+
+        projection_maintenance = (
+            ROOT / "scripts/rebuild-owner-truth-derived-projections.py"
+        )
+        self.assertTrue(os.access(projection_maintenance, os.X_OK))
+        self.assertIn("--apply", projection_maintenance.read_text())
 
     def test_runbook_fixes_one_operator_and_forbids_automatic_destructive_recovery(self):
         runbook = (ROOT / "docs/backend/2026-08-09-deployment-account-recovery-runbook.md").read_text()
