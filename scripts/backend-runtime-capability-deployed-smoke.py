@@ -10,6 +10,21 @@ BASE_URL = os.environ.get(
     os.environ.get("DREAMJOURNEY_BACKEND_BASE_URL", "http://127.0.0.1:3100"),
 ).rstrip("/")
 
+MEDIA_CAPABILITIES = frozenset(
+    {"ownerTruthMediaStorage", "ownerTruthMediaProcessing"}
+)
+INVENTORY_ALIGNMENT_FIELDS = (
+    "enabled",
+    "provider",
+    "providerKind",
+    "operation",
+    "dataClass",
+    "region",
+    "retentionPolicyVersion",
+    "fallbackMode",
+    "configurationStatus",
+)
+
 
 def require(condition, message):
     if not condition:
@@ -38,6 +53,50 @@ def request_runtime():
     require(status == 200, f"GET /config/runtime expected 200, got {status}")
     require(headers.get("cache-control") == "no-store", "/config/runtime must be no-store")
     return json.loads(body)
+
+
+def require_inventory_snapshot_alignment(capability, descriptor, snapshot):
+    """Validate provider facts without erasing public-admission evidence.
+
+    Provider inventory describes whether a configured adapter can operate.
+    Media capability snapshots additionally apply external-evidence and runtime
+    control decisions, so their reason/evidenceStatus fields can intentionally
+    differ from the inventory.
+    """
+
+    for field in INVENTORY_ALIGNMENT_FIELDS:
+        require(
+            descriptor.get(field) == snapshot.get(field),
+            f"{capability}.{field} inventory/snapshot mismatch",
+        )
+    require(
+        not snapshot["providerReady"] or descriptor["providerReady"],
+        f"{capability} runtime control cannot make an unready provider ready",
+    )
+
+    if capability not in MEDIA_CAPABILITIES:
+        for field in ("reason", "evidenceStatus"):
+            require(
+                descriptor.get(field) == snapshot.get(field),
+                f"{capability}.{field} inventory/snapshot mismatch",
+            )
+        return
+
+    evidence_status = snapshot.get("evidenceStatus")
+    require(
+        evidence_status
+        in {"notRequested", "notVerified", "invalid", "stale", "internalOnly", "externallyVerified"},
+        f"{capability}.evidenceStatus is invalid",
+    )
+    require(
+        snapshot.get("externalVerified") is (evidence_status == "externallyVerified"),
+        f"{capability} external evidence state is inconsistent",
+    )
+    if capability == "ownerTruthMediaStorage" and descriptor.get("provider") == "filesystem":
+        require(snapshot.get("reason") == "internalProviderOnly", "filesystem storage reason")
+        require(evidence_status == "internalOnly", "filesystem storage evidence status")
+        require(snapshot.get("externalVerified") is False, "filesystem storage external evidence")
+        require(snapshot.get("releaseVisible") is False, "filesystem storage public visibility")
 
 
 def main():
@@ -156,26 +215,7 @@ def main():
     ):
         descriptor = inventory_capabilities.get(capability) or {}
         snapshot = snapshots[capability]
-        for field in (
-            "enabled",
-            "provider",
-            "providerKind",
-            "operation",
-            "dataClass",
-            "region",
-            "retentionPolicyVersion",
-            "fallbackMode",
-            "configurationStatus",
-            "evidenceStatus",
-        ):
-            require(
-                descriptor.get(field) == snapshot.get(field),
-                f"{capability}.{field} inventory/snapshot mismatch",
-            )
-        require(
-            not snapshot["providerReady"] or descriptor["providerReady"],
-            f"{capability} runtime control cannot make an unready provider ready",
-        )
+        require_inventory_snapshot_alignment(capability, descriptor, snapshot)
 
     runtime_control = runtime.get("runtimeCapabilityControl") or {}
     require(runtime_control.get("contractVersion") == 1, "runtime control contract must be v1")
