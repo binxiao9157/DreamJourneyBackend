@@ -172,27 +172,64 @@ def _load_targets(store: PostgresStore, *, limit: int) -> tuple[tuple[Projection
 
 
 def _rebuild_target(store: PostgresStore, target: ProjectionTarget) -> dict[str, object]:
+    store._fetchone(  # Operational state only; no Source or formal fact mutation.
+        """
+        UPDATE owner_truth.source_projection_rebuild_requests
+           SET state = 'processing', updated_at = NOW()
+         WHERE vault_id = %s AND state = 'pending'
+        RETURNING request_id
+        """,
+        (target.vault_id,),
+    )
     context = OwnerTruthCommandContext(
         vault_id=target.vault_id,
         owner_subject_id=target.owner_subject_id,
         actor_subject_id=target.owner_subject_id,
     )
-    memory_result = OwnerTruthMemoryProjectionService(store).rebuild(context=context)
-    memory_snapshot = memory_result.snapshot
-    if str(memory_snapshot.get("state") or "") != "ready":
-        raise RuntimeError("memory projection did not become ready")
-    checkpoint = str(memory_snapshot.get("checkpoint") or "")
-    if len(checkpoint) != 64:
-        raise RuntimeError("memory projection checkpoint is invalid")
+    try:
+        memory_result = OwnerTruthMemoryProjectionService(store).rebuild(context=context)
+        memory_snapshot = memory_result.snapshot
+        if str(memory_snapshot.get("state") or "") != "ready":
+            raise RuntimeError("memory projection did not become ready")
+        checkpoint = str(memory_snapshot.get("checkpoint") or "")
+        if len(checkpoint) != 64:
+            raise RuntimeError("memory projection checkpoint is invalid")
 
-    search_result = OwnerTruthMemorySearchDocumentProjectionService(store).rebuild(
-        context=context
+        search_result = OwnerTruthMemorySearchDocumentProjectionService(store).rebuild(
+            context=context
+        )
+        if search_result.projection is None:
+            raise RuntimeError("search projection did not become ready")
+        search_summary = search_result.projection.value_free_summary()
+        if str(search_summary.get("checkpoint") or "") != checkpoint:
+            raise RuntimeError("search projection checkpoint is stale")
+    except Exception:
+        store._fetchone(
+            """
+            UPDATE owner_truth.source_projection_rebuild_requests
+               SET state = 'pending', updated_at = NOW()
+             WHERE vault_id = %s AND state = 'processing'
+            RETURNING request_id
+            """,
+            (target.vault_id,),
+        )
+        raise
+    store._fetchone(
+        """
+        UPDATE owner_truth.source_projection_rebuild_requests
+           SET state = 'completed', updated_at = NOW()
+         WHERE vault_id = %s
+           AND state IN ('pending', 'processing')
+           AND authority_epoch = %s
+           AND memory_revision <= %s
+        RETURNING request_id
+        """,
+        (
+            target.vault_id,
+            target.authority_epoch,
+            int(memory_snapshot.get("memoryRevision") or 0),
+        ),
     )
-    if search_result.projection is None:
-        raise RuntimeError("search projection did not become ready")
-    search_summary = search_result.projection.value_free_summary()
-    if str(search_summary.get("checkpoint") or "") != checkpoint:
-        raise RuntimeError("search projection checkpoint is stale")
     return {
         "memoryOutcome": memory_result.outcome,
         "searchOutcome": search_result.outcome,

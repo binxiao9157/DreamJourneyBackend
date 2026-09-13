@@ -440,11 +440,14 @@ class OwnerTruthInterviewFormalReviewBatchInboxAPITests(unittest.TestCase):
             status_body = status.json()
             self.assertEqual(
                 status_body["schemaVersion"],
-                "owner-truth-interview-candidate-proposal-status-v1",
+                "owner-truth-interview-candidate-proposal-status-v3",
             )
             self.assertEqual(status_body["candidateProposal"], {"status": "admitted"})
             self.assertEqual(status_body["source"], {"status": "admitted"})
-            self.assertEqual(status_body["candidateExtraction"], {"status": "requested"})
+            self.assertEqual(status_body["candidateExtraction"]["status"], "requested")
+            self.assertEqual(status_body["candidateExtraction"]["jobState"], "pending")
+            self.assertEqual(status_body["candidateExtraction"]["maxAttempts"], 3)
+            self.assertFalse(status_body["candidateExtraction"]["retryable"])
             self.assertEqual(status_body["effectExecution"], {"status": "disabled"})
             self.assertEqual(status_body["candidateReview"], {"status": "notReady"})
             rendered_status = json.dumps(status_body, ensure_ascii=False, sort_keys=True)

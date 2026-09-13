@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any, ContextManager, Mapping, Protocol
 
 from app.async_effects.contracts import EffectReceiptSummary
@@ -343,6 +344,47 @@ class OwnerTruthMemoryChangeSetGroupReviewService:
                     context=context,
                 )
                 return result
+
+    def lookup_result(
+        self,
+        *,
+        command_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthMemoryChangeSetGroupCommitResult | None:
+        """Read one atomic group receipt without replaying the review write."""
+
+        _assert_owner_context(context)
+        normalized_command_id = str(command_id or "").strip()
+        allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.:-"
+        if (
+            not normalized_command_id
+            or len(normalized_command_id) > 128
+            or any(character not in allowed for character in normalized_command_id)
+        ):
+            raise OwnerTruthMemoryChangeSetGroupError(
+                "command_id must be an opaque identifier"
+            )
+        command_id_hash = sha256(normalized_command_id.encode("utf-8")).hexdigest()
+        with self._request_unit_of_work(
+            correlation_id=(
+                f"owner-truth-memory-changeset-group-result-{context.vault_id}:"
+                f"{command_id_hash}"
+            ),
+            command_id=f"lookup:{command_id_hash}",
+        ):
+            repository = self._store.owner_truth_candidate_review_repository()
+            reader = getattr(repository, "lookup_changeset_group_receipt", None)
+            if not callable(reader):
+                raise OwnerTruthMemoryChangeSetGroupError(
+                    "Candidate repository does not support group receipt lookup"
+                )
+            persisted = reader(command_id_hash=command_id_hash, context=context)
+            if persisted is None:
+                return None
+            return OwnerTruthMemoryChangeSetGroupCommitResult.from_persisted(
+                persisted,
+                outcome="deduplicated",
+            )
 
     def _build_fresh_proposal(
         self,

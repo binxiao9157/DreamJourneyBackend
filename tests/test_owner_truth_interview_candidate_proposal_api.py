@@ -345,7 +345,7 @@ class OwnerTruthInterviewCandidateProposalAPITests(unittest.TestCase):
         self.assertEqual(
             pending.json(),
             {
-                "schemaVersion": "owner-truth-interview-candidate-proposal-status-v1",
+                "schemaVersion": "owner-truth-interview-candidate-proposal-status-v3",
                 "vaultId": vault_id,
                 "reviewBatch": {
                     "reviewBatchId": review_batch_id,
@@ -353,7 +353,19 @@ class OwnerTruthInterviewCandidateProposalAPITests(unittest.TestCase):
                 },
                 "candidateProposal": {"status": "pendingAcknowledgement"},
                 "source": {"status": "notAdmitted"},
-                "candidateExtraction": {"status": "notRequested"},
+                "candidateExtraction": {
+                    "status": "notRequested",
+                    "jobState": "notCreated",
+                    "attempt": 0,
+                    "maxAttempts": 0,
+                    "retryAvailableAt": None,
+                    "firstFailureCode": None,
+                    "failureCode": None,
+                    "failureCategory": None,
+                    "terminationCode": None,
+                    "retryable": False,
+                    "deadLetterState": None,
+                },
                 "effectExecution": {"status": "disabled"},
                 "candidateReview": {"status": "notReady"},
             },
@@ -374,7 +386,11 @@ class OwnerTruthInterviewCandidateProposalAPITests(unittest.TestCase):
         self.assertEqual(ready.status_code, 200, ready.text)
         self.assertEqual(ready.json()["candidateProposal"], {"status": "readyForAdmission"})
         self.assertEqual(ready.json()["source"], {"status": "notAdmitted"})
-        self.assertEqual(ready.json()["candidateExtraction"], {"status": "notRequested"})
+        ready_extraction = ready.json()["candidateExtraction"]
+        self.assertEqual(ready_extraction["status"], "notRequested")
+        self.assertEqual(ready_extraction["jobState"], "notCreated")
+        self.assertEqual(ready_extraction["attempt"], 0)
+        self.assertFalse(ready_extraction["retryable"])
 
         admitted = client.post(
             self._admission_path(vault_id, review_batch_id),
@@ -390,7 +406,11 @@ class OwnerTruthInterviewCandidateProposalAPITests(unittest.TestCase):
         self.assertEqual(staged.status_code, 200, staged.text)
         self.assertEqual(staged.json()["candidateProposal"], {"status": "admitted"})
         self.assertEqual(staged.json()["source"], {"status": "admitted"})
-        self.assertEqual(staged.json()["candidateExtraction"], {"status": "requested"})
+        staged_extraction = staged.json()["candidateExtraction"]
+        self.assertEqual(staged_extraction["status"], "requested")
+        self.assertEqual(staged_extraction["jobState"], "pending")
+        self.assertEqual(staged_extraction["maxAttempts"], 3)
+        self.assertFalse(staged_extraction["retryable"])
         self.assertEqual(staged.json()["effectExecution"], {"status": "disabled"})
         self.assertEqual(staged.json()["candidateReview"], {"status": "notReady"})
         rendered = json.dumps(staged.json(), ensure_ascii=False, sort_keys=True)
@@ -454,7 +474,22 @@ class OwnerTruthInterviewCandidateProposalAPITests(unittest.TestCase):
         self.assertEqual(status.status_code, 200, status.text)
         self.assertEqual(status.json()["candidateProposal"], {"status": "invalidated"})
         self.assertEqual(status.json()["source"], {"status": "inactive"})
-        self.assertEqual(status.json()["candidateExtraction"], {"status": "blocked"})
+        self.assertEqual(
+            status.json()["candidateExtraction"],
+            {
+                "status": "blocked",
+                "jobState": "notCreated",
+                "attempt": 0,
+                "maxAttempts": 0,
+                "retryAvailableAt": None,
+                "firstFailureCode": None,
+                "failureCode": None,
+                "failureCategory": None,
+                "terminationCode": None,
+                "retryable": False,
+                "deadLetterState": None,
+            },
+        )
         self.assertEqual(status.json()["effectExecution"], {"status": "disabled"})
         self.assertEqual(status.json()["candidateReview"], {"status": "notReady"})
         rendered = json.dumps(status.json(), ensure_ascii=False, sort_keys=True)

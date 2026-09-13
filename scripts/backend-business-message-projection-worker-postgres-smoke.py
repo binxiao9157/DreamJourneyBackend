@@ -57,6 +57,7 @@ IDENTITY_CHALLENGE_ID = "challenge-message-worker-smoke"
 IDENTITY_PROOF_ID = "proof-message-worker-smoke"
 CANONICAL_OWNER_ID = "owner-canonical-message-worker-smoke"
 CANONICAL_VAULT_ID = "vault-canonical-message-worker-smoke"
+CANONICAL_IDENTITY_BINDING_ID = "binding-canonical-message-worker-smoke"
 
 
 def require(condition: bool, message: str) -> None:
@@ -211,6 +212,19 @@ def seed_canonical_owner_inbox(dsn: str) -> None:
                 """,
                 (CANONICAL_VAULT_ID, CANONICAL_OWNER_ID),
             )
+            cursor.execute(
+                """
+                INSERT INTO identity_bindings (
+                    id, subject_id, identity_type, target_hash_key_version,
+                    target_hash, provider_mode, status, verified_at
+                ) VALUES (%s, %s, 'phone', 'v1', %s, 'synthetic', 'active', NOW())
+                """,
+                (
+                    CANONICAL_IDENTITY_BINDING_ID,
+                    CANONICAL_OWNER_ID,
+                    digest("canonical-message-worker-smoke-phone"),
+                ),
+            )
 
 
 def completed_source(store: PostgresStore, *, label: str) -> BusinessCompletionMessageSource:
@@ -257,6 +271,7 @@ def enqueue(
     store: PostgresStore,
     *,
     source: BusinessCompletionMessageSource,
+    account_epoch: int = 0,
     max_attempts: int = 3,
 ) -> BusinessMessageProjectionRequest:
     request = BusinessMessageProjectionRequest(
@@ -264,7 +279,7 @@ def enqueue(
         inbox_account=InboxAccountSnapshot(
             inbox_subject_id=str(source.inbox_subject_id),
             inbox_vault_id=str(source.inbox_vault_id),
-            account_epoch=4,
+            account_epoch=account_epoch,
         ),
         max_attempts=max_attempts,
     )
@@ -382,7 +397,10 @@ def exercise(dsn: str) -> None:
         )
 
         completed = worker(store=store, enabled=True).run_once()
-        require(completed["status"] == "completed", "enabled worker must consume the typed job")
+        require(
+            completed["status"] == "completed",
+            f"enabled worker must consume the typed job: {completed}",
+        )
         require(
             completed["messageProjectionOutcome"] == "recorded",
             "first worker projection must be durable",
@@ -439,13 +457,11 @@ def exercise(dsn: str) -> None:
             table_count(dsn, "async_effects.dead_letters") == 1,
             "terminal worker failure must admit exactly one dead letter",
         )
-        with psycopg.connect(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "UPDATE users SET payload = %s::jsonb WHERE id = %s",
-                    (account_payload(auth_epoch=5), LEGACY_USER_ID),
-                )
-        rotated_request = enqueue(store, source=completed_source(store, label="rotated"))
+        rotated_request = enqueue(
+            store,
+            source=completed_source(store, label="rotated"),
+            account_epoch=1,
+        )
         rotated = worker(store=store, enabled=True).run_once()
         require(rotated["status"] == "blocked", "rotated inbox snapshot must not project")
         require(
@@ -519,7 +535,7 @@ def main() -> None:
         exercise(test_dsn)
         print(
             "Business-message projection worker Postgres smoke passed "
-            "(default-off internal shadow only; mailbox, notification and Provider remain unchanged)."
+            "(private in-app notification generated; public mailbox and external Provider remain unchanged)."
         )
     finally:
         if created:

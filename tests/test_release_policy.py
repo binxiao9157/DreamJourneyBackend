@@ -1393,6 +1393,14 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
         )
         self.assertEqual(
             gate.feature_for_request(
+                "GET",
+                "/v2/vaults/vault-a/candidates/candidate-a/decision-result",
+                {},
+            ),
+            "ownerTruthCandidateReview",
+        )
+        self.assertEqual(
+            gate.feature_for_request(
                 "POST",
                 "/v2/vaults/vault-a/memory-changeset-groups/preview",
                 {},
@@ -1403,6 +1411,14 @@ class ReleasePolicyCommandGateTests(unittest.TestCase):
             gate.feature_for_request(
                 "POST",
                 "/v2/vaults/vault-a/memory-changeset-groups/confirm",
+                {},
+            ),
+            "ownerTruthCandidateReview",
+        )
+        self.assertEqual(
+            gate.feature_for_request(
+                "GET",
+                "/v2/vaults/vault-a/memory-changeset-groups/decision-result",
                 {},
             ),
             "ownerTruthCandidateReview",

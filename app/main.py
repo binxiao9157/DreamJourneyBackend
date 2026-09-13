@@ -570,6 +570,7 @@ from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectio
 from app.services.formal_memory_conversation_snapshot import (
     FormalMemoryConversationSnapshotError,
     FormalMemoryConversationSnapshotService,
+    bind_provider_role_text,
 )
 from app.services.owner_truth_echo_conversation_context import (
     OwnerTruthEchoConversationContextError,
@@ -5181,6 +5182,27 @@ def _owner_truth_candidate_decision_response(result: Any) -> Dict[str, Any]:
         },
         "memoryRevision": result.memory_revision,
     }
+
+
+def _owner_truth_candidate_decision_lookup_response(result: Any) -> Dict[str, Any]:
+    response: Dict[str, Any] = {
+        "schemaVersion": "owner-truth-candidate-decision-lookup-v1",
+        "result": result.result,
+    }
+    if result.result != "found" or result.decision_result is None:
+        return response
+    response.update(
+        {
+            "expectedCandidateVersion": result.expected_candidate_version,
+            "candidateBeforeHash": result.candidate_before_hash,
+            "expectedChangeSetId": result.expected_change_set_id,
+            "expectedProposalHash": result.expected_proposal_hash,
+            "decisionResult": _owner_truth_candidate_decision_response(
+                result.decision_result
+            ),
+        }
+    )
+    return response
 
 
 def _owner_truth_interview_candidate_review_item_response(item: Any) -> Dict[str, Any]:
@@ -10636,6 +10658,38 @@ def confirm_owner_truth_memory_changeset_group(
     )
 
 
+@app.get(
+    "/v2/vaults/{vault_id}/memory-changeset-groups/decision-result",
+    include_in_schema=False,
+)
+def read_owner_truth_memory_changeset_group_decision_result(
+    request: Request,
+    vault_id: str,
+) -> JSONResponse:
+    """Read one persisted atomic group receipt without replaying its write."""
+
+    try:
+        context = _owner_truth_direct_candidate_review_context(request, vault_id=vault_id)
+        command_id = str(
+            request.headers.get("x-dreamjourney-review-command-id") or ""
+        ).strip()
+        result = OwnerTruthMemoryChangeSetGroupReviewService(store).lookup_result(
+            command_id=command_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content={
+            "schemaVersion": "owner-truth-memory-changeset-group-decision-lookup-v1",
+            "status": "found" if result is not None else "notObserved",
+            "result": result.payload() if result is not None else None,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post(
     "/v2/vaults/{vault_id}/candidates/{candidate_id}/decisions",
     include_in_schema=False,
@@ -10678,6 +10732,36 @@ def review_owner_truth_candidate(
     return JSONResponse(
         status_code=201 if result.review.outcome == "created" else 200,
         content=_owner_truth_candidate_decision_response(result),
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/candidates/{candidate_id}/decision-result",
+    include_in_schema=False,
+)
+def read_owner_truth_candidate_decision_result(
+    request: Request,
+    vault_id: str,
+    candidate_id: str,
+) -> JSONResponse:
+    """Read one persisted review result without replaying the write command."""
+
+    try:
+        context = _owner_truth_direct_candidate_review_context(request, vault_id=vault_id)
+        command_id = str(
+            request.headers.get("x-dreamjourney-review-command-id") or ""
+        ).strip()
+        result = OwnerTruthCandidateReviewService(store).lookup_decision_result(
+            candidate_id=candidate_id,
+            command_id=command_id,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=_owner_truth_candidate_decision_lookup_response(result),
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -17031,6 +17115,20 @@ _REALTIME_LIVE_SPEAKING_STYLE = (
 )
 
 
+def _realtime_voice_failure_stage(code: str) -> str:
+    if code in {"formalMemorySnapshotUnavailable", "formalMemorySnapshotTooLarge"}:
+        return "snapshot"
+    if code == "realtimeVoiceFormalMemoryBindingInvalid":
+        return "binding"
+    if code == "realtimeVoiceConcurrentSessionLimit":
+        return "ticketStore"
+    if code == "realtimeVoiceSubjectUnavailable":
+        return "targetAuthorization"
+    if code in {"realtimeVoiceUpstreamURLInvalid", "realtimeVoicePublicURLInvalid"}:
+        return "capability"
+    return "unknown"
+
+
 def _build_authorized_realtime_live_session(
     request: Request,
     *,
@@ -17112,11 +17210,25 @@ def _build_authorized_realtime_live_session(
             context=context,
             persona_scope="family" if persona_scope == "family" else "personal",
         )
+        snapshot = bind_provider_role_text(
+            snapshot,
+            system_role=_REALTIME_LIVE_SYSTEM_ROLE,
+            speaking_style=_REALTIME_LIVE_SPEAKING_STYLE,
+            max_chars=settings.realtime_voice_snapshot_max_chars,
+        )
     except FormalMemoryConversationSnapshotError as exc:
         status_code = 503 if exc.code in {
             "formalMemorySnapshotUnavailable",
             "formalMemorySnapshotTooLarge",
         } else 409
+        logger.warning(
+            "realtimeVoiceRuntimeConfigRejected stage=%s businessCode=%s "
+            "httpStatus=%s retryable=%s",
+            _realtime_voice_failure_stage(exc.code),
+            exc.code,
+            status_code,
+            status_code == 503,
+        )
         raise HTTPException(
             status_code=status_code,
             detail={"code": exc.code, "retryable": status_code == 503},
@@ -17133,7 +17245,7 @@ def _build_authorized_realtime_live_session(
     logger.info(
         "liveSnapshotIssued contractVersion=%s factCount=%s snapshotChars=%s "
         "snapshotBytes=%s checkpointHash=%s contextHash=%s",
-        5,
+        7,
         len(snapshot.get("coreFacts") or []),
         len(snapshot_json),
         len(snapshot_json.encode("utf-8")),
@@ -17162,6 +17274,8 @@ def _build_authorized_realtime_live_session(
         "sessionContext": {
             "systemRole": _REALTIME_LIVE_SYSTEM_ROLE,
             "speakingStyle": _REALTIME_LIVE_SPEAKING_STYLE,
+            "providerRoleText": snapshot["providerRoleText"],
+            "providerContextHash": snapshot["providerContextHash"],
             "formalMemorySnapshot": snapshot,
         },
     }
@@ -17566,8 +17680,17 @@ def realtime_token(request: Request, payload: Dict[str, Any]) -> JSONResponse:
             session_context=live_session["sessionContext"],
         )
     except RealtimeVoiceProxyError as exc:
+        status_code = 409 if exc.retryable else 503
+        logger.warning(
+            "realtimeVoiceRuntimeConfigRejected stage=%s businessCode=%s "
+            "httpStatus=%s retryable=%s",
+            _realtime_voice_failure_stage(exc.code),
+            exc.code,
+            status_code,
+            exc.retryable,
+        )
         raise HTTPException(
-            status_code=409 if exc.retryable else 503,
+            status_code=status_code,
             detail={"code": exc.code, "retryable": exc.retryable},
         ) from exc
     return JSONResponse(content=response, headers={"Cache-Control": "no-store"})

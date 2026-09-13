@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+import hashlib
 import json
 import unittest
 from uuid import uuid4
@@ -33,6 +34,7 @@ from app.domain.owner_truth.ontology import (
     canonicalize_memory_payload,
 )
 from app.services.formal_memory_conversation_snapshot import (
+    bind_provider_role_text,
     FormalMemoryConversationSnapshotService,
 )
 from app.services.owner_truth_echo_conversation_context import (
@@ -226,7 +228,7 @@ class OwnerTruthTerraBAuditRegressionTests(unittest.TestCase):
         self.assertEqual(len(groups), 2)
         self.assertEqual({item["status"] for item in groups}, {"ready"})
 
-    def test_p06_live_snapshot_is_budgeted_without_rejecting_many_facts(self) -> None:
+    def test_p06_live_provider_role_is_budgeted_without_dropping_facts(self) -> None:
         fixture = OwnerTruthMemoryChangeSetTests()
         fixture.setUp()
         contents = [
@@ -241,11 +243,21 @@ class OwnerTruthTerraBAuditRegressionTests(unittest.TestCase):
         snapshot = FormalMemoryConversationSnapshotService(store).build(
             context=self._projection_context()
         )
+        bound = bind_provider_role_text(
+            snapshot,
+            system_role="你是用户的记忆助手。",
+            speaking_style="友善、自然，事实准确。",
+        )
 
-        self.assertLessEqual(len(json.dumps(snapshot, ensure_ascii=False)), 32_768)
         self.assertEqual(snapshot["coverage"]["eligibleFactCount"], 100)
-        self.assertLess(snapshot["coverage"]["includedFactCount"], 100)
-        self.assertTrue(snapshot["coverage"]["truncated"])
+        self.assertEqual(snapshot["coverage"]["includedFactCount"], 100)
+        self.assertFalse(snapshot["coverage"]["truncated"])
+        self.assertLessEqual(bound["providerRoleCharacterCount"], 32_768)
+        self.assertEqual(
+            bound["providerContextHash"],
+            "sha256:"
+            + hashlib.sha256(bound["providerRoleText"].encode("utf-8")).hexdigest(),
+        )
 
     def test_p07_followup_query_is_resolved_from_same_session_history_before_search(self) -> None:
         turns = [

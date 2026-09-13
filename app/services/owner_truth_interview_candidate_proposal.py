@@ -91,6 +91,27 @@ class OwnerTruthInterviewCandidateProposalStore(Protocol):
         ...
 
 
+def _candidate_extraction_failure_category(code: str | None) -> str | None:
+    normalized = str(code or "").strip()
+    if not normalized:
+        return None
+    if ".providerAuthorization." in normalized:
+        return "authorization"
+    if ".providerQuota." in normalized:
+        return "quota"
+    if normalized.endswith(".providerRateLimited"):
+        return "rateLimit"
+    if normalized.endswith(".timeout"):
+        return "timeout"
+    if ".responseContract." in normalized:
+        return "contract"
+    if normalized.endswith(".transport") or ".providerHttp." in normalized:
+        return "transport"
+    if ".runtime." in normalized:
+        return "configuration"
+    return "internal"
+
+
 @dataclass(frozen=True)
 class OwnerTruthInterviewCandidateProposalStatus:
     """Value-free progress for one review batch's default-off proposal lane.
@@ -110,6 +131,14 @@ class OwnerTruthInterviewCandidateProposalStatus:
     candidate_extraction_status: str
     effect_execution_status: str
     candidate_review_status: str
+    candidate_extraction_job_state: str = "notCreated"
+    candidate_extraction_attempt: int = 0
+    candidate_extraction_max_attempts: int = 0
+    candidate_extraction_retry_available_at: str | None = None
+    candidate_extraction_first_failure_code: str | None = None
+    candidate_extraction_failure_code: str | None = None
+    candidate_extraction_terminal_reason_code: str | None = None
+    candidate_extraction_dead_letter_state: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -131,19 +160,41 @@ class OwnerTruthInterviewCandidateProposalStatus:
                     f"{field} is required"
                 )
             object.__setattr__(self, field, value)
+        if self.candidate_extraction_attempt < 0:
+            raise OwnerTruthInterviewCandidateProposalError(
+                "candidate_extraction_attempt must be non-negative"
+            )
+        if self.candidate_extraction_max_attempts < 0:
+            raise OwnerTruthInterviewCandidateProposalError(
+                "candidate_extraction_max_attempts must be non-negative"
+            )
 
     def public_summary(self) -> dict[str, Any]:
         """Return a deliberately value-free QA diagnostic envelope."""
 
         return {
-            "schemaVersion": "owner-truth-interview-candidate-proposal-status-v1",
+            "schemaVersion": "owner-truth-interview-candidate-proposal-status-v3",
             "reviewBatch": {
                 "reviewBatchId": self.review_batch_id,
                 "state": self.review_batch_state,
             },
             "candidateProposal": {"status": self.candidate_proposal_status},
             "source": {"status": self.source_status},
-            "candidateExtraction": {"status": self.candidate_extraction_status},
+            "candidateExtraction": {
+                "status": self.candidate_extraction_status,
+                "jobState": self.candidate_extraction_job_state,
+                "attempt": self.candidate_extraction_attempt,
+                "maxAttempts": self.candidate_extraction_max_attempts,
+                "retryAvailableAt": self.candidate_extraction_retry_available_at,
+                "firstFailureCode": self.candidate_extraction_first_failure_code,
+                "failureCode": self.candidate_extraction_failure_code,
+                "failureCategory": _candidate_extraction_failure_category(
+                    self.candidate_extraction_failure_code
+                ),
+                "terminationCode": self.candidate_extraction_terminal_reason_code,
+                "retryable": self.candidate_extraction_job_state == "retryWait",
+                "deadLetterState": self.candidate_extraction_dead_letter_state,
+            },
             "effectExecution": {"status": self.effect_execution_status},
             "candidateReview": {"status": self.candidate_review_status},
         }
@@ -162,6 +213,14 @@ class OwnerTruthInterviewCandidateProposalExtractionStatus:
 
     latest_status: str | None
     has_pending_candidates: bool
+    job_state: str = "notCreated"
+    attempt: int = 0
+    max_attempts: int = 0
+    retry_available_at: str | None = None
+    first_failure_code: str | None = None
+    failure_code: str | None = None
+    terminal_reason_code: str | None = None
+    dead_letter_state: str | None = None
 
     def __post_init__(self) -> None:
         if self.latest_status not in {None, "succeeded", "failed", "quarantined"}:
@@ -169,6 +228,10 @@ class OwnerTruthInterviewCandidateProposalExtractionStatus:
                 "unsupported candidate extraction status"
             )
         object.__setattr__(self, "has_pending_candidates", bool(self.has_pending_candidates))
+        if self.attempt < 0 or self.max_attempts < 0:
+            raise OwnerTruthInterviewCandidateProposalError(
+                "candidate extraction attempts must be non-negative"
+            )
 
 
 def _assert_owner_context(context: OwnerTruthCommandContext) -> None:
@@ -594,6 +657,39 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
         source_is_live: bool = True,
         extraction_status: OwnerTruthInterviewCandidateProposalExtractionStatus | None = None,
     ) -> OwnerTruthInterviewCandidateProposalStatus:
+        derived_job_state = "notCreated"
+        if extraction_status is not None:
+            derived_job_state = extraction_status.job_state
+            if derived_job_state == "notCreated" and extraction_status.latest_status is not None:
+                derived_job_state = (
+                    "succeeded"
+                    if extraction_status.latest_status == "succeeded"
+                    else "failed"
+                )
+        extraction_progress = {
+            "candidate_extraction_job_state": derived_job_state,
+            "candidate_extraction_attempt": (
+                extraction_status.attempt if extraction_status is not None else 0
+            ),
+            "candidate_extraction_max_attempts": (
+                extraction_status.max_attempts if extraction_status is not None else 0
+            ),
+            "candidate_extraction_retry_available_at": (
+                extraction_status.retry_available_at if extraction_status is not None else None
+            ),
+            "candidate_extraction_first_failure_code": (
+                extraction_status.first_failure_code if extraction_status is not None else None
+            ),
+            "candidate_extraction_failure_code": (
+                extraction_status.failure_code if extraction_status is not None else None
+            ),
+            "candidate_extraction_terminal_reason_code": (
+                extraction_status.terminal_reason_code if extraction_status is not None else None
+            ),
+            "candidate_extraction_dead_letter_state": (
+                extraction_status.dead_letter_state if extraction_status is not None else None
+            ),
+        }
         if batch.state == "pendingAcknowledgement":
             return OwnerTruthInterviewCandidateProposalStatus(
                 review_batch_id=batch.review_batch_id,
@@ -603,6 +699,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 candidate_extraction_status="notRequested",
                 effect_execution_status="disabled",
                 candidate_review_status="notReady",
+                **extraction_progress,
             )
         if batch.state != "acknowledged":
             raise OwnerTruthInterviewCandidateProposalConflict(
@@ -617,6 +714,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 candidate_extraction_status="notRequested",
                 effect_execution_status="disabled",
                 candidate_review_status="notReady",
+                **extraction_progress,
             )
         if not source_is_live:
             return OwnerTruthInterviewCandidateProposalStatus(
@@ -627,6 +725,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 candidate_extraction_status="blocked",
                 effect_execution_status="disabled",
                 candidate_review_status="notReady",
+                **extraction_progress,
             )
         if extraction_status is not None and extraction_status.latest_status is not None:
             candidate_review_status = (
@@ -649,6 +748,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 # admission boundary; do not imply Provider execution here.
                 effect_execution_status="disabled",
                 candidate_review_status=candidate_review_status,
+                **extraction_progress,
             )
         return OwnerTruthInterviewCandidateProposalStatus(
             review_batch_id=batch.review_batch_id,
@@ -658,6 +758,24 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
             candidate_extraction_status="requested",
             effect_execution_status="disabled",
             candidate_review_status="notReady",
+            candidate_extraction_job_state=(
+                extraction_status.job_state if extraction_status is not None else "pending"
+            ),
+            candidate_extraction_attempt=(
+                extraction_status.attempt if extraction_status is not None else 0
+            ),
+            candidate_extraction_max_attempts=(
+                extraction_status.max_attempts if extraction_status is not None else 3
+            ),
+            candidate_extraction_retry_available_at=(
+                extraction_status.retry_available_at if extraction_status is not None else None
+            ),
+            candidate_extraction_failure_code=(
+                extraction_status.failure_code if extraction_status is not None else None
+            ),
+            candidate_extraction_dead_letter_state=(
+                extraction_status.dead_letter_state if extraction_status is not None else None
+            ),
         )
 
     @staticmethod
@@ -1076,6 +1194,51 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
 
         cursor.execute(
             """
+            SELECT j.state, j.attempt, j.max_attempts, j.available_at,
+                latest_attempt.error_code,
+                latest_attempt.terminal_reason_code,
+                first_failure.error_code AS first_failure_code,
+                latest_dead_letter.state AS dead_letter_state
+            FROM async_effects.jobs AS j
+            LEFT JOIN LATERAL (
+                SELECT a.error_code, a.terminal_reason_code
+                FROM async_effects.job_attempts AS a
+                WHERE a.job_id = j.job_id
+                ORDER BY a.attempt DESC
+                LIMIT 1
+            ) AS latest_attempt ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT a.error_code
+                FROM async_effects.job_attempts AS a
+                WHERE a.job_id = j.job_id
+                  AND a.error_code IS NOT NULL
+                ORDER BY a.attempt ASC
+                LIMIT 1
+            ) AS first_failure ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT d.state
+                FROM async_effects.dead_letters AS d
+                WHERE d.job_id = j.job_id
+                ORDER BY d.attempt DESC
+                LIMIT 1
+            ) AS latest_dead_letter ON TRUE
+            WHERE j.vault_id = %s
+              AND j.owner_subject_id = %s
+              AND j.resource_type = 'source'
+              AND j.resource_id = %s
+              AND j.resource_version = %s
+              AND j.purpose = 'candidateExtraction'
+              AND j.job_type = 'ownerTruth.source.created'
+              AND j.authority_epoch = %s
+            ORDER BY j.created_at DESC, j.job_id DESC
+            LIMIT 1
+            """,
+            (vault_id, owner_subject_id, source_id, source_version, authority_epoch),
+        )
+        job = cursor.fetchone()
+
+        cursor.execute(
+            """
             SELECT id, status
             FROM owner_truth.extraction_results
             WHERE vault_id = %s
@@ -1087,7 +1250,7 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
             (vault_id, source_id, source_version),
         )
         latest = cursor.fetchone()
-        if latest is None:
+        if latest is None and job is None:
             return None
 
         cursor.execute(
@@ -1127,11 +1290,37 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                 ),
             )
             has_pending_candidates = cursor.fetchone() is not None
+        retry_available_at = None
+        if job is not None and job["state"] == "retryWait" and job["available_at"] is not None:
+            retry_available_at = job["available_at"].isoformat()
         return OwnerTruthInterviewCandidateProposalExtractionStatus(
-            latest_status=str(latest["status"]),
+            latest_status=(str(latest["status"]) if latest is not None else None),
             has_pending_candidates=has_pending_candidates,
+            job_state=(str(job["state"]) if job is not None else "notCreated"),
+            attempt=(int(job["attempt"]) if job is not None else 0),
+            max_attempts=(int(job["max_attempts"]) if job is not None else 0),
+            retry_available_at=retry_available_at,
+            first_failure_code=(
+                str(job["first_failure_code"])
+                if job is not None and job["first_failure_code"] is not None
+                else None
+            ),
+            failure_code=(
+                str(job["error_code"])
+                if job is not None and job["error_code"] is not None
+                else None
+            ),
+            terminal_reason_code=(
+                str(job["terminal_reason_code"])
+                if job is not None and job["terminal_reason_code"] is not None
+                else None
+            ),
+            dead_letter_state=(
+                str(job["dead_letter_state"])
+                if job is not None and job["dead_letter_state"] is not None
+                else None
+            ),
         )
-
     def _locked_active_vault(
         self,
         cursor: Any,

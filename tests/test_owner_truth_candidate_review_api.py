@@ -357,6 +357,87 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             [],
         )
 
+    def test_owner_can_lookup_one_durable_decision_without_replaying_the_write(self) -> None:
+        owner_id, headers = self._login("13800139201")
+        vault_id = "vault-api-decision-result"
+        candidate = self._candidate(vault_id=vault_id, owner_subject_id=owner_id)
+        self._seed(candidate)
+        command_id = "candidate-api-result-lookup-001"
+
+        before = client.get(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decision-result",
+            headers={**headers, "X-DreamJourney-Review-Command-Id": command_id},
+        )
+        self.assertEqual(before.status_code, 200, before.text)
+        self.assertEqual(before.json()["result"], "notObserved")
+
+        created = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
+            headers=headers,
+            json={
+                "commandId": command_id,
+                "expectedCandidateVersion": 1,
+                "action": "accept",
+                "reasonCode": "ownerReviewed",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+
+        found = client.get(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decision-result",
+            headers={**headers, "X-DreamJourney-Review-Command-Id": command_id},
+        )
+        self.assertEqual(found.status_code, 200, found.text)
+        body = found.json()
+        self.assertEqual(body["schemaVersion"], "owner-truth-candidate-decision-lookup-v1")
+        self.assertEqual(body["result"], "found")
+        self.assertEqual(body["expectedCandidateVersion"], 1)
+        self.assertEqual(body["candidateBeforeHash"], candidate.content_hash)
+        self.assertEqual(body["decisionResult"]["receipt"]["receiptId"], created.json()["receipt"]["receiptId"])
+
+        snapshot = main_module.store.owner_truth_candidate_review_repository().snapshot()
+        self.assertEqual(len(snapshot["receipts"]), 1)
+        self.assertEqual(len(snapshot["memoryActivations"]), 1)
+
+    def test_decision_result_lookup_is_scoped_to_owner_vault_candidate_and_command(self) -> None:
+        owner_id, headers = self._login("13800139202")
+        other_owner_id, other_headers = self._login("13800139203")
+        vault_id = "vault-api-decision-result-scope"
+        candidate = self._candidate(vault_id=vault_id, owner_subject_id=owner_id)
+        self._seed(candidate)
+        command_id = "candidate-api-result-scope-001"
+        created = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
+            headers=headers,
+            json={
+                "commandId": command_id,
+                "expectedCandidateVersion": 1,
+                "action": "reject",
+                "reasonCode": "ownerReviewed",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+
+        wrong_command = client.get(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decision-result",
+            headers={**headers, "X-DreamJourney-Review-Command-Id": "different-command"},
+        )
+        self.assertEqual(wrong_command.status_code, 200, wrong_command.text)
+        self.assertEqual(wrong_command.json()["result"], "notObserved")
+
+        wrong_owner = client.get(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decision-result",
+            headers={**other_headers, "X-DreamJourney-Review-Command-Id": command_id},
+        )
+        self.assertEqual(wrong_owner.status_code, 403, wrong_owner.text)
+        self.assertEqual(
+            wrong_owner.json()["detail"]["code"],
+            "ownerTruthCandidateReviewDenied",
+        )
+        self.assertNotIn(command_id, wrong_owner.text)
+        self.assertNotIn(owner_id, wrong_owner.text)
+        self.assertNotEqual(owner_id, other_owner_id)
+
     def test_v5_candidate_binds_an_owner_visible_changeset_before_decision(self) -> None:
         owner_id, headers = self._login("13800139142")
         vault_id = "vault-api-v5-changeset-preview"
@@ -520,6 +601,19 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             "expectedGroupProposalId": group["groupProposalId"],
             "expectedGroupProposalHash": group["groupProposalHash"],
         }
+        lookup_headers = {
+            **headers,
+            "X-DreamJourney-Review-Command-Id": command["commandId"],
+        }
+        not_observed = client.get(
+            f"/v2/vaults/{vault_id}/memory-changeset-groups/decision-result",
+            headers=lookup_headers,
+        )
+        self.assertEqual(not_observed.status_code, 200, not_observed.text)
+        self.assertEqual(not_observed.headers["cache-control"], "no-store")
+        self.assertEqual(not_observed.json()["status"], "notObserved")
+        self.assertIsNone(not_observed.json()["result"])
+
         created = client.post(
             f"/v2/vaults/{vault_id}/memory-changeset-groups/confirm",
             headers=headers,
@@ -530,6 +624,29 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         self.assertEqual(created.json()["appliedMemoryRevision"], 2)
         self.assertEqual(len(created.json()["members"]), 2)
         self.assertEqual(created.json()["projectionEffectCount"], 2)
+
+        found = client.get(
+            f"/v2/vaults/{vault_id}/memory-changeset-groups/decision-result",
+            headers=lookup_headers,
+        )
+        self.assertEqual(found.status_code, 200, found.text)
+        self.assertEqual(found.headers["cache-control"], "no-store")
+        self.assertEqual(found.json()["status"], "found")
+        self.assertEqual(
+            found.json()["result"]["groupReceiptId"],
+            created.json()["groupReceiptId"],
+        )
+        self.assertEqual(found.json()["result"]["status"], "deduplicated")
+
+        _other_owner_id, other_headers = self._login("13800139173")
+        forbidden = client.get(
+            f"/v2/vaults/{vault_id}/memory-changeset-groups/decision-result",
+            headers={
+                **other_headers,
+                "X-DreamJourney-Review-Command-Id": command["commandId"],
+            },
+        )
+        self.assertIn(forbidden.status_code, {403, 404})
 
         replay = client.post(
             f"/v2/vaults/{vault_id}/memory-changeset-groups/confirm",

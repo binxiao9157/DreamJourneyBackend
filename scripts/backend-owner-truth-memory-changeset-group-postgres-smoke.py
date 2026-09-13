@@ -444,10 +444,40 @@ def run_replay_case(dsn: str) -> dict[str, Any]:
             command_prefix="terra-a-replay",
         )
         service = OwnerTruthMemoryChangeSetGroupReviewService(store)
+        before_lookup = service.lookup_result(
+            command_id=command.command_id,
+            context=context,
+        )
+        require(before_lookup is None, "uncommitted group must be notObserved")
+        before_lookup_counts = vault_counts(dsn, context=context)
         created = service.confirm(command=command, context=context)
         first_counts = vault_counts(dsn, context=context)
+        found = service.lookup_result(
+            command_id=command.command_id,
+            context=context,
+        )
+        wrong_command = service.lookup_result(
+            command_id=f"{command.command_id}-other",
+            context=context,
+        )
+        after_lookup_counts = vault_counts(dsn, context=context)
         replayed = service.confirm(command=command, context=context)
         second_counts = vault_counts(dsn, context=context)
+        require(
+            before_lookup_counts["candidateStates"] == {"pending": 2},
+            "notObserved lookup changed candidate state",
+        )
+        require(found is not None, "committed group receipt must be found")
+        require(
+            found.group_receipt_id == created.group_receipt_id,
+            "lookup returned a different group transaction",
+        )
+        require(
+            found.members == created.members,
+            "lookup returned different atomic group members",
+        )
+        require(wrong_command is None, "unrelated command must remain notObserved")
+        require(first_counts == after_lookup_counts, "read-only lookup changed persisted state")
         require(created.outcome == "created", "replay baseline must create the group")
         require(replayed.outcome == "deduplicated", "replay must return persisted receipt")
         require(first_counts == second_counts, "replay changed persisted state")

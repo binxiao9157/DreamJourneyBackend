@@ -60,6 +60,10 @@ def _rights_rebuild_reason(rights: OwnerTruthProjectionRightsSnapshot) -> str:
     return "rightsRevoked" if not rights.projection_allowed else "rightsRevisionChanged"
 
 
+class OwnerTruthMemoryProjectionEvidenceUnavailable(OwnerTruthMemoryProjectionError):
+    """A current formal MemoryVersion references stale or unavailable evidence."""
+
+
 class OwnerTruthMemoryProjectionStore(Protocol):
     def owner_truth_memory_projection_repository(self) -> Any:
         ...
@@ -242,6 +246,11 @@ class PostgresOwnerTruthMemoryProjectionRepository:
                 (f"owner-truth-memory-projection:{context.vault_id}:{authority_epoch}",),
             )
             inputs = self._load_current_inputs(
+                cursor,
+                context=context,
+                authority_epoch=authority_epoch,
+            )
+            self._assert_current_evidence_sources(
                 cursor,
                 context=context,
                 authority_epoch=authority_epoch,
@@ -658,6 +667,62 @@ class PostgresOwnerTruthMemoryProjectionRepository:
             )
             for row in cursor.fetchall()
         )
+
+    def _assert_current_evidence_sources(
+        self,
+        cursor: Any,
+        *,
+        context: OwnerTruthCommandContext,
+        authority_epoch: int,
+    ) -> None:
+        cursor.execute(
+            """
+            SELECT 1
+            FROM owner_truth.memories AS memory
+            JOIN owner_truth.memory_versions AS version
+              ON version.vault_id = memory.vault_id
+             AND version.memory_id = memory.id
+             AND version.is_current = TRUE
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE
+                    WHEN jsonb_typeof(version.payload -> 'evidenceRefs') = 'array'
+                    THEN version.payload -> 'evidenceRefs'
+                    ELSE '[]'::JSONB
+                END
+            ) AS evidence(reference)
+            LEFT JOIN owner_truth.sources AS source
+              ON source.vault_id = version.vault_id
+             AND source.id::TEXT = evidence.reference ->> 'sourceId'
+            WHERE memory.vault_id = %s
+              AND memory.owner_subject_id = %s
+              AND memory.status = 'active'
+              AND memory.authority_epoch = %s
+              AND (
+                    source.id IS NULL
+                    OR source.owner_subject_id <> %s
+                    OR source.authority_epoch <> %s
+                    OR source.state <> 'active'
+                    OR COALESCE(evidence.reference ->> 'sourceVersion', '') !~ '^[0-9]+$'
+                    OR source.source_version IS DISTINCT FROM CASE
+                        WHEN COALESCE(evidence.reference ->> 'sourceVersion', '') ~ '^[0-9]+$'
+                        THEN (evidence.reference ->> 'sourceVersion')::BIGINT
+                        ELSE NULL
+                    END
+              )
+            LIMIT 1
+            """,
+            (
+                context.vault_id,
+                context.owner_subject_id,
+                authority_epoch,
+                context.owner_subject_id,
+                authority_epoch,
+            ),
+        )
+        if cursor.fetchone() is not None:
+            raise OwnerTruthMemoryProjectionEvidenceUnavailable(
+                "a formal evidence source is unavailable or no longer current"
+            )
 
     def _load_stored_entries(
         self,

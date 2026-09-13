@@ -171,7 +171,7 @@ class TestAccountAllowlistServiceTests(unittest.TestCase):
         self.assertEqual(
             {
                 event["payload"]["route"]
-                for event in store.list_evidence_events()
+                for event in store.list_evidence_events(include_expired=True)
             },
             {
                 "POST /ops/test-accounts",

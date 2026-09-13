@@ -71,6 +71,13 @@ def _normalize_retry_seconds(retry_seconds: object) -> int:
     return normalized
 
 
+def _normalize_error_code(error_code: object) -> str:
+    normalized = str(error_code or "").strip()
+    if not _WORKER_IDENTIFIER_PATTERN.fullmatch(normalized):
+        raise AsyncEffectLeaseError("error_code must be an opaque identifier")
+    return normalized
+
+
 def _normalize_preview_limit(limit: object) -> int:
     if isinstance(limit, bool):
         raise AsyncEffectLeaseError("preview limit must be a positive integer")
@@ -179,25 +186,43 @@ def _terminal_completion_fields(
     *,
     outcome: object,
     error_code: object,
-) -> tuple[str, str, str, str | None]:
+    terminal_reason_code: object = None,
+) -> tuple[str, str, str, str | None, str | None]:
     normalized_outcome = str(outcome or "").strip()
     normalized_error = str(error_code or "").strip() or None
+    normalized_terminal_reason = str(terminal_reason_code or "").strip() or None
     if normalized_outcome == "succeeded":
-        if normalized_error is not None:
+        if normalized_error is not None or normalized_terminal_reason is not None:
             raise AsyncEffectLeaseError("successful completion cannot carry an error code")
-        return ("succeeded", "completed", "succeeded", None)
+        return ("succeeded", "completed", "succeeded", None, None)
+    if normalized_terminal_reason is not None and not _WORKER_IDENTIFIER_PATTERN.fullmatch(
+        normalized_terminal_reason
+    ):
+        raise AsyncEffectLeaseError("terminal reason code must be an opaque identifier")
     if normalized_outcome == "blocked":
         if normalized_error is None:
             raise AsyncEffectLeaseError("blocked completion requires an error code")
         if not _WORKER_IDENTIFIER_PATTERN.fullmatch(normalized_error):
             raise AsyncEffectLeaseError("blocked completion error code must be an opaque identifier")
-        return ("blocked", "blocked", "terminalFailed", normalized_error)
+        return (
+            "blocked",
+            "blocked",
+            "terminalFailed",
+            normalized_error,
+            normalized_terminal_reason,
+        )
     if normalized_outcome == "failed":
         if normalized_error is None:
             raise AsyncEffectLeaseError("failed completion requires an error code")
         if not _WORKER_IDENTIFIER_PATTERN.fullmatch(normalized_error):
             raise AsyncEffectLeaseError("failed completion error code must be an opaque identifier")
-        return ("failed", "failed", "terminalFailed", normalized_error)
+        return (
+            "failed",
+            "failed",
+            "terminalFailed",
+            normalized_error,
+            normalized_terminal_reason,
+        )
     raise AsyncEffectLeaseError("completion outcome must be succeeded, blocked, or failed")
 
 
@@ -273,6 +298,7 @@ class InMemoryAsyncEffectLeaseRepository:
                 "startedAt": now,
                 "finishedAt": None,
                 "errorCode": None,
+                "terminalReasonCode": None,
             }
             return self._lease_from_job(job, attempt_id=attempt_id)
 
@@ -294,10 +320,18 @@ class InMemoryAsyncEffectLeaseRepository:
         *,
         outcome: str,
         error_code: str | None = None,
+        terminal_reason_code: str | None = None,
     ) -> AsyncEffectJobCompletion:
-        job_state, operation_state, attempt_state, normalized_error = _terminal_completion_fields(
+        (
+            job_state,
+            operation_state,
+            attempt_state,
+            normalized_error,
+            normalized_terminal_reason,
+        ) = _terminal_completion_fields(
             outcome=outcome,
             error_code=error_code,
+            terminal_reason_code=terminal_reason_code,
         )
         now = self._now()
         with self._lock:
@@ -314,7 +348,12 @@ class InMemoryAsyncEffectLeaseRepository:
                 leaseUntil=None,
                 heartbeatAt=None,
             )
-            attempt.update(state=attempt_state, errorCode=normalized_error, finishedAt=now)
+            attempt.update(
+                state=attempt_state,
+                errorCode=normalized_error,
+                terminalReasonCode=normalized_terminal_reason,
+                finishedAt=now,
+            )
             return AsyncEffectJobCompletion(
                 job_id=lease.job_id,
                 operation_id=lease.operation_id,
@@ -367,14 +406,21 @@ class InMemoryAsyncEffectLeaseRepository:
                 cancel_requested_at=_utc_iso(job["cancelRequestedAt"]),
             )
 
-    def release_retryable(self, lease: AsyncEffectJobLease, *, retry_seconds: int) -> AsyncEffectJobPreview:
+    def release_retryable(
+        self,
+        lease: AsyncEffectJobLease,
+        *,
+        retry_seconds: int,
+        error_code: str = "retryableFailure",
+    ) -> AsyncEffectJobPreview:
         normalized_retry_seconds = _normalize_retry_seconds(retry_seconds)
+        normalized_error = _normalize_error_code(error_code)
         now = self._now()
         with self._lock:
             job = self._jobs.get(lease.job_id)
             self._assert_active_lease(job, lease, now)
             attempt = self._attempts[(lease.job_id, lease.attempt)]
-            attempt.update(state="retryableFailed", errorCode="shadowOnly", finishedAt=now)
+            attempt.update(state="retryableFailed", errorCode=normalized_error, finishedAt=now)
             job.update(
                 state=AsyncEffectJobState.RETRY_WAIT.value,
                 availableAt=now + timedelta(seconds=normalized_retry_seconds),
@@ -670,6 +716,7 @@ class PostgresAsyncEffectLeaseRepository:
         *,
         outcome: str,
         error_code: str | None = None,
+        terminal_reason_code: str | None = None,
     ) -> AsyncEffectJobCompletion:
         """Atomically terminalize a leased, internally consumed job.
 
@@ -678,9 +725,16 @@ class PostgresAsyncEffectLeaseRepository:
         coordination state transition and never receives business payloads.
         """
 
-        job_state, operation_state, attempt_state, normalized_error = _terminal_completion_fields(
+        (
+            job_state,
+            operation_state,
+            attempt_state,
+            normalized_error,
+            normalized_terminal_reason,
+        ) = _terminal_completion_fields(
             outcome=outcome,
             error_code=error_code,
+            terminal_reason_code=terminal_reason_code,
         )
         with self._cursor() as cursor:
             cursor.execute(
@@ -711,6 +765,7 @@ class PostgresAsyncEffectLeaseRepository:
                 UPDATE async_effects.job_attempts
                 SET state = %s,
                     error_code = %s,
+                    terminal_reason_code = %s,
                     finished_at = NOW(),
                     updated_at = NOW()
                 WHERE job_id = %s
@@ -719,7 +774,14 @@ class PostgresAsyncEffectLeaseRepository:
                   AND state = 'started'
                 RETURNING attempt_id
                 """,
-                (attempt_state, normalized_error, lease.job_id, lease.operation_id, lease.attempt),
+                (
+                    attempt_state,
+                    normalized_error,
+                    normalized_terminal_reason,
+                    lease.job_id,
+                    lease.operation_id,
+                    lease.attempt,
+                ),
             )
             if cursor.fetchone() is None:
                 raise AsyncEffectLeaseError("current job attempt is not active")
@@ -842,8 +904,15 @@ class PostgresAsyncEffectLeaseRepository:
                 cancel_requested_at=_utc_iso(row["cancel_requested_at"]),
             )
 
-    def release_retryable(self, lease: AsyncEffectJobLease, *, retry_seconds: int) -> AsyncEffectJobPreview:
+    def release_retryable(
+        self,
+        lease: AsyncEffectJobLease,
+        *,
+        retry_seconds: int,
+        error_code: str = "retryableFailure",
+    ) -> AsyncEffectJobPreview:
         normalized_retry_seconds = _normalize_retry_seconds(retry_seconds)
+        normalized_error = _normalize_error_code(error_code)
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -871,12 +940,12 @@ class PostgresAsyncEffectLeaseRepository:
                 """
                 UPDATE async_effects.job_attempts
                 SET state = 'retryableFailed',
-                    error_code = 'shadowOnly',
+                    error_code = %s,
                     finished_at = NOW(),
                     updated_at = NOW()
                 WHERE job_id = %s AND attempt = %s AND state = 'started'
                 """,
-                (lease.job_id, lease.attempt),
+                (normalized_error, lease.job_id, lease.attempt),
             )
             cursor.execute(
                 """

@@ -47,6 +47,13 @@ from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_JOB_TYPE,
     MEMORY_PROJECTION_RIGHTS_REBUILD_OPERATION_TYPE,
 )
+from app.services.owner_truth_memory_projection import (
+    OwnerTruthMemoryProjectionEvidenceUnavailable,
+)
+from app.services.owner_truth_source_projection_rebuild_request import (
+    OwnerTruthSourceProjectionRebuildLeaseLost,
+    OwnerTruthSourceProjectionRebuildRequest,
+)
 from app.services.store_factory import close_store, make_store, open_store
 
 
@@ -103,7 +110,7 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
 
         lease = self._claim_next()
         if lease is None:
-            return self._payload(status="idle", reason="noEligibleMemoryProjectionRebuildJob")
+            return self._run_source_projection_rebuild_request()
 
         try:
             with self._unit_of_work(
@@ -127,6 +134,119 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
             result = self._release_retryable_or_terminalize(lease)
         self._record_attempt(lease=lease, result=result, started_at=started_at)
         return result
+
+    def _run_source_projection_rebuild_request(self) -> dict[str, Any]:
+        repository_factory = getattr(
+            self._store,
+            "owner_truth_source_projection_rebuild_request_repository",
+            None,
+        )
+        if not callable(repository_factory):
+            return self._payload(
+                status="idle", reason="noEligibleMemoryProjectionRebuildJob"
+            )
+
+        request = self._claim_source_projection_rebuild_request()
+        if request is None:
+            return self._payload(
+                status="idle", reason="noEligibleMemoryProjectionRebuildJob"
+            )
+        try:
+            with self._unit_of_work(
+                correlation_id=(
+                    "owner-truth-source-projection-rebuild-worker-"
+                    f"{request.request_id}"
+                ),
+                command_id=(
+                    "ownerTruthSourceProjectionRebuildWorker:"
+                    f"{request.request_id}:{request.attempt}"
+                ),
+            ):
+                repository = repository_factory()
+                if not repository.authority_is_current(request):
+                    repository.block(
+                        request,
+                        error_code="sourceProjectionAuthorityChanged",
+                    )
+                    return self._source_request_payload(
+                        status="blocked",
+                        reason="sourceProjectionAuthorityChanged",
+                        request=request,
+                    )
+                context = OwnerTruthCommandContext(
+                    vault_id=request.vault_id,
+                    owner_subject_id=request.owner_subject_id,
+                    actor_subject_id=request.owner_subject_id,
+                )
+                (
+                    projection_outcome,
+                    snapshot,
+                    checkpoint,
+                    search_projection_outcome,
+                    search_projection_document_count,
+                ) = self._rebuild_source_request_projections_with_heartbeat(
+                    request=request,
+                    context=context,
+                )
+                repository.complete(request)
+                return self._source_request_payload(
+                    status="completed",
+                    reason="sourceProjectionRecoveryCompleted",
+                    request=request,
+                    projection_outcome=projection_outcome,
+                    projection_checkpoint=checkpoint,
+                    projection_entry_count=snapshot.get("entryCount"),
+                    search_projection_outcome=search_projection_outcome,
+                    search_projection_document_count=(
+                        search_projection_document_count
+                    ),
+                )
+        except OwnerTruthMemoryProjectionEvidenceUnavailable:
+            return self._block_source_request(
+                request,
+                error_code="formalEvidenceSourceUnavailable",
+            )
+        except OwnerTruthSourceProjectionRebuildLeaseLost:
+            return self._source_request_payload(
+                status="lost",
+                reason="sourceProjectionRecoveryLeaseLost",
+                request=request,
+            )
+        except Exception:
+            return self._release_source_request_retryable(request)
+
+    def _block_source_request(
+        self,
+        request: OwnerTruthSourceProjectionRebuildRequest,
+        *,
+        error_code: str,
+    ) -> dict[str, Any]:
+        try:
+            with self._unit_of_work(
+                correlation_id=(
+                    "owner-truth-source-projection-rebuild-block-"
+                    f"{request.request_id}"
+                ),
+                command_id=(
+                    "ownerTruthSourceProjectionRebuildBlock:"
+                    f"{request.request_id}:{request.attempt}"
+                ),
+            ):
+                self._store.owner_truth_source_projection_rebuild_request_repository().block(
+                    request,
+                    error_code=error_code,
+                )
+            return self._source_request_payload(
+                status="blocked",
+                reason=error_code,
+                request=request,
+            )
+        except OwnerTruthSourceProjectionRebuildLeaseLost:
+            return self._source_request_payload(
+                status="lost",
+                reason="sourceProjectionRecoveryLeaseLost",
+                request=request,
+            )
 
     def _make_metric_recorder(self) -> OperationMetricRecorder:
         sink = getattr(self._store, "append_evidence_event", None)
@@ -396,6 +516,86 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
             )
         return outcome, len(documents)
 
+    def _rebuild_source_request_projections_with_heartbeat(
+        self,
+        *,
+        request: OwnerTruthSourceProjectionRebuildRequest,
+        context: OwnerTruthCommandContext,
+    ) -> tuple[str, Mapping[str, Any], str, str | None, int | None]:
+        heartbeat = WorkerLeaseHeartbeat(
+            heartbeat=lambda: self._renew_source_request_lease(request),
+            interval_seconds=self._heartbeat_interval_seconds,
+        )
+        heartbeat.start()
+        try:
+            projection = self._store.owner_truth_memory_projection_repository().rebuild(
+                context=context
+            )
+            projection_outcome = str(getattr(projection, "outcome", "")).strip()
+            snapshot = getattr(projection, "snapshot", None)
+            if projection_outcome not in {"rebuilt", "unchanged"} or not isinstance(
+                snapshot, Mapping
+            ):
+                raise OwnerTruthMemoryProjectionWorkerError(
+                    "source recovery projection returned an invalid outcome"
+                )
+            checkpoint = str(snapshot.get("checkpoint") or "").strip()
+            if len(checkpoint) != 64:
+                raise OwnerTruthMemoryProjectionWorkerError(
+                    "source recovery projection returned no checkpoint"
+                )
+            search_outcome: str | None = None
+            search_document_count: int | None = None
+            if self._settings.owner_truth_memory_search_projection_worker_enabled:
+                search_outcome, search_document_count = self._rebuild_search_projection(
+                    context=context,
+                    source_checkpoint=checkpoint,
+                    authority_epoch=request.authority_epoch,
+                )
+        except Exception:
+            self._stop_and_verify_source_request_heartbeat(heartbeat)
+            raise
+        self._stop_and_verify_source_request_heartbeat(heartbeat)
+        return (
+            projection_outcome,
+            snapshot,
+            checkpoint,
+            search_outcome,
+            search_document_count,
+        )
+
+    @staticmethod
+    def _stop_and_verify_source_request_heartbeat(
+        heartbeat: WorkerLeaseHeartbeat,
+    ) -> None:
+        heartbeat.stop()
+        try:
+            heartbeat.raise_if_failed()
+        except OwnerTruthSourceProjectionRebuildLeaseLost:
+            raise
+        except Exception as exc:
+            raise OwnerTruthSourceProjectionRebuildLeaseLost(
+                "source projection recovery heartbeat failed"
+            ) from exc
+
+    def _renew_source_request_lease(
+        self, request: OwnerTruthSourceProjectionRebuildRequest
+    ) -> None:
+        with self._unit_of_work(
+            correlation_id=(
+                "owner-truth-source-projection-rebuild-heartbeat-"
+                f"{request.request_id}"
+            ),
+            command_id=(
+                "ownerTruthSourceProjectionRebuildHeartbeat:"
+                f"{request.request_id}:{request.attempt}"
+            ),
+        ):
+            self._store.owner_truth_source_projection_rebuild_request_repository().heartbeat(
+                request,
+                lease_seconds=self._lease_seconds,
+            )
+
     def _claim_next(self) -> AsyncEffectJobLease | None:
         with self._unit_of_work(
             correlation_id="owner-truth-memory-projection-worker-claim",
@@ -405,6 +605,66 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
                 worker_id=self._worker_id,
                 lease_seconds=self._lease_seconds,
                 supported_job_types=[MEMORY_PROJECTION_REBUILD_JOB_TYPE],
+            )
+
+    def _claim_source_projection_rebuild_request(
+        self,
+    ) -> OwnerTruthSourceProjectionRebuildRequest | None:
+        with self._unit_of_work(
+            correlation_id="owner-truth-source-projection-rebuild-claim",
+            command_id="ownerTruthSourceProjectionRebuildClaim",
+        ):
+            return (
+                self._store.owner_truth_source_projection_rebuild_request_repository()
+                .claim_next(
+                    worker_id=self._worker_id,
+                    lease_seconds=self._lease_seconds,
+                )
+            )
+
+    def _release_source_request_retryable(
+        self, request: OwnerTruthSourceProjectionRebuildRequest
+    ) -> dict[str, Any]:
+        try:
+            with self._unit_of_work(
+                correlation_id=(
+                    "owner-truth-source-projection-rebuild-retry-"
+                    f"{request.request_id}"
+                ),
+                command_id=(
+                    "ownerTruthSourceProjectionRebuildRetry:"
+                    f"{request.request_id}:{request.attempt}"
+                ),
+            ):
+                outcome = (
+                    self._store.owner_truth_source_projection_rebuild_request_repository()
+                    .release_retryable(
+                        request,
+                        retry_seconds=self._retry_seconds,
+                        error_code="sourceProjectionRebuildFailed",
+                    )
+                )
+                return self._source_request_payload(
+                    status=("blocked" if outcome.state == "blocked" else "retryWait"),
+                    reason=(
+                        "sourceProjectionRecoveryRetriesExhausted"
+                        if outcome.state == "blocked"
+                        else "sourceProjectionRecoveryRetryableFailure"
+                    ),
+                    request=request,
+                    retry_available_at=outcome.available_at,
+                )
+        except OwnerTruthSourceProjectionRebuildLeaseLost:
+            return self._source_request_payload(
+                status="lost",
+                reason="sourceProjectionRecoveryLeaseLost",
+                request=request,
+            )
+        except Exception:
+            return self._source_request_payload(
+                status="failed",
+                reason="sourceProjectionRecoveryRetryReleaseFailed",
+                request=request,
             )
 
     def _release_retryable_or_terminalize(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
@@ -660,6 +920,38 @@ class OwnerTruthMemoryProjectionWorkerRuntime:
                     "deadLetterState": admission.state.value,
                 }
             )
+        return payload
+
+    def _source_request_payload(
+        self,
+        *,
+        status: str,
+        reason: str,
+        request: OwnerTruthSourceProjectionRebuildRequest,
+        projection_outcome: str | None = None,
+        projection_checkpoint: str | None = None,
+        projection_entry_count: object | None = None,
+        search_projection_outcome: str | None = None,
+        search_projection_document_count: int | None = None,
+        retry_available_at: str | None = None,
+    ) -> dict[str, Any]:
+        payload = self._payload(
+            status=status,
+            reason=reason,
+            projection_outcome=projection_outcome,
+            projection_checkpoint=projection_checkpoint,
+            projection_entry_count=projection_entry_count,
+            search_projection_outcome=search_projection_outcome,
+            search_projection_document_count=search_projection_document_count,
+            retry_available_at=retry_available_at,
+        )
+        payload.update(
+            {
+                "requestType": "sourceProjectionRebuild",
+                "requestId": request.request_id,
+                "attempt": request.attempt,
+            }
+        )
         return payload
 
 

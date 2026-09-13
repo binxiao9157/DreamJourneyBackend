@@ -1,0 +1,26 @@
+{
+  "version": "0121",
+  "name": "owner_truth_source_dependency_recovery",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthSourceDependencyRecoveryV2",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true
+  },
+  "summary": "Tracks every current formal-memory evidence source, preserves original worker failure classifications, and makes source-triggered derived projection recovery leaseable and retryable.",
+  "operations": [
+    "extend source projection rebuild requests with lease, retry and recovery coordinates",
+    "extend job attempts with a separate terminal reason code",
+    "replace the source dependency function with main-source and evidenceRefs version checks"
+  ],
+  "rollback": "Keep additive columns and the broader dependency trigger. Roll back application workers only to a schema-compatible image; never mark a projection ready manually or rewrite formal facts.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false,
+    "invalidatesDerivedProjections": true
+  }
+}

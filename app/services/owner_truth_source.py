@@ -87,6 +87,7 @@ def build_source_created_effect_intent(
             authority_epoch=source.authority_epoch,
         ),
         payload_hash=record.payload_hash,
+        max_attempts=3,
     )
 
 

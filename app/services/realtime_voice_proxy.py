@@ -78,7 +78,7 @@ class RealtimeVoiceSessionBroker:
                 "evidenceVersion": "dreamjourney-realtime-voice-proxy-v1",
             },
             "fallback": {"enabled": True, "mode": "text"},
-            "contractVersion": 6,
+            "contractVersion": 7,
         }
 
     def issue_runtime_config(
@@ -116,10 +116,16 @@ class RealtimeVoiceSessionBroker:
         resolved_projection_checkpoint = str(projection_checkpoint or "").strip()
         resolved_context_hash = str(context_hash or "").strip()
         resolved_memory_revision = self._optional_nonnegative_int(memory_revision)
+        resolved_provider_context_hash = (
+            str(session_context.get("providerContextHash") or "").strip()
+            if isinstance(session_context, Mapping)
+            else ""
+        )
         self._assert_formal_memory_binding_contract(
             projection_checkpoint=resolved_projection_checkpoint,
             context_hash=resolved_context_hash,
             memory_revision=resolved_memory_revision,
+            provider_context_hash=resolved_provider_context_hash,
             session_context=session_context,
         )
         record = {
@@ -141,6 +147,7 @@ class RealtimeVoiceSessionBroker:
             "productSessionId": resolved_product_session_id,
             "projectionCheckpoint": resolved_projection_checkpoint,
             "contextHash": resolved_context_hash,
+            "providerContextHash": resolved_provider_context_hash,
             "authorityEpoch": authority_epoch,
             "memoryRevision": resolved_memory_revision,
         }
@@ -191,6 +198,7 @@ class RealtimeVoiceSessionBroker:
                 "authorityEpoch": authority_epoch,
                 "memoryRevision": resolved_memory_revision,
                 "contextHash": resolved_context_hash,
+                "providerContextHash": resolved_provider_context_hash,
             }
         if isinstance(session_context, Mapping):
             response["sessionContext"] = dict(session_context)
@@ -343,6 +351,7 @@ class RealtimeVoiceSessionBroker:
         projection_checkpoint: str,
         context_hash: str,
         memory_revision: int | None,
+        provider_context_hash: str,
         session_context: Optional[Mapping[str, Any]],
     ) -> None:
         """Reject mismatched ticket and injected snapshot contracts at issue time."""
@@ -351,17 +360,29 @@ class RealtimeVoiceSessionBroker:
         has_binding = any(value not in {None, ""} for value in binding_values)
         if not has_binding:
             return
-        if not projection_checkpoint or not context_hash or memory_revision is None:
+        if (
+            not projection_checkpoint
+            or not context_hash
+            or memory_revision is None
+            or not provider_context_hash
+        ):
             raise RealtimeVoiceProxyError("realtimeVoiceFormalMemoryBindingInvalid")
         if not isinstance(session_context, Mapping):
             raise RealtimeVoiceProxyError("realtimeVoiceFormalMemoryBindingInvalid")
         snapshot = session_context.get("formalMemorySnapshot")
         if not isinstance(snapshot, Mapping):
             raise RealtimeVoiceProxyError("realtimeVoiceFormalMemoryBindingInvalid")
+        provider_role_text = str(session_context.get("providerRoleText") or "")
+        expected_provider_context_hash = "sha256:" + hashlib.sha256(
+            provider_role_text.encode("utf-8")
+        ).hexdigest()
         if (
             str(snapshot.get("projectionCheckpoint") or "") != projection_checkpoint
             or str(snapshot.get("contextHash") or "") != context_hash
             or snapshot.get("memoryRevision") != memory_revision
+            or str(snapshot.get("providerContextHash") or "") != provider_context_hash
+            or provider_role_text != str(snapshot.get("providerRoleText") or "")
+            or provider_context_hash != expected_provider_context_hash
         ):
             raise RealtimeVoiceProxyError("realtimeVoiceFormalMemoryBindingInvalid")
 

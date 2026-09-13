@@ -161,6 +161,9 @@ from app.services.publication_external_cleanup import (
 from app.services.owner_truth_memory_projection import (
     PostgresOwnerTruthMemoryProjectionRepository,
 )
+from app.services.owner_truth_source_projection_rebuild_request import (
+    PostgresOwnerTruthSourceProjectionRebuildRequestRepository,
+)
 from app.services.owner_truth_thread_summary_projection import (
     PostgresOwnerTruthThreadSummaryProjectionRepository,
 )
@@ -631,6 +634,20 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth memory projection requires an active unit of work")
         return PostgresOwnerTruthMemoryProjectionRepository(active.connection)
+
+    def owner_truth_source_projection_rebuild_request_repository(
+        self,
+    ) -> PostgresOwnerTruthSourceProjectionRebuildRequestRepository:
+        """Return source-triggered projection recovery coordination in the UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError(
+                "source projection rebuild recovery requires an active unit of work"
+            )
+        return PostgresOwnerTruthSourceProjectionRebuildRequestRepository(
+            active.connection
+        )
 
     def owner_truth_projection_rights_repository(
         self,

@@ -975,6 +975,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
         "knowledge": "claim",
         "emotion": "label",
     }
+    _allowed_extractor_fact_types = DeepSeekTextMemoryOrganizationProxy._allowed_extractor_fact_types
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -1078,9 +1079,9 @@ class DeepSeekLiveMemoryOrganizationProxy:
 只输出以下严格 JSON：
 {{
   "memories": [
-    {{"memoryKind":"experience","summary":"第一人称经历摘要","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[{{"value":"人物称呼","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}},
-    {{"memoryKind":"knowledge","claim":"用户明确表达的经验、知识或观点","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}},
-    {{"memoryKind":"emotion","label":"用户明确表达的感受及其对象或原因","sourceTurnIndices":[{first_user_index}],"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[{{"value":"怀念","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}
+    {{"memoryKind":"experience","summary":"第一人称经历摘要","sourceTurnIndices":[{first_user_index}],"factType":"event","dimensions":["lifeEvents"],"predicate":"occurred","object":null,"qualifiers":{{"polarity":"unknown","strengthExpression":null,"superlativeAsserted":false,"currentApplicability":"historical","validTime":{{"start":null,"end":null,"precision":"unknown","expression":null}},"place":null,"scenario":null}},"facets":{{"people":[{{"value":"人物称呼","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}},
+    {{"memoryKind":"knowledge","claim":"用户明确表达的经验、知识或观点","sourceTurnIndices":[{first_user_index}],"factType":"knowledge","dimensions":["knowledgeSkills"],"predicate":"states","object":null,"qualifiers":{{"polarity":"unknown","strengthExpression":null,"superlativeAsserted":false,"currentApplicability":"unknown","validTime":{{"start":null,"end":null,"precision":"unknown","expression":null}},"place":null,"scenario":null}},"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}},
+    {{"memoryKind":"emotion","label":"用户明确表达的感受及其对象或原因","sourceTurnIndices":[{first_user_index}],"factType":"affect","dimensions":["emotions"],"predicate":"felt","object":null,"qualifiers":{{"polarity":"unknown","strengthExpression":null,"superlativeAsserted":false,"currentApplicability":"unknown","validTime":{{"start":null,"end":null,"precision":"unknown","expression":null}},"place":null,"scenario":null}},"affect":{{"experiencer":null,"target":null,"trigger":null,"emotionExpression":"用户明确表达的感受及其对象或原因","reporter":null}},"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[{{"value":"怀念","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}
   ]
 }}
 
@@ -1093,11 +1094,12 @@ class DeepSeekLiveMemoryOrganizationProxy:
 6. 合并重复表达，但不要把不同主题混成一条；保留第一人称语义。summary、claim、label 必须中性、客观且尽可能贴近用户原话，只允许删除无意义口头填充、补齐标点和拆分原子事实，不得润色、文学化、委婉化、夸大或弱化。
 7. facets 必须包含 people/time/places/relationships/emotions/values/personality/habits/goals/identity/reflections 十一个数组和 0 到 1 的 confidence；没有可靠值时数组为空。
 8. 每个 facet 值必须包含 value、confidence、sourceTurnIndices 和 evidenceMode。用户原话直接表达用 ownerStated；只有确属推断时才用 inferred，禁止把推断伪装成用户陈述。
-9. 每条记忆还必须有 factType、dimensions、predicate、object（可为 null）和 qualifiers。qualifiers 至少含 polarity、strengthExpression、superlativeAsserted、currentApplicability、validTime、place、scenario。只可填写用户原话可支持的结构，未知保留 null 或 unknown。
+9. 每条记忆还必须有 factType、dimensions、predicate、object（可为 null）和 qualifiers。experience 的 factType 只能是 attribute/event/relation/preference/habit/value/traitReport/goal/other；knowledge 只能是 attribute/knowledge/preference/habit/value/traitReport/goal/other；emotion 只能是 affect/other。dimensions 只能使用 identity/lifeEvents/relationships/knowledgeSkills/preferences/habits/emotions/values/traits/goals/other，不得自创 education、career 等标签。qualifiers 至少含 polarity、strengthExpression、superlativeAsserted、currentApplicability、validTime、place、scenario。只可填写用户原话可支持的结构，未知保留 null 或 unknown。
 10. emotion 类型还要给 affect（experiencer、target、trigger、emotionExpression、reporter）；所有值都必须由 role=user 证据支持。
 11. facet 的 sourceTurnIndices 也只能引用 role=user；关系 facet 只是记忆内容，不代表账号、家庭或分享权限。
 12. 用户说“我记得”“我觉得”“可能”“大概”等内容时，必须保留这种来源或不确定性，不得改写成已经核实的确定事实。
-13. 不要输出诊断、评价、行动建议、模型解释或 JSON 之外的文字。"""
+13. 同一个原子事实只输出一次，不得仅为换一个 memoryKind、factType 或 dimensions 而重复输出。
+14. 不要输出诊断、评价、行动建议、模型解释或 JSON 之外的文字。"""
 
     @classmethod
     def parse_organization(
@@ -1202,6 +1204,15 @@ class DeepSeekLiveMemoryOrganizationProxy:
                 "sourceTurnIndices": source_indices,
                 "facets": normalized_facets,
             }
+            fact_type = str(raw_memory.get("factType") or "").strip()
+            if fact_type and fact_type not in cls._allowed_extractor_fact_types[
+                MemoryKind(memory_kind)
+            ]:
+                # factType is a derived retrieval label, not Owner evidence.
+                # Ignore a provider-invented taxonomy value and let V5 derive
+                # the kind-specific safe default. The primary statement and
+                # every evidence index remain fail-closed above.
+                fact_type = ""
             for field in (
                 "factType",
                 "dimensions",
@@ -1212,6 +1223,8 @@ class DeepSeekLiveMemoryOrganizationProxy:
             ):
                 if field in raw_memory:
                     normalized_memory[field] = raw_memory[field]
+            if not fact_type:
+                normalized_memory.pop("factType", None)
             memories.append(normalized_memory)
         return {"memories": memories}
 

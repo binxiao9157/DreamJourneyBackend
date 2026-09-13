@@ -45,6 +45,10 @@ from app.services.owner_truth_memory_projection_effects import (
     MEMORY_PROJECTION_REBUILD_OPERATION_TYPE,
     build_memory_projection_rebuild_effect_intent_for_rights_revision,
 )
+from app.services.owner_truth_source_projection_rebuild_request import (
+    InMemoryOwnerTruthSourceProjectionRebuildRequestRepository,
+    OwnerTruthSourceProjectionRebuildRequest,
+)
 
 
 def _digest(value: object) -> str:
@@ -155,6 +159,9 @@ class _Store:
         self.message_input_repository = InMemoryBusinessMessageProjectionRequestRepository()
         self.message_inbox_resolver: InMemoryLegacyInboxAccountResolver | None = None
         self.business_message_projection_enabled = False
+        self.source_rebuild_request_repository = (
+            InMemoryOwnerTruthSourceProjectionRebuildRequestRepository()
+        )
         self.uow_calls = 0
 
     def readiness_probe(self):
@@ -179,6 +186,9 @@ class _Store:
 
     def owner_truth_memory_projection_repository(self):
         return self.projection_repository
+
+    def owner_truth_source_projection_rebuild_request_repository(self):
+        return self.source_rebuild_request_repository
 
     def owner_truth_memory_search_document_projection_repository(self):
         return self.search_projection_repository
@@ -304,6 +314,27 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
             operation_metric_recorder=operation_metric_recorder,
         )
 
+    def seed_source_rebuild_request(
+        self,
+        *,
+        request_id: int = 121,
+        max_attempts: int = 3,
+    ) -> None:
+        self.store.source_rebuild_request_repository.seed(
+            OwnerTruthSourceProjectionRebuildRequest(
+                request_id=request_id,
+                vault_id=self.vault_id,
+                owner_subject_id=self.owner_subject_id,
+                source_id="00000000-0000-0000-0000-000000000121",
+                source_version=4,
+                authority_epoch=6,
+                memory_revision=7,
+                rights_revision=2,
+                attempt=0,
+                max_attempts=max_attempts,
+            )
+        )
+
     def test_default_disabled_worker_does_not_claim_a_projection_rebuild(self):
         result = self.worker(enabled=False).run_once()
 
@@ -315,6 +346,55 @@ class OwnerTruthMemoryProjectionWorkerTests(unittest.TestCase):
             supported_job_types=[MEMORY_PROJECTION_REBUILD_JOB_TYPE],
         )
         self.assertIsNotNone(lease)
+
+    def test_idle_projection_worker_automatically_consumes_source_rebuild_request(self):
+        store = _Store()
+        self.store = store
+        self.seed_source_rebuild_request()
+
+        result = self.worker(store=store, search_projection_enabled=True).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["reason"], "sourceProjectionRecoveryCompleted")
+        self.assertEqual(result["requestType"], "sourceProjectionRebuild")
+        self.assertEqual(result["requestId"], 121)
+        self.assertEqual(result["searchProjectionOutcome"], "rebuilt")
+        self.assertEqual(
+            store.source_rebuild_request_repository._rows[121]["state"],
+            "completed",
+        )
+        self.assertEqual(self.worker(store=store).run_once()["status"], "idle")
+
+    def test_source_rebuild_failure_is_retried_and_not_marked_completed(self):
+        store = _Store(projection=_ProjectionRepository(fail=True))
+        self.store = store
+        self.seed_source_rebuild_request(max_attempts=2)
+
+        result = self.worker(store=store, retry_seconds=1).run_once()
+
+        self.assertEqual(result["status"], "retryWait")
+        self.assertEqual(result["reason"], "sourceProjectionRecoveryRetryableFailure")
+        row = store.source_rebuild_request_repository._rows[121]
+        self.assertEqual(row["state"], "pending")
+        self.assertEqual(row["attempt"], 1)
+        self.assertEqual(row["last_error_code"], "sourceProjectionRebuildFailed")
+
+    def test_expired_source_rebuild_lease_is_recovered_by_worker(self):
+        store = _Store()
+        self.store = store
+        self.seed_source_rebuild_request()
+        claimed = store.source_rebuild_request_repository.claim_next(
+            worker_id="crashed-worker",
+            lease_seconds=1,
+        )
+        row = store.source_rebuild_request_repository._rows[claimed.request_id]
+        row["lease_until"] = row["lease_until"].replace(year=2020)
+
+        result = self.worker(store=store, worker_id="recovery-worker").run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["attempt"], 2)
+        self.assertEqual(row["state"], "completed")
 
     def test_current_memory_projection_is_rebuilt_and_terminalized_atomically(self):
         self.store.business_message_projection_enabled = True

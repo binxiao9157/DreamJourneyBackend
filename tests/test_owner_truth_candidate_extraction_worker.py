@@ -194,6 +194,12 @@ class _FailingExtractor:
         raise RuntimeError("deterministic extractor fixture failure")
 
 
+class _TransientFailingExtractor:
+    def extract(self, **_kwargs):
+        request = httpx.Request("POST", "https://provider.invalid/chat/completions")
+        raise httpx.ConnectError("provider unavailable", request=request)
+
+
 class _FailingInboxResolver:
     def resolve_active(self, *_args, **_kwargs):
         raise RuntimeError("owner inbox fixture unavailable")
@@ -972,69 +978,114 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertTrue(all(payload["reviewMode"] == "single" for payload in payloads.values()))
         self.assertTrue(all(payload["confidence"] == 0.0 for payload in payloads.values()))
 
-    def test_live_organization_transport_failure_falls_back_to_owner_evidence(self) -> None:
+    def test_live_organization_accepts_assistant_opening_before_first_user_evidence(self) -> None:
+        assistant_turn = "请只讲一条用于隔离验证的合成经历。"
+        owner_turn = "我于2016年从晨光大学计算机专业毕业。"
+        organizer = _RecordingLiveMemoryOrganizer(
+            [
+                {
+                    "memoryKind": "experience",
+                    "summary": owner_turn,
+                    "sourceTurnIndices": [2],
+                    "facets": _facets(),
+                }
+            ]
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(owner_turn),
+                source_text=owner_turn,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": [
+                        {
+                            "index": 1,
+                            "role": "assistant",
+                            "text": assistant_turn,
+                            "captureMode": "live",
+                        },
+                        {
+                            "index": 2,
+                            "role": "user",
+                            "text": owner_turn,
+                            "captureMode": "live",
+                        },
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(len(command.proposals), 1)
+        self.assertEqual(
+            organizer.calls,
+            [[
+                {"index": 1, "role": "assistant", "text": assistant_turn},
+                {"index": 2, "role": "user", "text": owner_turn},
+            ]],
+        )
+
+    def test_live_organization_transport_failure_is_not_converted_to_a_candidate(self) -> None:
         owner_turn = "我记得外公总会在河边等我。"
         extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
             settings=Settings(owner_truth_live_memory_organization_enabled=True),
             organizer=_UnavailableLiveMemoryOrganizer(),
         )
 
-        command = extractor.extract(
-            intent=self.intent,
-            source=OwnerTruthCandidateExtractionInput(
-                source_content_hash=_digest(owner_turn),
-                source_text=owner_turn,
-                source_metadata={
-                    "captureMode": "live",
-                    "sourcePolicy": "userEvidenceOnly",
-                    "conversationTurns": [
-                        {
-                            "index": 1,
-                            "role": "user",
-                            "text": owner_turn,
-                            "captureMode": "live",
-                        }
-                    ],
-                },
-            ),
-        )
+        with self.assertRaises(httpx.ConnectError):
+            extractor.extract(
+                intent=self.intent,
+                source=OwnerTruthCandidateExtractionInput(
+                    source_content_hash=_digest(owner_turn),
+                    source_text=owner_turn,
+                    source_metadata={
+                        "captureMode": "live",
+                        "sourcePolicy": "userEvidenceOnly",
+                        "conversationTurns": [
+                            {
+                                "index": 1,
+                                "role": "user",
+                                "text": owner_turn,
+                                "captureMode": "live",
+                            }
+                        ],
+                    },
+                ),
+            )
 
-        self.assertEqual(command.extractor_id, "deterministicLiveConversationDigest")
-        self.assertEqual(command.model_id, "deterministic-live-conversation-digest-v1")
-        self.assertEqual(len(command.proposals), 1)
-        self.assertEqual(command.proposals[0].content["summary"], owner_turn)
-
-    def test_live_organization_invalid_response_falls_back_to_owner_evidence(self) -> None:
+    def test_live_organization_invalid_response_is_not_converted_to_a_candidate(self) -> None:
         owner_turn = "我记得外公总会在河边等我。"
         extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
             settings=Settings(owner_truth_live_memory_organization_enabled=True),
             organizer=_InvalidLiveMemoryOrganizer(),
         )
 
-        command = extractor.extract(
-            intent=self.intent,
-            source=OwnerTruthCandidateExtractionInput(
-                source_content_hash=_digest(owner_turn),
-                source_text=owner_turn,
-                source_metadata={
-                    "captureMode": "live",
-                    "sourcePolicy": "userEvidenceOnly",
-                    "conversationTurns": [
-                        {
-                            "index": 1,
-                            "role": "user",
-                            "text": owner_turn,
-                            "captureMode": "live",
-                        }
-                    ],
-                },
-            ),
-        )
-
-        self.assertEqual(command.extractor_id, "deterministicLiveConversationDigest")
-        self.assertEqual(command.model_id, "deterministic-live-conversation-digest-v1")
-        self.assertEqual(len(command.proposals), 1)
-        self.assertEqual(command.proposals[0].content["summary"], owner_turn)
+        with self.assertRaises(ValueError):
+            extractor.extract(
+                intent=self.intent,
+                source=OwnerTruthCandidateExtractionInput(
+                    source_content_hash=_digest(owner_turn),
+                    source_text=owner_turn,
+                    source_metadata={
+                        "captureMode": "live",
+                        "sourcePolicy": "userEvidenceOnly",
+                        "conversationTurns": [
+                            {
+                                "index": 1,
+                                "role": "user",
+                                "text": owner_turn,
+                                "captureMode": "live",
+                            }
+                        ],
+                    },
+                ),
+            )
 
     def test_live_organization_cannot_use_an_assistant_turn_as_evidence(self) -> None:
         owner_turn = "我小时候住在河边。"
@@ -1311,9 +1362,11 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(result["consumerOutcome"], "accepted")
         self.assertEqual(result["businessOutcome"], "failed")
         self.assertEqual(result["deadLetterOutcome"], "admitted")
-        self.assertEqual(result["deadLetterCause"], "maxAttemptsExceeded")
+        self.assertEqual(result["deadLetterCause"], "manualInterventionRequired")
+        self.assertEqual(result["failureCode"], "candidateExtraction.runtime.blocked")
+        self.assertFalse(result["retryable"])
         self.assertEqual(result["deadLetterState"], "open")
-        self.assertEqual(result["deadLetterNextAction"], "authorizedReplayRequired")
+        self.assertEqual(result["deadLetterNextAction"], "manualInterventionRequired")
         self.assertEqual(
             self.store.lease_repository.attempt_state(self.intent.job_id, 1),
             "terminalFailed",
@@ -1325,7 +1378,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         admission = self.store.dead_letter_repository.load(result["deadLetterId"])
         self.assertEqual(admission.intent, self.intent)
         self.assertEqual(admission.attempt, 1)
-        self.assertEqual(admission.cause.value, "maxAttemptsExceeded")
+        self.assertEqual(admission.cause.value, "manualInterventionRequired")
 
     def test_adapter_failure_retries_until_the_explicit_attempt_limit(self) -> None:
         intent = replace(self.intent, max_attempts=3)
@@ -1333,7 +1386,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         store.lease_repository.seed(intent)
         worker = self._worker(
             store=store,
-            extractor=_FailingExtractor(),
+            extractor=_TransientFailingExtractor(),
             retry_seconds=1,
         )
 
@@ -1345,12 +1398,45 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
 
         self.assertEqual([first["status"], second["status"], third["status"]], ["retryWait", "retryWait", "failed"])
         self.assertEqual(third["reason"], "candidateExtractionRetriesExhausted")
+        self.assertEqual(third["failureCode"], "candidateExtraction.providerRequest.transport")
         self.assertEqual(third["attempt"], 3)
         self.assertEqual(third["deadLetterCause"], "maxAttemptsExceeded")
         self.assertEqual(store.lease_repository.attempt_state(intent.job_id, 1), "retryableFailed")
         self.assertEqual(store.lease_repository.attempt_state(intent.job_id, 2), "retryableFailed")
         self.assertEqual(store.lease_repository.attempt_state(intent.job_id, 3), "terminalFailed")
         self.assertEqual(store.dead_letter_repository.record_count(), 1)
+
+    def test_provider_authorization_failure_is_terminal_and_keeps_safe_status(self) -> None:
+        request = httpx.Request("POST", "https://provider.invalid/v1/organize")
+        response = httpx.Response(401, request=request, text="private provider response")
+
+        class AuthorizationRejectedExtractor:
+            def extract(self, *, intent, source):
+                raise httpx.HTTPStatusError(
+                    "private provider response",
+                    request=request,
+                    response=response,
+                )
+
+        result = self._worker(extractor=AuthorizationRejectedExtractor()).run_once()
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(
+            result["failureCode"],
+            "candidateExtraction.providerAuthorization.rejected",
+        )
+        self.assertEqual(result["providerStatus"], 401)
+        self.assertFalse(result["retryable"])
+        self.assertNotIn("private provider response", json.dumps(result, sort_keys=True))
+        attempt = self.store.lease_repository._attempts[(self.intent.job_id, 1)]
+        self.assertEqual(
+            attempt["errorCode"],
+            "candidateExtraction.providerAuthorization.rejected",
+        )
+        self.assertEqual(
+            attempt["terminalReasonCode"],
+            "candidateExtractionRetriesExhausted",
+        )
 
     def test_slow_extractor_heartbeats_lease_and_blocks_second_worker(self) -> None:
         started = Event()

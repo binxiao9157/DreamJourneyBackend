@@ -1,0 +1,26 @@
+{
+  "version": "0120",
+  "name": "owner_truth_source_dependency_projection_invalidation",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthSourceDependencyProjectionInvalidationV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthEnhancedMemory": true
+  },
+  "summary": "Prevents unreviewed Source inserts from invalidating formal projections while preserving fail-closed invalidation and a durable rebuild request for referenced Source mutations.",
+  "operations": [
+    "add durable source-dependent projection rebuild request records",
+    "replace the broad Source trigger with current MemoryVersion dependency checks",
+    "keep referenced Source mutations fail-closed without changing formal facts"
+  ],
+  "rollback": "Keep the additive request table. Restore the dependency-aware trigger only after draining affected writes; never restore stale ready checkpoints or change formal facts.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false,
+    "invalidatesDerivedProjections": true
+  }
+}

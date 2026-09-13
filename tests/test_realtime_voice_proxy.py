@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import unittest
 
@@ -113,6 +114,8 @@ class RealtimeVoiceSessionBrokerTests(unittest.TestCase):
                 "memoryRevision": 12,
             }
         )
+        provider_role = "server role with formal facts"
+        provider_hash = "sha256:" + hashlib.sha256(provider_role.encode()).hexdigest()
         config = self.broker.issue_runtime_config(
             user_id=self.user["id"],
             auth_session_id=self.auth["sessionId"],
@@ -126,15 +129,19 @@ class RealtimeVoiceSessionBrokerTests(unittest.TestCase):
             memory_revision=12,
             session_context={
                 "systemRole": "role",
+                "providerRoleText": provider_role,
+                "providerContextHash": provider_hash,
                 "formalMemorySnapshot": {
                     "projectionCheckpoint": "checkpoint-7",
                     "contextHash": "sha256:context",
                     "memoryRevision": 12,
+                    "providerRoleText": provider_role,
+                    "providerContextHash": provider_hash,
                 },
             },
         )
 
-        self.assertEqual(config["contractVersion"], 6)
+        self.assertEqual(config["contractVersion"], 7)
         self.assertEqual(config["echoSession"]["productSessionId"], "echo_live_product_001")
         self.assertEqual(config["echoSession"]["projectionCheckpoint"], "checkpoint-7")
         lease = self.broker.consume(config["proxy"]["sessionToken"])
@@ -160,6 +167,8 @@ class RealtimeVoiceSessionBrokerTests(unittest.TestCase):
             }
         )
         self.store.owner_truth_memory_projection_repository = lambda: reader
+        provider_role = "server role with current formal facts"
+        provider_hash = "sha256:" + hashlib.sha256(provider_role.encode()).hexdigest()
         config = self.broker.issue_runtime_config(
             user_id=self.user["id"],
             auth_session_id=self.auth["sessionId"],
@@ -171,10 +180,14 @@ class RealtimeVoiceSessionBrokerTests(unittest.TestCase):
             authority_epoch=7,
             memory_revision=12,
             session_context={
+                "providerRoleText": provider_role,
+                "providerContextHash": provider_hash,
                 "formalMemorySnapshot": {
                     "projectionCheckpoint": "checkpoint-current",
                     "contextHash": "sha256:current-context",
                     "memoryRevision": 12,
+                    "providerRoleText": provider_role,
+                    "providerContextHash": provider_hash,
                 }
             },
         )

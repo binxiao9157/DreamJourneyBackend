@@ -10,7 +10,10 @@ from app.domain.owner_truth.source_commands import (
     OwnerTruthCommandContext,
     OwnerTruthSourceCommandResult,
 )
-from app.services.owner_truth_source import OwnerTruthSourceAsyncEffectCommandService
+from app.services.owner_truth_source import (
+    OwnerTruthSourceAsyncEffectCommandService,
+    build_source_created_effect_intent,
+)
 
 
 class _FailingEffectWriter:
@@ -121,6 +124,22 @@ class OwnerTruthSourceAsyncEffectTests(unittest.TestCase):
         self.assertEqual(created.effect.operation_id, replayed.effect.operation_id)
         self.assertEqual(created.effect.outbox_event_id, replayed.effect.outbox_event_id)
         self.assertNotIn("payloadHash", created.public_receipt()["effect"])
+
+    def test_source_candidate_extraction_has_three_bounded_attempts(self):
+        command = self.command()
+        record = command.write_record(context=self.context)
+        source = OwnerTruthSourceCommandResult(
+            outcome="created",
+            receipt_id=record.receipt_id,
+            source_id=record.source_id,
+            source_version=1,
+            authority_epoch=0,
+            content_hash=record.content_hash,
+        )
+
+        intent = build_source_created_effect_intent(record=record, source=source)
+
+        self.assertEqual(intent.max_attempts, 3)
 
     def test_effect_failure_rolls_back_the_source_write(self):
         store = _AtomicSourceEffectStore(effect_writer=_FailingEffectWriter())

@@ -11,6 +11,7 @@ text never appears in worker output, logs, or a public API.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from hashlib import sha256
 import json
 import re
@@ -81,6 +82,85 @@ _TERMINAL_FAILURE_EXTRACTOR_ID = "candidateWorkerTerminalizer"
 _TERMINAL_FAILURE_MODEL_ID = "notApplicable"
 _TERMINAL_FAILURE_PROMPT_VERSION = "owner-truth-candidate-worker-terminal-v1"
 _TERMINAL_FAILURE_REASON = "candidateExtractionRetriesExhausted"
+
+
+@dataclass(frozen=True)
+class CandidateExtractionFailure:
+    code: str
+    stage: str
+    error_type: str
+    retryable: bool
+    dead_letter_cause: DeadLetterCause
+    provider_status: int | None = None
+
+
+def _classify_candidate_extraction_failure(error: Exception) -> CandidateExtractionFailure:
+    if isinstance(error, httpx.HTTPStatusError):
+        status = int(error.response.status_code)
+        retryable = status == 429 or status >= 500
+        if status in {401, 403}:
+            code = "candidateExtraction.providerAuthorization.rejected"
+        elif status == 402:
+            code = "candidateExtraction.providerQuota.unavailable"
+        elif status == 404:
+            code = "candidateExtraction.providerModel.unavailable"
+        elif status == 429:
+            code = "candidateExtraction.providerRateLimited"
+        elif status >= 500:
+            code = "candidateExtraction.providerHttp.transient"
+        else:
+            code = "candidateExtraction.providerRequest.rejected"
+        return CandidateExtractionFailure(
+            code=code,
+            stage="providerRequest",
+            error_type="httpStatus",
+            retryable=retryable,
+            dead_letter_cause=(
+                DeadLetterCause.MAX_ATTEMPTS_EXCEEDED
+                if retryable
+                else DeadLetterCause.MANUAL_INTERVENTION_REQUIRED
+            ),
+            provider_status=status,
+        )
+    if isinstance(error, httpx.TimeoutException):
+        return CandidateExtractionFailure(
+            code="candidateExtraction.providerRequest.timeout",
+            stage="providerRequest",
+            error_type="timeout",
+            retryable=True,
+            dead_letter_cause=DeadLetterCause.MAX_ATTEMPTS_EXCEEDED,
+        )
+    if isinstance(error, httpx.TransportError):
+        return CandidateExtractionFailure(
+            code="candidateExtraction.providerRequest.transport",
+            stage="providerRequest",
+            error_type="transport",
+            retryable=True,
+            dead_letter_cause=DeadLetterCause.MAX_ATTEMPTS_EXCEEDED,
+        )
+    if isinstance(error, ValueError):
+        return CandidateExtractionFailure(
+            code="candidateExtraction.responseContract.invalid",
+            stage="responseValidation",
+            error_type="contract",
+            retryable=False,
+            dead_letter_cause=DeadLetterCause.POISON_PAYLOAD,
+        )
+    if isinstance(error, RuntimeError):
+        return CandidateExtractionFailure(
+            code="candidateExtraction.runtime.blocked",
+            stage="runtimeConfiguration",
+            error_type="configuration",
+            retryable=False,
+            dead_letter_cause=DeadLetterCause.MANUAL_INTERVENTION_REQUIRED,
+        )
+    return CandidateExtractionFailure(
+        code="candidateExtraction.internal.transient",
+        stage="workerExecution",
+        error_type="internal",
+        retryable=True,
+        dead_letter_cause=DeadLetterCause.MAX_ATTEMPTS_EXCEEDED,
+    )
 
 
 class OwnerTruthCandidateExtractionWorkerError(RuntimeError):
@@ -457,11 +537,10 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
             try:
                 organization = self._organizer.request_organization(turns=chunk)
             except (httpx.HTTPError, ValueError):
-                # Keep a closed Live session reviewable when the semantic
-                # organizer is unavailable or returns an unusable structured
-                # response. This fallback uses owner evidence only and still
-                # requires explicit review.
-                return self._fallback.extract(intent=intent, source=source)
+                # A provider or response-contract failure is not a memory
+                # result. Let the worker retry or terminalize it explicitly;
+                # never concatenate transcript text into a false success.
+                raise
             chunk_memories = organization.get("memories")
             if not isinstance(chunk_memories, list):
                 raise ValueError("live memory organizer returned an invalid memories contract")
@@ -583,7 +662,10 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
         for turn in segmented_turns:
             text = str(turn.get("text") or "").strip()
             turn_index = turn.get("index")
-            would_overflow = current and (
+            current_has_user_evidence = any(
+                item.get("role") == "user" for item in current
+            )
+            would_overflow = current and current_has_user_evidence and (
                 len(current) >= maximum_turn_count
                 or current_characters + len(text) > maximum_total_characters
                 or turn_index in current_indices
@@ -595,19 +677,20 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                 current_indices = set()
 
             if not current and turn.get("role") == "assistant":
-                if latest_user_turn is None:
-                    raise ValueError("Live transcript must begin with user evidence")
-                current.append(latest_user_turn)
-                current_characters = len(str(latest_user_turn.get("text") or ""))
-                current_indices.add(latest_user_turn["index"])
+                if latest_user_turn is not None:
+                    current.append(latest_user_turn)
+                    current_characters = len(str(latest_user_turn.get("text") or ""))
+                    current_indices.add(latest_user_turn["index"])
             current.append(turn)
             current_characters += len(text)
             current_indices.add(turn_index)
             if turn.get("role") == "user":
                 latest_user_turn = turn
 
-        if current:
+        if current and any(item.get("role") == "user" for item in current):
             chunks.append(current)
+        elif current:
+            raise ValueError("Live transcript chunk contains no user evidence")
         if not chunks:
             raise ValueError("Live transcript has no organization input")
         return tuple(chunks)
@@ -846,8 +929,11 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 reason="candidateExtractionLeaseLost",
                 lease=lease,
             )
-        except Exception:
-            result = self._release_retryable_or_terminalize(lease)
+        except Exception as error:
+            result = self._release_retryable_or_terminalize(
+                lease,
+                failure=_classify_candidate_extraction_failure(error),
+            )
         self._record_attempt(lease=lease, result=result, started_at=started_at)
         return result
 
@@ -1110,7 +1196,12 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 lease_seconds=self._lease_seconds,
             )
 
-    def _release_retryable_or_terminalize(self, lease: AsyncEffectJobLease) -> dict[str, Any]:
+    def _release_retryable_or_terminalize(
+        self,
+        lease: AsyncEffectJobLease,
+        *,
+        failure: CandidateExtractionFailure,
+    ) -> dict[str, Any]:
         try:
             with self._unit_of_work(
                 correlation_id=f"owner-truth-candidate-extraction-worker-retry-{lease.job_id}",
@@ -1119,17 +1210,20 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 lease_repository = self._store.async_effect_lease_repository()
                 intent = lease_repository.load_intent(lease)
                 self._assert_typed_intent(intent)
-                if lease.attempt < int(intent.max_attempts):
+                if failure.retryable and lease.attempt < int(intent.max_attempts):
+                    retry_seconds = self._retry_delay_seconds(lease)
                     preview = lease_repository.release_retryable(
                         lease,
-                        retry_seconds=self._retry_seconds,
+                        retry_seconds=retry_seconds,
+                        error_code=failure.code,
                     )
                     return self._payload(
                         status="retryWait",
-                        reason="candidateExtractionRetryableFailure",
+                        reason=failure.code,
                         lease=lease,
                         intent=intent,
                         retry_available_at=preview.available_at,
+                        failure=failure,
                     )
 
                 admission = (
@@ -1174,6 +1268,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 command = self._terminal_failure_command(
                     intent=intent,
                     source=source,
+                    failure_code=failure.code,
                 )
                 extraction_result = OwnerTruthCandidateExtractionService(
                     self._store
@@ -1197,14 +1292,15 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 completion = lease_repository.complete(
                     lease,
                     outcome="failed",
-                    error_code=_TERMINAL_FAILURE_REASON,
+                    error_code=failure.code,
+                    terminal_reason_code=_TERMINAL_FAILURE_REASON,
                 )
                 admission_record = admit_dead_letter(
                     intent=intent,
                     job_state=AsyncEffectJobState.FAILED,
                     attempt=lease.attempt,
                     max_attempts=int(intent.max_attempts),
-                    cause=DeadLetterCause.MAX_ATTEMPTS_EXCEEDED,
+                    cause=failure.dead_letter_cause,
                     failure_hash=_result_hash(
                         intent.stable_key,
                         _TERMINAL_FAILURE_REASON,
@@ -1228,6 +1324,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                     receipt=extraction_result.consumer,
                     extraction_result=extraction_result,
                     dead_letter=dead_letter,
+                    failure=failure,
                 )
         except AsyncEffectLeaseCancelled:
             return self._payload(
@@ -1253,6 +1350,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
         *,
         intent: AsyncEffectIntent,
         source: OwnerTruthCandidateExtractionInput,
+        failure_code: str,
     ) -> SyntheticCandidateExtractionCommand:
         """Persist a worker failure without representing it as model output."""
 
@@ -1265,9 +1363,16 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
             source_content_hash=source.source_content_hash,
             status=ExtractionResultStatus.FAILED,
             proposals=(),
-            failure_code=_TERMINAL_FAILURE_REASON,
+            failure_code=failure_code,
             retryable=False,
         )
+
+    def _retry_delay_seconds(self, lease: AsyncEffectJobLease) -> int:
+        if self._retry_seconds != _DEFAULT_RETRY_SECONDS:
+            return self._retry_seconds
+        base = 5 if lease.attempt == 1 else 20
+        jitter = int(lease.job_id.replace("-", "")[-2:], 16) % 3
+        return base + jitter
 
     def _runtime_block_reason(self) -> str | None:
         readiness = self._readiness()
@@ -1322,6 +1427,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
         message_projection_failure_reason: str | None = None,
         retry_available_at: str | None = None,
         dead_letter: Any | None = None,
+        failure: CandidateExtractionFailure | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "mode": "run",
@@ -1395,6 +1501,17 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
             )
         if retry_available_at is not None:
             payload["retryAvailableAt"] = retry_available_at
+        if failure is not None:
+            payload.update(
+                {
+                    "failureCode": failure.code,
+                    "failureStage": failure.stage,
+                    "failureType": failure.error_type,
+                    "retryable": failure.retryable,
+                }
+            )
+            if failure.provider_status is not None:
+                payload["providerStatus"] = failure.provider_status
         if dead_letter is not None:
             admission = dead_letter.admission
             payload.update(

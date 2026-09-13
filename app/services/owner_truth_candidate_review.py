@@ -241,6 +241,18 @@ class OwnerTruthCandidateDecisionActivationResult:
     memory_revision: int | None = None
 
 
+@dataclass(frozen=True)
+class OwnerTruthCandidateDecisionLookupResult:
+    """Read-only observation of one immutable review command result."""
+
+    result: str
+    expected_candidate_version: int | None = None
+    candidate_before_hash: str | None = None
+    expected_change_set_id: str | None = None
+    expected_proposal_hash: str | None = None
+    decision_result: OwnerTruthCandidateDecisionActivationResult | None = None
+
+
 class OwnerTruthCandidateReviewStore(Protocol):
     def owner_truth_candidate_review_repository(self) -> Any:
         ...
@@ -932,6 +944,97 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 corrected_value_id=record.corrected_value_id,
             )
 
+    def lookup_decision_result(
+        self,
+        *,
+        candidate_id: str,
+        command_id_hash: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthCandidateDecisionLookupResult:
+        """Observe a durable receipt without replaying the review command."""
+
+        _assert_owner_context(context)
+        with self._lock:
+            self.assert_active_owner_vault(context=context)
+            candidate = self._candidates.get(candidate_id)
+            if (
+                candidate is None
+                or candidate.vault_id != context.vault_id
+                or candidate.owner_subject_id != context.owner_subject_id
+            ):
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "Candidate does not exist in this Owner Vault"
+                )
+            receipt = self._receipts.get(command_id_hash)
+            if receipt is None or str(receipt.get("candidateId") or "") != candidate_id:
+                return OwnerTruthCandidateDecisionLookupResult(result="notObserved")
+            if str(receipt.get("actorSubjectId") or "") != context.owner_subject_id:
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "DecisionReceipt does not belong to this Owner Vault"
+                )
+
+            activation_record = self._memory_activations.get(str(receipt["id"]))
+            if candidate.decision in {
+                CandidateDecision.REJECTED,
+                CandidateDecision.INVALIDATED,
+            }:
+                activation = OwnerTruthMemoryActivationResult(
+                    outcome="notApplicable",
+                    receipt_id=str(receipt["id"]),
+                    candidate_id=candidate.candidate_id,
+                    decision=candidate.decision,
+                    memory_id=None,
+                    memory_version_id=None,
+                    memory_version=None,
+                    authority_epoch=None,
+                    content_hash=None,
+                )
+            elif activation_record is not None:
+                activation = self._activation_result_from_record(
+                    record=activation_record,
+                    outcome=str(activation_record.get("activationOutcome") or "created"),
+                    receipt_id=str(receipt["id"]),
+                    candidate=candidate,
+                )
+            else:
+                raise OwnerTruthCandidateReviewConflict(
+                    "persisted DecisionReceipt is missing its MemoryVersion result"
+                )
+
+            corrected_value_id = receipt.get("correctedValueId")
+            review = OwnerTruthCandidateReviewResult(
+                outcome="created",
+                receipt_id=str(receipt["id"]),
+                candidate_id=candidate.candidate_id,
+                decision=candidate.decision,
+                candidate_row_version=candidate.row_version,
+                candidate_before_hash=str(receipt["candidateBeforeHash"]),
+                candidate_after_hash=str(receipt["candidateAfterHash"]),
+                corrected_value_id=(
+                    str(corrected_value_id) if corrected_value_id is not None else None
+                ),
+            )
+            return OwnerTruthCandidateDecisionLookupResult(
+                result="found",
+                expected_candidate_version=int(receipt["expectedCandidateVersion"]),
+                candidate_before_hash=str(receipt["candidateBeforeHash"]),
+                expected_change_set_id=(
+                    str(receipt["expectedChangeSetId"])
+                    if receipt.get("expectedChangeSetId")
+                    else None
+                ),
+                expected_proposal_hash=(
+                    str(receipt["expectedProposalHash"])
+                    if receipt.get("expectedProposalHash")
+                    else None
+                ),
+                decision_result=OwnerTruthCandidateDecisionActivationResult(
+                    review=review,
+                    memory_activation=activation,
+                    memory_revision=int(self._memory_revisions.get(context.vault_id, 0)),
+                ),
+            )
+
     def _current_formal_memories(
         self,
         *,
@@ -1182,6 +1285,7 @@ class InMemoryOwnerTruthCandidateReviewRepository:
 
                 operation = changeset_plan.change_set.operation
                 activation_record: dict[str, Any] = {
+                    "activationOutcome": changeset_plan.outcome,
                     "authorityEpoch": changeset_plan.authority_epoch,
                     "candidateId": changeset_plan.candidate_id,
                     "changeSet": {
@@ -1252,6 +1356,7 @@ class InMemoryOwnerTruthCandidateReviewRepository:
             if plan is None:  # defensive: non-activating decisions returned above
                 raise OwnerTruthCandidateReviewConflict("terminal decision cannot activate MemoryVersion")
             self._memory_activations[plan.receipt_id] = {
+                "activationOutcome": "created",
                 "authorityEpoch": plan.authority_epoch,
                 "candidateId": plan.candidate_id,
                 "contentHash": plan.content_hash,
@@ -2416,6 +2521,154 @@ class PostgresOwnerTruthCandidateReviewRepository:
             candidate_after_hash=record.candidate_after_hash,
             corrected_value_id=record.corrected_value_id,
         )
+
+    def lookup_decision_result(
+        self,
+        *,
+        candidate_id: str,
+        command_id_hash: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthCandidateDecisionLookupResult:
+        """Read one committed command result without locks or side effects."""
+
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            vault = self._active_vault(cursor, context=context, lock=False)
+            cursor.execute(
+                """
+                SELECT c.id, c.decision_status, c.row_version, c.authority_epoch,
+                    receipt.id AS receipt_id, receipt.decision,
+                    receipt.actor_subject_id, receipt.expected_candidate_version,
+                    receipt.candidate_before_hash, receipt.candidate_after_hash,
+                    receipt.expected_change_set_id, receipt.expected_proposal_hash,
+                    correction.id AS corrected_value_id,
+                    changeset.activation_outcome,
+                    changeset.target_memory_id, changeset.target_memory_version_id,
+                    changeset.target_memory_version,
+                    version.memory_id AS written_memory_id,
+                    version.id AS written_memory_version_id,
+                    version.version_number AS written_memory_version,
+                    version.content_hash AS written_content_hash
+                FROM owner_truth.memory_candidates AS c
+                LEFT JOIN owner_truth.decision_receipts AS receipt
+                  ON receipt.vault_id = c.vault_id
+                 AND receipt.candidate_id = c.id
+                 AND receipt.command_id_hash = %s
+                LEFT JOIN owner_truth.candidate_decision_values AS correction
+                  ON correction.vault_id = receipt.vault_id
+                 AND correction.decision_receipt_id = receipt.id
+                LEFT JOIN owner_truth.memory_changesets AS changeset
+                  ON changeset.vault_id = receipt.vault_id
+                 AND changeset.decision_receipt_id = receipt.id
+                LEFT JOIN owner_truth.memory_versions AS version
+                  ON version.vault_id = receipt.vault_id
+                 AND (
+                    version.decision_receipt_id = receipt.id
+                    OR version.id = changeset.target_memory_version_id
+                 )
+                WHERE c.vault_id = %s
+                  AND c.id = %s
+                  AND c.owner_subject_id = %s
+                """,
+                (
+                    command_id_hash,
+                    context.vault_id,
+                    candidate_id,
+                    context.owner_subject_id,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "Candidate does not exist in this Owner Vault"
+                )
+            if row.get("receipt_id") is None:
+                return OwnerTruthCandidateDecisionLookupResult(result="notObserved")
+            if str(row.get("actor_subject_id") or "") != context.owner_subject_id:
+                raise OwnerTruthCandidateReviewAccessDenied(
+                    "DecisionReceipt does not belong to this Owner Vault"
+                )
+
+            decision = CandidateDecision(str(row["decision"]))
+            if decision in {CandidateDecision.REJECTED, CandidateDecision.INVALIDATED}:
+                activation = OwnerTruthMemoryActivationResult(
+                    outcome="notApplicable",
+                    receipt_id=str(row["receipt_id"]),
+                    candidate_id=candidate_id,
+                    decision=decision,
+                    memory_id=None,
+                    memory_version_id=None,
+                    memory_version=None,
+                    authority_epoch=None,
+                    content_hash=None,
+                )
+            else:
+                memory_id = row.get("written_memory_id") or row.get("target_memory_id")
+                memory_version_id = (
+                    row.get("written_memory_version_id")
+                    or row.get("target_memory_version_id")
+                )
+                memory_version = (
+                    row.get("written_memory_version")
+                    or row.get("target_memory_version")
+                )
+                if not memory_id or not memory_version_id or memory_version is None:
+                    raise OwnerTruthCandidateReviewConflict(
+                        "persisted DecisionReceipt is missing its MemoryVersion result"
+                    )
+                activation = OwnerTruthMemoryActivationResult(
+                    outcome=str(row.get("activation_outcome") or "created"),
+                    receipt_id=str(row["receipt_id"]),
+                    candidate_id=candidate_id,
+                    decision=decision,
+                    memory_id=str(memory_id),
+                    memory_version_id=str(memory_version_id),
+                    memory_version=int(memory_version),
+                    authority_epoch=int(row.get("authority_epoch") or vault["authority_epoch"]),
+                    content_hash=(
+                        str(row["written_content_hash"])
+                        if row.get("written_content_hash")
+                        else str(row["candidate_after_hash"])
+                    ),
+                )
+
+            review = OwnerTruthCandidateReviewResult(
+                outcome="created",
+                receipt_id=str(row["receipt_id"]),
+                candidate_id=candidate_id,
+                decision=decision,
+                candidate_row_version=int(row["row_version"]),
+                candidate_before_hash=str(row["candidate_before_hash"]),
+                candidate_after_hash=str(row["candidate_after_hash"]),
+                corrected_value_id=(
+                    str(row["corrected_value_id"])
+                    if row.get("corrected_value_id")
+                    else None
+                ),
+            )
+            return OwnerTruthCandidateDecisionLookupResult(
+                result="found",
+                expected_candidate_version=int(row["expected_candidate_version"]),
+                candidate_before_hash=str(row["candidate_before_hash"]),
+                expected_change_set_id=(
+                    str(row["expected_change_set_id"])
+                    if row.get("expected_change_set_id")
+                    else None
+                ),
+                expected_proposal_hash=(
+                    str(row["expected_proposal_hash"])
+                    if row.get("expected_proposal_hash")
+                    else None
+                ),
+                decision_result=OwnerTruthCandidateDecisionActivationResult(
+                    review=review,
+                    memory_activation=activation,
+                    memory_revision=self._memory_revision_for_read(
+                        cursor,
+                        vault_id=context.vault_id,
+                    ),
+                ),
+            )
 
     def memory_revision(self, *, context: OwnerTruthCommandContext) -> int:
         """Read the current Vault-wide V5 formal-memory revision."""
@@ -3905,6 +4158,48 @@ class OwnerTruthCandidateReviewService:
         ):
             return self._store.owner_truth_candidate_review_repository().decide(
                 command=command,
+                context=context,
+            )
+
+    def lookup_decision_result(
+        self,
+        *,
+        candidate_id: str,
+        command_id: str,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthCandidateDecisionLookupResult:
+        """Read durable outcome for one command without replaying its write."""
+
+        _assert_owner_context(context)
+        normalized_candidate_id = str(candidate_id or "").strip()
+        normalized_command_id = str(command_id or "").strip()
+        if not normalized_candidate_id:
+            raise OwnerTruthCandidateReviewAccessDenied(
+                "Candidate does not exist in this Owner Vault"
+            )
+        allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.:-"
+        if (
+            not normalized_command_id
+            or len(normalized_command_id) > 128
+            or any(character not in allowed for character in normalized_command_id)
+        ):
+            raise OwnerTruthCandidateReviewError(
+                "command_id must be an opaque identifier"
+            )
+        command_id_hash = sha256(normalized_command_id.encode("utf-8")).hexdigest()
+        with self._request_unit_of_work(
+            correlation_id=f"owner-truth-decision-result-{command_id_hash}",
+            command_id=f"lookup:{command_id_hash}",
+        ):
+            repository = self._store.owner_truth_candidate_review_repository()
+            lookup = getattr(repository, "lookup_decision_result", None)
+            if not callable(lookup):
+                raise OwnerTruthCandidateReviewConflict(
+                    "Candidate decision result lookup is unavailable"
+                )
+            return lookup(
+                candidate_id=normalized_candidate_id,
+                command_id_hash=command_id_hash,
                 context=context,
             )
 

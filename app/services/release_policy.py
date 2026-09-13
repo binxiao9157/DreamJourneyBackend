@@ -1213,11 +1213,19 @@ class ReleasePolicyCommandGate:
             and memory_segments[3] == "candidates"
             and memory_segments[5] in {"changeset-preview", "decisions"}
         ) or (
-            normalized_method == "POST"
-            and len(memory_segments) == 5
+            len(memory_segments) == 5
             and memory_segments[:2] == ("v2", "vaults")
             and memory_segments[3] == "memory-changeset-groups"
-            and memory_segments[4] in {"preview", "confirm"}
+            and (
+                (
+                    normalized_method == "POST"
+                    and memory_segments[4] in {"preview", "confirm"}
+                )
+                or (
+                    normalized_method == "GET"
+                    and memory_segments[4] == "decision-result"
+                )
+            )
         ) or (
             normalized_method == "GET"
             and len(memory_segments) == 4
@@ -1239,6 +1247,12 @@ class ReleasePolicyCommandGate:
             and memory_segments[3] == "memories"
             and memory_segments[5] == "revisions"
             and normalized_method == "POST"
+        ) or (
+            normalized_method == "GET"
+            and len(memory_segments) == 6
+            and memory_segments[:2] == ("v2", "vaults")
+            and memory_segments[3] == "candidates"
+            and memory_segments[5] == "decision-result"
         ):
             return "ownerTruthCandidateReview"
         if (

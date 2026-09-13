@@ -360,6 +360,12 @@ class RouteOwnershipRegistry:
             ),
             _rule(
                 "GET",
+                "/v2/vaults/{vault_id}/candidates/{candidate_id}/decision-result",
+                session,
+                "ownerTruthCandidateDecisionResult",
+            ),
+            _rule(
+                "GET",
                 "/v2/vaults/{vault_id}/candidate-review-history",
                 session,
                 "ownerTruthCandidateReviewHistory",
@@ -621,6 +627,12 @@ class RouteOwnershipRegistry:
                 "/v2/vaults/{vault_id}/memory-changeset-groups/confirm",
                 session,
                 "ownerTruthMemoryChangeSetGroupConfirm",
+            ),
+            _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/memory-changeset-groups/decision-result",
+                session,
+                "ownerTruthMemoryChangeSetGroupDecisionResult",
             ),
             _rule(
                 "POST",

@@ -8,6 +8,9 @@ import app.main as main_module
 from app.core.config import settings
 from app.main import app
 from app.services.in_memory_store import InMemoryStore
+from app.services.formal_memory_conversation_snapshot import (
+    FormalMemoryConversationSnapshotError,
+)
 from app.services.release_policy import ReleasePolicyCommandGate, ReleasePolicyService
 from app.services.tokens import TokenService
 
@@ -246,6 +249,43 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
             0,
         )
         self.assert_value_free(body)
+
+    def test_realtime_voice_snapshot_failure_returns_and_logs_safe_business_code(self):
+        object.__setattr__(
+            settings,
+            "public_base_url",
+            "https://api.example.test/dreamjourney-api",
+        )
+        object.__setattr__(settings, "realtime_voice_proxy_enabled", True)
+        headers, user_id = self.user_headers("13800139907")
+
+        with patch(
+            "app.main.FormalMemoryConversationSnapshotService.build",
+            side_effect=FormalMemoryConversationSnapshotError(
+                "formalMemorySnapshotUnavailable"
+            ),
+        ), self.assertLogs("app.main", level="WARNING") as captured:
+            response = client.post(
+                "/voice/realtime-token",
+                headers=headers,
+                json={"userId": user_id},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assert_no_store(response)
+        self.assertEqual(
+            response.json()["detail"],
+            {
+                "code": "formalMemorySnapshotUnavailable",
+                "retryable": True,
+            },
+        )
+        log_text = "\n".join(captured.output)
+        self.assertIn("stage=snapshot", log_text)
+        self.assertIn("businessCode=formalMemorySnapshotUnavailable", log_text)
+        self.assertIn("httpStatus=503", log_text)
+        self.assertNotIn(user_id, log_text)
+        self.assertNotIn(self.sentinels["volcengine_app_token"], log_text)
 
     def test_legacy_tts_response_is_no_store_and_redacts_provider_references(self):
         headers, user_id = self.user_headers("13800139905")

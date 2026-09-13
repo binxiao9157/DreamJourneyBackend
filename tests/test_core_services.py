@@ -1073,11 +1073,61 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
         self.assertIn("尽可能贴近用户原话", prompt)
         self.assertIn("不得润色、文学化、委婉化、夸大或弱化", prompt)
         self.assertIn("必须保留这种来源或不确定性", prompt)
+        self.assertIn("factType 只能是", prompt)
+        self.assertIn("dimensions 只能使用", prompt)
+        self.assertIn("不得自创 education、career 等标签", prompt)
+        self.assertIn("同一个原子事实只输出一次", prompt)
         self.assertNotIn("audio", request["json"])
         self.assertNotIn("pcm", prompt.lower())
         self.assertEqual(request["json"]["response_format"], {"type": "json_object"})
         self.assertEqual(request["json"]["thinking"], {"type": "disabled"})
         self.assertGreaterEqual(request["json"]["max_tokens"], 4_096)
+
+    def test_live_memory_organization_discards_provider_taxonomy_fact_type(self):
+        turns = [
+            {"index": 1, "role": "user", "text": "我于2016年从晨光大学计算机专业毕业。"},
+        ]
+        facets = {
+            "people": [],
+            "time": [],
+            "places": [],
+            "relationships": [],
+            "emotions": [],
+            "values": [],
+            "personality": [],
+            "habits": [],
+            "goals": [],
+            "identity": [],
+            "reflections": [],
+            "confidence": 0.9,
+        }
+
+        result = DeepSeekLiveMemoryOrganizationProxy.parse_organization(
+            json.dumps(
+                {
+                    "memories": [
+                        {
+                            "memoryKind": "knowledge",
+                            "claim": "我于2016年从晨光大学计算机专业毕业。",
+                            "sourceTurnIndices": [1],
+                            "factType": "education",
+                            "dimensions": ["education"],
+                            "predicate": "graduatedFrom",
+                            "object": {"label": "晨光大学"},
+                            "qualifiers": {},
+                            "facets": facets,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            turns=turns,
+        )
+
+        memory = result["memories"][0]
+        self.assertNotIn("factType", memory)
+        self.assertEqual(memory["claim"], turns[0]["text"])
+        self.assertEqual(memory["sourceTurnIndices"], [1])
 
     def test_text_memory_organization_is_objective_and_forbids_polishing(self):
         proxy = DeepSeekTextMemoryOrganizationProxy(
