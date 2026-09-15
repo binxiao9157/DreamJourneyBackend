@@ -135,3 +135,4 @@ AFTER INSERT OR DELETE OR UPDATE OF
 ON owner_truth.sources
 FOR EACH ROW EXECUTE FUNCTION
     owner_truth.invalidate_source_memory_derivatives_if_referenced();
+
