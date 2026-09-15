@@ -1103,7 +1103,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
 {{"schemaVersion":"{LIVE_MEMORY_SUPPORT_SCHEMA_VERSION}","turnAssessments":[{{"turnIndex":1,"speechAct":"assertion"}}],"memoryAssessments":[{{"memoryIndex":0,"verdict":"supported","supportingTurnIndices":[1]}}],"omittedFactBearingTurnIndices":[]}}
 
 规则：
-1. 每个 role=user 的 turn 必须且只能出现一次；speechAct 只能是 assertion、correction、timeSupplement、query、quotedSpeech、ambiguous。
+1. turnAssessments 只能包含 role=user 的 turn，不得包含 role=assistant；每个 role=user 的 turn 必须且只能出现一次；speechAct 只能是 assertion、correction、timeSupplement、query、quotedSpeech、ambiguous。
 2. 每条草案必须且只能出现一次；verdict 只能是 supported、unsupported、superseded、uncertain。
 3. supported 必须列出直接支持命题的 user turn，且只能来自草案已有 sourceTurnIndices；其他 verdict 的 supportingTurnIndices 必须为空。
 4. 纯查询、确认问法、反问和当场“用户问过什么”的转述不能支持事实草案。问号不是唯一判断依据。

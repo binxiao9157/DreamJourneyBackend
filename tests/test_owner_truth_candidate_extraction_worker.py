@@ -1120,6 +1120,63 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
         self.assertEqual(len(organizer.support_calls), 1)
 
+    def test_b7_support_review_ignores_extra_assistant_turn_assessment(self) -> None:
+        user_fact = "我于2016年从晨光大学计算机专业毕业。"
+        organizer = _RecordingLiveMemoryOrganizer(
+            [{
+                "memoryKind": "experience",
+                "summary": user_fact,
+                "sourceTurnIndices": [2],
+                "facets": _facets(),
+            }],
+            support_review={
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [
+                    {"turnIndex": 1, "speechAct": "assertion"},
+                    {"turnIndex": 2, "speechAct": "assertion"},
+                ],
+                "memoryAssessments": [{
+                    "memoryIndex": 0,
+                    "verdict": "supported",
+                    "supportingTurnIndices": [2],
+                }],
+                "omittedFactBearingTurnIndices": [],
+            },
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(user_fact),
+                source_text=user_fact,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": [
+                        {
+                            "index": 1,
+                            "role": "assistant",
+                            "text": "请只讲一条用于隔离验证的合成经历。",
+                            "captureMode": "live",
+                        },
+                        {
+                            "index": 2,
+                            "role": "user",
+                            "text": user_fact,
+                            "captureMode": "live",
+                        },
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(len(command.proposals), 1)
+        self.assertEqual(command.proposals[0].content["summary"], user_fact)
+
     def test_b7_assistant_answer_cannot_be_smuggled_through_a_user_query_index(self) -> None:
         query = "我的测试清单代号是什么？"
         organizer = _RecordingLiveMemoryOrganizer(

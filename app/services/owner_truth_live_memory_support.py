@@ -42,6 +42,11 @@ def validate_live_memory_support(
         for turn in turns
         if isinstance(turn, Mapping) and turn.get("role") == "user"
     }
+    assistant_indices = {
+        turn.get("index")
+        for turn in turns
+        if isinstance(turn, Mapping) and turn.get("role") == "assistant"
+    }
     if not user_indices or any(isinstance(index, bool) or not isinstance(index, int) for index in user_indices):
         raise ValueError("live memory support review has invalid user turns")
 
@@ -49,11 +54,17 @@ def validate_live_memory_support(
     if not isinstance(raw_turn_reviews, list):
         raise ValueError("live memory support review misses turn assessments")
     speech_acts: dict[int, str] = {}
+    ignored_assistant_indices: set[int] = set()
     for item in raw_turn_reviews:
         if not isinstance(item, Mapping):
             raise ValueError("live memory support turn assessment must be an object")
         index = item.get("turnIndex")
         speech_act = item.get("speechAct")
+        if index in assistant_indices:
+            if speech_act not in _SPEECH_ACTS or index in ignored_assistant_indices:
+                raise ValueError("live memory support assistant assessment is invalid")
+            ignored_assistant_indices.add(index)
+            continue
         if index not in user_indices or index in speech_acts or speech_act not in _SPEECH_ACTS:
             raise ValueError("live memory support turn assessment is invalid")
         speech_acts[index] = str(speech_act)
