@@ -500,6 +500,7 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
             json={},
         )
         self.assertEqual(refreshed.status_code, 200, refreshed.text)
+        self.assertNotIn("correctionBinding", refreshed.json())
         self.assertEqual(
             refreshed.json()["proposedChangeSet"]["proposalHash"],
             proposed["proposalHash"],
@@ -520,6 +521,130 @@ class OwnerTruthCandidateReviewAPITests(unittest.TestCase):
         )
         self.assertEqual(created.status_code, 201, created.text)
         self.assertEqual(created.json()["memoryActivation"]["status"], "created")
+
+    def test_v5_correction_preview_binds_source_candidate_and_resolved_content(self) -> None:
+        owner_id, headers = self._login("13800139143")
+        vault_id = "vault-api-v5-correction-binding"
+        candidate = self._candidate(vault_id=vault_id, owner_subject_id=owner_id)
+        original_content = enrich_memory_payload_v5(
+            kind=MemoryKind.KNOWLEDGE,
+            payload={
+                "statement": "测试阅读清单代号是陈鑫。",
+                "knowledgeType": "preference",
+                "domains": ["knowledgeSkills"],
+                "factType": "knowledge",
+                "predicate": "readingListCodeName",
+                "object": {"label": "陈鑫", "category": "codeName"},
+            },
+            provenance={"mode": "selfReport"},
+            memory_subject_id="person-owner",
+            claim_subject_id="person-owner",
+        )
+        candidate = replace(
+            candidate,
+            memory_kind=MemoryKind.KNOWLEDGE,
+            content_schema_version=OWNER_TRUTH_SCHEMA_VERSION_V5,
+            content_hash=_content_hash(original_content),
+            payload={
+                **candidate.payload,
+                "content": original_content,
+                "contentSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION_V5,
+            },
+        )
+        self._seed(candidate)
+        corrected_content = json.loads(json.dumps(original_content, ensure_ascii=False))
+        corrected_content["statement"] = "测试阅读清单代号是晨星。"
+        corrected_content["object"] = {"label": "晨星", "category": "codeName"}
+
+        response = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/changeset-preview",
+            headers=headers,
+            json={
+                "correctedValue": corrected_content,
+                "correctedValueSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION_V5,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        proposal = body["proposedChangeSet"]
+        binding = body["correctionBinding"]
+        self.assertNotEqual(proposal["candidateContentHash"], candidate.content_hash)
+        self.assertEqual(binding["schemaVersion"], "owner-truth-candidate-correction-binding-v1")
+        self.assertEqual(binding["sourceCandidateVersion"], candidate.row_version)
+        self.assertEqual(binding["sourceCandidateContentHash"], candidate.content_hash)
+        self.assertEqual(
+            binding["submittedCorrection"],
+            {
+                "correctedValueSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION_V5,
+                "correctedValue": corrected_content,
+            },
+        )
+        self.assertEqual(binding["resolvedContentHash"], proposal["candidateContentHash"])
+
+        after_preview = client.get(
+            f"/v2/vaults/{vault_id}/candidates",
+            headers=headers,
+        )
+        self.assertEqual(after_preview.status_code, 200, after_preview.text)
+        self.assertEqual(after_preview.json()["memoryRevision"], 0)
+        self.assertEqual(
+            after_preview.json()["candidates"][0]["candidateVersion"],
+            candidate.row_version,
+        )
+
+        tampered_content = json.loads(json.dumps(corrected_content, ensure_ascii=False))
+        tampered_content["statement"] = "测试阅读清单代号是另一值。"
+        tampered = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
+            headers=headers,
+            json={
+                "commandId": "candidate-api-v5-correction-tampered-001",
+                "expectedCandidateVersion": candidate.row_version,
+                "expectedMemoryRevision": proposal["baseMemoryRevision"],
+                "expectedChangeSetId": proposal["changeSetId"],
+                "expectedProposalHash": proposal["proposalHash"],
+                "action": "correct",
+                "correctedValue": tampered_content,
+                "correctedValueSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION_V5,
+                "reasonCode": "ownerCorrected",
+            },
+        )
+        self.assertEqual(tampered.status_code, 409, tampered.text)
+        self.assertEqual(
+            tampered.json()["detail"]["code"],
+            "ownerTruthCandidateReviewConflict",
+        )
+
+        command = {
+            "commandId": "candidate-api-v5-correction-bound-001",
+            "expectedCandidateVersion": candidate.row_version,
+            "expectedMemoryRevision": proposal["baseMemoryRevision"],
+            "expectedChangeSetId": proposal["changeSetId"],
+            "expectedProposalHash": proposal["proposalHash"],
+            "action": "correct",
+            "correctedValue": corrected_content,
+            "correctedValueSchemaVersion": OWNER_TRUTH_SCHEMA_VERSION_V5,
+            "reasonCode": "ownerCorrected",
+        }
+        created = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
+            headers=headers,
+            json=command,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        receipt = created.json()["receipt"]
+        self.assertEqual(receipt["candidateBeforeHash"], candidate.content_hash)
+        self.assertEqual(receipt["candidateAfterHash"], proposal["candidateContentHash"])
+        self.assertEqual(receipt["candidateVersion"], candidate.row_version + 1)
+
+        replay = client.post(
+            f"/v2/vaults/{vault_id}/candidates/{candidate.candidate_id}/decisions",
+            headers=headers,
+            json=command,
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["receipt"]["receiptId"], receipt["receiptId"])
 
     def test_v5_dependency_group_previews_commits_atomically_and_replays(self) -> None:
         owner_id, headers = self._login("13800139172")

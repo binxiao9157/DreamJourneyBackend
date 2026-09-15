@@ -65,6 +65,10 @@ from app.services.deepseek import (
     DeepSeekLiveMemoryOrganizationProxy,
     DeepSeekTextMemoryOrganizationProxy,
 )
+from app.services.owner_truth_live_memory_support import (
+    LIVE_MEMORY_SUPPORT_VALIDATOR_VERSION,
+    validate_live_memory_support,
+)
 from app.services.owner_truth_candidate_extraction import (
     OwnerTruthCandidateExtractionInput,
     OwnerTruthCandidateExtractionResult,
@@ -490,6 +494,18 @@ class LiveMemoryOrganizationProvider(Protocol):
         ...
 
 
+class LiveMemorySupportReviewProvider(Protocol):
+    support_prompt_version: str
+
+    def request_support_review(
+        self,
+        *,
+        turns: list[dict[str, Any]],
+        memories: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        ...
+
+
 class TextMemoryOrganizationProvider(Protocol):
     model: str
     prompt_version: str
@@ -511,9 +527,19 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
         *,
         settings: Settings,
         organizer: LiveMemoryOrganizationProvider | None = None,
+        support_reviewer: LiveMemorySupportReviewProvider | None = None,
         fallback: OwnerTruthCandidateExtractor | None = None,
     ) -> None:
-        self._organizer = organizer or DeepSeekLiveMemoryOrganizationProxy(settings)
+        default_provider = DeepSeekLiveMemoryOrganizationProxy(settings)
+        self._organizer = organizer or default_provider
+        if support_reviewer is not None:
+            self._support_reviewer = support_reviewer
+        elif hasattr(self._organizer, "request_support_review"):
+            self._support_reviewer = self._organizer
+        elif organizer is None:
+            self._support_reviewer = default_provider
+        else:
+            raise ValueError("Live memory organizer requires an independent support reviewer")
         self._fallback = fallback or DeterministicOwnerTruthCandidateExtractor()
         self._live_organization_enabled = (
             settings.owner_truth_live_memory_organization_enabled
@@ -559,6 +585,15 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                     continue
                 seen_memories.add(dedupe_key)
                 memories.append(memory)
+        support_review = self._support_reviewer.request_support_review(
+            turns=turns,
+            memories=memories,
+        )
+        memories = validate_live_memory_support(
+            turns=turns,
+            memories=memories,
+            review=support_review,
+        )
         spans = self._owner_evidence_spans(source=source, turns=turns)
         source_perspective, source_epistemic = _source_provenance(
             source.source_metadata or {}
@@ -619,7 +654,10 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
             intent=intent,
             extractor_id=self._EXTRACTOR_ID,
             model_id=self._organizer.model,
-            prompt_version=self._organizer.prompt_version,
+            prompt_version=(
+                f"{self._organizer.prompt_version}+"
+                f"{getattr(self._support_reviewer, 'support_prompt_version', LIVE_MEMORY_SUPPORT_VALIDATOR_VERSION)}"
+            ),
             policy_version=OWNER_TRUTH_SCHEMA_VERSION,
             source_content_hash=source.source_content_hash,
             status=ExtractionResultStatus.SUCCEEDED,

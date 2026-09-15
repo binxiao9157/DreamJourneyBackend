@@ -131,6 +131,13 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         return f"/v2/vaults/{vault_id}/interview-sessions/{session_id}/end"
 
     @staticmethod
+    def _live_delivery_status_path(vault_id: str, session_id: str) -> str:
+        return (
+            f"/v2/vaults/{vault_id}/interview-sessions/"
+            f"{session_id}/live-delivery-status"
+        )
+
+    @staticmethod
     def _topic_switch_path(vault_id: str, session_id: str) -> str:
         return (
             f"/v2/vaults/{vault_id}/interview-sessions/"
@@ -346,6 +353,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             session_id=session_id,
         )
         self.assertEqual(started.status_code, 201, started.text)
+        self.assertEqual(started.json()["receipt"]["authorityEpoch"], 0)
         appended = client.post(
             self._append_path(vault_id, session_id),
             headers=headers,
@@ -419,6 +427,125 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             blocked_append.json()["detail"]["code"],
             "ownerTruthInterviewSessionConflict",
         )
+
+    def test_live_delivery_status_reads_exact_persisted_sequence_after_end(self) -> None:
+        _, headers, _ = self._login("13800139649")
+        vault_id = "vault-live-delivery-status"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        product_session_id = "live-delivery-status-session"
+        started = client.post(
+            self._start_path(vault_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "sessionId": session_id,
+                "entryMode": "live",
+                "productSessionId": product_session_id,
+            },
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+
+        appended = client.post(
+            self._append_path(vault_id, session_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "messageId": str(uuid4()),
+                "expectedThreadVersion": 1,
+                "expectedSessionVersion": 1,
+                "author": "owner",
+                "captureMode": "live",
+                "clientSequenceNumber": 1,
+                "capturedAt": "2026-09-15T00:00:00Z",
+                "text": "合成投递状态测试内容。",
+            },
+        )
+        self.assertEqual(appended.status_code, 201, appended.text)
+        ended = self._end_session(
+            vault_id=vault_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_thread_version=2,
+            expected_session_version=2,
+            headers=headers,
+            extra={
+                "lastClientSequenceNumber": 1,
+            },
+        )
+        self.assertEqual(ended.status_code, 201, ended.text)
+
+        status = client.get(
+            self._live_delivery_status_path(vault_id, session_id),
+            headers=headers,
+            params={
+                "productSessionId": product_session_id,
+                "fromClientSequence": 1,
+                "limit": 64,
+            },
+        )
+
+        self.assertEqual(status.status_code, 200, status.text)
+        payload = status.json()
+        self.assertEqual(payload["schemaVersion"], "owner-truth-live-delivery-status-v1")
+        self.assertEqual(payload["productSessionId"], product_session_id)
+        self.assertEqual(payload["session"]["threadId"], thread_id)
+        self.assertEqual(payload["session"]["sessionId"], session_id)
+        self.assertEqual(payload["session"]["state"], "ended")
+        self.assertEqual(payload["session"]["boundary"], "open")
+        self.assertEqual(payload["session"]["threadVersion"], 3)
+        self.assertEqual(payload["session"]["sessionVersion"], 4)
+        self.assertEqual(payload["session"]["continuousClientSequence"], 1)
+        self.assertEqual(payload["session"]["closeRequestedClientSequence"], 1)
+        self.assertEqual(payload["window"]["fromClientSequence"], 1)
+        self.assertEqual(payload["window"]["limit"], 64)
+        self.assertEqual(payload["window"]["missingClientSequences"], [])
+        self.assertIsNone(payload["window"]["nextFromClientSequence"])
+        self.assertIn("observedAt", payload)
+        self.assertEqual(len(payload["deliveries"]), 1)
+        self.assertEqual(payload["deliveries"][0]["clientSequenceNumber"], 1)
+        self.assertEqual(payload["deliveries"][0]["author"], "owner")
+        self.assertIn("contentHash", payload["deliveries"][0])
+        self.assertIn("commandIdHash", payload["deliveries"][0])
+        operations = {item["operation"]: item for item in payload["operations"]}
+        self.assertEqual(
+            set(operations),
+            {"startInterviewSession", "endInterviewSession"},
+        )
+        self.assertEqual(operations["endInterviewSession"]["resultState"], "ended")
+        self.assertEqual(operations["endInterviewSession"]["sessionId"], session_id)
+        self.assertNotIn("text", json.dumps(payload, ensure_ascii=False))
+        wrong_product = client.get(
+            self._live_delivery_status_path(vault_id, session_id),
+            headers=headers,
+            params={"productSessionId": "different-product-session"},
+        )
+        self.assertEqual(wrong_product.status_code, 403, wrong_product.text)
+        _, other_headers, _ = self._login("13800139650")
+        wrong_owner = client.get(
+            self._live_delivery_status_path(vault_id, session_id),
+            headers=other_headers,
+            params={"productSessionId": product_session_id},
+        )
+        self.assertEqual(wrong_owner.status_code, 403, wrong_owner.text)
+        repeated = client.get(
+            self._live_delivery_status_path(vault_id, session_id),
+            headers=headers,
+            params={
+                "productSessionId": product_session_id,
+                "fromClientSequence": 1,
+                "limit": 64,
+            },
+        )
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        repeated_payload = repeated.json()
+        payload_without_observation = dict(payload)
+        repeated_without_observation = dict(repeated_payload)
+        payload_without_observation.pop("observedAt", None)
+        repeated_without_observation.pop("observedAt", None)
+        self.assertEqual(repeated_without_observation, payload_without_observation)
         current = client.get(self._current_path(vault_id), headers=headers)
         self.assertEqual(current.status_code, 200, current.text)
         self.assertIsNone(current.json()["currentSession"])
@@ -538,6 +665,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(second.json()["receipt"]["clientSequenceNumber"], 2)
         self.assertEqual(second.json()["receipt"]["continuousClientSequence"], 0)
         self.assertEqual(second.json()["receipt"]["deliveryState"], "awaitingPriorTurns")
+        self.assertEqual(second.json()["receipt"]["authorityEpoch"], 0)
 
         premature_end = self._end_session(
             vault_id=vault_id,
@@ -577,6 +705,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         self.assertEqual(first.status_code, 201, first.text)
         self.assertEqual(first.json()["receipt"]["continuousClientSequence"], 2)
         self.assertEqual(first.json()["receipt"]["deliveryState"], "contiguous")
+        self.assertEqual(first.json()["receipt"]["authorityEpoch"], 0)
 
         ended = self._end_session(
             vault_id=vault_id,
@@ -593,6 +722,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
             ended.json()["receipt"]["deliveryState"],
             "closedAfterContiguousDelivery",
         )
+        self.assertEqual(ended.json()["receipt"]["authorityEpoch"], 0)
 
     def test_end_requires_owner_current_versions_and_exact_payload(self) -> None:
         _, owner_headers, _ = self._login("13800139619")
@@ -955,6 +1085,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
                     "sessionVersion": 1,
                     "state": "active",
                     "boundary": "open",
+                    "authorityEpoch": 0,
                 },
             },
         )
@@ -993,6 +1124,7 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
                     "boundary": "open",
                     "messageId": message_id,
                     "messageSequence": 1,
+                    "authorityEpoch": 0,
                 },
             },
         )

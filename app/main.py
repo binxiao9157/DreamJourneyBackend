@@ -5464,6 +5464,7 @@ def _owner_truth_interview_session_command_response(
             "clientSequenceNumber",
             "continuousClientSequence",
             "deliveryState",
+            "authorityEpoch",
         )
         if key in receipt
     }
@@ -5471,6 +5472,63 @@ def _owner_truth_interview_session_command_response(
         "schemaVersion": "owner-truth-interview-session-command-v1",
         "vaultId": vault_id,
         "receipt": minimized_receipt,
+    }
+
+
+def _owner_truth_live_delivery_status_response(
+    *,
+    vault_id: str,
+    snapshot: Any,
+) -> Dict[str, Any]:
+    return {
+        "schemaVersion": "owner-truth-live-delivery-status-v1",
+        "vaultId": vault_id,
+        "productSessionId": snapshot.product_session_id,
+        "session": {
+            "threadId": snapshot.thread_id,
+            "sessionId": snapshot.session_id,
+            "state": snapshot.state.value,
+            "boundary": snapshot.boundary.value,
+            "threadVersion": snapshot.thread_version,
+            "sessionVersion": snapshot.session_version,
+            "authorityEpoch": snapshot.authority_epoch,
+            "continuousClientSequence": snapshot.continuous_client_sequence,
+            "closeRequestedClientSequence": snapshot.close_requested_client_sequence,
+        },
+        "observedAt": snapshot.observed_at.isoformat(),
+        "window": {
+            "fromClientSequence": snapshot.from_client_sequence,
+            "limit": snapshot.limit,
+            "missingClientSequences": list(snapshot.missing_client_sequences),
+            "nextFromClientSequence": snapshot.next_from_client_sequence,
+        },
+        "deliveries": [
+            {
+                "messageId": item.message_id,
+                "commandIdHash": item.command_id_hash,
+                "clientSequenceNumber": item.client_sequence_number,
+                "author": item.author.value,
+                "kind": item.kind.value,
+                "capturedAt": (
+                    item.captured_at.isoformat()
+                    if hasattr(item.captured_at, "isoformat")
+                    else str(item.captured_at)
+                ),
+                "contentHash": item.content_hash,
+            }
+            for item in snapshot.deliveries
+        ],
+        "operations": [
+            {
+                "operation": item.operation,
+                "commandIdHash": item.command_id_hash,
+                "receiptId": item.receipt_id,
+                "threadId": item.thread_id,
+                "sessionId": item.session_id,
+                "resultState": item.result_state.value,
+            }
+            for item in snapshot.operations
+        ],
     }
 
 
@@ -10572,25 +10630,30 @@ def preview_owner_truth_candidate_changeset(
         corrected_value, corrected_schema_version = (
             _owner_truth_candidate_changeset_preview_payload(payload)
         )
-        proposal = OwnerTruthCandidateReviewService(store).preview_changeset(
+        preview = OwnerTruthCandidateReviewService(store).preview_changeset_result(
             candidate_id=candidate_id,
             context=context,
             corrected_value=corrected_value,
             corrected_value_schema_version=corrected_schema_version,
         )
+        proposal = preview.proposal
         if proposal is None:
             raise OwnerTruthCandidateReviewConflict(
                 "Candidate ChangeSet preview is unavailable for this schema"
             )
     except OwnerTruthContractError as error:
         raise _owner_truth_candidate_review_http_error(error) from error
-    return JSONResponse(
-        content={
+    response_content = {
             "schemaVersion": "owner-truth-candidate-changeset-preview-v1",
             "vaultId": context.vault_id,
             "candidateId": candidate_id,
             "proposedChangeSet": proposal.payload(),
-        },
+        }
+    correction_binding = preview.correction_binding_payload()
+    if correction_binding is not None:
+        response_content["correctionBinding"] = correction_binding
+    return JSONResponse(
+        content=response_content,
         headers={"Cache-Control": "no-store"},
     )
 
@@ -10816,6 +10879,43 @@ def read_owner_truth_interview_session_state(
     return JSONResponse(
         status_code=200,
         content=_owner_truth_interview_session_state_read_response(
+            vault_id=context.vault_id,
+            snapshot=snapshot,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get(
+    "/v2/vaults/{vault_id}/interview-sessions/{session_id}/live-delivery-status",
+    include_in_schema=False,
+)
+def read_owner_truth_live_delivery_status(
+    request: Request,
+    vault_id: str,
+    session_id: str,
+    productSessionId: str = Query(min_length=1, max_length=128),
+    fromClientSequence: int = Query(default=1, ge=1),
+    limit: int = Query(default=64, ge=1, le=64),
+) -> JSONResponse:
+    """Read exact, value-free Live delivery receipts for one product session."""
+
+    try:
+        context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
+        snapshot = OwnerTruthConversationService(
+            store.owner_truth_conversation_repository()
+        ).read_live_delivery_status(
+            session_id=session_id,
+            product_session_id=productSessionId,
+            from_client_sequence=fromClientSequence,
+            limit=limit,
+            context=context,
+        )
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+    return JSONResponse(
+        status_code=200,
+        content=_owner_truth_live_delivery_status_response(
             vault_id=context.vault_id,
             snapshot=snapshot,
         ),

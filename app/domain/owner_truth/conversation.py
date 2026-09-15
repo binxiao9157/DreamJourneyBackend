@@ -990,6 +990,7 @@ class OwnerTruthInterviewSessionResult:
     client_sequence_number: Optional[int] = None
     continuous_client_sequence: Optional[int] = None
     delivery_state: Optional[str] = None
+    authority_epoch: Optional[int] = None
     authority_effects: Tuple[str, ...] = ()
 
     def public_receipt(self) -> Mapping[str, Any]:
@@ -1017,6 +1018,8 @@ class OwnerTruthInterviewSessionResult:
             result["continuousClientSequence"] = self.continuous_client_sequence
         if self.delivery_state is not None:
             result["deliveryState"] = self.delivery_state
+        if self.authority_epoch is not None:
+            result["authorityEpoch"] = self.authority_epoch
         return result
 
 
@@ -1040,6 +1043,48 @@ class OwnerTruthInterviewSessionSnapshot:
     product_session_id: str | None = None
     continuous_client_sequence: int = 0
     close_requested_client_sequence: int | None = None
+
+
+@dataclass(frozen=True)
+class OwnerTruthLiveDeliveryItemSnapshot:
+    message_id: str
+    command_id_hash: str
+    client_sequence_number: int
+    author: ConversationMessageAuthor
+    kind: ConversationMessageKind
+    captured_at: datetime
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class OwnerTruthLiveDeliveryOperationSnapshot:
+    operation: str
+    command_id_hash: str
+    receipt_id: str
+    thread_id: str
+    session_id: str
+    result_state: InterviewSessionState
+
+
+@dataclass(frozen=True)
+class OwnerTruthLiveDeliveryStatusSnapshot:
+    thread_id: str
+    session_id: str
+    product_session_id: str
+    state: InterviewSessionState
+    boundary: InterviewBoundary
+    thread_version: int
+    session_version: int
+    authority_epoch: int
+    continuous_client_sequence: int
+    close_requested_client_sequence: int | None
+    observed_at: datetime
+    from_client_sequence: int
+    limit: int
+    missing_client_sequences: Tuple[int, ...]
+    next_from_client_sequence: int | None
+    deliveries: Tuple[OwnerTruthLiveDeliveryItemSnapshot, ...]
+    operations: Tuple[OwnerTruthLiveDeliveryOperationSnapshot, ...]
 
 
 @dataclass(frozen=True)
@@ -1197,6 +1242,9 @@ __all__ = [
     "OwnerTruthInterviewSessionResult",
     "OwnerTruthInterviewSessionSnapshot",
     "OwnerTruthInterviewSessionStateConflict",
+    "OwnerTruthLiveDeliveryItemSnapshot",
+    "OwnerTruthLiveDeliveryOperationSnapshot",
+    "OwnerTruthLiveDeliveryStatusSnapshot",
     "OwnerTruthInterviewTurnsPending",
     "OwnerTruthInterviewReviewBatchResult",
     "OwnerTruthInterviewReviewBatchSnapshot",

@@ -857,6 +857,12 @@ class RouteOwnershipRegistry:
                 "ownerTruthInterviewSessionStateRead",
             ),
             _rule(
+                "GET",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/live-delivery-status",
+                session,
+                "ownerTruthInterviewLiveDeliveryStatusRead",
+            ),
+            _rule(
                 "POST",
                 "/v2/vaults/{vault_id}/interview-sessions/{session_id}/orchestration/read",
                 session,

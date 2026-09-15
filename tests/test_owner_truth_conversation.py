@@ -1,5 +1,6 @@
 import unittest
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.domain.owner_truth.conversation import (
@@ -598,6 +599,115 @@ class OwnerTruthConversationTests(unittest.TestCase):
 
 
 class PostgresOwnerTruthConversationRepositoryTests(unittest.TestCase):
+    def test_live_delivery_status_reads_message_and_operation_receipts(self) -> None:
+        captured_at = datetime(2026, 9, 15, 0, 0, tzinfo=timezone.utc)
+
+        class CapturingCursor:
+            def __init__(self) -> None:
+                self.statement = ""
+                self.statements: list[tuple[str, tuple[object, ...]]] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                return None
+
+            def execute(self, statement: str, params: tuple[object, ...]) -> None:
+                self.statement = statement
+                self.statements.append((statement, params))
+
+            def fetchone(self):
+                if "FROM owner_truth.vaults" in self.statement:
+                    return {
+                        "owner_subject_id": "owner-a",
+                        "authority_epoch": 4,
+                        "status": "active",
+                    }
+                if "FROM owner_truth.interview_sessions AS s" in self.statement:
+                    return {
+                        "id": "session-a",
+                        "thread_id": "thread-a",
+                        "state": "ended",
+                        "boundary": "open",
+                        "row_version": 9,
+                        "thread_version": 8,
+                        "authority_epoch": 4,
+                        "continuous_client_sequence": 1,
+                        "close_requested_client_sequence": 1,
+                    }
+                return None
+
+            def fetchall(self):
+                if "FROM owner_truth.conversation_messages AS m" in self.statement:
+                    return [
+                        {
+                            "id": "message-a",
+                            "client_sequence_number": 1,
+                            "author": "owner",
+                            "kind": "narrative",
+                            "captured_at": captured_at,
+                            "content_hash": "content-hash-a",
+                            "command_id_hash": "append-command-hash-a",
+                        }
+                    ]
+                if "command_type IN ('startInterviewSession', 'endInterviewSession')" in self.statement:
+                    return [
+                        {
+                            "id": "receipt-start-a",
+                            "command_id_hash": "start-command-hash-a",
+                            "command_type": "startInterviewSession",
+                            "target_thread_id": "thread-a",
+                            "target_session_id": "session-a",
+                        },
+                        {
+                            "id": "receipt-end-a",
+                            "command_id_hash": "end-command-hash-a",
+                            "command_type": "endInterviewSession",
+                            "target_thread_id": "thread-a",
+                            "target_session_id": "session-a",
+                        },
+                    ]
+                return []
+
+        class CapturingConnection:
+            def __init__(self, cursor: CapturingCursor) -> None:
+                self.cursor_value = cursor
+
+            def cursor(self, *, row_factory=None):
+                return self.cursor_value
+
+        cursor = CapturingCursor()
+        repository = PostgresOwnerTruthConversationRepository(CapturingConnection(cursor))
+        context = OwnerTruthCommandContext(
+            vault_id="vault-a",
+            owner_subject_id="owner-a",
+            actor_subject_id="owner-a",
+            policy_version="owner-truth-v1",
+        )
+
+        status = repository.read_live_delivery_status(
+            session_id="session-a",
+            product_session_id="echo-live-a",
+            from_client_sequence=1,
+            limit=20,
+            context=context,
+        )
+
+        self.assertEqual(status.continuous_client_sequence, 1)
+        self.assertEqual(status.close_requested_client_sequence, 1)
+        self.assertEqual([item.client_sequence_number for item in status.deliveries], [1])
+        self.assertEqual(
+            [operation.operation for operation in status.operations],
+            ["startInterviewSession", "endInterviewSession"],
+        )
+        operation_queries = [
+            statement
+            for statement, _ in cursor.statements
+            if "command_type IN ('startInterviewSession', 'endInterviewSession')" in statement
+        ]
+        self.assertEqual(len(operation_queries), 1)
+
     def test_pause_for_topic_switch_does_not_require_end_delivery_watermark(self) -> None:
         class CapturingCursor:
             def __init__(self) -> None:

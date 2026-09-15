@@ -17,6 +17,9 @@ from app.domain.owner_truth.ontology import (
 from app.domain.owner_truth.contracts import MemoryKind
 from app.observability.redaction import provider_dry_run_report
 from app.services.knowledge_extraction import LEGACY_TRANSCRIPT, USER_EVIDENCE_ONLY
+from app.services.owner_truth_live_memory_support import (
+    LIVE_MEMORY_SUPPORT_SCHEMA_VERSION,
+)
 
 
 class ArchiveAnalysisStatus(str, Enum):
@@ -964,7 +967,8 @@ class DeepSeekLiveMemoryOrganizationProxy:
     """
 
     model = "deepseek-v4-flash"
-    prompt_version = "owner-truth-live-memory-organization-v4"
+    prompt_version = "owner-truth-live-memory-organization-v5"
+    support_prompt_version = "owner-truth-live-memory-support-v1"
     maximum_turn_count = 200
     maximum_turn_characters = 4_000
     maximum_total_characters = 30_000
@@ -1024,6 +1028,104 @@ class DeepSeekLiveMemoryOrganizationProxy:
             response.raise_for_status()
         content = DeepSeekImageAnalysisProxy._extract_content(response.json())
         return self.parse_organization(content, turns=normalized_turns)
+
+    def request_support_review(
+        self,
+        *,
+        turns: List[Dict[str, Any]],
+        memories: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if not self.settings.deepseek_api_key:
+            raise ValueError("DEEPSEEK_API_KEY is not configured")
+        request = self.build_support_request(turns=turns, memories=memories)
+        with httpx.Client(timeout=60) as client:
+            response = client.post(
+                request["url"],
+                headers=request["headers"],
+                json=request["json"],
+            )
+            response.raise_for_status()
+        content = DeepSeekImageAnalysisProxy._extract_content(response.json())
+        return self.parse_support_review(content)
+
+    def build_support_request(
+        self,
+        *,
+        turns: List[Dict[str, Any]],
+        memories: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        normalized_turns = self.normalize_turns(turns)
+        if not isinstance(memories, list) or len(memories) > self.maximum_memory_count * 4:
+            raise ValueError("live memory support received an invalid draft set")
+        prompt = self.build_support_prompt(normalized_turns, memories)
+        return {
+            "url": self.settings.deepseek_base_url,
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.settings.deepseek_api_key or ''}",
+            },
+            "json": {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是独立的记忆证据复核器，只输出严格 JSON。"
+                            "你必须区分用户陈述与用户提问，助手回答永远不能成为用户事实证据。"
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "response_format": {"type": "json_object"},
+                "thinking": {"type": "disabled"},
+                "temperature": 0,
+                "max_tokens": 4_096,
+            },
+        }
+
+    @classmethod
+    def build_support_prompt(
+        cls,
+        turns: List[Dict[str, Any]],
+        memories: List[Dict[str, Any]],
+    ) -> str:
+        serialized_turns = json.dumps(turns, ensure_ascii=False, separators=(",", ":"))
+        serialized_memories = json.dumps(memories, ensure_ascii=False, separators=(",", ":"))
+        return f"""复核一次已结束 Live 对话的记忆草案。不要相信草案自报的证据，必须重新对照整场对话。
+
+【整场对话】
+{serialized_turns}
+
+【待复核草案，memoryIndex 按数组下标】
+{serialized_memories}
+
+输出严格 JSON：
+{{"schemaVersion":"{LIVE_MEMORY_SUPPORT_SCHEMA_VERSION}","turnAssessments":[{{"turnIndex":1,"speechAct":"assertion"}}],"memoryAssessments":[{{"memoryIndex":0,"verdict":"supported","supportingTurnIndices":[1]}}],"omittedFactBearingTurnIndices":[]}}
+
+规则：
+1. 每个 role=user 的 turn 必须且只能出现一次；speechAct 只能是 assertion、correction、timeSupplement、query、quotedSpeech、ambiguous。
+2. 每条草案必须且只能出现一次；verdict 只能是 supported、unsupported、superseded、uncertain。
+3. supported 必须列出直接支持命题的 user turn，且只能来自草案已有 sourceTurnIndices；其他 verdict 的 supportingTurnIndices 必须为空。
+4. 纯查询、确认问法、反问和当场“用户问过什么”的转述不能支持事实草案。问号不是唯一判断依据。
+5. 助手答案、建议、猜测和诱导永远不能支持用户事实；用户只说“对”时不得自动采纳助手命题，除非用户随后明确完整自述。
+6. 同轮或跨轮纠正、否定、撤回必须整场裁决；旧说法标 superseded，最终说法标 supported。不能仅按最后出现覆盖无关事实。
+7. 用户明确陈述的新事实、感受、观点及时间补充必须有最终 supported 草案；若生成器漏掉，将对应 turnIndex 放入 omittedFactBearingTurnIndices。
+8. 不确定时标 uncertain，不得猜测。不要输出正文、解释或 JSON 之外的文字。"""
+
+    @staticmethod
+    def parse_support_review(content: str) -> Dict[str, Any]:
+        cleaned = content.replace("```json", "").replace("```", "").strip()
+        parsed = DeepSeekImageAnalysisProxy._loads_json(cleaned)
+        if parsed is None:
+            extracted = DeepSeekImageAnalysisProxy.extract_json_substring(cleaned)
+            parsed = (
+                DeepSeekImageAnalysisProxy._loads_json(extracted)
+                if extracted is not None
+                else None
+            )
+        if not isinstance(parsed, dict):
+            raise ValueError("DeepSeek live memory support returned invalid JSON")
+        return parsed
 
     @classmethod
     def normalize_turns(cls, turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1085,8 +1187,9 @@ class DeepSeekLiveMemoryOrganizationProxy:
   ]
 }}
 
-规则：
-1. 最多输出 {cls.maximum_memory_count} 条；没有可靠新记忆时输出 {{"memories":[]}}。
+	规则：
+	1. 最多输出 {cls.maximum_memory_count} 条；没有可靠新记忆时输出 {{"memories":[]}}。
+	1a. 纯查询、确认问法、反问、助手答案以及“用户问过什么”的当场转述都不是用户事实，不得生成记忆；不能只根据是否有问号判断。
 2. experience 使用 summary，knowledge 使用 claim，emotion 使用 label；字段不得混用。
 3. 每条记忆都必须能被 role=user 的原话直接支持，并列出全部相关 sourceTurnIndices。
 4. role=assistant 只用于理解问题和上下文，不得成为证据，不得把助手的猜测、建议或诱导写成用户记忆。

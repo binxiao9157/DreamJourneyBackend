@@ -208,33 +208,93 @@ class _FailingInboxResolver:
 class _RecordingLiveMemoryOrganizer:
     model = "deepseek-live-memory-test"
     prompt_version = "owner-truth-live-memory-organization-test-v1"
+    support_prompt_version = "owner-truth-live-memory-support-test-v1"
 
-    def __init__(self, memories: list[dict[str, object]]) -> None:
+    def __init__(
+        self,
+        memories: list[dict[str, object]],
+        *,
+        support_review: dict[str, object] | None = None,
+    ) -> None:
         self.memories = memories
+        self.support_review = support_review
         self.turns: list[dict[str, object]] | None = None
         self.calls: list[list[dict[str, object]]] = []
+        self.support_calls: list[dict[str, object]] = []
 
     def request_organization(self, *, turns):
         self.turns = list(turns)
         self.calls.append(list(turns))
         return {"memories": self.memories}
 
+    def request_support_review(self, *, turns, memories):
+        self.support_calls.append({"turns": list(turns), "memories": list(memories)})
+        if self.support_review is not None:
+            return self.support_review
+        supported_turns = {
+            index
+            for memory in memories
+            for index in memory.get("sourceTurnIndices", [])
+        }
+        return {
+            "schemaVersion": "owner-truth-live-memory-support-v1",
+            "turnAssessments": [
+                {
+                    "turnIndex": turn["index"],
+                    "speechAct": "assertion" if turn["index"] in supported_turns else "query",
+                }
+                for turn in turns
+                if turn["role"] == "user"
+            ],
+            "memoryAssessments": [
+                {
+                    "memoryIndex": index,
+                    "verdict": "supported",
+                    "supportingTurnIndices": list(memory["sourceTurnIndices"]),
+                }
+                for index, memory in enumerate(memories)
+            ],
+            "omittedFactBearingTurnIndices": [],
+        }
+
+
+class _SequencedLiveMemoryOrganizer(_RecordingLiveMemoryOrganizer):
+    def __init__(self, responses, *, support_review):
+        super().__init__([], support_review=support_review)
+        self.responses = list(responses)
+
+    def request_organization(self, *, turns):
+        self.turns = list(turns)
+        self.calls.append(list(turns))
+        response_index = len(self.calls) - 1
+        if response_index >= len(self.responses):
+            raise AssertionError("unexpected extra live organization chunk")
+        return {"memories": self.responses[response_index]}
+
 
 class _UnavailableLiveMemoryOrganizer:
     model = "deepseek-live-memory-test"
     prompt_version = "owner-truth-live-memory-organization-test-v1"
+    support_prompt_version = "owner-truth-live-memory-support-test-v1"
 
     def request_organization(self, *, turns):
         request = httpx.Request("POST", "https://provider.invalid/chat/completions")
         raise httpx.ConnectError("provider unavailable", request=request)
 
+    def request_support_review(self, *, turns, memories):
+        raise AssertionError("support review must not run after organization transport failure")
+
 
 class _InvalidLiveMemoryOrganizer:
     model = "deepseek-live-memory-test"
     prompt_version = "owner-truth-live-memory-organization-test-v1"
+    support_prompt_version = "owner-truth-live-memory-support-test-v1"
 
     def request_organization(self, *, turns):
         raise ValueError("DeepSeek returned empty content")
+
+    def request_support_review(self, *, turns, memories):
+        raise AssertionError("support review must not run after invalid organization")
 
 
 class _RecordingTextMemoryOrganizer:
@@ -379,6 +439,26 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             extractor=extractor,
             operation_metric_recorder=operation_metric_recorder,
+        )
+
+    def _extract_live(self, *, organizer, user_text: str):
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+        return extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(user_text),
+                source_text=user_text,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": [
+                        {"index": 1, "role": "user", "text": user_text, "captureMode": "live"}
+                    ],
+                },
+            ),
         )
 
     def test_default_disabled_worker_does_not_claim_a_candidate_extraction_job(self) -> None:
@@ -977,6 +1057,451 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         self.assertEqual(payloads["emotion"]["content"]["factType"], "affect")
         self.assertTrue(all(payload["reviewMode"] == "single" for payload in payloads.values()))
         self.assertTrue(all(payload["confidence"] == 0.0 for payload in payloads.values()))
+
+    def test_b7_pure_questions_are_rejected_by_semantic_support_before_candidate_builder(self) -> None:
+        questions = ["我的测试清单代号是什么？", "这次档案测试的代号是什么？"]
+        memories = [
+            {
+                "memoryKind": "knowledge",
+                "claim": "用户问过自己的测试清单代号是什么。",
+                "sourceTurnIndices": [1],
+                "facets": _facets(),
+            },
+            {
+                "memoryKind": "knowledge",
+                "claim": "用户问过这次档案测试的代号是什么。",
+                "sourceTurnIndices": [3],
+                "facets": _facets(),
+            },
+        ]
+        organizer = _RecordingLiveMemoryOrganizer(
+            memories,
+            support_review={
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [
+                    {"turnIndex": 1, "speechAct": "query"},
+                    {"turnIndex": 3, "speechAct": "query"},
+                ],
+                "memoryAssessments": [
+                    {"memoryIndex": 0, "verdict": "unsupported", "supportingTurnIndices": []},
+                    {"memoryIndex": 1, "verdict": "unsupported", "supportingTurnIndices": []},
+                ],
+                "omittedFactBearingTurnIndices": [],
+            },
+        )
+        source_text = "\n\n".join(questions)
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(source_text),
+            source_text=source_text,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {"index": 1, "role": "user", "text": questions[0], "captureMode": "live"},
+                    {"index": 2, "role": "assistant", "text": "代号是晨星。", "captureMode": "live"},
+                    {"index": 3, "role": "user", "text": questions[1], "captureMode": "live"},
+                ],
+            },
+        )
+        store.lease_repository.seed(self.intent)
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        result = self._worker(store=store, extractor=extractor).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["reason"], "candidateExtractionCompletedNoChange")
+        self.assertEqual(result["candidateCount"], 0)
+        self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
+        self.assertEqual(len(organizer.support_calls), 1)
+
+    def test_b7_assistant_answer_cannot_be_smuggled_through_a_user_query_index(self) -> None:
+        query = "我的测试清单代号是什么？"
+        organizer = _RecordingLiveMemoryOrganizer(
+            [{
+                "memoryKind": "knowledge",
+                "claim": "测试清单代号是晨星。",
+                "sourceTurnIndices": [1],
+                "facets": _facets(),
+            }],
+            support_review={
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [{"turnIndex": 1, "speechAct": "query"}],
+                "memoryAssessments": [{
+                    "memoryIndex": 0,
+                    "verdict": "unsupported",
+                    "supportingTurnIndices": [],
+                }],
+                "omittedFactBearingTurnIndices": [],
+            },
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(query),
+                source_text=query,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": [
+                        {"index": 1, "role": "user", "text": query, "captureMode": "live"},
+                        {"index": 2, "role": "assistant", "text": "代号是晨星。", "captureMode": "live"},
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(command.proposals, ())
+
+    def test_b7_whole_session_support_keeps_only_the_final_correction(self) -> None:
+        first = "测试清单代号是晚霞。"
+        correction = "我更正一下，测试清单代号是晨星。"
+        memories = [
+            {
+                "memoryKind": "knowledge",
+                "claim": "测试清单代号是晚霞。",
+                "sourceTurnIndices": [1],
+                "facets": _facets(),
+            },
+            {
+                "memoryKind": "knowledge",
+                "claim": "测试清单代号是晨星。",
+                "sourceTurnIndices": [3],
+                "facets": _facets(),
+            },
+        ]
+        organizer = _RecordingLiveMemoryOrganizer(
+            memories,
+            support_review={
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [
+                    {"turnIndex": 1, "speechAct": "assertion"},
+                    {"turnIndex": 3, "speechAct": "correction"},
+                ],
+                "memoryAssessments": [
+                    {"memoryIndex": 0, "verdict": "superseded", "supportingTurnIndices": []},
+                    {"memoryIndex": 1, "verdict": "supported", "supportingTurnIndices": [3]},
+                ],
+                "omittedFactBearingTurnIndices": [],
+            },
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+        source_text = f"{first}\n\n{correction}"
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(source_text),
+                source_text=source_text,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": [
+                        {"index": 1, "role": "user", "text": first, "captureMode": "live"},
+                        {"index": 2, "role": "assistant", "text": "收到。", "captureMode": "live"},
+                        {"index": 3, "role": "user", "text": correction, "captureMode": "live"},
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(len(command.proposals), 1)
+        self.assertEqual(command.proposals[0].content["claim"], "测试清单代号是晨星。")
+        self.assertEqual(command.proposals[0].evidence_span.start, len(first) + 2)
+
+    def test_b7_empty_organization_cannot_hide_an_omitted_user_fact(self) -> None:
+        fact = "我在 2018 年搬到了杭州。"
+        organizer = _RecordingLiveMemoryOrganizer(
+            [],
+            support_review={
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [{"turnIndex": 1, "speechAct": "assertion"}],
+                "memoryAssessments": [],
+                "omittedFactBearingTurnIndices": [1],
+            },
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        with self.assertRaisesRegex(ValueError, "omitted fact-bearing"):
+            extractor.extract(
+                intent=self.intent,
+                source=OwnerTruthCandidateExtractionInput(
+                    source_content_hash=_digest(fact),
+                    source_text=fact,
+                    source_metadata={
+                        "captureMode": "live",
+                        "sourcePolicy": "userEvidenceOnly",
+                        "conversationTurns": [
+                            {"index": 1, "role": "user", "text": fact, "captureMode": "live"}
+                        ],
+                    },
+                ),
+            )
+
+    def test_b7_question_suffix_does_not_drop_an_explicit_correction(self) -> None:
+        correction = "不是晚霞，测试清单代号是晨星，记住了吗？"
+        organizer = _RecordingLiveMemoryOrganizer(
+            [{
+                "memoryKind": "knowledge",
+                "claim": "测试清单代号是晨星。",
+                "sourceTurnIndices": [1],
+                "facets": _facets(),
+            }],
+            support_review={
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [{"turnIndex": 1, "speechAct": "correction"}],
+                "memoryAssessments": [{
+                    "memoryIndex": 0,
+                    "verdict": "supported",
+                    "supportingTurnIndices": [1],
+                }],
+                "omittedFactBearingTurnIndices": [],
+            },
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(correction),
+                source_text=correction,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": [
+                        {"index": 1, "role": "user", "text": correction, "captureMode": "live"}
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(len(command.proposals), 1)
+        self.assertEqual(command.proposals[0].content["claim"], "测试清单代号是晨星。")
+
+    def test_b7_historical_quoted_question_keeps_only_the_supported_user_event(self) -> None:
+        text = "我昨天问老师‘什么时候开学？’，后来去了图书馆。"
+        organizer = _RecordingLiveMemoryOrganizer(
+            [
+                {
+                    "memoryKind": "experience",
+                    "summary": "我昨天去了图书馆。",
+                    "sourceTurnIndices": [1],
+                    "facets": _facets(),
+                },
+                {
+                    "memoryKind": "knowledge",
+                    "claim": "学校昨天开学。",
+                    "sourceTurnIndices": [1],
+                    "facets": _facets(),
+                },
+            ],
+            support_review={
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [{"turnIndex": 1, "speechAct": "assertion"}],
+                "memoryAssessments": [
+                    {"memoryIndex": 0, "verdict": "supported", "supportingTurnIndices": [1]},
+                    {"memoryIndex": 1, "verdict": "unsupported", "supportingTurnIndices": []},
+                ],
+                "omittedFactBearingTurnIndices": [],
+            },
+        )
+
+        command = self._extract_live(organizer=organizer, user_text=text)
+
+        self.assertEqual(len(command.proposals), 1)
+        self.assertEqual(command.proposals[0].content["summary"], "我昨天去了图书馆。")
+
+    def test_b7_fact_and_query_in_one_turn_keeps_only_the_supported_fact(self) -> None:
+        text = "我 2021 年搬到苏州。能帮我查一下学校吗？"
+        organizer = _RecordingLiveMemoryOrganizer(
+            [{
+                "memoryKind": "experience",
+                "summary": "我 2021 年搬到苏州。",
+                "sourceTurnIndices": [1],
+                "facets": _facets(),
+            }],
+            support_review={
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [{"turnIndex": 1, "speechAct": "assertion"}],
+                "memoryAssessments": [{
+                    "memoryIndex": 0,
+                    "verdict": "supported",
+                    "supportingTurnIndices": [1],
+                }],
+                "omittedFactBearingTurnIndices": [],
+            },
+        )
+
+        command = self._extract_live(organizer=organizer, user_text=text)
+
+        self.assertEqual(len(command.proposals), 1)
+        self.assertEqual(command.proposals[0].content["summary"], "我 2021 年搬到苏州。")
+
+    def test_b7_ambiguous_assent_cannot_adopt_the_assistant_claim(self) -> None:
+        text = "对。"
+        organizer = _RecordingLiveMemoryOrganizer(
+            [{
+                "memoryKind": "knowledge",
+                "claim": "我目前住在杭州。",
+                "sourceTurnIndices": [3],
+                "facets": _facets(),
+            }],
+            support_review={
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [
+                    {"turnIndex": 1, "speechAct": "query"},
+                    {"turnIndex": 3, "speechAct": "ambiguous"},
+                ],
+                "memoryAssessments": [{
+                    "memoryIndex": 0,
+                    "verdict": "unsupported",
+                    "supportingTurnIndices": [],
+                }],
+                "omittedFactBearingTurnIndices": [],
+            },
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+        source_text = "我目前住在杭州吗？\n\n对。"
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(source_text),
+                source_text=source_text,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": [
+                        {"index": 1, "role": "user", "text": "我目前住在杭州吗？", "captureMode": "live"},
+                        {"index": 2, "role": "assistant", "text": "你目前住在杭州。", "captureMode": "live"},
+                        {"index": 3, "role": "user", "text": text, "captureMode": "live"},
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(command.proposals, ())
+
+    def test_b7_cross_chunk_correction_is_resolved_against_the_whole_session(self) -> None:
+        old = "测试清单代号是晚霞。"
+        correction = "我更正一下，测试清单代号是晨星。"
+        old_memory = {
+            "memoryKind": "knowledge",
+            "claim": "测试清单代号是晚霞。",
+            "sourceTurnIndices": [1],
+            "facets": _facets(),
+        }
+        corrected_memory = {
+            "memoryKind": "knowledge",
+            "claim": "测试清单代号是晨星。",
+            "sourceTurnIndices": [3],
+            "facets": _facets(),
+        }
+        organizer = _SequencedLiveMemoryOrganizer(
+            [[old_memory], [corrected_memory]],
+            support_review={
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [
+                    {"turnIndex": 1, "speechAct": "assertion"},
+                    {"turnIndex": 3, "speechAct": "correction"},
+                ],
+                "memoryAssessments": [
+                    {"memoryIndex": 0, "verdict": "superseded", "supportingTurnIndices": []},
+                    {"memoryIndex": 1, "verdict": "supported", "supportingTurnIndices": [3]},
+                ],
+                "omittedFactBearingTurnIndices": [],
+            },
+        )
+        organizer.maximum_turn_count = 2
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+        source_text = f"{old}\n\n{correction}"
+
+        command = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(source_text),
+                source_text=source_text,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": [
+                        {"index": 1, "role": "user", "text": old, "captureMode": "live"},
+                        {"index": 2, "role": "assistant", "text": "收到。", "captureMode": "live"},
+                        {"index": 3, "role": "user", "text": correction, "captureMode": "live"},
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(len(organizer.calls), 2)
+        self.assertEqual(len(command.proposals), 1)
+        self.assertEqual(command.proposals[0].content["claim"], "测试清单代号是晨星。")
+
+    def test_b7_uncertain_semantic_review_fails_closed_before_builder(self) -> None:
+        query = "难道测试清单代号不是晨星吗？"
+        organizer = _RecordingLiveMemoryOrganizer(
+            [{
+                "memoryKind": "knowledge",
+                "claim": "测试清单代号是晨星。",
+                "sourceTurnIndices": [1],
+                "facets": _facets(),
+            }],
+            support_review={
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [{"turnIndex": 1, "speechAct": "ambiguous"}],
+                "memoryAssessments": [{
+                    "memoryIndex": 0,
+                    "verdict": "uncertain",
+                    "supportingTurnIndices": [],
+                }],
+                "omittedFactBearingTurnIndices": [],
+            },
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=Settings(owner_truth_live_memory_organization_enabled=True),
+            organizer=organizer,
+        )
+
+        with self.assertRaisesRegex(ValueError, "review is uncertain"):
+            extractor.extract(
+                intent=self.intent,
+                source=OwnerTruthCandidateExtractionInput(
+                    source_content_hash=_digest(query),
+                    source_text=query,
+                    source_metadata={
+                        "captureMode": "live",
+                        "sourcePolicy": "userEvidenceOnly",
+                        "conversationTurns": [
+                            {"index": 1, "role": "user", "text": query, "captureMode": "live"}
+                        ],
+                    },
+                ),
+            )
 
     def test_live_organization_accepts_assistant_opening_before_first_user_evidence(self) -> None:
         assistant_turn = "请只讲一条用于隔离验证的合成经历。"

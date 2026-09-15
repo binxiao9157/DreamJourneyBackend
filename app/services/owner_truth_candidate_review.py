@@ -188,6 +188,35 @@ class OwnerTruthCandidateInboxItem:
 
 
 @dataclass(frozen=True)
+class OwnerTruthCandidateChangeSetPreview:
+    """One proposal plus the source and correction values used to build it."""
+
+    proposal: OwnerTruthMemoryChangeSetProposal | None
+    source_candidate_version: int
+    source_candidate_content_hash: str
+    submitted_corrected_value: Mapping[str, Any] | None = None
+    submitted_corrected_value_schema_version: str | None = None
+
+    def correction_binding_payload(self) -> Mapping[str, Any] | None:
+        if self.submitted_corrected_value is None:
+            return None
+        if self.submitted_corrected_value_schema_version is None or self.proposal is None:
+            raise OwnerTruthCandidateReviewConflict(
+                "correction preview binding is incomplete"
+            )
+        return {
+            "schemaVersion": "owner-truth-candidate-correction-binding-v1",
+            "sourceCandidateVersion": self.source_candidate_version,
+            "sourceCandidateContentHash": self.source_candidate_content_hash,
+            "submittedCorrection": {
+                "correctedValueSchemaVersion": self.submitted_corrected_value_schema_version,
+                "correctedValue": deepcopy(dict(self.submitted_corrected_value)),
+            },
+            "resolvedContentHash": self.proposal.candidate_content_hash,
+        }
+
+
+@dataclass(frozen=True)
 class OwnerTruthCandidateReviewHistoryItem:
     candidate: OwnerTruthCandidateInboxItem
     decision: CandidateDecision
@@ -579,6 +608,21 @@ class InMemoryOwnerTruthCandidateReviewRepository:
         corrected_value: Mapping[str, Any] | None = None,
         corrected_value_schema_version: str | None = None,
     ) -> OwnerTruthMemoryChangeSetProposal | None:
+        return self.preview_changeset_result(
+            candidate_id=candidate_id,
+            context=context,
+            corrected_value=corrected_value,
+            corrected_value_schema_version=corrected_value_schema_version,
+        ).proposal
+
+    def preview_changeset_result(
+        self,
+        *,
+        candidate_id: str,
+        context: OwnerTruthCommandContext,
+        corrected_value: Mapping[str, Any] | None = None,
+        corrected_value_schema_version: str | None = None,
+    ) -> OwnerTruthCandidateChangeSetPreview:
         """Create the exact Owner-visible V5 diff before a terminal decision.
 
         This read path does not mutate the processor-owned Candidate. A
@@ -599,12 +643,23 @@ class InMemoryOwnerTruthCandidateReviewRepository:
                 raise OwnerTruthCandidateReviewConflict(
                     "terminal Candidate cannot receive a ChangeSet preview"
                 )
-            return self._propose_changeset(
+            proposal = self._propose_changeset(
                 candidate=candidate,
                 current_memories=self._current_formal_memories(context=context),
                 base_memory_revision=int(self._memory_revisions.get(context.vault_id, 0)),
                 resolved_content=corrected_value,
                 resolved_content_schema_version=corrected_value_schema_version,
+            )
+            return OwnerTruthCandidateChangeSetPreview(
+                proposal=proposal,
+                source_candidate_version=candidate.row_version,
+                source_candidate_content_hash=candidate.content_hash,
+                submitted_corrected_value=(
+                    deepcopy(dict(corrected_value))
+                    if corrected_value is not None
+                    else None
+                ),
+                submitted_corrected_value_schema_version=corrected_value_schema_version,
             )
 
     def list_review_history(
@@ -1941,6 +1996,21 @@ class PostgresOwnerTruthCandidateReviewRepository:
         corrected_value: Mapping[str, Any] | None = None,
         corrected_value_schema_version: str | None = None,
     ) -> OwnerTruthMemoryChangeSetProposal | None:
+        return self.preview_changeset_result(
+            candidate_id=candidate_id,
+            context=context,
+            corrected_value=corrected_value,
+            corrected_value_schema_version=corrected_value_schema_version,
+        ).proposal
+
+    def preview_changeset_result(
+        self,
+        *,
+        candidate_id: str,
+        context: OwnerTruthCommandContext,
+        corrected_value: Mapping[str, Any] | None = None,
+        corrected_value_schema_version: str | None = None,
+    ) -> OwnerTruthCandidateChangeSetPreview:
         """Persist a deterministic, Owner-visible V5 ChangeSet preview.
 
         PostgreSQL stores the immutable preview so a later decision can prove
@@ -1961,7 +2031,7 @@ class PostgresOwnerTruthCandidateReviewRepository:
                 raise OwnerTruthCandidateReviewConflict(
                     "terminal Candidate cannot receive a ChangeSet preview"
                 )
-            return self._propose_changeset(
+            proposal = self._propose_changeset(
                 cursor,
                 candidate=candidate,
                 current_memories=self._current_formal_memories(
@@ -1975,6 +2045,17 @@ class PostgresOwnerTruthCandidateReviewRepository:
                 ),
                 resolved_content=corrected_value,
                 resolved_content_schema_version=corrected_value_schema_version,
+            )
+            return OwnerTruthCandidateChangeSetPreview(
+                proposal=proposal,
+                source_candidate_version=candidate.row_version,
+                source_candidate_content_hash=candidate.content_hash,
+                submitted_corrected_value=(
+                    deepcopy(dict(corrected_value))
+                    if corrected_value is not None
+                    else None
+                ),
+                submitted_corrected_value_schema_version=corrected_value_schema_version,
             )
 
     def list_review_history(
@@ -4137,6 +4218,41 @@ class OwnerTruthCandidateReviewService:
             if not callable(preview):
                 raise OwnerTruthCandidateReviewConflict(
                     "Candidate ChangeSet preview is unavailable"
+                )
+            return preview(
+                candidate_id=normalized_candidate_id,
+                context=context,
+                corrected_value=corrected_value,
+                corrected_value_schema_version=corrected_value_schema_version,
+            )
+
+    def preview_changeset_result(
+        self,
+        *,
+        candidate_id: str,
+        context: OwnerTruthCommandContext,
+        corrected_value: Mapping[str, Any] | None = None,
+        corrected_value_schema_version: str | None = None,
+    ) -> OwnerTruthCandidateChangeSetPreview:
+        """Return a proposal and its source/correction binding from one read."""
+
+        _assert_owner_context(context)
+        normalized_candidate_id = str(candidate_id or "").strip()
+        if not normalized_candidate_id:
+            raise OwnerTruthCandidateReviewAccessDenied(
+                "Candidate does not exist in this Owner Vault"
+            )
+        with self._request_unit_of_work(
+            correlation_id=(
+                f"owner-truth-candidate-changeset-preview-{normalized_candidate_id}"
+            ),
+            command_id=f"ownerTruthCandidateChangesetPreview:{normalized_candidate_id}",
+        ):
+            repository = self._store.owner_truth_candidate_review_repository()
+            preview = getattr(repository, "preview_changeset_result", None)
+            if not callable(preview):
+                raise OwnerTruthCandidateReviewConflict(
+                    "Candidate ChangeSet preview binding is unavailable"
                 )
             return preview(
                 candidate_id=normalized_candidate_id,

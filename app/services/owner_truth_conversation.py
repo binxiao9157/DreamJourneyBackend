@@ -8,6 +8,7 @@ creates Sources, Candidates, DecisionReceipts, or MemoryVersions on its own.
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 from threading import RLock
 from typing import Any, Mapping, Protocol
@@ -42,6 +43,9 @@ from app.domain.owner_truth.conversation import (
     OwnerTruthInterviewSessionSnapshot,
     OwnerTruthInterviewSessionStateConflict,
     OwnerTruthInterviewTurnsPending,
+    OwnerTruthLiveDeliveryItemSnapshot,
+    OwnerTruthLiveDeliveryOperationSnapshot,
+    OwnerTruthLiveDeliveryStatusSnapshot,
     PauseInterviewForTopicSwitchCommand,
     PauseInterviewForTopicSwitchWriteRecord,
     RecordInterviewPacingCommand,
@@ -152,6 +156,17 @@ class OwnerTruthConversationRepository(Protocol):
         natural-input lane, which remains single-active per Vault.
         """
 
+        ...
+
+    def read_live_delivery_status(
+        self,
+        *,
+        session_id: str,
+        product_session_id: str,
+        from_client_sequence: int,
+        limit: int,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthLiveDeliveryStatusSnapshot:
         ...
 
     def get_interview_message_authority(
@@ -387,6 +402,31 @@ class OwnerTruthConversationService:
             product_session_id=_optional_product_session_id(product_session_id),
         )
 
+    def read_live_delivery_status(
+        self,
+        *,
+        session_id: str,
+        product_session_id: str,
+        from_client_sequence: int,
+        limit: int,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthLiveDeliveryStatusSnapshot:
+        _assert_owner_context(context)
+        normalized_product_session_id = _optional_product_session_id(product_session_id)
+        if normalized_product_session_id is None:
+            raise OwnerTruthConversationAccessDenied(
+                "live delivery status requires its original product session"
+            )
+        if from_client_sequence < 1 or not 1 <= limit <= 64:
+            raise OwnerTruthConversationError("invalid live delivery status window")
+        return self._repository.read_live_delivery_status(
+            session_id=session_id,
+            product_session_id=normalized_product_session_id,
+            from_client_sequence=from_client_sequence,
+            limit=limit,
+            context=context,
+        )
+
     def read_message_authority(
         self,
         *,
@@ -529,6 +569,7 @@ class InMemoryOwnerTruthConversationRepository:
                 session_version=1,
                 state=InterviewSessionState.ACTIVE,
                 boundary=InterviewBoundary.OPEN,
+                authority_epoch=authority_epoch,
             )
             self._store_receipt(record, result)
             return result
@@ -1031,6 +1072,7 @@ class InMemoryOwnerTruthConversationRepository:
                     if record.client_sequence_number is not None
                     else None
                 ),
+                authority_epoch=int(session["authorityEpoch"]),
             )
             self._store_receipt(record, result)
             return result
@@ -1242,6 +1284,7 @@ class InMemoryOwnerTruthConversationRepository:
                     if record.last_client_sequence_number is not None
                     else None
                 ),
+                authority_epoch=int(session["authorityEpoch"]),
             )
             self._store_receipt(record, result)
             return result
@@ -1405,6 +1448,131 @@ class InMemoryOwnerTruthConversationRepository:
                 ),
                 continuous_client_sequence=int(session.get("continuousClientSequence") or 0),
                 close_requested_client_sequence=session.get("closeRequestedClientSequence"),
+            )
+
+    def read_live_delivery_status(
+        self,
+        *,
+        session_id: str,
+        product_session_id: str,
+        from_client_sequence: int,
+        limit: int,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthLiveDeliveryStatusSnapshot:
+        _assert_owner_context(context)
+        with self._lock:
+            vault = self._ensure_active_vault(
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+            )
+            session = self._sessions.get((context.vault_id, session_id))
+            if (
+                session is None
+                or session["ownerSubjectId"] != context.owner_subject_id
+                or int(session["authorityEpoch"]) != int(vault["authorityEpoch"])
+                or self._product_session_id_from_metadata(session.get("metadata"))
+                != product_session_id
+            ):
+                raise OwnerTruthConversationAccessDenied(
+                    "live delivery status does not belong to this active Owner Vault"
+                )
+            messages = sorted(
+                (
+                    item
+                    for item in self._messages.values()
+                    if item["vaultId"] == context.vault_id
+                    and item["sessionId"] == session_id
+                    and item["ownerSubjectId"] == context.owner_subject_id
+                    and int(item["authorityEpoch"]) == int(vault["authorityEpoch"])
+                    and item.get("clientSequenceNumber") is not None
+                    and int(item["clientSequenceNumber"]) >= from_client_sequence
+                    and int(item["clientSequenceNumber"])
+                    <= from_client_sequence + limit - 1
+                ),
+                key=lambda item: int(item["clientSequenceNumber"]),
+            )
+            deliveries: list[OwnerTruthLiveDeliveryItemSnapshot] = []
+            for message in messages:
+                receipt_hash = next(
+                    (
+                        command_hash
+                        for (receipt_vault, command_hash), receipt in self._receipts.items()
+                        if receipt_vault == context.vault_id
+                        and receipt.get("messageId") == message["id"]
+                    ),
+                    None,
+                )
+                if receipt_hash is None:
+                    raise OwnerTruthConversationConflict(
+                        "live delivery message has no immutable command receipt"
+                    )
+                deliveries.append(
+                    OwnerTruthLiveDeliveryItemSnapshot(
+                        message_id=str(message["id"]),
+                        command_id_hash=str(receipt_hash),
+                        client_sequence_number=int(message["clientSequenceNumber"]),
+                        author=ConversationMessageAuthor(message["author"]),
+                        kind=ConversationMessageKind(message["kind"]),
+                        captured_at=message["capturedAt"],
+                        content_hash=str(message["contentHash"]),
+                    )
+                )
+            observed_sequences = {item.client_sequence_number for item in deliveries}
+            window_end = from_client_sequence + limit - 1
+            observed_prefix_end = min(
+                int(session.get("continuousClientSequence") or 0),
+                window_end,
+            )
+            missing = tuple(
+                sequence
+                for sequence in range(from_client_sequence, observed_prefix_end + 1)
+                if sequence not in observed_sequences
+            )
+            thread = self._threads.get((context.vault_id, str(session["threadId"])))
+            if thread is None:
+                raise OwnerTruthConversationConflict(
+                    "live delivery session has no bound conversation thread"
+                )
+            operations = tuple(
+                OwnerTruthLiveDeliveryOperationSnapshot(
+                    operation=str(receipt["commandType"]),
+                    command_id_hash=str(command_hash),
+                    receipt_id=str(receipt["result"].receipt_id),
+                    thread_id=str(receipt["result"].thread_id),
+                    session_id=str(receipt["result"].session_id),
+                    result_state=InterviewSessionState(receipt["result"].state),
+                )
+                for (receipt_vault, command_hash), receipt in self._receipts.items()
+                if receipt_vault == context.vault_id
+                and receipt.get("commandType") in {
+                    "startInterviewSession",
+                    "endInterviewSession",
+                }
+                and isinstance(receipt.get("result"), OwnerTruthInterviewSessionResult)
+                and str(receipt["result"].session_id) == str(session["id"])
+            )
+            return OwnerTruthLiveDeliveryStatusSnapshot(
+                thread_id=str(session["threadId"]),
+                session_id=str(session["id"]),
+                product_session_id=product_session_id,
+                state=InterviewSessionState(session["state"]),
+                boundary=InterviewBoundary(session["boundary"]),
+                thread_version=int(thread["rowVersion"]),
+                session_version=int(session["rowVersion"]),
+                authority_epoch=int(vault["authorityEpoch"]),
+                continuous_client_sequence=int(session.get("continuousClientSequence") or 0),
+                close_requested_client_sequence=session.get("closeRequestedClientSequence"),
+                observed_at=datetime.now(timezone.utc),
+                from_client_sequence=from_client_sequence,
+                limit=limit,
+                missing_client_sequences=missing,
+                next_from_client_sequence=(
+                    window_end + 1
+                    if int(session.get("continuousClientSequence") or 0) > window_end
+                    else None
+                ),
+                deliveries=tuple(deliveries),
+                operations=operations,
             )
 
     @staticmethod
@@ -1852,6 +2020,7 @@ class InMemoryOwnerTruthConversationRepository:
             client_sequence_number=result.client_sequence_number,
             continuous_client_sequence=result.continuous_client_sequence,
             delivery_state=result.delivery_state,
+            authority_epoch=result.authority_epoch,
             authority_effects=result.authority_effects,
         )
 
@@ -1988,6 +2157,7 @@ class PostgresOwnerTruthConversationRepository:
             session_version=int(session["row_version"]),
             state=InterviewSessionState(str(session["state"])),
             boundary=InterviewBoundary(str(session["boundary"])),
+            authority_epoch=int(vault["authority_epoch"]),
         )
 
     def append_interview_message(
@@ -2163,6 +2333,7 @@ class PostgresOwnerTruthConversationRepository:
                 if record.client_sequence_number is not None
                 else None
             ),
+            authority_epoch=int(vault["authority_epoch"]),
         )
 
     def set_interview_boundary(
@@ -2546,6 +2717,7 @@ class PostgresOwnerTruthConversationRepository:
                 if record.last_client_sequence_number is not None
                 else None
             ),
+            authority_epoch=int(vault["authority_epoch"]),
         )
 
     def record_interview_pacing(
@@ -3174,6 +3346,165 @@ class PostgresOwnerTruthConversationRepository:
             ),
         )
 
+    def read_live_delivery_status(
+        self,
+        *,
+        session_id: str,
+        product_session_id: str,
+        from_client_sequence: int,
+        limit: int,
+        context: OwnerTruthCommandContext,
+    ) -> OwnerTruthLiveDeliveryStatusSnapshot:
+        _assert_owner_context(context)
+        with self._cursor() as cursor:
+            vault = self._active_vault(
+                cursor,
+                vault_id=context.vault_id,
+                owner_subject_id=context.owner_subject_id,
+                lock=False,
+            )
+            cursor.execute(
+                """
+                SELECT s.id, s.thread_id, s.state, s.boundary, s.row_version,
+                    t.row_version AS thread_version, s.authority_epoch,
+                    s.continuous_client_sequence, s.close_requested_client_sequence
+                FROM owner_truth.interview_sessions AS s
+                JOIN owner_truth.conversation_threads AS t
+                  ON t.vault_id = s.vault_id
+                 AND t.id = s.thread_id
+                 AND t.owner_subject_id = s.owner_subject_id
+                 AND t.authority_epoch = s.authority_epoch
+                WHERE s.vault_id = %s
+                  AND s.id = %s
+                  AND s.owner_subject_id = %s
+                  AND s.authority_epoch = %s
+                  AND COALESCE(
+                        s.product_session_id,
+                        NULLIF(BTRIM(s.metadata ->> 'productSessionId'), '')
+                      ) = %s
+                """,
+                (
+                    context.vault_id,
+                    session_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    product_session_id,
+                ),
+            )
+            session = cursor.fetchone()
+            if session is None:
+                raise OwnerTruthConversationAccessDenied(
+                    "live delivery status does not belong to this active Owner Vault"
+                )
+            cursor.execute(
+                """
+                SELECT m.id, m.client_sequence_number, m.author, m.kind,
+                    m.captured_at, m.content_hash, r.command_id_hash
+                FROM owner_truth.conversation_messages AS m
+                JOIN owner_truth.conversation_command_receipts AS r
+                  ON r.vault_id = m.vault_id
+                 AND r.result_message_id = m.id
+                 AND r.target_session_id = m.session_id
+                WHERE m.vault_id = %s
+                  AND m.session_id = %s
+                  AND m.owner_subject_id = %s
+                  AND m.authority_epoch = %s
+                  AND m.client_sequence_number >= %s
+                  AND m.client_sequence_number <= %s
+                ORDER BY m.client_sequence_number ASC
+                """,
+                (
+                    context.vault_id,
+                    session_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    from_client_sequence,
+                    from_client_sequence + limit - 1,
+                ),
+            )
+            rows = cursor.fetchall()
+            cursor.execute(
+                """
+                SELECT id, command_id_hash, command_type, target_thread_id,
+                    target_session_id
+                FROM owner_truth.conversation_command_receipts
+                WHERE vault_id = %s
+                  AND owner_subject_id = %s
+                  AND authority_epoch = %s
+                  AND target_session_id = %s
+                  AND command_type IN ('startInterviewSession', 'endInterviewSession')
+                ORDER BY command_type ASC, id ASC
+                """,
+                (
+                    context.vault_id,
+                    context.owner_subject_id,
+                    int(vault["authority_epoch"]),
+                    session_id,
+                ),
+            )
+            operation_rows = cursor.fetchall()
+        deliveries = tuple(
+            OwnerTruthLiveDeliveryItemSnapshot(
+                message_id=str(row["id"]),
+                command_id_hash=str(row["command_id_hash"]),
+                client_sequence_number=int(row["client_sequence_number"]),
+                author=ConversationMessageAuthor(str(row["author"])),
+                kind=ConversationMessageKind(str(row["kind"])),
+                captured_at=row["captured_at"],
+                content_hash=str(row["content_hash"]),
+            )
+            for row in rows
+        )
+        operations = tuple(
+            OwnerTruthLiveDeliveryOperationSnapshot(
+                operation=str(row["command_type"]),
+                command_id_hash=str(row["command_id_hash"]),
+                receipt_id=str(row["id"]),
+                thread_id=str(row["target_thread_id"]),
+                session_id=str(row["target_session_id"]),
+                result_state=InterviewSessionState(str(session["state"])),
+            )
+            for row in operation_rows
+        )
+        observed_sequences = {item.client_sequence_number for item in deliveries}
+        window_end = from_client_sequence + limit - 1
+        observed_prefix_end = min(
+            int(session["continuous_client_sequence"]),
+            window_end,
+        )
+        missing = tuple(
+            sequence
+            for sequence in range(from_client_sequence, observed_prefix_end + 1)
+            if sequence not in observed_sequences
+        )
+        return OwnerTruthLiveDeliveryStatusSnapshot(
+            thread_id=str(session["thread_id"]),
+            session_id=str(session["id"]),
+            product_session_id=product_session_id,
+            state=InterviewSessionState(str(session["state"])),
+            boundary=InterviewBoundary(str(session["boundary"])),
+            thread_version=int(session["thread_version"]),
+            session_version=int(session["row_version"]),
+            authority_epoch=int(session["authority_epoch"]),
+            continuous_client_sequence=int(session["continuous_client_sequence"]),
+            close_requested_client_sequence=(
+                None
+                if session["close_requested_client_sequence"] is None
+                else int(session["close_requested_client_sequence"])
+            ),
+            observed_at=datetime.now(timezone.utc),
+            from_client_sequence=from_client_sequence,
+            limit=limit,
+            missing_client_sequences=missing,
+            next_from_client_sequence=(
+                window_end + 1
+                if int(session["continuous_client_sequence"]) > window_end
+                else None
+            ),
+            deliveries=deliveries,
+            operations=operations,
+        )
+
     def get_interview_message_authority(
         self,
         *,
@@ -3624,6 +3955,7 @@ class PostgresOwnerTruthConversationRepository:
                 if requested_close_sequence is not None
                 else None
             ),
+            authority_epoch=int(session["authority_epoch"]),
         )
 
     def _deduplicated_review_batch_result(
