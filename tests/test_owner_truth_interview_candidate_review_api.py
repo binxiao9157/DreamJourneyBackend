@@ -849,6 +849,9 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
             )
             self.assertEqual(replay.status_code, 200)
             self.assertEqual(replay.json()["status"], "deduplicated")
+            self.assertFalse(
+                replay.json()["memoryActivation"]["memoryVersionCreated"]
+            )
 
             confirmation = client.get(
                 self._confirmation_path(vault_id, review_batch_id),
@@ -1201,6 +1204,9 @@ class OwnerTruthInterviewCandidateReviewAPITests(unittest.TestCase):
             )
             self.assertEqual(replay.status_code, 200)
             self.assertEqual(replay.json()["status"], "deduplicated")
+            self.assertFalse(
+                replay.json()["memoryActivation"]["memoryVersionCreated"]
+            )
         finally:
             policy_service._CLOSED_PILOT_OWNER_VISIBLE = previous_visible
 

@@ -199,6 +199,7 @@ class CreateTextSourceCommand:
     metadata: Mapping[str, Any]
     source_kind: SourceKind = SourceKind.TEXT
     expected_authority_epoch: int | None = None
+    trusted_live_capacity: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", require_nonblank(self.command_id, field="command_id"))
@@ -206,10 +207,7 @@ class CreateTextSourceCommand:
         if not isinstance(self.expected_version, int) or self.expected_version < 0:
             raise OwnerTruthContractError("expected_version must be a non-negative integer")
         normalized_text = require_nonblank(self.text, field="text")
-        if len(normalized_text) > _MAX_TEXT_CHARACTERS:
-            raise OwnerTruthContractError("text exceeds maximum source length")
-        object.__setattr__(self, "text", normalized_text)
-        object.__setattr__(self, "metadata", _normalized_metadata(self.metadata))
+        normalized_metadata = _normalized_metadata(self.metadata)
         try:
             source_kind = SourceKind(self.source_kind)
         except (TypeError, ValueError) as exc:
@@ -219,6 +217,44 @@ class CreateTextSourceCommand:
                 "CreateTextSourceCommand supports text, conversation, or import sources"
             )
         object.__setattr__(self, "source_kind", source_kind)
+        if self.trusted_live_capacity:
+            if (
+                source_kind is not SourceKind.CONVERSATION
+                or normalized_metadata.get("captureMode") != "live"
+                or normalized_metadata.get("sourcePolicy") != "userEvidenceOnly"
+                or normalized_metadata.get("origin")
+                != "interviewReviewBatchCandidateProposal"
+                or not str(normalized_metadata.get("reviewBatchId") or "").strip()
+            ):
+                raise OwnerTruthContractError(
+                    "trusted Live source capacity requires server-admitted Live metadata"
+                )
+            if len(normalized_text) > 100_000:
+                raise OwnerTruthContractError("Live user source text exceeds maximum length")
+            turns = normalized_metadata.get("conversationTurns")
+            if not isinstance(turns, list) or not turns:
+                raise OwnerTruthContractError("Live source requires conversation turns")
+            total_turn_characters = 0
+            for turn in turns:
+                if not isinstance(turn, Mapping):
+                    raise OwnerTruthContractError("Live source turn is invalid")
+                turn_text = str(turn.get("text") or "")
+                if len(turn_text) > 20_000:
+                    raise OwnerTruthContractError("Live source turn exceeds maximum length")
+                total_turn_characters += len(turn_text)
+            if total_turn_characters > 200_000:
+                raise OwnerTruthContractError("Live source turns exceed maximum length")
+            serialized_size = len(
+                _canonical_json(
+                    {"text": normalized_text, "metadata": normalized_metadata}
+                ).encode("utf-8")
+            )
+            if serialized_size > 2 * 1024 * 1024:
+                raise OwnerTruthContractError("Live source envelope exceeds maximum size")
+        elif len(normalized_text) > _MAX_TEXT_CHARACTERS:
+            raise OwnerTruthContractError("text exceeds maximum source length")
+        object.__setattr__(self, "text", normalized_text)
+        object.__setattr__(self, "metadata", normalized_metadata)
         if self.expected_authority_epoch is not None and (
             type(self.expected_authority_epoch) is not int
             or self.expected_authority_epoch < 0

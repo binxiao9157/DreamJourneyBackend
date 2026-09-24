@@ -1,0 +1,28 @@
+{
+  "version": "0122",
+  "name": "owner_truth_live_long_memory_pipeline",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthLiveLongMemoryV3",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthLiveLongMemoryPipeline": false
+  },
+  "summary": "Adds private resumable Live organization runs, bounded work units, provider attempts, evidence atoms and atomic publication manifests.",
+  "operations": [
+    "persist authority-fenced Live organization runs",
+    "persist deterministic work units and bounded provider reservations",
+    "persist evidence atoms, source ranges and cross-batch relation proofs",
+    "persist classified run and work-unit failure closure",
+    "bind one immutable publication manifest to the final Source"
+  ],
+  "rollback": "Disable ownerTruthLiveLongMemoryPipeline. Keep additive private coordination rows for audit and recovery; do not delete Sources, Candidates or formal memories.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false,
+    "invalidatesDerivedProjections": false
+  }
+}

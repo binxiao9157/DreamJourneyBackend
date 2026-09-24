@@ -198,6 +198,7 @@ class OwnerTruthInterviewCandidateProposalPreparation:
     session_id: str
     source_text: str
     source_metadata: Mapping[str, Any]
+    authority_epoch: int
     owner_message_count: int
     first_message_sequence: int
     last_message_sequence: int
@@ -207,6 +208,14 @@ class OwnerTruthInterviewCandidateProposalPreparation:
             object.__setattr__(self, field, require_uuid(getattr(self, field), field=field))
         object.__setattr__(self, "source_text", require_nonblank(self.source_text, field="source_text"))
         object.__setattr__(self, "source_metadata", _normalised_metadata(self.source_metadata))
+        if (
+            isinstance(self.authority_epoch, bool)
+            or not isinstance(self.authority_epoch, int)
+            or self.authority_epoch < 0
+        ):
+            raise OwnerTruthInterviewCandidateProposalError(
+                "authority_epoch must be a non-negative integer"
+            )
         for field in ("owner_message_count", "first_message_sequence", "last_message_sequence"):
             _positive_version(getattr(self, field), field=field)
         if self.last_message_sequence < self.first_message_sequence:

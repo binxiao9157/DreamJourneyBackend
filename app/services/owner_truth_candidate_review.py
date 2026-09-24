@@ -3074,10 +3074,10 @@ class PostgresOwnerTruthCandidateReviewRepository:
         receipt_id: str,
         candidate: OwnerTruthCandidateSnapshot,
     ) -> OwnerTruthMemoryActivationResult:
-        outcome = str(record.get("activation_outcome") or "")
-        if outcome == "notApplicable":
+        persisted_outcome = str(record.get("activation_outcome") or "")
+        if persisted_outcome == "notApplicable":
             return OwnerTruthMemoryActivationResult(
-                outcome=outcome,
+                outcome=persisted_outcome,
                 receipt_id=receipt_id,
                 candidate_id=candidate.candidate_id,
                 decision=candidate.decision,
@@ -3093,7 +3093,8 @@ class PostgresOwnerTruthCandidateReviewRepository:
             receipt_id=receipt_id,
             version_id=(
                 str(record.get("target_memory_version_id"))
-                if outcome == "duplicate" and record.get("target_memory_version_id")
+                if persisted_outcome == "duplicate"
+                and record.get("target_memory_version_id")
                 else None
             ),
         )
@@ -3102,7 +3103,7 @@ class PostgresOwnerTruthCandidateReviewRepository:
                 "persisted MemoryChangeSet is missing its MemoryVersion result"
             )
         return OwnerTruthMemoryActivationResult(
-            outcome=outcome,
+            outcome="deduplicated",
             receipt_id=receipt_id,
             candidate_id=candidate.candidate_id,
             decision=candidate.decision,

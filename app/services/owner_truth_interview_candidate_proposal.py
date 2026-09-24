@@ -36,6 +36,11 @@ from app.domain.owner_truth.source_commands import (
     OwnerTruthSourceWriteRecord,
 )
 from app.services.owner_truth_source import build_source_created_effect_intent
+from app.services.owner_truth_live_long_memory import (
+    LiveLongMemoryBudgetPolicy,
+    LiveLongMemoryError,
+    LiveLongMemoryRunIdentity,
+)
 
 
 FORMAL_INTERVIEW_CANDIDATE_PROPOSAL_FEATURE = "ownerTruthCandidateReview"
@@ -283,8 +288,14 @@ def _admitted_source_is_live(
 class OwnerTruthInterviewCandidateProposalService:
     """Admit one acknowledged batch into the default-off Source effect lane."""
 
-    def __init__(self, store: OwnerTruthInterviewCandidateProposalStore):
+    def __init__(
+        self,
+        store: OwnerTruthInterviewCandidateProposalStore,
+        *,
+        live_long_memory_enabled: bool = False,
+    ):
         self._store = store
+        self._live_long_memory_enabled = bool(live_long_memory_enabled)
 
     def admit_review_batch(
         self,
@@ -303,6 +314,62 @@ class OwnerTruthInterviewCandidateProposalService:
             if isinstance(prepared, OwnerTruthInterviewCandidateProposalResult):
                 return prepared
 
+            live_binding: tuple[Any, LiveLongMemoryRunIdentity, int] | None = None
+            if (
+                self._live_long_memory_enabled
+                and prepared.source_metadata.get("captureMode") == "live"
+            ):
+                product_session_id = str(
+                    prepared.source_metadata.get("productSessionId")
+                    or prepared.source_metadata.get("sessionId")
+                    or ""
+                ).strip()
+                raw_generation = prepared.source_metadata.get(
+                    "productCaptureGeneration", 1
+                )
+                raw_authority_epoch = prepared.authority_epoch
+                turns = prepared.source_metadata.get("conversationTurns") or ()
+                if (
+                    not product_session_id
+                    or isinstance(raw_generation, bool)
+                    or not isinstance(raw_generation, int)
+                    or raw_generation < 1
+                    or isinstance(raw_authority_epoch, bool)
+                    or not isinstance(raw_authority_epoch, int)
+                    or raw_authority_epoch < 0
+                    or not isinstance(turns, (list, tuple))
+                ):
+                    raise OwnerTruthInterviewCandidateProposalConflict(
+                        "Live memory Source binding metadata is invalid"
+                    )
+                final_watermark = max(
+                    (
+                        int(turn.get("index") or 0)
+                        for turn in turns
+                        if isinstance(turn, Mapping)
+                    ),
+                    default=0,
+                )
+                if final_watermark < 1:
+                    raise OwnerTruthInterviewCandidateProposalConflict(
+                        "Live memory Source binding watermark is invalid"
+                    )
+                identity = LiveLongMemoryRunIdentity(
+                    owner_subject_id=context.owner_subject_id,
+                    vault_id=context.vault_id,
+                    product_session_id=product_session_id,
+                    capture_generation=raw_generation,
+                    authority_epoch=raw_authority_epoch,
+                )
+                live_repository = self._store.owner_truth_live_long_memory_repository()
+                try:
+                    live_repository.begin_or_load(identity, LiveLongMemoryBudgetPolicy())
+                except LiveLongMemoryError as error:
+                    raise OwnerTruthInterviewCandidateProposalConflict(
+                        "Live memory Source authority binding is stale"
+                    ) from error
+                live_binding = (live_repository, identity, final_watermark)
+
             source_command = CreateTextSourceCommand(
                 command_id=record.source_command_id,
                 source_id=record.source_id,
@@ -310,9 +377,22 @@ class OwnerTruthInterviewCandidateProposalService:
                 text=prepared.source_text,
                 metadata=prepared.source_metadata,
                 source_kind=SourceKind.CONVERSATION,
+                trusted_live_capacity=(
+                    prepared.source_metadata.get("captureMode") == "live"
+                ),
             )
             source_record = source_command.write_record(context=context)
             source = self._store.create_owner_truth_source(source_record)
+            if live_binding is not None:
+                live_repository, identity, final_watermark = live_binding
+                live_repository.bind_source(
+                    run_id=identity.run_id,
+                    authority_epoch=identity.authority_epoch,
+                    source_id=source.source_id,
+                    source_version=source.source_version,
+                    source_content_hash=source.content_hash,
+                    final_watermark=final_watermark,
+                )
             effect = self._store.effect_kernel_repository().accept(
                 build_source_created_effect_intent(record=source_record, source=source)
             )
@@ -361,6 +441,7 @@ class _InMemoryReviewBatch:
     owner_subject_id: str
     thread_id: str
     session_id: str
+    product_session_id: str | None
     state: str
     row_version: int
     authority_epoch: int
@@ -438,6 +519,8 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
         state: str = "acknowledged",
         row_version: int = 2,
         authority_epoch: int = 0,
+        capture_mode: str | None = None,
+        product_session_id: str | None = None,
     ) -> None:
         if not owner_messages:
             raise ValueError("owner_messages are required")
@@ -448,6 +531,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
             owner_subject_id=owner_subject_id,
             thread_id=thread_id,
             session_id=session_id,
+            product_session_id=product_session_id,
             state=state,
             row_version=row_version,
             authority_epoch=authority_epoch,
@@ -456,7 +540,12 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
             through_message_sequence=ordered_messages[-1][0],
             owner_messages=ordered_messages,
             conversation_turns=tuple(
-                {"index": sequence, "role": "user", "text": text}
+                {
+                    "index": sequence,
+                    "role": "user",
+                    "text": text,
+                    **({"captureMode": capture_mode} if capture_mode else {}),
+                }
                 for sequence, text in ordered_messages
             ),
         )
@@ -818,6 +907,9 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 owner_subject_id=str(snapshot["ownerSubjectId"]),
                 thread_id=str(snapshot["threadId"]),
                 session_id=str(snapshot["sessionId"]),
+                product_session_id=(
+                    str(snapshot.get("productSessionId") or "").strip() or None
+                ),
                 state=str(snapshot["state"]),
                 row_version=int(snapshot["rowVersion"]),
                 authority_epoch=int(snapshot["authorityEpoch"]),
@@ -868,6 +960,8 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 "reviewBatchId": batch.review_batch_id,
                 "threadId": batch.thread_id,
                 "sessionId": batch.session_id,
+                "productSessionId": batch.product_session_id,
+                "productCaptureGeneration": 1,
                 "ownerTurnStartCount": batch.owner_turn_start_count,
                 "ownerTurnEndCount": batch.owner_turn_end_count,
                 "throughMessageSequence": batch.through_message_sequence,
@@ -876,6 +970,7 @@ class InMemoryOwnerTruthInterviewCandidateProposalRepository:
                 "captureMode": _conversation_capture_mode(list(batch.conversation_turns)),
                 "sourcePolicy": "userEvidenceOnly",
             },
+            authority_epoch=batch.authority_epoch,
             owner_message_count=len(batch.owner_messages),
             first_message_sequence=batch.owner_messages[0][0],
             last_message_sequence=batch.owner_messages[-1][0],
@@ -982,7 +1077,7 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                 batch=batch,
                 record=record,
                 first_message_sequence=int(messages[0]["sequence_number"]),
-                last_message_sequence=int(messages[-1]["sequence_number"]),
+                last_message_sequence=int(batch["through_message_sequence"]),
             )
             return OwnerTruthInterviewCandidateProposalPreparation(
                 review_batch_id=record.review_batch_id,
@@ -995,6 +1090,10 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                     "reviewBatchId": record.review_batch_id,
                     "threadId": str(batch["thread_id"]),
                     "sessionId": str(batch["session_id"]),
+                    "productSessionId": (
+                        str(batch.get("product_session_id") or "").strip() or None
+                    ),
+                    "productCaptureGeneration": 1,
                     "ownerTurnStartCount": int(batch["owner_turn_start_count"]),
                     "ownerTurnEndCount": int(batch["owner_turn_end_count"]),
                     "throughMessageSequence": int(batch["through_message_sequence"]),
@@ -1003,6 +1102,7 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
                     "captureMode": _conversation_capture_mode(conversation_turns),
                     "sourcePolicy": "userEvidenceOnly",
                 },
+                authority_epoch=int(batch["authority_epoch"]),
                 owner_message_count=len(messages),
                 first_message_sequence=int(messages[0]["sequence_number"]),
                 last_message_sequence=int(messages[-1]["sequence_number"]),
@@ -1355,12 +1455,18 @@ class PostgresOwnerTruthInterviewCandidateProposalRepository:
     ) -> Mapping[str, Any]:
         cursor.execute(
             """
-            SELECT id, vault_id, owner_subject_id, session_id, thread_id,
-                state, captured_candidate_batch_turn_count,
-                owner_turn_start_count, owner_turn_end_count,
-                through_message_sequence, row_version, authority_epoch
-            FROM owner_truth.interview_review_batches
-            WHERE vault_id = %s AND id = %s
+            SELECT b.id, b.vault_id, b.owner_subject_id, b.session_id, b.thread_id,
+                b.state, b.captured_candidate_batch_turn_count,
+                b.owner_turn_start_count, b.owner_turn_end_count,
+                b.through_message_sequence, b.row_version, b.authority_epoch,
+                COALESCE(
+                    NULLIF(BTRIM(s.product_session_id), ''),
+                    NULLIF(BTRIM(s.metadata ->> 'productSessionId'), '')
+                ) AS product_session_id
+            FROM owner_truth.interview_review_batches AS b
+            JOIN owner_truth.interview_sessions AS s
+              ON s.vault_id = b.vault_id AND s.id = b.session_id
+            WHERE b.vault_id = %s AND b.id = %s
             FOR UPDATE
             """,
             (record.vault_id, record.review_batch_id),

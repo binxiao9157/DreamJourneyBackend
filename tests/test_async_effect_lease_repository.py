@@ -106,6 +106,164 @@ class AsyncEffectLeaseRepositoryTests(unittest.TestCase):
         self.clock.advance(1)
         self.assertIsNotNone(self.claim("worker-b"))
 
+    def test_contract_retry_context_is_scoped_to_current_lease_and_allowlisted_failure(self):
+        first = self.claim("worker-a")
+        self.assertIsNotNone(first)
+        self.repository.release_retryable(
+            first,
+            retry_seconds=0,
+            error_code="candidateExtraction.live.organizationDecode.invalidJson",
+        )
+        second = self.claim("worker-b")
+        self.assertIsNotNone(second)
+
+        context = self.repository.load_contract_retry_context(second)
+
+        self.assertEqual(context.attempt, 1)
+        self.assertEqual(context.stage, "organizationDecode")
+        self.assertEqual(context.reason, "invalidJson")
+        with self.assertRaises(AsyncEffectLeaseLost):
+            self.repository.load_contract_retry_context(first)
+
+        unrelated = InMemoryAsyncEffectLeaseRepository(now=self.clock.now)
+        unrelated.seed(self.intent)
+        unrelated_first = unrelated.claim_next(
+            worker_id="worker-c",
+            lease_seconds=30,
+            supported_job_types=[self.intent.job_type],
+        )
+        self.assertIsNotNone(unrelated_first)
+        unrelated.release_retryable(
+            unrelated_first,
+            retry_seconds=0,
+            error_code="providerUnavailable",
+        )
+        unrelated_second = unrelated.claim_next(
+            worker_id="worker-d",
+            lease_seconds=30,
+            supported_job_types=[self.intent.job_type],
+        )
+
+        self.assertIsNotNone(unrelated_second)
+        self.assertIsNone(unrelated.load_contract_retry_context(unrelated_second))
+
+    def test_contract_retry_context_rejects_patterned_but_unapproved_reason(self):
+        first = self.claim("worker-a")
+        self.assertIsNotNone(first)
+        self.repository.release_retryable(
+            first,
+            retry_seconds=0,
+            error_code=(
+                "candidateExtraction.live.organizationDecode.arbitraryButPatterned"
+            ),
+        )
+        second = self.claim("worker-b")
+        self.assertIsNotNone(second)
+
+        self.assertIsNone(self.repository.load_contract_retry_context(second))
+
+    def test_contract_retry_context_survives_contiguous_transient_attempt(self):
+        first = self.claim("worker-a")
+        self.assertIsNotNone(first)
+        self.repository.release_retryable(
+            first,
+            retry_seconds=0,
+            error_code="candidateExtraction.live.organizationDecode.invalidJson",
+        )
+        second = self.claim("worker-b")
+        self.assertIsNotNone(second)
+        self.repository.release_retryable(
+            second,
+            retry_seconds=0,
+            error_code="candidateExtraction.live.organizationRequest.transport",
+        )
+        third = self.claim("worker-c")
+        self.assertIsNotNone(third)
+
+        context = self.repository.load_contract_retry_context(third)
+
+        self.assertEqual(context.attempt, 1)
+        self.assertEqual(context.stage, "organizationDecode")
+        self.assertEqual(context.reason, "invalidJson")
+
+    def test_contract_retry_context_rejects_unapproved_later_attempt_failures(self):
+        later_error_codes = (
+            "candidateExtraction.live.supportValidate.factOmitted",
+            "candidateExtraction.live.organizationRequest.authorizationRejected",
+            "candidateExtraction.live.organizationRequest.arbitrary",
+        )
+
+        for later_error_code in later_error_codes:
+            with self.subTest(later_error_code=later_error_code):
+                repository = InMemoryAsyncEffectLeaseRepository(now=self.clock.now)
+                repository.seed(self.intent)
+                first = repository.claim_next(
+                    worker_id="worker-a",
+                    lease_seconds=30,
+                    supported_job_types=[self.intent.job_type],
+                )
+                self.assertIsNotNone(first)
+                repository.release_retryable(
+                    first,
+                    retry_seconds=0,
+                    error_code="candidateExtraction.live.organizationDecode.invalidJson",
+                )
+                second = repository.claim_next(
+                    worker_id="worker-b",
+                    lease_seconds=30,
+                    supported_job_types=[self.intent.job_type],
+                )
+                self.assertIsNotNone(second)
+                repository.release_retryable(
+                    second,
+                    retry_seconds=0,
+                    error_code=later_error_code,
+                )
+                third = repository.claim_next(
+                    worker_id="worker-c",
+                    lease_seconds=30,
+                    supported_job_types=[self.intent.job_type],
+                )
+                self.assertIsNotNone(third)
+
+                self.assertIsNone(repository.load_contract_retry_context(third))
+
+    def test_contract_retry_context_rejects_discontinuous_attempt_history(self):
+        first = self.claim("worker-a")
+        self.assertIsNotNone(first)
+        self.repository.release_retryable(
+            first,
+            retry_seconds=0,
+            error_code="candidateExtraction.live.organizationDecode.invalidJson",
+        )
+        second = self.claim("worker-b")
+        self.assertIsNotNone(second)
+        self.repository.release_retryable(
+            second,
+            retry_seconds=0,
+            error_code="candidateExtraction.live.organizationRequest.transport",
+        )
+        third = self.claim("worker-c")
+        self.assertIsNotNone(third)
+        del self.repository._attempts[(third.job_id, 2)]
+
+        self.assertIsNone(self.repository.load_contract_retry_context(third))
+
+    def test_contract_retry_context_rejects_expired_current_lease(self):
+        first = self.claim("worker-a")
+        self.assertIsNotNone(first)
+        self.repository.release_retryable(
+            first,
+            retry_seconds=0,
+            error_code="candidateExtraction.live.organizationDecode.invalidJson",
+        )
+        second = self.claim("worker-b")
+        self.assertIsNotNone(second)
+        self.clock.advance(31)
+
+        with self.assertRaises(AsyncEffectLeaseLost):
+            self.repository.load_contract_retry_context(second)
+
     def test_cancellation_stops_a_leased_worker_without_executing_business_logic(self):
         lease = self.claim()
         self.assertIsNotNone(lease)

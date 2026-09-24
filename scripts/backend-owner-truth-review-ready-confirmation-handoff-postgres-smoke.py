@@ -121,16 +121,28 @@ def assert_value_minimized_status(
     require(
         body
         == {
-            "schemaVersion": "owner-truth-interview-candidate-proposal-status-v1",
+            "schemaVersion": "owner-truth-interview-candidate-proposal-status-v3",
             "vaultId": vault_id,
             "reviewBatch": {"reviewBatchId": review_batch_id, "state": "acknowledged"},
             "candidateProposal": {"status": "admitted"},
             "source": {"status": "admitted"},
-            "candidateExtraction": {"status": "succeeded"},
+            "candidateExtraction": {
+                "status": "succeeded",
+                "jobState": "succeeded",
+                "attempt": 0,
+                "maxAttempts": 0,
+                "retryAvailableAt": None,
+                "firstFailureCode": None,
+                "failureCode": None,
+                "failureCategory": None,
+                "terminationCode": None,
+                "retryable": False,
+                "deadLetterState": None,
+            },
             "effectExecution": {"status": "disabled"},
             "candidateReview": {"status": "reviewReady"},
         },
-        "status must be exact and value-minimized for the selected review batch",
+        f"status must be exact and value-minimized for the selected review batch: {body}",
     )
     rendered = json.dumps(body, ensure_ascii=False, sort_keys=True)
     for forbidden in (

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -549,6 +550,66 @@ class OwnerTruthInterviewInputAPITests(unittest.TestCase):
         current = client.get(self._current_path(vault_id), headers=headers)
         self.assertEqual(current.status_code, 200, current.text)
         self.assertIsNone(current.json()["currentSession"])
+
+    def test_expired_bearer_rejection_happens_before_live_append_is_applied(self) -> None:
+        _, headers, _ = self._login("13800139701")
+        vault_id = "vault-live-pre-handler-auth-rejection"
+        thread_id = str(uuid4())
+        session_id = str(uuid4())
+        product_session_id = "live-pre-handler-auth-rejection"
+        started = client.post(
+            self._start_path(vault_id),
+            headers=headers,
+            json={
+                "commandId": str(uuid4()),
+                "threadId": thread_id,
+                "sessionId": session_id,
+                "entryMode": "live",
+                "productSessionId": product_session_id,
+            },
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+
+        with patch.object(
+            OwnerTruthConversationService,
+            "append_message",
+            autospec=True,
+        ) as append_message:
+            rejected = client.post(
+                self._append_path(vault_id, session_id),
+                headers={"Authorization": "Bearer definitely-expired-access-token"},
+                json={
+                    "commandId": str(uuid4()),
+                    "threadId": thread_id,
+                    "messageId": str(uuid4()),
+                    "expectedThreadVersion": 1,
+                    "expectedSessionVersion": 1,
+                    "author": "owner",
+                    "captureMode": "live",
+                    "clientSequenceNumber": 1,
+                    "capturedAt": "2026-09-18T00:00:00Z",
+                    "text": "仅用于隔离认证中间件测试的合成文本。",
+                },
+            )
+            append_message.assert_not_called()
+        self.assertEqual(rejected.status_code, 401, rejected.text)
+        self.assertEqual(
+            rejected.json(),
+            {"detail": "invalid or expired access token"},
+        )
+
+        status = client.get(
+            self._live_delivery_status_path(vault_id, session_id),
+            headers=headers,
+            params={
+                "productSessionId": product_session_id,
+                "fromClientSequence": 1,
+            },
+        )
+        self.assertEqual(status.status_code, 200, status.text)
+        payload = status.json()
+        self.assertEqual(payload["session"]["continuousClientSequence"], 0)
+        self.assertEqual(payload["deliveries"], [])
 
     def test_live_assistant_turn_is_context_only_and_batch_waits_for_explicit_end(self) -> None:
         owner_id, headers, _ = self._login("13800139718")

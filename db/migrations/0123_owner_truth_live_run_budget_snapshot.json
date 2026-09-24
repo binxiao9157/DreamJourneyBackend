@@ -1,0 +1,25 @@
+{
+  "version": "0123",
+  "name": "owner_truth_live_run_budget_snapshot",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthLiveLongMemoryV3BudgetSnapshot",
+  "requiresOldWorkerDrain": true,
+  "releaseFlags": {
+    "ownerTruthLiveLongMemoryPipeline": false
+  },
+  "summary": "Stores the complete immutable budget and deadline policy for each newly created Live organization run.",
+  "operations": [
+    "add nullable policy snapshot and hash to preserve historical runs without guessing their limits",
+    "freeze exact policy at new run creation"
+  ],
+  "rollback": "Stop new Live admissions and keep 0123 columns and run rows. Use only a worker compatible with budget snapshots; do not backfill unknown historical policy from current defaults.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false,
+    "invalidatesDerivedProjections": false
+  }
+}

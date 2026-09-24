@@ -23,6 +23,10 @@ except ImportError as exc:  # pragma: no cover - exercised only without runtime 
     raise RuntimeError("FastAPI is not installed. Run `pip install -r requirements.txt`.") from exc
 
 from app.core.config import settings
+from app.services.owner_truth_live_long_memory import (
+    LiveLongMemoryBudgetPolicy,
+    LiveLongMemoryRunIdentity,
+)
 from app.async_effects.contracts import is_async_effect_store_ready
 from app.async_effects.worker_activation import (
     OwnerTruthWorkerKind,
@@ -5852,7 +5856,10 @@ def _owner_truth_interview_candidate_confirmation_memory_activation_response(
         "candidateId": result.candidate_id,
         "memoryActivation": {
             "status": activation.outcome,
-            "memoryVersionCreated": activation.memory_version_id is not None,
+            "memoryVersionCreated": (
+                activation.memory_version_id is not None
+                and activation.outcome != "deduplicated"
+            ),
         },
         "projectionRebuildRequested": result.projection_effect is not None,
     }
@@ -11202,6 +11209,33 @@ def append_owner_truth_interview_narrative(
                 command=command,
                 context=context,
             )
+            if (
+                capture_mode == "live"
+                and settings.owner_truth_live_long_memory_pipeline_enabled
+            ):
+                live_session = OwnerTruthInterviewSessionReadService(store).read(
+                    session_id=command.session_id,
+                    context=context,
+                )
+                product_session_id = str(
+                    live_session.product_session_id or command.session_id
+                )
+                identity = LiveLongMemoryRunIdentity(
+                    owner_subject_id=context.owner_subject_id,
+                    vault_id=context.vault_id,
+                    product_session_id=product_session_id,
+                    capture_generation=1,
+                    authority_epoch=int(live_session.authority_epoch),
+                )
+                store.owner_truth_live_long_memory_repository().register_segment(
+                    identity=identity,
+                    message_id=command.message_id,
+                    sequence=int(result.message_sequence or 0),
+                    role="user" if is_owner_turn else "assistant",
+                    text=narrative_text,
+                    text_hash=hashlib.sha256(narrative_text.encode("utf-8")).hexdigest(),
+                    policy=LiveLongMemoryBudgetPolicy(),
+                )
             if is_owner_turn:
                 _record_owner_truth_interview_append_decision_audit(
                     command=command,
@@ -11287,6 +11321,27 @@ def end_owner_truth_interview_session(
                 command=command,
                 context=context,
             )
+            if settings.owner_truth_live_long_memory_pipeline_enabled:
+                ended_session = OwnerTruthInterviewSessionReadService(store).read(
+                    session_id=command.session_id,
+                    context=context,
+                )
+                if ended_session.entry_mode == "live":
+                    identity = LiveLongMemoryRunIdentity(
+                        owner_subject_id=context.owner_subject_id,
+                        vault_id=context.vault_id,
+                        product_session_id=str(
+                            ended_session.product_session_id or command.session_id
+                        ),
+                        capture_generation=1,
+                        authority_epoch=int(ended_session.authority_epoch),
+                    )
+                    repository = store.owner_truth_live_long_memory_repository()
+                    repository.begin_or_load(identity, LiveLongMemoryBudgetPolicy())
+                    repository.finalize_open_unit(
+                        run_id=identity.run_id,
+                        policy=LiveLongMemoryBudgetPolicy(),
+                    )
             formal_review_batch_session_version = (
                 _owner_truth_formal_review_batch_automation_in_active_unit_of_work(
                     session_id=command.session_id,
@@ -11808,7 +11863,10 @@ def admit_owner_truth_interview_review_batch_candidate_proposal(
             payload=payload,
             review_batch_id=review_batch_id,
         )
-        result = OwnerTruthInterviewCandidateProposalService(store).admit_review_batch(
+        result = OwnerTruthInterviewCandidateProposalService(
+            store,
+            live_long_memory_enabled=settings.owner_truth_live_long_memory_pipeline_enabled,
+        ).admit_review_batch(
             command=command,
             context=context,
         )
@@ -12098,6 +12156,15 @@ def review_owner_truth_interview_candidate_confirmation_single(
                 or OWNER_TRUTH_SCHEMA_VERSION
             ),
             reason_code=str(payload.get("reasonCode") or "ownerConfirmedAtBoundary"),
+            expected_memory_revision=_owner_truth_candidate_expected_memory_revision(
+                payload
+            ),
+            expected_change_set_id=(
+                str(payload.get("expectedChangeSetId") or "").strip() or None
+            ),
+            expected_proposal_hash=(
+                str(payload.get("expectedProposalHash") or "").strip() or None
+            ),
         )
         result = OwnerTruthInterviewCandidateSingleReviewService(store).review_single(
             command=command,

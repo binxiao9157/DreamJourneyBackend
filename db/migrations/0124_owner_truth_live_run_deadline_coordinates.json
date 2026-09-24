@@ -1,0 +1,23 @@
+{
+  "version": "0124",
+  "name": "owner_truth_live_run_deadline_coordinates",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthLiveLongMemoryV3DeadlineCoordinates",
+  "requiresOldWorkerDrain": true,
+  "releaseFlags": {"ownerTruthLiveLongMemoryPipeline": false},
+  "summary": "Persists post-close deadline coordinates without guessing historical Run progress.",
+  "operations": [
+    "add nullable organization start and last actual progress timestamps",
+    "freeze start on first immutable Source bind and advance progress only on completed unit"
+  ],
+  "rollback": "Stop new admissions, retain the additive columns and original Run rows, and use only a deadline-aware worker. Do not backfill historical progress from updated_at.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false,
+    "invalidatesDerivedProjections": false
+  }
+}

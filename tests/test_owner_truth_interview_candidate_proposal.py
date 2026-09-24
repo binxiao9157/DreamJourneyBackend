@@ -25,6 +25,20 @@ from app.services.owner_truth_interview_candidate_proposal import (
     OwnerTruthInterviewCandidateProposalExtractionStatus,
     OwnerTruthInterviewCandidateProposalStatusService,
 )
+from app.services.owner_truth_live_long_memory import (
+    InMemoryLiveLongMemoryRepository,
+    LiveLongMemoryRunIdentity,
+)
+
+
+class _CountingLiveLongMemoryRepository(InMemoryLiveLongMemoryRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.begin_count = 0
+
+    def begin_or_load(self, identity, policy):
+        self.begin_count += 1
+        return super().begin_or_load(identity, policy)
 
 
 class _AdmissionStore:
@@ -36,6 +50,7 @@ class _AdmissionStore:
         self.repository = repository or InMemoryOwnerTruthInterviewCandidateProposalRepository()
         self.effects = InMemoryEffectKernelRepository()
         self.sources: dict[tuple[str, str], dict[str, object]] = {}
+        self.live_long_memory = _CountingLiveLongMemoryRepository()
 
     @contextmanager
     def request_unit_of_work(self, *, correlation_id: str, command_id: str):
@@ -77,6 +92,9 @@ class _AdmissionStore:
 
     def effect_kernel_repository(self):
         return self.effects
+
+    def owner_truth_live_long_memory_repository(self):
+        return self.live_long_memory
 
 
 class OwnerTruthInterviewCandidateProposalTests(unittest.TestCase):
@@ -164,6 +182,145 @@ class OwnerTruthInterviewCandidateProposalTests(unittest.TestCase):
             self.service.admit_review_batch(command=self._command(version=1), context=self.context)
         self.assertEqual(self.store.sources, {})
         self.assertEqual(self.store.effects.record_count(), 0)
+
+    def test_live_admission_freezes_nonzero_authority_and_replay_does_not_reopen_run(self) -> None:
+        store = _AdmissionStore()
+        review_batch_id = str(uuid4())
+        product_session_id = "live-authority-product-session"
+        store.repository.seed_review_batch(
+            review_batch_id=review_batch_id,
+            vault_id=self.context.vault_id,
+            owner_subject_id=self.context.owner_subject_id,
+            thread_id=str(uuid4()),
+            session_id=str(uuid4()),
+            owner_messages=((1, "非零授权代次的合成 Live 正文。"),),
+            authority_epoch=7,
+            capture_mode="live",
+            product_session_id=product_session_id,
+        )
+        service = OwnerTruthInterviewCandidateProposalService(
+            store,
+            live_long_memory_enabled=True,
+        )
+        command = AdmitInterviewReviewBatchForCandidateProposalCommand(
+            command_id="live-authority-nonzero",
+            review_batch_id=review_batch_id,
+            expected_review_batch_version=2,
+        )
+
+        created = service.admit_review_batch(command=command, context=self.context)
+        replayed = service.admit_review_batch(command=command, context=self.context)
+        identity = LiveLongMemoryRunIdentity(
+            owner_subject_id=self.context.owner_subject_id,
+            vault_id=self.context.vault_id,
+            product_session_id=product_session_id,
+            capture_generation=1,
+            authority_epoch=7,
+        )
+        snapshot = store.live_long_memory.snapshot(identity.run_id)
+
+        self.assertEqual(created.outcome, "created")
+        self.assertEqual(replayed.outcome, "deduplicated")
+        self.assertEqual((snapshot or {}).get("authorityEpoch"), 7)
+        self.assertEqual(store.live_long_memory.begin_count, 1)
+        self.assertEqual(len(store.sources), 1)
+        self.assertEqual(store.effects.record_count(), 1)
+
+    def test_live_admission_rejects_invalid_authority_epoch_before_side_effects(self) -> None:
+        for invalid_epoch in (True, -1, "7"):
+            with self.subTest(authority_epoch=invalid_epoch):
+                store = _AdmissionStore()
+                review_batch_id = str(uuid4())
+                store.repository.seed_review_batch(
+                    review_batch_id=review_batch_id,
+                    vault_id=self.context.vault_id,
+                    owner_subject_id=self.context.owner_subject_id,
+                    thread_id=str(uuid4()),
+                    session_id=str(uuid4()),
+                    owner_messages=((1, "非法授权代次不得产生任何写副作用。"),),
+                    authority_epoch=invalid_epoch,
+                    capture_mode="live",
+                    product_session_id="live-invalid-authority",
+                )
+                service = OwnerTruthInterviewCandidateProposalService(
+                    store,
+                    live_long_memory_enabled=True,
+                )
+
+                with self.assertRaises(OwnerTruthInterviewCandidateProposalError):
+                    service.admit_review_batch(
+                        command=AdmitInterviewReviewBatchForCandidateProposalCommand(
+                            command_id=f"invalid-live-authority-{invalid_epoch}",
+                            review_batch_id=review_batch_id,
+                            expected_review_batch_version=2,
+                        ),
+                        context=self.context,
+                    )
+
+                self.assertEqual(store.sources, {})
+                self.assertEqual(store.effects.record_count(), 0)
+                self.assertEqual(store.live_long_memory.begin_count, 0)
+                self.assertEqual(
+                    store.repository.snapshot()["admissionsByBatch"],
+                    {},
+                )
+
+    def test_live_admission_rejects_stale_authority_before_new_source_or_admission(self) -> None:
+        store = _AdmissionStore()
+        service = OwnerTruthInterviewCandidateProposalService(
+            store,
+            live_long_memory_enabled=True,
+        )
+        product_session_id = "live-stale-authority-product-session"
+        first_batch_id = str(uuid4())
+        store.repository.seed_review_batch(
+            review_batch_id=first_batch_id,
+            vault_id=self.context.vault_id,
+            owner_subject_id=self.context.owner_subject_id,
+            thread_id=str(uuid4()),
+            session_id=str(uuid4()),
+            owner_messages=((1, "原授权代次的合成正文。"),),
+            authority_epoch=7,
+            capture_mode="live",
+            product_session_id=product_session_id,
+        )
+        service.admit_review_batch(
+            command=AdmitInterviewReviewBatchForCandidateProposalCommand(
+                command_id="live-authority-original",
+                review_batch_id=first_batch_id,
+                expected_review_batch_version=2,
+            ),
+            context=self.context,
+        )
+        second_batch_id = str(uuid4())
+        store.repository.seed_review_batch(
+            review_batch_id=second_batch_id,
+            vault_id=self.context.vault_id,
+            owner_subject_id=self.context.owner_subject_id,
+            thread_id=str(uuid4()),
+            session_id=str(uuid4()),
+            owner_messages=((1, "失效授权代次不得进入同一 Run。"),),
+            authority_epoch=8,
+            capture_mode="live",
+            product_session_id=product_session_id,
+        )
+
+        with self.assertRaises(OwnerTruthInterviewCandidateProposalConflict):
+            service.admit_review_batch(
+                command=AdmitInterviewReviewBatchForCandidateProposalCommand(
+                    command_id="live-authority-stale",
+                    review_batch_id=second_batch_id,
+                    expected_review_batch_version=2,
+                ),
+                context=self.context,
+            )
+
+        self.assertEqual(len(store.sources), 1)
+        self.assertEqual(store.effects.record_count(), 1)
+        self.assertEqual(
+            len(store.repository.snapshot()["admissionsByBatch"]),
+            1,
+        )
 
     def test_other_owner_cannot_admit_the_review_batch(self) -> None:
         other_context = OwnerTruthCommandContext(

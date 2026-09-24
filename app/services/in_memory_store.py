@@ -1,7 +1,7 @@
 from collections import Counter
 from contextlib import contextmanager
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 from math import ceil
 import secrets
@@ -130,6 +130,9 @@ from app.services.owner_truth_knowledge_dimension_confirmation import (
 from app.services.owner_truth_saved_continuation import (
     InMemoryOwnerTruthSavedContinuationCueRepository,
 )
+from app.services.owner_truth_live_long_memory import (
+    InMemoryLiveLongMemoryRepository,
+)
 from app.services.owner_truth_knowledge_recommendation_activation import (
     InMemoryOwnerTruthKnowledgeRecommendationActivationRepository,
 )
@@ -199,6 +202,9 @@ class InMemoryStore:
         self._kb_lock = RLock()
         self._archive_lock = RLock()
         self._owner_truth_lock = RLock()
+        self._owner_truth_live_long_memory_repository = (
+            InMemoryLiveLongMemoryRepository()
+        )
         self._evidence_lock = RLock()
         self._memories: Dict[str, List[Dict[str, Any]]] = {}
         self._archive_items: Dict[str, List[Dict[str, Any]]] = {}
@@ -462,6 +468,11 @@ class InMemoryStore:
         self,
     ) -> InMemoryOwnerTruthCandidateReviewRepository:
         return self._owner_truth_candidate_review_repository
+
+    def owner_truth_live_long_memory_repository(
+        self,
+    ) -> InMemoryLiveLongMemoryRepository:
+        return self._owner_truth_live_long_memory_repository
 
     def owner_truth_formal_memory_repository(
         self,
@@ -1314,9 +1325,11 @@ class InMemoryStore:
                 self._realtime_voice_session_tickets[ticket_id] = revoked
                 return None
             active = deepcopy(item)
+            pinned_seconds = max(60, min(int(item.get("maxSessionSeconds") or 0), 4 * 60 * 60))
+            pinned_expiry = (now + timedelta(seconds=pinned_seconds)).isoformat()
             active["status"] = "active"
             active["consumedAt"] = now_iso
-            active["expiresAt"] = session_expires_at_iso
+            active["expiresAt"] = pinned_expiry if item.get("maxSessionSeconds") else session_expires_at_iso
             active["updatedAt"] = now_iso
             self._realtime_voice_session_tickets[ticket_id] = active
             return deepcopy(active)

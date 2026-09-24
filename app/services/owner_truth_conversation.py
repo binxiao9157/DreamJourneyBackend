@@ -908,6 +908,15 @@ class InMemoryOwnerTruthConversationRepository:
                 "ownerSubjectId": str(item["ownerSubjectId"]),
                 "threadId": str(item["threadId"]),
                 "sessionId": str(item["sessionId"]),
+                "productSessionId": (
+                    str(
+                        self._sessions[
+                            (str(record.vault_id), str(item["sessionId"]))
+                        ].get("metadata", {}).get("productSessionId")
+                        or ""
+                    ).strip()
+                    or None
+                ),
                 "state": str(getattr(state, "value", state)),
                 "rowVersion": int(item["rowVersion"]),
                 "authorityEpoch": current_epoch,
@@ -3365,13 +3374,14 @@ class PostgresOwnerTruthConversationRepository:
             )
             cursor.execute(
                 """
-                SELECT s.id, s.thread_id, s.state, s.boundary, s.row_version,
+                SELECT s.id, s.current_thread_id AS thread_id,
+                    s.state, s.boundary, s.row_version,
                     t.row_version AS thread_version, s.authority_epoch,
                     s.continuous_client_sequence, s.close_requested_client_sequence
                 FROM owner_truth.interview_sessions AS s
                 JOIN owner_truth.conversation_threads AS t
                   ON t.vault_id = s.vault_id
-                 AND t.id = s.thread_id
+                 AND t.id = s.current_thread_id
                  AND t.owner_subject_id = s.owner_subject_id
                  AND t.authority_epoch = s.authority_epoch
                 WHERE s.vault_id = %s

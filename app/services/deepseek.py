@@ -1,8 +1,13 @@
 import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from enum import Enum
+from hashlib import sha256
 import re
+from threading import Event, Timer
 import time
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import httpx
 
@@ -19,6 +24,11 @@ from app.observability.redaction import provider_dry_run_report
 from app.services.knowledge_extraction import LEGACY_TRANSCRIPT, USER_EVIDENCE_ONLY
 from app.services.owner_truth_live_memory_support import (
     LIVE_MEMORY_SUPPORT_SCHEMA_VERSION,
+    build_live_memory_evidence_catalog,
+)
+from app.services.owner_truth_live_memory_contract_errors import (
+    LiveMemoryContractFailure,
+    contract_failure,
 )
 
 
@@ -957,7 +967,36 @@ class DeepSeekTextMemoryOrganizationProxy:
         return normalized
 
 
+@dataclass(frozen=True)
+class PreparedLiveModelRequest:
+    url: str
+    headers: tuple[tuple[str, str], ...]
+    body: bytes
+
+    @classmethod
+    def freeze(cls, request: Mapping[str, Any]) -> "PreparedLiveModelRequest":
+        payload = request.get("json")
+        if not isinstance(payload, Mapping):
+            raise contract_failure("providerInput", "inputInvalid", category="input")
+        return cls(
+            url=str(request["url"]),
+            headers=tuple(sorted((str(key), str(value)) for key, value in request["headers"].items())),
+            body=json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+        )
+
+    def payload(self) -> Dict[str, Any]:
+        return json.loads(self.body)
+
+    def transport_request(self) -> Dict[str, Any]:
+        return {"url": self.url, "headers": dict(self.headers), "content": self.body}
+
+
+class LiveMemoryOrganizationCapacityExceeded(ValueError):
+    pass
+
+
 class DeepSeekLiveMemoryOrganizationProxy:
+    supports_prepared_request = True
     """Organize one closed Live transcript into evidence-bound memory drafts.
 
     Audio never reaches this adapter. Assistant turns provide conversational
@@ -969,6 +1008,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
     model = "deepseek-v4-flash"
     prompt_version = "owner-truth-live-memory-organization-v5"
     support_prompt_version = "owner-truth-live-memory-support-v1"
+    relation_prompt_version = "owner-truth-live-memory-relation-v1"
     maximum_turn_count = 200
     maximum_turn_characters = 4_000
     maximum_total_characters = 30_000
@@ -981,12 +1021,123 @@ class DeepSeekLiveMemoryOrganizationProxy:
     }
     _allowed_extractor_fact_types = DeepSeekTextMemoryOrganizationProxy._allowed_extractor_fact_types
 
-    def __init__(self, settings: Settings):
-        self.settings = settings
+    supports_contract_repair_hint = True
+    supports_stage_diagnostics = True
+    supports_atom_responsibility_contract = True
 
-    def build_request(self, *, turns: List[Dict[str, Any]]) -> Dict[str, Any]:
+    @staticmethod
+    def _report_stage(
+        reporter: Optional[Callable[[str, Mapping[str, int]], None]],
+        stage: str,
+        **counts: int,
+    ) -> None:
+        if reporter is None:
+            return
+        try:
+            reporter(stage, counts)
+        except Exception:
+            # Diagnostics are deliberately shadow-only. A sink outage must not
+            # alter provider validation or candidate extraction.
+            return
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        transport: Optional[httpx.BaseTransport] = None,
+    ):
+        self.settings = settings
+        self._transport = transport
+        self._request_deadline_seconds = 90.0
+        self._clock = time.monotonic
+
+    def _client(self) -> httpx.Client:
+        options: Dict[str, Any] = {"timeout": min(60.0, self._request_deadline_seconds)}
+        if self._transport is not None:
+            options["transport"] = self._transport
+        return httpx.Client(**options)
+
+    @staticmethod
+    def _timeout_reason(error: httpx.TimeoutException) -> str:
+        if isinstance(error, httpx.ConnectTimeout):
+            return "connectTimeout"
+        if isinstance(error, httpx.ReadTimeout):
+            return "readTimeout"
+        if isinstance(error, httpx.WriteTimeout):
+            return "writeTimeout"
+        if isinstance(error, httpx.PoolTimeout):
+            return "poolTimeout"
+        return "timeout"
+
+    @staticmethod
+    def _retry_after_seconds(headers: httpx.Headers) -> Optional[int]:
+        raw = headers.get("Retry-After", "").strip()
+        if not raw:
+            return None
+        if raw.isdecimal():
+            if len(raw) > 5:
+                return 86_400
+            return min(int(raw), 86_400)
+        try:
+            due = parsedate_to_datetime(raw)
+            if due.tzinfo is None:
+                due = due.replace(tzinfo=timezone.utc)
+            return min(max(0, int((due - datetime.now(timezone.utc)).total_seconds())), 86_400)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _post_with_deadline(
+        self, client: httpx.Client, request: Mapping[str, Any], *, stage: str
+    ) -> httpx.Response:
+        started = self._clock()
+        expired = Event()
+
+        def expire() -> None:
+            expired.set()
+            try:
+                client.close()
+            except RuntimeError:
+                pass
+
+        timer = Timer(self._request_deadline_seconds, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            try:
+                if "content" in request:
+                    response = client.post(
+                        request["url"], headers=request["headers"], content=request["content"]
+                    )
+                else:
+                    response = client.post(
+                        request["url"], headers=request["headers"], json=request["json"]
+                    )
+            except httpx.TransportError:
+                if not expired.is_set() and self._clock() - started < self._request_deadline_seconds:
+                    raise
+                raise LiveMemoryContractFailure(
+                    stage=stage, reason="timeout", category="transport",
+                    transport_retryable=True,
+                ) from None
+            if expired.is_set() or self._clock() - started >= self._request_deadline_seconds:
+                raise LiveMemoryContractFailure(
+                    stage=stage, reason="timeout", category="transport",
+                    transport_retryable=True,
+                )
+            return response
+        finally:
+            timer.cancel()
+
+    def build_request(
+        self,
+        *,
+        turns: List[Dict[str, Any]],
+        repair_hint: Optional[str] = None,
+    ) -> Dict[str, Any]:
         normalized_turns = self.normalize_turns(turns)
         prompt = self.build_prompt(normalized_turns)
+        if repair_hint:
+            prompt = f"{prompt}\n\n【上次安全合同反馈】\n{repair_hint}"
         return {
             "url": self.settings.deepseek_base_url,
             "headers": {
@@ -1014,50 +1165,189 @@ class DeepSeekLiveMemoryOrganizationProxy:
             },
         }
 
-    def request_organization(self, *, turns: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def request_organization(
+        self,
+        *,
+        turns: List[Dict[str, Any]],
+        repair_hint: Optional[str] = None,
+        stage_reporter: Optional[Callable[[str, Mapping[str, int]], None]] = None,
+        prepared_request: Optional[PreparedLiveModelRequest] = None,
+    ) -> Dict[str, Any]:
         if not self.settings.deepseek_api_key:
-            raise ValueError("DEEPSEEK_API_KEY is not configured")
-        normalized_turns = self.normalize_turns(turns)
-        request = self.build_request(turns=normalized_turns)
-        with httpx.Client(timeout=60) as client:
-            response = client.post(
-                request["url"],
-                headers=request["headers"],
-                json=request["json"],
+            raise contract_failure(
+                "organizationInput", "configurationMissing", category="configuration"
             )
-            response.raise_for_status()
-        content = DeepSeekImageAnalysisProxy._extract_content(response.json())
-        return self.parse_organization(content, turns=normalized_turns)
+        try:
+            normalized_turns = self.normalize_turns(turns)
+            request = prepared_request.transport_request() if prepared_request else self.build_request(
+                turns=normalized_turns, repair_hint=repair_hint
+            )
+            self._report_stage(
+                stage_reporter,
+                "organizationInputBuilt",
+                turnCount=len(normalized_turns),
+                userTurnCount=sum(
+                    1 for turn in normalized_turns if turn.get("role") == "user"
+                ),
+            )
+        except LiveMemoryContractFailure:
+            raise
+        except (TypeError, ValueError) as error:
+            raise contract_failure(
+                "organizationInput", "inputInvalid", category="input"
+            ) from error
+        try:
+            self._report_stage(stage_reporter, "organizationRequestStarted")
+            with self._client() as client:
+                response = self._post_with_deadline(client, request, stage="organizationRequest")
+                self._report_stage(
+                    stage_reporter,
+                    "organizationResponseReceived",
+                    statusCode=int(response.status_code),
+                )
+                response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            status = int(error.response.status_code)
+            raise LiveMemoryContractFailure(
+                stage="organizationRequest",
+                reason=self._http_reason(status),
+                category="http",
+                provider_status=status,
+                transport_retryable=status == 429 or status >= 500,
+                retry_after_seconds=self._retry_after_seconds(error.response.headers)
+                if status in {429, 503} else None,
+            ) from None
+        except httpx.TimeoutException as error:
+            raise LiveMemoryContractFailure(
+                stage="organizationRequest",
+                reason=self._timeout_reason(error),
+                category="transport",
+                transport_retryable=True,
+            ) from None
+        except httpx.TransportError:
+            raise LiveMemoryContractFailure(
+                stage="organizationRequest",
+                reason="transport",
+                category="transport",
+                transport_retryable=True,
+            ) from None
+        content = self._response_content(response, stage="organizationDecode")
+        if self._decoded_json(content) is None:
+            raise contract_failure(
+                "organizationDecode", "invalidJson", eligible=True
+            )
+        self._report_stage(stage_reporter, "organizationDecoded")
+        try:
+            organization = self.parse_organization(content, turns=normalized_turns)
+            observation = self._response_observation(response, stage="organizationDecode")
+            organization.update(observation)
+            self._report_stage(
+                stage_reporter,
+                "organizationValidated",
+                memoryCount=len(organization.get("memories") or []),
+            )
+            return organization
+        except LiveMemoryContractFailure:
+            raise
+        except LiveMemoryOrganizationCapacityExceeded as error:
+            raise contract_failure(
+                "organizationValidate", "outputOverCapacity", eligible=True
+            ) from error
+        except (TypeError, ValueError) as error:
+            raise contract_failure(
+                "organizationValidate", "schemaInvalid", eligible=True
+            ) from error
 
     def request_support_review(
         self,
         *,
         turns: List[Dict[str, Any]],
         memories: List[Dict[str, Any]],
+        repair_hint: Optional[str] = None,
+        stage_reporter: Optional[Callable[[str, Mapping[str, int]], None]] = None,
+        prepared_request: Optional[PreparedLiveModelRequest] = None,
     ) -> Dict[str, Any]:
         if not self.settings.deepseek_api_key:
-            raise ValueError("DEEPSEEK_API_KEY is not configured")
-        request = self.build_support_request(turns=turns, memories=memories)
-        with httpx.Client(timeout=60) as client:
-            response = client.post(
-                request["url"],
-                headers=request["headers"],
-                json=request["json"],
+            raise contract_failure(
+                "supportInput", "configurationMissing", category="configuration"
             )
-            response.raise_for_status()
-        content = DeepSeekImageAnalysisProxy._extract_content(response.json())
-        return self.parse_support_review(content)
+        try:
+            request = prepared_request.transport_request() if prepared_request else self.build_support_request(
+                turns=turns,
+                memories=memories,
+                repair_hint=repair_hint,
+            )
+            self._report_stage(
+                stage_reporter,
+                "supportInputBuilt",
+                turnCount=len(turns),
+                memoryCount=len(memories),
+            )
+        except LiveMemoryContractFailure:
+            raise
+        except (TypeError, ValueError) as error:
+            raise contract_failure("supportInput", "inputInvalid", category="input") from error
+        try:
+            self._report_stage(stage_reporter, "supportRequestStarted")
+            with self._client() as client:
+                response = self._post_with_deadline(client, request, stage="supportRequest")
+                self._report_stage(
+                    stage_reporter,
+                    "supportResponseReceived",
+                    statusCode=int(response.status_code),
+                )
+                response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            status = int(error.response.status_code)
+            raise LiveMemoryContractFailure(
+                stage="supportRequest",
+                reason=self._http_reason(status),
+                category="http",
+                provider_status=status,
+                transport_retryable=status == 429 or status >= 500,
+                retry_after_seconds=self._retry_after_seconds(error.response.headers)
+                if status in {429, 503} else None,
+            ) from None
+        except httpx.TimeoutException as error:
+            raise LiveMemoryContractFailure(
+                stage="supportRequest",
+                reason=self._timeout_reason(error),
+                category="transport",
+                transport_retryable=True,
+            ) from None
+        except httpx.TransportError:
+            raise LiveMemoryContractFailure(
+                stage="supportRequest",
+                reason="transport",
+                category="transport",
+                transport_retryable=True,
+            ) from None
+        content = self._response_content(response, stage="supportDecode")
+        if self._decoded_json(content) is None:
+            raise contract_failure("supportDecode", "invalidJson", eligible=True)
+        self._report_stage(stage_reporter, "supportDecoded")
+        try:
+            review = self.parse_support_review(content)
+            review.update(self._response_observation(response, stage="supportDecode"))
+            return review
+        except (TypeError, ValueError) as error:
+            raise contract_failure(
+                "supportValidate", "schemaInvalid", eligible=True
+            ) from error
 
     def build_support_request(
         self,
         *,
         turns: List[Dict[str, Any]],
         memories: List[Dict[str, Any]],
+        repair_hint: Optional[str] = None,
     ) -> Dict[str, Any]:
         normalized_turns = self.normalize_turns(turns)
         if not isinstance(memories, list) or len(memories) > self.maximum_memory_count * 4:
             raise ValueError("live memory support received an invalid draft set")
         prompt = self.build_support_prompt(normalized_turns, memories)
+        if repair_hint:
+            prompt = f"{prompt}\n\n【上次安全合同反馈】\n{repair_hint}"
         return {
             "url": self.settings.deepseek_base_url,
             "headers": {
@@ -1083,6 +1373,494 @@ class DeepSeekLiveMemoryOrganizationProxy:
             },
         }
 
+    def request_relation_review(
+        self,
+        *,
+        turns: List[Dict[str, Any]],
+        incoming: Dict[str, Any],
+        existing: List[Dict[str, Any]],
+        prepared_request: Optional[PreparedLiveModelRequest] = None,
+    ) -> Dict[str, Any]:
+        normalized_turns = self.normalize_turns(turns)
+        request = prepared_request.transport_request() if prepared_request else self.build_relation_request(
+            turns=turns, incoming=incoming, existing=existing
+        )
+        try:
+            with self._client() as client:
+                response = self._post_with_deadline(client, request, stage="relationRequest")
+                response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            status = int(error.response.status_code)
+            raise LiveMemoryContractFailure(
+                stage="relationRequest",
+                reason=self._http_reason(status),
+                category="http",
+                provider_status=status,
+                transport_retryable=status == 429 or status >= 500,
+                retry_after_seconds=self._retry_after_seconds(error.response.headers)
+                if status in {429, 503} else None,
+            ) from None
+        except httpx.TimeoutException as error:
+            raise LiveMemoryContractFailure(
+                stage="relationRequest", reason=self._timeout_reason(error), category="transport",
+                transport_retryable=True,
+            ) from None
+        except httpx.TransportError:
+            raise LiveMemoryContractFailure(
+                stage="relationRequest", reason="transport", category="transport",
+                transport_retryable=True,
+            ) from None
+        content = self._response_content(response, stage="relationDecode")
+        try:
+            review = self.parse_relation_review(
+                content,
+                turns=normalized_turns,
+                existing_count=len(existing),
+            )
+            review.update(self._response_observation(response, stage="relationDecode"))
+            return review
+        except (TypeError, ValueError) as error:
+            raise contract_failure(
+                "relationValidate", "schemaInvalid", eligible=True
+            ) from error
+
+    def build_relation_request(
+        self,
+        *,
+        turns: List[Dict[str, Any]],
+        incoming: Dict[str, Any],
+        existing: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if not self.settings.deepseek_api_key:
+            raise contract_failure(
+                "relationInput", "configurationMissing", category="configuration"
+            )
+        if not isinstance(existing, list) or not 1 <= len(existing) <= 32:
+            raise contract_failure("relationInput", "pageInvalid", category="input")
+        normalized_turns = self.normalize_turns(turns)
+        prompt = self._build_relation_prompt(
+            turns=normalized_turns,
+            incoming=incoming,
+            existing=existing,
+        )
+        request = {
+            "url": self.settings.deepseek_base_url,
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.settings.deepseek_api_key or ''}",
+            },
+            "json": {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是家庭记忆原子事实关系核对器，只输出严格 JSON。"
+                            "只能根据给出的用户原文证据判断，不得补充事实。"
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "response_format": {"type": "json_object"},
+                "thinking": {"type": "disabled"},
+                "temperature": 0.0,
+                "max_tokens": 2_048,
+            },
+        }
+        return request
+
+    def request_relation_batch_review(
+        self,
+        *,
+        turns: List[Dict[str, Any]],
+        incoming: List[Dict[str, Any]],
+        existing: List[Dict[str, Any]],
+        intra_batch: bool = False,
+        prepared_request: Optional[PreparedLiveModelRequest] = None,
+    ) -> Dict[str, Any]:
+        normalized_turns = self.normalize_turns(turns)
+        request = prepared_request.transport_request() if prepared_request else self.build_relation_batch_request(
+            turns=turns, incoming=incoming, existing=existing,
+            intra_batch=intra_batch,
+        )
+        try:
+            with self._client() as client:
+                response = self._post_with_deadline(client, request, stage="relationRequest")
+                response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            status = int(error.response.status_code)
+            raise LiveMemoryContractFailure(
+                stage="relationRequest",
+                reason=self._http_reason(status),
+                category="http",
+                provider_status=status,
+                transport_retryable=status == 429 or status >= 500,
+                retry_after_seconds=self._retry_after_seconds(error.response.headers)
+                if status in {429, 503} else None,
+            ) from None
+        except httpx.TimeoutException as error:
+            raise LiveMemoryContractFailure(
+                stage="relationRequest", reason=self._timeout_reason(error), category="transport",
+                transport_retryable=True,
+            ) from None
+        except httpx.TransportError:
+            raise LiveMemoryContractFailure(
+                stage="relationRequest", reason="transport", category="transport",
+                transport_retryable=True,
+            ) from None
+        content = self._response_content(response, stage="relationDecode")
+        try:
+            review = self.parse_relation_batch_review(
+                content,
+                turns=normalized_turns,
+                incoming_count=len(incoming),
+                existing_count=len(existing),
+            )
+            review.update(self._response_observation(response, stage="relationDecode"))
+            return review
+        except (TypeError, ValueError) as error:
+            raise contract_failure(
+                "relationValidate", "schemaInvalid", eligible=True
+            ) from error
+
+    def build_relation_batch_request(
+        self,
+        *,
+        turns: List[Dict[str, Any]],
+        incoming: List[Dict[str, Any]],
+        existing: List[Dict[str, Any]],
+        intra_batch: bool = False,
+    ) -> Dict[str, Any]:
+        if not self.settings.deepseek_api_key:
+            raise contract_failure(
+                "relationInput", "configurationMissing", category="configuration"
+            )
+        if (
+            not isinstance(incoming, list)
+            or not 1 <= len(incoming) <= 8
+            or not isinstance(existing, list)
+            or not 1 <= len(existing) <= 32
+        ):
+            raise contract_failure("relationInput", "pageInvalid", category="input")
+        normalized_turns = self.normalize_turns(turns)
+        prompt = self._build_relation_batch_prompt(
+            turns=normalized_turns,
+            incoming=incoming,
+            existing=existing,
+            intra_batch=intra_batch,
+        )
+        request = {
+            "url": self.settings.deepseek_base_url,
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.settings.deepseek_api_key or ''}",
+            },
+            "json": {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是家庭记忆原子事实关系核对器，只输出严格 JSON。"
+                            "只能根据给出的用户原文证据判断，不得补充事实。"
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "response_format": {"type": "json_object"},
+                "thinking": {"type": "disabled"},
+                "temperature": 0.0,
+                "max_tokens": 4_096,
+            },
+        }
+        return request
+
+    @staticmethod
+    def _relation_prompt_evidence(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        evidence: List[Dict[str, Any]] = []
+        for turn in turns:
+            item = dict(turn)
+            ranges = item.get("evidenceRanges")
+            if isinstance(ranges, list):
+                item["evidenceRanges"] = [
+                    {key: value for key, value in raw.items() if key != "text"}
+                    for raw in ranges
+                ]
+            evidence.append(item)
+        return evidence
+
+    @classmethod
+    def _build_relation_batch_prompt(
+        cls,
+        *,
+        turns: List[Dict[str, Any]],
+        incoming: List[Dict[str, Any]],
+        existing: List[Dict[str, Any]],
+        intra_batch: bool,
+    ) -> str:
+        evidence = json.dumps(
+            cls._relation_prompt_evidence(turns),
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        incoming_json = json.dumps(incoming, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        existing_json = json.dumps(existing, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        intra_rule = (
+            "这是批内检查：incomingIndex 只能指向 existingIndex 小于自身的事实；"
+            "自身及更晚事实不得返回。"
+            if intra_batch
+            else "这是跨批检查。"
+        )
+        return f"""分页核对最多八个新原子事实与一个既有事实页的关系。
+用户证据：{evidence}
+新事实页：{incoming_json}
+既有事实页：{existing_json}
+{intra_rule}
+
+只输出：{{"results":[{{"incomingIndex":0,"scannedExistingCount":{len(existing)},"decisions":[]}}]}}。
+每个 incomingIndex 必须且只能出现一次，scannedExistingCount 必须等于本页既有事实数。
+decisions 只列非 distinct 关系；每项含 existingIndex 与 relation。relation 只能是 duplicate、supplement、correction、retraction、unresolved。
+每个新事实至多一个非 distinct 目标；整个响应 decisions 不得超过64条。
+supplement 必须额外返回 resolvedMemory，结构与输入 memory 完全相同并引用全部相关 user sourceTurnIndices。
+相似词、共同实体或时间相近都不能单独证明关系；无法确定必须 unresolved。不要输出解释。"""
+
+    @classmethod
+    def parse_relation_batch_review(
+        cls,
+        content: str,
+        *,
+        turns: List[Dict[str, Any]],
+        incoming_count: int,
+        existing_count: int,
+    ) -> Dict[str, Any]:
+        cleaned = content.replace("```json", "").replace("```", "").strip()
+        parsed = DeepSeekImageAnalysisProxy._loads_json(cleaned)
+        if parsed is None:
+            extracted = DeepSeekImageAnalysisProxy.extract_json_substring(cleaned)
+            parsed = DeepSeekImageAnalysisProxy._loads_json(extracted) if extracted else None
+        results = parsed.get("results") if isinstance(parsed, Mapping) else None
+        if not isinstance(results, list) or len(results) != incoming_count:
+            raise ValueError("Live memory relation batch coverage is invalid")
+        allowed = {"duplicate", "supplement", "correction", "retraction", "unresolved"}
+        seen_incoming: set[int] = set()
+        total_decisions = 0
+        normalized: List[Dict[str, Any]] = []
+        for result in results:
+            if not isinstance(result, Mapping):
+                raise ValueError("Live memory relation batch result is invalid")
+            incoming_index = result.get("incomingIndex")
+            scanned_count = result.get("scannedExistingCount")
+            decisions = result.get("decisions")
+            if (
+                isinstance(incoming_index, bool)
+                or not isinstance(incoming_index, int)
+                or not 0 <= incoming_index < incoming_count
+                or incoming_index in seen_incoming
+                or isinstance(scanned_count, bool)
+                or scanned_count != existing_count
+                or not isinstance(decisions, list)
+            ):
+                raise ValueError("Live memory relation batch result is invalid")
+            seen_existing: set[int] = set()
+            normalized_decisions: List[Dict[str, Any]] = []
+            for decision in decisions:
+                if not isinstance(decision, Mapping):
+                    raise ValueError("Live memory relation batch decision is invalid")
+                existing_index = decision.get("existingIndex")
+                relation = decision.get("relation")
+                if (
+                    isinstance(existing_index, bool)
+                    or not isinstance(existing_index, int)
+                    or not 0 <= existing_index < existing_count
+                    or existing_index in seen_existing
+                    or relation not in allowed
+                ):
+                    raise ValueError("Live memory relation batch decision is invalid")
+                item: Dict[str, Any] = {
+                    "existingIndex": existing_index,
+                    "relation": relation,
+                }
+                if relation == "supplement":
+                    resolved = decision.get("resolvedMemory")
+                    if not isinstance(resolved, Mapping):
+                        raise ValueError("Live memory supplement misses resolved memory")
+                    validated = cls.parse_organization(
+                        json.dumps({"memories": [resolved]}, ensure_ascii=False),
+                        turns=turns,
+                    )["memories"]
+                    item["resolvedMemory"] = validated[0]
+                elif "resolvedMemory" in decision:
+                    raise ValueError("resolved memory is only valid for supplement")
+                seen_existing.add(existing_index)
+                normalized_decisions.append(item)
+            total_decisions += len(normalized_decisions)
+            if len(normalized_decisions) > 1 or total_decisions > 64:
+                raise ValueError("Live memory relation batch is ambiguous or saturated")
+            seen_incoming.add(incoming_index)
+            normalized.append(
+                {
+                    "incomingIndex": incoming_index,
+                    "scannedExistingCount": existing_count,
+                    "decisions": normalized_decisions,
+                }
+            )
+        return {"results": sorted(normalized, key=lambda item: item["incomingIndex"])}
+
+    @classmethod
+    def _build_relation_prompt(
+        cls,
+        *,
+        turns: List[Dict[str, Any]],
+        incoming: Dict[str, Any],
+        existing: List[Dict[str, Any]],
+    ) -> str:
+        evidence = json.dumps(
+            cls._relation_prompt_evidence(turns),
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        incoming_json = json.dumps(incoming, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        existing_json = json.dumps(existing, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return f"""核对一个新原子事实与现有事实页的关系。
+用户证据：{evidence}
+新事实：{incoming_json}
+现有事实页：{existing_json}
+
+只输出：{{"decisions":[{{"existingIndex":0,"relation":"distinct"}}]}}。
+每个 existingIndex 必须且只能出现一次。relation 只能是 duplicate、supplement、correction、retraction、distinct、unresolved。
+duplicate 表示命题等价；correction 表示用户明确用新说法替代旧说法；retraction 表示用户明确撤回旧命题；无法确定必须 unresolved。
+supplement 仅用于同一事实的互补信息，并必须额外返回 resolvedMemory，结构与输入 memory 完全相同且引用全部相关 user sourceTurnIndices。
+相似词、共同实体或时间相近都不能单独证明关系。不要输出解释。"""
+
+    @classmethod
+    def parse_relation_review(
+        cls,
+        content: str,
+        *,
+        turns: List[Dict[str, Any]],
+        existing_count: int,
+    ) -> Dict[str, Any]:
+        cleaned = content.replace("```json", "").replace("```", "").strip()
+        parsed = DeepSeekImageAnalysisProxy._loads_json(cleaned)
+        if parsed is None:
+            extracted = DeepSeekImageAnalysisProxy.extract_json_substring(cleaned)
+            parsed = DeepSeekImageAnalysisProxy._loads_json(extracted) if extracted else None
+        decisions = parsed.get("decisions") if isinstance(parsed, Mapping) else None
+        if not isinstance(decisions, list) or len(decisions) != existing_count or len(decisions) > 64:
+            raise ValueError("Live memory relation coverage is invalid")
+        allowed = {"duplicate", "supplement", "correction", "retraction", "distinct", "unresolved"}
+        seen: set[int] = set()
+        normalized: List[Dict[str, Any]] = []
+        for decision in decisions:
+            if not isinstance(decision, Mapping):
+                raise ValueError("Live memory relation decision is invalid")
+            index = decision.get("existingIndex")
+            relation = decision.get("relation")
+            if (
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or not 0 <= index < existing_count
+                or index in seen
+                or relation not in allowed
+            ):
+                raise ValueError("Live memory relation decision is invalid")
+            item: Dict[str, Any] = {"existingIndex": index, "relation": relation}
+            if relation == "supplement":
+                resolved = decision.get("resolvedMemory")
+                if not isinstance(resolved, Mapping):
+                    raise ValueError("Live memory supplement misses resolved memory")
+                validated = cls.parse_organization(
+                    json.dumps({"memories": [resolved]}, ensure_ascii=False),
+                    turns=turns,
+                )["memories"]
+                item["resolvedMemory"] = validated[0]
+            elif "resolvedMemory" in decision:
+                raise ValueError("resolved memory is only valid for supplement")
+            seen.add(index)
+            normalized.append(item)
+        return {"decisions": normalized}
+
+    @staticmethod
+    def _http_reason(status: int) -> str:
+        if status in {401, 403}:
+            return "authorizationRejected"
+        if status == 402:
+            return "quotaUnavailable"
+        if status == 404:
+            return "modelUnavailable"
+        if status == 429:
+            return "rateLimited"
+        if status >= 500:
+            return "httpTransient"
+        return "requestRejected"
+
+    @staticmethod
+    def _response_content(response: httpx.Response, *, stage: str) -> str:
+        try:
+            envelope = response.json()
+        except (TypeError, ValueError):
+            raise contract_failure(stage, "httpEnvelopeInvalid", eligible=True) from None
+        if not isinstance(envelope, dict):
+            raise contract_failure(stage, "httpEnvelopeInvalid", eligible=True) from None
+        choices = envelope.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise contract_failure(stage, "httpEnvelopeInvalid", eligible=True)
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise contract_failure(stage, "httpEnvelopeInvalid", eligible=True)
+        finish_reason = choice.get("finish_reason")
+        if finish_reason is not None and not isinstance(finish_reason, str):
+            raise contract_failure(stage, "finishReasonTypeInvalid", eligible=True)
+        if finish_reason == "length":
+            raise contract_failure(stage, "outputTruncated", eligible=True)
+        if finish_reason not in {None, "stop"}:
+            raise contract_failure(stage, "finishReasonInvalid", eligible=True)
+        message = choice.get("message")
+        if not isinstance(message, dict) or "content" not in message:
+            raise contract_failure(stage, "httpEnvelopeInvalid", eligible=True)
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            reason = "emptyContent" if content is None or content == "" else "contentTypeInvalid"
+            raise contract_failure(stage, reason, eligible=True)
+        return content
+
+    @staticmethod
+    def _response_observation(response: httpx.Response, *, stage: str) -> Dict[str, Any]:
+        try:
+            envelope = response.json()
+            choice = envelope["choices"][0]
+        except (TypeError, ValueError, KeyError, IndexError):
+            raise contract_failure(stage, "httpEnvelopeInvalid", eligible=True) from None
+        finish_reason = choice.get("finish_reason")
+        usage = envelope.get("usage")
+        normalized_usage: Dict[str, int] | None = None
+        if usage is not None:
+            if not isinstance(usage, Mapping):
+                raise contract_failure(stage, "usageTypeInvalid", eligible=True)
+            normalized_usage = {}
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                value = usage.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise contract_failure(stage, "usageTypeInvalid", eligible=True)
+                normalized_usage[key] = value
+        return {
+            "_providerFinishReason": finish_reason,
+            "_providerUsage": normalized_usage,
+        }
+
+    @staticmethod
+    def _decoded_json(content: str) -> Any:
+        cleaned = content.replace("```json", "").replace("```", "").strip()
+        parsed = DeepSeekImageAnalysisProxy._loads_json(cleaned)
+        if parsed is not None:
+            return parsed
+        extracted = DeepSeekImageAnalysisProxy.extract_json_substring(cleaned)
+        return (
+            DeepSeekImageAnalysisProxy._loads_json(extracted)
+            if extracted is not None
+            else None
+        )
+
     @classmethod
     def build_support_prompt(
         cls,
@@ -1091,6 +1869,27 @@ class DeepSeekLiveMemoryOrganizationProxy:
     ) -> str:
         serialized_turns = json.dumps(turns, ensure_ascii=False, separators=(",", ":"))
         serialized_memories = json.dumps(memories, ensure_ascii=False, separators=(",", ":"))
+        responsibility_atom_ids = list(
+            dict.fromkeys(
+                str(atom_id)
+                for memory in memories
+                for atom_id in memory.get("_atomIds", ())
+                if str(atom_id)
+            )
+        )
+        atom_scope_example = (
+            f',"responsibilityAtomIds":{json.dumps(responsibility_atom_ids, ensure_ascii=False)},'
+            '"omittedOwnedAtomIds":[]'
+            if responsibility_atom_ids
+            else ""
+        )
+        atom_scope_rules = (
+            "\n9. 本次是分页复核。responsibilityAtomIds 必须原样返回；只检查这些 atom 的当前表达。"
+            "原话中属于其他页的事实仅是上下文，不得放入 omittedFactBearingTurnIndices。"
+            "若本页责任 atom 缺少最终草案，将其 ID 放入 omittedOwnedAtomIds。"
+            if responsibility_atom_ids
+            else ""
+        )
         return f"""复核一次已结束 Live 对话的记忆草案。不要相信草案自报的证据，必须重新对照整场对话。
 
 【整场对话】
@@ -1100,7 +1899,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
 {serialized_memories}
 
 输出严格 JSON：
-{{"schemaVersion":"{LIVE_MEMORY_SUPPORT_SCHEMA_VERSION}","turnAssessments":[{{"turnIndex":1,"speechAct":"assertion"}}],"memoryAssessments":[{{"memoryIndex":0,"verdict":"supported","supportingTurnIndices":[1]}}],"omittedFactBearingTurnIndices":[]}}
+{{"schemaVersion":"{LIVE_MEMORY_SUPPORT_SCHEMA_VERSION}","turnAssessments":[{{"turnIndex":1,"speechAct":"assertion"}}],"memoryAssessments":[{{"memoryIndex":0,"verdict":"supported","supportingTurnIndices":[1]}}],"omittedFactBearingTurnIndices":[]{atom_scope_example}}}
 
 规则：
 1. turnAssessments 只能包含 role=user 的 turn，不得包含 role=assistant；每个 role=user 的 turn 必须且只能出现一次；speechAct 只能是 assertion、correction、timeSupplement、query、quotedSpeech、ambiguous。
@@ -1110,7 +1909,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
 5. 助手答案、建议、猜测和诱导永远不能支持用户事实；用户只说“对”时不得自动采纳助手命题，除非用户随后明确完整自述。
 6. 同轮或跨轮纠正、否定、撤回必须整场裁决；旧说法标 superseded，最终说法标 supported。不能仅按最后出现覆盖无关事实。
 7. 用户明确陈述的新事实、感受、观点及时间补充必须有最终 supported 草案；若生成器漏掉，将对应 turnIndex 放入 omittedFactBearingTurnIndices。
-8. 不确定时标 uncertain，不得猜测。不要输出正文、解释或 JSON 之外的文字。"""
+8. 不确定时标 uncertain，不得猜测。不要输出正文、解释或 JSON 之外的文字。{atom_scope_rules}"""
 
     @staticmethod
     def parse_support_review(content: str) -> Dict[str, Any]:
@@ -1164,7 +1963,33 @@ class DeepSeekLiveMemoryOrganizationProxy:
             seen_indices.add(index)
             if role == "user":
                 user_turn_count += 1
-            normalized.append({"index": index, "role": role, "text": text})
+            normalized_turn: Dict[str, Any] = {"index": index, "role": role, "text": text}
+            original_turn_index = turn.get("_originalTurnIndex")
+            if original_turn_index is not None:
+                if type(original_turn_index) is not int or original_turn_index < 0:
+                    raise ValueError(f"live conversation turn {position} has invalid original index")
+                normalized_turn["originalTurnIndex"] = original_turn_index
+            evidence_ranges = turn.get("_evidenceRanges")
+            if evidence_ranges is not None:
+                if not isinstance(evidence_ranges, list) or not evidence_ranges:
+                    raise ValueError(f"live conversation turn {position} has invalid evidence mapping")
+                for evidence_range in evidence_ranges:
+                    if not isinstance(evidence_range, Mapping):
+                        raise ValueError(f"live conversation turn {position} has invalid evidence mapping")
+                    fragment = evidence_range.get("text")
+                    if (
+                        type(evidence_range.get("start")) is not int
+                        or type(evidence_range.get("end")) is not int
+                        or evidence_range["start"] < 0
+                        or evidence_range["end"] <= evidence_range["start"]
+                        or not isinstance(fragment, str)
+                        or len(fragment) != evidence_range["end"] - evidence_range["start"]
+                        or sha256(fragment.encode("utf-8")).hexdigest() != evidence_range.get("textHash")
+                    ):
+                        raise ValueError(f"live conversation turn {position} has invalid evidence mapping")
+                normalized_turn["projectionVersion"] = "live-evidence-projection-v1"
+                normalized_turn["evidenceRanges"] = evidence_ranges
+            normalized.append(normalized_turn)
         if user_turn_count == 0:
             raise ValueError("live conversation requires user evidence")
         return normalized
@@ -1173,17 +1998,33 @@ class DeepSeekLiveMemoryOrganizationProxy:
     def build_prompt(cls, turns: List[Dict[str, Any]]) -> str:
         first_user_index = next(turn["index"] for turn in turns if turn["role"] == "user")
         serialized_turns = json.dumps(turns, ensure_ascii=False, separators=(",", ":"))
+        evidence_catalog = build_live_memory_evidence_catalog(turns)
+        serialized_evidence = json.dumps(
+            [
+                {
+                    "evidenceId": item["evidenceId"],
+                    "turnIndex": item["turnIndex"],
+                    "text": item["text"],
+                }
+                for item in evidence_catalog
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         return f"""请把一次已经结束的 Live 对话整理成少量、原子化、可由用户确认的记忆草稿。
 
 【结构化对话】
 {serialized_turns}
 
+【不可变证据片段】
+{serialized_evidence}
+
 只输出以下严格 JSON：
 {{
   "memories": [
-    {{"memoryKind":"experience","summary":"第一人称经历摘要","sourceTurnIndices":[{first_user_index}],"factType":"event","dimensions":["lifeEvents"],"predicate":"occurred","object":null,"qualifiers":{{"polarity":"unknown","strengthExpression":null,"superlativeAsserted":false,"currentApplicability":"historical","validTime":{{"start":null,"end":null,"precision":"unknown","expression":null}},"place":null,"scenario":null}},"facets":{{"people":[{{"value":"人物称呼","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}},
-    {{"memoryKind":"knowledge","claim":"用户明确表达的经验、知识或观点","sourceTurnIndices":[{first_user_index}],"factType":"knowledge","dimensions":["knowledgeSkills"],"predicate":"states","object":null,"qualifiers":{{"polarity":"unknown","strengthExpression":null,"superlativeAsserted":false,"currentApplicability":"unknown","validTime":{{"start":null,"end":null,"precision":"unknown","expression":null}},"place":null,"scenario":null}},"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}},
-    {{"memoryKind":"emotion","label":"用户明确表达的感受及其对象或原因","sourceTurnIndices":[{first_user_index}],"factType":"affect","dimensions":["emotions"],"predicate":"felt","object":null,"qualifiers":{{"polarity":"unknown","strengthExpression":null,"superlativeAsserted":false,"currentApplicability":"unknown","validTime":{{"start":null,"end":null,"precision":"unknown","expression":null}},"place":null,"scenario":null}},"affect":{{"experiencer":null,"target":null,"trigger":null,"emotionExpression":"用户明确表达的感受及其对象或原因","reporter":null}},"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[{{"value":"怀念","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}
+    {{"memoryKind":"experience","summary":"第一人称经历摘要","sourceTurnIndices":[{first_user_index}],"evidenceFragmentIds":["从不可变证据片段选择"],"factType":"event","dimensions":["lifeEvents"],"predicate":"occurred","object":null,"qualifiers":{{"polarity":"unknown","strengthExpression":null,"superlativeAsserted":false,"currentApplicability":"historical","validTime":{{"start":null,"end":null,"precision":"unknown","expression":null}},"place":null,"scenario":null}},"facets":{{"people":[{{"value":"人物称呼","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}},
+    {{"memoryKind":"knowledge","claim":"用户明确表达的经验、知识或观点","sourceTurnIndices":[{first_user_index}],"evidenceFragmentIds":["从不可变证据片段选择"],"factType":"knowledge","dimensions":["knowledgeSkills"],"predicate":"states","object":null,"qualifiers":{{"polarity":"unknown","strengthExpression":null,"superlativeAsserted":false,"currentApplicability":"unknown","validTime":{{"start":null,"end":null,"precision":"unknown","expression":null}},"place":null,"scenario":null}},"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}},
+    {{"memoryKind":"emotion","label":"用户明确表达的感受及其对象或原因","sourceTurnIndices":[{first_user_index}],"evidenceFragmentIds":["从不可变证据片段选择"],"factType":"affect","dimensions":["emotions"],"predicate":"felt","object":null,"qualifiers":{{"polarity":"unknown","strengthExpression":null,"superlativeAsserted":false,"currentApplicability":"unknown","validTime":{{"start":null,"end":null,"precision":"unknown","expression":null}},"place":null,"scenario":null}},"affect":{{"experiencer":null,"target":null,"trigger":null,"emotionExpression":"用户明确表达的感受及其对象或原因","reporter":null}},"facets":{{"people":[],"time":[],"places":[],"relationships":[],"emotions":[{{"value":"怀念","evidenceMode":"ownerStated","confidence":1.0,"sourceTurnIndices":[{first_user_index}]}}],"values":[],"personality":[],"habits":[],"goals":[],"identity":[],"reflections":[],"confidence":0.9}}}}
   ]
 }}
 
@@ -1191,7 +2032,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
 	1. 最多输出 {cls.maximum_memory_count} 条；没有可靠新记忆时输出 {{"memories":[]}}。
 	1a. 纯查询、确认问法、反问、助手答案以及“用户问过什么”的当场转述都不是用户事实，不得生成记忆；不能只根据是否有问号判断。
 2. experience 使用 summary，knowledge 使用 claim，emotion 使用 label；字段不得混用。
-3. 每条记忆都必须能被 role=user 的原话直接支持，并列出全部相关 sourceTurnIndices。
+3. 每条记忆都必须能被 role=user 的原话直接支持，并列出全部相关 sourceTurnIndices 和 evidenceFragmentIds。evidenceFragmentIds 只能逐字引用上方不可变证据片段；整理后的表述可以换序或使用不增加事实的同义表达，但不得据生成表述反推证据。
 4. role=assistant 只用于理解问题和上下文，不得成为证据，不得把助手的猜测、建议或诱导写成用户记忆。
 5. 不得补写用户没说过的人名、地点、时间、关系、因果、知识、情绪或态度。
 6. 合并重复表达，但不要把不同主题混成一条；保留第一人称语义。summary、claim、label 必须中性、客观且尽可能贴近用户原话，只允许删除无意义口头填充、补齐标点和拆分原子事实，不得润色、文学化、委婉化、夸大或弱化。
@@ -1225,11 +2066,17 @@ class DeepSeekLiveMemoryOrganizationProxy:
             raise ValueError("DeepSeek live memory organization returned invalid JSON")
         raw_memories = parsed["memories"]
         if len(raw_memories) > cls.maximum_memory_count:
-            raise ValueError("DeepSeek live memory organization returned too many memories")
+            raise LiveMemoryOrganizationCapacityExceeded(
+                "DeepSeek live memory organization returned too many memories"
+            )
 
         all_indices = {turn["index"] for turn in normalized_turns}
         user_indices = {
             turn["index"] for turn in normalized_turns if turn["role"] == "user"
+        }
+        evidence_catalog = build_live_memory_evidence_catalog(normalized_turns)
+        evidence_by_id = {
+            str(item["evidenceId"]): item for item in evidence_catalog
         }
         memories: List[Dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
@@ -1256,6 +2103,24 @@ class DeepSeekLiveMemoryOrganizationProxy:
             ):
                 raise ValueError(f"organized memory {position} has invalid user evidence")
             source_indices = list(dict.fromkeys(source_indices))
+            raw_evidence_ids = raw_memory.get("evidenceFragmentIds")
+            evidence_ids: list[str] = []
+            if raw_evidence_ids is not None:
+                if (
+                    not isinstance(raw_evidence_ids, list)
+                    or not raw_evidence_ids
+                    or any(not isinstance(value, str) or not value for value in raw_evidence_ids)
+                    or len(set(raw_evidence_ids)) != len(raw_evidence_ids)
+                    or any(value not in evidence_by_id for value in raw_evidence_ids)
+                    or any(
+                        int(evidence_by_id[value]["turnIndex"]) not in source_indices
+                        for value in raw_evidence_ids
+                    )
+                ):
+                    raise ValueError(
+                        f"organized memory {position} has invalid evidence fragments"
+                    )
+                evidence_ids = list(raw_evidence_ids)
             raw_facets = raw_memory.get("facets")
             facet_validation = validate_memory_facets(raw_facets)
             if not facet_validation.accepted:
@@ -1307,6 +2172,8 @@ class DeepSeekLiveMemoryOrganizationProxy:
                 "sourceTurnIndices": source_indices,
                 "facets": normalized_facets,
             }
+            if evidence_ids:
+                normalized_memory["_sourceEvidenceFragmentIds"] = evidence_ids
             fact_type = str(raw_memory.get("factType") or "").strip()
             if fact_type and fact_type not in cls._allowed_extractor_fact_types[
                 MemoryKind(memory_kind)

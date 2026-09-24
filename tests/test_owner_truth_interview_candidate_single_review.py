@@ -32,6 +32,7 @@ from app.domain.owner_truth.interview_candidate_single_review import (
     OwnerTruthInterviewCandidateSingleReviewBatchRequired,
     OwnerTruthInterviewCandidateSingleReviewCommand,
     OwnerTruthInterviewCandidateSingleReviewConflict,
+    OwnerTruthInterviewCandidateSingleReviewError,
 )
 from app.domain.owner_truth.source_commands import (
     OwnerTruthCommandAuthorizationCapture,
@@ -262,6 +263,58 @@ class OwnerTruthInterviewCandidateSingleReviewTests(TestCase):
         snapshot = store.review_repository.snapshot()
         self.assertEqual(snapshot["candidates"][explicit_single.candidate_id]["decision"], "accepted")
         self.assertEqual(snapshot["memoryActivations"], {})
+
+    def test_v5_changeset_binding_is_preserved_in_child_review_command(self) -> None:
+        candidate = self._candidate(
+            summary="V5 候选必须保留已展示的变更方案绑定。",
+            sensitivity=SensitivityLevel.STANDARD,
+            review_mode=CandidateReviewMode.SINGLE,
+        )
+        change_set_id = str(uuid4())
+        command = OwnerTruthInterviewCandidateSingleReviewCommand(
+            command_id="interview-single-review-v5-binding-001",
+            review_batch_id=self.review_batch_id,
+            candidate_id=candidate.candidate_id,
+            expected_candidate_version=candidate.row_version,
+            action=CandidateReviewAction.ACCEPT,
+            corrected_value=None,
+            corrected_value_schema_version=candidate.content_schema_version,
+            reason_code="ownerReviewed",
+            expected_memory_revision=7,
+            expected_change_set_id=change_set_id,
+            expected_proposal_hash="A" * 64,
+        )
+
+        child = command.child_command()
+
+        self.assertEqual(child.expected_memory_revision, 7)
+        self.assertEqual(child.expected_change_set_id, change_set_id)
+        self.assertEqual(child.expected_proposal_hash, "a" * 64)
+
+    def test_changeset_binding_rejects_partial_or_malformed_values(self) -> None:
+        candidate = self._candidate(summary="错误绑定必须关闭审核写入。")
+        common = dict(
+            command_id="interview-single-review-v5-invalid-001",
+            review_batch_id=self.review_batch_id,
+            candidate_id=candidate.candidate_id,
+            expected_candidate_version=candidate.row_version,
+            action=CandidateReviewAction.ACCEPT,
+            corrected_value=None,
+            corrected_value_schema_version=candidate.content_schema_version,
+            reason_code="ownerReviewed",
+        )
+
+        with self.assertRaises(OwnerTruthInterviewCandidateSingleReviewError):
+            OwnerTruthInterviewCandidateSingleReviewCommand(
+                **common,
+                expected_change_set_id=str(uuid4()),
+            )
+        with self.assertRaises(OwnerTruthInterviewCandidateSingleReviewError):
+            OwnerTruthInterviewCandidateSingleReviewCommand(
+                **common,
+                expected_change_set_id=str(uuid4()),
+                expected_proposal_hash="not-a-hash",
+            )
 
     def test_replay_deduplicates_after_candidate_leaves_pending_composition(self) -> None:
         sensitive = self._candidate(summary="可重放的敏感候选。")

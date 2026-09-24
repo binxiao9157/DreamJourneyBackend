@@ -143,6 +143,9 @@ class Settings:
     # transcript. Sending that transcript to DeepSeek for semantic memory
     # organization requires this separate, explicit production switch.
     owner_truth_live_memory_organization_enabled: bool = False
+    # Long Live memory processing is a separately versioned, default-off lane.
+    # It bounds every provider request and never changes legacy extraction jobs.
+    owner_truth_live_long_memory_pipeline_enabled: bool = False
     # Owner-authored Archive text uses a separate consent and rollout lane.
     # When enabled, the text is organized into typed review Candidates instead
     # of being persisted as one undifferentiated echo of the Source.
@@ -362,6 +365,9 @@ class Settings:
     realtime_voice_upstream_connect_timeout_seconds: float = 10.0
     realtime_voice_max_frame_bytes: int = 2 * 1024 * 1024
     realtime_voice_max_session_bytes: int = 512 * 1024 * 1024
+    realtime_voice_long_live_profile_enabled: bool = False
+    realtime_voice_long_live_max_session_seconds: int = 2 * 60 * 60
+    realtime_voice_long_live_max_session_bytes: int = 1024 * 1024 * 1024
     realtime_voice_snapshot_max_chars: int = 32_768
     volcengine_voice_clone_api_key: Optional[str] = None
     volcengine_voice_clone_train_url: str = "https://openspeech.bytedance.com/api/v3/tts/voice_clone"
@@ -679,6 +685,10 @@ class Settings:
             owner_truth_live_memory_organization_enabled=_env_bool(
                 "OWNER_TRUTH_LIVE_MEMORY_ORGANIZATION_ENABLED",
                 cls.owner_truth_live_memory_organization_enabled,
+            ),
+            owner_truth_live_long_memory_pipeline_enabled=_env_bool(
+                "OWNER_TRUTH_LIVE_LONG_MEMORY_PIPELINE_ENABLED",
+                cls.owner_truth_live_long_memory_pipeline_enabled,
             ),
             owner_truth_text_memory_organization_enabled=_env_bool(
                 "OWNER_TRUTH_TEXT_MEMORY_ORGANIZATION_ENABLED",
@@ -1131,6 +1141,18 @@ class Settings:
             realtime_voice_max_session_bytes=_env_int(
                 "REALTIME_VOICE_MAX_SESSION_BYTES",
                 cls.realtime_voice_max_session_bytes,
+            ),
+            realtime_voice_long_live_profile_enabled=_env_bool(
+                "REALTIME_VOICE_LONG_LIVE_PROFILE_ENABLED",
+                cls.realtime_voice_long_live_profile_enabled,
+            ),
+            realtime_voice_long_live_max_session_seconds=_env_int(
+                "REALTIME_VOICE_LONG_LIVE_MAX_SESSION_SECONDS",
+                cls.realtime_voice_long_live_max_session_seconds,
+            ),
+            realtime_voice_long_live_max_session_bytes=_env_int(
+                "REALTIME_VOICE_LONG_LIVE_MAX_SESSION_BYTES",
+                cls.realtime_voice_long_live_max_session_bytes,
             ),
             realtime_voice_snapshot_max_chars=_env_int(
                 "REALTIME_VOICE_SNAPSHOT_MAX_CHARS",

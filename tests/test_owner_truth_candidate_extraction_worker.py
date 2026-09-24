@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from dataclasses import replace
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import io
 from threading import Event, Thread
 from time import sleep
 import unittest
@@ -28,15 +30,45 @@ from app.async_effects.owner_truth_candidate_extraction_worker import (
     ModelAssistedOwnerTruthLiveConversationExtractor,
     ModelAssistedOwnerTruthSourceExtractor,
     OwnerTruthCandidateExtractionWorkerRuntime,
+    _log_stage_diagnostic,
+    _worker_result_dedupe_key,
 )
 from app.async_effects.target_admission import InMemoryOwnerTruthSourceTargetAdmissionRepository
 from app.async_effects.repository import InMemoryEffectKernelRepository
 from app.core.config import Settings
-from app.services.deepseek import DeepSeekTextMemoryOrganizationProxy
+from app.domain.owner_truth.candidate_decisions import (
+    CandidateReviewAction,
+    OwnerTruthCandidateReviewCommand,
+    OwnerTruthCandidateSnapshot,
+)
+from app.domain.owner_truth.contracts import (
+    CandidateDecision,
+    EpistemicStatus,
+    MemoryKind,
+    PerspectiveType,
+    SensitivityLevel,
+)
+from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+from app.services.deepseek import (
+    DeepSeekLiveMemoryOrganizationProxy,
+    DeepSeekTextMemoryOrganizationProxy,
+)
 from app.services.owner_truth_candidate_extraction import (
     InMemoryOwnerTruthCandidateExtractionRepository,
     OwnerTruthCandidateExtractionInput,
     PostgresOwnerTruthCandidateExtractionInputRepository,
+)
+from app.services.owner_truth_live_memory_contract_errors import (
+    LiveMemoryContractFailure,
+)
+from app.services.owner_truth_candidate_review import (
+    InMemoryOwnerTruthCandidateReviewRepository,
+    OwnerTruthCandidateReviewService,
+)
+from app.services.owner_truth_formal_memory import (
+    InMemoryOwnerTruthFormalMemoryRepository,
+    OwnerTruthFormalMemoryQuery,
+    OwnerTruthFormalMemoryService,
 )
 
 
@@ -187,6 +219,25 @@ class _Store:
 
     def async_effect_legacy_inbox_account_resolver(self):
         return self.message_inbox_resolver
+
+
+class _ReviewStore:
+    def __init__(
+        self,
+        repository: InMemoryOwnerTruthCandidateReviewRepository | None = None,
+    ) -> None:
+        self.repository = repository or InMemoryOwnerTruthCandidateReviewRepository()
+        self.formal_repository = InMemoryOwnerTruthFormalMemoryRepository(self.repository)
+
+    @contextmanager
+    def request_unit_of_work(self, **_kwargs):
+        yield self
+
+    def owner_truth_candidate_review_repository(self):
+        return self.repository
+
+    def owner_truth_formal_memory_repository(self):
+        return self.formal_repository
 
 
 class _FailingExtractor:
@@ -421,6 +472,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
         enabled: bool = True,
         extractor=None,
         operation_metric_recorder=None,
+        stage_diagnostic_recorder=None,
         worker_id: str = "candidate-extraction-worker-test",
         lease_seconds: int = 60,
         retry_seconds: int = 5,
@@ -439,7 +491,407 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             extractor=extractor,
             operation_metric_recorder=operation_metric_recorder,
+            stage_diagnostic_recorder=stage_diagnostic_recorder,
         )
+
+    def test_loop_dedupes_only_jobless_idle_or_blocked_heartbeats(self) -> None:
+        idle = {"status": "idle", "reason": "noEligibleCandidateExtractionJob"}
+        blocked = {"status": "blocked", "reason": "workerDisabled"}
+        first_job = {
+            "status": "failed",
+            "reason": "candidateExtractionRetriesExhausted",
+            "jobId": "job-a",
+            "attempt": 1,
+        }
+        second_job = {**first_job, "jobId": "job-b"}
+        second_attempt = {**first_job, "attempt": 2}
+
+        self.assertEqual(
+            _worker_result_dedupe_key(idle),
+            ("idle", "noEligibleCandidateExtractionJob"),
+        )
+        self.assertEqual(
+            _worker_result_dedupe_key(blocked),
+            ("blocked", "workerDisabled"),
+        )
+        self.assertIsNone(_worker_result_dedupe_key(first_job))
+        self.assertIsNone(_worker_result_dedupe_key(second_job))
+        self.assertIsNone(_worker_result_dedupe_key(second_attempt))
+
+    def test_default_live_chain_records_actual_safe_stages_per_job(self) -> None:
+        fact = "本次逐任务诊断测试代号是清风十六号。"
+        source_id = str(uuid4())
+        intent = replace(
+            self.intent,
+            target=replace(self.intent.target, resource_id=source_id),
+            max_attempts=1,
+        )
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=source_id,
+            source_content_hash=_digest(fact),
+            source_text=fact,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {"index": 1, "role": "user", "text": fact, "captureMode": "live"},
+                ],
+            },
+        )
+        store.lease_repository.seed(intent)
+        organization = {
+            "memories": [{
+                "memoryKind": "knowledge",
+                "claim": "本次逐任务诊断测试代号是清风十六号。",
+                "sourceTurnIndices": [1],
+                "facets": _facets(),
+            }]
+        }
+        support = {
+            "schemaVersion": "owner-truth-live-memory-support-v1",
+            "turnAssessments": [{"turnIndex": 1, "speechAct": "assertion"}],
+            "memoryAssessments": [{
+                "memoryIndex": 0,
+                "verdict": "supported",
+                "supportingTurnIndices": [1],
+            }],
+            "omittedFactBearingTurnIndices": [],
+        }
+        contents = iter([organization, support])
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": json.dumps(next(contents), ensure_ascii=False),
+                        },
+                    }],
+                },
+            )
+
+        settings = Settings(
+            deepseek_api_key="synthetic-test-key",
+            owner_truth_live_memory_organization_enabled=True,
+        )
+        events: list[dict[str, object]] = []
+        extractor = ModelAssistedOwnerTruthSourceExtractor(
+            settings=settings,
+            live_extractor=ModelAssistedOwnerTruthLiveConversationExtractor(
+                settings=settings,
+                organizer=DeepSeekLiveMemoryOrganizationProxy(
+                    settings,
+                    transport=httpx.MockTransport(handle),
+                ),
+            ),
+        )
+
+        result = self._worker(
+            store=store,
+            extractor=extractor,
+            stage_diagnostic_recorder=lambda event: events.append(dict(event)),
+        ).run_once()
+
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(
+            [event["stage"] for event in events],
+            [
+                "organizationInputBuilt",
+                "organizationRequestStarted",
+                "organizationResponseReceived",
+                "organizationDecoded",
+                "organizationValidated",
+                "supportInputBuilt",
+                "supportRequestStarted",
+                "supportResponseReceived",
+                "supportDecoded",
+                "supportValidated",
+                "proposalBuildStarted",
+                "proposalBuildCompleted",
+                "candidateCommitStarted",
+                "candidateCommitSucceeded",
+            ],
+        )
+        self.assertTrue(all(event["attempt"] == 1 for event in events))
+        self.assertEqual(len({event["correlation"] for event in events}), 1)
+        serialized = json.dumps(events, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn(fact, serialized)
+        self.assertNotIn(source_id, serialized)
+        self.assertNotIn(intent.job_id, serialized)
+
+    def test_default_stage_sink_emits_safe_cli_diagnostic_without_logger_setup(self) -> None:
+        output = io.StringIO()
+        event = {
+            "stage": "supportDecoded",
+            "attempt": 2,
+            "correlation": "diagnostic-correlation",
+            "counts": {"memoryCount": 1},
+        }
+
+        with redirect_stderr(output):
+            _log_stage_diagnostic(event)
+
+        line = output.getvalue().strip()
+        self.assertTrue(line)
+        decoded = json.loads(line)
+        self.assertEqual(decoded["event"], "ownerTruthCandidateExtractionStage")
+        self.assertEqual(decoded["stage"], "supportDecoded")
+        self.assertEqual(decoded["attempt"], 2)
+        self.assertNotIn("content", decoded)
+
+    def test_support_validated_stage_is_not_emitted_before_semantic_validation(self) -> None:
+        fact = "本次语义阶段测试代号是清风十七号。"
+        source_id = str(uuid4())
+        intent = replace(
+            self.intent,
+            target=replace(self.intent.target, resource_id=source_id),
+            max_attempts=1,
+        )
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=source_id,
+            source_content_hash=_digest(fact),
+            source_text=fact,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {"index": 1, "role": "user", "text": fact, "captureMode": "live"},
+                ],
+            },
+        )
+        store.lease_repository.seed(intent)
+        contents = iter([
+            {
+                "memories": [{
+                    "memoryKind": "knowledge",
+                    "claim": fact,
+                    "sourceTurnIndices": [1],
+                    "facets": _facets(),
+                }],
+            },
+            {
+                "schemaVersion": "owner-truth-live-memory-support-v1",
+                "turnAssessments": [{"turnIndex": 1, "speechAct": "assertion"}],
+                "memoryAssessments": [{
+                    "memoryIndex": 0,
+                    "verdict": "uncertain",
+                    "supportingTurnIndices": [1],
+                }],
+                "omittedFactBearingTurnIndices": [],
+            },
+        ])
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": json.dumps(next(contents), ensure_ascii=False),
+                        },
+                    }],
+                },
+            )
+
+        settings = Settings(
+            deepseek_api_key="synthetic-test-key",
+            owner_truth_live_memory_organization_enabled=True,
+        )
+        events: list[dict[str, object]] = []
+        extractor = ModelAssistedOwnerTruthSourceExtractor(
+            settings=settings,
+            live_extractor=ModelAssistedOwnerTruthLiveConversationExtractor(
+                settings=settings,
+                organizer=DeepSeekLiveMemoryOrganizationProxy(
+                    settings,
+                    transport=httpx.MockTransport(handle),
+                ),
+            ),
+        )
+
+        result = self._worker(
+            store=store,
+            extractor=extractor,
+            stage_diagnostic_recorder=lambda event: events.append(dict(event)),
+        ).run_once()
+
+        self.assertEqual(result["status"], "failed", result)
+        stages = [event["stage"] for event in events]
+        self.assertIn("supportDecoded", stages)
+        self.assertNotIn("supportValidated", stages)
+
+    def test_stage_diagnostic_failure_does_not_change_live_result(self) -> None:
+        def fail_diagnostic(_event) -> None:
+            raise RuntimeError("controlled diagnostic sink failure")
+
+        result = self._worker(
+            stage_diagnostic_recorder=fail_diagnostic,
+        ).run_once()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["candidateCount"], 1)
+
+    def _run_default_live_http_contract_case(
+        self,
+        *,
+        response_envelopes: list[object],
+    ) -> tuple[dict[str, object], int, _Store]:
+        fact = "本次合同边界测试代号是清泉十二号。"
+        source_id = str(uuid4())
+        intent = replace(
+            self.intent,
+            target=replace(self.intent.target, resource_id=source_id),
+            max_attempts=1,
+        )
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=source_id,
+            source_content_hash=_digest(fact),
+            source_text=fact,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {
+                        "index": 1,
+                        "role": "user",
+                        "text": fact,
+                        "captureMode": "live",
+                    }
+                ],
+            },
+        )
+        store.lease_repository.seed(intent)
+        envelopes = iter(response_envelopes)
+        request_count = 0
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            return httpx.Response(200, request=request, json=next(envelopes))
+
+        settings = Settings(
+            deepseek_api_key="synthetic-test-key",
+            owner_truth_live_memory_organization_enabled=True,
+        )
+        live_extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=settings,
+            organizer=DeepSeekLiveMemoryOrganizationProxy(
+                settings,
+                transport=httpx.MockTransport(handle),
+            ),
+        )
+        result = self._worker(
+            store=store,
+            extractor=ModelAssistedOwnerTruthSourceExtractor(
+                settings=settings,
+                live_extractor=live_extractor,
+            ),
+        ).run_once()
+        return result, request_count, store
+
+    def _review_snapshots_from_extraction(
+        self,
+        store: _Store,
+    ) -> tuple[OwnerTruthCandidateSnapshot, ...]:
+        snapshot = store.candidate_repository.snapshot()
+        extraction = next(iter(snapshot["extractions"].values()))
+        policy_version = str(extraction["payload"]["policyVersion"])
+        values = []
+        for candidate_id, stored in snapshot["candidates"].items():
+            payload = stored["payload"]
+            values.append(
+                OwnerTruthCandidateSnapshot(
+                    candidate_id=candidate_id,
+                    vault_id=self.vault_id,
+                    owner_subject_id=self.owner_subject_id,
+                    source_id=stored["sourceId"],
+                    memory_kind=MemoryKind(payload["candidateKind"]),
+                    perspective_type=PerspectiveType(payload["perspectiveType"]),
+                    epistemic_status=EpistemicStatus(payload["epistemicStatus"]),
+                    sensitivity=SensitivityLevel(payload["sensitivity"]),
+                    decision=CandidateDecision.PENDING,
+                    policy_version=policy_version,
+                    authority_epoch=7,
+                    row_version=1,
+                    content_hash=stored["contentHash"],
+                    content_schema_version=payload["contentSchemaVersion"],
+                    payload=payload,
+                )
+            )
+        return tuple(values)
+
+    def _confirm_and_reopen_formal_memories(
+        self,
+        candidates: tuple[OwnerTruthCandidateSnapshot, ...],
+    ) -> None:
+        self.assertGreater(len(candidates), 0)
+        repository = InMemoryOwnerTruthCandidateReviewRepository()
+        store = _ReviewStore(repository)
+        for candidate in candidates:
+            repository.seed(candidate)
+        context = OwnerTruthCommandContext(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            actor_subject_id=self.owner_subject_id,
+            policy_version=candidates[0].policy_version,
+        )
+        commands = []
+        service = OwnerTruthCandidateReviewService(store)
+        for index, candidate in enumerate(candidates, start=1):
+            inbox_item = next(
+                item
+                for item in repository.list_pending(context=context)
+                if item.candidate_id == candidate.candidate_id
+            )
+            proposal = inbox_item.proposed_change_set
+            self.assertIsNotNone(proposal)
+            command = OwnerTruthCandidateReviewCommand(
+                command_id=f"live-local-confirm-{index}",
+                candidate_id=candidate.candidate_id,
+                expected_candidate_version=1,
+                action=CandidateReviewAction.ACCEPT,
+                corrected_value=None,
+                corrected_value_schema_version=candidate.content_schema_version,
+                reason_code="ownerReviewed",
+                expected_memory_revision=int(proposal["baseMemoryRevision"]),
+                expected_change_set_id=str(proposal["changeSetId"]),
+                expected_proposal_hash=str(proposal["proposalHash"]),
+            )
+            commands.append(command)
+            created = service.decide_and_activate(command=command, context=context)
+            self.assertEqual(created.review.outcome, "created")
+            self.assertEqual(created.memory_activation.outcome, "created")
+
+        reopened_store = _ReviewStore(repository)
+        reopened_review = OwnerTruthCandidateReviewService(reopened_store)
+        for command in commands:
+            replayed = reopened_review.decide_and_activate(
+                command=command,
+                context=context,
+            )
+            self.assertEqual(replayed.review.outcome, "deduplicated")
+            self.assertEqual(replayed.memory_activation.outcome, "deduplicated")
+
+        formal = OwnerTruthFormalMemoryService(reopened_store)
+        page = formal.list(context=context, query=OwnerTruthFormalMemoryQuery(limit=20))
+        self.assertEqual(len(page.items), len(candidates))
+        for item in page.items:
+            detail = formal.detail(context=context, memory_id=item.memory_id)
+            self.assertEqual(detail.current_version.version_number, 1)
+            self.assertEqual(detail.current_version.source_count, 1)
+        review_snapshot = repository.snapshot()
+        self.assertEqual(len(review_snapshot["memoryActivations"]), len(candidates))
 
     def _extract_live(self, *, organizer, user_text: str):
         extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
@@ -1295,7 +1747,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
             organizer=organizer,
         )
 
-        with self.assertRaisesRegex(ValueError, "omitted fact-bearing"):
+        with self.assertRaises(LiveMemoryContractFailure) as raised:
             extractor.extract(
                 intent=self.intent,
                 source=OwnerTruthCandidateExtractionInput(
@@ -1310,6 +1762,8 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
                     },
                 ),
             )
+        self.assertEqual(raised.exception.stage, "supportValidate")
+        self.assertEqual(raised.exception.reason, "factOmitted")
 
     def test_b7_question_suffix_does_not_drop_an_explicit_correction(self) -> None:
         correction = "不是晚霞，测试清单代号是晨星，记住了吗？"
@@ -1544,7 +1998,7 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
             organizer=organizer,
         )
 
-        with self.assertRaisesRegex(ValueError, "review is uncertain"):
+        with self.assertRaises(LiveMemoryContractFailure) as raised:
             extractor.extract(
                 intent=self.intent,
                 source=OwnerTruthCandidateExtractionInput(
@@ -1559,6 +2013,8 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
                     },
                 ),
             )
+        self.assertEqual(raised.exception.stage, "supportValidate")
+        self.assertEqual(raised.exception.reason, "semanticUncertain")
 
     def test_live_organization_accepts_assistant_opening_before_first_user_evidence(self) -> None:
         assistant_turn = "请只讲一条用于隔离验证的合成经历。"
@@ -2123,6 +2579,949 @@ class OwnerTruthCandidateExtractionWorkerTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["candidateCount"], 1)
+
+    def test_non_live_source_read_failure_keeps_legacy_classification(self) -> None:
+        original_read = self.store.input_repository.read_for_candidate_extraction
+        calls = 0
+
+        def fail_read(intent):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("synthetic ordinary source failure")
+            return original_read(intent)
+
+        self.store.input_repository.read_for_candidate_extraction = fail_read
+
+        result = self._worker().run_once()
+
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(result["failureStage"], "responseValidation")
+        self.assertEqual(
+            result["failureCode"],
+            "candidateExtraction.responseContract.invalid",
+        )
+
+    def test_non_live_candidate_commit_failure_keeps_legacy_classification(self) -> None:
+        original_persist = self.store.candidate_repository.persist
+        calls = 0
+
+        def fail_persist(record):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("synthetic ordinary candidate commit failure")
+            return original_persist(record)
+
+        self.store.candidate_repository.persist = fail_persist
+
+        result = self._worker().run_once()
+
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(result["failureStage"], "responseValidation")
+        self.assertEqual(
+            result["failureCode"],
+            "candidateExtraction.responseContract.invalid",
+        )
+
+    def test_live_http_contract_failure_reuses_original_job_and_recovers_once(self) -> None:
+        intent = replace(self.intent, max_attempts=3)
+        first_user_turn = "我小学时参加过一次校园合唱演出。"
+        second_user_turn = "那次演出的测试代号是松塔七号。"
+        source_text = f"{first_user_turn}\n\n{second_user_turn}"
+        source_metadata = {
+            "captureMode": "live",
+            "sourcePolicy": "userEvidenceOnly",
+            "conversationTurns": [
+                {"index": 1, "role": "user", "text": first_user_turn, "captureMode": "live"},
+                {"index": 2, "role": "assistant", "text": "我会按原话记录。", "captureMode": "live"},
+                {"index": 3, "role": "user", "text": second_user_turn, "captureMode": "live"},
+            ],
+        }
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(source_text),
+            source_text=source_text,
+            source_metadata=source_metadata,
+        )
+        store.lease_repository.seed(intent)
+        facets = {
+            "people": [], "time": [], "places": [], "relationships": [],
+            "emotions": [], "values": [], "personality": [], "habits": [],
+            "goals": [], "identity": [], "reflections": [], "confidence": 0.9,
+        }
+        organization = {
+            "memories": [{
+                "memoryKind": "experience",
+                "summary": "我小学时参加过一次校园合唱演出，测试代号是松塔七号。",
+                "sourceTurnIndices": [1, 3],
+                "facets": facets,
+            }]
+        }
+        support = {
+            "schemaVersion": "owner-truth-live-memory-support-v1",
+            "turnAssessments": [
+                {"turnIndex": 1, "speechAct": "assertion"},
+                {"turnIndex": 3, "speechAct": "assertion"},
+            ],
+            "memoryAssessments": [{
+                "memoryIndex": 0,
+                "verdict": "supported",
+                "supportingTurnIndices": [1, 3],
+            }],
+            "omittedFactBearingTurnIndices": [],
+        }
+        response_contents = iter([
+            "not-json",
+            json.dumps(organization, ensure_ascii=False),
+            json.dumps(support, ensure_ascii=False),
+        ])
+        request_bodies: list[dict[str, object]] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            request_bodies.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                request=request,
+                json={"choices": [{"message": {"content": next(response_contents)}}]},
+            )
+
+        settings = Settings(
+            deepseek_api_key="synthetic-test-key",
+            owner_truth_live_memory_organization_enabled=True,
+        )
+        transport = httpx.MockTransport(handle)
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=settings,
+            organizer=DeepSeekLiveMemoryOrganizationProxy(
+                settings,
+                transport=transport,
+            ),
+        )
+        worker = self._worker(
+            store=store,
+            extractor=ModelAssistedOwnerTruthSourceExtractor(
+                settings=settings,
+                live_extractor=extractor,
+            ),
+            retry_seconds=1,
+        )
+        first = worker.run_once()
+        self.assertEqual(first["status"], "retryWait", first)
+        self.assertEqual(first["failureStage"], "organizationDecode")
+        self.assertEqual(first["failureCode"], "candidateExtraction.live.organizationDecode.invalidJson")
+        self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
+
+        store.lease_repository._jobs[intent.job_id]["availableAt"] = datetime.now(
+            timezone.utc
+        )
+        second = worker.run_once()
+
+        self.assertEqual(second["status"], "completed")
+        self.assertEqual(second["candidateCount"], 1)
+        self.assertEqual(second["jobId"], first["jobId"])
+        self.assertEqual(second["attempt"], 2)
+        self.assertEqual(len(request_bodies), 3)
+        first_prompt = request_bodies[0]["messages"][1]["content"]
+        retry_prompt = request_bodies[1]["messages"][1]["content"]
+        support_prompt = request_bodies[2]["messages"][1]["content"]
+        self.assertNotIn("上次安全合同反馈", first_prompt)
+        self.assertIn("上次安全合同反馈", retry_prompt)
+        self.assertIn("上次安全合同反馈", support_prompt)
+        self.assertEqual(len(store.candidate_repository.snapshot()["candidates"]), 1)
+
+    def test_live_contract_repair_is_not_granted_after_attempt_two(self) -> None:
+        intent = replace(self.intent, max_attempts=3)
+        source_text = "我曾在学校参加合唱演出。"
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(source_text),
+            source_text=source_text,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {"index": 1, "role": "user", "text": source_text, "captureMode": "live"},
+                ],
+            },
+        )
+        store.lease_repository.seed(intent)
+        request_count = 0
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            return httpx.Response(
+                200,
+                request=request,
+                json={"choices": [{"message": {"content": "not-json"}}]},
+            )
+
+        settings = Settings(
+            deepseek_api_key="synthetic-test-key",
+            owner_truth_live_memory_organization_enabled=True,
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=settings,
+            organizer=DeepSeekLiveMemoryOrganizationProxy(
+                settings,
+                transport=httpx.MockTransport(handle),
+            ),
+        )
+        worker = self._worker(
+            store=store,
+            extractor=ModelAssistedOwnerTruthSourceExtractor(
+                settings=settings,
+                live_extractor=extractor,
+            ),
+            retry_seconds=1,
+        )
+
+        first = worker.run_once()
+        store.lease_repository._jobs[intent.job_id]["availableAt"] = datetime.now(
+            timezone.utc
+        )
+        second = worker.run_once()
+
+        self.assertEqual(first["status"], "retryWait")
+        self.assertEqual(second["status"], "failed")
+        self.assertEqual(second["attempt"], 2)
+        self.assertEqual(
+            second["failureCode"],
+            "candidateExtraction.live.organizationDecode.invalidJson",
+        )
+        self.assertEqual(request_count, 2)
+        self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
+        self.assertEqual(
+            store.lease_repository.attempt_state(intent.job_id, 2),
+            "terminalFailed",
+        )
+
+    def test_live_support_contract_failure_regenerates_full_source_once(self) -> None:
+        intent = replace(self.intent, max_attempts=3)
+        fact = "我在大学时参加过校园广播站，测试代号是青禾八号。"
+        metadata = {
+            "captureMode": "live",
+            "sourcePolicy": "userEvidenceOnly",
+            "conversationTurns": [
+                {"index": 1, "role": "user", "text": fact, "captureMode": "live"},
+            ],
+        }
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(fact),
+            source_text=fact,
+            source_metadata=metadata,
+        )
+        store.lease_repository.seed(intent)
+        organization = {
+            "memories": [{
+                "memoryKind": "knowledge",
+                "claim": "测试代号是青禾八号。",
+                "sourceTurnIndices": [1],
+                "facets": _facets(),
+            }]
+        }
+        invalid_support = {
+            "schemaVersion": "owner-truth-live-memory-support-v1",
+            "turnAssessments": [{"turnIndex": 1, "speechAct": "assertion"}],
+            "memoryAssessments": [{
+                "memoryIndex": 0,
+                "verdict": "supported",
+                "supportingTurnIndices": [1],
+            }],
+            "omittedFactBearingTurnIndices": [1],
+        }
+        valid_support = {
+            **invalid_support,
+            "omittedFactBearingTurnIndices": [],
+        }
+        contents = iter([
+            json.dumps(organization, ensure_ascii=False),
+            json.dumps(invalid_support, ensure_ascii=False),
+            json.dumps(organization, ensure_ascii=False),
+            json.dumps(valid_support, ensure_ascii=False),
+        ])
+        prompts: list[str] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8"))
+            prompts.append(body["messages"][1]["content"])
+            return httpx.Response(
+                200,
+                request=request,
+                json={"choices": [{"message": {"content": next(contents)}}]},
+            )
+
+        settings = Settings(
+            deepseek_api_key="synthetic-test-key",
+            owner_truth_live_memory_organization_enabled=True,
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=settings,
+            organizer=DeepSeekLiveMemoryOrganizationProxy(
+                settings,
+                transport=httpx.MockTransport(handle),
+            ),
+        )
+        worker = self._worker(
+            store=store,
+            extractor=ModelAssistedOwnerTruthSourceExtractor(
+                settings=settings,
+                live_extractor=extractor,
+            ),
+            retry_seconds=1,
+        )
+
+        first = worker.run_once()
+        self.assertEqual(first["status"], "retryWait", first)
+        self.assertEqual(first["failureStage"], "supportValidate")
+        self.assertEqual(first["failureCode"], "candidateExtraction.live.supportValidate.factOmitted")
+        self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
+
+        store.lease_repository._jobs[intent.job_id]["availableAt"] = datetime.now(
+            timezone.utc
+        )
+        second = worker.run_once()
+        self.assertEqual(second["status"], "completed", second)
+        self.assertEqual(second["attempt"], 2)
+        self.assertEqual(second["candidateCount"], 1)
+        self.assertEqual(len(prompts), 4)
+        self.assertNotIn("上次安全合同反馈", prompts[0])
+        self.assertIn("上次安全合同反馈", prompts[2])
+        self.assertIn("上次安全合同反馈", prompts[3])
+
+    def test_live_contract_failure_does_not_raise_original_max_attempts(self) -> None:
+        intent = replace(self.intent, max_attempts=1)
+        source_text = "我曾参加过学校合唱团。"
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(source_text),
+            source_text=source_text,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {"index": 1, "role": "user", "text": source_text, "captureMode": "live"},
+                ],
+            },
+        )
+        store.lease_repository.seed(intent)
+        request_count = 0
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            return httpx.Response(
+                200,
+                request=request,
+                json={"choices": [{"message": {"content": "not-json"}}]},
+            )
+
+        settings = Settings(
+            deepseek_api_key="synthetic-test-key",
+            owner_truth_live_memory_organization_enabled=True,
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=settings,
+            organizer=DeepSeekLiveMemoryOrganizationProxy(
+                settings,
+                transport=httpx.MockTransport(handle),
+            ),
+        )
+
+        result = self._worker(
+            store=store,
+            extractor=ModelAssistedOwnerTruthSourceExtractor(
+                settings=settings,
+                live_extractor=extractor,
+            ),
+        ).run_once()
+
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(result["attempt"], 1)
+        self.assertEqual(request_count, 1)
+        self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
+
+    def test_live_contract_feedback_survives_transient_attempt_without_new_budget(self) -> None:
+        intent = replace(self.intent, max_attempts=3)
+        fact = "本次恢复链测试代号是松涛十号。"
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(fact),
+            source_text=fact,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {"index": 1, "role": "user", "text": fact, "captureMode": "live"},
+                ],
+            },
+        )
+        store.lease_repository.seed(intent)
+        organization = {
+            "memories": [{
+                "memoryKind": "knowledge",
+                "claim": "本次恢复链测试代号是松涛十号。",
+                "sourceTurnIndices": [1],
+                "facets": _facets(),
+            }]
+        }
+        support = {
+            "schemaVersion": "owner-truth-live-memory-support-v1",
+            "turnAssessments": [{"turnIndex": 1, "speechAct": "assertion"}],
+            "memoryAssessments": [{
+                "memoryIndex": 0,
+                "verdict": "supported",
+                "supportingTurnIndices": [1],
+            }],
+            "omittedFactBearingTurnIndices": [],
+        }
+        outcomes: list[object] = [
+            "not-json",
+            httpx.ConnectError("controlled transport interruption"),
+            json.dumps(organization, ensure_ascii=False),
+            json.dumps(support, ensure_ascii=False),
+        ]
+        prompts: list[str] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8"))
+            prompts.append(body["messages"][1]["content"])
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, httpx.ConnectError):
+                raise httpx.ConnectError(str(outcome), request=request)
+            return httpx.Response(
+                200,
+                request=request,
+                json={"choices": [{"message": {"content": outcome}}]},
+            )
+
+        settings = Settings(
+            deepseek_api_key="synthetic-test-key",
+            owner_truth_live_memory_organization_enabled=True,
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=settings,
+            organizer=DeepSeekLiveMemoryOrganizationProxy(
+                settings,
+                transport=httpx.MockTransport(handle),
+            ),
+        )
+        worker = self._worker(
+            store=store,
+            extractor=ModelAssistedOwnerTruthSourceExtractor(
+                settings=settings,
+                live_extractor=extractor,
+            ),
+            retry_seconds=1,
+        )
+
+        first = worker.run_once()
+        self.assertEqual(first["status"], "retryWait")
+        store.lease_repository._jobs[intent.job_id]["availableAt"] = datetime.now(timezone.utc)
+        second = worker.run_once()
+        self.assertEqual(second["status"], "retryWait")
+        store.lease_repository._jobs[intent.job_id]["availableAt"] = datetime.now(timezone.utc)
+        third = worker.run_once()
+
+        self.assertEqual(third["status"], "completed", third)
+        self.assertEqual(third["attempt"], 3)
+        self.assertEqual(third["candidateCount"], 1)
+        self.assertEqual(len(prompts), 4)
+        self.assertNotIn("上次安全合同反馈", prompts[0])
+        self.assertIn("上次安全合同反馈", prompts[1])
+        self.assertIn("上次安全合同反馈", prompts[2])
+        self.assertIn("上次安全合同反馈", prompts[3])
+
+    def test_live_transient_then_contract_does_not_gain_contract_retry_budget(self) -> None:
+        intent = replace(self.intent, max_attempts=3)
+        fact = "本次反向预算测试代号是青竹十三号。"
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(fact),
+            source_text=fact,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {"index": 1, "role": "user", "text": fact, "captureMode": "live"},
+                ],
+            },
+        )
+        store.lease_repository.seed(intent)
+        outcomes: list[object] = [
+            httpx.ConnectError("controlled transport interruption"),
+            "not-json",
+        ]
+        prompts: list[str] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8"))
+            prompts.append(body["messages"][1]["content"])
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, httpx.ConnectError):
+                raise httpx.ConnectError(str(outcome), request=request)
+            return httpx.Response(
+                200,
+                request=request,
+                json={"choices": [{"message": {"content": outcome}}]},
+            )
+
+        settings = Settings(
+            deepseek_api_key="synthetic-test-key",
+            owner_truth_live_memory_organization_enabled=True,
+        )
+        live_extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=settings,
+            organizer=DeepSeekLiveMemoryOrganizationProxy(
+                settings,
+                transport=httpx.MockTransport(handle),
+            ),
+        )
+        worker = self._worker(
+            store=store,
+            extractor=ModelAssistedOwnerTruthSourceExtractor(
+                settings=settings,
+                live_extractor=live_extractor,
+            ),
+            retry_seconds=1,
+        )
+
+        first = worker.run_once()
+        self.assertEqual(first["status"], "retryWait")
+        store.lease_repository._jobs[intent.job_id]["availableAt"] = datetime.now(
+            timezone.utc
+        )
+        second = worker.run_once()
+
+        self.assertEqual(second["status"], "failed", second)
+        self.assertEqual(second["attempt"], 2)
+        self.assertEqual(
+            second["failureCode"],
+            "candidateExtraction.live.organizationDecode.invalidJson",
+        )
+        self.assertEqual(len(prompts), 2)
+        self.assertNotIn("上次安全合同反馈", prompts[0])
+        self.assertNotIn("上次安全合同反馈", prompts[1])
+        self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
+
+    def test_live_missing_configuration_makes_zero_http_requests(self) -> None:
+        source_text = "配置缺失测试代号是清川十一号。"
+        store = _Store(
+            vault_id=self.vault_id,
+            owner_subject_id=self.owner_subject_id,
+            source_id=self.source_id,
+            source_content_hash=_digest(source_text),
+            source_text=source_text,
+            source_metadata={
+                "captureMode": "live",
+                "sourcePolicy": "userEvidenceOnly",
+                "conversationTurns": [
+                    {"index": 1, "role": "user", "text": source_text, "captureMode": "live"},
+                ],
+            },
+        )
+        store.lease_repository.seed(self.intent)
+        request_count = 0
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            return httpx.Response(500, request=request)
+
+        settings = Settings(
+            deepseek_api_key="",
+            owner_truth_live_memory_organization_enabled=True,
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=settings,
+            organizer=DeepSeekLiveMemoryOrganizationProxy(
+                settings,
+                transport=httpx.MockTransport(handle),
+            ),
+        )
+
+        result = self._worker(store=store, extractor=extractor).run_once()
+
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(result["failureStage"], "organizationInput")
+        self.assertEqual(
+            result["failureCode"],
+            "candidateExtraction.live.organizationInput.configurationMissing",
+        )
+        self.assertEqual(request_count, 0)
+
+    def test_default_live_http_contract_rejects_malformed_envelopes_and_truncation(
+        self,
+    ) -> None:
+        cases = (
+            ("arrayEnvelope", [], "httpEnvelopeInvalid"),
+            ("badChoiceType", {"choices": [42]}, "httpEnvelopeInvalid"),
+            (
+                "nonTextContent",
+                {"choices": [{"message": {"content": ['{"memories":[]}']}}]},
+                "contentTypeInvalid",
+            ),
+            (
+                "truncated",
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {"content": '{"memories":[]}'},
+                        }
+                    ]
+                },
+                "outputTruncated",
+            ),
+            (
+                "finishReasonList",
+                {
+                    "choices": [{
+                        "finish_reason": ["stop"],
+                        "message": {"content": '{"memories":[]}'},
+                    }],
+                },
+                "finishReasonTypeInvalid",
+            ),
+            (
+                "finishReasonObject",
+                {
+                    "choices": [{
+                        "finish_reason": {"value": "stop"},
+                        "message": {"content": '{"memories":[]}'},
+                    }],
+                },
+                "finishReasonTypeInvalid",
+            ),
+        )
+        for name, envelope, reason in cases:
+            with self.subTest(name=name):
+                result, request_count, store = self._run_default_live_http_contract_case(
+                    response_envelopes=[envelope]
+                )
+                self.assertEqual(result["status"], "failed", result)
+                self.assertEqual(result["failureStage"], "organizationDecode")
+                self.assertEqual(
+                    result["failureCode"],
+                    f"candidateExtraction.live.organizationDecode.{reason}",
+                )
+                self.assertEqual(request_count, 1)
+                self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
+
+    def test_default_live_support_rejects_boolean_evidence_indices(self) -> None:
+        organization = {
+            "memories": [
+                {
+                    "memoryKind": "knowledge",
+                    "claim": "本次合同边界测试代号是清泉十二号。",
+                    "sourceTurnIndices": [1],
+                    "facets": _facets(),
+                }
+            ]
+        }
+        support = {
+            "schemaVersion": "owner-truth-live-memory-support-v1",
+            "turnAssessments": [{"turnIndex": True, "speechAct": "assertion"}],
+            "memoryAssessments": [
+                {
+                    "memoryIndex": 0,
+                    "verdict": "supported",
+                    "supportingTurnIndices": [True],
+                }
+            ],
+            "omittedFactBearingTurnIndices": [],
+        }
+        result, request_count, store = self._run_default_live_http_contract_case(
+            response_envelopes=[
+                {"choices": [{"message": {"content": json.dumps(organization)}}]},
+                {"choices": [{"message": {"content": json.dumps(support)}}]},
+            ]
+        )
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(result["failureStage"], "supportValidate")
+        self.assertEqual(
+            result["failureCode"],
+            "candidateExtraction.live.supportValidate.evidenceInvalid",
+        )
+        self.assertEqual(request_count, 2)
+        self.assertEqual(store.candidate_repository.snapshot()["candidates"], {})
+
+    def test_live_short_and_long_http_candidates_confirm_into_formal_memory(self) -> None:
+        short_turns = [
+            {"index": 1, "role": "user", "text": "我小学时参加过合唱团。", "captureMode": "live"},
+            {"index": 2, "role": "assistant", "text": "我会按原话记录。", "captureMode": "live"},
+            {"index": 3, "role": "user", "text": "本次短场代号是青檐九号。", "captureMode": "live"},
+        ]
+        long_turns = []
+        for index in range(1, 32):
+            if index % 2 == 0:
+                long_turns.append({
+                    "index": index,
+                    "role": "assistant",
+                    "text": "这是助手上下文，不作为用户事实。",
+                    "captureMode": "live",
+                })
+            else:
+                text = {
+                    1: "我大学时参加过校广播站。",
+                    15: "长场中段代号是溪云十五号。",
+                    31: "长场结束代号是远峰三十一号。",
+                }.get(index, f"这是第 {index} 轮普通问题吗？")
+                long_turns.append({
+                    "index": index,
+                    "role": "user",
+                    "text": text,
+                    "captureMode": "live",
+                })
+
+        scenarios = (
+            (
+                "short",
+                short_turns,
+                [
+                    {
+                        "memoryKind": "experience",
+                        "summary": "我小学时参加过合唱团，本次短场代号是青檐九号。",
+                        "sourceTurnIndices": [1, 3],
+                        "facets": _facets(),
+                    }
+                ],
+                {1: "assertion", 3: "assertion"},
+            ),
+            (
+                "long",
+                long_turns,
+                [
+                    {
+                        "memoryKind": "experience",
+                        "summary": "我大学时参加过校广播站。",
+                        "sourceTurnIndices": [1],
+                        "facets": _facets(),
+                    },
+                    {
+                        "memoryKind": "knowledge",
+                        "claim": "长场中段代号是溪云十五号。",
+                        "sourceTurnIndices": [15],
+                        "facets": _facets(),
+                    },
+                    {
+                        "memoryKind": "knowledge",
+                        "claim": "长场结束代号是远峰三十一号。",
+                        "sourceTurnIndices": [31],
+                        "facets": _facets(),
+                    },
+                ],
+                {
+                    index: ("assertion" if index in {1, 15, 31} else "query")
+                    for index in range(1, 32, 2)
+                },
+            ),
+        )
+
+        for name, turns, memories, speech_acts in scenarios:
+            with self.subTest(name=name):
+                user_turns = [turn for turn in turns if turn["role"] == "user"]
+                source_text = "\n\n".join(str(turn["text"]) for turn in user_turns)
+                source_id = str(uuid4())
+                intent = replace(
+                    self.intent,
+                    target=replace(self.intent.target, resource_id=source_id),
+                )
+                store = _Store(
+                    vault_id=self.vault_id,
+                    owner_subject_id=self.owner_subject_id,
+                    source_id=source_id,
+                    source_content_hash=_digest(source_text),
+                    source_text=source_text,
+                    source_metadata={
+                        "captureMode": "live",
+                        "sourcePolicy": "userEvidenceOnly",
+                        "conversationTurns": turns,
+                    },
+                )
+                store.lease_repository.seed(intent)
+                support = {
+                    "schemaVersion": "owner-truth-live-memory-support-v1",
+                    "turnAssessments": [
+                        {
+                            "turnIndex": int(turn["index"]),
+                            "speechAct": speech_acts[int(turn["index"])],
+                        }
+                        for turn in user_turns
+                    ],
+                    "memoryAssessments": [
+                        {
+                            "memoryIndex": memory_index,
+                            "verdict": "supported",
+                            "supportingTurnIndices": memory["sourceTurnIndices"],
+                        }
+                        for memory_index, memory in enumerate(memories)
+                    ],
+                    "omittedFactBearingTurnIndices": [],
+                }
+                contents = iter([
+                    json.dumps({"memories": memories}, ensure_ascii=False),
+                    json.dumps(support, ensure_ascii=False),
+                ])
+                request_count = 0
+
+                def handle(request: httpx.Request) -> httpx.Response:
+                    nonlocal request_count
+                    request_count += 1
+                    return httpx.Response(
+                        200,
+                        request=request,
+                        json={"choices": [{"message": {"content": next(contents)}}]},
+                    )
+
+                settings = Settings(
+                    deepseek_api_key="synthetic-test-key",
+                    owner_truth_live_memory_organization_enabled=True,
+                )
+                extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+                    settings=settings,
+                    organizer=DeepSeekLiveMemoryOrganizationProxy(
+                        settings,
+                        transport=httpx.MockTransport(handle),
+                    ),
+                )
+                result = self._worker(store=store, extractor=extractor).run_once()
+
+                self.assertEqual(result["status"], "completed", result)
+                self.assertEqual(result["candidateCount"], len(memories))
+                self.assertEqual(request_count, 2)
+                candidates = self._review_snapshots_from_extraction(store)
+                self.assertEqual(len(candidates), len(memories))
+                self._confirm_and_reopen_formal_memories(candidates)
+
+    def test_live_long_shape_sends_every_turn_to_organization_and_support(self) -> None:
+        turns: list[dict[str, object]] = []
+        user_indices: list[int] = []
+        for index in range(1, 32):
+            if index % 2 == 1:
+                user_indices.append(index)
+                text = {
+                    1: "我小学时参加过合唱团。",
+                    15: "中段测试代号是青枝十五号。",
+                    31: "结束测试代号是远帆三十一号。",
+                }.get(index, f"这是第 {index} 轮普通问题吗？")
+                role = "user"
+            else:
+                text = "这是不作为事实证据的助手上下文。"
+                role = "assistant"
+            turns.append(
+                {
+                    "index": index,
+                    "role": role,
+                    "text": text,
+                    "captureMode": "live",
+                }
+            )
+        memories = [
+            {
+                "memoryKind": "experience",
+                "summary": "我小学时参加过合唱团。",
+                "sourceTurnIndices": [1],
+                "facets": _facets(),
+            },
+            {
+                "memoryKind": "knowledge",
+                "claim": "中段测试代号是青枝十五号。",
+                "sourceTurnIndices": [15],
+                "facets": _facets(),
+            },
+            {
+                "memoryKind": "knowledge",
+                "claim": "结束测试代号是远帆三十一号。",
+                "sourceTurnIndices": [31],
+                "facets": _facets(),
+            },
+        ]
+        support = {
+            "schemaVersion": "owner-truth-live-memory-support-v1",
+            "turnAssessments": [
+                {
+                    "turnIndex": index,
+                    "speechAct": "assertion" if index in {1, 15, 31} else "query",
+                }
+                for index in user_indices
+            ],
+            "memoryAssessments": [
+                {
+                    "memoryIndex": memory_index,
+                    "verdict": "supported",
+                    "supportingTurnIndices": [source_index],
+                }
+                for memory_index, source_index in enumerate((1, 15, 31))
+            ],
+            "omittedFactBearingTurnIndices": [],
+        }
+        contents = iter(
+            [
+                json.dumps({"memories": memories}, ensure_ascii=False),
+                json.dumps(support, ensure_ascii=False),
+            ]
+        )
+        requests: list[dict[str, object]] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            requests.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                request=request,
+                json={"choices": [{"message": {"content": next(contents)}}]},
+            )
+
+        settings = Settings(
+            deepseek_api_key="synthetic-test-key",
+            owner_truth_live_memory_organization_enabled=True,
+        )
+        extractor = ModelAssistedOwnerTruthLiveConversationExtractor(
+            settings=settings,
+            organizer=DeepSeekLiveMemoryOrganizationProxy(
+                settings,
+                transport=httpx.MockTransport(handle),
+            ),
+        )
+        source_text = "\n\n".join(
+            str(turn["text"]) for turn in turns if turn["role"] == "user"
+        )
+
+        result = extractor.extract(
+            intent=self.intent,
+            source=OwnerTruthCandidateExtractionInput(
+                source_content_hash=_digest(source_text),
+                source_text=source_text,
+                source_metadata={
+                    "captureMode": "live",
+                    "sourcePolicy": "userEvidenceOnly",
+                    "conversationTurns": turns,
+                },
+            ),
+        )
+
+        self.assertEqual(len(result.proposals), 3)
+        self.assertEqual(len(requests), 2)
+        organization_prompt = requests[0]["messages"][1]["content"]
+        support_prompt = requests[1]["messages"][1]["content"]
+        for index in user_indices:
+            marker = f'"index":{index}'
+            self.assertIn(marker, organization_prompt)
+            self.assertIn(marker, support_prompt)
 
     def test_postgres_input_repository_reads_source_text_only_under_share_lock(self) -> None:
         connection = _PostgresInputConnection(

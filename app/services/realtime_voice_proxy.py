@@ -50,9 +50,16 @@ class RealtimeVoiceSessionBroker:
     REQUIRED_PROPERTIES = ("scope", "ttl", "audience", "revocation")
     TICKET_HEADER = "X-DreamJourney-Voice-Session"
 
-    def __init__(self, settings: Settings, store: Any):
+    def __init__(
+        self,
+        settings: Settings,
+        store: Any,
+        *,
+        now: Optional[Callable[[], datetime]] = None,
+    ):
         self.settings = settings
         self.store = store
+        self._now = now or (lambda: datetime.now(timezone.utc))
 
     def capability_descriptor(self) -> Dict[str, Any]:
         reason = self._configuration_block_reason()
@@ -103,7 +110,7 @@ class RealtimeVoiceSessionBroker:
         if not str(user_id or "").strip() or not str(auth_session_id or "").strip():
             raise RealtimeVoiceProxyError("authenticatedVoiceSessionRequired")
 
-        now = datetime.now(timezone.utc)
+        now = self._now()
         ticket_ttl = max(15, min(int(self.settings.realtime_voice_ticket_ttl_seconds), 300))
         expires_at = now + timedelta(seconds=ticket_ttl)
         raw_ticket = "djv_" + secrets.token_urlsafe(32)
@@ -128,6 +135,7 @@ class RealtimeVoiceSessionBroker:
             provider_context_hash=resolved_provider_context_hash,
             session_context=session_context,
         )
+        resource_profile = self._resource_profile(purpose=purpose)
         record = {
             "ticketId": ticket_id,
             "ticketHash": ticket_hash,
@@ -150,6 +158,9 @@ class RealtimeVoiceSessionBroker:
             "providerContextHash": resolved_provider_context_hash,
             "authorityEpoch": authority_epoch,
             "memoryRevision": resolved_memory_revision,
+            "resourceProfile": resource_profile["name"],
+            "maxSessionSeconds": resource_profile["maxSessionSeconds"],
+            "maxSessionBytes": resource_profile["maxSessionBytes"],
         }
         try:
             self.store.issue_realtime_voice_session_ticket(
@@ -210,10 +221,9 @@ class RealtimeVoiceSessionBroker:
         normalized = str(raw_ticket or "").strip()
         if not normalized.startswith("djv_") or len(normalized) < 32:
             return None
-        now = datetime.now(timezone.utc)
-        max_seconds = max(
-            60,
-            min(int(self.settings.realtime_voice_max_session_seconds), 4 * 60 * 60),
+        now = self._now()
+        max_seconds = self._bounded_session_seconds(
+            self.settings.realtime_voice_max_session_seconds
         )
         lease = self.store.consume_realtime_voice_session_ticket(
             self.ticket_hash(normalized),
@@ -225,13 +235,46 @@ class RealtimeVoiceSessionBroker:
             return None
         return lease
 
+    def _resource_profile(self, *, purpose: str) -> Dict[str, Any]:
+        use_long_live = (
+            str(purpose or "") == "echoLive"
+            and bool(self.settings.owner_truth_live_long_memory_pipeline_enabled)
+            and bool(self.settings.realtime_voice_long_live_profile_enabled)
+        )
+        if use_long_live:
+            return {
+                "name": "echoLiveLongMemoryV1",
+                "maxSessionSeconds": self._bounded_session_seconds(
+                    self.settings.realtime_voice_long_live_max_session_seconds
+                ),
+                "maxSessionBytes": self._bounded_session_bytes(
+                    self.settings.realtime_voice_long_live_max_session_bytes
+                ),
+            }
+        return {
+            "name": "default",
+            "maxSessionSeconds": self._bounded_session_seconds(
+                self.settings.realtime_voice_max_session_seconds
+            ),
+            "maxSessionBytes": self._bounded_session_bytes(
+                self.settings.realtime_voice_max_session_bytes
+            ),
+        }
+
+    @staticmethod
+    def _bounded_session_seconds(value: Any) -> int:
+        return max(60, min(int(value), 4 * 60 * 60))
+
+    def _bounded_session_bytes(self, value: Any) -> int:
+        return max(int(self.settings.realtime_voice_max_frame_bytes), int(value))
+
     def release(self, lease: Dict[str, Any], *, reason: str) -> None:
         ticket_id = str(lease.get("ticketId") or "")
         if not ticket_id:
             return
         self.store.release_realtime_voice_session_ticket(
             ticket_id,
-            released_at_iso=datetime.now(timezone.utc).isoformat(),
+            released_at_iso=self._now().isoformat(),
             reason=reason,
         )
 
@@ -239,7 +282,7 @@ class RealtimeVoiceSessionBroker:
         if self.capability_descriptor()["status"] != "ready":
             return False
         expires_at = self._parse_datetime(str(lease.get("expiresAt") or ""))
-        if expires_at is None or expires_at <= datetime.now(timezone.utc):
+        if expires_at is None or expires_at <= self._now():
             return False
         if not self._is_target_authority_current(lease):
             return False
@@ -420,7 +463,10 @@ class RealtimeVoiceSessionBroker:
         try:
             traffic_budget = _RealtimeVoiceTrafficBudget(
                 max_frame_bytes=self.settings.realtime_voice_max_frame_bytes,
-                max_session_bytes=self.settings.realtime_voice_max_session_bytes,
+                max_session_bytes=int(
+                    lease.get("maxSessionBytes")
+                    or self.settings.realtime_voice_max_session_bytes
+                ),
             )
             upstream_context = connector(
                 self.upstream_url(),

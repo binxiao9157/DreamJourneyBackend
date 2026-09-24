@@ -87,6 +87,9 @@ class OwnerTruthInterviewCandidateSingleReviewCommand:
     corrected_value: Mapping[str, Any] | None
     corrected_value_schema_version: str
     reason_code: str
+    expected_memory_revision: int | None = None
+    expected_change_set_id: str | None = None
+    expected_proposal_hash: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_id", _identifier(self.command_id, field="command_id"))
@@ -128,6 +131,35 @@ class OwnerTruthInterviewCandidateSingleReviewCommand:
             raise OwnerTruthInterviewCandidateSingleReviewError(
                 "only correct action may include corrected_value"
             )
+        if self.expected_memory_revision is not None and (
+            isinstance(self.expected_memory_revision, bool)
+            or not isinstance(self.expected_memory_revision, int)
+            or self.expected_memory_revision < 0
+        ):
+            raise OwnerTruthInterviewCandidateSingleReviewError(
+                "expected_memory_revision must be a non-negative integer when provided"
+            )
+        if (self.expected_change_set_id is None) != (
+            self.expected_proposal_hash is None
+        ):
+            raise OwnerTruthInterviewCandidateSingleReviewError(
+                "expected_change_set_id and expected_proposal_hash must be provided together"
+            )
+        if self.expected_change_set_id is not None:
+            object.__setattr__(
+                self,
+                "expected_change_set_id",
+                require_uuid(
+                    self.expected_change_set_id,
+                    field="expected_change_set_id",
+                ),
+            )
+            normalized_hash = str(self.expected_proposal_hash or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", normalized_hash):
+                raise OwnerTruthInterviewCandidateSingleReviewError(
+                    "expected_proposal_hash must be a lowercase SHA-256 digest"
+                )
+            object.__setattr__(self, "expected_proposal_hash", normalized_hash)
         object.__setattr__(self, "reason_code", _identifier(self.reason_code, field="reason_code"))
 
     @property
@@ -140,19 +172,24 @@ class OwnerTruthInterviewCandidateSingleReviewCommand:
 
     @property
     def payload_hash(self) -> str:
+        payload = {
+            "action": self.action.value,
+            "candidateId": self.candidate_id,
+            "correctedValue": self.corrected_value,
+            "correctedValueSchemaVersion": self.corrected_value_schema_version,
+            "expectedCandidateVersion": self.expected_candidate_version,
+            "reasonCode": self.reason_code,
+            "reviewBatchId": self.review_batch_id,
+            "schemaVersion": OWNER_TRUTH_INTERVIEW_CANDIDATE_SINGLE_REVIEW_SCHEMA_VERSION,
+        }
+        if self.expected_memory_revision is not None:
+            payload["expectedMemoryRevision"] = self.expected_memory_revision
+        if self.expected_change_set_id is not None:
+            payload["expectedChangeSetId"] = self.expected_change_set_id
+        if self.expected_proposal_hash is not None:
+            payload["expectedProposalHash"] = self.expected_proposal_hash
         return sha256(
-            _canonical_json(
-                {
-                    "action": self.action.value,
-                    "candidateId": self.candidate_id,
-                    "correctedValue": self.corrected_value,
-                    "correctedValueSchemaVersion": self.corrected_value_schema_version,
-                    "expectedCandidateVersion": self.expected_candidate_version,
-                    "reasonCode": self.reason_code,
-                    "reviewBatchId": self.review_batch_id,
-                    "schemaVersion": OWNER_TRUTH_INTERVIEW_CANDIDATE_SINGLE_REVIEW_SCHEMA_VERSION,
-                }
-            ).encode("utf-8")
+            _canonical_json(payload).encode("utf-8")
         ).hexdigest()
 
     def batch_decision_id(self, *, vault_id: str) -> str:
@@ -175,6 +212,9 @@ class OwnerTruthInterviewCandidateSingleReviewCommand:
             corrected_value=self.corrected_value,
             corrected_value_schema_version=self.corrected_value_schema_version,
             reason_code=self.reason_code,
+            expected_memory_revision=self.expected_memory_revision,
+            expected_change_set_id=self.expected_change_set_id,
+            expected_proposal_hash=self.expected_proposal_hash,
         )
 
 

@@ -132,6 +132,9 @@ from app.services.owner_truth_candidate_extraction import (
     PostgresOwnerTruthCandidateExtractionInputRepository,
     PostgresOwnerTruthCandidateExtractionRepository,
 )
+from app.services.owner_truth_live_long_memory import (
+    PostgresLiveLongMemoryRepository,
+)
 from app.services.owner_truth_media_source_object import (
     OwnerTruthMediaIngestionError,
     PostgresOwnerTruthMediaSourceObjectRepository,
@@ -520,6 +523,16 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth candidate extraction requires an active unit of work")
         return PostgresOwnerTruthCandidateExtractionRepository(active.connection)
+
+    def owner_truth_live_long_memory_repository(
+        self,
+    ) -> PostgresLiveLongMemoryRepository:
+        """Return the durable private Live organization ledger in the active UoW."""
+
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("Live long-memory coordination requires an active unit of work")
+        return PostgresLiveLongMemoryRepository(active.connection)
 
     def owner_truth_candidate_extraction_input_repository(
         self,
@@ -2115,7 +2128,16 @@ class PostgresStore:
                 return None
             item["status"] = "active"
             item["consumedAt"] = now_iso
-            item["expiresAt"] = session_expires_at_iso
+            pinned_seconds = max(
+                60,
+                min(int(item.get("maxSessionSeconds") or 0), 4 * 60 * 60),
+            )
+            pinned_expiry = (
+                self._parse_iso_datetime(now_iso) + timedelta(seconds=pinned_seconds)
+            ).isoformat()
+            item["expiresAt"] = (
+                pinned_expiry if item.get("maxSessionSeconds") else session_expires_at_iso
+            )
             item["updatedAt"] = now_iso
             cursor.execute(
                 """
@@ -2126,7 +2148,7 @@ class PostgresStore:
                 RETURNING payload
                 """,
                 self._adapt_params(
-                    (session_expires_at_iso, now_iso, item, now_iso, row["id"])
+                    (item["expiresAt"], now_iso, item, now_iso, row["id"])
                 ),
             )
             updated = cursor.fetchone()

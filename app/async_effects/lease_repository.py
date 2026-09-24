@@ -26,6 +26,103 @@ _TERMINAL_JOB_STATES = {
     AsyncEffectJobState.CANCELLED.value,
     AsyncEffectJobState.BLOCKED.value,
 }
+_LIVE_CONTRACT_RETRY_CODES = {
+    "candidateExtraction.live.organizationDecode.httpEnvelopeInvalid": (
+        "organizationDecode",
+        "httpEnvelopeInvalid",
+    ),
+    "candidateExtraction.live.organizationDecode.emptyContent": (
+        "organizationDecode",
+        "emptyContent",
+    ),
+    "candidateExtraction.live.organizationDecode.contentTypeInvalid": (
+        "organizationDecode",
+        "contentTypeInvalid",
+    ),
+    "candidateExtraction.live.organizationDecode.outputTruncated": (
+        "organizationDecode",
+        "outputTruncated",
+    ),
+    "candidateExtraction.live.organizationDecode.finishReasonInvalid": (
+        "organizationDecode",
+        "finishReasonInvalid",
+    ),
+    "candidateExtraction.live.organizationDecode.finishReasonTypeInvalid": (
+        "organizationDecode",
+        "finishReasonTypeInvalid",
+    ),
+    "candidateExtraction.live.organizationDecode.invalidJson": (
+        "organizationDecode",
+        "invalidJson",
+    ),
+    "candidateExtraction.live.organizationValidate.schemaInvalid": (
+        "organizationValidate",
+        "schemaInvalid",
+    ),
+    "candidateExtraction.live.supportDecode.httpEnvelopeInvalid": (
+        "supportDecode",
+        "httpEnvelopeInvalid",
+    ),
+    "candidateExtraction.live.supportDecode.emptyContent": (
+        "supportDecode",
+        "emptyContent",
+    ),
+    "candidateExtraction.live.supportDecode.contentTypeInvalid": (
+        "supportDecode",
+        "contentTypeInvalid",
+    ),
+    "candidateExtraction.live.supportDecode.outputTruncated": (
+        "supportDecode",
+        "outputTruncated",
+    ),
+    "candidateExtraction.live.supportDecode.finishReasonInvalid": (
+        "supportDecode",
+        "finishReasonInvalid",
+    ),
+    "candidateExtraction.live.supportDecode.finishReasonTypeInvalid": (
+        "supportDecode",
+        "finishReasonTypeInvalid",
+    ),
+    "candidateExtraction.live.supportDecode.invalidJson": (
+        "supportDecode",
+        "invalidJson",
+    ),
+    "candidateExtraction.live.supportValidate.schemaInvalid": (
+        "supportValidate",
+        "schemaInvalid",
+    ),
+    "candidateExtraction.live.supportValidate.coverageIncomplete": (
+        "supportValidate",
+        "coverageIncomplete",
+    ),
+    "candidateExtraction.live.supportValidate.evidenceInvalid": (
+        "supportValidate",
+        "evidenceInvalid",
+    ),
+    "candidateExtraction.live.supportValidate.evidenceOutOfRange": (
+        "supportValidate",
+        "evidenceOutOfRange",
+    ),
+    "candidateExtraction.live.supportValidate.semanticUncertain": (
+        "supportValidate",
+        "semanticUncertain",
+    ),
+    "candidateExtraction.live.supportValidate.factOmitted": (
+        "supportValidate",
+        "factOmitted",
+    ),
+    "candidateExtraction.live.supportValidate.factWithoutFinalDraft": (
+        "supportValidate",
+        "factWithoutFinalDraft",
+    ),
+}
+_LIVE_CONTRACT_RETRY_TRANSIENT_CODES = frozenset(
+    {
+        f"candidateExtraction.live.{stage}.{reason}"
+        for stage in ("organizationRequest", "supportRequest")
+        for reason in ("timeout", "transport", "rateLimited", "httpTransient")
+    }
+)
 
 
 class AsyncEffectLeaseError(RuntimeError):
@@ -121,6 +218,41 @@ class AsyncEffectJobLease:
     attempt: int
     lease_until: str
     heartbeat_at: str
+
+
+@dataclass(frozen=True)
+class AsyncEffectContractRetryContext:
+    attempt: int
+    stage: str
+    reason: str
+
+
+def _contract_retry_context_from_history(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    current_attempt: int,
+) -> Optional[AsyncEffectContractRetryContext]:
+    by_attempt = {int(row["attempt"]): row for row in rows}
+    if current_attempt <= 1:
+        return None
+    for attempt in range(1, current_attempt):
+        row = by_attempt.get(attempt)
+        if row is None or str(row.get("state") or "") != "retryableFailed":
+            return None
+        if attempt > 1:
+            later_error_code = str(row.get("errorCode") or row.get("error_code") or "")
+            if later_error_code not in _LIVE_CONTRACT_RETRY_TRANSIENT_CODES:
+                return None
+    first = by_attempt[1]
+    error_code = str(first.get("errorCode") or first.get("error_code") or "")
+    summary = _LIVE_CONTRACT_RETRY_CODES.get(error_code)
+    if summary is None:
+        return None
+    return AsyncEffectContractRetryContext(
+        attempt=1,
+        stage=summary[0],
+        reason=summary[1],
+    )
 
 
 @dataclass(frozen=True)
@@ -263,6 +395,7 @@ class InMemoryAsyncEffectLeaseRepository:
         worker_id: str,
         lease_seconds: int,
         supported_job_types: Iterable[str],
+        require_live_run_ready: bool = False,
     ) -> Optional[AsyncEffectJobLease]:
         normalized_worker_id = _normalize_worker_id(worker_id)
         normalized_lease_seconds = _normalize_lease_seconds(lease_seconds)
@@ -313,6 +446,26 @@ class InMemoryAsyncEffectLeaseRepository:
             if intent.operation_id != lease.operation_id or intent.job_id != lease.job_id:
                 raise AsyncEffectLeaseError("leased job intent does not match the current lease")
             return intent
+
+    def load_contract_retry_context(
+        self,
+        lease: AsyncEffectJobLease,
+    ) -> Optional[AsyncEffectContractRetryContext]:
+        """Return only an allowlisted safe failure from this active job."""
+
+        now = self._now()
+        with self._lock:
+            job = self._jobs.get(lease.job_id)
+            self._assert_active_lease(job, lease, now)
+            rows = [
+                self._attempts[(lease.job_id, attempt)]
+                for attempt in range(1, lease.attempt)
+                if (lease.job_id, attempt) in self._attempts
+            ]
+            return _contract_retry_context_from_history(
+                rows,
+                current_attempt=lease.attempt,
+            )
 
     def complete(
         self,
@@ -555,18 +708,45 @@ class PostgresAsyncEffectLeaseRepository:
         worker_id: str,
         lease_seconds: int,
         supported_job_types: Iterable[str],
+        require_live_run_ready: bool = False,
     ) -> Optional[AsyncEffectJobLease]:
         normalized_worker_id = _normalize_worker_id(worker_id)
         normalized_lease_seconds = _normalize_lease_seconds(lease_seconds)
         normalized_job_types = _normalize_job_types(supported_job_types)
         with self._cursor() as cursor:
-            cursor.execute(
+            live_ready_clause = ""
+            parameters: list[Any] = [list(normalized_job_types)]
+            if require_live_run_ready:
+                live_ready_clause = """
+                      AND (
+                          job.job_type <> %s
+                          OR NOT EXISTS (
+                              SELECT 1
+                              FROM owner_truth.live_memory_runs AS live_run
+                              WHERE live_run.vault_id = job.vault_id
+                                AND live_run.source_id::text = job.resource_id
+                                AND live_run.authority_epoch = job.authority_epoch
+                                AND live_run.state NOT IN ('failed', 'published')
+                                AND EXISTS (
+                                    SELECT 1
+                                    FROM owner_truth.live_memory_work_units AS live_unit
+                                    WHERE live_unit.run_id = live_run.id
+                                      AND live_unit.kind = 'atomExtraction'
+                                      AND live_unit.state <> 'completed'
+                                )
+                          )
+                      )
                 """
+                parameters.append("ownerTruth.source.created")
+            parameters.extend((normalized_worker_id, normalized_lease_seconds))
+            cursor.execute(
+                f"""
                 WITH candidate AS (
                     SELECT job_id, state AS previous_state, attempt AS previous_attempt
-                    FROM async_effects.jobs
+                    FROM async_effects.jobs AS job
                     WHERE job_type = ANY(%s)
                       AND cancel_requested_at IS NULL
+                      {live_ready_clause}
                       AND (
                           (state IN ('pending', 'retryWait') AND available_at <= NOW())
                           OR (state = 'leased' AND lease_until <= NOW())
@@ -586,7 +766,7 @@ class PostgresAsyncEffectLeaseRepository:
                 WHERE job.job_id = candidate.job_id
                 RETURNING job.*, candidate.previous_state, candidate.previous_attempt
                 """,
-                (list(normalized_job_types), normalized_worker_id, normalized_lease_seconds),
+                tuple(parameters),
             )
             row = cursor.fetchone()
             if row is None:
@@ -709,6 +889,30 @@ class PostgresAsyncEffectLeaseRepository:
             ):
                 raise AsyncEffectLeaseError("leased job cannot reconstruct its immutable effect intent")
             return intent
+
+    def load_contract_retry_context(
+        self,
+        lease: AsyncEffectJobLease,
+    ) -> Optional[AsyncEffectContractRetryContext]:
+        """Read an allowlisted attempt summary without exposing provider output."""
+
+        self.load_intent(lease)
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT attempt.attempt, attempt.state, attempt.error_code
+                FROM async_effects.job_attempts AS attempt
+                WHERE attempt.job_id = %s
+                  AND attempt.attempt < %s
+                ORDER BY attempt.attempt ASC
+                """,
+                (lease.job_id, lease.attempt),
+            )
+            rows = cursor.fetchall()
+            return _contract_retry_context_from_history(
+                rows,
+                current_attempt=lease.attempt,
+            )
 
     def complete(
         self,
